@@ -1,0 +1,8 @@
+[run]
+source = ["ocean_skill"]
+branch = true
+omit = ["**/__init__.py"]
+
+[report]
+skip_covered = true
+show_missing = true

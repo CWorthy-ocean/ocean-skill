@@ -1,0 +1,2897 @@
+aliases:
+  woa23_nitrate_annual: woa23_nitrate_annual
+  woa23_nitrate_month01: woa23_nitrate_month01
+  woa23_nitrate_month02: woa23_nitrate_month02
+  woa23_nitrate_month03: woa23_nitrate_month03
+  woa23_nitrate_month04: woa23_nitrate_month04
+  woa23_nitrate_month05: woa23_nitrate_month05
+  woa23_nitrate_month06: woa23_nitrate_month06
+  woa23_nitrate_month07: woa23_nitrate_month07
+  woa23_nitrate_month08: woa23_nitrate_month08
+  woa23_nitrate_month09: woa23_nitrate_month09
+  woa23_nitrate_month10: woa23_nitrate_month10
+  woa23_nitrate_month11: woa23_nitrate_month11
+  woa23_nitrate_month12: woa23_nitrate_month12
+  woa23_oxygen_annual: woa23_oxygen_annual
+  woa23_oxygen_month01: woa23_oxygen_month01
+  woa23_oxygen_month02: woa23_oxygen_month02
+  woa23_oxygen_month03: woa23_oxygen_month03
+  woa23_oxygen_month04: woa23_oxygen_month04
+  woa23_oxygen_month05: woa23_oxygen_month05
+  woa23_oxygen_month06: woa23_oxygen_month06
+  woa23_oxygen_month07: woa23_oxygen_month07
+  woa23_oxygen_month08: woa23_oxygen_month08
+  woa23_oxygen_month09: woa23_oxygen_month09
+  woa23_oxygen_month10: woa23_oxygen_month10
+  woa23_oxygen_month11: woa23_oxygen_month11
+  woa23_oxygen_month12: woa23_oxygen_month12
+  woa23_phosphate_annual: woa23_phosphate_annual
+  woa23_phosphate_month01: woa23_phosphate_month01
+  woa23_phosphate_month02: woa23_phosphate_month02
+  woa23_phosphate_month03: woa23_phosphate_month03
+  woa23_phosphate_month04: woa23_phosphate_month04
+  woa23_phosphate_month05: woa23_phosphate_month05
+  woa23_phosphate_month06: woa23_phosphate_month06
+  woa23_phosphate_month07: woa23_phosphate_month07
+  woa23_phosphate_month08: woa23_phosphate_month08
+  woa23_phosphate_month09: woa23_phosphate_month09
+  woa23_phosphate_month10: woa23_phosphate_month10
+  woa23_phosphate_month11: woa23_phosphate_month11
+  woa23_phosphate_month12: woa23_phosphate_month12
+  woa23_salinity_annual: woa23_salinity_annual
+  woa23_salinity_month01: woa23_salinity_month01
+  woa23_salinity_month02: woa23_salinity_month02
+  woa23_salinity_month03: woa23_salinity_month03
+  woa23_salinity_month04: woa23_salinity_month04
+  woa23_salinity_month05: woa23_salinity_month05
+  woa23_salinity_month06: woa23_salinity_month06
+  woa23_salinity_month07: woa23_salinity_month07
+  woa23_salinity_month08: woa23_salinity_month08
+  woa23_salinity_month09: woa23_salinity_month09
+  woa23_salinity_month10: woa23_salinity_month10
+  woa23_salinity_month11: woa23_salinity_month11
+  woa23_salinity_month12: woa23_salinity_month12
+  woa23_silicate_annual: woa23_silicate_annual
+  woa23_silicate_month01: woa23_silicate_month01
+  woa23_silicate_month02: woa23_silicate_month02
+  woa23_silicate_month03: woa23_silicate_month03
+  woa23_silicate_month04: woa23_silicate_month04
+  woa23_silicate_month05: woa23_silicate_month05
+  woa23_silicate_month06: woa23_silicate_month06
+  woa23_silicate_month07: woa23_silicate_month07
+  woa23_silicate_month08: woa23_silicate_month08
+  woa23_silicate_month09: woa23_silicate_month09
+  woa23_silicate_month10: woa23_silicate_month10
+  woa23_silicate_month11: woa23_silicate_month11
+  woa23_silicate_month12: woa23_silicate_month12
+  woa23_temperature_annual: woa23_temperature_annual
+  woa23_temperature_month01: woa23_temperature_month01
+  woa23_temperature_month02: woa23_temperature_month02
+  woa23_temperature_month03: woa23_temperature_month03
+  woa23_temperature_month04: woa23_temperature_month04
+  woa23_temperature_month05: woa23_temperature_month05
+  woa23_temperature_month06: woa23_temperature_month06
+  woa23_temperature_month07: woa23_temperature_month07
+  woa23_temperature_month08: woa23_temperature_month08
+  woa23_temperature_month09: woa23_temperature_month09
+  woa23_temperature_month10: woa23_temperature_month10
+  woa23_temperature_month11: woa23_temperature_month11
+  woa23_temperature_month12: woa23_temperature_month12
+data:
+  04195b2b5440aed5:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n12_01.nc
+    metadata: {}
+    user_parameters: {}
+  06eecbea5c55db6a:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o11_01.nc
+    metadata: {}
+    user_parameters: {}
+  07b0d5d76f1a214d:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p04_01.nc
+    metadata: {}
+    user_parameters: {}
+  0eaaf7b93c4c169b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o12_01.nc
+    metadata: {}
+    user_parameters: {}
+  0f274441eae6af05:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o08_01.nc
+    metadata: {}
+    user_parameters: {}
+  1081dccd1beed913:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t09_01.nc
+    metadata: {}
+    user_parameters: {}
+  1238ead44ac01f9d:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n07_01.nc
+    metadata: {}
+    user_parameters: {}
+  1b05fb793723bdd8:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n09_01.nc
+    metadata: {}
+    user_parameters: {}
+  1d5f4e258b321faa:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n11_01.nc
+    metadata: {}
+    user_parameters: {}
+  1dad127286f42130:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s07_01.nc
+    metadata: {}
+    user_parameters: {}
+  231d80fc7d7a987b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i06_01.nc
+    metadata: {}
+    user_parameters: {}
+  2625fb9141a50fd4:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i05_01.nc
+    metadata: {}
+    user_parameters: {}
+  27d115bd0fdbd548:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o03_01.nc
+    metadata: {}
+    user_parameters: {}
+  296a03dc831ee4ee:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p12_01.nc
+    metadata: {}
+    user_parameters: {}
+  2affd3050d9db00d:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o04_01.nc
+    metadata: {}
+    user_parameters: {}
+  33bd41be6974f33b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t10_01.nc
+    metadata: {}
+    user_parameters: {}
+  3485752f89f9f857:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p07_01.nc
+    metadata: {}
+    user_parameters: {}
+  3a92f1c51cabaf59:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p00_01.nc
+    metadata: {}
+    user_parameters: {}
+  3c26e0f2ccac50d2:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s01_01.nc
+    metadata: {}
+    user_parameters: {}
+  404d276ddd3a9fa5:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i03_01.nc
+    metadata: {}
+    user_parameters: {}
+  405993c6222457a1:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o02_01.nc
+    metadata: {}
+    user_parameters: {}
+  43e3ec243c4129e7:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s00_01.nc
+    metadata: {}
+    user_parameters: {}
+  44248a1087b226d8:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t02_01.nc
+    metadata: {}
+    user_parameters: {}
+  449f746fd30ca829:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n06_01.nc
+    metadata: {}
+    user_parameters: {}
+  46337d0d59fa000e:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s12_01.nc
+    metadata: {}
+    user_parameters: {}
+  49f2b57f88dc1ee1:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p06_01.nc
+    metadata: {}
+    user_parameters: {}
+  4ddcf235043a1792:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t11_01.nc
+    metadata: {}
+    user_parameters: {}
+  50bd14462e58789b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o07_01.nc
+    metadata: {}
+    user_parameters: {}
+  5532aeac7e9b52c1:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t12_01.nc
+    metadata: {}
+    user_parameters: {}
+  572942467bc4cc3d:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o05_01.nc
+    metadata: {}
+    user_parameters: {}
+  5dbdd13d63b07f8c:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s06_01.nc
+    metadata: {}
+    user_parameters: {}
+  626ff26a066afde5:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s03_01.nc
+    metadata: {}
+    user_parameters: {}
+  637700b74ae8a10b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n01_01.nc
+    metadata: {}
+    user_parameters: {}
+  658bff33cba34a17:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t07_01.nc
+    metadata: {}
+    user_parameters: {}
+  68b07d4201bc8e43:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s02_01.nc
+    metadata: {}
+    user_parameters: {}
+  699d61882b2ad4cc:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p02_01.nc
+    metadata: {}
+    user_parameters: {}
+  69f3d173ee155c08:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i11_01.nc
+    metadata: {}
+    user_parameters: {}
+  6d25b5827372c02c:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t00_01.nc
+    metadata: {}
+    user_parameters: {}
+  6eecafcd9556179f:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i10_01.nc
+    metadata: {}
+    user_parameters: {}
+  73c93e6250a62df8:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o09_01.nc
+    metadata: {}
+    user_parameters: {}
+  75b52aecc80a54f0:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t08_01.nc
+    metadata: {}
+    user_parameters: {}
+  79c2859e24140bf7:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n10_01.nc
+    metadata: {}
+    user_parameters: {}
+  7c1c26f0c0a51e0d:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p01_01.nc
+    metadata: {}
+    user_parameters: {}
+  7fa9b62cc4850245:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i04_01.nc
+    metadata: {}
+    user_parameters: {}
+  83a86a45794b3ae0:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o06_01.nc
+    metadata: {}
+    user_parameters: {}
+  83e21f5375201704:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o00_01.nc
+    metadata: {}
+    user_parameters: {}
+  866e1b4963774ae6:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i00_01.nc
+    metadata: {}
+    user_parameters: {}
+  8ddc62dbeb9a4c92:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n04_01.nc
+    metadata: {}
+    user_parameters: {}
+  913412446f94a875:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p09_01.nc
+    metadata: {}
+    user_parameters: {}
+  92ecbdfa499c3a21:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i09_01.nc
+    metadata: {}
+    user_parameters: {}
+  941617743c063e26:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t06_01.nc
+    metadata: {}
+    user_parameters: {}
+  97b77b20c756d9fb:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s09_01.nc
+    metadata: {}
+    user_parameters: {}
+  9a9fadbf77332115:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i01_01.nc
+    metadata: {}
+    user_parameters: {}
+  a323aece3f1f77f5:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o01_01.nc
+    metadata: {}
+    user_parameters: {}
+  a554fce99bf0aae4:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p11_01.nc
+    metadata: {}
+    user_parameters: {}
+  a70010565aa859a5:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s08_01.nc
+    metadata: {}
+    user_parameters: {}
+  a76e190ad0a0ca80:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s11_01.nc
+    metadata: {}
+    user_parameters: {}
+  a7b9d3e41e7f64bf:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i02_01.nc
+    metadata: {}
+    user_parameters: {}
+  af5cc59d85ac7c39:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p10_01.nc
+    metadata: {}
+    user_parameters: {}
+  ba30757b5264f104:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i08_01.nc
+    metadata: {}
+    user_parameters: {}
+  bf5206f692fec949:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t03_01.nc
+    metadata: {}
+    user_parameters: {}
+  c56729aba434c7f4:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n02_01.nc
+    metadata: {}
+    user_parameters: {}
+  ca78f65c9e3476c3:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s04_01.nc
+    metadata: {}
+    user_parameters: {}
+  cdff65814bf4ed4f:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p05_01.nc
+    metadata: {}
+    user_parameters: {}
+  d1cbc53c28c101ec:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i12_01.nc
+    metadata: {}
+    user_parameters: {}
+  d4adf13752fe3816:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/oxygen/netcdf/all/1.00/woa23_all_o10_01.nc
+    metadata: {}
+    user_parameters: {}
+  d8d07ed28152e35e:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s10_01.nc
+    metadata: {}
+    user_parameters: {}
+  dc08690d7b85574b:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n08_01.nc
+    metadata: {}
+    user_parameters: {}
+  dc4b8df996083495:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p08_01.nc
+    metadata: {}
+    user_parameters: {}
+  dc67bdccf7de19a8:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n03_01.nc
+    metadata: {}
+    user_parameters: {}
+  ded0908233b5d947:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/salinity/netcdf/decav/1.00/woa23_decav_s05_01.nc
+    metadata: {}
+    user_parameters: {}
+  ec10ede27f67d6c9:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n05_01.nc
+    metadata: {}
+    user_parameters: {}
+  efc44f6e8fe50321:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t04_01.nc
+    metadata: {}
+    user_parameters: {}
+  f10d21434a270803:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/phosphate/netcdf/all/1.00/woa23_all_p03_01.nc
+    metadata: {}
+    user_parameters: {}
+  f37ced29a3d87d44:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t01_01.nc
+    metadata: {}
+    user_parameters: {}
+  fb1ed0bd86370c08:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/temperature/netcdf/decav/1.00/woa23_decav_t05_01.nc
+    metadata: {}
+    user_parameters: {}
+  fcd5a061879e1e1e:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/silicate/netcdf/all/1.00/woa23_all_i07_01.nc
+    metadata: {}
+    user_parameters: {}
+  feada518d94630a0:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: simplecache::https://www.ncei.noaa.gov/data/oceans/woa/WOA23/DATA/nitrate/netcdf/all/1.00/woa23_all_n00_01.nc
+    metadata: {}
+    user_parameters: {}
+entries:
+  woa23_nitrate_annual:
+    kwargs:
+      args:
+      - '{data(feada518d94630a0)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (annual, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month01:
+    kwargs:
+      args:
+      - '{data(637700b74ae8a10b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month01, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month02:
+    kwargs:
+      args:
+      - '{data(c56729aba434c7f4)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month02, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month03:
+    kwargs:
+      args:
+      - '{data(dc67bdccf7de19a8)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month03, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month04:
+    kwargs:
+      args:
+      - '{data(8ddc62dbeb9a4c92)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month04, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month05:
+    kwargs:
+      args:
+      - '{data(ec10ede27f67d6c9)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month05, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month06:
+    kwargs:
+      args:
+      - '{data(449f746fd30ca829)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month06, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month07:
+    kwargs:
+      args:
+      - '{data(1238ead44ac01f9d)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month07, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month08:
+    kwargs:
+      args:
+      - '{data(dc08690d7b85574b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month08, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month09:
+    kwargs:
+      args:
+      - '{data(1b05fb793723bdd8)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month09, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month10:
+    kwargs:
+      args:
+      - '{data(79c2859e24140bf7)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month10, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month11:
+    kwargs:
+      args:
+      - '{data(1d5f4e258b321faa)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month11, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_nitrate_month12:
+    kwargs:
+      args:
+      - '{data(04195b2b5440aed5)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        n_an: moles_of_nitrate_per_unit_mass_in_sea_water
+      title: WOA23 nitrate (month12, 1 deg)
+      variables:
+      - moles_of_nitrate_per_unit_mass_in_sea_water
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_annual:
+    kwargs:
+      args:
+      - '{data(83e21f5375201704)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (annual, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month01:
+    kwargs:
+      args:
+      - '{data(a323aece3f1f77f5)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month01, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month02:
+    kwargs:
+      args:
+      - '{data(405993c6222457a1)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month02, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month03:
+    kwargs:
+      args:
+      - '{data(27d115bd0fdbd548)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month03, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month04:
+    kwargs:
+      args:
+      - '{data(2affd3050d9db00d)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month04, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month05:
+    kwargs:
+      args:
+      - '{data(572942467bc4cc3d)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month05, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month06:
+    kwargs:
+      args:
+      - '{data(83a86a45794b3ae0)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month06, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month07:
+    kwargs:
+      args:
+      - '{data(50bd14462e58789b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month07, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month08:
+    kwargs:
+      args:
+      - '{data(0f274441eae6af05)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month08, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month09:
+    kwargs:
+      args:
+      - '{data(73c93e6250a62df8)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month09, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month10:
+    kwargs:
+      args:
+      - '{data(d4adf13752fe3816)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month10, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month11:
+    kwargs:
+      args:
+      - '{data(06eecbea5c55db6a)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month11, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_oxygen_month12:
+    kwargs:
+      args:
+      - '{data(0eaaf7b93c4c169b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        o_an: moles_of_oxygen_per_unit_mass_in_sea_water
+      title: WOA23 oxygen (month12, 1 deg)
+      variables:
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_annual:
+    kwargs:
+      args:
+      - '{data(3a92f1c51cabaf59)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (annual, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month01:
+    kwargs:
+      args:
+      - '{data(7c1c26f0c0a51e0d)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month01, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month02:
+    kwargs:
+      args:
+      - '{data(699d61882b2ad4cc)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month02, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month03:
+    kwargs:
+      args:
+      - '{data(f10d21434a270803)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month03, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month04:
+    kwargs:
+      args:
+      - '{data(07b0d5d76f1a214d)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month04, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month05:
+    kwargs:
+      args:
+      - '{data(cdff65814bf4ed4f)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month05, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month06:
+    kwargs:
+      args:
+      - '{data(49f2b57f88dc1ee1)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month06, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month07:
+    kwargs:
+      args:
+      - '{data(3485752f89f9f857)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month07, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month08:
+    kwargs:
+      args:
+      - '{data(dc4b8df996083495)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month08, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month09:
+    kwargs:
+      args:
+      - '{data(913412446f94a875)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month09, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month10:
+    kwargs:
+      args:
+      - '{data(af5cc59d85ac7c39)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month10, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month11:
+    kwargs:
+      args:
+      - '{data(a554fce99bf0aae4)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month11, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_phosphate_month12:
+    kwargs:
+      args:
+      - '{data(296a03dc831ee4ee)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        p_an: moles_of_phosphate_per_unit_mass_in_sea_water
+      title: WOA23 phosphate (month12, 1 deg)
+      variables:
+      - moles_of_phosphate_per_unit_mass_in_sea_water
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_annual:
+    kwargs:
+      args:
+      - '{data(43e3ec243c4129e7)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (annual, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month01:
+    kwargs:
+      args:
+      - '{data(3c26e0f2ccac50d2)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month01, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month02:
+    kwargs:
+      args:
+      - '{data(68b07d4201bc8e43)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month02, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month03:
+    kwargs:
+      args:
+      - '{data(626ff26a066afde5)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month03, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month04:
+    kwargs:
+      args:
+      - '{data(ca78f65c9e3476c3)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month04, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month05:
+    kwargs:
+      args:
+      - '{data(ded0908233b5d947)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month05, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month06:
+    kwargs:
+      args:
+      - '{data(5dbdd13d63b07f8c)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month06, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month07:
+    kwargs:
+      args:
+      - '{data(1dad127286f42130)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month07, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month08:
+    kwargs:
+      args:
+      - '{data(a70010565aa859a5)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month08, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month09:
+    kwargs:
+      args:
+      - '{data(97b77b20c756d9fb)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month09, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month10:
+    kwargs:
+      args:
+      - '{data(d8d07ed28152e35e)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month10, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month11:
+    kwargs:
+      args:
+      - '{data(a76e190ad0a0ca80)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month11, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_salinity_month12:
+    kwargs:
+      args:
+      - '{data(46337d0d59fa000e)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        s_an: sea_water_salinity
+      title: WOA23 salinity (month12, 1 deg)
+      variables:
+      - sea_water_salinity
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_annual:
+    kwargs:
+      args:
+      - '{data(866e1b4963774ae6)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (annual, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month01:
+    kwargs:
+      args:
+      - '{data(9a9fadbf77332115)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month01, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month02:
+    kwargs:
+      args:
+      - '{data(a7b9d3e41e7f64bf)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month02, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month03:
+    kwargs:
+      args:
+      - '{data(404d276ddd3a9fa5)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month03, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month04:
+    kwargs:
+      args:
+      - '{data(7fa9b62cc4850245)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month04, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month05:
+    kwargs:
+      args:
+      - '{data(2625fb9141a50fd4)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month05, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month06:
+    kwargs:
+      args:
+      - '{data(231d80fc7d7a987b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month06, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month07:
+    kwargs:
+      args:
+      - '{data(fcd5a061879e1e1e)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month07, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month08:
+    kwargs:
+      args:
+      - '{data(ba30757b5264f104)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month08, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month09:
+    kwargs:
+      args:
+      - '{data(92ecbdfa499c3a21)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month09, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month10:
+    kwargs:
+      args:
+      - '{data(6eecafcd9556179f)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month10, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month11:
+    kwargs:
+      args:
+      - '{data(69f3d173ee155c08)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month11, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_silicate_month12:
+    kwargs:
+      args:
+      - '{data(d1cbc53c28c101ec)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        i_an: moles_of_silicate_per_unit_mass_in_sea_water
+      title: WOA23 silicate (month12, 1 deg)
+      variables:
+      - moles_of_silicate_per_unit_mass_in_sea_water
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_annual:
+    kwargs:
+      args:
+      - '{data(6d25b5827372c02c)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: annual
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (annual, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '00'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month01:
+    kwargs:
+      args:
+      - '{data(f37ced29a3d87d44)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month01
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month01, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '01'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month02:
+    kwargs:
+      args:
+      - '{data(44248a1087b226d8)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month02
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month02, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '02'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month03:
+    kwargs:
+      args:
+      - '{data(bf5206f692fec949)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month03
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month03, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '03'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month04:
+    kwargs:
+      args:
+      - '{data(efc44f6e8fe50321)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month04
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month04, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '04'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month05:
+    kwargs:
+      args:
+      - '{data(fb1ed0bd86370c08)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month05
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month05, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '05'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month06:
+    kwargs:
+      args:
+      - '{data(941617743c063e26)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month06
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month06, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '06'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month07:
+    kwargs:
+      args:
+      - '{data(658bff33cba34a17)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month07
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month07, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '07'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month08:
+    kwargs:
+      args:
+      - '{data(75b52aecc80a54f0)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month08
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month08, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: 08
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month09:
+    kwargs:
+      args:
+      - '{data(1081dccd1beed913)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month09
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month09, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: 09
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month10:
+    kwargs:
+      args:
+      - '{data(33bd41be6974f33b)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month10
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month10, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '10'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month11:
+    kwargs:
+      args:
+      - '{data(4ddcf235043a1792)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month11
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month11, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '11'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  woa23_temperature_month12:
+    kwargs:
+      args:
+      - '{data(5532aeac7e9b52c1)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      climatology: true
+      climatology_period: month12
+      depth_coord: depth
+      featureType: grid
+      featureType_source: declared
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      institution: NOAA NCEI
+      lon_convention: -180-180
+      nominal_resolution_km: 111
+      standard_names:
+        t_an: sea_water_temperature
+      title: WOA23 temperature (month12, 1 deg)
+      variables:
+      - sea_water_temperature
+      woa_period_code: '12'
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+metadata:
+  description: WOA23 objectively-analyzed climatology; files cached on first read.
+  featureTypes:
+  - grid
+  institution: NOAA NCEI
+  title: "World Ocean Atlas 2023 (1 deg) \u2014 annual + monthly climatology"
+user_parameters: {}
+version: 2

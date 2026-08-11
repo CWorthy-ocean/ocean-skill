@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Figures and metrics written by osk.outputs — regenerable from a run
+output/
+
+# Kerchunk references: regenerable, and they store absolute paths to local model
+# output, so they are meaningless in anyone else's clone
+refs/
+docs/refs/
+
+# Machine-specific: absolute paths to local model output
+catalogs/gom_offline.yaml
+catalogs/ROMS.yaml
+catalogs/roms_example.catalog.yaml
+
+# Notebook scratch: divergent copies of catalogs/, shadows them from docs/
+docs/catalogs/

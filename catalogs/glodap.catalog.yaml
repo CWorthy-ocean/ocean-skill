@@ -1,0 +1,49 @@
+aliases:
+  glodap: glodap
+data: {}
+entries:
+  glodap:
+    kwargs:
+      cache_dir: ~/.ocean-skill/cache/obs
+      keep_vars:
+      - Depth
+      known_hash: null
+      member_glob: '*.nc'
+      url: https://www.nodc.noaa.gov/archive/arc0107/0162565/2.2/data/0-data/mapped/GLODAPv2.2016b_MappedClimatologies.tar.gz
+      var_from_filename: true
+    metadata:
+      climatology: true
+      depth_coord: depth_surface
+      featureType: grid
+      institution: NOAA NCEI / GLODAPv2
+      nominal_resolution_km: 111
+      notes: 'Open-ocean product: marginal seas are largely masked (~8% coverage in
+        the Gulf of Mexico).'
+      references: Olsen et al. 2016 (ESSD); Lauvset et al. GLODAPv2.2016b
+      standard_names:
+        NO3: mole_concentration_of_nitrate_in_sea_water
+        PO4: mole_concentration_of_phosphate_in_sea_water
+        TAlk: sea_water_alkalinity_expressed_as_mole_equivalent
+        TCO2: mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
+        oxygen: mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+        salinity: sea_water_practical_salinity
+        silicate: mole_concentration_of_silicate_in_sea_water
+        temperature: sea_water_potential_temperature
+      title: GLODAPv2.2016b Mapped Climatology
+      variables:
+      - mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
+      - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+      - mole_concentration_of_nitrate_in_sea_water
+      - mole_concentration_of_phosphate_in_sea_water
+      - mole_concentration_of_silicate_in_sea_water
+      - sea_water_alkalinity_expressed_as_mole_equivalent
+      - sea_water_potential_temperature
+      - sea_water_practical_salinity
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:PoochTarNetCDF
+    user_parameters: {}
+metadata:
+  institution: NOAA NCEI
+  title: GLODAPv2.2016b Mapped Climatologies
+user_parameters: {}
+version: 2

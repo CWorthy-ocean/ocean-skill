@@ -1,0 +1,74 @@
+aliases:
+  oceansoda_ethz: oceansoda_ethz
+data:
+  c0bccbbe069a04c6:
+    datatype: intake.readers.datatypes:HDF5
+    kwargs:
+      path: ''
+      url: blockcache::https://www.ncei.noaa.gov/data/oceans/ncei/ocads/data/0220059/OceanSODA_ETHZ-v2025.OCADS.01-1982-2024.nc
+    metadata: {}
+    user_parameters: {}
+entries:
+  oceansoda_ethz:
+    kwargs:
+      args:
+      - '{data(c0bccbbe069a04c6)}'
+      chunks: {}
+      decode_times: false
+      engine: h5netcdf
+    metadata:
+      axes:
+        T: time
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -179.5
+      lon_convention: -180-180
+      source: NCEI OCADS accession 0220059
+      standard_names:
+        dic: mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
+        omega_ar: aragonite saturation state
+        omega_ca: calcite saturation state
+        salinity: sea_surface_salinity
+        spco2: surface_partial_pressure_of_carbon_dioxide_in_sea_water
+        talk: total_alkalinity_in_sea_water
+        temperature: sea_surface_temperature
+      time_coverage_end: '2024-12-15'
+      time_coverage_start: '1982-01-15'
+      variables:
+      - aragonite saturation state
+      - calcite saturation state
+      - mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
+      - sea_surface_salinity
+      - sea_surface_temperature
+      - surface_partial_pressure_of_carbon_dioxide_in_sea_water
+      - total_alkalinity_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+metadata:
+  description: OceanSODA-ETHZ v2025 surface carbonate system climatology (1982-2024),
+    NCEI OCADS 0220059.
+  featureTypes:
+  - grid
+  geospatial_lat_max: 89.5
+  geospatial_lat_min: -89.5
+  geospatial_lon_max: 179.5
+  geospatial_lon_min: -179.5
+  standard_names:
+  - aragonite saturation state
+  - calcite saturation state
+  - mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
+  - sea_surface_salinity
+  - sea_surface_temperature
+  - surface_partial_pressure_of_carbon_dioxide_in_sea_water
+  - total_alkalinity_in_sea_water
+  time_coverage_end: '2024-12-15'
+  time_coverage_start: '1982-01-15'
+  title: OceanSODA-ETHZ
+user_parameters: {}
+version: 2

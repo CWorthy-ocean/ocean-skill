@@ -1,0 +1,2742 @@
+aliases:
+  ooi-gp02hypm-rim01-02-ctdmog039: ooi-gp02hypm-rim01-02-ctdmog039
+  ooi-gp02hypm-wfp02-01-flordl000: ooi-gp02hypm-wfp02-01-flordl000
+  ooi-gp02hypm-wfp02-03-dostal000: ooi-gp02hypm-wfp02-03-dostal000
+  ooi-gp02hypm-wfp02-04-ctdpfl000: ooi-gp02hypm-wfp02-04-ctdpfl000
+  ooi-gp02hypm-wfp02-05-vel3dl000: ooi-gp02hypm-wfp02-05-vel3dl000
+  ooi-gp02hypm-wfp03-01-flordl000: ooi-gp02hypm-wfp03-01-flordl000
+  ooi-gp02hypm-wfp03-03-dostal000: ooi-gp02hypm-wfp03-03-dostal000
+  ooi-gp02hypm-wfp03-04-ctdpfl000: ooi-gp02hypm-wfp03-04-ctdpfl000
+  ooi-gp02hypm-wfp03-05-vel3dl000: ooi-gp02hypm-wfp03-05-vel3dl000
+  ooi-gp03flma-rim01-02-adcpsl003: ooi-gp03flma-rim01-02-adcpsl003
+  ooi-gp03flma-rim01-02-ctdmog040: ooi-gp03flma-rim01-02-ctdmog040
+  ooi-gp03flma-rim01-02-ctdmog041: ooi-gp03flma-rim01-02-ctdmog041
+  ooi-gp03flma-rim01-02-ctdmog042: ooi-gp03flma-rim01-02-ctdmog042
+  ooi-gp03flma-rim01-02-ctdmog043: ooi-gp03flma-rim01-02-ctdmog043
+  ooi-gp03flma-rim01-02-ctdmog044: ooi-gp03flma-rim01-02-ctdmog044
+  ooi-gp03flma-rim01-02-ctdmog045: ooi-gp03flma-rim01-02-ctdmog045
+  ooi-gp03flma-rim01-02-ctdmog046: ooi-gp03flma-rim01-02-ctdmog046
+  ooi-gp03flma-rim01-02-ctdmog047: ooi-gp03flma-rim01-02-ctdmog047
+  ooi-gp03flma-rim01-02-ctdmog048: ooi-gp03flma-rim01-02-ctdmog048
+  ooi-gp03flma-rim01-02-ctdmoh049: ooi-gp03flma-rim01-02-ctdmoh049
+  ooi-gp03flma-rim01-02-ctdmoh050: ooi-gp03flma-rim01-02-ctdmoh050
+  ooi-gp03flma-rim01-02-ctdmoh051: ooi-gp03flma-rim01-02-ctdmoh051
+  ooi-gp03flma-ris01-03-dostad000: ooi-gp03flma-ris01-03-dostad000
+  ooi-gp03flma-ris01-04-phsenf000: ooi-gp03flma-ris01-04-phsenf000
+  ooi-gp03flma-ris01-05-flortd000: ooi-gp03flma-ris01-05-flortd000
+  ooi-gp03flmb-rim01-02-adcpsl007: ooi-gp03flmb-rim01-02-adcpsl007
+  ooi-gp03flmb-rim01-02-ctdmog060: ooi-gp03flmb-rim01-02-ctdmog060
+  ooi-gp03flmb-rim01-02-ctdmog061: ooi-gp03flmb-rim01-02-ctdmog061
+  ooi-gp03flmb-rim01-02-ctdmog062: ooi-gp03flmb-rim01-02-ctdmog062
+  ooi-gp03flmb-rim01-02-ctdmog063: ooi-gp03flmb-rim01-02-ctdmog063
+  ooi-gp03flmb-rim01-02-ctdmog064: ooi-gp03flmb-rim01-02-ctdmog064
+  ooi-gp03flmb-rim01-02-ctdmog065: ooi-gp03flmb-rim01-02-ctdmog065
+  ooi-gp03flmb-rim01-02-ctdmog066: ooi-gp03flmb-rim01-02-ctdmog066
+  ooi-gp03flmb-rim01-02-ctdmog067: ooi-gp03flmb-rim01-02-ctdmog067
+  ooi-gp03flmb-rim01-02-ctdmog068: ooi-gp03flmb-rim01-02-ctdmog068
+  ooi-gp03flmb-rim01-02-ctdmoh069: ooi-gp03flmb-rim01-02-ctdmoh069
+  ooi-gp03flmb-rim01-02-ctdmoh070: ooi-gp03flmb-rim01-02-ctdmoh070
+  ooi-gp03flmb-rim01-02-ctdmoh071: ooi-gp03flmb-rim01-02-ctdmoh071
+  ooi-gp03flmb-ris01-03-dostad000: ooi-gp03flmb-ris01-03-dostad000
+  ooi-gp03flmb-ris01-04-phsenf000: ooi-gp03flmb-ris01-04-phsenf000
+  ooi-gp03flmb-ris01-05-flortd000: ooi-gp03flmb-ris01-05-flortd000
+data: {}
+entries:
+  ooi-gp02hypm-rim01-02-ctdmog039:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-rim01-02-ctdmog039
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-rim01-02-ctdmog039
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-rim01-02-ctdmog039/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2025-08-24T08:00:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T08:15:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Mooring Riser: CTD'' (ooi-gp02hypm-rim01-02-ctdmog039)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-rim01-02-ctdmog039
+      time_coverage_end: '2025-08-24'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Mooring Riser: CTD'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp02-01-flordl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp02-01-flordl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp02-01-flordl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp02-01-flordl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2024-12-31T06:00:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T11:02:00Z'
+      standard_names:
+        flubsct_profiler_depth_enabled (m-1): flubsct_profiler_depth_enabled
+        mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled (microg.L-1): mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Upper: 2-Wavelength Fluorometer'' (ooi-gp02hypm-wfp02-01-flordl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp02-01-flordl000
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Upper: 2-Wavelength Fluorometer'
+      units:
+        flubsct_profiler_depth_enabled (m-1): m-1
+        mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled (microg.L-1): microg.L-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - flubsct_profiler_depth_enabled
+      - mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp02-03-dostal000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp02-03-dostal000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp02-03-dostal000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp02-03-dostal000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2024-12-31T06:00:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T11:02:00Z'
+      standard_names:
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled (micromol.L-1): mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled
+        moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled (micromol.kg-1): moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Upper: Dissolved Oxygen'' (ooi-gp02hypm-wfp02-03-dostal000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp02-03-dostal000
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Upper: Dissolved Oxygen'
+      units:
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled (micromol.L-1): micromol.L-1
+        moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled (micromol.kg-1): micromol.kg-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled
+      - moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp02-04-ctdpfl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp02-04-ctdpfl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp02-04-ctdpfl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp02-04-ctdpfl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2025-08-17T14:03:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T11:00:00Z'
+      standard_names:
+        sea_water_density_profiler_depth_enabled (kg.m-3): sea_water_density_profiler_depth_enabled
+        sea_water_electrical_conductivity_profiler_depth_enabled (mS.cm-1): sea_water_electrical_conductivity_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Upper: CTD'' (ooi-gp02hypm-wfp02-04-ctdpfl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp02-04-ctdpfl000
+      time_coverage_end: '2025-08-17'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Upper: CTD'
+      units:
+        sea_water_density_profiler_depth_enabled (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity_profiler_depth_enabled (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - sea_water_density_profiler_depth_enabled
+      - sea_water_electrical_conductivity_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp02-05-vel3dl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp02-05-vel3dl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp02-05-vel3dl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp02-05-vel3dl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2024-12-31T06:02:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T11:00:00Z'
+      standard_names:
+        eastward_sea_water_velocity_profiler_depth_enabled (m.s-1): eastward_sea_water_velocity_profiler_depth_enabled
+        northward_sea_water_velocity_profiler_depth_enabled (m.s-1): northward_sea_water_velocity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        station: station
+        velptmn_vlu_asc_profiler_depth_enabled (m.s-1): velptmn_vlu_asc_profiler_depth_enabled
+        velptmn_vlu_dsc_profiler_depth_enabled (m.s-1): velptmn_vlu_dsc_profiler_depth_enabled
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Upper: 3-D Single Point Velocity Meter'' (ooi-gp02hypm-wfp02-05-vel3dl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp02-05-vel3dl000
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Upper: 3-D Single Point Velocity Meter'
+      units:
+        eastward_sea_water_velocity_profiler_depth_enabled (m.s-1): m.s-1
+        northward_sea_water_velocity_profiler_depth_enabled (m.s-1): m.s-1
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        velptmn_vlu_asc_profiler_depth_enabled (m.s-1): m.s-1
+        velptmn_vlu_dsc_profiler_depth_enabled (m.s-1): m.s-1
+      variables:
+      - eastward_sea_water_velocity_profiler_depth_enabled
+      - northward_sea_water_velocity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - station
+      - velptmn_vlu_asc_profiler_depth_enabled
+      - velptmn_vlu_dsc_profiler_depth_enabled
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp03-01-flordl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp03-01-flordl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp03-01-flordl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp03-01-flordl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2025-08-15T22:00:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T15:02:00Z'
+      standard_names:
+        flubsct_profiler_depth_enabled (m-1): flubsct_profiler_depth_enabled
+        mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled (microg.L-1): mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Lower: 2-Wavelength Fluorometer'' (ooi-gp02hypm-wfp03-01-flordl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp03-01-flordl000
+      time_coverage_end: '2025-08-15'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Lower: 2-Wavelength Fluorometer'
+      units:
+        flubsct_profiler_depth_enabled (m-1): m-1
+        mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled (microg.L-1): microg.L-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - flubsct_profiler_depth_enabled
+      - mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp03-03-dostal000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp03-03-dostal000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp03-03-dostal000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp03-03-dostal000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2024-12-31T05:43:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T15:02:00Z'
+      standard_names:
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled (micromol.L-1): mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled
+        moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled (micromol.kg-1): moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Lower: Dissolved Oxygen'' (ooi-gp02hypm-wfp03-03-dostal000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp03-03-dostal000
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Lower: Dissolved Oxygen'
+      units:
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled (micromol.L-1): micromol.L-1
+        moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled (micromol.kg-1): micromol.kg-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled
+      - moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp03-04-ctdpfl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp03-04-ctdpfl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp03-04-ctdpfl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp03-04-ctdpfl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2025-06-29T09:58:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T15:00:00Z'
+      standard_names:
+        sea_water_density_profiler_depth_enabled (kg.m-3): sea_water_density_profiler_depth_enabled
+        sea_water_electrical_conductivity_profiler_depth_enabled (mS.cm-1): sea_water_electrical_conductivity_profiler_depth_enabled
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): sea_water_practical_salinity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): sea_water_temperature_profiler_depth_enabled
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Lower: CTD'' (ooi-gp02hypm-wfp03-04-ctdpfl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp03-04-ctdpfl000
+      time_coverage_end: '2025-06-29'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Lower: CTD'
+      units:
+        sea_water_density_profiler_depth_enabled (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity_profiler_depth_enabled (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity_profiler_depth_enabled (1e-3): 1e-3
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        sea_water_temperature_profiler_depth_enabled (degree_Celsius): degree_Celsius
+      variables:
+      - sea_water_density_profiler_depth_enabled
+      - sea_water_electrical_conductivity_profiler_depth_enabled
+      - sea_water_practical_salinity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - sea_water_temperature_profiler_depth_enabled
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp02hypm-wfp03-05-vel3dl000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp02hypm-wfp03-05-vel3dl000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp02hypm-wfp03-05-vel3dl000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.069483
+      geospatial_lat_min: 50.069483
+      geospatial_lon_max: -144.8022
+      geospatial_lon_min: -144.8022
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp02hypm-wfp03-05-vel3dl000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.069483
+      maxLongitude: -144.8022
+      maxTime: '2024-12-31T05:45:00Z'
+      minLatitude: 50.069483
+      minLongitude: -144.8022
+      minTime: '2013-07-26T15:00:00Z'
+      standard_names:
+        eastward_sea_water_velocity_profiler_depth_enabled (m.s-1): eastward_sea_water_velocity_profiler_depth_enabled
+        northward_sea_water_velocity_profiler_depth_enabled (m.s-1): northward_sea_water_velocity_profiler_depth_enabled
+        sea_water_pressure_profiler_depth_enabled (decibars): sea_water_pressure_profiler_depth_enabled
+        station: station
+        velptmn_vlu_asc_profiler_depth_enabled (m.s-1): velptmn_vlu_asc_profiler_depth_enabled
+        velptmn_vlu_dsc_profiler_depth_enabled (m.s-1): velptmn_vlu_dsc_profiler_depth_enabled
+      summary: 'Timeseries data from ''Global Station Papa: Apex Profiler Mooring:
+        Wire-Following Profiler Lower: 3-D Single Point Velocity Meter'' (ooi-gp02hypm-wfp03-05-vel3dl000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp02hypm-wfp03-05-vel3dl000
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '2013-07-26'
+      title: 'Global Station Papa: Apex Profiler Mooring: Wire-Following Profiler
+        Lower: 3-D Single Point Velocity Meter'
+      units:
+        eastward_sea_water_velocity_profiler_depth_enabled (m.s-1): m.s-1
+        northward_sea_water_velocity_profiler_depth_enabled (m.s-1): m.s-1
+        sea_water_pressure_profiler_depth_enabled (decibars): decibars
+        velptmn_vlu_asc_profiler_depth_enabled (m.s-1): m.s-1
+        velptmn_vlu_dsc_profiler_depth_enabled (m.s-1): m.s-1
+      variables:
+      - eastward_sea_water_velocity_profiler_depth_enabled
+      - northward_sea_water_velocity_profiler_depth_enabled
+      - sea_water_pressure_profiler_depth_enabled
+      - station
+      - velptmn_vlu_asc_profiler_depth_enabled
+      - velptmn_vlu_dsc_profiler_depth_enabled
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-adcpsl003:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-adcpsl003
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-adcpsl003
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-adcpsl003/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T16:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T23:00:00Z'
+      standard_names:
+        eastward_sea_water_velocity (m.s-1): eastward_sea_water_velocity
+        northward_sea_water_velocity (m.s-1): northward_sea_water_velocity
+        station: station
+        upward_sea_water_velocity (m.s-1): upward_sea_water_velocity
+        velprof_err (m.s-1): velprof_err
+        velprof_evl (m.s-1): velprof_evl
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: Velocity Profiler (75 kHz)'' (ooi-gp03flma-rim01-02-adcpsl003)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-adcpsl003
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: Velocity
+        Profiler (75 kHz)'
+      units:
+        eastward_sea_water_velocity (m.s-1): m.s-1
+        northward_sea_water_velocity (m.s-1): m.s-1
+        upward_sea_water_velocity (m.s-1): m.s-1
+        velprof_err (m.s-1): m.s-1
+        velprof_evl (m.s-1): m.s-1
+      variables:
+      - eastward_sea_water_velocity
+      - northward_sea_water_velocity
+      - station
+      - upward_sea_water_velocity
+      - velprof_err
+      - velprof_evl
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog040:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog040
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog040
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog040/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (30 meters)'' (ooi-gp03flma-rim01-02-ctdmog040)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog040
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (30 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog041:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog041
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog041
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog041/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (40 meters)'' (ooi-gp03flma-rim01-02-ctdmog041)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog041
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (40 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog042:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog042
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog042
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog042/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (60 meters)'' (ooi-gp03flma-rim01-02-ctdmog042)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog042
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (60 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog043:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog043
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog043
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog043/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (90 meters)'' (ooi-gp03flma-rim01-02-ctdmog043)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog043
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (90 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog044:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog044
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog044
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog044/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (130 meters)'' (ooi-gp03flma-rim01-02-ctdmog044)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog044
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (130 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog045:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog045
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog045
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog045/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (180 meters)'' (ooi-gp03flma-rim01-02-ctdmog045)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog045
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (180 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog046:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog046
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog046
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog046/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (250 meters)'' (ooi-gp03flma-rim01-02-ctdmog046)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog046
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (250 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog047:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog047
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog047
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog047/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (350 meters)'' (ooi-gp03flma-rim01-02-ctdmog047)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog047
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (350 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmog048:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmog048
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmog048
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmog048/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (500 meters)'' (ooi-gp03flma-rim01-02-ctdmog048)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmog048
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (500 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmoh049:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmoh049
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmoh049
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmoh049/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (750 meters)'' (ooi-gp03flma-rim01-02-ctdmoh049)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmoh049
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (750 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmoh050:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmoh050
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmoh050
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmoh050/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (1000 meters)'' (ooi-gp03flma-rim01-02-ctdmoh050)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmoh050
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (1000 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-rim01-02-ctdmoh051:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-rim01-02-ctdmoh051
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-rim01-02-ctdmoh051
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-rim01-02-ctdmoh051/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T12:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: CTD (1500 meters)'' (ooi-gp03flma-rim01-02-ctdmoh051)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-rim01-02-ctdmoh051
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: CTD
+        (1500 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-ris01-03-dostad000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-ris01-03-dostad000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-ris01-03-dostad000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.978
+      geospatial_lat_min: 49.978
+      geospatial_lon_max: -144.246
+      geospatial_lon_min: -144.246
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-ris01-03-dostad000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T16:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-21T22:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water (micromol.L-1): mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+        moles_of_oxygen_per_unit_mass_in_sea_water (micromol.kg-1): moles_of_oxygen_per_unit_mass_in_sea_water
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: Dissolved Oxygen'' (ooi-gp03flma-ris01-03-dostad000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-ris01-03-dostad000
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2013-07-21'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: Dissolved
+        Oxygen'
+      units:
+        depth_reading (m): m
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water (micromol.L-1): micromol.L-1
+        moles_of_oxygen_per_unit_mass_in_sea_water (micromol.kg-1): micromol.kg-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-ris01-04-phsenf000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-ris01-04-phsenf000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-ris01-04-phsenf000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.978
+      geospatial_lat_min: 49.978
+      geospatial_lon_max: -144.246
+      geospatial_lon_min: -144.246
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-ris01-04-phsenf000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-12T23:57:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2013-07-22T02:00:00Z'
+      standard_names:
+        sea_water_ph_reported_on_total_scale (1): sea_water_ph_reported_on_total_scale
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: Seawater pH'' (ooi-gp03flma-ris01-04-phsenf000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-ris01-04-phsenf000
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-22'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: Seawater
+        pH'
+      units:
+        sea_water_ph_reported_on_total_scale (1): '1'
+        sea_water_practical_salinity (1e-3): 1e-3
+      variables:
+      - sea_water_ph_reported_on_total_scale
+      - sea_water_practical_salinity
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flma-ris01-05-flortd000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flma-ris01-05-flortd000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flma-ris01-05-flortd000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 49.977563
+      geospatial_lat_min: 49.977563
+      geospatial_lon_max: -144.245227
+      geospatial_lon_min: -144.245227
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flma-ris01-05-flortd000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 49.977563
+      maxLongitude: -144.245227
+      maxTime: '2025-10-13T16:00:00Z'
+      minLatitude: 49.977563
+      minLongitude: -144.245227
+      minTime: '2014-06-18T06:00:00Z'
+      standard_names:
+        ? concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+          (1e-9)
+        : concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+        flubsct (m-1): flubsct
+        mass_concentration_of_chlorophyll_a_in_sea_water (microg.L-1): mass_concentration_of_chlorophyll_a_in_sea_water
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        A: Mooring Riser: 3-Wavelength Fluorometer'' (ooi-gp03flma-ris01-05-flortd000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flma-ris01-05-flortd000
+      time_coverage_end: '2025-10-13'
+      time_coverage_start: '2014-06-18'
+      title: 'Global Station Papa: Flanking Subsurface Mooring A: Mooring Riser: 3-Wavelength
+        Fluorometer'
+      units:
+        ? concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+          (1e-9)
+        : 1e-9
+        flubsct (m-1): m-1
+        mass_concentration_of_chlorophyll_a_in_sea_water (microg.L-1): microg.L-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+      - flubsct
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - sea_water_practical_salinity
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-adcpsl007:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-adcpsl007
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-adcpsl007
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-adcpsl007/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-05-28T19:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T07:26:00Z'
+      standard_names:
+        eastward_sea_water_velocity (m.s-1): eastward_sea_water_velocity
+        northward_sea_water_velocity (m.s-1): northward_sea_water_velocity
+        station: station
+        upward_sea_water_velocity (m.s-1): upward_sea_water_velocity
+        velprof_evl (m.s-1): velprof_evl
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: Velocity Profiler (75 kHz)'' (ooi-gp03flmb-rim01-02-adcpsl007)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-adcpsl007
+      time_coverage_end: '2025-05-28'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: Velocity
+        Profiler (75 kHz)'
+      units:
+        eastward_sea_water_velocity (m.s-1): m.s-1
+        northward_sea_water_velocity (m.s-1): m.s-1
+        upward_sea_water_velocity (m.s-1): m.s-1
+        velprof_evl (m.s-1): m.s-1
+      variables:
+      - eastward_sea_water_velocity
+      - northward_sea_water_velocity
+      - station
+      - upward_sea_water_velocity
+      - velprof_evl
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog060:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog060
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog060
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog060/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (30 meters)'' (ooi-gp03flmb-rim01-02-ctdmog060)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog060
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (30 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog061:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog061
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog061
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog061/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (40 meters)'' (ooi-gp03flmb-rim01-02-ctdmog061)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog061
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (40 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog062:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog062
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog062
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog062/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (60 meters)'' (ooi-gp03flmb-rim01-02-ctdmog062)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog062
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (60 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog063:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog063
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog063
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog063/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (90 meters)'' (ooi-gp03flmb-rim01-02-ctdmog063)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog063
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (90 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog064:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog064
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog064
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog064/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (130 meters)'' (ooi-gp03flmb-rim01-02-ctdmog064)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog064
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (130 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog065:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog065
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog065
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog065/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (180 meters)'' (ooi-gp03flmb-rim01-02-ctdmog065)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog065
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (180 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog066:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog066
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog066
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog066/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (250 meters)'' (ooi-gp03flmb-rim01-02-ctdmog066)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog066
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (250 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog067:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog067
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog067
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog067/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (350 meters)'' (ooi-gp03flmb-rim01-02-ctdmog067)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog067
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (350 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmog068:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmog068
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmog068
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmog068/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (500 meters)'' (ooi-gp03flmb-rim01-02-ctdmog068)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmog068
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (500 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmoh069:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmoh069
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmoh069
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmoh069/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (750 meters)'' (ooi-gp03flmb-rim01-02-ctdmoh069)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmoh069
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (750 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmoh070:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmoh070
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmoh070
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmoh070/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (1000 meters)'' (ooi-gp03flmb-rim01-02-ctdmoh070)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmoh070
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (1000 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-rim01-02-ctdmoh071:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-rim01-02-ctdmoh071
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-rim01-02-ctdmoh071
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-rim01-02-ctdmoh071/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        sea_water_density (kg.m-3): sea_water_density
+        sea_water_electrical_conductivity (mS.cm-1): sea_water_electrical_conductivity
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: CTD (1500 meters)'' (ooi-gp03flmb-rim01-02-ctdmoh071)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-rim01-02-ctdmoh071
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: CTD
+        (1500 meters)'
+      units:
+        depth_reading (m): m
+        sea_water_density (kg.m-3): kg.m-3
+        sea_water_electrical_conductivity (mS.cm-1): mS.cm-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - sea_water_density
+      - sea_water_electrical_conductivity
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-ris01-03-dostad000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-ris01-03-dostad000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-ris01-03-dostad000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-ris01-03-dostad000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T06:45:00Z'
+      standard_names:
+        depth_reading (m): depth_reading
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water (micromol.L-1): mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+        moles_of_oxygen_per_unit_mass_in_sea_water (micromol.kg-1): moles_of_oxygen_per_unit_mass_in_sea_water
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_pressure (decibars): sea_water_pressure
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: Dissolved Oxygen'' (ooi-gp03flmb-ris01-03-dostad000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-ris01-03-dostad000
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: Dissolved
+        Oxygen'
+      units:
+        depth_reading (m): m
+        mole_concentration_of_dissolved_molecular_oxygen_in_sea_water (micromol.L-1): micromol.L-1
+        moles_of_oxygen_per_unit_mass_in_sea_water (micromol.kg-1): micromol.kg-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_pressure (decibars): decibars
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - depth_reading
+      - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+      - moles_of_oxygen_per_unit_mass_in_sea_water
+      - sea_water_practical_salinity
+      - sea_water_pressure
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-ris01-04-phsenf000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-ris01-04-phsenf000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-ris01-04-phsenf000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.3315
+      geospatial_lat_min: 50.3315
+      geospatial_lon_max: -144.3976
+      geospatial_lon_min: -144.3976
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-ris01-04-phsenf000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-12T00:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2013-07-24T12:00:00Z'
+      standard_names:
+        sea_water_ph_reported_on_total_scale (1): sea_water_ph_reported_on_total_scale
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: Seawater pH'' (ooi-gp03flmb-ris01-04-phsenf000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-ris01-04-phsenf000
+      time_coverage_end: '2025-10-12'
+      time_coverage_start: '2013-07-24'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: Seawater
+        pH'
+      units:
+        sea_water_ph_reported_on_total_scale (1): '1'
+        sea_water_practical_salinity (1e-3): 1e-3
+      variables:
+      - sea_water_ph_reported_on_total_scale
+      - sea_water_practical_salinity
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+  ooi-gp03flmb-ris01-05-flortd000:
+    kwargs:
+      cache_kwargs: null
+      constraints: {}
+      dataset_id: ooi-gp03flmb-ris01-05-flortd000
+      dropna: false
+      mask_failed_qartod: true
+      open_kwargs: {}
+      protocol: tabledap
+      server: https://erddap.dataexplorer.oceanobservatories.org/erddap
+      variables: null
+    metadata:
+      axes:
+        T: time (UTC)
+        X: longitude (degrees_east)
+        Y: latitude (degrees_north)
+      datasetID: ooi-gp03flmb-ris01-05-flortd000
+      featureType: timeSeries
+      featureType_source: inferred
+      geospatial_lat_max: 50.32957
+      geospatial_lat_min: 50.32957
+      geospatial_lon_max: -144.398637
+      geospatial_lon_min: -144.398637
+      griddap: ''
+      info_url: https://erddap.dataexplorer.oceanobservatories.org/erddap/info/ooi-gp03flmb-ris01-05-flortd000/index.csv
+      institution: Ocean Observatories Initiative (OOI)
+      lon_convention: -180-180
+      maxLatitude: 50.32957
+      maxLongitude: -144.398637
+      maxTime: '2025-10-11T20:00:00Z'
+      minLatitude: 50.32957
+      minLongitude: -144.398637
+      minTime: '2014-01-01T00:00:00Z'
+      standard_names:
+        ? concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+          (1e-9)
+        : concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+        flubsct (m-1): flubsct
+        mass_concentration_of_chlorophyll_a_in_sea_water (microg.L-1): mass_concentration_of_chlorophyll_a_in_sea_water
+        sea_water_practical_salinity (1e-3): sea_water_practical_salinity
+        sea_water_temperature (degree_Celsius): sea_water_temperature
+        station: station
+      summary: 'Timeseries data from ''Global Station Papa: Flanking Subsurface Mooring
+        B: Mooring Riser: 3-Wavelength Fluorometer'' (ooi-gp03flmb-ris01-05-flortd000)'
+      tabledap: https://erddap.dataexplorer.oceanobservatories.org/erddap/tabledap/ooi-gp03flmb-ris01-05-flortd000
+      time_coverage_end: '2025-10-11'
+      time_coverage_start: '2014-01-01'
+      title: 'Global Station Papa: Flanking Subsurface Mooring B: Mooring Riser: 3-Wavelength
+        Fluorometer'
+      units:
+        ? concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+          (1e-9)
+        : 1e-9
+        flubsct (m-1): m-1
+        mass_concentration_of_chlorophyll_a_in_sea_water (microg.L-1): microg.L-1
+        sea_water_practical_salinity (1e-3): 1e-3
+        sea_water_temperature (degree_Celsius): degree_Celsius
+      variables:
+      - concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+      - flubsct
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - sea_water_practical_salinity
+      - sea_water_temperature
+      - station
+    output_instance: pandas:DataFrame
+    reader: intake_erddap.erddap:TableDAPReader
+    user_parameters: {}
+metadata:
+  description: 'Ocean Observatories Initiative Global Station Papa (50N 145W, Gulf
+    of Alaska): every timeSeries dataset ERDDAP returns for a ''papa'' search, discovered
+    via intake_erddap.ERDDAPCatalogReader and probed generically (read the data, derive
+    metadata) -- the same mechanism any other source uses, no ERDDAP-specific code.'
+  featureTypes:
+  - timeSeries
+  geospatial_lat_max: 50.3315
+  geospatial_lat_min: 49.977563
+  geospatial_lon_max: -144.245227
+  geospatial_lon_min: -144.8022
+  standard_names:
+  - concentration_of_colored_dissolved_organic_matter_in_sea_water_expressed_as_equivalent_mass_fraction_of_quinine_sulfate_dihydrate
+  - depth_reading
+  - eastward_sea_water_velocity
+  - eastward_sea_water_velocity_profiler_depth_enabled
+  - flubsct
+  - flubsct_profiler_depth_enabled
+  - mass_concentration_of_chlorophyll_a_in_sea_water
+  - mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled
+  - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+  - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water_profiler_depth_enabled
+  - moles_of_oxygen_per_unit_mass_in_sea_water
+  - moles_of_oxygen_per_unit_mass_in_sea_water_profiler_depth_enabled
+  - northward_sea_water_velocity
+  - northward_sea_water_velocity_profiler_depth_enabled
+  - sea_water_density
+  - sea_water_density_profiler_depth_enabled
+  - sea_water_electrical_conductivity
+  - sea_water_electrical_conductivity_profiler_depth_enabled
+  - sea_water_ph_reported_on_total_scale
+  - sea_water_practical_salinity
+  - sea_water_practical_salinity_profiler_depth_enabled
+  - sea_water_pressure
+  - sea_water_pressure_profiler_depth_enabled
+  - sea_water_temperature
+  - sea_water_temperature_profiler_depth_enabled
+  - station
+  - upward_sea_water_velocity
+  - velprof_err
+  - velprof_evl
+  - velptmn_vlu_asc_profiler_depth_enabled
+  - velptmn_vlu_dsc_profiler_depth_enabled
+  time_coverage_end: '2025-10-13'
+  time_coverage_start: '2013-07-21'
+  title: OOI Station Papa
+user_parameters: {}
+version: 2

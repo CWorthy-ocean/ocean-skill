@@ -1,0 +1,64 @@
+# Conda/mamba environment for ocean-skill — the source of truth for a working
+# development and analysis environment (the pip core in pyproject.toml is deliberately
+# minimal). Create with:  mamba env create -f environment.yml
+#
+# Some libraries are still installed via pip below because they are either intake-2-era
+# rewrites or not reliably on conda-forge yet; move them to the conda section as they
+# stabilize. Versions are intentionally loose for now — pin once the stack is proven.
+name: ocean-skill
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  # --- core scientific stack ---
+  - numpy
+  - pandas
+  - xarray
+  - dask
+  - netcdf4
+  - pydantic>=2
+  - pyyaml>=6.0
+  - platformdirs
+  - pooch
+  - pint
+  - pint-xarray
+  - pint-pandas
+  # --- CF / grids / regridding ---
+  - cf_xarray
+  - xgcm
+  - xesmf            # pulls esmpy (conda-only)
+  - xoak
+  # --- metrics ---
+  - xskillscore
+  # --- plotting (static + interactive) ---
+  - matplotlib-base
+  - cartopy
+  - cmocean
+  - holoviews
+  - hvplot
+  - bokeh
+  - geoviews          # cartopy coastlines for the interactive maps
+  - panel             # hosts static + interactive side by side
+  - h5py              # required by virtualizarr's HDF parser
+  - fastparquet       # parquet kerchunk references
+  # --- virtual zarr / references ---
+  - kerchunk
+  - fsspec
+  - zarr
+  # --- dev tooling ---
+  - ruff>=0.12
+  - pytest
+  - pytest-cov
+  # --- pip-installed (intake-2 era / not reliably on conda-forge) ---
+  - pip
+  - pip:
+      - "intake>=2"          # Take2; user-proven
+      - intake-erddap        # rewritten for intake 2 by the user
+      - cf_pandas            # intake-erddap hard-imports this; not pulled in as a dep
+      - virtualizarr         # build kerchunk references
+      - xcmocean             # colormap <-> variable logic
+      - xroms                # ROMS vertical-coord engine (standardize on later)
+      - ioos_qc              # QARTOD (Phase 3)
+      - anywidget            # interactive embedding (Phase 4)
+      # - icechunk           # live-output step (Phase 4/5)
+      - -e .                 # ocean-skill itself, editable

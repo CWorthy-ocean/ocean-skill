@@ -1,0 +1,468 @@
+aliases:
+  modis_chl_climatology_apr: modis_chl_climatology_apr
+  modis_chl_climatology_aug: modis_chl_climatology_aug
+  modis_chl_climatology_dec: modis_chl_climatology_dec
+  modis_chl_climatology_feb: modis_chl_climatology_feb
+  modis_chl_climatology_jan: modis_chl_climatology_jan
+  modis_chl_climatology_jul: modis_chl_climatology_jul
+  modis_chl_climatology_jun: modis_chl_climatology_jun
+  modis_chl_climatology_mar: modis_chl_climatology_mar
+  modis_chl_climatology_may: modis_chl_climatology_may
+  modis_chl_climatology_nov: modis_chl_climatology_nov
+  modis_chl_climatology_oct: modis_chl_climatology_oct
+  modis_chl_climatology_sep: modis_chl_climatology_sep
+  modis_chl_daily_20120101: modis_chl_daily_20120101
+  modis_chl_daily_20120102: modis_chl_daily_20120102
+data:
+  0b633954be39edc7:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2012/0101/AQUA_MODIS.20120101.L3m.DAY.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  28a391316152cb52:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/1201/AQUA_MODIS.20021201_20211231.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  33b280e0657445d6:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0201/AQUA_MODIS.20030201_20220228.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  422a88d249a41d3e:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0601/AQUA_MODIS.20030601_20210630.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  4a112d357a55469a:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0501/AQUA_MODIS.20030501_20200531.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  69fa3167fec2da6f:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0101/AQUA_MODIS.20030101_20220131.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  712efc82fc50d78f:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/0701/AQUA_MODIS.20020701_20210731.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  786c35525ef2215d:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/1001/AQUA_MODIS.20021001_20211031.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  7b2e3d6a7ba940c0:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/1101/AQUA_MODIS.20021101_20211130.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  86a75d738c22d187:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/0901/AQUA_MODIS.20020901_20210930.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  a7aab1a95eaae1ba:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0401/AQUA_MODIS.20030401_20200430.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  bfc06cc3d60007f7:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0301/AQUA_MODIS.20030301_20210331.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  ca69e7d3dc024ca9:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2012/0102/AQUA_MODIS.20120102.L3m.DAY.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+  d608816b62bc94f2:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2002/0801/AQUA_MODIS.20020801_20210831.L3m.MC.CHL.chlor_a.4km.nc
+    metadata: {}
+    user_parameters: {}
+entries:
+  modis_chl_climatology_apr:
+    kwargs:
+      args:
+      - '{data(a7aab1a95eaae1ba)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_aug:
+    kwargs:
+      args:
+      - '{data(d608816b62bc94f2)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_dec:
+    kwargs:
+      args:
+      - '{data(28a391316152cb52)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_feb:
+    kwargs:
+      args:
+      - '{data(33b280e0657445d6)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_jan:
+    kwargs:
+      args:
+      - '{data(69fa3167fec2da6f)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_jul:
+    kwargs:
+      args:
+      - '{data(712efc82fc50d78f)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_jun:
+    kwargs:
+      args:
+      - '{data(422a88d249a41d3e)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_mar:
+    kwargs:
+      args:
+      - '{data(bfc06cc3d60007f7)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_may:
+    kwargs:
+      args:
+      - '{data(4a112d357a55469a)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_nov:
+    kwargs:
+      args:
+      - '{data(7b2e3d6a7ba940c0)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_oct:
+    kwargs:
+      args:
+      - '{data(786c35525ef2215d)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_climatology_sep:
+    kwargs:
+      args:
+      - '{data(86a75d738c22d187)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: monthly_climatology
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_daily_20120101:
+    kwargs:
+      args:
+      - '{data(0b633954be39edc7)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: daily
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  modis_chl_daily_20120102:
+    kwargs:
+      args:
+      - '{data(ca69e7d3dc024ca9)}'
+      decode_times: false
+    metadata:
+      axes:
+        X: lon
+        Y: lat
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      lon_convention: -180-180
+      period: daily
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+metadata:
+  description: 'Aqua MODIS L3 mapped chlorophyll-a (chlor_a, 4km): monthly climatologies
+    (all 12 months) plus two example daily granules, read directly over OPeNDAP from
+    NASA''s OB.DAAC. Filenames (and especially the climatology''s end-date) come from
+    ocean_skill.build.discover_opendap_files rather than being hand-typed, since NASA
+    periodically reprocesses and extends them.'
+  featureTypes:
+  - grid
+  geospatial_lat_max: 89.97916412353516
+  geospatial_lat_min: -89.97917175292969
+  geospatial_lon_max: 179.9791717529297
+  geospatial_lon_min: -179.9791717529297
+  standard_names:
+  - mass_concentration_of_chlorophyll_in_sea_water
+  title: MODIS Aqua Chlorophyll
+user_parameters: {}
+version: 2

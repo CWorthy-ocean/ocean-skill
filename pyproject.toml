@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocean-skill"
+version = "0.0.1"
+description = "Modular, composable model–data validation and analysis for ocean models."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Kristen Thyng" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+# Minimal, pip-friendly core so `import ocean_skill` works without the full conda
+# scientific stack. The heavy geoscience libraries (xesmf, xgcm, cartopy, intake,
+# xskillscore, ...) live in environment.yml, which is the source of truth for a working
+# dev/analysis environment. Modules defer imports of those libraries into function
+# bodies so the package imports cleanly with only these installed.
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml>=6.0",
+    "pydantic>=2",
+    "platformdirs",
+    "pooch",
+    "zarr",  # storage format for the aligned-result cache (ocean_skill.cache)
+    # Units: one shared pint registry so gridded (xarray) and point/timeseries
+    # (pandas) data are directly comparable -- see ocean_skill.units.
+    "pint",
+    "pint-xarray",
+    "pint-pandas",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+
+[project.urls]
+Homepage = "https://github.com/"   # TODO: set when a remote exists
+
+[tool.setuptools.packages.find]
+include = ["ocean_skill*"]
+
+[tool.setuptools.package-data]
+# Ship packaged example catalogs and any YAML assets inside the wheel.
+"*" = ["*.yaml", "*.yml"]
+
+# --- ruff: linter + formatter (mirrors cstar-forge / roms-tools house style) ---
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+fix = true
+# _taylor.py is vendored upstream code (public domain); keep it byte-close to
+# its source so it stays diffable against the gist.
+extend-exclude = ["docs", "ocean_skill/plot/_taylor.py"]
+
+[tool.ruff.lint]
+# I=isort, E/W=pycodestyle, F=pyflakes, D=pydocstyle, RUF=ruff, UP=pyupgrade.
+extend-select = ["I", "E", "W", "F", "D", "RUF", "UP"]
+# Missing-docstring codes are non-blocking (encouraged, not mandated), matching
+# cstar-forge. D203/D213 conflict with pep257 defaults. RUF001/002/003 flag "ambiguous"
+# unicode (–, −, ×, σ, µ, °) which is intentional in scientific docstrings/comments.
+ignore = [
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", "D203", "D213",
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
