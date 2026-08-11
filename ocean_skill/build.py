@@ -182,6 +182,59 @@ def _store_for(target):
     return f"file://{path}", LocalStore(prefix=path.parent)
 
 
+#: Leading bytes that identify a file's container format. NetCDF is two unrelated
+#: formats wearing one extension: netCDF-4 is HDF5, netCDF-3 ("classic"/64-bit/CDF-5)
+#: is not, and each needs a different virtualizarr parser. ROMS commonly writes
+#: netCDF-4 output alongside a netCDF-3 grid file, so one store can need both.
+_MAGIC = {
+    b"\x89HDF": "hdf5",
+    b"CDF\x01": "netcdf3",
+    b"CDF\x02": "netcdf3",
+    # CDF-5 is netCDF-3's 64-bit-data variant, called out separately because nothing
+    # here reads it: virtualizarr's NetCDF3Parser is scipy-backed, and scipy supports
+    # CDF-1/CDF-2 only. It dies with "index 0 is out of bounds" deep in scipy, which
+    # says nothing about the format, so _parser_for rejects it up front instead.
+    b"CDF\x05": "cdf5",
+}
+
+
+def _file_format(target) -> str | None:
+    """Container format of ``target`` from its magic number; ``None`` if unreadable.
+
+    Sniffing the bytes rather than trusting the extension: ``.nc`` says nothing about
+    which of the two formats is inside, and guessing wrong surfaces as h5py's
+    "file signature not found", which names neither the file nor the reason.
+    """
+    if _is_remote(target):
+        return None  # would need a range request; callers fall back to the default
+    try:
+        with open(target, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return None
+    return _MAGIC.get(head)
+
+
+def _parser_for(target):
+    """Return the virtualizarr parser matching ``target``'s container format.
+
+    Raises on CDF-5, which nothing in the stack can read — better than the
+    ``IndexError`` deep in the parser that it otherwise produces.
+    """
+    from virtualizarr.parsers import HDFParser, NetCDF3Parser
+
+    fmt = _file_format(target)
+    if fmt == "cdf5":
+        raise ValueError(
+            f"{target} is netCDF-3 CDF-5 (64-bit data), which cannot be kerchunked: "
+            "virtualizarr's NetCDF3Parser is scipy-backed and scipy reads CDF-1/CDF-2 "
+            "only. Convert it first, then pass the converted file:\n"
+            f"    nccopy -k netCDF-4 {target} converted.nc\n"
+            "(ncdump -k names the format of any file.)"
+        )
+    return NetCDF3Parser() if fmt == "netcdf3" else HDFParser()
+
+
 def detect_concat(file) -> tuple[str, tuple[str, ...]]:
     """Return ``(concat_dim, loadable_variables)`` inferred from one output file.
 
@@ -268,7 +321,6 @@ def make_kerchunk(
     import xarray as xr
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr import open_virtual_dataset, open_virtual_mfdataset
-    from virtualizarr.parsers import HDFParser
 
     # Deliberately not Path() for remote sources: Path collapses the "//" in a URL
     # to "/", so http://host/f.nc becomes http:/host/f.nc and every downstream check
@@ -282,7 +334,7 @@ def make_kerchunk(
         loadable_variables = (
             detected_loadable if loadable_variables is None else loadable_variables
         )
-    parser = HDFParser()
+    parser = _parser_for(paths[0])
 
     ctx = tolerant_hdf_attrs() if tolerant_attrs else contextlib.nullcontext()
     with ctx:
@@ -298,10 +350,12 @@ def make_kerchunk(
 
         if grid is not None:
             gurl, gstore = _store_for(grid)
+            # its own parser: a netCDF-3 grid beside netCDF-4 output is the norm
+            # for ROMS, and the two formats need different readers
             vgrid = open_virtual_dataset(
                 url=gurl,
                 registry=ObjectStoreRegistry({gurl: gstore}),
-                parser=parser,
+                parser=_parser_for(grid),
             )
             vds = xr.merge(
                 [vds, vgrid],

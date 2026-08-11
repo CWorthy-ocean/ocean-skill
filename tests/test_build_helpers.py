@@ -447,3 +447,119 @@ def test_a_remote_url_survives_path_normalization():
     assert _is_remote(url)
     key, _store = _store_for(url)
     assert key == url, "the registry key doubles as the URL virtualizarr opens"
+
+
+# ------------------------------------------------------------- container formats
+
+# "NetCDF" is two unrelated formats sharing one extension: netCDF-4 is HDF5, netCDF-3
+# is not. ROMS routinely writes netCDF-4 output beside a netCDF-3 grid file, so a
+# single kerchunk store needs both readers. Using HDFParser on a netCDF-3 file fails
+# with h5py's "file signature not found", which names neither the file nor the reason.
+
+
+def _roms_like(path, fmt, value=1.0):
+    xr.Dataset(
+        {"NO3": (("ocean_time", "eta_rho", "xi_rho"), np.full((2, 4, 5), value))},
+        coords={"ocean_time": ("ocean_time", [0.0, 43200.0], {"units": "second"})},
+    ).to_netcdf(path, format=fmt)
+    return path
+
+
+def _grid(path, fmt):
+    xr.Dataset(
+        {
+            "lon_rho": (
+                ("eta_rho", "xi_rho"),
+                np.linspace(-160, -140, 20).reshape(4, 5),
+            ),
+            "lat_rho": (("eta_rho", "xi_rho"), np.linspace(50, 60, 20).reshape(4, 5)),
+            "h": (("eta_rho", "xi_rho"), np.full((4, 5), 100.0)),
+        }
+    ).to_netcdf(path, format=fmt)
+    return path
+
+
+def test_the_container_format_is_sniffed_not_assumed(tmp_path):
+    """``.nc`` says nothing about which of the two formats is inside."""
+    from ocean_skill.build import _file_format
+
+    assert _file_format(_roms_like(tmp_path / "n4.nc", "NETCDF4")) == "hdf5"
+    assert _file_format(_roms_like(tmp_path / "n3.nc", "NETCDF3_CLASSIC")) == "netcdf3"
+    assert _file_format(_roms_like(tmp_path / "n3b.nc", "NETCDF3_64BIT")) == "netcdf3"
+    assert _file_format(tmp_path / "does_not_exist.nc") is None
+
+
+def test_a_netcdf3_grid_merges_into_netcdf4_output(tmp_path):
+    """The real ROMS combination, and the one that used to raise OSError."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"out.{i}.nc", "NETCDF4", value=i + 1) for i in range(2)
+    ]
+    grid = _grid(tmp_path / "grid.nc", "NETCDF3_CLASSIC")
+
+    out = make_kerchunk(files, out=tmp_path / "refs.json", grid=grid)
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4
+    assert {"lon_rho", "lat_rho", "h"} <= set(ds.variables)
+    assert np.allclose(ds.lon_rho.values, xr.open_dataset(grid).lon_rho.values)
+
+
+@pytest.mark.parametrize(
+    ("out_fmt", "grid_fmt"),
+    [
+        ("NETCDF4", "NETCDF4"),
+        ("NETCDF4", "NETCDF3_CLASSIC"),
+        ("NETCDF3_CLASSIC", "NETCDF3_CLASSIC"),
+        ("NETCDF3_64BIT", "NETCDF4"),
+    ],
+)
+def test_every_format_combination_builds(tmp_path, out_fmt, grid_fmt):
+    from ocean_skill.build import make_kerchunk
+
+    files = [_roms_like(tmp_path / f"o.{i}.nc", out_fmt) for i in range(2)]
+    out = make_kerchunk(
+        files, out=tmp_path / "r.json", grid=_grid(tmp_path / "g.nc", grid_fmt)
+    )
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4
+    assert "h" in ds.variables
+
+
+def _cdf5(path):
+    """Write a CDF-5 file — netCDF-3's 64-bit-data variant (``ncdump -k``: cdf5)."""
+    from netCDF4 import Dataset
+
+    nc = Dataset(path, "w", format="NETCDF3_64BIT_DATA")
+    nc.createDimension("eta_rho", 4)
+    nc.createDimension("xi_rho", 5)
+    nc.createVariable("h", "f8", ("eta_rho", "xi_rho"))[:] = np.full((4, 5), 100.0)
+    nc.close()
+    return path
+
+
+def test_cdf5_is_distinguished_from_other_netcdf3(tmp_path):
+    from ocean_skill.build import _file_format
+
+    assert _file_format(_cdf5(tmp_path / "c5.nc")) == "cdf5"
+    assert _file_format(_roms_like(tmp_path / "c1.nc", "NETCDF3_CLASSIC")) == "netcdf3"
+
+
+def test_cdf5_is_refused_with_the_conversion_command(tmp_path):
+    """Scipy — and so virtualizarr's NetCDF3Parser — reads CDF-1/CDF-2 only.
+
+    Left to itself it dies with ``IndexError: index 0 is out of bounds`` inside scipy,
+    which names neither the file nor the format. A real ROMS grid file hit this.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [_roms_like(tmp_path / f"o.{i}.nc", "NETCDF4") for i in range(2)]
+
+    with pytest.raises(ValueError, match=r"CDF-5.*cannot be kerchunked") as excinfo:
+        make_kerchunk(files, out=tmp_path / "r.json", grid=_cdf5(tmp_path / "g.nc"))
+
+    assert "nccopy -k netCDF-4" in str(excinfo.value), (
+        "the error must say how to fix it"
+    )
