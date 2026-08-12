@@ -635,7 +635,9 @@ def field_row(
     # sizing, not after, and the same answer used for both the allowance and the bars.
     aspect = _map_aspect([{"aligned": aligned}], reference_name)
     horizontal = colorbar_is_horizontal(
-        aspect, requested=(colorbar_kwargs or {}).get("orientation")
+        aspect,
+        default_horizontal=True,  # one row: bars below, panels get the full cell width
+        requested=(colorbar_kwargs or {}).get("orientation"),
     )
     figsize = figsize or auto_figsize(
         aspect,
@@ -1120,11 +1122,13 @@ def field_grid(
     n = len(comparisons)
     proj = ccrs.PlateCarree()
     canvas = resolve_canvas(size, zoom)
-    # One decision, used for both the layout allowance and the bars themselves. Splitting
-    # them is how overriding the orientation used to cost 37% of the panel: the bars moved
-    # below the maps while the row height went on reserving space beside them.
+    # One decision, used for both the layout allowance and the bars themselves.
+    # Splitting them is how overriding the orientation used to cost 37% of the panel:
+    # the bars moved below the maps while the row height reserved space beside them.
     horizontal = colorbar_is_horizontal(
         _map_aspect(comparisons, reference_name),
+        # stacked rows: bars beside, since height is the dimension in short supply
+        default_horizontal=False,
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
     row_h = row_height or _row_height(

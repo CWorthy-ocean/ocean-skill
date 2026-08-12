@@ -159,6 +159,59 @@ def test_row_height_is_bounded_by_a_canvas_that_caps_its_height():
     assert tg.row_height(1.0, nrows=8) * 8 <= tg.PAGE_H
 
 
+# --- facet grids: shared decorations cost less than self-contained rows -------------
+
+
+def test_an_extra_facet_row_costs_less_than_the_first_one():
+    """The invariant the old constants broke, stated where it can be checked.
+
+    A facet grid's later rows share the top row's titles and the bottom row's longitude
+    labels, so each should cost only a gap (plus its own title, if any) — less than the
+    first row's full set. Stated in ems alone at 2.6 + 2.4, they charged 5.0 em
+    where the first row was charged 1.6, which is the wrong way round and left ~0.6in of
+    dead space at every row boundary of a three-row grid.
+    """
+    from itertools import pairwise
+
+    heights = [tg.facet_figsize(1.385, nrows=n, ncols=3)[1] for n in (1, 2, 3, 4)]
+    one_row = heights[0]
+    extras = [b - a for a, b in pairwise(heights)]
+    assert all(e < one_row for e in extras), (one_row, extras)
+    # and each extra row costs about the same as the one before it
+    assert max(extras) - min(extras) < 0.05
+
+
+def test_a_facet_grid_amortises_its_shared_decorations_over_its_rows():
+    """The height *per row* falls as rows are added, because the shared cost is fixed.
+
+    That is what "charged once" means arithmetically, and it is the property that
+    separates ``facet_figsize`` from multiplying :func:`row_height` by the row count. It
+    also depends on the fixed term being right: ``facet_figsize`` used ``ROW_OVERHEAD``,
+    the figure for a *self-contained* grid row, 0.36in short of what a facet grid needs
+    once (it carries one colorbar for the figure where a grid row carries its own).
+    """
+    per_row = []
+    for nrows in (1, 2, 3, 4):
+        _, h = tg.facet_figsize(1.385, nrows=nrows, ncols=3)
+        per_row.append(h / nrows)
+    assert per_row == sorted(per_row, reverse=True), per_row
+    # a self-contained row of the same maps costs more than any amortised facet row
+    assert tg.row_height(1.385, nrows=1) < per_row[0]
+
+
+def test_facet_layout_still_prefers_the_grid_a_person_would_draw():
+    """9 panels is 3x3, not 2x5 — the case ``BLANK_CELL_WEIGHT`` exists to protect.
+
+    Lowering ``SUPTITLE_ALLOWANCE`` to its measured value gave every candidate a little
+    more height and tipped this one to 2x5, adding a blank cell where there had been
+    none.
+    """
+    assert tg.facet_layout(9, 1.385) == (3, 3)
+    assert tg.facet_layout(6, 1.385) == (2, 3)
+    # a wide domain still stacks and a tall one still spreads
+    assert tg.facet_layout(4, 4.0)[0] < tg.facet_layout(4, 0.35)[0]
+
+
 # --- the canvas ---------------------------------------------------------------------
 
 
@@ -632,6 +685,42 @@ def test_fit_text_is_dropped_interactively_without_a_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         _interactive_row(fit_text=False)
+
+
+def test_colorbar_orientation_defers_to_the_family_except_at_the_extremes():
+    """The aspect ratio only overrides where it is unambiguous.
+
+    A bar wants the panel's longer edge, but the two orientations cost different things
+    (horizontal is charged per row, vertical takes its width once), and aspect alone
+    cannot weigh that — so between the limits each family keeps its own default. Pinning
+    it here because my first attempt used a single 1.5 threshold, which flipped a
+    page-width GoM row (aspect 1.385) to vertical bars and lost half its panel area.
+    """
+    horizontal = tg.colorbar_is_horizontal
+    # a GoM-ish box sits between the limits: each family keeps its default
+    assert horizontal(1.385, default_horizontal=True) is True
+    assert horizontal(1.385, default_horizontal=False) is False
+    # far enough either way and the shape decides regardless
+    assert horizontal(3.5, default_horizontal=False) is True
+    assert horizontal(0.4, default_horizontal=True) is False
+    # and an explicit request always wins, whatever the shape
+    assert horizontal(0.4, default_horizontal=False, requested="horizontal") is True
+    assert horizontal(3.5, default_horizontal=True, requested="vertical") is False
+
+
+def test_an_overridden_orientation_also_resizes_the_figure():
+    """The override has to reach the *sizing*, not just the drawing.
+
+    Horizontal bars come out of a row's height and vertical ones out of its width, so a
+    figure sized for one and drawn with the other loses the difference. Asking a grid
+    for horizontal bars used to cost 37% of its panel, with no warning.
+    """
+    rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(3)]
+    beside = field_grid(rows, title="t")
+    below = field_grid(rows, title="t", colorbar_kwargs={"orientation": "horizontal"})
+    # the figure grew to hold the bars rather than the panels shrinking to make room
+    assert below.get_size_inches()[1] > beside.get_size_inches()[1]
+    assert _panel_box(below)[0] >= _panel_box(beside)[0] * 0.98
 
 
 def test_a_top_level_option_is_never_reported_as_a_nested_key():

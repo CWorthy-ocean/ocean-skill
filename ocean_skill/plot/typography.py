@@ -46,8 +46,10 @@ __all__ = [
     "BASE_PT_AT_1IN",
     "BLANK_CELL_WEIGHT",
     "CANVASES",
-    "COLORBAR_ORIENTATION_ASPECT",
+    "COLORBAR_ASPECT_FORCES_HORIZONTAL",
+    "COLORBAR_ASPECT_FORCES_VERTICAL",
     "DEFAULT_SIZE",
+    "FACET_OVERHEAD",
     "FACET_PANEL_W_FRACTION",
     "FONT_STEPS",
     "MAX_BASE_PT",
@@ -59,10 +61,10 @@ __all__ = [
     "PANEL_W_FRACTION_HORIZONTAL_CBAR",
     "REFERENCE_FIGSIZE",
     "REFERENCE_GRID",
-    "ROW_GAP_EM",
+    "ROW_GAP",
     "ROW_OVERHEAD",
     "ROW_OVERHEAD_HORIZONTAL_CBAR",
-    "ROW_TITLE_EM",
+    "ROW_TITLE",
     "STEP",
     "SUPTITLE_ALLOWANCE",
     "Canvas",
@@ -386,44 +388,66 @@ FACET_PANEL_W_FRACTION = 0.88
 #: How hard :func:`facet_layout` argues against blank cells, per unit of blank *share*
 #: (blanks / cells). Pure aspect-matching will happily leave a 6-panel sequence as 5x2
 #: — four of ten cells empty — because those cells happen to be the right shape; for an
-#: ordered series of maps that reads as a mistake rather than as a layout. At 1.5 a
-#: layout must be a good deal closer in aspect to justify each blank it adds, which
-#: recovers the 3x2 a person would have drawn without forbidding ragged grids outright
-#: (7 panels as 3x3 is still right).
-BLANK_CELL_WEIGHT = 1.5
+#: ordered series of maps that reads as a mistake rather than as a layout. The weight
+#: makes a layout be a good deal closer in aspect to justify each blank it adds, which
+#: recovers the grid a person would have drawn without forbidding ragged ones outright
+#: (7 panels as 2x4 is still right).
+#:
+#: Raised from 1.5 when :data:`SUPTITLE_ALLOWANCE` came down to its measured 0.35in: the
+#: extra usable height shifted every cell aspect slightly and tipped 9 panels from 3x3
+#: to 2x5 — one blank cell where there had been none, exactly the outcome this weight
+#: exists to prevent. 2.0 restores it, and across 105 panel-count/aspect combinations it
+#: moves only two others (13 and 14 panels of a tall domain), both to layouts with
+#: *fewer* blanks than before. So it is a strict improvement on the stated criterion
+#: rather than a trade.
+BLANK_CELL_WEIGHT = 2.0
 
-#: Aspect ratio at or above which a colorbar is laid out **horizontally below** its
-#: panels rather than vertically beside them.
+#: Aspect ratios at which the map's own shape overrides the family's default colorbar
+#: orientation: wider than the first, bars go horizontally below; narrower than the
+#: second, they go vertically beside.
 #:
-#: The principle is that a bar should run along the panel's *longer* edge: it comes out
-#: longer (so more of its tick labels fit) and its thickness is taken out of the
-#: dimension that has more to give. A wide map has width to run along and height to
-#: spare; a tall one is the other way round. On that reasoning alone the threshold would
-#: be 1.0.
+#: A bar wants to run along the panel's *longer* edge -- it comes out longer, so more of
+#: its tick labels fit, and its thickness is taken out of the dimension with more to
+#: give. On that alone the switch would sit at 1.0, but the two orientations do not cost
+#: the same thing. Horizontal bars are charged **per row**
+#: (:data:`ROW_OVERHEAD_HORIZONTAL_CBAR` is ~0.8in more fixed height than the vertical
+#: case) while a vertical bar takes its width once and is reused down a column; they buy
+#: ~19% more panel width in exchange. Which side of that trade you want depends on how
+#: many rows there are, and the aspect ratio alone cannot tell you.
 #:
-#: It sits above 1.0 because the two orientations do not cost the same thing. Horizontal
-#: bars are charged **per row** -- ``ROW_OVERHEAD_HORIZONTAL_CBAR`` is 0.8in more fixed
-#: height than the vertical case -- so on a many-row grid they add height row by row,
-#: while a vertical bar takes its width once and is reused down the column. They buy real
-#: width in exchange (``PANEL_W_FRACTION`` 0.72 -> 0.86, ~19% wider panels), which is
-#: worth it for a wide map on few rows and steadily less so as rows accumulate.
-COLORBAR_ORIENTATION_ASPECT = 1.5
+#: So the aspect only decides the cases where it is *unambiguous* -- a 3:1 box gains
+#: little from a bar down its short side, a 1:3 one gains little from a bar under its
+#: narrow bottom -- and everything between keeps its family's default: horizontal for a
+#: single row (bars below, panels get the full cell width), vertical for a stacked grid
+#: (bars beside, height is the scarce dimension). That also leaves the figures these
+#: defaults were calibrated and reviewed against unchanged.
+COLORBAR_ASPECT_FORCES_HORIZONTAL = 2.5
+COLORBAR_ASPECT_FORCES_VERTICAL = 0.8
 
 
 def colorbar_is_horizontal(
-    aspect: float, *, requested: str | None = None
+    aspect: float, *, default_horizontal: bool, requested: str | None = None
 ) -> bool:
     """Whether this map's colorbars should sit below it rather than beside it.
 
+    ``default_horizontal`` is what the plot family would do left alone; the aspect ratio
+    overrides it only outside :data:`COLORBAR_ASPECT_FORCES_HORIZONTAL` /
+    :data:`COLORBAR_ASPECT_FORCES_VERTICAL`.
+
     ``requested`` is the caller's own ``colorbar_kwargs={"orientation": ...}``, which
     wins outright -- and, importantly, is then used to size the figure. Overriding the
-    orientation used to change only where the bars were drawn, while the row height went
-    on reserving space for the orientation the function would have picked: asking a grid
-    for horizontal bars cost 37% of the panel, silently.
+    orientation used to change only where the bars were drawn while the row height went
+    on reserving space for the orientation the function would have picked, which cost a
+    grid 37% of its panel, silently.
     """
     if requested is not None:
         return str(requested).lower().startswith("h")
-    return clamp_aspect(aspect) >= COLORBAR_ORIENTATION_ASPECT
+    aspect = clamp_aspect(aspect)
+    if aspect >= COLORBAR_ASPECT_FORCES_HORIZONTAL:
+        return True
+    if aspect <= COLORBAR_ASPECT_FORCES_VERTICAL:
+        return False
+    return default_horizontal
 
 
 def clamp_aspect(aspect: float) -> float:
@@ -468,11 +492,11 @@ def row_height(
     the last, so three agree to well under a tenth of a point.
 
     ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being the
-    colorbar and labelling. It is a parameter rather than a constant because a facet grid
-    shares one colorbar across every panel instead of drawing one per row, so its panels
-    keep materially more of their cell (:data:`FACET_PANEL_W_FRACTION`). Left ``None`` it
-    follows the colorbar orientation, which is the other thing that decides how much of
-    the cell the bar takes.
+    colorbar and labelling. It is a parameter rather than a constant because a facet
+    grid shares one colorbar across every panel instead of one per row, so its panels
+    keep materially more of their cell (:data:`FACET_PANEL_W_FRACTION`). Left ``None``
+    it follows the colorbar orientation, the other thing that decides how much of the
+    cell the bar takes.
 
     The result is the row height at which the maps are *not* squeezed and no more —
     deliberately tight, since slack here is dead space between rows. This figure being
@@ -487,7 +511,9 @@ def row_height(
     cell_w = canvas.width / max(ncols, 1)
     if panel_w_fraction is None:
         panel_w_fraction = (
-            PANEL_W_FRACTION_HORIZONTAL_CBAR if horizontal_colorbar else PANEL_W_FRACTION
+            PANEL_W_FRACTION_HORIZONTAL_CBAR
+            if horizontal_colorbar
+            else PANEL_W_FRACTION
         )
     panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
     em, fixed = ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
@@ -501,24 +527,50 @@ def row_height(
     return float(height)
 
 
-#: Vertical room, in ems, that each row *after the first* needs in a facet grid: the gap
-#: between one row's map and the next one's, and — when every row carries its own title —
-#: the title too. Less than a self-contained row needs (:data:`ROW_OVERHEAD`), because in
-#: a facet grid the decorations are shared: titles on the top row, longitude labels on
-#: the bottom. Charging every row for a full set leaves the rows visibly adrift from each
-#: other — most of a panel's height of white between them on a 3x6.
+#: Vertical room each row *after the first* needs in a facet grid, each as ``(ems of the
+#: row's base font, fixed inches)`` like :data:`ROW_OVERHEAD`: the gap between one row's
+#: map and the next one's, plus — when every row carries its own title — the title. Less
+#: than a self-contained row needs, because a facet grid shares its decorations: titles
+#: on the top row, longitude labels on the bottom. Charging every row for a full set
+#: leaves the rows visibly adrift from each other.
 #:
-#: .. note::
-#:    These two were calibrated against the ``ROW_OVERHEAD_EM = 8.1`` that
-#:    :data:`ROW_OVERHEAD` replaced, and only as em terms, so they carry the same two
-#:    flaws that constant did: a share of what they cover is fixed padding rather than a
-#:    multiple of the type, and their scale was set relative to a first-row figure now
-#:    known to be ~4x too large. At 5.0 em combined they can exceed what the *first* row
-#:    is charged, which cannot be right. Re-measure them the way :data:`ROW_OVERHEAD` was
-#:    (sweep the height, find where the panels stop growing) before trusting facet grids
-#:    to be tight.
-ROW_GAP_EM = 2.6
-ROW_TITLE_EM = 2.4
+#: The split falls out of what each thing *is*, which is why the units matter: a title
+#: is pure type and scales with it, while the inter-row padding is a fixed fraction of
+#: an inch that ``constrained_layout`` applies whatever the font size. Measured by
+#: drawing facet grids and subtracting the text inside each row boundary from the
+#: boundary itself — a title runs ~1.0 em and the padding ~0.17in, near enough constant
+#: across 3x2, 3x3, 3x4 and 2x3.
+#:
+#: Both were previously stated in ems alone and scaled against the ``ROW_OVERHEAD_EM =
+#: 8.1`` that :data:`ROW_OVERHEAD` replaced: 5.0 em between them, which charged more for
+#: an *extra* row than the first row itself cost and left ~0.6in of slack at every row
+#: boundary on a grid of three rows or more. On a page-capped grid that surfaced not as
+#: visible slack but as panels squeezed to make room for it, which is why it had gone
+#: unnoticed.
+#:
+#: The plateau sweep that measured :data:`ROW_OVERHEAD` cannot be used here: a facet
+#: grid's type comes from its figsize, so forcing the height changes the type too, and
+#: past a point large type eats the cell width and the panels shrink again — the curve
+#: is not monotone and has no plateau to find.
+ROW_GAP = (0.0, 0.17)
+ROW_TITLE = (1.1, 0.0)
+
+#: What a facet grid needs *once*, regardless of row count, as ``(em, fixed inches)``:
+#: the top row's title, the bottom row's longitude labels, the shared colorbar with its
+#: own label and ticks, and the outer padding.
+#:
+#: Not :data:`ROW_OVERHEAD`, which is the same quantity for a ``field_grid`` row and
+#: comes out 0.36in smaller — a facet grid carries one colorbar for the whole figure
+#: where a grid row carries its own, and that stack has to go somewhere. Using the
+#: grid's figure here under-provisioned every facet grid, and since the shortfall is
+#: fixed rather than per-row it hurt *fewest*-row grids worst: a 3x2 came out with
+#: smaller panels than a 3x3 of the same maps, which is the wrong way round.
+#:
+#: Measured as ``fig_height - nrows * panel_height - (nrows - 1) * gap`` on drawn grids,
+#: which is ~0.75-0.85in across 3x3, 3x4 and 2x3 (the 3x2 reading is not usable: its
+#: panels were height-limited, so its panel height is not the one the model is solving
+#: for).
+FACET_OVERHEAD = (1.6, 0.55)
 
 
 def facet_figsize(
@@ -552,15 +604,17 @@ def facet_figsize(
     cell_w = page_w / max(ncols, 1)
     panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
     nrows = max(nrows, 1)
-    # first row is self-contained; the rest share its titles and axis labels
-    first_em, first_fixed = ROW_OVERHEAD
-    extra_em = ROW_GAP_EM + (ROW_TITLE_EM if title_every_row else 0.0)
-    em = first_em + (nrows - 1) * extra_em
+    # the shared decorations are charged once; each further row adds only a gap, plus a
+    # title if it carries its own
+    em, fixed = FACET_OVERHEAD
+    for term in (ROW_GAP, ROW_TITLE if title_every_row else (0.0, 0.0)):
+        em += (nrows - 1) * term[0]
+        fixed += (nrows - 1) * term[1]
 
     height = panel_h * nrows
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height / nrows)) * font_scale
-        height = panel_h * nrows + em * base / 72.0 + first_fixed
+        height = panel_h * nrows + em * base / 72.0 + fixed
     return (page_w, float(min(height, page_h - SUPTITLE_ALLOWANCE)))
 
 
