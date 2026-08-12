@@ -460,6 +460,38 @@ def test_a_field_movie_fixes_one_colour_scale(tmp_path):
     assert ani._fig.axes[0].collections[0].norm.vmin == before
 
 
+def test_a_field_movie_pins_its_title_position(tmp_path):
+    """Automatic title placement must be off, or matplotlib 3.11 crops the map away.
+
+    A movie's panel has no title text — the frame label is a box inside the panel — and
+    the obvious way to write that, skipping ``set_title`` altogether, leaves automatic
+    title placement switched on. Over a cartopy GeoAxes carrying gridline labels that
+    computes an infinite y on 3.11, giving the title a NaN extent, the axes a NaN tight
+    bbox, and ``bbox_inches="tight"`` a figure with the map dropped out of it: Jupyter
+    renders the colorbar alone. Asserted on ``_autotitlepos`` rather than on the crop
+    because the crop only reproduces on 3.11 while the cause is visible on any version —
+    which is exactly how this shipped.
+    """
+    ani = _facet_film(_run(4), domain=None)
+    maps = [ax for ax in ani._fig.axes if not getattr(ax, "_osk_cbar_parents", None)]
+    assert maps and all(ax._autotitlepos is False for ax in maps)
+
+
+def test_a_field_movie_survives_a_tight_bbox_crop(tmp_path):
+    """The crop itself, for the versions that reproduce it: the map must still be there.
+
+    A colorbar-only strip is far wider than it is tall, so the aspect ratio tells the
+    two apart without needing to inspect pixels.
+    """
+    from PIL import Image
+
+    out = tmp_path / "frame.png"
+    ani = _facet_film(_run(4), domain=None)
+    ani._fig.savefig(out, bbox_inches="tight", dpi=80)
+    width, height = Image.open(out).size
+    assert width / height < 3, "the map was cropped out; only the colorbar survived"
+
+
 def test_a_single_map_has_nothing_to_play():
     flat = _run(4).mean("time")
     with pytest.raises(ValueError, match="needs an axis to play"):
@@ -504,6 +536,36 @@ def test_field_movie_routes_through_the_facet_movie_family(monkeypatch):
         warnings.simplefilter("ignore")
         ani = make_field("stub", NITRATE).movie(domain=None)
     assert ani._save_count == 4
+
+
+def test_nothing_is_reduced_unless_asked(monkeypatch):
+    """A month selected is a month of frames: no reduction happens behind your back.
+
+    This used to default to ``{"time": "mean"}``, so selecting January silently returned
+    its mean and a movie had nothing to play. Pinned at the ``_prepare`` level because
+    that is where the default lived, and a movie is only the first thing to notice it.
+    """
+    from ocean_skill.comparison import NO_AGGREGATION, _prepare
+
+    assert NO_AGGREGATION == {}
+    ds = _run(31).rename("salt").to_dataset()
+    ds["salt"].attrs["standard_name"] = NITRATE
+    select = {"time": "2012-01"}
+
+    for label, agg in (("unset", None), ("explicit", {})):
+        kept, _ = _prepare(ds, {}, NITRATE, select, agg)
+        assert kept.sizes["time"] == 31, f"aggregate {label} reduced something"
+    collapsed, _ = _prepare(ds, {}, NITRATE, select, {"time": "mean"})
+    assert "time" not in collapsed.dims, "an explicit mean must still collapse"
+
+
+def test_the_collapsed_field_error_names_the_way_out():
+    """The error has to name a reduction that keeps the axis, not just refuse."""
+    with pytest.raises(ValueError) as excinfo:
+        _facet_film(_run(4).mean("time"), facet_dim=None, domain=None)
+    message = str(excinfo.value)
+    assert "resample" in message
+    assert "every step" in message
 
 
 def test_a_field_with_no_axis_left_says_so_from_movie(monkeypatch):

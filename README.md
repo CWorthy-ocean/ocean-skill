@@ -78,6 +78,18 @@ run.movie(save="nitrate.mp4")         # the same six, played instead of laid out
 run.movie(renderer="holoviews")       # the same six, stepped through on a slider
 ```
 
+**Nothing is reduced unless you ask.** There is no default aggregation anywhere: omit
+`aggregate` and every step of the selection survives as its own panel or frame. A
+`compare()` needs a single map, so it will tell you to choose rather than average an axis
+behind your back:
+
+```python
+osk.compare(reference="woa23_nitrate_month01", test="GOM_bgc", variables=[NITRATE])
+# ValueError: the test lane ('GOM_bgc') still has time=124 beyond its horizontal axes...
+#   aggregate={"time": "mean"}          one map, the mean over time
+#   select={"time": <one value>}    or narrow it to a single value instead
+```
+
 `resample` gives consecutive periods (`Jan 2012`, `Feb 2012`, …); `{"groupby": "month"}`
 gives a climatology (`Jan`, `Feb`, …, every January of the record in one panel). The
 panels label themselves differently, so the two can't be confused on the page. A

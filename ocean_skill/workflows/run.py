@@ -85,6 +85,13 @@ def run_suite(suite_path: str | Path):
         variables=suite["variables"],
         depths=tuple(suite.get("depths", (SURFACE,))),
         method=suite.get("regrid", "conservative_normed"),
+        # A suite has to be able to say this, and until now could not: `aggregate` was
+        # simply not forwarded, so every suite silently got the old implicit time mean.
+        # With no default reduction a suite omitting it would fail on its own model
+        # output, so it is both forwarded and required in the YAML — see
+        # _require_reduced.
+        aggregate=suite.get("aggregate"),
+        select=suite.get("select"),
     )
     if not len(results):
         print("no comparisons produced; check the suite's sources and variables")

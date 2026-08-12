@@ -34,6 +34,12 @@ variables:
 depths: [0]
 regrid: conservative_normed
 
+# How the model's time axis collapses to the single map a comparison compares. Required:
+# there is no default reduction, so a suite that omits this fails naming the axis rather
+# than quietly averaging the whole run.
+aggregate:
+  time: mean
+
 plot:
   title: Surface nutrients & oxygen — GOM vs WOA23
   filename: surface_nutrients.png

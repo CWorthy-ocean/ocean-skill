@@ -12,8 +12,10 @@ The public API is intentionally small:
     osk.find(variable=...)       # search sources across catalogs
     osk.describe("glodap")       # metadata for one source, or one whole catalog
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
-    osk.compare(reference=..., test=..., variables=[...]).plot()
-    osk.Comparison(reference=..., test=..., variable=...)
+    osk.compare(reference=..., test=..., variables=[...],
+                aggregate={"time": "mean"}).plot()   # no default reduction: say so
+    osk.field(source, variable, select=...)          # one source, no reference
+
     osk.cache.info()             # processed intermediates are cached; where, how big
     osk.outputs.info()           # where figures + metrics get written
 """
