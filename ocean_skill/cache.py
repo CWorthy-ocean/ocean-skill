@@ -41,6 +41,7 @@ __all__ = [
     "enabled",
     "entries",
     "info",
+    "obs_dir",
     "path",
 ]
 
@@ -81,7 +82,13 @@ def base_dir() -> Path:
 _FSSPEC_CACHES = ("simplecache", "blockcache", "filecache")
 
 
-def configure_fsspec_cache() -> None:
+#: What :func:`configure_fsspec_cache` last wrote, per protocol. A value fsspec is
+#: still carrying from us is ours to move; anything else came from the user and is
+#: left alone. See the ``relocate`` note below.
+_fsspec_applied: dict[str, str] = {}
+
+
+def configure_fsspec_cache(*, relocate: bool = False) -> None:
     """Point fsspec's file caches at ocean-skill's cache directory.
 
     A catalog says *what* to read; where a downloaded copy lands is a property of the
@@ -89,16 +96,52 @@ def configure_fsspec_cache() -> None:
     between sessions, so the location has to come from somewhere — and baking it into
     the catalog put one developer's absolute home path into all 78 WOA entries.
 
-    ``setdefault``, never assignment: fsspec applies ``~/.config/fsspec/*.json`` and
+    Never a plain assignment: fsspec applies ``~/.config/fsspec/*.json`` and
     ``FSSPEC_*`` environment variables at *its* import, which happens before this runs.
     Overwriting would silently undo someone who pointed the cache at HPC scratch rather
     than a home quota.
+
+    ``relocate`` is for :func:`enable` moving the base directory mid-process. Setting
+    the location once at import was not enough: the caller saw :func:`info` report the
+    new directory while downloads kept landing in the old one, because only the two
+    result caches had actually moved. So a value we set earlier gets rewritten to the
+    new base — but a value the *user* set still wins, which is why this tracks what it
+    wrote rather than overwriting whatever it finds.
     """
     import fsspec.config
 
     target = str(base_dir() / "cache" / "obs")
     for protocol in _FSSPEC_CACHES:
-        fsspec.config.conf.setdefault(protocol, {}).setdefault("cache_storage", target)
+        conf = fsspec.config.conf.setdefault(protocol, {})
+        current = conf.get("cache_storage")
+        ours = current is None or (
+            relocate and current == _fsspec_applied.get(protocol)
+        )
+        if not ours:
+            continue
+        conf["cache_storage"] = target
+        _fsspec_applied[protocol] = target
+
+
+def obs_dir() -> Path:
+    """Return the directory downloaded source files land in.
+
+    Both download paths resolve here — fsspec's ``simplecache::`` URLs via
+    :func:`configure_fsspec_cache`, and :class:`ocean_skill.readers.PoochTarNetCDF`
+    via its ``cache_dir`` default — so there is one answer to "where did that file
+    go?" and it moves with the base directory.
+
+    If the user pointed fsspec somewhere themselves, that is the honest answer and it
+    is what gets reported and what pooch follows: this must not claim a location that
+    downloads are not actually using, which is the bug it exists to close.
+    """
+    import fsspec.config
+
+    conf = fsspec.config.conf.get("simplecache") or {}
+    current = conf.get("cache_storage")
+    if current and current != _fsspec_applied.get("simplecache"):
+        return Path(current).expanduser()
+    return base_dir() / "cache" / "obs"
 
 
 configure_fsspec_cache()
@@ -131,6 +174,9 @@ def enable(directory: str | Path | None = None) -> None:
     _enabled = True
     if directory is not None:
         _override_dir = Path(directory).expanduser()
+        # Downloads have to follow, or the move is only half done — see the
+        # ``relocate`` note in configure_fsspec_cache.
+        configure_fsspec_cache(relocate=True)
 
 
 def disable() -> None:
@@ -334,15 +380,22 @@ def _size_bytes() -> int:
 
 
 def info() -> Text:
-    """Return a human-readable summary: state, location, entry counts, size on disk."""
+    """Return a human-readable summary: state, location, entry counts, size on disk.
+
+    Downloads are reported alongside the results, and separately: they are the bigger
+    directory, and reporting only the results location once let a relocation look
+    complete while downloads carried on landing somewhere else.
+    """
     state = "on" if _enabled else "off"
     root = base_dir() / "cache"
     counts = {k: len(entries(k)) for k in KINDS}
     if not sum(counts.values()):
-        return Text(f"ocean-skill cache: {state}, empty ({root})")
-    breakdown = ", ".join(f"{n} {k}" for k, n in counts.items() if n)
-    size = _size_bytes() / 1e6
-    return Text(f"ocean-skill cache: {state}, {breakdown}, {size:.1f} MB ({root})")
+        head = f"ocean-skill cache: {state}, empty ({root})"
+    else:
+        breakdown = ", ".join(f"{n} {k}" for k, n in counts.items() if n)
+        size = _size_bytes() / 1e6
+        head = f"ocean-skill cache: {state}, {breakdown}, {size:.1f} MB ({root})"
+    return Text(f"{head}\n  downloaded sources: {obs_dir()}")
 
 
 def clear(kind: str | None = None) -> int:

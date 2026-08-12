@@ -232,6 +232,67 @@ def test_row_labels_never_overlap_the_latitude_labels(two_rows, width):
     assert _row_label_gap(fig) > 0
 
 
+def _leftmost_label_x(fig) -> float:
+    """Display x of the leftmost thing drawn beside the maps; < 0 means clipped."""
+    from ocean_skill.plot.matplotlib_renderer import _left_label_artists
+
+    renderer = fig.canvas.get_renderer()
+    return min(
+        text.get_window_extent(renderer).x0
+        for ax in fig.axes
+        for text in _left_label_artists(ax)
+    )
+
+
+def test_left_labels_stay_on_the_canvas(two_rows):
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    assert _leftmost_label_x(fig) >= 0
+
+
+def test_every_panel_survives_a_tight_bbox_crop(two_rows):
+    """No axes may report a non-finite tight bbox.
+
+    One that does is dropped from the *figure's* tight bbox, and then
+    ``bbox_inches="tight"`` — our own ``save=``, and Jupyter's inline backend —
+    crops it out of the picture entirely. That is how a whole column of maps went
+    missing on matplotlib 3.11 while every panel was still being drawn correctly:
+    automatic title placement over a gridline-labelled GeoAxes put the title at
+    y=inf, so its extent was NaN and it poisoned the axes bbox containing it.
+    """
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    renderer = fig.canvas.get_renderer()
+    for ax in fig.axes:
+        bbox = ax.get_tightbbox(renderer)
+        assert np.isfinite([bbox.x0, bbox.y0, bbox.x1, bbox.y1]).all(), (
+            f"non-finite tight bbox for the {ax.get_title()!r} panel: {bbox}"
+        )
+    figure_bbox = fig.get_tightbbox(renderer)
+    leftmost = min(ax.get_position().x0 for ax in fig.axes) * fig.get_size_inches()[0]
+    assert figure_bbox.x0 <= leftmost, "the tight bbox starts right of the first column"
+
+
+def test_left_margin_is_refitted_when_the_layout_reserves_none(two_rows):
+    """Backstop: recover a left margin too narrow for the labels hanging off it.
+
+    Not reachable through the public API now that the NaN title bbox behind the
+    matplotlib 3.11 clipping is fixed at the source (see ``DEFAULT_TITLE_KWARGS``),
+    which is why the clipped state has to be staged here by shifting ``rect`` off the
+    left edge. Kept because the failure it recovers from is invisible in the numbers
+    the renderer reports — the panels are all drawn, and only the labels outboard of
+    the leftmost axes go missing.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _fit_left_margin
+
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig.get_layout_engine().set(rect=(-0.08, 0, 1.08, 1))
+    fig.canvas.draw()
+    assert _leftmost_label_x(fig) < 0, "failed to stage the clipped layout"
+
+    _fit_left_margin(fig)
+    assert _leftmost_label_x(fig) >= 0
+    assert _row_label_gap(fig) > 0, "the refit must not push labels into each other"
+
+
 def test_row_labels_are_not_bold(two_rows):
     fig = render(PlotSpec(family="field_grid", items=two_rows, options={}))
     labels = [

@@ -19,8 +19,9 @@ class PoochTarNetCDF(BaseReader):
     """Fetch + untar a remote tarball of NetCDFs (pooch-cached) into a merged Dataset.
 
     Downloads ``url`` once via pooch (untarring with :class:`pooch.Untar`), caches under
-    ``cache_dir``, keeps the members matching ``member_glob``, and opens + merges them
-    with ``xarray.open_mfdataset``. Used for GLODAP (a NOAA .tar.gz of per-variable
+    ``cache_dir`` (default :func:`ocean_skill.cache.obs_dir`, alongside every other
+    downloaded source), keeps the members matching ``member_glob``, and opens + merges
+    them with ``xarray.open_mfdataset``. Used for GLODAP (a NOAA .tar.gz of per-variable
     NetCDFs) but generic to any tarball-of-NetCDFs source.
     """
 
@@ -44,8 +45,16 @@ class PoochTarNetCDF(BaseReader):
         import pooch
         import xarray as xr
 
+        # Default to the same directory fsspec downloads into, resolved per call rather
+        # than written into the catalog: a catalog that named an absolute path pinned
+        # every install to one machine's home directory and ignored both
+        # ``$OCEAN_SKILL_DIR`` and ``cache.enable()``.
         if cache_dir:
             cache_dir = os.path.expanduser(cache_dir)
+        else:
+            from ocean_skill import cache
+
+            cache_dir = str(cache.obs_dir())
         paths = pooch.retrieve(
             url, known_hash=known_hash, processor=pooch.Untar(), path=cache_dir
         )

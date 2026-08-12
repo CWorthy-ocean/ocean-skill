@@ -10,6 +10,7 @@ when you did not ask for that.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import intake
 import numpy as np
@@ -563,3 +564,63 @@ def test_cdf5_is_refused_with_the_conversion_command(tmp_path):
     assert "nccopy -k netCDF-4" in str(excinfo.value), (
         "the error must say how to fix it"
     )
+
+
+# ------------------------------------------------------------- tilde expansion
+
+# Path("~/x") keeps the tilde literally. obstore then reports "Unable to canonicalize
+# filesystem root: ~/...", which does not hint that the path merely needed expanding.
+# `root` and `out_dir` were already expanded; `grid` was not, so it was the one
+# argument of the three that rejected a perfectly ordinary "~/..." path.
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    """Point HOME at a temp dir, so ``~`` resolves somewhere assertable."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return tmp_path
+
+
+def test_file_format_expands_tilde(fake_home):
+    """A None here would silently downgrade format detection to the HDF default."""
+    from ocean_skill.build import _file_format
+
+    _roms_like(fake_home / "f.nc", "NETCDF4")
+    assert _file_format("~/f.nc") == "hdf5"
+
+
+def test_store_for_expands_tilde(fake_home):
+    from ocean_skill.build import _store_for
+
+    _roms_like(fake_home / "f.nc", "NETCDF4")
+    url, _store = _store_for("~/f.nc")
+    assert "~" not in url
+    assert str(fake_home) in url
+
+
+def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
+    """root, grid and out_dir all take ``~`` — grid used to be the odd one out."""
+    from ocean_skill.build import build_kerchunk
+
+    (fake_home / "runs").mkdir()
+    for i in range(2):
+        _roms_like(fake_home / "runs" / f"o.{i}.nc", "NETCDF4", value=i + 1)
+    _grid(fake_home / "grid.nc", "NETCDF4")
+
+    # Building at all is the assertion: before the fix this raised obstore's
+    # "Unable to canonicalize filesystem root: ~/grid.nc". Deliberately no read-back —
+    # build_kerchunk writes parquet, and the parquet reference reader is intermittently
+    # broken upstream ("boolean value of NA is ambiguous"), which would make this test
+    # flaky for a reason with nothing to do with tilde expansion.
+    refs = build_kerchunk(
+        {"dev": "runs/o.*.nc"},
+        root="~/",
+        grid="~/grid.nc",
+        out_dir="~/refs/",
+    )
+
+    built = refs["dev"]
+    assert "~" not in str(built)
+    assert built.exists()
+    assert built.is_relative_to(fake_home / "refs")

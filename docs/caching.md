@@ -147,6 +147,7 @@ change the key on their own — those need no special handling.
 | What | How |
 |---|---|
 | Where it lives | `osk.cache.path()` (or `path("prepared")`) |
+| Where downloaded sources land | `osk.cache.obs_dir()` |
 | State, entry counts, size | `osk.cache.info()` |
 | Turn off for this session | `osk.cache.disable()` |
 | Turn back on | `osk.cache.enable()` |
@@ -159,6 +160,12 @@ change the key on their own — those need no special handling.
 Location resolves as `osk.cache.enable(dir)` → `$OCEAN_SKILL_DIR` →
 [platformdirs](https://pypi.org/project/platformdirs/) user cache dir (the
 conventional home for regenerable data, and what OS cleanup tools know to reclaim).
+
+Moving the base directory moves **downloaded source files** (`cache/obs`) with it, not
+just the two result layers — whether the move comes from the environment variable or
+from `enable()` mid-session. The one thing that stays put is a location *you* set: an
+explicit `cache_storage` in `~/.config/fsspec/*.json` or `$FSSPEC_*`, or a catalog
+entry's own `cache_dir`, wins over ocean-skill's default and is never rewritten.
 
 Everything under `osk.cache.path()` is reproducible and **safe to delete at any
 time** — by hand, by `clear()`, or by the OS.

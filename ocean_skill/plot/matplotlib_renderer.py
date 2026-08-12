@@ -49,7 +49,16 @@ DEFAULT_METRIC_KEYS = ("bias", "rmse", "corr")
 # wholesale — passing e.g. title_kwargs={"fontsize": 10} doesn't require also
 # supplying every other title property. Each maps onto exactly one matplotlib/cartopy
 # call, so any kwarg that call accepts works, not just a hand-picked subset.
-DEFAULT_TITLE_KWARGS: dict[str, Any] = {"fontsize": 8}
+#: ``y`` is pinned rather than left to matplotlib's automatic title placement, which
+#: is broken over a cartopy GeoAxES carrying gridline labels: matplotlib 3.11 places
+#: the title above the union of the axes' children's bboxes, cartopy contributes an
+#: empty ``(inf, inf, -inf, -inf)`` one, and the title's y comes out infinite. Its
+#: window extent is then NaN, which makes the whole *axes* report a NaN tight bbox,
+#: which drops that axes out of the figure's tight bbox — so ``bbox_inches="tight"``,
+#: used both by our own ``save=`` and by Jupyter's inline backend, silently crops the
+#: leftmost column out of the figure. Supplying any explicit ``y`` skips the automatic
+#: placement that computes the infinity. Identical output on 3.10, where it is a no-op.
+DEFAULT_TITLE_KWARGS: dict[str, Any] = {"fontsize": 8, "y": 1.0}
 DEFAULT_GRIDLINE_KWARGS: dict[str, Any] = {
     "linewidth": 0.2,
     "color": "0.6",
@@ -358,9 +367,10 @@ def field_row(
         DEFAULT_COLORBAR_KWARGS_ROW,
     )
 
-    _clear_row_labels(fig)
+    # after the suptitle, so the margin is fitted to the layout the figure ends with
     if title:
         fig.suptitle(title, **_merged(DEFAULT_SUPTITLE_KWARGS_ROW, suptitle_kwargs))
+    _fit_left_margin(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -371,8 +381,28 @@ def field_row(
 #: Air (display points) left between a row label and the latitude labels it clears.
 _ROW_LABEL_PAD = 4.0
 
+#: Air (display points) left between the leftmost label and the canvas edge, once
+#: :func:`_fit_left_margin` has had to make room.
+_LEFT_MARGIN_PAD = 3.0
 
-def _clear_row_labels(fig) -> None:
+
+def _left_label_artists(ax):
+    """Every text artist drawn to the left of ``ax``: latitude labels, row label.
+
+    Cartopy exposes a gridliner's labels through ``left_label_artists``; the row
+    label is our own free text. Both are what a too-tight left margin eats.
+    """
+    for artist in ax.artists:
+        yield from (
+            text
+            for text in getattr(artist, "left_label_artists", []) or []
+            if text.get_visible() and text.get_text()
+        )
+    if (label := getattr(ax, "_osk_row_label", None)) is not None:
+        yield label
+
+
+def _clear_row_labels(fig, renderer=None) -> None:
     """Move each row label just left of its own latitude labels.
 
     The offset cannot be a constant. It was ``x=-0.18`` in *axes fraction*, i.e. a
@@ -385,8 +415,9 @@ def _clear_row_labels(fig) -> None:
     Measuring after the layout has settled avoids both traps, and a free text artist
     takes no part in the layout, so nothing shifts back underneath it.
     """
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    if renderer is None:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
     for ax in fig.axes:
         label = getattr(ax, "_osk_row_label", None)
         if label is None:
@@ -405,6 +436,51 @@ def _clear_row_labels(fig) -> None:
         x_display = min(lefts) - pad_px - half_width
         x_axes = ax.transAxes.inverted().transform((x_display, 0))[0]
         label.set_position((x_axes, 0.5))
+
+
+def _fit_left_margin(fig, *, passes: int = 3) -> None:
+    """Place the row labels, then widen the left margin until nothing spills off-canvas.
+
+    Whether the left margin is wide enough is not something the layout engine can be
+    trusted to know: what hangs off the left of the leftmost panel is cartopy's
+    latitude labels and our own row label, neither of which the engine reliably
+    counts as taking up room. When it reserves nothing, both are drawn at a negative
+    x and clipped off the canvas, leaving the maps themselves looking intact.
+
+    This is a backstop rather than the cure for any particular bug — the matplotlib
+    3.11 clipping that prompted it is fixed at its source in ``DEFAULT_TITLE_KWARGS``
+    — and it costs nothing when the margin is already adequate, which is the usual
+    case: the first pass measures and returns.
+
+    ``bbox_inches="tight"`` is not the escape hatch it looks like: cartopy's gridline
+    labels are not in the tight bbox either, so the saved PNG loses them too.
+
+    Measuring the drawn result and pushing constrained_layout's ``rect`` in from the
+    left settles it in the one way that holds on either cartopy. Each pass re-places
+    the row labels first, since they are positioned relative to the latitude labels
+    and so move with the axes; two passes normally converge, and ``passes`` bounds it
+    either way.
+    """
+    engine = fig.get_layout_engine()
+    for _ in range(passes):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        _clear_row_labels(fig, renderer)
+        lefts = [
+            text.get_window_extent(renderer).x0
+            for ax in fig.axes
+            for text in _left_label_artists(ax)
+        ]
+        pad_px = _LEFT_MARGIN_PAD * fig.dpi / 72.0
+        if not lefts or min(lefts) >= pad_px:
+            return
+        if engine is None or not hasattr(engine, "get"):
+            return  # no constrained layout to push on; leave the figure as drawn
+        rect = tuple(engine.get().get("rect", (0, 0, 1, 1)))
+        gutter = (pad_px - min(lefts)) / (fig.get_size_inches()[0] * fig.dpi)
+        # rect is (left, bottom, width, height): take the space off the width too, or
+        # the right-hand colorbar labels walk off the other edge instead.
+        engine.set(rect=(rect[0] + gutter, rect[1], rect[2] - gutter, rect[3]))
 
 
 def _row_height(comparisons, reference_name: str, n: int) -> float:
@@ -571,9 +647,10 @@ def field_grid(
             DEFAULT_COLORBAR_KWARGS_GRID,
         )
 
-    _clear_row_labels(fig)
+    # after the suptitle, so the margin is fitted to the layout the figure ends with
     if title:
         fig.suptitle(title, **_merged(DEFAULT_SUPTITLE_KWARGS_GRID, suptitle_kwargs))
+    _fit_left_margin(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,6 @@ data: {}
 entries:
   glodap:
     kwargs:
-      cache_dir: ~/.ocean-skill/cache/obs
       keep_vars:
       - Depth
       known_hash: null

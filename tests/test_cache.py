@@ -13,6 +13,8 @@ recompute with a warning, never an exception.
 
 from __future__ import annotations
 
+import os
+import pathlib
 import warnings
 from unittest import mock
 
@@ -315,3 +317,61 @@ def test_clear_can_target_one_kind(aligned):
     assert cache.clear("prepared") == 1
     assert len(cache.entries("aligned")) == 1
     assert cache.clear() == 1
+
+
+class TestDownloadLocationFollowsTheCache:
+    """Relocating the cache must move *downloads* too, not just the result layers.
+
+    The bug this pins down: ``enable(dir)`` moved ``prepared/`` and ``aligned/`` and
+    ``info()`` duly reported the new directory, while every downloaded source file
+    kept landing under the old one — because fsspec's location was set once at import
+    and never revisited. A half-move that reports itself as complete is worse than no
+    move at all, so each half is asserted separately.
+    """
+
+    def test_enable_relocates_the_fsspec_download_cache(self, tmp_path):
+        import fsspec.config
+
+        cache.enable(tmp_path / "moved")
+
+        assert cache.obs_dir() == tmp_path / "moved" / "cache" / "obs"
+        for protocol in cache._FSSPEC_CACHES:
+            assert fsspec.config.conf[protocol]["cache_storage"] == str(cache.obs_dir())
+
+    def test_a_location_the_user_set_is_never_overwritten(self, tmp_path):
+        """Someone who pointed fsspec at HPC scratch must keep it — and be told so."""
+        import fsspec.config
+
+        fsspec.config.conf["simplecache"] = {"cache_storage": "/scratch/mine"}
+
+        cache.enable(tmp_path / "moved")
+
+        assert fsspec.config.conf["simplecache"]["cache_storage"] == "/scratch/mine"
+        assert cache.obs_dir() == pathlib.Path("/scratch/mine")
+        assert "/scratch/mine" in str(cache.info()), "info must not claim the wrong dir"
+
+    def test_info_reports_where_downloads_go(self, tmp_path):
+        cache.enable(tmp_path / "moved")
+        assert str(cache.obs_dir()) in str(cache.info())
+
+    def test_pooch_reader_defaults_to_the_same_directory(self, tmp_path):
+        """The catalog used to hardcode one machine's home dir; the default resolves."""
+        from ocean_skill.readers import PoochTarNetCDF
+
+        cache.enable(tmp_path / "moved")
+        with mock.patch("pooch.retrieve", return_value=[]) as retrieve:
+            with pytest.raises(FileNotFoundError):  # no members: we only want the call
+                PoochTarNetCDF()._read(url="https://example.org/x.tar.gz")
+
+        assert retrieve.call_args.kwargs["path"] == str(cache.obs_dir())
+
+    def test_pooch_reader_still_honours_an_explicit_cache_dir(self, tmp_path):
+        from ocean_skill.readers import PoochTarNetCDF
+
+        with mock.patch("pooch.retrieve", return_value=[]) as retrieve:
+            with pytest.raises(FileNotFoundError):
+                PoochTarNetCDF()._read(
+                    url="https://example.org/x.tar.gz", cache_dir="~/somewhere"
+                )
+
+        assert retrieve.call_args.kwargs["path"] == os.path.expanduser("~/somewhere")

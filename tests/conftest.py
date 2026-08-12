@@ -11,15 +11,27 @@ def isolated_cache(tmp_path):
 
     Autouse and unconditional: a test that reached the real user cache could both
     pollute it and — worse — pass by reading an entry a previous run left behind.
-    Restores the module's own state afterwards rather than leaving an override set.
+    Restores the module's own state afterwards rather than leaving an override set —
+    including fsspec's, since ``enable`` now relocates the download cache too and that
+    lives in fsspec's process-global config, outside this package.
     """
+    import fsspec.config
+
     from ocean_skill import cache
 
     saved = (cache._enabled, cache._override_dir, cache._announced)
+    saved_fsspec = {
+        p: dict(fsspec.config.conf.get(p, {})) for p in cache._FSSPEC_CACHES
+    }
+    saved_applied = dict(cache._fsspec_applied)
     cache.enable(tmp_path / "osk")
     cache._announced = True  # keep the one-time banner out of test output
     yield cache
     cache._enabled, cache._override_dir, cache._announced = saved
+    cache._fsspec_applied.clear()
+    cache._fsspec_applied.update(saved_applied)
+    for protocol, conf in saved_fsspec.items():
+        fsspec.config.conf[protocol] = conf
 
 
 @pytest.fixture

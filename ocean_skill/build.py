@@ -178,7 +178,10 @@ def _store_for(target):
             url.rsplit("/", 1)[0],
             client_options={"allow_http": url.startswith("http://")},
         )
-    path = Path(url)
+    # expanduser: "~/refs/grid.nc" reaches obstore as a *literal* tilde directory and
+    # fails with "Unable to canonicalize filesystem root", which gives no hint that the
+    # path simply was not expanded.
+    path = Path(url).expanduser()
     return f"file://{path}", LocalStore(prefix=path.parent)
 
 
@@ -208,7 +211,7 @@ def _file_format(target) -> str | None:
     if _is_remote(target):
         return None  # would need a range request; callers fall back to the default
     try:
-        with open(target, "rb") as fh:
+        with open(Path(target).expanduser(), "rb") as fh:
             head = fh.read(4)
     except OSError:
         return None
@@ -325,7 +328,7 @@ def make_kerchunk(
     # Deliberately not Path() for remote sources: Path collapses the "//" in a URL
     # to "/", so http://host/f.nc becomes http:/host/f.nc and every downstream check
     # then treats it as a local relative path.
-    paths = [str(f) if _is_remote(f) else Path(f) for f in files]
+    paths = [str(f) if _is_remote(f) else Path(f).expanduser() for f in files]
     if not paths:
         raise ValueError("make_kerchunk: no files given")
     if concat_dim is None or loadable_variables is None:
@@ -335,6 +338,8 @@ def make_kerchunk(
             detected_loadable if loadable_variables is None else loadable_variables
         )
     parser = _parser_for(paths[0])
+    if grid is not None and not _is_remote(grid):
+        grid = Path(grid).expanduser()
 
     ctx = tolerant_hdf_attrs() if tolerant_attrs else contextlib.nullcontext()
     with ctx:
