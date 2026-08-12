@@ -85,6 +85,7 @@ class Field:
         label: str | None = None,
         cache: bool | None = None,
     ):
+        from ocean_skill.comparison import as_select
         from ocean_skill.vocabulary import resolve_and_report
 
         self.source = source
@@ -93,7 +94,7 @@ class Field:
             if isinstance(variable, str)
             else variable
         )
-        self.select = dict(select or {})
+        self.select = as_select(select)
         self.aggregate = aggregate
         self.label = label
         self.cache = cache

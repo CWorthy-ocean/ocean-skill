@@ -246,6 +246,29 @@ def surface(ds: xr.Dataset, meta: dict[str, Any] | None = None) -> xr.Dataset:
     return top.drop_vars([s_dim, "z_rho"], errors="ignore")
 
 
+def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
+    """Return ``da`` with its vertical axis in a single dask chunk.
+
+    Interpolating to a depth reads the whole water column at once — xgcm passes the
+    vertical to ``apply_ufunc`` as a *core* dimension — so a source chunked along
+    ``s_rho`` fails outright with "consists of multiple chunks, but is also a core
+    dimension". Whether that happens is a property of how the store was written, which
+    is why it can lie unnoticed until a particular dataset is used.
+
+    Rechunking here rather than passing xgcm ``allow_rechunk=True``: the two do the
+    same work, but allow_rechunk lets dask decide, and its warning that this "may
+    significantly increase memory usage" is well earned on a full model run. One
+    column is the smallest unit the interpolation can act on, and doing it explicitly
+    leaves the *horizontal* chunking — which is what bounds memory here — untouched.
+
+    A numpy-backed array is returned unchanged; ``.chunk()`` on one would make it lazy,
+    which is a surprising thing for a rechunk helper to do.
+    """
+    if da.chunks is None or s_dim not in da.dims:
+        return da
+    return da.chunk({s_dim: -1})
+
+
 def to_depth(
     ds: xr.Dataset, meta: dict[str, Any], d: float | list[float]
 ) -> xr.Dataset:
@@ -273,6 +296,7 @@ def to_depth(
     except TypeError:  # older xgcm without autoparse_metadata kwarg
         grid = xgcm.Grid(ds, coords={"Z": {"center": s_dim}}, periodic=False)
 
+    z_rho = _contiguous_column(ds["z_rho"], s_dim)
     out = {}
     for var in ds.data_vars:
         da = ds[var]
@@ -280,7 +304,11 @@ def to_depth(
         # interpolation to rho first (deferred), so skip them here.
         if s_dim in da.dims and {"eta_rho", "xi_rho"} <= set(da.dims):
             out[var] = grid.transform(
-                da, "Z", targets, target_data=ds["z_rho"], method="linear"
+                _contiguous_column(da, s_dim),
+                "Z",
+                targets,
+                target_data=z_rho,
+                method="linear",
             )
     result = xr.Dataset(out, coords={"lon": ds["lon"], "lat": ds["lat"], "z": -depths})
     result.attrs.update(ds.attrs)

@@ -20,6 +20,7 @@ __all__ = [
     "SURFACE",
     "Comparison",
     "ComparisonSet",
+    "as_select",
     "compare",
     "is_surface_request",
     "prepare_source",
@@ -58,6 +59,28 @@ def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     # normalize. This assumes the domain doesn't itself straddle the anti-meridian.
     lon_min, lon_max = (((lo + 180) % 360) - 180 for lo in (lon_min, lon_max))
     return lon_min, lat_min, lon_max, lat_max
+
+
+def as_select(select: Any) -> dict[str, Any]:
+    """Return ``select`` as a dict, refusing anything else with a usable message.
+
+    ``select="surface"`` is the natural slip, because that is very nearly how
+    :func:`compare` spells it (``depths=("surface",)``) and because "surface" reads
+    like a complete thought on its own. Passing it to ``dict()`` raises "dictionary
+    update sequence element #0 has length 1; 2 is required", which names neither the
+    parameter at fault nor the spelling that works — and it is raised from the
+    constructor, so there is no traceback line pointing at ``select`` either.
+    """
+    if select is None:
+        return {}
+    if isinstance(select, dict):
+        return dict(select)
+    raise TypeError(
+        f"select must be a dict of axis -> selection, got {select!r}. "
+        f'Did you mean select={{"depth": {select!r}}}? '
+        'Other axes take the same form: {"time": "2012-01"}, '
+        '{"lat": {"min": 20, "max": 30}}.'
+    )
 
 
 def is_depth_band(depth: Any) -> bool:
@@ -336,7 +359,7 @@ class Comparison:
             if isinstance(variable, str)
             else variable
         )
-        self.select = dict(select or {})
+        self.select = as_select(select)
         self.aggregate = aggregate
         self.method = method
         self.label = label

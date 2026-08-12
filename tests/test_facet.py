@@ -397,6 +397,27 @@ def test_three_leftover_axes_are_refused(monkeypatch, daily):
         _ = make_field("stub", "nitrate").facet_dims
 
 
+@pytest.mark.parametrize("factory", ["field", "comparison"])
+def test_a_bare_select_says_what_to_write_instead(factory):
+    """``select="surface"`` reaches dict() and dies with a message about sequences.
+
+    Both entry points, because the slip is the same one either side and a helpful
+    error in only half of them is a coin toss from the caller's point of view.
+    """
+    from ocean_skill.comparison import Comparison
+    from ocean_skill.field import field as make_field
+
+    call = (
+        (lambda: make_field("stub", "nitrate", select="surface"))
+        if factory == "field"
+        else (
+            lambda: Comparison(reference="a", test="b", variable="x", select="surface")
+        )
+    )
+    with pytest.raises(TypeError, match=r'select=\{"depth": .surface.\}'):
+        call()
+
+
 def test_a_missing_variable_is_reported_against_its_source(monkeypatch):
     import ocean_skill.comparison as comparison
     from ocean_skill.field import field as make_field
