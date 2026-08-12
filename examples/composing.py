@@ -20,7 +20,13 @@ O2 = "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
 
 # 1. ONE comparison ------------------------------------------------------------
 c = osk.Comparison(
-    reference="woa23_nitrate_month01", test="GOM_bgc", variable=NO3, select={"depth": 0}
+    reference="woa23_nitrate_month01",
+    test="GOM_bgc",
+    variable=NO3,
+    select={"depth": 0},
+    # required, not decorative: the model lane has a time axis and a comparison is one
+    # map, so it has to be told what happens to it. There is no default reduction.
+    aggregate={"time": "mean"},
 )
 print(
     "1. single :",
@@ -41,6 +47,7 @@ nutrients = osk.compare(
     test="GOM_bgc",
     variables=[NO3, PO4, SIO3, O2],
     depths=(0,),
+    aggregate={"time": "mean"},
 )
 print(f"2. by variable: {nutrients}")
 nutrients.plot(title="Surface nutrients — GOM vs WOA23", save=OUT / "2_nutrients.png")
@@ -52,6 +59,7 @@ depths = osk.compare(
     test="GOM_bgc",
     variables=[NO3],
     depths=(0, 50, 100, 300),
+    aggregate={"time": "mean"},
 )
 print(f"3. by depth   : {depths}")
 depths.plot(title="Nitrate vs depth — GOM vs WOA23", save=OUT / "3_depths.png")

@@ -139,9 +139,58 @@ def _without_vertical(agg: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (agg or {}).items() if k not in _VERTICAL_KEYS}
 
 
-#: Time reduction applied when a caller names none — the long-standing behaviour,
-#: now expressed in the same grammar as any other aggregation.
-DEFAULT_AGGREGATE: dict[str, Any] = {"time": "mean"}
+#: What ``aggregate=None`` means: **reduce nothing**. There is deliberately no default
+#: reduction any more.
+#:
+#: This used to be ``{"time": "mean"}``, which made ``select={"time": "2010-01"}``
+#: silently return the January *mean* — a reasonable thing to want and a terrible thing
+#: to assume, since the caller who wanted the 31 days had no way to tell it had happened
+#: except by looking at the shape. It also worked directly against
+#: :class:`~ocean_skill.field.Field`, whose reason to exist is the axis that survives.
+#:
+#: Nothing is assumed in the other direction either: a reduction is *required* the
+#: moment an axis survives that the consumer cannot draw, and each consumer says what it
+#: can take. A :class:`Comparison` must reduce to one map (:func:`_require_reduced`
+#: below); a ``Field`` can draw one leftover axis as panels or frames and two as a grid,
+#: refusing three (:func:`ocean_skill.field._facet_dims`). So you are asked to choose
+#: exactly when the data forces a choice, and never averaged behind your back.
+NO_AGGREGATION: dict[str, Any] = {}
+
+
+def _require_reduced(da, role: str, source: str) -> None:
+    """Raise unless ``da`` is a single map, naming what is left and how to collapse it.
+
+    A comparison regrids one field onto another and differences them, so it has to be
+    2-D; :func:`ocean_skill.align._require_2d` enforces the same thing one step later,
+    where it protects xesmf. This exists in front of it for two reasons: it can name the
+    *source* whose lane is at fault, which align cannot (it sees two anonymous arrays),
+    and it runs before :func:`prepare_source` computes anything, so being told to choose
+    costs nothing rather than costing the whole vertical transform first.
+    """
+    from ocean_skill.align import _lat_name, _lon_name
+
+    spatial: set[str] = set()
+    for name in (_lon_name(da), _lat_name(da)):
+        if name is not None:
+            spatial |= {str(d) for d in da[name].dims}
+    extra = [str(d) for d in da.dims if d not in spatial]
+    if not extra:
+        return
+    sizes = ", ".join(f"{d}={da.sizes[d]}" for d in extra)
+    raise ValueError(
+        f"the {role} lane ({source!r}) still has {sizes} beyond its horizontal axes, "
+        "so it is not a single map and cannot be compared. A comparison differences "
+        "two fields on one grid, so it needs the other axes collapsed — say how:\n"
+        f'  aggregate={{"{extra[0]}": "mean"}}          one map, the mean over '
+        f"{extra[0]}\n"
+        f'  aggregate={{"{extra[0]}": {{"reduce": "quantile", "q": 0.9}}}}   or any '
+        "other reduction\n"
+        f'  select={{"{extra[0]}": <one value>}}    or narrow it to a single value '
+        "instead\n"
+        "There is no default reduction: a comparison will not average an axis you did "
+        "not ask it to. To keep the axis and look at one source over it, use "
+        "osk.field() rather than a comparison."
+    )
 
 
 def _prepare(
@@ -155,8 +204,9 @@ def _prepare(
 
     ``variable`` is anything :func:`ocean_skill.operators.resolve_variable` accepts:
     a name, or a combination such as ``{"sum": ["spChl", "diatChl", "diazChl"]}``.
-    ``aggregate`` is a :func:`ocean_skill.operators.aggregate` spec, defaulting to
-    :data:`DEFAULT_AGGREGATE`.
+    ``aggregate`` is a :func:`ocean_skill.operators.aggregate` spec; ``None`` reduces
+    **nothing** (see :data:`NO_AGGREGATION`), leaving whatever ``select`` left standing
+    for the caller's consumer to draw or refuse.
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -168,7 +218,7 @@ def _prepare(
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
     surface = is_surface_request(depth)
     band = is_depth_band(depth)
-    agg = DEFAULT_AGGREGATE if aggregate is None else aggregate
+    agg = NO_AGGREGATION if aggregate is None else aggregate
 
     da = operators.resolve_variable(obj, variable)
     if da is None:
@@ -176,9 +226,11 @@ def _prepare(
 
     # Order matters twice over. Selection precedes reduction, or "the mean of
     # January" would average the whole record. And the *non-vertical* reduction runs
-    # before the vertical step, so an expensive s-coordinate transform sees one
-    # time-mean field rather than every time step -- the vertical part of the
-    # aggregation then collapses whatever the vertical selection left standing.
+    # before the vertical step, so an expensive s-coordinate transform sees as few
+    # fields as the reduction leaves it -- one, for a time mean; every step, now that
+    # no reduction is the default, which is the cost of asking for every step. The
+    # vertical part of the aggregation then collapses whatever the vertical selection
+    # left standing.
     horizontal = {k: v for k, v in select.items() if k not in _VERTICAL_KEYS}
     da = operators.select(da, horizontal)
     da = operators.aggregate(da, _without_vertical(agg))
@@ -280,6 +332,7 @@ def prepare_source(
     *,
     use_cache: bool = True,
     refresh: bool = False,
+    require_reduced: str | None = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -291,6 +344,14 @@ def prepare_source(
     :class:`~ocean_skill.field.Field` wants exactly this lane and exactly this cache
     entry, and a second copy of the keying rules would be a second chance to key them
     differently.
+
+    ``require_reduced`` names this lane's role (``"test"``/``"reference"``) for a
+    :func:`_require_reduced` check, which a comparison wants and a
+    :class:`~ocean_skill.field.Field` must not have: the axis a comparison cannot
+    tolerate is the one a field exists to draw. Checked here rather than by the caller
+    because here is the only place it is free — dimensions are known from the lazy
+    graph, so an unreduced lane is refused before the ``.load()`` below spends the
+    vertical transform on every step of it.
 
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
@@ -316,6 +377,9 @@ def prepare_source(
         dict(select or {}),
         aggregate,
     )
+    if da is not None and require_reduced:
+        # before .load(), while it is still free -- see the docstring
+        _require_reduced(da, require_reduced, source)
     # Computed here rather than left lazy: the vertical transform is the most
     # expensive step in the pipeline, and a dask-backed lane re-runs it on every
     # consumer that touches values -- the metrics, then each panel of each plot.
@@ -404,8 +468,15 @@ class Comparison:
 
         return _cache.enabled() if self.cache is None else self.cache
 
-    def _prepare_lane(self, source: str, use_cache: bool, refresh: bool):
-        """Reduce one source to its comparable 2-D field, via the lane cache."""
+    def _prepare_lane(
+        self, source: str, use_cache: bool, refresh: bool, role: str = "test"
+    ):
+        """Reduce one source to its comparable 2-D field, via the lane cache.
+
+        ``role`` names the lane in the error raised if the reduction left it more than a
+        map — the one thing a comparison's use of :func:`prepare_source` needs that a
+        field's does not.
+        """
         return prepare_source(
             source,
             self.variable,
@@ -413,6 +484,7 @@ class Comparison:
             self.aggregate,
             use_cache=use_cache,
             refresh=refresh,
+            require_reduced=role,
         )
 
     # -- pipeline ---------------------------------------------------------------
@@ -443,8 +515,10 @@ class Comparison:
                 self._actual_depth = hit.attrs.get("actual_depth")
                 return self._aligned
 
-        r, r_depth = self._prepare_lane(self.reference_name, use_cache, refresh)
-        t, _ = self._prepare_lane(self.test_name, use_cache, refresh)
+        r, r_depth = self._prepare_lane(
+            self.reference_name, use_cache, refresh, role="reference"
+        )
+        t, _ = self._prepare_lane(self.test_name, use_cache, refresh, role="test")
         if r is None or t is None:
             missing = self.reference_name if r is None else self.test_name
             raise KeyError(f"{self.variable!r} not available in {missing!r}")
@@ -749,10 +823,16 @@ def compare(
 
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
-    ``aggregate`` names how dimensions collapse (default ``{"time": "mean"}``);
-    ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology, and
-    ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep
-    an axis standing, which a comparison cannot use — see
+    ``aggregate`` names how dimensions collapse, and **there is no default**: a
+    comparison has to be a single map, so if the sources carry a time axis you have to
+    say what happens to it — ``{"time": "mean"}`` for the whole selection's mean,
+    ``select={"time": <one step>}`` to compare one instant. Omitting it no longer means
+    "take the mean"; it means "reduce nothing", which then fails with the axis named
+    rather than averaging something you did not ask for (see :data:`NO_AGGREGATION`).
+
+    ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology and
+    ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep an
+    axis standing, which a comparison still cannot use — see
     :func:`ocean_skill.field.field` for the model-only path that plots those as panels.
 
     ``variables`` is required, deliberately not inferred from the sources' catalog

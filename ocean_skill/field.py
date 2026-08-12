@@ -201,6 +201,12 @@ class Field:
             run.movie(save="salt.mp4")          # every step as a frame
             run.movie(renderer="holoviews")     # every step on a slider
 
+        Nothing is reduced unless asked (see
+        :data:`~ocean_skill.comparison.NO_AGGREGATION`), so that is a frame per step of
+        January. Pass an ``aggregate`` to play a coarser cadence — a ``resample`` for
+        one frame per day or month, a ``groupby`` for a climatology — or ``every=`` to
+        keep every Nth step of the one you have.
+
         Which is the better reading depends on how many steps there are: a handful of
         monthly means are best seen at once, where a month of daily output is forty
         panels too small to read and forty frames a drag apart.

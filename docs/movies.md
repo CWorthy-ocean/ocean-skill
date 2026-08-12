@@ -24,6 +24,21 @@ run.movie(save="salt.mp4")        # every step as a frame
 run.movie(renderer="holoviews")   # every step on a slider
 ```
 
+Nothing is reduced unless you ask, so a month selected is a month of frames. `aggregate=`
+chooses a coarser cadence when the raw one is too fine to watch:
+
+| `aggregate=` | frames |
+|---|---|
+| omitted (or `{}`) | every step in the selection |
+| `{"time": {"resample": "1D", "reduce": "mean"}}` | one per day — thins hourly output |
+| `{"time": {"resample": "1MS", "reduce": "mean"}}` | one per month |
+| `{"time": {"groupby": "month", "reduce": "mean"}}` | twelve, a climatology |
+| `{"time": "mean"}` | **one — a single map, not a movie** |
+
+A reduction and `every=` are not the same thinning: `{"resample": "1D"}` *averages* each
+day into a frame, `every=24` keeps every 24th hour and discards the rest. Both give one
+frame per day from hourly output; only the first shows you a daily mean.
+
 Which reading is better depends on how many steps there are, and they trade off in
 opposite directions: a handful of monthly means are best seen at once, side by side,
 where a month of daily output is 31 panels too small to read and 31 frames a drag apart.

@@ -1699,9 +1699,15 @@ def _one_facet_axis(field, facet_dim: str | None) -> str:
     """
     if facet_dim is None:
         raise ValueError(
-            "a movie needs an axis to play, but this field is a single map. Leave an "
-            'axis standing for it — aggregate={"time": {"resample": "1MS", "reduce": '
-            '"mean"}} gives one frame per month — or use .plot() for the map you have.'
+            "a movie needs an axis to play, but this field is a single map — every "
+            "axis was collapsed, either by an aggregate= that reduces them all or by a "
+            "select= that picked one value. Leave time standing:\n"
+            "  aggregate=None (or {})                                    every step\n"
+            '  aggregate={"time": {"resample": "1MS", "reduce": "mean"}}  one per '
+            "month\n"
+            '  aggregate={"time": {"groupby": "month", "reduce": "mean"}} a '
+            "climatology\n"
+            "Or use .plot() for the single map you have."
         )
     if facet_dim not in field.dims:
         raise ValueError(
@@ -2047,7 +2053,17 @@ def facet_movie(
     im = _draw_map(
         ax,
         field.isel({facet_dim: indices[0]}),
-        label=None,
+        # An empty title rather than no title, so that set_title runs and pins ``y``
+        # from DEFAULT_TITLE_KWARGS. A frame is identified by the label box inside the
+        # panel (fixed position, so the layout it was built with still holds), which
+        # leaves nothing for the title to say — but skipping set_title leaves
+        # matplotlib's automatic title placement switched on, and over a cartopy
+        # GeoAxes carrying gridline labels that computes an infinite y on matplotlib
+        # 3.11: the title's extent comes out NaN, the axes' tight bbox with it, and the
+        # map then drops out of the figure's tight bbox altogether. bbox_inches="tight"
+        # — which Jupyter's inline backend uses — thereupon crops the map away and
+        # leaves only the colorbar. See DEFAULT_TITLE_KWARGS for the full account.
+        label="",
         cmap=cmap,
         norm=norm,
         mark=mark,

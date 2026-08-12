@@ -18,7 +18,13 @@ import pytest
 import xarray as xr
 
 from ocean_skill import roms
-from ocean_skill.comparison import SURFACE, _depth_label, _prepare, is_surface_request
+from ocean_skill.comparison import (
+    SURFACE,
+    _depth_label,
+    _prepare,
+    _require_reduced,
+    is_surface_request,
+)
 
 # WOA/GLODAP spell dissolved oxygen per-mass; ROMS/MARBL writes it per-volume (see
 # ocean_skill.vocabulary.VOCABULARY) — comparing across that alias is what broke.
@@ -75,9 +81,12 @@ def test_prepare_resolves_aliased_variable(gom_bgc):
     chokes on non-numeric fields like ``spherical``.
     """
     ds, meta = gom_bgc
-    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    # the reduction is passed explicitly now that there is no default one: the crash
+    # this guards needs a mean to actually happen
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {}, {"time": "mean"})
     assert da is not None
     assert np.isfinite(da.values).any()
+    assert "time" not in da.dims
 
 
 def test_prepare_fails_closed_on_missing_variable(gom_bgc):
@@ -116,6 +125,41 @@ def test_surface_and_depth_zero_are_distinct(gom_bgc):
         warnings.simplefilter("always")
         _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": 0})
     assert any("entirely NaN" in str(w.message) for w in caught)
+
+
+def test_nothing_is_reduced_unless_a_reduction_is_named(gom_bgc):
+    """No default aggregation: the axes you did not name survive.
+
+    The reverse of what this module used to assume. ``{"time": "mean"}`` was applied
+    whenever a caller named nothing, so ``select={"time": "2010-01"}`` returned
+    January's mean and the caller had no way to notice but the shape. The choice is now
+    the caller's, and a comparison that needs one is told (see
+    :func:`test_a_comparison_refuses_an_unreduced_lane`).
+    """
+    ds, meta = gom_bgc
+    kept, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    assert kept.sizes["time"] == ds.sizes["time"], "something reduced time unasked"
+    collapsed, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {}, {"time": "mean"})
+    assert "time" not in collapsed.dims
+
+
+def test_a_comparison_refuses_an_unreduced_lane(gom_bgc):
+    """And says which lane, which axis, and what to do — before computing anything."""
+    ds, meta = gom_bgc
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    with pytest.raises(ValueError) as excinfo:
+        _require_reduced(da, "test", "GOM_bgc")
+    message = str(excinfo.value)
+    assert "GOM_bgc" in message, "the failing lane has to be named"
+    assert f"time={ds.sizes['time']}" in message, "so does the axis and its size"
+    assert 'aggregate={"time": "mean"}' in message
+    assert "osk.field()" in message, "the way to keep the axis instead"
+
+
+def test_a_reduced_lane_passes_the_check(gom_bgc):
+    ds, meta = gom_bgc
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {}, {"time": "mean"})
+    _require_reduced(da, "test", "GOM_bgc")  # must not raise
 
 
 def test_depth_label():
