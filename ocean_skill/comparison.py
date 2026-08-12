@@ -595,6 +595,44 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Play the set's comparisons as movie frames rather than stacking them as rows.
+
+        The same items :meth:`plot` lays out down the page, animated instead: one
+        ``test | reference | difference`` row, redrawn per comparison, with each
+        comparison's own label as the frame label and its own metrics in the corner box.
+        So a set that reads as a small multiple statically reads as a movie here, and
+        both are the same set — nothing is re-prepared.
+
+        ``save`` names the file and its extension picks the format: ``.mp4`` (needs
+        ffmpeg) or ``.gif`` (needs nothing extra) statically, ``.html`` with
+        ``renderer="holoviews"``, where the frames go on a slider instead. See
+        :func:`ocean_skill.plot.matplotlib_renderer.field_movie`.
+
+        Ordering is the set's own order, which for a :func:`compare` fan-out is the
+        order the fan produced. That is what you want when one thing varies across the
+        set (a depth, a time, a run) and is meaningless when several do — a movie whose
+        frames step through both variable *and* depth is not a movie of either.
+        """
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        if not self.comparisons:
+            raise ValueError("no comparisons to animate: every pair was skipped")
+        first = self.comparisons[0]
+        # a row label (drawn rotated at a grid row's left edge) and a frame label (drawn
+        # in the panel, changing as the movie plays) are the same identity in two
+        # places, so the movie reads it from the same c.label the grid does
+        frames = [
+            {**item, "frame_label": item.get("row_label")} for item in self._items()
+        ]
+        kwargs.setdefault("labels", (first.test_name, first.reference_name))
+        kwargs.setdefault("domain", _domain_of(first.test_name))
+        return render(
+            PlotSpec(family="field_movie", items=frames, options=kwargs),
+            renderer=renderer,
+        )
+
     def taylor(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Taylor diagram of the set (correlation + variability; blind to bias)."""
         from ocean_skill.plot.registry import render

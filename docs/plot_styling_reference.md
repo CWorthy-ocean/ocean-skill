@@ -3,12 +3,13 @@
 `field_row`/`field_grid` (and `Comparison.plot()`/`ComparisonSet.plot()`, which forward
 arbitrary kwargs to them) expose **7 style parameters**, each a dict that merges onto a
 built-in default and is unpacked straight into one specific matplotlib/cartopy call —
-so any keyword that call accepts works, not just a hand-picked subset. A few more
-parameters aren't styling dicts at all (`title`, `metric_keys`, `shared_limits`,
-`shared_axis_labels`, `shared_axes`) — see [Other
-parameters](#other-parameters-not-styling-dicts) at the end of this doc.
+so any keyword that call accepts works, not just a hand-picked subset. An eighth,
+[`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
+no per-frame label on a still. A few more parameters aren't styling dicts at all
+(`title`, `metric_keys`, `shared_limits`, `shared_axis_labels`, `shared_axes`) — see
+[Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
 
-> **The 7 `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
+> **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
 > matplotlib or cartopy call, so none of them do anything with `renderer="holoviews"`
 > — passing one warns once and is dropped, naming which renderer to use instead.
 > **`title` and `metric_keys` are the exception**: both renderers honor them the same
@@ -38,6 +39,7 @@ want everything bigger or smaller.
 | [`row_label_kwargs`](#row_label_kwargs) | the rotated variable name (field_grid only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`metrics_kwargs`](#metrics_kwargs) | the bias/rmse/corr corner box | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
+| [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -264,6 +266,37 @@ c.plot(metrics_kwargs={"fontsize": 8, "bbox": {"facecolor": "lightyellow", "alph
 Note: passing `bbox` replaces the *whole* bbox dict (not a deep-merge) — repeat any
 sub-keys you still want.
 
+## `frame_label_kwargs`
+
+`field_movie` only — draws the per-frame label (the timestamp, usually) in the top-left
+of the test panel via
+[`Axes.text(0.02, 0.98, frame_label, **frame_label_kwargs)`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html).
+Any `Text` property, including `bbox`. Mirrors `metrics_kwargs`' box in the bottom-left
+of the difference panel, and shares its box styling so the two read as one figure's
+annotations rather than two.
+
+**Default:** an automatic `fontsize` (7pt at the default page-width row — a step above
+the metrics box, since the frame label is the one thing in the figure that changes and so
+the thing being read) plus
+```python
+{
+    "va": "top", "ha": "left", "family": "monospace",
+    "bbox": {"facecolor": "white", "alpha": 0.75, "pad": 2, "edgecolor": "0.6", "linewidth": 0.4},
+}
+```
+
+`family="monospace"` is deliberate: in a proportional font a counting timestamp jitters
+sideways as its digits change width, which is invisible on a still and distracting once
+it is animated. Override it if your labels aren't numeric.
+
+```python
+runs.movie(save="m.mp4", frame_label_kwargs={"fontsize": 11, "color": "navy"})
+runs.movie(save="m.mp4", frame_label=False)      # no label at all
+```
+
+Interactively the frame label is the slider's own value (and the test panel's title), so
+this dict is matplotlib-only like the rest — see [Movies](movies.md).
+
 ## `suptitle_kwargs`
 
 Draws the overall figure title (the `title=` argument's actual text) via
@@ -384,6 +417,18 @@ depths = osk.compare(reference="woa23_nitrate_month01", test="my_run",
                       variables=[NITRATE], depths=("surface", 50, 100))
 depths.plot(shared_limits=True)   # same colour scale on every depth row
 ```
+
+**`field_movie` defaults it to `True`** instead, and means something slightly different
+by `False`: a movie's scale is fixed for its whole length either way, and the option only
+picks whether it is derived from every frame or from the first. A scale re-derived per
+frame would make the ruler move with the field, which is unreadable rather than merely
+inconsistent — see [Movies](movies.md#one-colour-scale-for-the-whole-movie).
+
+### Movie-only parameters
+
+`field_movie` adds `save`, `fps`, `dpi`, `every`, `frame_label`, `frame_label_kwargs`,
+`player` (interactive) and `progress`. They are documented together in
+[Movies](movies.md), since they only mean anything once there is more than one frame.
 
 ### `shared_axis_labels`
 

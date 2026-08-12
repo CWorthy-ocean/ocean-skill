@@ -20,7 +20,12 @@ __all__ = ["FAMILIES", "PlotSpec"]
 #: Plot families a renderer may implement. A renderer need not support all of them —
 #: :func:`ocean_skill.plot.registry.render` reports clearly when one is missing, and the
 #: holoviews renderer deliberately delegates ``taylor`` back to matplotlib.
-FAMILIES = ("field_row", "field_grid", "taylor", "target", "paired")
+#:
+#: ``field_movie`` takes the same ``items`` as ``field_grid`` and stacks them in *time*
+#: rather than down the page: one ``test | reference | difference`` row, redrawn per
+#: item. That is why it is a family of its own rather than an option on ``field_row`` —
+#: the payload is a list, as ``field_grid``'s is.
+FAMILIES = ("field_row", "field_grid", "field_movie", "taylor", "target", "paired")
 
 
 @dataclass

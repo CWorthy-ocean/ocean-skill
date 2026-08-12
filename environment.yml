@@ -39,6 +39,7 @@ dependencies:
   - bokeh
   - geoviews          # cartopy coastlines for the interactive maps
   - panel             # hosts static + interactive side by side
+  - ffmpeg            # mp4 encoding for .movie(); a .gif needs only matplotlib
   - h5py              # required by virtualizarr's HDF parser
   - fastparquet       # parquet kerchunk references
   # --- virtual zarr / references ---

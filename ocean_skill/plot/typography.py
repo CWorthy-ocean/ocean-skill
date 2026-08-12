@@ -120,6 +120,9 @@ FONT_STEPS: dict[str, tuple[str, int]] = {
     "row_label": ("panel", -1),
     "colorbar_tick": ("panel", -2),
     "metrics": ("panel", -2),
+    # a movie's per-frame label (the timestamp): a step above the metrics box, since it
+    # is the one thing in the figure that changes and so the thing being read
+    "frame_label": ("panel", -1),
     "tick_label": ("panel", -3),
     "annotation": ("panel", -3),
     "contour_label": ("panel", -3),

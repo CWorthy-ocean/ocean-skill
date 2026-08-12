@@ -42,6 +42,18 @@ comparison.plot(renderer="holoviews") # the same plot, interactive
 comparison.metrics()                  # bias, rmse, corr, sigma_ratio, n
 ```
 
+A set of comparisons stacks as rows, or plays as frames — the same items either way
+(see [docs/movies.md](docs/movies.md)):
+
+```python
+depths = osk.compare(reference="woa23_nitrate_month01", test="GOM_bgc",
+                     variables=[NITRATE], depths=("surface", 50, 100))
+
+depths.plot()                         # three rows, stacked
+depths.movie(save="depths.mp4")       # the same three, played  (.gif also works)
+depths.movie(renderer="holoviews")    # the same three, on a slider
+```
+
 Roles are set at compare time rather than in the catalog, so comparing two *models*
 is the same call with a different `reference`:
 
