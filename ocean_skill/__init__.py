@@ -21,17 +21,20 @@ The public API is intentionally small:
 from ocean_skill import cache, outputs
 from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, compare
+from ocean_skill.field import Field, field
 from ocean_skill.sources import read
 
 __version__ = "0.0.1"
 
 __all__ = [
     "Comparison",
+    "Field",
     "__version__",
     "cache",
     "catalogs",
     "compare",
     "describe",
+    "field",
     "find",
     "outputs",
     "read",

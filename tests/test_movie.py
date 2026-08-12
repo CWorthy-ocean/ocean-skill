@@ -14,6 +14,8 @@ this machine may not be in.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -359,3 +361,159 @@ def test_a_player_is_available_for_when_it_should_just_run(frames):
 def test_static_only_styling_still_warns_here(frames):
     with pytest.warns(UserWarning, match="only affect the static"):
         _interactive(frames, frame_label_kwargs={"fontsize": 14})
+
+
+# --- the model-only movie: one field, its facet axis played --------------------------
+#
+# The counterpart of field_facet rather than of field_grid: one panel, no reference, no
+# difference, no metrics. What has to hold is that a movie and a facet grid of the same
+# field agree — same labels, same one colour scale — since they are one field read two
+# ways and a reader will compare them.
+
+
+def _run(days: int = 6, *, depths=None) -> xr.DataArray:
+    """``days`` of daily output, optionally with a depth axis left standing too."""
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    coords = {
+        "time": pd.date_range("2012-01-01", periods=days, freq="D"),
+        "lat": np.linspace(18, 31, 12),
+        "lon": np.linspace(-98, -80, 20),
+    }
+    dims = ("time", "lat", "lon")
+    shape = (days, 12, 20)
+    if depths is not None:
+        coords["depth"] = list(depths)
+        dims = ("time", "depth", "lat", "lon")
+        shape = (days, len(depths), 12, 20)
+    return xr.DataArray(
+        rng.normal(5.0, 1.0, shape),
+        dims=dims,
+        coords=coords,
+        attrs={"units": "mmol m-3"},
+    )
+
+
+def _facet_item(field, facet_dim="time") -> dict:
+    """One spec item shaped as ``Field.as_item()`` builds it."""
+    return {
+        "field": field,
+        "facet_dim": facet_dim,
+        "row_dim": None,
+        "units": "mmol m-3",
+        "standard_name": NITRATE,
+        "label": "GOM_bgc",
+    }
+
+
+def _facet_film(field, *, renderer="matplotlib", facet_dim="time", **options):
+    return render(
+        PlotSpec(
+            family="facet_movie", items=[_facet_item(field, facet_dim)], options=options
+        ),
+        renderer=renderer,
+    )
+
+
+def test_a_field_movie_is_one_panel_per_frame(tmp_path):
+    out = tmp_path / "run.gif"
+    ani = _facet_film(_run(4), save=out, domain=None)
+    assert out.read_bytes()[:4] == b"GIF8"
+    assert ani._save_count == 4
+    # one map, one colorbar — no reference and no difference panel
+    assert len(ani._fig.axes) == 2
+
+
+def test_a_field_movie_labels_its_frames_like_the_facet_grid_titles(tmp_path):
+    """Same field, same labels — a movie and a grid of it must not disagree."""
+    from ocean_skill.plot.matplotlib_renderer import facet_labels, frame_labels
+
+    monthly = _run(3).resample(time="1MS").mean()
+    assert frame_labels(monthly["time"]) == facet_labels(monthly["time"])
+    ani = _facet_film(monthly, domain=None)
+    ani._func(0)
+    texts = [t.get_text() for ax in ani._fig.axes for t in ax.texts]
+    assert "Jan 2012" in texts
+
+
+def test_frame_labels_get_finer_when_a_month_is_not_enough():
+    """31 frames all called 'Jan 2012' would be a slider that loses 30 of them.
+
+    facet_labels is right for the reduction it was written for (monthly means), and a
+    movie is as often over the raw axis, so the label has to refine itself.
+    """
+    from ocean_skill.plot.matplotlib_renderer import facet_labels, frame_labels
+
+    daily = _run(31)
+    assert len(set(facet_labels(daily["time"]))) == 1  # the case being guarded
+    labels = frame_labels(daily["time"])
+    assert len(set(labels)) == 31
+    assert labels[0] == "2012-01-01"
+
+
+def test_a_field_movie_fixes_one_colour_scale(tmp_path):
+    ani = _facet_film(_run(4), domain=None)
+    before = ani._fig.axes[0].collections[0].norm.vmin
+    for index in range(4):
+        ani._func(index)
+    assert ani._fig.axes[0].collections[0].norm.vmin == before
+
+
+def test_a_single_map_has_nothing_to_play():
+    flat = _run(4).mean("time")
+    with pytest.raises(ValueError, match="needs an axis to play"):
+        _facet_film(flat, facet_dim=None, domain=None)
+
+
+def test_a_second_facet_axis_is_refused_rather_than_animated():
+    """A depth axis left standing beside time would make a frame 3-D, not a map."""
+    with pytest.raises(ValueError, match="still stands beyond"):
+        _facet_film(_run(4, depths=(0.0, 50.0)), domain=None)
+
+
+def test_the_interactive_field_movie_puts_the_facet_axis_on_a_slider():
+    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
+    assert [d.name for d in movie.kdims] == ["frame"]
+    assert list(movie.keys()) == [f"2012-01-0{i}" for i in range(1, 6)]
+
+
+def test_the_interactive_field_movie_fixes_one_colour_scale():
+    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
+    assert len({_clim(el) for el in movie.values()}) == 1
+
+
+def test_both_renderers_agree_on_the_field_movie_scale():
+    field = _run(5)
+    static = _facet_film(field, domain=None)._fig.axes[0].collections[0].norm
+    interactive = _clim(next(iter(_facet_film(field, renderer="holoviews").values())))
+    assert interactive == pytest.approx((static.vmin, static.vmax))
+
+
+def test_every_thins_a_field_movie_too():
+    assert _facet_film(_run(10), every=3, domain=None)._save_count == 4
+
+
+def test_field_movie_routes_through_the_facet_movie_family(monkeypatch):
+    """``Field.movie()`` is ``Field.plot()``'s axis played instead of laid out."""
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    monkeypatch.setattr(comparison, "prepare_source", lambda *a, **k: (_run(4), None))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ani = make_field("stub", NITRATE).movie(domain=None)
+    assert ani._save_count == 4
+
+
+def test_a_field_with_no_axis_left_says_so_from_movie(monkeypatch):
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    monkeypatch.setattr(
+        comparison, "prepare_source", lambda *a, **k: (_run(4).mean("time"), None)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="needs an axis to play"):
+            make_field("stub", NITRATE).movie(domain=None)

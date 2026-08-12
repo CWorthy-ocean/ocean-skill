@@ -1,7 +1,8 @@
 # Plot styling reference
 
-`field_row`/`field_grid` (and `Comparison.plot()`/`ComparisonSet.plot()`, which forward
-arbitrary kwargs to them) expose **7 style parameters**, each a dict that merges onto a
+`field_row`/`field_grid`/`field_facet` (and `Comparison.plot()`/`ComparisonSet.plot()`/
+`Field.plot()`, which forward arbitrary kwargs to them) expose **7 style parameters**,
+each a dict that merges onto a
 built-in default and is unpacked straight into one specific matplotlib/cartopy call —
 so any keyword that call accepts works, not just a hand-picked subset. An eighth,
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
@@ -403,12 +404,18 @@ physics.plot(renderer="holoviews", shared_axes=False)   # each row zooms indepen
 
 ### `shared_limits`
 
-`field_grid` only. Makes every row's colour scale — and its difference range —
-span *all* rows' data combined, instead of each row scaling to its own. Meaningful
-only when every row is the same variable (e.g. one depth or one time per row):
-different variables have unrelated ranges and units, so sharing across those makes
-the colours meaningless relative to the numbers on the bar. Warns (once) if the
-rows' `standard_name`s actually differ.
+`field_grid` and a two-axis `field_facet`. Makes every row's colour scale — and, in
+`field_grid`, its difference range — span *all* rows' data combined, instead of each
+row scaling to its own. Meaningful only when every row is the same variable over a
+comparable range: different variables have unrelated ranges and units, so sharing
+across those makes the colours meaningless relative to the numbers on the bar.
+`field_grid` warns (once) if the rows' `standard_name`s actually differ.
+
+The same caution applies to a `field_facet` grid of depths, for a subtler reason: the
+rows *are* one variable, but nitrate at 100 m and at the surface still span unrelated
+ranges, so one scale across them pushes every surface panel to the bottom of the bar
+and hides the monthly change the figure exists to show. Reach for it when the levels
+you picked genuinely share a range, not by default.
 
 **Default:** `False` (each row scales independently, as before this option existed)
 
@@ -418,17 +425,66 @@ depths = osk.compare(reference="woa23_nitrate_month01", test="my_run",
 depths.plot(shared_limits=True)   # same colour scale on every depth row
 ```
 
-**`field_movie` defaults it to `True`** instead, and means something slightly different
-by `False`: a movie's scale is fixed for its whole length either way, and the option only
-picks whether it is derived from every frame or from the first. A scale re-derived per
-frame would make the ruler move with the field, which is unreadable rather than merely
-inconsistent — see [Movies](movies.md#one-colour-scale-for-the-whole-movie).
+**The movie families default it to `True`** instead, and mean something slightly
+different by `False`: a movie's scale is fixed for its whole length either way, and the
+option only picks whether it is derived from every frame or from the first. A scale
+re-derived per frame would make the ruler move with the field, which is unreadable rather
+than merely inconsistent — see
+[Movies](movies.md#one-colour-scale-for-the-whole-movie).
 
 ### Movie-only parameters
 
-`field_movie` adds `save`, `fps`, `dpi`, `every`, `frame_label`, `frame_label_kwargs`,
-`player` (interactive) and `progress`. They are documented together in
-[Movies](movies.md), since they only mean anything once there is more than one frame.
+`field_movie` and `facet_movie` add `save`, `fps`, `dpi`, `every`, `frame_label`,
+`frame_label_kwargs`, `player` (interactive) and `progress`. They are documented together
+in [Movies](movies.md), since they only mean anything once there is more than one frame.
+
+### `ncols` (`field_facet` only)
+
+How many columns the panels are laid out in. By default there is no fixed answer:
+[`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
+from the domain's own aspect ratio, because a grid that suits a wide box is wrong for a
+tall one and vice versa. A Gulf-of-Mexico box stacks down the page one panel per row; a
+California-Current box spreads across it. Blank cells are charged for, so an ordered
+series doesn't end up scattered through a mostly empty grid just because those cells
+happened to be the right shape.
+
+The colorbar follows whatever grid results — horizontal beneath a wide, short grid;
+vertical beside a tall one — since a bar on the grid's long edge is the one that stays
+the same length as the panels it describes.
+
+Pass an integer to override the layout entirely.
+
+**Default:** `None` (chosen from the domain's aspect ratio)
+
+```python
+run.plot()            # orientation follows the domain
+run.plot(ncols=3)     # three columns, whatever the domain
+```
+
+**With two facet axes there is nothing to choose.** If the reduction leaves both a
+time axis and a depth axis standing (`select={"depth": [0, 50, 100]}` alongside a
+monthly `aggregate`), the grid is `len(depth)` × `len(time)` — depths down the rows,
+months across the columns — and `ncols` is refused rather than ignored, since a count
+that disagrees with the data would drop panels instead of re-flowing them. Depth takes
+the rows by convention (it reads top-to-bottom, surface first) rather than by whichever
+arrangement fits the page; pass `row_dim` to `field_facet` directly to swap them.
+
+Month titles then appear on the top row only, and each row is named down its left edge
+(`50 m`) with the same rotated label `field_grid` uses — so `row_label_kwargs` applies
+in this case, though `metrics_kwargs` still does not, there being no metrics without a
+reference.
+
+> **One facet axis: one shared colour scale and one colorbar**, and that is not
+> configurable. The panels are the same quantity at different times, so per-panel
+> scaling would draw a doubling between March and April as no change at all.
+>
+> **Two facet axes: one scale and one colorbar per depth row** — see
+> [`shared_limits`](#shared_limits) to collapse them into one.
+
+`ncols` has no counterpart in `facet_movie`: a movie has one panel, and the axis a grid
+would arrange is the one it plays instead. A field with *two* facet axes therefore can't
+be a movie — one of them would have to become panels, which is what `field_facet` is
+for — and is refused rather than quietly animated along one axis.
 
 ### `shared_axis_labels`
 
@@ -438,7 +494,10 @@ leftmost column (latitude) and the bottom row (longitude) — the usual conventi
 for a grid of maps, since three side-by-side copies of the same latitude labels say
 nothing three copies didn't already say once. Set `False` to label every panel's
 axes independently (`field_row`'s single row is always effectively "bottom", so
-this only visibly changes anything for `field_grid`'s left column).
+this only visibly changes anything for `field_grid`'s left column). In a `field_facet`
+grid the last row can be ragged, so "bottom" means *has no panel below it* rather than
+"is in the last row" — the seventh of seven panels and the sixth both get longitude
+labels.
 
 **Default:** `True`
 

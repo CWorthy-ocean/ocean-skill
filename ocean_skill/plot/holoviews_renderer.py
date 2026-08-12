@@ -5,13 +5,13 @@ so switching between static and interactive output is only a change of renderer 
 Returns holoviews objects, which display inline in a notebook and can be saved to
 standalone HTML with ``holoviews.save(obj, "plot.html")``.
 
-``field_movie`` is where the two renderers differ most in form and least in intent: the
-static one encodes the frames into an mp4, this one puts them on a slider. Stepping is
-the interactive form of playing — you can hold a frame, step back, and hover a cell for
-its value — with an optional play/pause scrubber for when it should just run.
+The two movie families are where the renderers differ most in form and least in intent:
+the static one encodes the frames into an mp4, this one puts them on a slider. Stepping
+is the interactive form of playing — you can hold a frame, step back, and hover a cell
+for its value — with an optional play/pause scrubber for when it should just run.
 
-Implemented: ``field_row``, ``field_grid``, ``field_movie`` and ``target``. **Taylor is
-delegated back to
+Implemented: ``field_row``, ``field_grid``, ``field_facet``, ``field_movie``,
+``facet_movie`` and ``target``. **Taylor is delegated back to
 matplotlib**: it is drawn on a floating polar axis (``mpl_toolkits.axisartist``) that
 bokeh has no equivalent for, and rebuilding the curved correlation axis from primitives
 is a project in itself rather than a port. ``paired`` therefore returns a static Taylor
@@ -35,6 +35,11 @@ __all__ = ["render"]
 
 #: Families bokeh cannot reasonably draw; these fall back to matplotlib with a warning.
 _DELEGATED = {"taylor", "paired"}
+
+#: The animated families. They are the only ones here with a file to write and a rate to
+#: play at, so ``save``/``fps`` reach them where every other family leaves both to the
+#: static renderer.
+_MOVIES = {"field_movie", "facet_movie"}
 
 #: Style parameters that only mean something to the static renderer (see
 #: docs/plot_styling_reference.md) — each maps onto a matplotlib/cartopy call bokeh
@@ -285,11 +290,142 @@ def _field_grid(
     return layout
 
 
+def _field_facet(
+    item: dict[str, Any],
+    geo=True,
+    shared_axes: bool = True,
+    title: str | None = None,
+    ncols: int | None = None,
+    shared_limits: bool = False,
+    font_scale: float = 1.0,
+    **_,
+):
+    """One interactive map per value of the facet axis: a field over time, in order.
+
+    The interactive twin of :func:`ocean_skill.plot.matplotlib_renderer.field_facet`,
+    and the same two commitments hold. Every panel shares one colour scale, because
+    the panels are one quantity at different times and per-panel scaling would hide
+    exactly the change the figure exists to show. Panel titles come from the facet
+    coordinate through the shared :func:`~ocean_skill.plot.matplotlib_renderer.
+    facet_labels`, so a consecutive-month figure says ``Jan 2012`` here too and cannot
+    be mistaken for the climatology that says ``Jan``.
+
+    The column count also comes from the shared
+    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
+    same panels the same way. Its page-fitting argument is weaker here — a bokeh layout
+    grows a scrollbar rather than a smaller panel — but a plot that rearranges itself
+    when you switch renderer is not the same plot drawn interactively.
+
+    With a second facet axis (``row_dim``, a depth) the grid is fixed at levels by
+    periods and each row keeps its own colour range, as it does statically. The level
+    joins each panel's title rather than sitting rotated at the row's left edge, bokeh
+    having no equivalent of that floating text — the same substitution
+    :func:`_field_row` makes for a field grid's ``row_label``.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _aspect_of, _limits, facet_labels
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    field = item["field"]
+    facet_dim = item.get("facet_dim")
+    row_dim = item.get("row_dim")
+    for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
+        if value is not None and value not in field.dims:
+            raise ValueError(
+                f"{name} {value!r} is not a dimension of the field ({list(field.dims)})"
+            )
+    n = int(field.sizes[facet_dim]) if facet_dim else 1
+    nrows = int(field.sizes[row_dim]) if row_dim else 1
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    seq, _div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+
+    def _clim(sub):
+        lo, hi = _limits(sub)
+        return (max(lo, 1e-6) if log else lo, hi)
+
+    # One scale per row when the rows are levels, matching the static renderer: depths
+    # have unrelated ranges, and one scale across them flattens the shallow rows.
+    per_row = row_dim is not None and not shared_limits
+    clims = [
+        _clim(field.isel({row_dim: r})) if per_row else _clim(field)
+        for r in range(nrows)
+    ]
+
+    labels = (
+        facet_labels(field[facet_dim])
+        if facet_dim and facet_dim in field.coords
+        else [""] * n
+    )
+    row_labels = (
+        facet_labels(field[row_dim])
+        if row_dim and row_dim in field.coords
+        else [""] * nrows
+    )
+    if row_dim is not None:
+        ncols = n
+    elif ncols is None:
+        ncols, _nrows = facet_layout(n, _aspect_of(field))
+    ncols = max(int(ncols), 1)
+
+    def _panel(row, col):
+        if row_dim is not None:
+            sub = field.isel({row_dim: row, facet_dim: col})
+            # bokeh has no rotated row label, so the level joins the panel's own
+            # title -- the same move _field_row makes for a field grid's row_label
+            title = f"{row_labels[row]} — {labels[col]}"
+        else:
+            sub = field.isel({facet_dim: col}) if facet_dim else field
+            title = str(labels[col])
+        return _quadmesh(
+            sub,
+            title=title,
+            cmap=seq,
+            clim=clims[row],
+            units=units,
+            geo=geo,
+            log=log,
+            font_scale=font_scale,
+        )
+
+    panels = [
+        _panel(row, col)
+        for row in range(nrows)
+        for col in range(ncols if row_dim is not None else n)
+    ]
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
 #: Name of the dimension a movie's frames vary along, i.e. what the slider is labelled.
 #: A movie's frames are usually time steps, but not necessarily — the static renderer
 #: calls the per-frame text a ``frame_label`` for the same reason — so the neutral name
 #: is the honest one.
 FRAME_DIM = "frame"
+
+
+def _unique_keys(labels) -> list[str]:
+    """Make slider values unique, since a ``HoloMap`` key identifies a frame.
+
+    Two frames sharing a key do not draw twice — the second replaces the first and the
+    movie quietly loses a frame. Labels are usually unique already (see
+    :func:`~ocean_skill.plot.matplotlib_renderer.frame_labels`, which refines datetimes
+    until they are), so this is the backstop for the cases that cannot be refined: two
+    comparisons in one set carrying the same label, say.
+    """
+    seen: dict[str, int] = {}
+    out = []
+    for label in labels:
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return out
 
 
 def _frame_keys(frames) -> list[str]:
@@ -299,7 +435,84 @@ def _frame_keys(frames) -> list[str]:
     values shows them verbatim, and ``"2012-01-15"`` is what a viewer wants to read.
     Positions fill in for frames carrying no label, so the widget still steps.
     """
-    return [str(f.get("frame_label") or f"frame {i + 1}") for i, f in enumerate(frames)]
+    return _unique_keys(
+        [str(f.get("frame_label") or f"frame {i + 1}") for i, f in enumerate(frames)]
+    )
+
+
+def _facet_movie(
+    item: dict[str, Any],
+    geo=True,
+    title: str | None = None,
+    shared_limits: bool = True,
+    every: int = 1,
+    fps: int = 8,
+    player: bool = False,
+    save=None,
+    font_scale: float = 1.0,
+    **_,
+):
+    """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
+
+    Where :func:`_field_facet` lays the axis out as panels, this steps through it in
+    place — the same field, the same labels, one panel at a time. For a long axis that
+    is the more useful of the two: forty panels on a page are each too small to read,
+    while forty frames are full size and a drag apart.
+
+    One colour scale for the whole movie, as statically, and for the same reason — a
+    scale that moved with the slider would make a change in the ruler look like a change
+    in the field.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import (
+        _limits,
+        _one_facet_axis,
+        _select_frames,
+        frame_labels,
+    )
+
+    hv = _extension()
+    field = item["field"]
+    facet_dim = _one_facet_axis(field, item.get("facet_dim"))
+    indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
+    labels = (
+        frame_labels(field[facet_dim])
+        if facet_dim in field.coords
+        else [f"frame {i + 1}" for i in range(int(field.sizes[facet_dim]))]
+    )
+    keys = _unique_keys([labels[i] for i in indices])
+
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    seq, _div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+    scope = field if shared_limits else field.isel({facet_dim: indices[0]})
+    vmin, vmax = _limits(scope)
+    if log:
+        vmin = max(vmin, 1e-6)
+
+    dim = hv.Dimension(FRAME_DIM, values=keys)
+    panels = {
+        key: _quadmesh(
+            field.isel({facet_dim: index}),
+            title=key,
+            cmap=seq,
+            clim=(vmin, vmax),
+            units=units,
+            geo=geo,
+            log=log,
+            font_scale=font_scale,
+        )
+        for key, index in zip(keys, indices, strict=True)
+    }
+    movie = hv.HoloMap(panels, kdims=[dim])
+    if title:
+        movie = movie.opts(title=str(title))
+    if player:
+        movie = _scrubber(movie, fps=fps)
+    if save:
+        _save_interactive(movie, save)
+    return movie
 
 
 def _field_movie(
@@ -685,11 +898,14 @@ def render(spec, **kwargs: Any):
         "domain",
         "mark",
         "metrics",
+        # bokeh labels every panel's own axes and has no notion of borrowing a
+        # neighbour's, so there is nothing for this to switch off
+        "shared_axis_labels",
         *_STATIC_ONLY_KWARGS,
     ]
-    if family != "field_movie":
-        # a movie is the one family with something to write here (a standalone HTML
-        # page, the interactive counterpart of an mp4), and the one that plays at a
+    if family not in _MOVIES:
+        # a movie is the only family with something to write here (a standalone HTML
+        # page, the interactive counterpart of an mp4) and the only one that plays at a
         # rate; everywhere else both are the static renderer's business
         drops += ["save", "fps", "dpi", "progress"]
     for drop in drops:
@@ -699,8 +915,12 @@ def render(spec, **kwargs: Any):
         return _field_row(spec.single, **opts)
     if family == "field_grid":
         return _field_grid(spec.items, **opts)
+    if family == "field_facet":
+        return _field_facet(spec.single, **opts)
     if family == "field_movie":
         return _field_movie(spec.items, **opts)
+    if family == "facet_movie":
+        return _facet_movie(spec.single, **opts)
     if family == "target":
         return _target(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")

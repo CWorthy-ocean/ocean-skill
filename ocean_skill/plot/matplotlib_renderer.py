@@ -6,8 +6,11 @@ comparable) taken from the 10th–90th percentile of the pair; the difference pa
 a diverging map centred on zero. Metrics go in a corner box, leaving the title for
 identity. Registers itself under ``"matplotlib"``.
 
-:func:`field_grid` stacks several such rows down a page; :func:`field_movie` stacks the
-same items in *time* instead, writing one mp4 or gif whose every frame is that same row.
+Every family here draws its panels through :func:`_draw_map`, and the two movie
+families are the two static map families played rather than laid out:
+:func:`field_movie` animates :func:`field_grid`'s comparison rows, :func:`facet_movie`
+animates :func:`field_facet`'s facet axis. So a frame of a movie is the still it would
+have been.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from ocean_skill.plot.typography import (
     MIN_PT,
     PAGE_H,
     PAGE_W,
+    REFERENCE_GRID,
     auto_figsize,
     reference_scale,
     type_scale,
@@ -33,7 +37,7 @@ from ocean_skill.plot.typography import (
 # override of exactly this
 from ocean_skill.plot.typography import row_height as _typographic_row_height
 
-__all__ = ["field_grid", "field_movie", "field_row", "render"]
+__all__ = ["facet_labels", "field_facet", "field_grid", "field_row", "render"]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
 # which is where they are used to decide sizes; re-exported under their old names.
@@ -106,8 +110,8 @@ DEFAULT_METRICS_KWARGS: dict[str, Any] = {
         "linewidth": 0.4,
     },
 }
-#: ``field_movie`` only: the per-frame label (usually a timestamp), drawn in the
-#: top-left of the test panel — mirroring the metrics box in the bottom-left of the
+#: The movie families only: the per-frame label (usually a timestamp), drawn in the
+#: top-left of the panel — mirroring the metrics box in the bottom-left of the
 #: difference panel, and the same box styling so the two read as one figure's notes.
 #: ``monospace`` deliberately: a proportional font makes a counting timestamp jitter
 #: sideways from frame to frame, which is distracting in a way it never is on a still.
@@ -136,6 +140,14 @@ DEFAULT_COLORBAR_KWARGS_GRID: dict[str, Any] = {
 }
 DEFAULT_SUPTITLE_KWARGS_ROW: dict[str, Any] = {}
 DEFAULT_SUPTITLE_KWARGS_GRID: dict[str, Any] = {}
+
+#: Colorbar aspect (length/thickness) for ``field_facet``'s single shared bar.
+#: Both dicts above describe a bar spanning one row, and :func:`_align_colorbars`
+#: derives thickness from the bar's own length — so a bar re-fitted to span *every*
+#: row of a facet grid comes out as many times fatter as there are rows, and a 0.6in
+#: slab down the side of the page reads as a second figure rather than as a scale.
+#: Roughly the per-row aspect times the row count these grids typically have.
+FACET_COLORBAR_ASPECT = 40
 
 #: Reference sizes, i.e. what a default page-width ``field_row`` gets. There is no
 #: literal default dict to point at any more, so this is what the docs quote and what
@@ -346,6 +358,81 @@ def _align_colorbars(fig, renderer=None) -> None:
             cax.set_position([near + gap[False] / fig_w, lo, width, hi - lo])
 
 
+def _add_row_label(ax, text: str, row_label_kwargs: dict[str, Any]) -> None:
+    """Write a rotated label at the left edge of the row ``ax`` starts.
+
+    The x here is provisional; :func:`_clear_row_labels` moves it once the layout is
+    final and the latitude labels it must clear have a measurable width. Deliberately
+    NOT ``set_ylabel``: constrained_layout does not see cartopy's gridline labels (they
+    are free artists, not ytick labels), so it packs the axes against the ylabel alone
+    and the latitude labels land on top of it no matter how large a labelpad is set. A
+    free text artist takes no part in the layout, so it can be placed after the fact
+    without the layout shifting back underneath it.
+    """
+    ax._osk_row_label = ax.text(
+        -0.18, 0.5, text, transform=ax.transAxes, **row_label_kwargs
+    )
+
+
+def _draw_map(
+    ax,
+    da,
+    *,
+    label: str | None,
+    cmap,
+    norm,
+    mark: str,
+    domain: tuple[float, float, float, float] | None,
+    gridline_kwargs: dict[str, Any],
+    tick_label_kwargs: dict[str, Any],
+    title_kwargs: dict[str, Any],
+    left_labels: bool | None = None,
+    bottom_labels: bool | None = None,
+):
+    """Draw one map panel into ``ax`` and return its mappable.
+
+    Everything every map in this module has in common: the field, the land mask,
+    coastlines, gridlines, the optional model-domain outline and the title. Shared by
+    :func:`_draw_row` and :func:`field_facet` so that the two families cannot drift
+    apart on what a map of this package looks like — a change to the coastline weight
+    or the land grey should not be a change to only half the figures.
+
+    ``left_labels``/``bottom_labels`` of ``None`` leave cartopy's ``draw_labels=True``
+    default standing, i.e. every panel labels its own axes; ``True``/``False`` set them
+    explicitly, which is how a grid shows each axis once.
+    """
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
+    proj = ccrs.PlateCarree()
+    draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
+    kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+    im = draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
+    ax.add_feature(cfeature.LAND, facecolor="0.85", zorder=2)
+    ax.coastlines(linewidth=0.4, zorder=3)
+    gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
+    gl.top_labels = gl.right_labels = False
+    if left_labels is not None:
+        gl.left_labels = left_labels
+    if bottom_labels is not None:
+        gl.bottom_labels = bottom_labels
+    gl.xlabel_style = gl.ylabel_style = dict(tick_label_kwargs)
+    if domain:
+        lo0, la0, lo1, la1 = domain
+        ax.plot(
+            [lo0, lo1, lo1, lo0, lo0],
+            [la0, la0, la1, la1, la0],
+            transform=proj,
+            color="k",
+            lw=0.6,
+            ls="--",
+            zorder=4,
+        )
+    if label is not None:
+        ax.set_title(label, **title_kwargs)
+    return im
+
+
 def _draw_row(
     axes,
     aligned,
@@ -389,8 +476,6 @@ def _draw_row(
     than recomputed because the sizes belong to the whole figure, and a row cannot see
     how many other rows are sharing the page with it.
     """
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
     import matplotlib.colors as mcolors
 
     defaults = defaults or _style_defaults(reference_scale(), horizontal_colorbar=True)
@@ -409,7 +494,6 @@ def _draw_row(
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
         div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
-    proj = ccrs.PlateCarree()
 
     panels = [
         (t, tl, seq, seq_norm),
@@ -418,49 +502,27 @@ def _draw_row(
     ]
     ims = []
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
-        draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
-        kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+        # None leaves every panel labelling its own axes, as every version before
+        # shared_axis_labels existed did.
         ims.append(
-            draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
-        )
-        ax.add_feature(cfeature.LAND, facecolor="0.85", zorder=2)
-        ax.coastlines(linewidth=0.4, zorder=3)
-        gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
-        gl.top_labels = gl.right_labels = False
-        if shared_axis_labels:
-            gl.left_labels = j == 0
-            gl.bottom_labels = is_bottom_row
-        # else: leave left/bottom labels at gridlines(draw_labels=True)'s default —
-        # every panel gets its own, independent of position.
-        gl.xlabel_style = gl.ylabel_style = dict(tick_label_kwargs)
-        if domain:
-            lo0, la0, lo1, la1 = domain
-            ax.plot(
-                [lo0, lo1, lo1, lo0, lo0],
-                [la0, la0, la1, la1, la0],
-                transform=proj,
-                color="k",
-                lw=0.6,
-                ls="--",
-                zorder=4,
+            _draw_map(
+                ax,
+                da,
+                label=lab,
+                cmap=cmap,
+                norm=norm,
+                mark=mark,
+                domain=domain,
+                gridline_kwargs=gridline_kwargs,
+                tick_label_kwargs=tick_label_kwargs,
+                title_kwargs=title_kwargs,
+                left_labels=(j == 0) if shared_axis_labels else None,
+                bottom_labels=is_bottom_row if shared_axis_labels else None,
             )
-        ax.set_title(lab, **title_kwargs)
+        )
 
     if row_label:
-        # Provisional x only; _clear_row_labels moves it once the layout is final and
-        # the latitude labels it must clear have a measurable width. Deliberately NOT
-        # set_ylabel: constrained_layout does not see cartopy's gridline labels (they
-        # are free artists, not ytick labels), so it packs the axes against the ylabel
-        # alone and the latitude labels land on top of it no matter how large a
-        # labelpad is set. A free text artist takes no part in the layout, so it can be
-        # placed after the fact without the layout shifting back underneath it.
-        axes[0]._osk_row_label = axes[0].text(
-            -0.18,
-            0.5,
-            row_label,
-            transform=axes[0].transAxes,
-            **row_label_kwargs,
-        )
+        _add_row_label(axes[0], row_label, row_label_kwargs)
     if metrics:
         # stashed on the axes, as the row label is, so that field_movie can retext it
         # per frame rather than re-deriving where the box was put
@@ -796,6 +858,16 @@ def _fit_text_widths(fig, renderer=None) -> None:
             )
 
 
+def _aspect_of(da) -> float:
+    """Return one field's ``lon_span / lat_span`` — the shape a panel wants to be."""
+    try:
+        lon_span = float(np.ptp(np.asarray(da["lon"])))
+        lat_span = float(np.ptp(np.asarray(da["lat"])))
+        return lon_span / max(lat_span, 1e-6)
+    except Exception:  # pragma: no cover - fall back to a square-ish panel
+        return 1.0
+
+
 def _map_aspect(comparisons, reference_name: str) -> float:
     """Return the maps' ``lon_span / lat_span`` — the shape a panel wants to be.
 
@@ -804,10 +876,7 @@ def _map_aspect(comparisons, reference_name: str) -> float:
     to be caught, not corrected.
     """
     try:
-        da = comparisons[0]["aligned"][reference_name]
-        lon_span = float(np.ptp(np.asarray(da["lon"])))
-        lat_span = float(np.ptp(np.asarray(da["lat"])))
-        return lon_span / max(lat_span, 1e-6)
+        return _aspect_of(comparisons[0]["aligned"][reference_name])
     except Exception:  # pragma: no cover - fall back to a square-ish panel
         return 1.0
 
@@ -1014,6 +1083,323 @@ def field_grid(
     return fig
 
 
+#: Facet coordinates that name a vertical level rather than a time. ``z`` is what
+#: :func:`ocean_skill.roms.to_depth` produces; the rest are what observational products
+#: call the same axis, matching :data:`ocean_skill.cf._COORD_FALLBACKS`.
+_DEPTH_COORDS = ("z", "depth", "depth_surface", "lev")
+
+
+def facet_labels(coord) -> list[str]:
+    """Panel labels for a facet coordinate, spelled to say which reduction made it.
+
+    The shapes :mod:`ocean_skill.operators` can leave standing are distinguishable from
+    the coordinate alone, and are deliberately labelled so that the figure says which
+    one it is:
+
+    * timestamps (a ``resample``) -> ``"Jan 2012"``. The year is not optional here: it
+      is the only thing on the page distinguishing six consecutive months from six
+      months of a climatology, and a reader who cannot tell those apart is reading the
+      wrong figure without knowing it.
+    * integer months (``{"groupby": "month"}``) -> ``"Jan"``, no year, because there
+      isn't one — the panel is every January of the record.
+    * a vertical level -> ``"50 m"``. Taken through ``abs`` because the model's own
+      axis is negative-down (:func:`ocean_skill.roms.to_depth` interpolates onto
+      ``-depths``) while the depth the caller asked for, and the one a reader expects
+      on a label, is positive-down.
+    * anything else (``{"groupby": "season"}`` gives ``"DJF"``) -> its own value.
+    """
+    import calendar
+
+    name = str(coord.name)
+    values = list(np.atleast_1d(coord.values))
+    try:
+        # covers numpy datetime64 and cftime alike, which is why this goes through
+        # xarray's accessor rather than pandas or datetime directly -- a ROMS run on a
+        # 360-day calendar carries cftime objects that pd.Timestamp cannot parse.
+        return [str(v) for v in coord.dt.strftime("%b %Y").values]
+    except (TypeError, AttributeError):
+        pass
+    if name == "month":
+        try:
+            return [calendar.month_abbr[int(v)] for v in values]
+        except (ValueError, TypeError, IndexError):  # pragma: no cover - odd coord
+            pass
+    if name in _DEPTH_COORDS:
+        try:
+            return [f"{abs(float(v)):g} m" for v in values]
+        except (ValueError, TypeError):  # pragma: no cover - odd coord
+            pass
+    return [str(v) for v in values]
+
+
+def frame_labels(coord) -> list[str]:
+    """Return a movie's frame labels: :func:`facet_labels`, refined until they differ.
+
+    A facet grid's panels are almost always a reduction — six monthly means, twelve
+    climatological months — so ``"%b %Y"`` names them exactly. A movie is as often the
+    *unreduced* axis: every step of a run, which at daily cadence gives 31 panels all
+    called ``Jan 2012`` and at hourly cadence 744. On a still that is merely a repeated
+    caption; interactively the labels are the slider's values, and duplicates collapse
+    frames on top of each other silently.
+
+    So this starts from :func:`facet_labels` — a monthly movie is labelled exactly as
+    the equivalent grid is, which is the point — and escalates the resolution only when
+    the labels would not tell one frame from another. Non-datetime axes (levels,
+    seasons) come back unchanged, having nothing finer to fall back to.
+    """
+    labels = facet_labels(coord)
+    if len(set(labels)) == len(labels):
+        return labels
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M"):
+        try:
+            # same accessor facet_labels uses, so cftime calendars work here too
+            finer = [str(v) for v in coord.dt.strftime(fmt).values]
+        except (TypeError, AttributeError):
+            return labels
+        labels = finer
+        if len(set(finer)) == len(finer):
+            break
+    return labels
+
+
+def field_facet(
+    field,
+    *,
+    facet_dim: str | None = None,
+    row_dim: str | None = None,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    domain: tuple[float, float, float, float] | None = None,
+    ncols: int | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_limits: bool = False,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+):
+    """Draw one map per value of ``facet_dim``: a single field over time, in order.
+
+    The model-only counterpart of :func:`field_grid`. There is no reference and so no
+    difference panel and no metrics box; what varies across the panels is the facet
+    axis — most usefully time, via ``aggregate={"time": {"resample": "1MS", "reduce":
+    "mean"}}``, which gives one panel per month of the run.
+
+    **One facet axis.** The panels are a single series, so the grid is free and
+    ``ncols`` defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads
+    the orientation off the domain's own aspect ratio: a wide box stacks down the page,
+    a tall one spreads across it. Every panel shares one colour scale and one colorbar
+    — the whole point of the family rather than a default worth changing, since these
+    panels are the same quantity at different times and per-panel scaling would make a
+    doubling between March and April look like no change at all. The colorbar follows
+    the grid — horizontal beneath a wide, short one, vertical beside a tall one — since
+    a bar on the long edge stays the same length as the panels it describes.
+
+    **Two facet axes.** Pass ``row_dim`` as well (``select={"depth": [0, 50, 100]}``
+    leaves a vertical axis standing beside the monthly one) and the grid stops being a
+    free choice: it is ``len(row_dim)`` by ``len(facet_dim)``, so ``ncols`` and the
+    aspect-ratio rule no longer apply. Each row then gets **its own colour scale and its
+    own colorbar**, exactly as :func:`field_grid`'s rows do and for the same reason:
+    nitrate at 100 m and nitrate at the surface have unrelated ranges, and one scale
+    across both would flatten every surface panel to the bottom of the bar. Set
+    ``shared_limits=True`` for a single scale across the whole grid, which is right only
+    when the rows genuinely share a range.
+
+    Panel titles come from the facet coordinate itself (see :func:`facet_labels`), so a
+    consecutive-month figure is labelled ``Jan 2012`` and a climatology ``Jan``, and the
+    two cannot be confused for one another on the page. With a ``row_dim`` the titles
+    appear on the top row only — every row below shows the same months — and each row is
+    named down the left edge instead (``50 m``), the same rotated label
+    :func:`field_grid` uses.
+
+    The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
+    :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
+    metrics, and ``row_label_kwargs`` applies only when there is a ``row_dim``.
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.typography import facet_figsize, facet_layout
+
+    for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
+        if value is not None and value not in field.dims:
+            raise ValueError(
+                f"{name} {value!r} is not a dimension of the field ({list(field.dims)})"
+            )
+    if row_dim is not None and row_dim == facet_dim:
+        raise ValueError(
+            f"facet_dim and row_dim are both {facet_dim!r}; one axis cannot be both "
+            "the rows and the columns"
+        )
+
+    n = int(field.sizes[facet_dim]) if facet_dim else 1
+    aspect = _aspect_of(field)
+    if row_dim is not None:
+        # Two axes fix the grid: rows are the levels, columns the periods. Nothing is
+        # left for the aspect-ratio rule to choose, and an ncols that disagrees with
+        # the data would drop panels rather than re-flow them, so it is refused here
+        # instead of being quietly ignored.
+        if ncols is not None and int(ncols) != n:
+            raise ValueError(
+                f"ncols={ncols} contradicts row_dim={row_dim!r}: with two facet axes "
+                f"the grid is {field.sizes[row_dim]} x {n} (one column per "
+                f"{facet_dim!r}), so there is no column count left to choose."
+            )
+        nrows, ncols = int(field.sizes[row_dim]), n
+    elif ncols is None:
+        ncols, nrows = facet_layout(n, aspect)
+    else:
+        ncols = max(int(ncols), 1)
+        nrows = -(-n // ncols)
+    # A bar on the grid's long edge stays the same length as the panels it describes;
+    # on the short edge it would be a stub beside a tall column, or a rule under a
+    # wide one. Per-row bars are always vertical, beside their row.
+    per_row_bars = row_dim is not None and not shared_limits
+    horizontal = False if per_row_bars else ncols > nrows
+
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=nrows,
+        ncols=ncols,
+        # with two axes only the top row is titled, so the rows below need a gap
+        # rather than a title's worth of room as well
+        title_every_row=row_dim is None,
+        font_scale=font_scale,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        # the suptitle spans the page, so it is sized as every other family's is
+        # rather than off this grid's column count -- see type_scale
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    if not per_row_bars:
+        # One bar refitted across every row comes out as many times fatter as there are
+        # rows; a per-row bar spans one row, which is what the grid default already
+        # describes. See FACET_COLORBAR_ASPECT.
+        defaults["colorbar_kwargs"] = {
+            **defaults["colorbar_kwargs"],
+            "aspect": FACET_COLORBAR_ASPECT,
+        }
+    merged_title = _merged(defaults["title_kwargs"], title_kwargs)
+    merged_gridline = _merged(defaults["gridline_kwargs"], gridline_kwargs)
+    merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
+
+    cmap, _ = cmaps_for(standard_name)
+
+    def _norm_of(sub):
+        vmin, vmax = _limits(sub)
+        return norm_for(standard_name, vmin, vmax)
+
+    # Computed before drawing so each panel is drawn against its scale rather than
+    # corrected afterwards. One norm per row, unless there is only one scale to have.
+    if per_row_bars:
+        norms = [_norm_of(field.isel({row_dim: r})) for r in range(nrows)]
+    else:
+        norms = [_norm_of(field)] * nrows
+
+    labels = (
+        facet_labels(field[facet_dim])
+        if facet_dim and facet_dim in field.coords
+        else [None] * n
+    )
+    row_labels = (
+        facet_labels(field[row_dim])
+        if row_dim and row_dim in field.coords
+        else [None] * nrows
+    )
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes.ravel())
+    used, ims, im = [], [], None
+    n_panels = nrows * ncols if row_dim is not None else n
+    for i in range(n_panels):
+        ax = flat[i]
+        row, col = divmod(i, ncols)
+        if row_dim is not None:
+            panel = field.isel({row_dim: row, facet_dim: col})
+            # Below the top row every panel repeats its column's period; the row is
+            # named down the left edge instead.
+            label = labels[col] if row == 0 else None
+        else:
+            panel = field.isel({facet_dim: i}) if facet_dim else field
+            label = labels[i]
+        im = _draw_map(
+            ax,
+            panel,
+            label=label,
+            cmap=cmap,
+            norm=norms[row],
+            mark=mark,
+            domain=domain,
+            gridline_kwargs=merged_gridline,
+            tick_label_kwargs=merged_tick,
+            title_kwargs=merged_title,
+            # The bottom row is ragged when n does not fill the grid, so "is there a
+            # panel below me?" is the question, not "am I in the last row?".
+            left_labels=(col == 0) if shared_axis_labels else None,
+            bottom_labels=(i + ncols >= n_panels) if shared_axis_labels else None,
+        )
+        used.append(ax)
+        ims.append(im)
+        if col == 0 and row_labels[row]:
+            _add_row_label(ax, row_labels[row], merged_row_label)
+
+    # Cells past the last panel carry no map, no gridlines and so no label artists —
+    # hidden rather than deleted, which keeps the remaining panels on the grid they
+    # were sized for instead of letting the layout engine expand them into the gap.
+    for ax in flat[n_panels:]:
+        ax.set_visible(False)
+
+    bar_label = f"[{units}]" if units else ""
+    if per_row_bars:
+        for row in range(nrows):
+            span = slice(row * ncols, (row + 1) * ncols)
+            _draw_colorbar(
+                fig,
+                ims[span][0],
+                used[span],
+                bar_label,
+                colorbar_kwargs,
+                defaults["colorbar_kwargs"],
+            )
+    elif im is not None:
+        _draw_colorbar(
+            fig, im, used, bar_label, colorbar_kwargs, defaults["colorbar_kwargs"]
+        )
+
+    if title:
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
+    _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 #: Output formats :func:`field_movie` writes, and which matplotlib writer does each.
 #: A gif needs nothing beyond Pillow, which matplotlib already requires, so it always
 #: works; mp4 goes through ffmpeg, an external binary that may not be installed.
@@ -1042,13 +1428,16 @@ DEFAULT_MOVIE_DPI = 110
 FRAME_WARN_AT = 200
 
 
-def _select_frames(frames: list[dict[str, Any]], every: int) -> list[dict[str, Any]]:
+def _select_frames(frames: list, every: int) -> list:
     """Take every ``every``-th frame, warning if a lot are left.
 
     Striding is a plotting decision, not a data one — it thins what is *shown* without
     touching the reduction that produced it, which is why it lives here rather than in
     a ``select``/``aggregate`` spec. ``every=24`` turns hourly output into daily frames
     without re-preparing anything.
+
+    Takes any list, since a comparison movie's frames are spec items while a facet
+    movie's are indices into the facet axis; only the count matters here.
     """
     if every < 1:
         raise ValueError(f"every must be 1 or more, got {every}")
@@ -1114,6 +1503,44 @@ def _movie_writer(path: Path, fps: int):
             "fast",
         ],
     )
+
+
+def _one_facet_axis(field, facet_dim: str | None) -> str:
+    """Return ``facet_dim`` once confirmed to be the field's *only* non-spatial axis.
+
+    A movie plays one axis, so anything else left standing means a frame is not a single
+    map — most often a second facet axis (``select={"depth": [0, 50, 100]}`` beside a
+    monthly one), which :func:`field_facet` can lay out as rows and a movie cannot play.
+    Caught here rather than left to pcolormesh, which fails on the dimensionality with
+    nothing to say about the cause. Shared with the interactive renderer so the two
+    refuse the same fields for the same stated reason.
+    """
+    if facet_dim is None:
+        raise ValueError(
+            "a movie needs an axis to play, but this field is a single map. Leave an "
+            'axis standing for it — aggregate={"time": {"resample": "1MS", "reduce": '
+            '"mean"}} gives one frame per month — or use .plot() for the map you have.'
+        )
+    if facet_dim not in field.dims:
+        raise ValueError(
+            f"facet_dim {facet_dim!r} is not a dimension of the field "
+            f"({list(field.dims)})"
+        )
+    from ocean_skill.align import _lat_name, _lon_name
+
+    spatial: set[str] = set()
+    for name in (_lon_name(field), _lat_name(field)):
+        if name is not None:
+            spatial |= {str(d) for d in field[name].dims}
+    extra = [str(d) for d in field.dims if d not in spatial and str(d) != facet_dim]
+    if extra:
+        raise ValueError(
+            f"{extra} still stands beyond {facet_dim!r} and the horizontal axes, so a "
+            "frame is not a single map. A movie plays one axis: collapse the others "
+            'with aggregate= or narrow them with select= (e.g. {"depth": 50}). '
+            ".plot() can lay a second axis out as rows instead."
+        )
+    return facet_dim
 
 
 def _update_field(ax, im, da, *, mark: str, proj):
@@ -1209,7 +1636,6 @@ def field_movie(
     """
     import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
 
     if not frames:
         raise ValueError("a movie needs at least one frame, got none")
@@ -1310,30 +1736,185 @@ def field_movie(
             metrics_text.set_text(_metrics_text(frame.get("metrics"), metric_keys))
         return [*ims, label_text, metrics_text]
 
+    return _animate(
+        fig, update, len(frames), save=save, fps=fps, dpi=dpi, progress=progress
+    )
+
+
+def _animate(fig, update, n_frames: int, *, save, fps: int, dpi: int, progress: bool):
+    """Wrap ``update`` in a ``FuncAnimation`` and, if asked, encode it to ``save``.
+
+    The half of a movie that has nothing to do with what is being drawn, shared by
+    :func:`field_movie` and :func:`facet_movie` so that "which writer, at what rate,
+    reporting progress how" is answered once for both.
+    """
+    from matplotlib.animation import FuncAnimation
+
     ani = FuncAnimation(
         fig,
         update,
-        frames=len(frames),
+        frames=n_frames,
         interval=1000 / max(fps, 1),
-        # every frame reads its own values off `frames`, so there is nothing to cache;
-        # caching would hold every rendered frame in memory for no gain
+        # every frame reads its own values off the frame list, so there is nothing to
+        # cache; caching would hold every rendered frame in memory for no gain
         cache_frame_data=False,
         blit=False,
     )
-    if save:
-        save = Path(save).expanduser()
-        save.parent.mkdir(parents=True, exist_ok=True)
-        writer = _movie_writer(save, fps)
-        callback = None
-        if progress:
+    if not save:
+        return ani
+    save = Path(save).expanduser()
+    save.parent.mkdir(parents=True, exist_ok=True)
+    writer = _movie_writer(save, fps)
+    callback = None
+    if progress:
 
-            def callback(index, total):
-                end = "\n" if index + 1 == total else ""
-                print(f"\r  frame {index + 1}/{total}", end=end, flush=True)
+        def callback(index, total):
+            end = "\n" if index + 1 == total else ""
+            print(f"\r  frame {index + 1}/{total}", end=end, flush=True)
 
-        ani.save(str(save), writer=writer, dpi=dpi, progress_callback=callback)
-        print(f"ocean-skill: movie written to {save}")
+    ani.save(str(save), writer=writer, dpi=dpi, progress_callback=callback)
+    print(f"ocean-skill: movie written to {save}")
     return ani
+
+
+def facet_movie(
+    field,
+    *,
+    facet_dim: str | None = None,
+    save: str | Path | None = None,
+    fps: int = DEFAULT_FPS,
+    dpi: int = DEFAULT_MOVIE_DPI,
+    every: int = 1,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    mark: str = "pcolormesh",
+    domain: tuple[float, float, float, float] | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    frame_label_kwargs: dict[str, Any] | None = None,
+    frame_label: bool = True,
+    shared_limits: bool = True,
+    font_scale: float = 1.0,
+    progress: bool = True,
+):
+    """Play one source's facet axis instead of laying it out: a movie of one field.
+
+    The animated counterpart of :func:`field_facet`, and the model-only counterpart of
+    :func:`field_movie` — one map, no reference, no difference panel, no metrics box.
+    The axis that becomes the panels there becomes the frames here, so the same
+    ``Field`` reads either way::
+
+        run = osk.field("GOM_bgc", "salinity",
+                        select={"time": "2012", "depth": "surface"})
+        run.plot()                      # every step as a panel
+        run.movie(save="salt.mp4")      # every step as a frame
+
+    Frame labels come from the facet coordinate through :func:`frame_labels`, so they
+    are spelled exactly as the static panels' titles are — ``Jan 2012`` for consecutive
+    months, ``Jan`` for a climatology, ``50 m`` for a level — except where that would
+    not tell one frame from another, since a movie is as often over the unreduced axis
+    as over a reduction.
+
+    ``row_dim`` has no counterpart: a movie has one axis to play, and two facet axes
+    would need one to become the panels — which is what :func:`field_facet` is for.
+    Every other parameter means what it does there, or in :func:`field_movie` for the
+    movie-specific ones (``save``, ``fps``, ``dpi``, ``every``, ``frame_label``).
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.typography import REFERENCE_GRID, facet_figsize
+
+    facet_dim = _one_facet_axis(field, facet_dim)
+    indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
+    labels = frame_labels(field[facet_dim]) if facet_dim in field.coords else None
+    aspect = _aspect_of(field)
+    # One panel, so the grid's long edge is the map's own: a wide domain takes a
+    # horizontal bar beneath it, a tall one a vertical bar beside it. Same rule
+    # field_facet applies to its grid, which for a single cell *is* the map.
+    horizontal = aspect > 1.0
+    figsize = figsize or facet_figsize(aspect, nrows=1, ncols=1, font_scale=font_scale)
+    scale = type_scale(
+        figsize,
+        ncols=1,
+        nrows=1,
+        font_scale=font_scale,
+        # the suptitle spans the page whatever the panel count — see field_facet
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+
+    # One scale for the whole movie, from every frame or just the first. Mandatory in
+    # spirit either way: a scale re-derived per frame would make the ruler move with the
+    # field. field_facet shares one scale across its panels for the same reason.
+    scope = field if shared_limits else field.isel({facet_dim: indices[0]})
+    vmin, vmax = _limits(scope)
+    norm = norm_for(standard_name, vmin, vmax)
+    cmap, _ = cmaps_for(standard_name)
+
+    fig, ax = plt.subplots(
+        figsize=figsize,
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+    )
+    im = _draw_map(
+        ax,
+        field.isel({facet_dim: indices[0]}),
+        label=None,
+        cmap=cmap,
+        norm=norm,
+        mark=mark,
+        domain=domain,
+        gridline_kwargs=_merged(defaults["gridline_kwargs"], gridline_kwargs),
+        tick_label_kwargs=_merged(defaults["tick_label_kwargs"], tick_label_kwargs),
+        title_kwargs=_merged(defaults["title_kwargs"], title_kwargs),
+    )
+    _draw_colorbar(
+        fig,
+        im,
+        ax,
+        f"[{units}]" if units else "",
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+    )
+
+    label_text = None
+    if frame_label and labels:
+        label_text = ax.text(
+            0.02,
+            0.98,
+            labels[indices[0]],
+            transform=ax.transAxes,
+            zorder=5,
+            **_merged(defaults["frame_label_kwargs"], frame_label_kwargs),
+        )
+
+    if title:
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
+    _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    _align_colorbars(fig)
+
+    proj = ccrs.PlateCarree()
+    artists = [im]
+
+    def update(frame: int):
+        index = indices[frame]
+        artists[0] = _update_field(
+            ax, artists[0], field.isel({facet_dim: index}), mark=mark, proj=proj
+        )
+        if label_text is not None:
+            label_text.set_text(labels[index])
+        return [artists[0], label_text]
+
+    return _animate(
+        fig, update, len(indices), save=save, fps=fps, dpi=dpi, progress=progress
+    )
 
 
 def _nested_owner(key: str) -> str | None:
@@ -1402,9 +1983,35 @@ def render(spec, **kwargs: Any):
         _check_options(field_grid, opts)
     elif family == "field_row":
         _check_options(field_row, opts)
+    elif family == "field_facet":
+        _check_options(field_facet, opts)
     elif family == "field_movie":
         _check_options(field_movie, opts)
+    elif family == "facet_movie":
+        _check_options(facet_movie, opts)
 
+    if family == "field_facet":
+        item = spec.single
+        return field_facet(
+            item["field"],
+            facet_dim=item.get("facet_dim"),
+            row_dim=item.get("row_dim"),
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            **opts,
+        )
+    if family == "facet_movie":
+        # the same item field_facet takes, played rather than laid out. `row_dim` is
+        # deliberately not passed on: a movie has one axis to play, and a second facet
+        # axis would have to become panels, which is what field_facet is for.
+        item = spec.single
+        return facet_movie(
+            item["field"],
+            facet_dim=item.get("facet_dim"),
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            **opts,
+        )
     if family == "field_row":
         item = spec.single
         return field_row(

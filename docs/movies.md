@@ -1,9 +1,52 @@
 # Movies
 
-A movie is the plot you already have, over frames. `ComparisonSet.movie()` animates the
-same items `.plot()` stacks down the page — one `test | reference | difference` row,
-redrawn per frame — so a frame of the movie *is* the figure `field_row` draws, because
-it is drawn by the same code.
+**A movie is the plot you already have, played rather than laid out.** Both static plot
+families that draw a series of maps have an animated twin, and `.movie()` is `.plot()`
+with the series moved from the page into time. A frame is drawn by the same code as the
+still it would have been, so the two cannot drift apart.
+
+| | laid out | played |
+|---|---|---|
+| one model field, no reference | `Field.plot()` (`field_facet`) | `Field.movie()` (`facet_movie`) |
+| a comparison | `ComparisonSet.plot()` (`field_grid`) | `ComparisonSet.movie()` (`field_movie`) |
+
+## A model field over time
+
+The common case: one run, one variable, no reference. The axis the reduction leaves
+standing — which `Field.plot()` turns into panels — becomes the frames.
+
+```python
+run = osk.field("GOM_bgc", "salinity",
+                select={"time": "2012-01", "depth": "surface"})
+
+run.plot()                        # every step as a panel
+run.movie(save="salt.mp4")        # every step as a frame
+run.movie(renderer="holoviews")   # every step on a slider
+```
+
+Which reading is better depends on how many steps there are, and they trade off in
+opposite directions: a handful of monthly means are best seen at once, side by side,
+where a month of daily output is 31 panels too small to read and 31 frames a drag apart.
+
+Frame labels come from the facet coordinate, spelled as the static panel titles are —
+`Jan 2012` for consecutive months, `Jan` for a climatology, `50 m` for a level — except
+where that wouldn't tell one frame from another. A movie is as often over the *unreduced*
+axis, where every step of January is one month; there the label refines itself to
+`2012-01-05`, or to the minute if that is what separates two frames. Statically a
+repeated label is only a repeated caption, but interactively the labels *are* the
+slider's values, and duplicates would collapse frames on top of each other silently.
+
+A movie plays **one** axis. If the reduction leaves two standing (`select={"depth": [0,
+50, 100]}` beside a monthly `aggregate`) there is no single sequence to play, and the
+movie is refused rather than animated along one axis with the other quietly averaged —
+that is what `Field.plot()`'s depth-rows grid is for. A field collapsed all the way to a
+single map has nothing to play either, and says so instead of writing a one-frame movie.
+
+## A comparison over frames
+
+`ComparisonSet.movie()` animates the same items `.plot()` stacks down the page — one
+`test | reference | difference` row, redrawn per frame, with each comparison's label as
+the frame label and its own metrics in the corner box.
 
 ```python
 runs = osk.compare(reference="run_baseline", test="run_new", variables=[NITRATE],
@@ -13,6 +56,11 @@ runs.plot()                          # three rows, stacked
 runs.movie(save="depths.mp4")        # the same three, played
 runs.movie(renderer="holoviews")     # the same three, on a slider
 ```
+
+There is currently no way to fan a comparison out over *time* — `compare()` fans over
+variables and depths, and collapses time by default — so a comparison movie's frames are
+whatever varies across the set you built. A model-vs-data movie through time needs
+`compare(times=...)`, which is designed but not built.
 
 ## Formats
 
@@ -64,10 +112,10 @@ agree on them.
 The figure, its layout, its colorbars, its axis labelling and its left margin are built
 **once**, from the first frame. Only three things are redrawn:
 
-- the field values in each of the three panels
-- the **frame label** — the timestamp, in the top-left of the test panel
+- the field values, in the one panel or in all three
+- the **frame label** — the timestamp, in the panel's top-left corner
 - the **metrics box** — that frame's own bias/rmse/corr, in the bottom-left of the
-  difference panel
+  difference panel (comparison movies only; a model field has nothing to score against)
 
 So nothing shifts, resizes or re-fits as the movie plays. That matters more here than on
 a still: the layout machinery (`_align_colorbars`, `_fit_left_margin`, `_fit_text_widths`)
@@ -90,7 +138,7 @@ Every frame is a full cartopy redraw, so frames are the cost. A movie longer tha
 frames says so before spending the time, and suggests a stride:
 
 ```python
-runs.movie(save="year.mp4", every=24)     # hourly output -> daily frames
+run.movie(save="year.mp4", every=24)      # hourly output -> daily frames
 ```
 
 `every=N` keeps every Nth frame. It thins what is *shown*, not what was computed, so it
