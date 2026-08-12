@@ -35,7 +35,13 @@ TARGET_FIGSIZE = (PAGE_W * 0.55, PAGE_W * 0.55)
 PAIRED_FIGSIZE = (PAGE_W, PAGE_W * 0.5)
 
 
-def _scale(figsize, *, ncols: int = 1, font_scale: float = 1.0) -> dict[str, float]:
+def _scale(
+    figsize,
+    *,
+    ncols: int = 1,
+    font_scale: float = 1.0,
+    override: dict[str, float] | None = None,
+) -> dict[str, float]:
     """Type scale for a diagram of this size — see :mod:`ocean_skill.plot.typography`.
 
     These diagrams carry seven text sizes of their own (title, axis labels, tick labels,
@@ -43,8 +49,14 @@ def _scale(figsize, *, ncols: int = 1, font_scale: float = 1.0) -> dict[str, flo
     constants tuned for one figure size. Same table as the field renderers use, so a
     Taylor diagram and the field row beside it in a report agree about how big a label
     is when both are drawn at the same size.
+
+    ``override`` merges *onto* the computed scale rather than replacing it, so a caller
+    can name one role and leave the rest alone. These functions have no ``*_kwargs``
+    dicts, which makes this their only per-role override — it has to accept a partial
+    dict to be usable at all.
     """
-    return type_scale(figsize, ncols=ncols, nrows=1, font_scale=font_scale)
+    scale = type_scale(figsize, ncols=ncols, nrows=1, font_scale=font_scale)
+    return {**scale, **(override or {})}
 
 
 def _records(comparisons) -> list[dict[str, Any]]:
@@ -217,39 +229,83 @@ def _reference_handle():
 _LEGEND_MAX_COLS = 5
 
 
-def _legend_below(fig, handles, size, y=-0.04):
-    """Draw one key beneath the axes, in as many columns as actually fit.
+def _fit_text(fig) -> None:
+    """Shrink any label still too long for its own axes — the field renderer's pass.
+
+    Imported here rather than duplicated so the two renderers cannot disagree about what
+    counts as overflowing. Deferred because ``matplotlib_renderer`` reaches back into
+    module from ``render()``; a module-level import either way round would be circular.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _fit_text_widths
+
+    _fit_text_widths(fig)
+
+
+#: Air (display points) left between the key and the lowest thing above it.
+_LEGEND_PAD = 6.0
+
+
+def _lowest_artist_bottom(fig, renderer) -> float:
+    """Display-y of the bottom of the lowest axis label / tick label in the figure.
+
+    What the key has to clear is not the axes box — it is whatever hangs below it, which
+    is the x tick labels and then the x axis label, both of whose heights are set by the
+    type scale and so move when the level does.
+    """
+    bottoms = []
+    for ax in fig.axes:
+        bottoms.append(ax.get_window_extent(renderer).y0)
+        texts = [ax.xaxis.label, *ax.get_xticklabels()]
+        bottoms += [
+            t.get_window_extent(renderer).y0
+            for t in texts
+            if t.get_visible() and t.get_text()
+        ]
+    return min(bottoms) if bottoms else 0.0
+
+
+def _legend_below(fig, handles, size):
+    """Draw one key beneath the axes, clear of them, in as many columns as fit.
 
     Below rather than inside because these diagrams put data in every corner — Taylor
     fills the upper right at high correlation, and target points scatter around the
     origin — so any in-axes placement collides with the data for some input.
 
-    Five columns of entries is a lot of width, and the entries are whatever the
-    caller's comparisons happen to be called, which no type scale can know: ten labels
-    like ``ROMS-GOM-hindcast-run00-nitrate`` come to half again the figure's width and
-    run off both sides. That was already true at the fixed 7pt this replaced — more so,
-    since a figure-sized legend is larger — and matplotlib will not reflow one to fit.
+    **Vertical placement is measured, not assumed.** This used to sit at a fixed
+    ``y=-0.04`` in figure fractions while the x-axis labels it has to clear are a fixed
+    *height*, so raising the type level walked the key straight up into them — the same
+    bug, and the same fix, as the row label that used to sit at a constant ``x=-0.18``
+    (see ``matplotlib_renderer._clear_row_labels``). Placing it below the lowest drawn
+    label instead holds at any level.
 
-    Width is therefore bought back with *columns* before font size: the column count
-    comes down until the key fits, which keeps every entry readable, and only if a
-    single column is still too wide (one label longer than the whole figure) does the
-    text shrink, floored at ``MIN_PT``.
+    **Width is bought back with columns before font size.** Five columns is a lot, and
+    the entries are whatever the caller's comparisons happen to be called, which no type
+    scale can know: ten labels like ``ROMS-GOM-hindcast-run00-nitrate`` come to half
+    again the figure's width. Dropping the column count keeps every entry readable;
+    only if a single column is still too wide does the text shrink, floored at
+    ``MIN_PT``.
     """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    fig_h_px = fig.get_size_inches()[1] * fig.dpi
+    pad_px = _LEGEND_PAD * fig.dpi / 72.0
+    # figure fraction of the top of the key: just below everything already drawn
+    top = (_lowest_artist_bottom(fig, renderer) - pad_px) / fig_h_px
 
     def draw(ncol):
         return fig.legend(
             handles=handles,
             labels=[h.get_label() for h in handles],
-            loc="lower center",
+            loc="upper center",
             ncol=ncol,
             fontsize=size,
             frameon=False,
             numpoints=1,
-            bbox_to_anchor=(0.5, y),
+            bbox_to_anchor=(0.5, top),
         )
 
     limit = fig.get_size_inches()[0] * fig.dpi
-    legend = None
+    legend, width = None, 0.0
     for ncol in range(min(len(handles), _LEGEND_MAX_COLS), 0, -1):
         if legend is not None:
             legend.remove()
@@ -314,7 +370,7 @@ def taylor(
 
     refstd = 1.0 if normalize else recs[0]["std_reference"]
     figsize = figsize or TAYLOR_FIGSIZE
-    scale = scale or _scale(figsize, font_scale=font_scale)
+    scale = _scale(figsize, font_scale=font_scale, override=scale)
     if fig is None:
         fig = plt.figure(figsize=figsize)
     stds = [
@@ -418,10 +474,12 @@ def target(
 
     lim = max(1.15 * float(np.max(np.hypot(x, y))), max(circles) * 1.25, 1.2)
     figsize = figsize or TARGET_FIGSIZE
-    scale = scale or _scale(figsize, font_scale=font_scale)
-    if ax is None:
+    scale = _scale(figsize, font_scale=font_scale, override=scale)
+    owns_figure = ax is None
+    if owns_figure:
         fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     else:
+        # drawn into someone else's figure (paired); they fit the text once at the end
         fig = ax.figure
 
     for radius in circles:
@@ -460,11 +518,8 @@ def target(
             edgecolor="white",
             linewidth=0.6,
         )
-    if labels_mode == "annotate":
-        _offset_labels(ax, x, y, point_labels, scale["annotation"], colors=cols)
-    elif labels_mode == "legend":
-        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
-
+    # Axes labelling before the key: _legend_below places itself below the lowest label
+    # already drawn, so the x label has to exist by then or the key lands on top of it.
     ax.set(
         xlim=(-lim, lim),
         ylim=(-lim, lim),
@@ -477,6 +532,17 @@ def target(
     ax.set_aspect("equal")
     if title:
         ax.set_title(title, fontsize=scale["title"])
+
+    if labels_mode == "annotate":
+        _offset_labels(ax, x, y, point_labels, scale["annotation"], colors=cols)
+    elif labels_mode == "legend":
+        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
+
+    if owns_figure:
+        # That x label is longer than the axes it belongs to at any generous type level,
+        # and it is one particular string rather than a scale problem — so it gets the
+        # same measure-and-shrink treatment the field renderer gives a long panel title.
+        _fit_text(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -492,6 +558,7 @@ def paired(
     figsize: tuple[float, float] | None = None,
     labels: str | None = "legend",
     font_scale: float = 1.0,
+    scale: dict[str, float] | None = None,
     **kwargs,
 ):
     """Taylor and Target side by side — the pairing they are usually read as.
@@ -508,13 +575,16 @@ def paired(
     One type scale is computed here for the two-column figure and handed to both panels,
     rather than each sizing itself: called alone they are square and near page width, so
     left to themselves they would pick the type for a figure twice the size of the half
-    they actually get, and the pair would read as two plots pasted together.
+    they actually get, and the pair would read as two plots pasted together. ``scale``
+    overrides individual roles in it, as for :func:`taylor` — declared here rather than
+    left to ``**kwargs`` because the panels are handed this figure's scale explicitly,
+    which a forwarded ``scale=`` would collide with.
     """
     import matplotlib.pyplot as plt
 
     labels = _resolve_labels(labels)
     figsize = figsize or PAIRED_FIGSIZE
-    scale = _scale(figsize, ncols=2, font_scale=font_scale)
+    scale = _scale(figsize, ncols=2, font_scale=font_scale, override=scale)
     fig = plt.figure(figsize=figsize)
     # Panels never draw their own key: with "legend" it is shared (below), and with
     # "annotate" each panel labels its own markers.
@@ -538,6 +608,11 @@ def paired(
         **kwargs,
     )
 
+    if title:
+        fig.suptitle(title, fontsize=scale["suptitle"])
+    # Both of these move the axes, so they come before the key, which is placed by
+    # measuring where the axes and their labels actually ended up.
+    fig.subplots_adjust(wspace=0.35)
     if labels == "legend":
         # One shared key beneath both panels, so it cannot collide with either title
         recs = _records(comparisons)
@@ -545,9 +620,7 @@ def paired(
             recs, kwargs.get("color_by"), kwargs.get("marker_by")
         )
         _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
-    if title:
-        fig.suptitle(title, fontsize=scale["suptitle"])
-    fig.subplots_adjust(wspace=0.35)
+    _fit_text(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)

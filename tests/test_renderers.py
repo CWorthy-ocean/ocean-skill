@@ -384,11 +384,23 @@ def test_colorbar_alignment_survives_a_redraw(two_rows):
 
 
 def test_colorbar_alignment_can_be_turned_off(two_rows):
+    """``row_height`` is staged loose on purpose, and that is worth explaining.
+
+    ``fig.colorbar(ax=...)`` sizes a bar to the gridspec *cell*, so the overshoot this
+    checks for exists only insofar as the cell is taller than the panel inside it. Rows
+    used to carry ~0.9in of slack each (a miscalibrated ``ROW_OVERHEAD`` -- see
+    ``typography``), which is where that headroom came from. With rows sized to what
+    they need, an un-refitted bar lands flush and the overshoot measures exactly zero.
+
+    So the loose row is what makes the *absence* of the refit observable. The refit
+    still matters at any row height: it equalises bar thickness across a row, and
+    follows the way a fixed-aspect GeoAxes shrinks inside its own slot.
+    """
     fig = render(
         PlotSpec(
             family="field_grid",
             items=two_rows,
-            options={**dict(_TOP_LEVEL), "align_colorbars": False},
+            options={**dict(_TOP_LEVEL), "align_colorbars": False, "row_height": 2.6},
         )
     )
     bars = _colorbar_axes(fig)

@@ -23,7 +23,13 @@ import numpy as np
 from ocean_skill.colormaps import cmaps_for
 from ocean_skill.plot.matplotlib_renderer import DEFAULT_METRIC_KEYS
 from ocean_skill.plot.registry import register_renderer
-from ocean_skill.plot.typography import bokeh_fontsize, bokeh_scale, frame_px
+from ocean_skill.plot.typography import (
+    PAGE_W,
+    bokeh_fontsize,
+    bokeh_scale,
+    frame_px,
+    resolve_canvas,
+)
 
 __all__ = ["render"]
 
@@ -55,15 +61,28 @@ def _extension():
     return hv
 
 
-#: Width (CSS pixels) of one interactive map panel; the height follows the data's own
-#: aspect ratio, as the static renderer's panels do.
+#: Width (CSS pixels) of one interactive map panel on the default canvas; the height
+#: follows the data's own aspect ratio, as the static renderer's panels do.
 PANEL_WIDTH_PX = 260
 
 #: The Target diagram's frame, square because its guide rings must stay circular.
 TARGET_FRAME_PX = (400, 400)
 
 
-def _panel_geometry(da, *, font_scale: float = 1.0):
+def _canvas_factor(size=None, zoom: float = 1.0) -> float:
+    """How much wider than the default canvas ``size``/``zoom`` ask for.
+
+    ``size``/``zoom`` are stated in inches statically, which bokeh has no notion of, so
+    they arrive here as a ratio against the page and scale the frame in pixels instead.
+    Doing it as a ratio rather than converting inches to pixels is deliberate: the two
+    renderers agree about *relative* size (see
+    :func:`~ocean_skill.plot.typography.bokeh_fontsize`), and a browser's pixel is not a
+    physical length to convert to anyway.
+    """
+    return resolve_canvas(size, zoom).width / PAGE_W
+
+
+def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
     """``(frame_width, frame_height, fontsize)`` for one interactive map of ``da``.
 
     A fixed 260x200 frame letterboxed exactly the domains the static renderer fits, and
@@ -78,17 +97,28 @@ def _panel_geometry(da, *, font_scale: float = 1.0):
         )
     except Exception:  # pragma: no cover - unlabelled coords; fall back to square
         aspect = 1.0
-    px = frame_px(aspect, width_px=PANEL_WIDTH_PX)
+    px = frame_px(aspect, width_px=PANEL_WIDTH_PX * canvas_factor)
     return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
 
 
 def _quadmesh(
-    da, *, title, cmap, clim, units, geo=True, log=False, font_scale: float = 1.0
+    da,
+    *,
+    title,
+    cmap,
+    clim,
+    units,
+    geo=True,
+    log=False,
+    font_scale: float = 1.0,
+    canvas_factor: float = 1.0,
 ):
     """One interactive map panel with hover readout."""
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
-    frame_w, frame_h, fontsize = _panel_geometry(da, font_scale=font_scale)
+    frame_w, frame_h, fontsize = _panel_geometry(
+        da, font_scale=font_scale, canvas_factor=canvas_factor
+    )
     opts = {
         "x": "lon",
         "y": "lat",
@@ -141,6 +171,8 @@ def _field_row(
     title: str | None = None,
     row_label: str | None = None,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -166,6 +198,7 @@ def _field_row(
     from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     aligned = item["aligned"]
     t, r, d = aligned["test"], aligned["reference"], aligned["difference"]
     units = item.get("units") or ""
@@ -194,6 +227,7 @@ def _field_row(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=factor,
         ),
         _quadmesh(
             r,
@@ -204,6 +238,7 @@ def _field_row(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=factor,
         ),
         _quadmesh(
             d,
@@ -213,6 +248,7 @@ def _field_row(
             units=f"test − reference {units}",
             geo=geo,
             font_scale=font_scale,
+            canvas_factor=factor,
         ),
     ]
     row = panels[0] + panels[1] + panels[2]
@@ -230,6 +266,8 @@ def _field_grid(
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -264,6 +302,8 @@ def _field_grid(
             metric_keys=metric_keys,
             row_label=it.get("row_label"),
             font_scale=font_scale,
+            size=size,
+            zoom=zoom,
         )
         for it in items
     ]
@@ -427,6 +467,8 @@ def _target(
     color_by=None,
     marker_by=None,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
@@ -443,8 +485,11 @@ def _target(
     from ocean_skill.plot.summary import _resolve_labels, pretty_level
 
     hv = _extension()
-    sizes = bokeh_scale(TARGET_FRAME_PX, font_scale=font_scale)
-    fontsize = bokeh_fontsize(TARGET_FRAME_PX, font_scale=font_scale)
+    factor = _canvas_factor(size, zoom)
+    # not `frame`: that name is taken below for a per-group slice of the DataFrame
+    frame_size = (TARGET_FRAME_PX[0] * factor, TARGET_FRAME_PX[1] * factor)
+    sizes = bokeh_scale(frame_size, font_scale=font_scale)
+    fontsize = bokeh_fontsize(frame_size, font_scale=font_scale)
     labels_mode = _resolve_labels(labels)
     recs = [dict(i.get("metrics", {}), label=i.get("label") or "") for i in items]
     df = pd.DataFrame(recs)
@@ -550,8 +595,8 @@ def _target(
     return (guides * points).opts(
         # equal frame dims + data_aspect keeps the guide circles circular; fixed
         # width/height would fight the aspect and squash them into ellipses
-        frame_width=TARGET_FRAME_PX[0],
-        frame_height=TARGET_FRAME_PX[1],
+        frame_width=round(frame_size[0]),
+        frame_height=round(frame_size[1]),
         data_aspect=1,
         fontsize=fontsize,
         xlabel="signed centred RMSD / σ_ref  (← under | over →)",
@@ -608,6 +653,9 @@ def render(spec, **kwargs: Any):
         # level with the panel — align_colorbars is satisfied here by construction
         # rather than ignored, hence a silent drop and not _STATIC_ONLY_KWARGS.
         "align_colorbars",
+        # bokeh lays out its own text and never clips a long label the way a fixed
+        # matplotlib axes does, so the shrink-to-fit pass has nothing to do here.
+        "fit_text",
         "row_height",
         "domain",
         "mark",

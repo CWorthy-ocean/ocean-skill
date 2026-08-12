@@ -10,22 +10,24 @@ title on a 4-inch-wide row squeezes the three maps down to a third of an inch ea
 the figure stops being a figure, and no amount of retuning the *fonts* fixes it, because
 the fonts are the cause.
 
-Two ideas replace the eleven constants:
+Three ideas replace the eleven constants:
 
 **A modular scale.** Every role is one base size times :data:`STEP` raised to a small
 integer power (see :data:`FONT_STEPS`), so the sizes stay in fixed proportion to each
-other and there is exactly one number to move. The exponents were chosen to reproduce
-the hand-tuned sizes at the default figure size to within a point, so existing figures
-look as they did; what changes is that they now *track* the figure.
+other and there is exactly one number to move -- :data:`BASE_PT_AT_1IN`, the level,
+which was set by looking at the same figure rendered at four levels rather than by
+argument.
 
 **A base size read off the geometry.** :func:`type_scale` derives that base from one
 grid cell's size, so a smaller panel gets smaller type without being asked, and the
 text takes a roughly constant share of the space rather than an absolute one.
 
-The same two ideas also size the figure itself (:func:`auto_figsize`): a row is as tall
-as its maps' aspect ratio wants, plus the text above and below them measured in ems of
-the type it just chose -- so asking for larger type gives the row more room instead of
-squeezing the maps, which is the failure above in miniature.
+**A canvas.** :class:`Canvas` says where the figure has to fit -- a width, and whether
+it has to paginate. :func:`auto_figsize` then makes a row as tall as its maps' aspect
+ratio wants, plus the text above and below measured in ems of the type it just chose. So
+asking for larger type gives the row more room instead of eating the map, which is the
+failure above in miniature; and asking for a bigger figure (``zoom=``) moves canvas,
+panels and type together instead of leaving the caller to work out a ``figsize``.
 
 Renderer-agnostic on purpose: the interactive renderer draws the same plot and must not
 disagree about how big its type is, so it reads the same table through
@@ -36,12 +38,16 @@ strings, hence a converter rather than shared literals).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 __all__ = [
     "ASPECT_LIMITS",
     "BASE_EXPONENT",
     "BASE_PT_AT_1IN",
     "BLANK_CELL_WEIGHT",
+    "CANVASES",
+    "COLORBAR_ORIENTATION_ASPECT",
+    "DEFAULT_SIZE",
     "FACET_PANEL_W_FRACTION",
     "FONT_STEPS",
     "MAX_BASE_PT",
@@ -50,58 +56,73 @@ __all__ = [
     "PAGE_H",
     "PAGE_W",
     "PANEL_W_FRACTION",
+    "PANEL_W_FRACTION_HORIZONTAL_CBAR",
     "REFERENCE_FIGSIZE",
     "REFERENCE_GRID",
     "ROW_GAP_EM",
+    "ROW_OVERHEAD",
+    "ROW_OVERHEAD_HORIZONTAL_CBAR",
     "ROW_TITLE_EM",
     "STEP",
     "SUPTITLE_ALLOWANCE",
+    "Canvas",
     "auto_figsize",
     "bokeh_fontsize",
     "bokeh_pt",
     "bokeh_scale",
     "clamp_aspect",
+    "colorbar_is_horizontal",
     "facet_figsize",
     "facet_layout",
     "frame_px",
     "reference_scale",
+    "resolve_canvas",
     "row_height",
     "type_scale",
 ]
 
-#: Point size of the ``title`` role for a grid cell one inch across, and the exponent
-#: relating the two: ``base = BASE_PT_AT_1IN * length_in ** BASE_EXPONENT``.
+#: The overall **level** of the scale: the point size of the ``title`` role for a grid
+#: cell one inch across. Everything else follows from it and :data:`FONT_STEPS`, so this
+#: is the one number to move if the whole package reads too small or too large.
+#:
+#: 6.0 puts a default page-width row of three maps at an 11pt title, 9.7pt colorbar
+#: labels and 7.3pt lat/lon labels. **That level was chosen by looking at rendered
+#: output** -- the same comparison drawn at 8/11/12/14pt titles -- rather than derived,
+#: because "reads well" is not a thing arithmetic settles. It is deliberately well above
+#: the 8pt this module first shipped with: those were inherited matplotlib-era defaults
+#: nobody had chosen, and they were too small.
+BASE_PT_AT_1IN = 6.0
+
+#: How the level responds to figure size: ``base = BASE_PT_AT_1IN * length_in ** exp``.
 #:
 #: Type does not scale linearly with the panel it sits in. Doubling both leaves the type
 #: *feeling* oversized, because what has to stay readable is the glyph itself, not its
 #: ratio to the frame -- which is why every plotting library ships absolute point
-#: defaults rather than relative ones. But absolute sizes are what broke here, so the
-#: rule has to be somewhere in between, and the two ends of the range this package
-#: actually spans pin the curve:
+#: defaults rather than relative ones. But absolute sizes are exactly what broke here,
+#: so the rule has to sit between the two.
 #:
-#: * a dense page-width row of three maps (cell ~2.79in square) reads well at the 8pt
-#:   titles hand-tuned in ``matplotlib_renderer`` before this module existed;
-#: * a standalone square diagram at matplotlib's own default figure size, 6.4x4.8in
-#:   (cell ~5.54in), reads well at matplotlib's own default 12pt title.
-#:
-#: A power law through both anchors gives exponent 0.59 and coefficient 4.32; 0.6 is
-#: well inside the tolerance of "reads well" and easier to reason about. Being
-#: sub-linear also fails safe in the direction people actually go: a figure made much
-#: bigger for a poster gets somewhat bigger type, not proportionally bigger type.
-BASE_PT_AT_1IN = 4.32
+#: 0.6 is that middle: a canvas 1.6x larger gets type only 1.32x larger, so a bigger
+#: figure buys *detail* rather than just magnification, and the relative appearance
+#: stays near enough constant that one calibration serves the whole range. Checked by
+#: rendering the same row at 1x and 1.6x and comparing them at a common width. It also
+#: fails safe in the direction people actually go: a figure blown up for a poster gets
+#: somewhat bigger type, not proportionally bigger type.
 BASE_EXPONENT = 0.6
 
-#: Bounds on the base size. The floor is legibility -- below ~5pt the smaller roles
-#: stop being readable at all and a bigger figure is the only real fix, so clamping here
-#: (and at :data:`MIN_PT` per role) keeps a too-small figure merely cramped rather than
-#: illegible. The ceiling stops a deliberately huge canvas becoming three words.
-MIN_BASE_PT = 5.0
+#: Bounds on the base size. The floor is legibility: a canvas too small for its content
+#: should come out *cramped*, not unreadable, and no rearrangement of type sizes fixes a
+#: figure that is simply too small -- a bigger canvas does. The ceiling stops a
+#: deliberately huge canvas becoming three words.
+MIN_BASE_PT = 7.0
 MAX_BASE_PT = 24.0
 
 #: Absolute floor for any single role, applied after its step is taken. The base floor
-#: alone does not protect the small end of the scale: at ``MIN_BASE_PT`` the latitude
-#: labels are three steps down, i.e. 3.3pt.
-MIN_PT = 4.0
+#: alone does not protect the small end of the scale: the lat/lon labels sit three steps
+#: down, so at :data:`MIN_BASE_PT` they would be 4.6pt. 6pt is the minimum every journal
+#: style guide this package's figures are aimed at will accept at final printed size
+#: (AGU and Elsevier both ask for 6-8pt), which makes it the smallest size worth
+#: producing at all.
+MIN_PT = 6.0
 
 #: Ratio between adjacent steps of the scale. 1.15 is a conventional modular-scale
 #: ratio -- large enough that neighbouring roles are visibly distinct, small enough that
@@ -133,11 +154,105 @@ FONT_STEPS: dict[str, tuple[str, int]] = {
 }
 
 
-#: The page these figures have to fit, in inches. Lives here because it is the outer
-#: bound on every sizing decision below — and because it was previously a literal 8.5 in
-#: both renderer modules, free to drift apart.
+#: The portrait page, in inches: the ``"page"`` canvas' dimensions, and the reference
+#: width the rest of the module calibrates against.
 PAGE_W = 8.5
 PAGE_H = 11.0
+
+
+@dataclass(frozen=True)
+class Canvas:
+    """Where a figure has to fit: a width, and optionally a height it must not exceed.
+
+    Sizing used to take ``page_w``/``page_h`` arguments defaulting to 8.5x11, which
+    meant a *report* constraint was hardwired into a general mechanism: every figure was
+    page width whether or not it was going in a paper, and the 11-inch cap silently
+    squeezed panels (an eight-row grid loses about a third of its panel height to it)
+    with no way out but computing a ``figsize`` by hand.
+
+    Naming the canvas separates the two things that were conflated: how big the figure
+    is (``width``), and whether it has to paginate (``max_height``). ``max_height=None``
+    means "grow to whatever the content wants" -- right for a notebook, wrong for a
+    paper.
+    """
+
+    width: float
+    max_height: float | None = None
+
+    def scaled(self, zoom: float) -> Canvas:
+        """Return this canvas ``zoom`` times larger in both dimensions."""
+        if zoom == 1.0:
+            return self
+        cap = None if self.max_height is None else self.max_height * zoom
+        return Canvas(self.width * zoom, cap)
+
+
+#: Canvases by name, for ``size="page"`` and friends. Chosen to cover what this
+#: package's figures are actually made for; pass a ``Canvas`` or a ``(width,
+#: max_height)`` tuple for anything else.
+CANVASES: dict[str, Canvas] = {
+    # portrait US Letter with a margin — reports and papers, hence the default
+    "page": Canvas(PAGE_W, PAGE_H),
+    # page width but unbounded: every row keeps full panel height and the figure just
+    # gets longer, which is what you want in a notebook and never in a PDF
+    "free": Canvas(PAGE_W, None),
+    "slide": Canvas(13.33, 7.5),  # 16:9
+    "column": Canvas(3.5, None),  # one journal column; inherently cramped for 3 maps
+}
+
+#: The default canvas, as a name — reports are the common case and the one that has a
+#: hard constraint, so it stays the default the page-fitting behaviour is opt-out.
+DEFAULT_SIZE = "page"
+
+
+def resolve_canvas(
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+) -> Canvas:
+    """Normalize a ``size=`` argument, then apply ``zoom``.
+
+    Accepts a preset name from :data:`CANVASES`, a :class:`Canvas`, a
+    ``(width, max_height)`` pair whose height may be ``None``, or a bare number read as
+    width in inches. ``None`` means the default.
+
+    ``zoom`` is separate from ``size`` because they answer different questions -- *which
+    canvas* versus *how big* -- and because scaling a preset is the common way to want a
+    bigger figure without restating its shape. It is also separate from ``font_scale``,
+    which moves type only: ``zoom`` grows the canvas and type follows it sub-linearly
+    (see :data:`BASE_EXPONENT`), so ``zoom=2`` is a figure twice the size showing more
+    detail, where ``font_scale=2`` is the same figure with twice the type.
+    """
+    if size is None:
+        size = DEFAULT_SIZE
+    if isinstance(size, Canvas):
+        canvas = size
+    elif isinstance(size, str):
+        try:
+            canvas = CANVASES[size]
+        except KeyError:
+            raise ValueError(
+                f"unknown size {size!r}; expected one of {sorted(CANVASES)}, a "
+                "Canvas, a (width, max_height) pair, or a width in inches"
+            ) from None
+    elif isinstance(size, tuple | list):
+        if len(size) != 2:
+            raise ValueError(
+                f"size={size!r} should be (width, max_height) — pass None as the "
+                "height for a figure that may grow as tall as its content"
+            )
+        canvas = Canvas(float(size[0]), None if size[1] is None else float(size[1]))
+    elif isinstance(size, int | float):
+        canvas = Canvas(float(size), None)
+    else:
+        raise TypeError(
+            f"size={size!r} is not a preset name, Canvas, (width, max_height) pair "
+            "or width in inches"
+        )
+    if not canvas.width > 0:
+        raise ValueError(f"canvas width must be positive, got {canvas.width!r}")
+    if not zoom > 0:
+        raise ValueError(f"zoom must be positive, got {zoom!r}")
+    return canvas.scaled(zoom)
 
 
 def _base(length_in: float) -> float:
@@ -192,8 +307,8 @@ def type_scale(
 
 
 #: The figure size a page-width row of three maps defaults to, and the grid it forms:
-#: the shape :func:`reference_scale` reports sizes for, and the shape the anchors in
-#: :data:`BASE_PT_AT_1IN` were taken from.
+#: the shape :func:`reference_scale` reports sizes for, and the shape
+#: :data:`BASE_PT_AT_1IN` is calibrated at.
 REFERENCE_FIGSIZE = (PAGE_W, PAGE_W / 3.1)
 REFERENCE_GRID = (3, 1)  # ncols, nrows
 
@@ -204,8 +319,8 @@ def reference_scale() -> dict[str, float]:
     Every ``*_kwargs`` default in the renderers is now computed per figure, so there is
     no literal dict for the docs (or for the "did you mean to put this inside
     ``title_kwargs``?" error) to point at. This is the one canonical instance: the sizes
-    a default ``field_row`` actually gets, which are also the hand-tuned sizes the scale
-    was calibrated to reproduce.
+    a default ``field_row`` actually gets, and the shape :data:`BASE_PT_AT_1IN` was
+    calibrated at.
     """
     ncols, nrows = REFERENCE_GRID
     return type_scale(REFERENCE_FIGSIZE, ncols=ncols, nrows=nrows)
@@ -214,32 +329,53 @@ def reference_scale() -> dict[str, float]:
 # --- figure sizing -----------------------------------------------------------------
 
 #: Fraction of its grid cell that a map panel actually occupies horizontally, the rest
-#: being the colorbar, the colorbar's labels and the latitude labels. Measured across
-#: the figures this package draws -- page-width rows and 1-8 row grids of cartopy
-#: GeoAxes -- where it holds to within a few percent, because most of what it accounts
-#: for is a colorbar of fixed aspect rather than text. Used to turn the panel size the
-#: data wants into the figure size that yields it.
-PANEL_W_FRACTION = 0.73
+#: being the colorbar, its labels and the latitude labels. Two values because a grid
+#: puts a vertical colorbar *beside* every panel, taking width, where a single row puts
+#: horizontal bars below and takes none.
+#:
+#: Measured at the row height where the panel stops growing -- past that point extra
+#: height becomes gap, so that is the size worth aiming for. It drifts a little with
+#: type size (0.72 at ~10pt, 0.70 at ~11pt, since the latitude labels and colorbar take
+#: a little more), which is why aiming at the plateau rather than at any one drawn
+#: figure matters: read off a figure that was already too tall, it comes out low and the
+#: row gets under-provisioned.
+#:
+#: The single-row figure is much the larger of the two because nothing sits beside its
+#: panels at all -- the bars are underneath, so a panel gets almost the whole cell.
+PANEL_W_FRACTION = 0.72
+PANEL_W_FRACTION_HORIZONTAL_CBAR = 0.86
 
-#: Vertical room a row needs beyond the map itself, in ems of the row's own base font
-#: size: the panel title above, the longitude labels below, and constrained_layout's
-#: padding. Expressed in ems rather than inches so that asking for bigger type makes
-#: the row taller instead of eating the map -- the whole point of deriving the two
-#: together. The second figure adds the horizontal colorbar and its label, which a
-#: single row puts below the maps where a grid puts them beside.
-ROW_OVERHEAD_EM = 8.1
-ROW_OVERHEAD_EM_HORIZONTAL_CBAR = 11.1
+#: Vertical room a row needs beyond the map itself, as ``(ems of the row's own base
+#: font, fixed inches)``: the panel title above, the coordinate labels below, and
+#: constrained_layout's padding. Two terms because only some of that scales with type --
+#: a title does, the layout engine's padding is a fixed fraction of an inch -- and
+#: charging all of it per em over-allocates badly once the type grows.
+#:
+#: **Measured, and measured carefully**, because the obvious way to do it is wrong. The
+#: first version took ``cell_height - panel_height`` off already-drawn figures, which
+#: measures the slack a *previous* estimate produced rather than the requirement: it
+#: came out at 8.1 em, roughly 4x too large, and inflated further when the type level
+#: was raised -- about 0.9in of dead space per row, which is what made stacked
+#: comparisons look stretched.
+#:
+#: These come from sweeping the row height and watching where the drawn panel stops
+#: growing: below that the panel is smaller than it needs to be, above it every extra
+#: inch lands in the gap between rows. ``row_height`` therefore aims at the plateau, and
+#: the ems/fixed split is what keeps it there as the type size changes.
+#:
+#: Only the *grid* figure was badly wrong, and it is worth being clear why: charged per
+#: row, its error multiplied by the row count, so a four-row comparison carried four
+#: times the dead space. The single-row figure it was derived alongside landed within
+#: 0.11in of its plateau all along -- its overhead really is that large, because the
+#: colorbars and their labels sit below the maps rather than beside them, and most of
+#: that stack is a fixed height rather than a multiple of the type.
+ROW_OVERHEAD = (1.6, 0.19)
+ROW_OVERHEAD_HORIZONTAL_CBAR = (2.6, 1.01)
 
 #: Aspect ratios (lon span / lat span) outside which a map is letterboxed rather than
 #: sized to fit: past these the row would be a sliver or taller than the page, and a
 #: band of white above and below the map is the lesser evil.
 ASPECT_LIMITS = (0.3, 4.0)
-
-#: Vertical inches held back from the page for a suptitle, i.e. what the maps may not
-#: use. Named because :func:`row_height` and :func:`facet_layout` must agree about it —
-#: a layout chosen against the full page and then drawn into a shorter one is a layout
-#: chosen for a figure that does not exist.
-SUPTITLE_ALLOWANCE = 0.8
 
 #: Fraction of its cell a *facet* panel occupies horizontally, the counterpart of
 #: :data:`PANEL_W_FRACTION` for a grid whose colorbar is shared by every panel rather
@@ -256,6 +392,39 @@ FACET_PANEL_W_FRACTION = 0.88
 #: (7 panels as 3x3 is still right).
 BLANK_CELL_WEIGHT = 1.5
 
+#: Aspect ratio at or above which a colorbar is laid out **horizontally below** its
+#: panels rather than vertically beside them.
+#:
+#: The principle is that a bar should run along the panel's *longer* edge: it comes out
+#: longer (so more of its tick labels fit) and its thickness is taken out of the
+#: dimension that has more to give. A wide map has width to run along and height to
+#: spare; a tall one is the other way round. On that reasoning alone the threshold would
+#: be 1.0.
+#:
+#: It sits above 1.0 because the two orientations do not cost the same thing. Horizontal
+#: bars are charged **per row** -- ``ROW_OVERHEAD_HORIZONTAL_CBAR`` is 0.8in more fixed
+#: height than the vertical case -- so on a many-row grid they add height row by row,
+#: while a vertical bar takes its width once and is reused down the column. They buy real
+#: width in exchange (``PANEL_W_FRACTION`` 0.72 -> 0.86, ~19% wider panels), which is
+#: worth it for a wide map on few rows and steadily less so as rows accumulate.
+COLORBAR_ORIENTATION_ASPECT = 1.5
+
+
+def colorbar_is_horizontal(
+    aspect: float, *, requested: str | None = None
+) -> bool:
+    """Whether this map's colorbars should sit below it rather than beside it.
+
+    ``requested`` is the caller's own ``colorbar_kwargs={"orientation": ...}``, which
+    wins outright -- and, importantly, is then used to size the figure. Overriding the
+    orientation used to change only where the bars were drawn, while the row height went
+    on reserving space for the orientation the function would have picked: asking a grid
+    for horizontal bars cost 37% of the panel, silently.
+    """
+    if requested is not None:
+        return str(requested).lower().startswith("h")
+    return clamp_aspect(aspect) >= COLORBAR_ORIENTATION_ASPECT
+
 
 def clamp_aspect(aspect: float) -> float:
     """``aspect`` brought inside :data:`ASPECT_LIMITS`, guarding against zero spans."""
@@ -265,55 +434,89 @@ def clamp_aspect(aspect: float) -> float:
     return float(min(max(aspect, lo), hi))
 
 
+#: Height (inches) held back from a capped canvas for the figure's own suptitle, which
+#: sits outside every row. A suptitle measures ~0.27in drawn; the rest is margin, since
+#: over-reserving here only costs a little row height while under-reserving pushes the
+#: figure past the page it has to fit. It was 0.8in, which made the cap bind sooner than
+#: it needed to and squeezed rows for space nothing was using.
+#:
+#: :func:`row_height` and :func:`facet_layout` must agree about this: a layout chosen
+#: against the full page and then drawn into a shorter one is a layout chosen for a
+#: figure that does not exist.
+SUPTITLE_ALLOWANCE = 0.35
+
+
 def row_height(
     aspect: float,
     *,
     nrows: int = 1,
     ncols: int = 3,
-    page_w: float = PAGE_W,
-    page_h: float = PAGE_H,
+    canvas: Canvas | None = None,
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
-    panel_w_fraction: float = PANEL_W_FRACTION,
+    panel_w_fraction: float | None = None,
 ) -> float:
     """Height (inches) of one row of maps: the map, plus the type around it.
 
-    ``aspect`` is the map's ``lon_span / lat_span``. The map's height follows from it
-    and from the width a cell of the page has to spare (:data:`PANEL_W_FRACTION`); the
-    rest of the row is text overhead, which is where this gets circular -- the overhead
-    is a multiple of the font size, the font size comes from the cell size, and the cell
-    size is what is being solved for. The loop below settles it: because the base goes
-    as the cell's size to the power 0.6, and the overhead is a fraction of the row, each
-    pass moves the answer by a fraction of the last move, so three passes agree to well
-    under a tenth of a point.
+    ``aspect`` is the map's ``lon_span / lat_span``. The map's height follows from that
+    and from the width one cell of the canvas has to spare (:data:`PANEL_W_FRACTION`).
+    The rest of the row is text overhead (:data:`ROW_OVERHEAD`), and that is where this
+    turns circular: part of the overhead is a multiple of the font size, the font size
+    comes from the cell size, and the cell size is what we are solving for. The loop
+    settles it. Since the base grows as the cell's size to the power 0.6 and the
+    overhead is only a fraction of the row, each pass moves the answer by a fraction of
+    the last, so three agree to well under a tenth of a point.
 
-    ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being
-    the colorbar and labelling; it is a parameter rather than the constant it used to
-    be because a facet grid shares one colorbar across every panel instead of drawing
-    one per row, so its panels keep more of their cell (:data:`FACET_PANEL_W_FRACTION`).
+    ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being the
+    colorbar and labelling. It is a parameter rather than a constant because a facet grid
+    shares one colorbar across every panel instead of drawing one per row, so its panels
+    keep materially more of their cell (:data:`FACET_PANEL_W_FRACTION`). Left ``None`` it
+    follows the colorbar orientation, which is the other thing that decides how much of
+    the cell the bar takes.
 
-    Capped so ``nrows`` rows still fit ``page_h``, leaving room for a suptitle. Past
-    that cap the maps are squeezed, which is the honest outcome: the alternative is a
-    figure taller than the page it has to print on.
+    The result is the row height at which the maps are *not* squeezed and no more —
+    deliberately tight, since slack here is dead space between rows. This figure being
+    too generous (~0.9in a row) is what made stacked comparisons look stretched.
+
+    If the canvas caps its height, the result is capped so ``nrows`` rows fit inside it,
+    squeezing the maps -- the honest outcome for something that has to paginate. An
+    uncapped canvas (``Canvas.max_height is None``, i.e. ``size="free"``) instead lets
+    the figure grow, so every row keeps the height its aspect ratio asked for.
     """
-    panel_w = page_w / max(ncols, 1) * panel_w_fraction
-    panel_h = panel_w / clamp_aspect(aspect)
-    em = ROW_OVERHEAD_EM_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD_EM
-    cell_w = page_w / max(ncols, 1)
+    canvas = canvas or CANVASES[DEFAULT_SIZE]
+    cell_w = canvas.width / max(ncols, 1)
+    if panel_w_fraction is None:
+        panel_w_fraction = (
+            PANEL_W_FRACTION_HORIZONTAL_CBAR if horizontal_colorbar else PANEL_W_FRACTION
+        )
+    panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
+    em, fixed = ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
     height = panel_h
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height)) * font_scale
-        height = panel_h + em * base / 72.0
-    return float(min(height, (page_h - SUPTITLE_ALLOWANCE) / max(nrows, 1)))
+        height = panel_h + em * base / 72.0 + fixed
+    if canvas.max_height is not None:
+        cap = (canvas.max_height - SUPTITLE_ALLOWANCE) / max(nrows, 1)
+        height = min(height, cap)
+    return float(height)
 
 
-#: Vertical room, in ems, that each row *after the first* needs in a facet grid: the
-#: gap between one row's map and the next one's, and — when every row carries its own
-#: title — the title too. Both are much less than :data:`ROW_OVERHEAD_EM`, which sizes
-#: a row that is self-contained: a title above, longitude labels below, padding for
-#: both. In a facet grid those decorations are shared (titles on the top row, longitude
-#: labels on the bottom), so charging every row for a full set leaves the rows visibly
-#: adrift from each other — most of a panel's height of white between them on a 3x6.
+#: Vertical room, in ems, that each row *after the first* needs in a facet grid: the gap
+#: between one row's map and the next one's, and — when every row carries its own title —
+#: the title too. Less than a self-contained row needs (:data:`ROW_OVERHEAD`), because in
+#: a facet grid the decorations are shared: titles on the top row, longitude labels on
+#: the bottom. Charging every row for a full set leaves the rows visibly adrift from each
+#: other — most of a panel's height of white between them on a 3x6.
+#:
+#: .. note::
+#:    These two were calibrated against the ``ROW_OVERHEAD_EM = 8.1`` that
+#:    :data:`ROW_OVERHEAD` replaced, and only as em terms, so they carry the same two
+#:    flaws that constant did: a share of what they cover is fixed padding rather than a
+#:    multiple of the type, and their scale was set relative to a first-row figure now
+#:    known to be ~4x too large. At 5.0 em combined they can exceed what the *first* row
+#:    is charged, which cannot be right. Re-measure them the way :data:`ROW_OVERHEAD` was
+#:    (sweep the height, find where the panels stop growing) before trusting facet grids
+#:    to be tight.
 ROW_GAP_EM = 2.6
 ROW_TITLE_EM = 2.4
 
@@ -346,17 +549,18 @@ def facet_figsize(
     the saving only appears where the figure was not page-limited to begin with —
     which is where the slack actually was.
     """
-    panel_w = page_w / max(ncols, 1) * panel_w_fraction
-    panel_h = panel_w / clamp_aspect(aspect)
-    nrows = max(nrows, 1)
-    extra_em = ROW_GAP_EM + (ROW_TITLE_EM if title_every_row else 0.0)
-    em = ROW_OVERHEAD_EM + (nrows - 1) * extra_em
     cell_w = page_w / max(ncols, 1)
+    panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
+    nrows = max(nrows, 1)
+    # first row is self-contained; the rest share its titles and axis labels
+    first_em, first_fixed = ROW_OVERHEAD
+    extra_em = ROW_GAP_EM + (ROW_TITLE_EM if title_every_row else 0.0)
+    em = first_em + (nrows - 1) * extra_em
 
     height = panel_h * nrows
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height / nrows)) * font_scale
-        height = panel_h * nrows + em * base / 72.0
+        height = panel_h * nrows + em * base / 72.0 + first_fixed
     return (page_w, float(min(height, page_h - SUPTITLE_ALLOWANCE)))
 
 
@@ -408,28 +612,27 @@ def auto_figsize(
     *,
     nrows: int = 1,
     ncols: int = 3,
-    page_w: float = PAGE_W,
-    page_h: float = PAGE_H,
+    canvas: Canvas | None = None,
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
     panel_w_fraction: float = PANEL_W_FRACTION,
 ) -> tuple[float, float]:
-    """Page-width figure size for ``nrows`` rows of maps of the given aspect ratio.
+    """Figure size for ``nrows`` rows of maps of the given aspect ratio on ``canvas``.
 
-    Thin wrapper over :func:`row_height`; the width is the page, since these figures
-    exist to be read at page width.
+    Thin wrapper over :func:`row_height`: the width is the canvas', and the height is as
+    many rows as asked for.
     """
+    canvas = canvas or CANVASES[DEFAULT_SIZE]
     height = row_height(
         aspect,
         nrows=nrows,
         ncols=ncols,
-        page_w=page_w,
-        page_h=page_h,
+        canvas=canvas,
         font_scale=font_scale,
         horizontal_colorbar=horizontal_colorbar,
         panel_w_fraction=panel_w_fraction,
     )
-    return (page_w, height * max(nrows, 1))
+    return (canvas.width, height * max(nrows, 1))
 
 
 # --- interactive (bokeh) -------------------------------------------------------------
