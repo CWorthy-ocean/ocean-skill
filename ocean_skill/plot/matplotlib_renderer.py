@@ -1,10 +1,16 @@
-"""Static matplotlib renderer (PNG/JPG/PDF; mp4/gif later via FuncAnimation).
+"""Static matplotlib renderer (PNG/JPG/PDF, and mp4/gif via FuncAnimation).
 
 Currently implements the **field row**: ``test | reference | difference`` maps for a
 gridded comparison. Test and reference share one colour scale (so they are visually
 comparable) taken from the 10th–90th percentile of the pair; the difference panel uses
 a diverging map centred on zero. Metrics go in a corner box, leaving the title for
 identity. Registers itself under ``"matplotlib"``.
+
+Every family here draws its panels through :func:`_draw_map`, and the two movie
+families are the two static map families played rather than laid out:
+:func:`field_movie` animates :func:`field_grid`'s comparison rows, :func:`facet_movie`
+animates :func:`field_facet`'s facet axis. So a frame of a movie is the still it would
+have been.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, norm_for
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.typography import (
@@ -103,6 +110,17 @@ DEFAULT_METRICS_KWARGS: dict[str, Any] = {
         "linewidth": 0.4,
     },
 }
+#: The movie families only: the per-frame label (usually a timestamp), drawn in the
+#: top-left of the panel — mirroring the metrics box in the bottom-left of the
+#: difference panel, and the same box styling so the two read as one figure's notes.
+#: ``monospace`` deliberately: a proportional font makes a counting timestamp jitter
+#: sideways from frame to frame, which is distracting in a way it never is on a still.
+DEFAULT_FRAME_LABEL_KWARGS: dict[str, Any] = {
+    "va": "top",
+    "ha": "left",
+    "family": "monospace",
+    "bbox": dict(DEFAULT_METRICS_KWARGS["bbox"]),
+}
 #: field_row draws one row per figure (page-width, horizontal bars below); field_grid
 #: stacks several rows (vertical bars beside them) — same keys, different orientation.
 #: ``shrink`` is 1.0 in both because :func:`_align_colorbars` re-fits each bar to the
@@ -157,6 +175,10 @@ _NESTED_KWARGS: dict[str, dict[str, Any]] = {
         **DEFAULT_METRICS_KWARGS,
         "fontsize": REFERENCE_SCALE["metrics"],
     },
+    "frame_label_kwargs": {
+        **DEFAULT_FRAME_LABEL_KWARGS,
+        "fontsize": REFERENCE_SCALE["frame_label"],
+    },
     "suptitle_kwargs": {"fontsize": REFERENCE_SCALE["suptitle"]},
 }
 
@@ -203,6 +225,10 @@ def _style_defaults(
             "fontsize": scale["row_label"],
         },
         "metrics_kwargs": {**DEFAULT_METRICS_KWARGS, "fontsize": scale["metrics"]},
+        "frame_label_kwargs": {
+            **DEFAULT_FRAME_LABEL_KWARGS,
+            "fontsize": scale["frame_label"],
+        },
         "suptitle_kwargs": {"fontsize": scale["suptitle"]},
     }
 
@@ -498,20 +524,32 @@ def _draw_row(
     if row_label:
         _add_row_label(axes[0], row_label, row_label_kwargs)
     if metrics:
-        txt = "\n".join(
-            f"{k}={metrics[k]:.3g}"
-            for k in metric_keys
-            if isinstance(metrics.get(k), int | float)
-        )
-        axes[2].text(
+        # stashed on the axes, as the row label is, so that field_movie can retext it
+        # per frame rather than re-deriving where the box was put
+        axes[2]._osk_metrics_text = axes[2].text(
             0.02,
             0.02,
-            txt,
+            _metrics_text(metrics, metric_keys),
             transform=axes[2].transAxes,
             zorder=5,
             **metrics_kwargs,
         )
     return ims, (f"[{units}]" if units else "")
+
+
+def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
+    """Return the corner box's text: one ``key=value`` line per requested metric.
+
+    Its own function because :func:`field_movie` rewrites the box every frame and the
+    two spellings of "what the box says" must not drift apart.
+    """
+    if not metrics:
+        return ""
+    return "\n".join(
+        f"{k}={metrics[k]:.3g}"
+        for k in metric_keys
+        if isinstance(metrics.get(k), int | float)
+    )
 
 
 def field_row(
@@ -1094,6 +1132,36 @@ def facet_labels(coord) -> list[str]:
     return [str(v) for v in values]
 
 
+def frame_labels(coord) -> list[str]:
+    """Return a movie's frame labels: :func:`facet_labels`, refined until they differ.
+
+    A facet grid's panels are almost always a reduction — six monthly means, twelve
+    climatological months — so ``"%b %Y"`` names them exactly. A movie is as often the
+    *unreduced* axis: every step of a run, which at daily cadence gives 31 panels all
+    called ``Jan 2012`` and at hourly cadence 744. On a still that is merely a repeated
+    caption; interactively the labels are the slider's values, and duplicates collapse
+    frames on top of each other silently.
+
+    So this starts from :func:`facet_labels` — a monthly movie is labelled exactly as
+    the equivalent grid is, which is the point — and escalates the resolution only when
+    the labels would not tell one frame from another. Non-datetime axes (levels,
+    seasons) come back unchanged, having nothing finer to fall back to.
+    """
+    labels = facet_labels(coord)
+    if len(set(labels)) == len(labels):
+        return labels
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M"):
+        try:
+            # same accessor facet_labels uses, so cftime calendars work here too
+            finer = [str(v) for v in coord.dt.strftime(fmt).values]
+        except (TypeError, AttributeError):
+            return labels
+        labels = finer
+        if len(set(finer)) == len(finer):
+            break
+    return labels
+
+
 def field_facet(
     field,
     *,
@@ -1332,6 +1400,523 @@ def field_facet(
     return fig
 
 
+#: Output formats :func:`field_movie` writes, and which matplotlib writer does each.
+#: A gif needs nothing beyond Pillow, which matplotlib already requires, so it always
+#: works; mp4 goes through ffmpeg, an external binary that may not be installed.
+MOVIE_FORMATS: dict[str, str] = {
+    ".mp4": "ffmpeg",
+    ".m4v": "ffmpeg",
+    ".mov": "ffmpeg",
+    ".gif": "pillow",
+}
+
+#: Frames per second a movie defaults to. Model output at daily or monthly cadence reads
+#: better slowly than smoothly — an eighth of a second is long enough to take a frame in
+#: and short enough that the motion is still motion.
+DEFAULT_FPS = 8
+
+#: Dots per inch a movie's frames are rasterized at, below the 150 a saved PNG gets: a
+#: movie is watched rather than examined, and every frame pays the cost twice over (in
+#: encoding time and in file size).
+DEFAULT_MOVIE_DPI = 110
+
+#: Frame count past which :func:`field_movie` says so before spending the time. Not a
+#: cap: a year of hourly output really is 8760 frames, and refusing to draw what was
+#: asked for would be worse than taking a while over it. But every frame is a full
+#: cartopy redraw, so an accidental extra axis is worth catching before the render and
+#: not after it.
+FRAME_WARN_AT = 200
+
+
+def _select_frames(frames: list, every: int) -> list:
+    """Take every ``every``-th frame, warning if a lot are left.
+
+    Striding is a plotting decision, not a data one — it thins what is *shown* without
+    touching the reduction that produced it, which is why it lives here rather than in
+    a ``select``/``aggregate`` spec. ``every=24`` turns hourly output into daily frames
+    without re-preparing anything.
+
+    Takes any list, since a comparison movie's frames are spec items while a facet
+    movie's are indices into the facet axis; only the count matters here.
+    """
+    if every < 1:
+        raise ValueError(f"every must be 1 or more, got {every}")
+    frames = frames[::every]
+    if len(frames) > FRAME_WARN_AT:
+        import warnings
+
+        seconds = len(frames) / max(DEFAULT_FPS, 1)
+        warnings.warn(
+            f"{len(frames)} frames is a long movie ({seconds / 60:.0f}m "
+            f"{seconds % 60:.0f}s at {DEFAULT_FPS} fps) and every frame is a full "
+            "redraw. Narrow it with select= (e.g. {'time': '2012-01'}), collapse it "
+            "with aggregate= (e.g. a daily or monthly mean), or thin it here with "
+            f"every= (every={max(len(frames) // FRAME_WARN_AT, 2)} would give "
+            f"{len(frames) // max(len(frames) // FRAME_WARN_AT, 2)}).",
+            stacklevel=_stacklevel.find(),
+        )
+    return frames
+
+
+def _movie_writer(path: Path, fps: int):
+    """Return the matplotlib writer for ``path``'s extension.
+
+    Chosen from the extension rather than a ``format=`` parameter because the caller has
+    already said which they want by naming the file, and two ways to say it could
+    disagree.
+    """
+    kind = MOVIE_FORMATS.get(path.suffix.lower())
+    if kind is None:
+        raise ValueError(
+            f"cannot write a movie to {path.name!r}: unknown extension "
+            f"{path.suffix!r}. Use one of {', '.join(sorted(MOVIE_FORMATS))}."
+        )
+    if kind == "pillow":
+        from matplotlib.animation import PillowWriter
+
+        return PillowWriter(fps=fps)
+
+    from matplotlib.animation import FFMpegWriter
+
+    if not FFMpegWriter.isAvailable():
+        raise RuntimeError(
+            f"writing {path.name} needs ffmpeg, which matplotlib cannot find. Either\n"
+            "  install it:  conda install -c conda-forge ffmpeg   (or: module load "
+            "ffmpeg)\n"
+            f"  or write a .gif instead: save={str(path.with_suffix('.gif'))!r}, which "
+            "needs nothing beyond matplotlib itself."
+        )
+    return FFMpegWriter(
+        fps=fps,
+        metadata={"artist": "ocean-skill"},
+        codec="libx264",
+        extra_args=[
+            # yuv420p is what players that will not touch anything else want, which is
+            # most of them. It requires even pixel dimensions, and a figure sized in
+            # inches from the data's own aspect ratio lands on an odd one often enough
+            # that padding the odd edge is cheaper than constraining every figsize.
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:white",
+            "-preset",
+            "fast",
+        ],
+    )
+
+
+def _one_facet_axis(field, facet_dim: str | None) -> str:
+    """Return ``facet_dim`` once confirmed to be the field's *only* non-spatial axis.
+
+    A movie plays one axis, so anything else left standing means a frame is not a single
+    map — most often a second facet axis (``select={"depth": [0, 50, 100]}`` beside a
+    monthly one), which :func:`field_facet` can lay out as rows and a movie cannot play.
+    Caught here rather than left to pcolormesh, which fails on the dimensionality with
+    nothing to say about the cause. Shared with the interactive renderer so the two
+    refuse the same fields for the same stated reason.
+    """
+    if facet_dim is None:
+        raise ValueError(
+            "a movie needs an axis to play, but this field is a single map. Leave an "
+            'axis standing for it — aggregate={"time": {"resample": "1MS", "reduce": '
+            '"mean"}} gives one frame per month — or use .plot() for the map you have.'
+        )
+    if facet_dim not in field.dims:
+        raise ValueError(
+            f"facet_dim {facet_dim!r} is not a dimension of the field "
+            f"({list(field.dims)})"
+        )
+    from ocean_skill.align import _lat_name, _lon_name
+
+    spatial: set[str] = set()
+    for name in (_lon_name(field), _lat_name(field)):
+        if name is not None:
+            spatial |= {str(d) for d in field[name].dims}
+    extra = [str(d) for d in field.dims if d not in spatial and str(d) != facet_dim]
+    if extra:
+        raise ValueError(
+            f"{extra} still stands beyond {facet_dim!r} and the horizontal axes, so a "
+            "frame is not a single map. A movie plays one axis: collapse the others "
+            'with aggregate= or narrow them with select= (e.g. {"depth": 50}). '
+            ".plot() can lay a second axis out as rows instead."
+        )
+    return facet_dim
+
+
+def _update_field(ax, im, da, *, mark: str, proj):
+    """Point ``im`` at ``da`` — a new frame of the same field — and return the artist.
+
+    A ``QuadMesh`` holds its values in an array that can simply be swapped, which is
+    why ``pcolormesh`` is the mark to animate. A filled contour set is geometry rather
+    than an image and has no array to swap, so it is removed and redrawn at the same
+    cmap/norm — hence a *new* artist, which is why this returns one.
+    """
+    if mark == "contourf":
+        cmap, norm = im.cmap, im.norm
+        im.remove()
+        return ax.contourf(
+            da["lon"],
+            da["lat"],
+            da,
+            transform=proj,
+            cmap=cmap,
+            norm=norm,
+            levels=_contour_levels(norm),
+        )
+    im.set_array(np.asarray(da))
+    return im
+
+
+def field_movie(
+    frames: list[dict[str, Any]],
+    *,
+    save: str | Path | None = None,
+    fps: int = DEFAULT_FPS,
+    dpi: int = DEFAULT_MOVIE_DPI,
+    every: int = 1,
+    test_name: str = "test",
+    reference_name: str = "reference",
+    labels: tuple[str, str] | None = None,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    domain: tuple[float, float, float, float] | None = None,
+    figsize: tuple[float, float] | None = None,
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    frame_label_kwargs: dict[str, Any] | None = None,
+    frame_label: bool = True,
+    shared_limits: bool = True,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    progress: bool = True,
+):
+    """Animate one ``test | reference | difference`` row over a sequence of frames.
+
+    Each item of ``frames`` is shaped exactly as a :func:`field_grid` row (``aligned``
+    plus optional ``metrics``, ``units``, ``standard_name``, ``labels``) with one
+    addition: ``frame_label``, the text identifying that frame — a timestamp, usually —
+    drawn in the top-left of the test panel. So the same items that stack down a page as
+    a grid play as a movie here, and a frame looks exactly like the row
+    :func:`field_row` draws, because it is drawn by the same code.
+
+    ``save`` names the output file and, by its extension, the format:
+    ``.mp4``/``.m4v``/``.mov`` through ffmpeg, ``.gif`` through Pillow (see
+    :data:`MOVIE_FORMATS`). Only ffmpeg is an external dependency, so a gif is the
+    fallback when it is missing. Without ``save`` nothing is written and the animation
+    is only returned — useful in a notebook, where ``HTML(ani.to_jshtml())`` plays it
+    inline.
+
+    ``every=N`` keeps every Nth frame — ``every=24`` turns hourly output into daily
+    frames without re-preparing anything, since it thins what is *shown* rather than
+    what was computed. A movie longer than :data:`FRAME_WARN_AT` frames says so before
+    spending the time on it, and suggests a stride; it is a warning and not a cap, since
+    a year of hourly output legitimately is 8760 frames.
+
+    ``shared_limits=True`` (the default) takes the colour scale from **every** frame at
+    once, so a value is the same colour throughout; ``False`` takes it from the first
+    frame alone. Either way the scale is fixed for the whole movie — a per-frame scale
+    makes an animation unreadable, since every frame's colours would mean something
+    different and the eye cannot tell a change in the field from a change in the ruler.
+
+    Only the values, the frame label and the metrics box are redrawn per frame: the
+    figure, its layout, its colorbars and its axis labelling are built once from the
+    first frame, so nothing shifts or resizes as the movie plays. Every other parameter
+    means what it does in :func:`field_row`, which is where they are documented;
+    ``frame_label_kwargs`` styles the frame label (an ``Axes.text``, see
+    :data:`DEFAULT_FRAME_LABEL_KWARGS`) and ``frame_label=False`` omits it.
+
+    Returns the :class:`matplotlib.animation.FuncAnimation`. Keep a reference to it:
+    an animation whose last reference is dropped stops.
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    if not frames:
+        raise ValueError("a movie needs at least one frame, got none")
+    frames = _select_frames(frames, every)
+    shapes = {np.shape(f["aligned"][reference_name]) for f in frames}
+    if len(shapes) > 1:
+        raise ValueError(
+            f"every frame must be on the same grid, got shapes {sorted(shapes)}. "
+            "Frames are redrawn into one figure, so a grid that changes mid-movie has "
+            "nowhere to go — compare each grid as its own movie."
+        )
+
+    first = frames[0]
+    figsize = figsize or auto_figsize(
+        _map_aspect(frames, reference_name),
+        nrows=1,
+        font_scale=font_scale,
+        horizontal_colorbar=True,
+    )
+    scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=True)
+    proj = ccrs.PlateCarree()
+
+    seq_norm = div_norm = None
+    if shared_limits and len(frames) > 1:
+        seq_norm, div_norm = _shared_norms(frames, test_name, reference_name)
+
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=figsize,
+        subplot_kw={"projection": proj},
+        constrained_layout=True,
+    )
+    ims, lab = _draw_row(
+        axes,
+        first["aligned"],
+        test_name=test_name,
+        reference_name=reference_name,
+        labels=first.get("labels") or labels or ("test", "reference"),
+        units=first.get("units"),
+        standard_name=first.get("standard_name"),
+        metrics=first.get("metrics"),
+        mark=mark,
+        domain=domain,
+        metric_keys=metric_keys,
+        title_kwargs=title_kwargs,
+        gridline_kwargs=gridline_kwargs,
+        tick_label_kwargs=tick_label_kwargs,
+        metrics_kwargs=metrics_kwargs,
+        seq_norm=seq_norm,
+        div_norm=div_norm,
+        shared_axis_labels=shared_axis_labels,
+        is_bottom_row=True,
+        defaults=defaults,
+    )
+    _draw_colorbar(
+        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+    )
+    _draw_colorbar(
+        fig,
+        ims[2],
+        axes[2],
+        f"difference {lab}",
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+    )
+
+    label_text = None
+    if frame_label and any(f.get("frame_label") for f in frames):
+        label_text = axes[0].text(
+            0.02,
+            0.98,
+            str(first.get("frame_label") or ""),
+            transform=axes[0].transAxes,
+            zorder=5,
+            **_merged(defaults["frame_label_kwargs"], frame_label_kwargs),
+        )
+
+    if title:
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
+    _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+
+    metrics_text = getattr(axes[2], "_osk_metrics_text", None)
+    keys = (test_name, reference_name, "difference")
+
+    def update(index: int):
+        frame = frames[index]
+        aligned = frame["aligned"]
+        for j, (ax, key) in enumerate(zip(axes, keys, strict=True)):
+            ims[j] = _update_field(ax, ims[j], aligned[key], mark=mark, proj=proj)
+        if label_text is not None:
+            label_text.set_text(str(frame.get("frame_label") or ""))
+        if metrics_text is not None:
+            metrics_text.set_text(_metrics_text(frame.get("metrics"), metric_keys))
+        return [*ims, label_text, metrics_text]
+
+    return _animate(
+        fig, update, len(frames), save=save, fps=fps, dpi=dpi, progress=progress
+    )
+
+
+def _animate(fig, update, n_frames: int, *, save, fps: int, dpi: int, progress: bool):
+    """Wrap ``update`` in a ``FuncAnimation`` and, if asked, encode it to ``save``.
+
+    The half of a movie that has nothing to do with what is being drawn, shared by
+    :func:`field_movie` and :func:`facet_movie` so that "which writer, at what rate,
+    reporting progress how" is answered once for both.
+    """
+    from matplotlib.animation import FuncAnimation
+
+    ani = FuncAnimation(
+        fig,
+        update,
+        frames=n_frames,
+        interval=1000 / max(fps, 1),
+        # every frame reads its own values off the frame list, so there is nothing to
+        # cache; caching would hold every rendered frame in memory for no gain
+        cache_frame_data=False,
+        blit=False,
+    )
+    if not save:
+        return ani
+    save = Path(save).expanduser()
+    save.parent.mkdir(parents=True, exist_ok=True)
+    writer = _movie_writer(save, fps)
+    callback = None
+    if progress:
+
+        def callback(index, total):
+            end = "\n" if index + 1 == total else ""
+            print(f"\r  frame {index + 1}/{total}", end=end, flush=True)
+
+    ani.save(str(save), writer=writer, dpi=dpi, progress_callback=callback)
+    print(f"ocean-skill: movie written to {save}")
+    return ani
+
+
+def facet_movie(
+    field,
+    *,
+    facet_dim: str | None = None,
+    save: str | Path | None = None,
+    fps: int = DEFAULT_FPS,
+    dpi: int = DEFAULT_MOVIE_DPI,
+    every: int = 1,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    mark: str = "pcolormesh",
+    domain: tuple[float, float, float, float] | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    frame_label_kwargs: dict[str, Any] | None = None,
+    frame_label: bool = True,
+    shared_limits: bool = True,
+    font_scale: float = 1.0,
+    progress: bool = True,
+):
+    """Play one source's facet axis instead of laying it out: a movie of one field.
+
+    The animated counterpart of :func:`field_facet`, and the model-only counterpart of
+    :func:`field_movie` — one map, no reference, no difference panel, no metrics box.
+    The axis that becomes the panels there becomes the frames here, so the same
+    ``Field`` reads either way::
+
+        run = osk.field("GOM_bgc", "salinity",
+                        select={"time": "2012", "depth": "surface"})
+        run.plot()                      # every step as a panel
+        run.movie(save="salt.mp4")      # every step as a frame
+
+    Frame labels come from the facet coordinate through :func:`frame_labels`, so they
+    are spelled exactly as the static panels' titles are — ``Jan 2012`` for consecutive
+    months, ``Jan`` for a climatology, ``50 m`` for a level — except where that would
+    not tell one frame from another, since a movie is as often over the unreduced axis
+    as over a reduction.
+
+    ``row_dim`` has no counterpart: a movie has one axis to play, and two facet axes
+    would need one to become the panels — which is what :func:`field_facet` is for.
+    Every other parameter means what it does there, or in :func:`field_movie` for the
+    movie-specific ones (``save``, ``fps``, ``dpi``, ``every``, ``frame_label``).
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.typography import REFERENCE_GRID, facet_figsize
+
+    facet_dim = _one_facet_axis(field, facet_dim)
+    indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
+    labels = frame_labels(field[facet_dim]) if facet_dim in field.coords else None
+    aspect = _aspect_of(field)
+    # One panel, so the grid's long edge is the map's own: a wide domain takes a
+    # horizontal bar beneath it, a tall one a vertical bar beside it. Same rule
+    # field_facet applies to its grid, which for a single cell *is* the map.
+    horizontal = aspect > 1.0
+    figsize = figsize or facet_figsize(aspect, nrows=1, ncols=1, font_scale=font_scale)
+    scale = type_scale(
+        figsize,
+        ncols=1,
+        nrows=1,
+        font_scale=font_scale,
+        # the suptitle spans the page whatever the panel count — see field_facet
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+
+    # One scale for the whole movie, from every frame or just the first. Mandatory in
+    # spirit either way: a scale re-derived per frame would make the ruler move with the
+    # field. field_facet shares one scale across its panels for the same reason.
+    scope = field if shared_limits else field.isel({facet_dim: indices[0]})
+    vmin, vmax = _limits(scope)
+    norm = norm_for(standard_name, vmin, vmax)
+    cmap, _ = cmaps_for(standard_name)
+
+    fig, ax = plt.subplots(
+        figsize=figsize,
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+    )
+    im = _draw_map(
+        ax,
+        field.isel({facet_dim: indices[0]}),
+        label=None,
+        cmap=cmap,
+        norm=norm,
+        mark=mark,
+        domain=domain,
+        gridline_kwargs=_merged(defaults["gridline_kwargs"], gridline_kwargs),
+        tick_label_kwargs=_merged(defaults["tick_label_kwargs"], tick_label_kwargs),
+        title_kwargs=_merged(defaults["title_kwargs"], title_kwargs),
+    )
+    _draw_colorbar(
+        fig,
+        im,
+        ax,
+        f"[{units}]" if units else "",
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+    )
+
+    label_text = None
+    if frame_label and labels:
+        label_text = ax.text(
+            0.02,
+            0.98,
+            labels[indices[0]],
+            transform=ax.transAxes,
+            zorder=5,
+            **_merged(defaults["frame_label_kwargs"], frame_label_kwargs),
+        )
+
+    if title:
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
+    _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    _align_colorbars(fig)
+
+    proj = ccrs.PlateCarree()
+    artists = [im]
+
+    def update(frame: int):
+        index = indices[frame]
+        artists[0] = _update_field(
+            ax, artists[0], field.isel({facet_dim: index}), mark=mark, proj=proj
+        )
+        if label_text is not None:
+            label_text.set_text(labels[index])
+        return [artists[0], label_text]
+
+    return _animate(
+        fig, update, len(indices), save=save, fps=fps, dpi=dpi, progress=progress
+    )
+
+
 def _nested_owner(key: str) -> str | None:
     """Which ``*_kwargs`` dict ``key`` belongs inside, if any.
 
@@ -1400,6 +1985,10 @@ def render(spec, **kwargs: Any):
         _check_options(field_row, opts)
     elif family == "field_facet":
         _check_options(field_facet, opts)
+    elif family == "field_movie":
+        _check_options(field_movie, opts)
+    elif family == "facet_movie":
+        _check_options(facet_movie, opts)
 
     if family == "field_facet":
         item = spec.single
@@ -1407,6 +1996,18 @@ def render(spec, **kwargs: Any):
             item["field"],
             facet_dim=item.get("facet_dim"),
             row_dim=item.get("row_dim"),
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            **opts,
+        )
+    if family == "facet_movie":
+        # the same item field_facet takes, played rather than laid out. `row_dim` is
+        # deliberately not passed on: a movie has one axis to play, and a second facet
+        # axis would have to become panels, which is what field_facet is for.
+        item = spec.single
+        return facet_movie(
+            item["field"],
+            facet_dim=item.get("facet_dim"),
             units=item.get("units"),
             standard_name=item.get("standard_name"),
             **opts,
@@ -1422,6 +2023,8 @@ def render(spec, **kwargs: Any):
         )
     if family == "field_grid":
         return field_grid(spec.items, **opts)
+    if family == "field_movie":
+        return field_movie(spec.items, **opts)
     if family in ("taylor", "target", "paired"):
         # summary families work from metric records, which the spec carries per item
         fn = {"taylor": taylor, "target": target, "paired": paired}[family]

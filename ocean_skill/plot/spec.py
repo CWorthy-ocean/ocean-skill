@@ -20,7 +20,23 @@ __all__ = ["FAMILIES", "PlotSpec"]
 #: Plot families a renderer may implement. A renderer need not support all of them —
 #: :func:`ocean_skill.plot.registry.render` reports clearly when one is missing, and the
 #: holoviews renderer deliberately delegates ``taylor`` back to matplotlib.
-FAMILIES = ("field_row", "field_grid", "field_facet", "taylor", "target", "paired")
+#:
+#: The two ``*_movie`` families are the animated forms of the two static map families,
+#: paired as ``field_grid``/``field_movie`` (a comparison row, stacked down the page or
+#: played) and ``field_facet``/``facet_movie`` (one source's facet axis, laid out or
+#: played). Each is a family of its own rather than a ``mode=`` on its static twin
+#: because the frames are a different payload: a movie's items *are* the sequence, so
+#: the family has to say whether that sequence becomes panels or frames.
+FAMILIES = (
+    "field_row",
+    "field_grid",
+    "field_facet",
+    "field_movie",
+    "facet_movie",
+    "taylor",
+    "target",
+    "paired",
+)
 
 
 @dataclass
@@ -36,7 +52,10 @@ class PlotSpec:
         plus optional ``metrics``, ``units``, ``standard_name`` and ``label``. The
         ``field_facet`` family is the exception, carrying a single item with ``field``
         (one DataArray) and ``facet_dim`` instead of ``aligned`` — it draws one source
-        rather than a pair, so there is no aligned trio to carry.
+        rather than a pair, so there is no aligned trio to carry. ``facet_movie``
+        carries that same single item, being ``field_facet`` played rather than laid
+        out; ``field_movie`` carries ``field_grid``'s list, one entry per frame, each
+        optionally naming its ``frame_label``.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.

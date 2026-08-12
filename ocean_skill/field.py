@@ -189,6 +189,38 @@ class Field:
         spec = PlotSpec(family="field_facet", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
+    def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Play :attr:`facet_dim` instead of laying it out: this field as a movie.
+
+        The same axis :meth:`plot` turns into panels becomes the frames here, so the two
+        are one field read two ways::
+
+            run = osk.field("GOM_bgc", "salinity",
+                            select={"time": "2012-01", "depth": "surface"})
+            run.plot()                          # every step as a panel
+            run.movie(save="salt.mp4")          # every step as a frame
+            run.movie(renderer="holoviews")     # every step on a slider
+
+        Which is the better reading depends on how many steps there are: a handful of
+        monthly means are best seen at once, where a month of daily output is forty
+        panels too small to read and forty frames a drag apart.
+
+        ``save`` names the file and its extension picks the format — ``.mp4`` (needs
+        ffmpeg) or ``.gif`` (needs nothing extra) statically, ``.html`` interactively.
+        See :func:`ocean_skill.plot.matplotlib_renderer.facet_movie` for the rest, and
+        ``docs/movies.md`` for the whole picture.
+
+        A field the reduction left as a *single map* has no axis to play, and says so
+        rather than writing a one-frame movie.
+        """
+        from ocean_skill.comparison import _domain_of
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        kwargs.setdefault("domain", _domain_of(self.source))
+        spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
+        return render(spec, renderer=renderer)
+
     def save(
         self,
         project: str | None = None,
