@@ -15,6 +15,16 @@ hand-tuned appearance at the default size is a promise to existing notebooks.
 
 from __future__ import annotations
 
+import warnings
+
+import matplotlib
+
+# Before pyplot is imported anywhere. Layout depends on the backend's DPI, so a test
+# that measures drawn geometry gives different numbers under the default macosx backend
+# than under Agg — which made this module's results depend on whether another test
+# module (test_renderers, test_summary_labels) had already forced Agg first.
+matplotlib.use("Agg")
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -29,25 +39,37 @@ FIGURE_ROLES = [r for r, (base, _) in tg.FONT_STEPS.items() if base == "figure"]
 # --- the scale itself --------------------------------------------------------------
 
 
-def test_default_row_reproduces_the_hand_tuned_sizes():
-    """The calibration promise: existing figures keep looking as they did.
+def test_default_row_lands_on_the_chosen_level():
+    """The level is a decision, so it is pinned — the one absolute assertion here.
 
-    These are the sizes that were hand-tuned as literals in the renderers before the
-    scale existed (title 8, suptitle 9, colorbar label 7, row label 7, latitude labels
-    5, metrics 5.5). The scale has to land on them at the figure size they were tuned
-    for, or adopting it silently restyles every notebook in the wild — which is a
-    different change from the one being made.
+    These sizes were chosen by rendering the same comparison at 8/11/12/14pt titles and
+    picking. That makes them a deliberate choice rather than an accident, and the whole
+    point of the previous round was that the sizes it shipped were *not*: they
+    reproduced matplotlib-era defaults nobody had picked. If the coefficient drifts,
+    this fails and someone has to look at a figure again rather than at arithmetic.
     """
     scale = tg.reference_scale()
-    for role, tuned in {
-        "title": 8.0,
-        "suptitle": 9.0,
-        "colorbar_label": 7.0,
-        "row_label": 7.0,
-        "tick_label": 5.0,
-        "metrics": 5.5,
+    for role, chosen in {
+        "title": 11.1,
+        "suptitle": 12.9,
+        "colorbar_label": 9.7,
+        "row_label": 9.7,
+        "tick_label": 7.3,
+        "metrics": 8.4,
     }.items():
-        assert scale[role] == pytest.approx(tuned, abs=0.75), role
+        assert scale[role] == pytest.approx(chosen, abs=0.3), role
+
+
+def test_the_level_is_well_clear_of_the_old_inherited_defaults():
+    """A guard against silently sliding back to the sizes that prompted this.
+
+    The scale first shipped calibrated on 8pt titles and 5pt coordinate labels, taken
+    from matplotlib-era literals. Those turned out to be too small for anything this
+    package is used for, so the floor of the acceptable range is worth stating.
+    """
+    scale = tg.reference_scale()
+    assert scale["title"] >= 10.0
+    assert scale["tick_label"] >= 7.0
 
 
 def test_panel_type_shrinks_with_the_cell_and_grows_with_it():
@@ -60,26 +82,19 @@ def test_panel_type_shrinks_with_the_cell_and_grows_with_it():
 
 
 def test_type_is_sublinear_in_the_cell_size():
-    """Doubling the figure must not double the type.
+    """Doubling the canvas must not double the type.
 
-    A linear rule keeps the type a constant *share* of the panel, which is wrong at the
-    large end: matplotlib's own 12pt default on a 6.4x4.8in figure is far below what a
-    linear extrapolation from a dense page-width row would ask for. The exponent is what
-    reconciles the two anchors, so this guards it against being quietly linearised.
+    This is what makes a bigger figure buy *detail* rather than magnification, and what
+    lets one calibration serve the whole range — the sizes chosen at page width stay
+    reasonable on a poster instead of scaling into absurdity. A linear rule would keep
+    the type a constant share of the panel, so the figure would look identical at every
+    size and there would be no point growing it.
     """
     one = tg.type_scale((8.5, 2.74), ncols=3, nrows=1)["title"]
     two = tg.type_scale((17.0, 5.48), ncols=3, nrows=1)["title"]
     assert one < two < 2 * one
-
-
-def test_matplotlibs_own_default_figure_lands_on_matplotlibs_own_default_title():
-    """The second calibration anchor: a standalone figure at mpl's default size.
-
-    The curve is fitted through this point and the dense-row one, so if the coefficient
-    or exponent drifts, one of the two ends stops agreeing with the convention it was
-    matched to.
-    """
-    assert tg.type_scale((6.4, 4.8))["title"] == pytest.approx(12.0, abs=1.0)
+    # the specific exponent, stated where it can be checked: 2x canvas -> ~1.5x type
+    assert two / one == pytest.approx(2**tg.BASE_EXPONENT, rel=0.02)
 
 
 def test_roles_keep_their_proportions_at_every_size():
@@ -139,9 +154,124 @@ def test_row_height_follows_the_maps_aspect_ratio():
     assert wide < square < tall
 
 
-def test_row_height_is_bounded_by_the_page():
-    """Eight rows still have to print, which is why the cap exists at all."""
+def test_row_height_is_bounded_by_a_canvas_that_caps_its_height():
+    """Eight rows still have to print, which is what the ``"page"`` cap is for."""
     assert tg.row_height(1.0, nrows=8) * 8 <= tg.PAGE_H
+
+
+# --- facet grids: shared decorations cost less than self-contained rows -------------
+
+
+def test_an_extra_facet_row_costs_less_than_the_first_one():
+    """The invariant the old constants broke, stated where it can be checked.
+
+    A facet grid's later rows share the top row's titles and the bottom row's longitude
+    labels, so each should cost only a gap (plus its own title, if any) — less than the
+    first row's full set. Stated in ems alone at 2.6 + 2.4, they charged 5.0 em
+    where the first row was charged 1.6, which is the wrong way round and left ~0.6in of
+    dead space at every row boundary of a three-row grid.
+    """
+    from itertools import pairwise
+
+    heights = [tg.facet_figsize(1.385, nrows=n, ncols=3)[1] for n in (1, 2, 3, 4)]
+    one_row = heights[0]
+    extras = [b - a for a, b in pairwise(heights)]
+    assert all(e < one_row for e in extras), (one_row, extras)
+    # and each extra row costs about the same as the one before it
+    assert max(extras) - min(extras) < 0.05
+
+
+def test_a_facet_grid_amortises_its_shared_decorations_over_its_rows():
+    """The height *per row* falls as rows are added, because the shared cost is fixed.
+
+    That is what "charged once" means arithmetically, and it is the property that
+    separates ``facet_figsize`` from multiplying :func:`row_height` by the row count. It
+    also depends on the fixed term being right: ``facet_figsize`` used ``ROW_OVERHEAD``,
+    the figure for a *self-contained* grid row, 0.36in short of what a facet grid needs
+    once (it carries one colorbar for the figure where a grid row carries its own).
+    """
+    per_row = []
+    for nrows in (1, 2, 3, 4):
+        _, h = tg.facet_figsize(1.385, nrows=nrows, ncols=3)
+        per_row.append(h / nrows)
+    assert per_row == sorted(per_row, reverse=True), per_row
+    # a self-contained row of the same maps costs more than any amortised facet row
+    assert tg.row_height(1.385, nrows=1) < per_row[0]
+
+
+def test_facet_layout_still_prefers_the_grid_a_person_would_draw():
+    """9 panels is 3x3, not 2x5 — the case ``BLANK_CELL_WEIGHT`` exists to protect.
+
+    Lowering ``SUPTITLE_ALLOWANCE`` to its measured value gave every candidate a little
+    more height and tipped this one to 2x5, adding a blank cell where there had been
+    none.
+    """
+    assert tg.facet_layout(9, 1.385) == (3, 3)
+    assert tg.facet_layout(6, 1.385) == (2, 3)
+    # a wide domain still stacks and a tall one still spreads
+    assert tg.facet_layout(4, 4.0)[0] < tg.facet_layout(4, 0.35)[0]
+
+
+# --- the canvas ---------------------------------------------------------------------
+
+
+def test_an_uncapped_canvas_keeps_every_rows_panels_at_full_height():
+    """``size="free"`` is the escape from the report constraint.
+
+    The cap squeezes panels so a many-row grid fits a page — right for a PDF, wrong for
+    a notebook, and previously unavoidable because 8.5x11 was hardwired into the sizing
+    rule rather than being one canvas among several.
+    """
+    page, free = tg.CANVASES["page"], tg.CANVASES["free"]
+    capped = tg.row_height(1.4, nrows=8, canvas=page)
+    uncapped = tg.row_height(1.4, nrows=8, canvas=free)
+    assert uncapped > capped
+    # uncapped, the row is the height its aspect ratio asked for, whatever the row count
+    assert uncapped == pytest.approx(tg.row_height(1.4, nrows=1, canvas=free))
+
+
+def test_zoom_scales_the_canvas_and_the_type_follows_sub_linearly():
+    """``zoom`` is the "make it bigger" knob; ``font_scale`` is the "more type" knob.
+
+    They are separate because they answer different questions, and because zoom's type
+    growth is deliberately sub-linear — a figure twice the size shows more detail rather
+    than the same figure magnified.
+    """
+    plain = tg.resolve_canvas("page")
+    doubled = tg.resolve_canvas("page", zoom=2.0)
+    assert doubled.width == pytest.approx(2 * plain.width)
+    assert doubled.max_height == pytest.approx(2 * plain.max_height)
+
+    small = tg.type_scale((plain.width, 3.0), ncols=3)
+    big = tg.type_scale((doubled.width, 6.0), ncols=3)
+    assert 1.0 < big["title"] / small["title"] < 2.0
+
+
+def test_size_accepts_a_name_a_pair_a_number_and_a_canvas():
+    assert tg.resolve_canvas("slide") == tg.CANVASES["slide"]
+    assert tg.resolve_canvas((6.5, None)) == tg.Canvas(6.5, None)
+    assert tg.resolve_canvas(6.5) == tg.Canvas(6.5, None)
+    assert tg.resolve_canvas(tg.Canvas(4.0, 9.0)) == tg.Canvas(4.0, 9.0)
+    assert tg.resolve_canvas(None) == tg.CANVASES[tg.DEFAULT_SIZE]
+
+
+@pytest.mark.parametrize(
+    ("bad", "exc"),
+    [
+        ("A4", ValueError),  # not a preset — the message lists what is
+        ((1.0, 2.0, 3.0), ValueError),
+        (0.0, ValueError),
+        (object(), TypeError),
+    ],
+)
+def test_a_bad_size_is_rejected_by_name(bad, exc):
+    with pytest.raises(exc):
+        tg.resolve_canvas(bad)
+
+
+def test_a_bad_zoom_is_rejected():
+    with pytest.raises(ValueError):
+        tg.resolve_canvas("page", zoom=0.0)
 
 
 def test_extreme_aspects_are_letterboxed_rather_than_obeyed():
@@ -200,18 +330,82 @@ def _panel_box(fig):
     return pos.width * w, pos.height * h
 
 
-def test_a_small_figure_still_contains_maps():
-    """The failure that motivated all of this, as a drawn figure.
+def test_a_canvas_far_too_small_still_draws_maps_and_says_it_is_too_small():
+    """The honest limit of the whole approach, stated where it can be checked.
 
     matplotlib points are absolute and ``constrained_layout`` gives text priority over
     axes, so fixed 8pt titles on a 4-inch row squeezed the three maps to about a third
-    of an inch each — the text did not look wrong, it *ate the figure*. Sizing the type
-    to the geometry is what keeps a small figure merely small.
+    of an inch — the text did not look wrong, it *ate the figure*.
+
+    Deriving type from geometry does not rescue this case, and it is worth being clear
+    about why: the ``MIN_PT`` floor binds long before the maps get their room back, so
+    at four inches the panels stay about a third of an inch whatever the scale does. The
+    remedy is a bigger canvas, which is exactly what the warning says. What this asserts
+    is therefore the two things that *are* true: the figure is still a figure, and it
+    tells you what is wrong instead of leaving you to wonder.
     """
-    fig = field_row(_aligned(), figsize=(4.0, 4.0 / 3.1), title="t")
+    with pytest.warns(UserWarning, match="no room left to reclaim"):
+        fig = field_row(_aligned(), figsize=(4.0, 4.0 / 3.1), title="t")
+    panel_w, panel_h = _panel_box(fig)
+    assert panel_w > 0.25 and panel_h > 0.15, "the maps were crowded out entirely"
+
+
+def test_a_canvas_with_room_gets_panels_that_dominate_it():
+    """Where the sizing rule does pay off: a normal canvas, mostly map.
+
+    The counterpart to the test above — at page width the type takes a modest share and
+    the panels get the rest, which is the outcome the scale exists to produce.
+    """
+    fig = field_row(_aligned(), title="t")
     panel_w, _ = _panel_box(fig)
-    cell_w = 4.0 / 3
-    assert panel_w > 0.4 * cell_w, "the maps have been crowded out by their own labels"
+    cell_w = fig.get_size_inches()[0] / 3
+    assert panel_w > 0.6 * cell_w
+
+
+def test_a_canvas_too_narrow_says_to_widen_it():
+    """Below about five inches, three maps plus their labelling do not fit.
+
+    No font size fixes that, because the canvas is the constraint — the type is already
+    at its floor. Silently drawing sliver panels is the one outcome that leaves the user
+    guessing, so the figure reports what to change instead.
+    """
+    with pytest.warns(UserWarning, match="widen the canvas"):
+        field_row(_aligned(), figsize=(3.5, 1.2), title="t")
+
+
+def test_a_narrow_but_uncapped_canvas_can_still_fit():
+    """``size=3.5`` alone is not a problem: the row grows as tall as it needs to.
+
+    Only a canvas that is narrow *and* short forces the squeeze — worth pinning so the
+    warning does not start firing on every deliberately narrow figure.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        field_row(_aligned(), size=3.5, title="t")
+
+
+def test_a_height_capped_grid_is_told_to_lift_the_cap_not_to_widen():
+    """The two ways to run out of room want opposite advice.
+
+    Nine rows on a page are cramped because the *height* cap is splitting between them,
+    and widening does nothing for that — the fix is ``size="free"``. Naming the wrong
+    knob would send someone off in the wrong direction, so the message picks by which
+    constraint actually bound.
+    """
+    rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(9)]
+    with pytest.warns(UserWarning, match='size="free"'):
+        field_grid(rows, title="t")
+    # and with the cap lifted there is nothing to report
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        field_grid(rows, title="t", size="free")
+
+
+def test_a_normal_canvas_does_not_warn():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        field_row(_aligned(), title="t")
+        field_grid([{"aligned": _aligned(), "units": "degC"}] * 3, title="t")
 
 
 def test_drawn_type_tracks_the_figure_size():
@@ -247,10 +441,91 @@ def test_font_scale_reaches_the_drawn_figure():
     assert max(_titles(bigger)) > 1.3 * max(_titles(plain))
 
 
+def test_zoom_moves_figure_panels_and_type_together():
+    """One knob, three consequences — the point of deriving them from one canvas."""
+    plain = field_row(_aligned(), title="t")
+    big = field_row(_aligned(), title="t", zoom=1.6)
+    assert big.get_size_inches()[0] == pytest.approx(1.6 * plain.get_size_inches()[0])
+    assert _panel_box(big)[0] > _panel_box(plain)[0]
+    assert max(_titles(big)) > max(_titles(plain))
+
+
+def test_a_named_size_reaches_the_drawn_figure():
+    slide = field_row(_aligned(), title="t", size="slide")
+    assert slide.get_size_inches()[0] == pytest.approx(tg.CANVASES["slide"].width)
+
+
+def test_size_free_lets_a_many_row_grid_keep_its_panels():
+    """The drawn counterpart of the uncapped-canvas test above."""
+    rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(8)]
+    page = field_grid(rows, title="t")
+    free = field_grid(rows, title="t", size="free")
+    assert free.get_size_inches()[1] > page.get_size_inches()[1]
+    assert _panel_box(free)[1] > _panel_box(page)[1]
+
+
+def test_figsize_still_overrides_size_and_zoom():
+    fig = field_row(_aligned(), title="t", size="slide", zoom=3.0, figsize=(7.0, 2.5))
+    assert tuple(fig.get_size_inches()) == pytest.approx((7.0, 2.5))
+
+
 def test_an_explicit_size_still_wins_over_the_automatic_one():
     """Automatic sizing is a better default, not a new constraint."""
     fig = field_row(_aligned(), title="t", title_kwargs={"fontsize": 17})
     assert _titles(fig) == [17.0] * len(_titles(fig))
+
+
+def test_an_explicit_size_survives_an_overflow_that_would_shrink_it():
+    """The override has to be absolute, including against the fitting pass.
+
+    ``_fit_text_widths`` shrinks whatever overflows its box, and it used to do that to a
+    size the caller had set: asking for 20pt with a long label got you 4.7pt on one
+    panel and 20 on the others. That makes ``*_kwargs`` advisory rather than an
+    override, so an explicitly chosen size is now exempt.
+    """
+    long = "sea_water_potential_temperature_at_sea_floor climatology"
+    fig = field_row(
+        _aligned(),
+        labels=(long, "WOA"),
+        units="degC",
+        title="t",
+        title_kwargs={"fontsize": 20},
+    )
+    fig.canvas.draw()
+    assert set(_titles(fig)) == {20.0}
+
+
+def test_every_font_role_can_be_overridden():
+    """The whole point of the seven dicts: each names a size and each is honored."""
+    fig = field_row(
+        _aligned(),
+        title="t",
+        units="degC",
+        metrics={"bias": 0.1, "rmse": 0.3, "corr": 0.9},
+        title_kwargs={"fontsize": 13},
+        suptitle_kwargs={"fontsize": 19},
+        tick_label_kwargs={"size": 11},
+        metrics_kwargs={"fontsize": 12},
+        colorbar_kwargs={"label_size": 15, "tick_labelsize": 14},
+    )
+    fig.canvas.draw()
+    assert set(_titles(fig)) == {13.0}
+    assert fig._suptitle.get_fontsize() == 19.0
+    bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    assert bars
+    for cax in bars:
+        assert cax.xaxis.label.get_fontsize() == 15.0
+        assert cax.get_xticklabels()[0].get_fontsize() == 14.0
+
+
+def test_fit_text_can_be_turned_off_entirely():
+    long = "sea_water_potential_temperature_at_sea_floor climatology"
+    fitted = field_row(_aligned(), labels=(long, "WOA"), units="degC", title="t")
+    left = field_row(
+        _aligned(), labels=(long, "WOA"), units="degC", title="t", fit_text=False
+    )
+    assert max(_titles(left)) == min(_titles(left)), "nothing should have been resized"
+    assert min(_titles(fitted)) < min(_titles(left))
 
 
 def test_field_row_sizes_itself_to_the_domains_aspect_ratio():
@@ -279,22 +554,48 @@ def test_an_overlong_label_is_shrunk_to_fit_and_its_neighbours_are_not():
     passing a 50-character CF standard name as a panel title. Measuring the drawn result
     and shrinking only what overflows leaves every label that does fit at the size the
     scale chose.
+
+    The floor bounds how far this can go: a 56-character title over a 2.4in panel would
+    need about 4pt to fit outright, and ``MIN_PT`` stops it at 6, so it comes down to
+    the floor and still overhangs a little. That is the deliberate trade — a legible
+    label slightly wider than its panel beats an illegible one inside it.
     """
     long = "sea_water_potential_temperature_at_sea_floor climatology"
     fig = field_row(_aligned(), labels=(long, "WOA"), units="degC", title="t")
     fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
     by_text = {
         ax.title.get_text(): (ax.title, ax) for ax in fig.axes if ax.title.get_text()
     }
-    shrunk, shrunk_ax = by_text[long]
-    kept, _ = by_text["difference"]
-    assert shrunk.get_fontsize() < kept.get_fontsize()
-    assert kept.get_fontsize() == pytest.approx(tg.reference_scale()["title"], abs=1.0)
-    assert (
-        shrunk.get_window_extent(renderer).width
-        <= shrunk_ax.get_window_extent(renderer).width
+    shrunk, _ = by_text[long]
+    # its neighbours, compared within this figure rather than against the reference
+    # geometry — this test's domain is a different aspect ratio, so its scale differs
+    untouched = {by_text["difference"][0], by_text["WOA"][0]}
+    kept = next(iter(untouched))
+    sizes = {t.get_fontsize() for t in untouched}
+    assert len(sizes) == 1, "a label that fits was resized anyway"
+    assert shrunk.get_fontsize() < kept.get_fontsize(), "the long title was not shrunk"
+    assert shrunk.get_fontsize() >= tg.MIN_PT, "shrunk past the legibility floor"
+
+
+def test_a_label_that_fits_at_a_smaller_size_is_brought_inside_its_panel():
+    """The case the backstop is actually for: fixable by shrinking, and fixed.
+
+    Distinct from the test above, where the floor binds first. Here the label is long
+    enough to overflow at the chosen level but short enough that a size above ``MIN_PT``
+    fits, so it should end up inside its own panel.
+    """
+    fig = field_row(
+        _aligned(), labels=("ROMS GOM hindcast v3", "WOA"), units="degC", title="t"
     )
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for ax in fig.axes:
+        if not ax.title.get_text():
+            continue
+        assert (
+            ax.title.get_window_extent(renderer).width
+            <= ax.get_window_extent(renderer).width
+        ), ax.title.get_text()
 
 
 # --- the two renderers must agree ---------------------------------------------------
@@ -338,3 +639,164 @@ def test_interactive_frames_follow_the_aspect_ratio_too():
     wide, tall = tg.frame_px(3.0), tg.frame_px(0.5)
     assert wide[1] < tall[1]
     assert wide[0] == tall[0]  # width is what is pinned; height follows
+
+
+def _bokeh_figures(obj):
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    return list(hv.render(obj, backend="bokeh").select({"type": figure}))
+
+
+def _interactive_row(**options):
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    item = {"aligned": _aligned(), "units": "degC"}
+    spec = PlotSpec(family="field_row", items=[item], options=options)
+    return _bokeh_figures(render(spec, renderer="holoviews"))[0]
+
+
+def test_size_and_zoom_reach_the_interactive_renderer_too():
+    """Standing rule: a plot option lands in both renderers or in neither.
+
+    ``size``/``zoom`` are inches statically and CSS pixels interactively, so they cross
+    as a ratio against the page rather than a conversion — but the same call still has
+    to make the interactive plot bigger, or the two renderers are different plots.
+    """
+    plain = _interactive_row()
+    big = _interactive_row(zoom=1.5)
+    assert big.frame_width > plain.frame_width
+    assert big.frame_height > plain.frame_height
+
+    slide = _interactive_row(size="slide")
+    assert slide.frame_width > plain.frame_width
+
+
+def test_font_scale_reaches_the_interactive_renderer_too():
+    plain = _interactive_row()
+    bigger = _interactive_row(font_scale=1.5)
+    as_pt = lambda f: float(f.title.text_font_size.removesuffix("pt"))  # noqa: E731
+    assert as_pt(bigger) > 1.3 * as_pt(plain)
+
+
+def test_fit_text_is_dropped_interactively_without_a_warning():
+    """Bokeh lays out its own text, so the pass is satisfied by construction here."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        _interactive_row(fit_text=False)
+
+
+def test_colorbar_orientation_defers_to_the_family_except_at_the_extremes():
+    """The aspect ratio only overrides where it is unambiguous.
+
+    A bar wants the panel's longer edge, but the two orientations cost different things
+    (horizontal is charged per row, vertical takes its width once), and aspect alone
+    cannot weigh that — so between the limits each family keeps its own default. Pinning
+    it here because my first attempt used a single 1.5 threshold, which flipped a
+    page-width GoM row (aspect 1.385) to vertical bars and lost half its panel area.
+    """
+    horizontal = tg.colorbar_is_horizontal
+    # a GoM-ish box sits between the limits: each family keeps its default
+    assert horizontal(1.385, default_horizontal=True) is True
+    assert horizontal(1.385, default_horizontal=False) is False
+    # far enough either way and the shape decides regardless
+    assert horizontal(3.5, default_horizontal=False) is True
+    assert horizontal(0.4, default_horizontal=True) is False
+    # and an explicit request always wins, whatever the shape
+    assert horizontal(0.4, default_horizontal=False, requested="horizontal") is True
+    assert horizontal(3.5, default_horizontal=True, requested="vertical") is False
+
+
+def test_an_overridden_orientation_also_resizes_the_figure():
+    """The override has to reach the *sizing*, not just the drawing.
+
+    Horizontal bars come out of a row's height and vertical ones out of its width, so a
+    figure sized for one and drawn with the other loses the difference. Asking a grid
+    for horizontal bars used to cost 37% of its panel, with no warning.
+    """
+    rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(3)]
+    beside = field_grid(rows, title="t")
+    below = field_grid(rows, title="t", colorbar_kwargs={"orientation": "horizontal"})
+    # the figure grew to hold the bars rather than the panels shrinking to make room
+    assert below.get_size_inches()[1] > beside.get_size_inches()[1]
+    assert _panel_box(below)[0] >= _panel_box(beside)[0] * 0.98
+
+
+def test_a_top_level_option_is_never_reported_as_a_nested_key():
+    """``size`` is both a plot option and ``tick_label_kwargs``' font-size key.
+
+    The "did you mean to put this inside ``*_kwargs``?" helper matched on key name
+    alone, so it told callers that ``size="slide"`` belonged inside
+    ``tick_label_kwargs``. Any top-level parameter sharing a nested key's name hits it.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _nested_owner
+
+    for option in ("size", "zoom", "fit_text", "font_scale", "figsize"):
+        assert _nested_owner(option) is None, option
+    # and the redirection still works for keys that really are nested
+    assert _nested_owner("label_size") == "colorbar_kwargs"
+    assert _nested_owner("shrink") == "colorbar_kwargs"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        _interactive_row(size="slide", zoom=1.2)
+
+
+# --- the summary diagrams -----------------------------------------------------------
+
+
+class _Rec:
+    """A metric record shaped as the summary diagrams expect."""
+
+    def __init__(self, label="run"):
+        self.label = label
+
+    def metrics(self):
+        return {
+            "bias": 0.1,
+            "rmse": 0.4,
+            "corr": 0.9,
+            "crmsd": 0.3,
+            "std_test": 1.1,
+            "std_reference": 1.0,
+        }
+
+
+def test_summary_scale_accepts_a_partial_override():
+    """``scale=`` is these diagrams' only per-role override, so it must take one role.
+
+    They have no ``*_kwargs`` dicts, and this used to replace the computed scale
+    outright rather than merge onto it — so naming one role raised ``KeyError`` on the
+    first role you had not named, which made the parameter unusable for its only
+    purpose.
+    """
+    from ocean_skill.plot.summary import paired, target, taylor
+
+    for fn in (taylor, target, paired):
+        fig = fn([_Rec()], title="T", scale={"title": 20.0})
+        titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+        assert titles, fn.__name__
+        sizes = {ax.title.get_fontsize() for ax in fig.axes if ax.get_title()}
+        assert 20.0 in sizes, fn.__name__
+
+
+def test_the_summary_key_clears_the_axis_labels_at_any_level():
+    """The key used to sit at a fixed offset while the labels it clears did not.
+
+    ``y=-0.04`` in figure fractions against x labels of a fixed *height*: raising the
+    level walked the key up into them. Same bug, same fix, as the row label that used to
+    sit at a constant ``x=-0.18``.
+    """
+    from ocean_skill.plot.summary import paired
+
+    for font_scale in (1.0, 1.6):
+        fig = paired([_Rec("a"), _Rec("b")], title="T", font_scale=font_scale)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        key = fig.legends[0].get_window_extent(renderer)
+        for ax in fig.axes:
+            label = ax.xaxis.label
+            if not label.get_text():
+                continue
+            assert key.y1 <= label.get_window_extent(renderer).y0 + 1.0, font_scale
