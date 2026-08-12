@@ -181,8 +181,9 @@ def _require_2d(da, role: str) -> None:
 
     A leftover axis means the selection or aggregation did not collapse it — most
     often ``aggregate={"time": {"groupby": "month", ...}}``, which produces twelve
-    fields where a single reference field is expected. Without this, xesmf fails
-    much later with a shape mismatch that says nothing about the cause.
+    fields where a single reference field is expected, or the ``resample`` spelling
+    of the same idea. Without this, xesmf fails much later with a shape mismatch
+    that says nothing about the cause.
     """
     # The horizontal dims are whatever lon/lat are defined *on* — not necessarily
     # named lat/lon: a curvilinear ROMS field is (eta_rho, xi_rho) with 2-D lon/lat
@@ -197,8 +198,10 @@ def _require_2d(da, role: str) -> None:
             f"the {role} field still has {extra} beyond its horizontal axes, so it "
             "is not a single map. Collapse it with aggregate= (e.g. "
             '{"time": "mean"}) or narrow it with select= (e.g. {"time": "2012-01"}); '
-            'a groupby such as {"groupby": "month"} deliberately keeps a dimension '
-            "and cannot be compared against a single field."
+            'a groupby such as {"groupby": "month"} -- or a resample such as '
+            '{"resample": "1MS"} -- deliberately keeps a dimension and cannot be '
+            "compared against a single field. To plot those panels as they are, "
+            "use a model-only field() rather than a comparison."
         )
 
 

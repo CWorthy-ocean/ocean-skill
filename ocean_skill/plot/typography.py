@@ -41,6 +41,8 @@ __all__ = [
     "ASPECT_LIMITS",
     "BASE_EXPONENT",
     "BASE_PT_AT_1IN",
+    "BLANK_CELL_WEIGHT",
+    "FACET_PANEL_W_FRACTION",
     "FONT_STEPS",
     "MAX_BASE_PT",
     "MIN_BASE_PT",
@@ -50,12 +52,17 @@ __all__ = [
     "PANEL_W_FRACTION",
     "REFERENCE_FIGSIZE",
     "REFERENCE_GRID",
+    "ROW_GAP_EM",
+    "ROW_TITLE_EM",
     "STEP",
+    "SUPTITLE_ALLOWANCE",
     "auto_figsize",
     "bokeh_fontsize",
     "bokeh_pt",
     "bokeh_scale",
     "clamp_aspect",
+    "facet_figsize",
+    "facet_layout",
     "frame_px",
     "reference_scale",
     "row_height",
@@ -145,6 +152,7 @@ def type_scale(
     ncols: int = 1,
     nrows: int = 1,
     font_scale: float = 1.0,
+    figure_ncols: int | None = None,
 ) -> dict[str, float]:
     """Concrete point size for every role in :data:`FONT_STEPS`.
 
@@ -156,14 +164,25 @@ def type_scale(
     to share with the map. The figure base comes from the cell width alone; see
     :data:`FONT_STEPS`.
 
+    ``figure_ncols`` overrides the column count used for that *figure* base only. It
+    exists because a suptitle spans the page whatever grid is beneath it, so its size
+    should not move with the column count -- and for the families that pre-date facet
+    grids it never did, there being no such thing as a figure here that was not three
+    columns wide. A one-column facet grid asking for the figure base off its own cell
+    would get a 17pt suptitle where every other figure in the same report has 9.
+    Callers with a real grid pass :data:`REFERENCE_GRID`'s column count; callers whose
+    "figure" genuinely is one cell (a bokeh frame, via :func:`bokeh_scale`) leave it
+    alone.
+
     ``font_scale`` multiplies every result, for "all of this a bit bigger" without
     disturbing the proportions -- the one knob that replaces retuning eleven numbers.
     """
     cell_w = figsize[0] / max(ncols, 1)
     cell_h = figsize[1] / max(nrows, 1)
+    figure_w = figsize[0] / max(figure_ncols or ncols, 1)
     bases = {
         "panel": _base(math.sqrt(max(cell_w, 1e-3) * max(cell_h, 1e-3))),
-        "figure": _base(cell_w),
+        "figure": _base(figure_w),
     }
     scale = {}
     for role, (base, steps) in FONT_STEPS.items():
@@ -216,6 +235,27 @@ ROW_OVERHEAD_EM_HORIZONTAL_CBAR = 11.1
 #: band of white above and below the map is the lesser evil.
 ASPECT_LIMITS = (0.3, 4.0)
 
+#: Vertical inches held back from the page for a suptitle, i.e. what the maps may not
+#: use. Named because :func:`row_height` and :func:`facet_layout` must agree about it —
+#: a layout chosen against the full page and then drawn into a shorter one is a layout
+#: chosen for a figure that does not exist.
+SUPTITLE_ALLOWANCE = 0.8
+
+#: Fraction of its cell a *facet* panel occupies horizontally, the counterpart of
+#: :data:`PANEL_W_FRACTION` for a grid whose colorbar is shared by every panel rather
+#: than drawn per row. With no bar in the cell, only the latitude labels and the
+#: inter-panel padding come out of it, so the panel keeps materially more of its width.
+FACET_PANEL_W_FRACTION = 0.88
+
+#: How hard :func:`facet_layout` argues against blank cells, per unit of blank *share*
+#: (blanks / cells). Pure aspect-matching will happily leave a 6-panel sequence as 5x2
+#: — four of ten cells empty — because those cells happen to be the right shape; for an
+#: ordered series of maps that reads as a mistake rather than as a layout. At 1.5 a
+#: layout must be a good deal closer in aspect to justify each blank it adds, which
+#: recovers the 3x2 a person would have drawn without forbidding ragged grids outright
+#: (7 panels as 3x3 is still right).
+BLANK_CELL_WEIGHT = 1.5
+
 
 def clamp_aspect(aspect: float) -> float:
     """``aspect`` brought inside :data:`ASPECT_LIMITS`, guarding against zero spans."""
@@ -234,6 +274,7 @@ def row_height(
     page_h: float = PAGE_H,
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
+    panel_w_fraction: float = PANEL_W_FRACTION,
 ) -> float:
     """Height (inches) of one row of maps: the map, plus the type around it.
 
@@ -246,11 +287,16 @@ def row_height(
     pass moves the answer by a fraction of the last move, so three passes agree to well
     under a tenth of a point.
 
+    ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being
+    the colorbar and labelling; it is a parameter rather than the constant it used to
+    be because a facet grid shares one colorbar across every panel instead of drawing
+    one per row, so its panels keep more of their cell (:data:`FACET_PANEL_W_FRACTION`).
+
     Capped so ``nrows`` rows still fit ``page_h``, leaving room for a suptitle. Past
     that cap the maps are squeezed, which is the honest outcome: the alternative is a
     figure taller than the page it has to print on.
     """
-    panel_w = page_w / max(ncols, 1) * PANEL_W_FRACTION
+    panel_w = page_w / max(ncols, 1) * panel_w_fraction
     panel_h = panel_w / clamp_aspect(aspect)
     em = ROW_OVERHEAD_EM_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD_EM
     cell_w = page_w / max(ncols, 1)
@@ -258,7 +304,103 @@ def row_height(
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height)) * font_scale
         height = panel_h + em * base / 72.0
-    return float(min(height, (page_h - 0.8) / max(nrows, 1)))
+    return float(min(height, (page_h - SUPTITLE_ALLOWANCE) / max(nrows, 1)))
+
+
+#: Vertical room, in ems, that each row *after the first* needs in a facet grid: the
+#: gap between one row's map and the next one's, and — when every row carries its own
+#: title — the title too. Both are much less than :data:`ROW_OVERHEAD_EM`, which sizes
+#: a row that is self-contained: a title above, longitude labels below, padding for
+#: both. In a facet grid those decorations are shared (titles on the top row, longitude
+#: labels on the bottom), so charging every row for a full set leaves the rows visibly
+#: adrift from each other — most of a panel's height of white between them on a 3x6.
+ROW_GAP_EM = 2.6
+ROW_TITLE_EM = 2.4
+
+
+def facet_figsize(
+    aspect: float,
+    *,
+    nrows: int,
+    ncols: int,
+    title_every_row: bool = True,
+    page_w: float = PAGE_W,
+    page_h: float = PAGE_H,
+    font_scale: float = 1.0,
+    panel_w_fraction: float = FACET_PANEL_W_FRACTION,
+) -> tuple[float, float]:
+    """Figure size for a facet grid, charging shared decorations only once.
+
+    :func:`auto_figsize` multiplies one self-contained row's height by the row count,
+    which is right for a stack of independent rows and wrong for a grid whose rows
+    share their titles and axis labels — there the second and later rows need a gap and
+    (sometimes) a title, not a title *and* a set of longitude labels *and* the padding
+    for both.
+
+    Same circular solve as :func:`row_height`: the overhead is a multiple of the font
+    size, the font size comes from the cell size, and the cell size is what is being
+    solved for. Three passes settle it for the same reason.
+
+    Capped at the page less :data:`SUPTITLE_ALLOWANCE`. A one-column grid of wide maps
+    hits that cap and is squeezed exactly as it was before this function existed, so
+    the saving only appears where the figure was not page-limited to begin with —
+    which is where the slack actually was.
+    """
+    panel_w = page_w / max(ncols, 1) * panel_w_fraction
+    panel_h = panel_w / clamp_aspect(aspect)
+    nrows = max(nrows, 1)
+    extra_em = ROW_GAP_EM + (ROW_TITLE_EM if title_every_row else 0.0)
+    em = ROW_OVERHEAD_EM + (nrows - 1) * extra_em
+    cell_w = page_w / max(ncols, 1)
+
+    height = panel_h * nrows
+    for _ in range(3):
+        base = _base(math.sqrt(cell_w * height / nrows)) * font_scale
+        height = panel_h * nrows + em * base / 72.0
+    return (page_w, float(min(height, page_h - SUPTITLE_ALLOWANCE)))
+
+
+def facet_layout(
+    n: int,
+    aspect: float,
+    *,
+    page_w: float = PAGE_W,
+    page_h: float = PAGE_H,
+    blank_weight: float = BLANK_CELL_WEIGHT,
+) -> tuple[int, int]:
+    """Return ``(ncols, nrows)`` for ``n`` panels of a map with the given aspect ratio.
+
+    The orientation of a facet grid is not a free choice: a wide domain (a Gulf of
+    Mexico box, ``aspect`` ~4) stacks down the page one panel per row, while a tall one
+    (a California Current box, ~0.35) spreads across it, and getting this backwards
+    wastes most of the page on white space. So rather than a ``ncols=`` parameter with a
+    guessed default, every candidate is scored and the best one returned.
+
+    The score is how far the resulting *cell* is from the shape the map wants, measured
+    as a log ratio so that being twice as wide as wanted costs the same as being half as
+    wide — an asymmetric error would bias every domain toward one orientation. Blank
+    cells are then charged for (:data:`BLANK_CELL_WEIGHT`), because these panels are
+    normally an ordered series and a grid with a third of its cells empty reads as a
+    bug in a way that a merely imperfect aspect ratio does not.
+
+    The page height available is the page less :data:`SUPTITLE_ALLOWANCE`, matching
+    :func:`row_height`, so the layout is chosen against the space the figure will
+    actually be drawn into.
+    """
+    if n <= 0:
+        raise ValueError(f"a facet grid needs at least one panel, got {n}")
+    want = clamp_aspect(aspect)
+    usable_h = max(page_h - SUPTITLE_ALLOWANCE, 1e-3)
+
+    best, best_cost = (1, n), math.inf
+    for ncols in range(1, n + 1):
+        nrows = math.ceil(n / ncols)
+        cell_aspect = (page_w / ncols) / (usable_h / nrows)
+        cells = ncols * nrows
+        cost = abs(math.log(cell_aspect / want)) + blank_weight * (cells - n) / cells
+        if cost < best_cost:
+            best, best_cost = (ncols, nrows), cost
+    return best
 
 
 def auto_figsize(
@@ -270,6 +412,7 @@ def auto_figsize(
     page_h: float = PAGE_H,
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
+    panel_w_fraction: float = PANEL_W_FRACTION,
 ) -> tuple[float, float]:
     """Page-width figure size for ``nrows`` rows of maps of the given aspect ratio.
 
@@ -284,6 +427,7 @@ def auto_figsize(
         page_h=page_h,
         font_scale=font_scale,
         horizontal_colorbar=horizontal_colorbar,
+        panel_w_fraction=panel_w_fraction,
     )
     return (page_w, height * max(nrows, 1))
 
