@@ -51,6 +51,41 @@ runs.summary()                        # Taylor + target diagrams side by side
 runs.write_metrics("metrics/")        # tidy CSV, one row per comparison
 ```
 
+One source alone just plots — `osk.field` is the same pipeline without a reference,
+most useful when the reduction leaves a time axis standing, which becomes the panels:
+
+```python
+run = osk.field(
+    "GOM_bgc",
+    NITRATE,
+    select={"time": slice("2012-01", "2012-06"), "depth": "surface"},
+    aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+)
+run.plot()                            # six monthly means, one shared colour scale
+```
+
+`resample` gives consecutive periods (`Jan 2012`, `Feb 2012`, …); `{"groupby": "month"}`
+gives a climatology (`Jan`, `Feb`, …, every January of the record in one panel). The
+panels label themselves differently, so the two can't be confused on the page. A
+selection that starts or ends mid-period warns, since those panels average over part of
+a month but are labelled like whole ones. The grid's orientation follows the domain's
+aspect ratio — a wide box stacks down the page, a tall one spreads across it.
+
+Ask for several depths and the months become the columns, the depths the rows:
+
+```python
+osk.field(
+    "GOM_bgc",
+    NITRATE,
+    select={"time": slice("2012-01", "2012-06"), "depth": [0, 50, 100]},
+    aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+).plot()                              # 3 depths x 6 months, one colour scale per depth
+```
+
+Each depth row keeps its own colour scale, since nitrate at 100 m and at the surface
+span unrelated ranges and one scale across both would flatten the shallow rows — pass
+`shared_limits=True` if the levels you picked really do share a range.
+
 ## Catalogs
 
 Sources are described by [intake](https://intake.readthedocs.io) v2 catalogs, found

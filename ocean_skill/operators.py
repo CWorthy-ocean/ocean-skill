@@ -11,8 +11,17 @@ their sum), or a registered derived diagnostic.
 ``{"time": "2012-01"}``. Narrows a dimension; does not remove it.
 
 **Aggregation** — how dimensions collapse. ``{"time": "mean"}``, a climatology
-``{"time": {"groupby": "month", "reduce": "mean"}}``, a percentile
+``{"time": {"groupby": "month", "reduce": "mean"}}``, consecutive periods
+``{"time": {"resample": "1MS", "reduce": "mean"}}``, a percentile
 ``{"time": {"reduce": "quantile", "q": 0.9}}``.
+
+``groupby`` and ``resample`` are the two ways to keep an axis standing rather than
+collapse it, and they are not the same axis: ``groupby`` bins by *label*, giving a
+climatology (every January of the record averaged into one field), while ``resample``
+bins by *interval*, giving consecutive periods (January 2012, February 2012, ...).
+On a single-year run they coincide, which is exactly why they are spelled
+differently — and why the result carries a different dimension either way, so
+nothing downstream has to be told which was used.
 
 The design goal is that adding an operator costs no code. Two things make that work:
 
@@ -333,12 +342,18 @@ def aggregate(da, spec: dict[str, Any] | None):
     """Reduce ``da`` over each dimension in ``spec``. Returns ``da`` unchanged if empty.
 
     Each value is either a reduction name (``"mean"``) or a dict with ``reduce`` plus
-    optional ``groupby`` and any keyword the reduction takes::
+    optional ``groupby`` *or* ``resample``, and any keyword the reduction takes::
 
         {"time": "mean"}
-        {"time": {"groupby": "month", "reduce": "mean"}}     # climatology
+        {"time": {"groupby": "month", "reduce": "mean"}}     # climatology: 12 fields
+        {"time": {"resample": "1MS", "reduce": "mean"}}      # consecutive months
         {"time": {"reduce": "quantile", "q": 0.9}}
         {"depth": {"reduce": "integrate"}}
+
+    ``groupby`` and ``resample`` both *keep* an axis rather than collapsing it, and
+    they keep different ones — see this module's docstring. Setting both is an error
+    rather than a precedence rule, since either alone is a complete answer and
+    silently honouring one would give a plausible figure of the wrong thing.
 
     Dimensions absent from ``da`` are skipped rather than raising: a selection may
     already have collapsed one, and a spec shared across variables should not fail on
@@ -384,13 +399,91 @@ def _dim_kwarg(fn) -> str:
     return "coord" if "coord" in params and "dim" not in params else "dim"
 
 
+#: A resample bin holding less than this share of the median bin's sample count is
+#: reported by :func:`_warn_short_bins`. The threshold has to clear the *legitimate*
+#: variation between bins — a 28-day February against a 31-day median is 0.90 — while
+#: still catching a selection that starts or ends mid-period, which halves a bin to
+#: ~0.5. 0.8 sits between the two with room on either side.
+SHORT_BIN_FRACTION = 0.8
+
+
+def _bin_counts(coord, freq: str):
+    """Return the number of samples per resample bin, read off ``coord`` alone.
+
+    Deliberately not ``da.resample(...).count()``: that walks the *data*, which for a
+    lazy multi-file model run is the entire read, and this is a check that has to be
+    cheap enough to run unconditionally. A time coordinate is a small in-memory index
+    and already carries everything the count needs.
+    """
+    import xarray as xr
+
+    dim = str(coord.dims[0])
+    return xr.ones_like(coord, dtype=float).resample({dim: freq}).sum()
+
+
+def _bin_label(value) -> str:
+    """Return a resample bin's start as ``YYYY-MM-DD``, for numpy or cftime datetimes.
+
+    Slicing the string representation rather than calling ``strftime`` because the two
+    datetime families do not share one: a ROMS run on a 360-day calendar carries cftime
+    objects, and both spell their first ten characters the same way.
+    """
+    return str(value)[:10]
+
+
+def _warn_short_bins(coord, freq: str, dim: str) -> None:
+    """Warn about resample bins the selection only partly covers.
+
+    Selecting a time range that does not land on period boundaries — 15 February to
+    15 May, resampled monthly — silently yields a first and last bin averaged over
+    half as many samples as the rest. The panels are still labelled ``Feb 2012`` and
+    ``May 2012``, and a half-month mean sitting beside full ones under one shared
+    colour scale is the kind of wrong number that looks right on a map.
+
+    Compared against the *median* bin rather than the longest: month lengths genuinely
+    differ, and flagging February every time would train the warning away.
+    """
+    counts = _bin_counts(coord, freq)
+    values = [float(v) for v in counts.values]
+    if len(values) < 2:
+        return  # one bin has nothing to be short against
+    median = sorted(values)[len(values) // 2]
+    if median <= 0:
+        return
+    short = [
+        (_bin_label(label), int(n))
+        for label, n in zip(counts[dim].values, values, strict=True)
+        if n < SHORT_BIN_FRACTION * median
+    ]
+    if not short:
+        return
+    detail = ", ".join(f"{label} has {n}" for label, n in short)
+    warnings.warn(
+        f"resampling {dim!r} to {freq!r} leaves {len(short)} of {len(values)} bins "
+        f"with fewer samples than the usual {median:g}: {detail}. Those means are "
+        "over part of a period but are labelled like whole ones — narrow the "
+        "selection to whole periods, or drop the short bins, if that is not what "
+        "you want.",
+        stacklevel=2,
+    )
+
+
 def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
-    """Apply one reduction (optionally after a groupby) along ``dim``."""
+    """Apply one reduction (optionally after a groupby or resample) along ``dim``."""
     opts = {"reduce": how} if isinstance(how, str) else dict(how)
     group = opts.pop("groupby", None)
+    freq = opts.pop("resample", None)
     name = opts.pop("reduce", None)
     if not name:
         raise ValueError(f"aggregate spec for {dim!r} needs a 'reduce', got {how!r}")
+    if group is not None and freq is not None:
+        raise ValueError(
+            f"aggregate spec for {dim!r} sets both 'groupby' ({group!r}) and "
+            f"'resample' ({freq!r}), which are different reductions: groupby bins by "
+            "label (a climatology -- every January of the record in one field), "
+            "resample bins by interval (consecutive periods -- January 2012, "
+            "February 2012, ...). Pick one."
+        )
 
     attrs = dict(da.attrs)
     target = dim
@@ -402,6 +495,14 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
         # A climatology groups along the dim, then reduces *within* each group, so
         # the reduction still names the original dim.
         da = da.groupby(f"{dim}.{group}")
+        weights = None
+    elif freq is not None:
+        # Resampling keeps the dim's *name* (unlike groupby, which renames it to the
+        # grouping), so the result is still indexed by time -- consecutive period
+        # starts rather than every original step.
+        if target in da.coords:
+            _warn_short_bins(da[target], freq, target)
+        da = da.resample({target: freq})
         weights = None
 
     if weights is not None:

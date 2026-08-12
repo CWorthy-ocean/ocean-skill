@@ -20,7 +20,7 @@ __all__ = ["FAMILIES", "PlotSpec"]
 #: Plot families a renderer may implement. A renderer need not support all of them —
 #: :func:`ocean_skill.plot.registry.render` reports clearly when one is missing, and the
 #: holoviews renderer deliberately delegates ``taylor`` back to matplotlib.
-FAMILIES = ("field_row", "field_grid", "taylor", "target", "paired")
+FAMILIES = ("field_row", "field_grid", "field_facet", "taylor", "target", "paired")
 
 
 @dataclass
@@ -33,7 +33,10 @@ class PlotSpec:
         One of :data:`FAMILIES`.
     items
         One dict per comparison: ``aligned`` (the test/reference/difference Dataset),
-        plus optional ``metrics``, ``units``, ``standard_name`` and ``label``.
+        plus optional ``metrics``, ``units``, ``standard_name`` and ``label``. The
+        ``field_facet`` family is the exception, carrying a single item with ``field``
+        (one DataArray) and ``facet_dim`` instead of ``aligned`` — it draws one source
+        rather than a pair, so there is no aligned trio to carry.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.

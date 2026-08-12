@@ -276,6 +276,120 @@ def _field_grid(
     return layout
 
 
+def _field_facet(
+    item: dict[str, Any],
+    geo=True,
+    shared_axes: bool = True,
+    title: str | None = None,
+    ncols: int | None = None,
+    shared_limits: bool = False,
+    font_scale: float = 1.0,
+    **_,
+):
+    """One interactive map per value of the facet axis: a field over time, in order.
+
+    The interactive twin of :func:`ocean_skill.plot.matplotlib_renderer.field_facet`,
+    and the same two commitments hold. Every panel shares one colour scale, because
+    the panels are one quantity at different times and per-panel scaling would hide
+    exactly the change the figure exists to show. Panel titles come from the facet
+    coordinate through the shared :func:`~ocean_skill.plot.matplotlib_renderer.
+    facet_labels`, so a consecutive-month figure says ``Jan 2012`` here too and cannot
+    be mistaken for the climatology that says ``Jan``.
+
+    The column count also comes from the shared
+    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
+    same panels the same way. Its page-fitting argument is weaker here — a bokeh layout
+    grows a scrollbar rather than a smaller panel — but a plot that rearranges itself
+    when you switch renderer is not the same plot drawn interactively.
+
+    With a second facet axis (``row_dim``, a depth) the grid is fixed at levels by
+    periods and each row keeps its own colour range, as it does statically. The level
+    joins each panel's title rather than sitting rotated at the row's left edge, bokeh
+    having no equivalent of that floating text — the same substitution
+    :func:`_field_row` makes for a field grid's ``row_label``.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _aspect_of, _limits, facet_labels
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    field = item["field"]
+    facet_dim = item.get("facet_dim")
+    row_dim = item.get("row_dim")
+    for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
+        if value is not None and value not in field.dims:
+            raise ValueError(
+                f"{name} {value!r} is not a dimension of the field ({list(field.dims)})"
+            )
+    n = int(field.sizes[facet_dim]) if facet_dim else 1
+    nrows = int(field.sizes[row_dim]) if row_dim else 1
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    seq, _div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+
+    def _clim(sub):
+        lo, hi = _limits(sub)
+        return (max(lo, 1e-6) if log else lo, hi)
+
+    # One scale per row when the rows are levels, matching the static renderer: depths
+    # have unrelated ranges, and one scale across them flattens the shallow rows.
+    per_row = row_dim is not None and not shared_limits
+    clims = [
+        _clim(field.isel({row_dim: r})) if per_row else _clim(field)
+        for r in range(nrows)
+    ]
+
+    labels = (
+        facet_labels(field[facet_dim])
+        if facet_dim and facet_dim in field.coords
+        else [""] * n
+    )
+    row_labels = (
+        facet_labels(field[row_dim])
+        if row_dim and row_dim in field.coords
+        else [""] * nrows
+    )
+    if row_dim is not None:
+        ncols = n
+    elif ncols is None:
+        ncols, _nrows = facet_layout(n, _aspect_of(field))
+    ncols = max(int(ncols), 1)
+
+    def _panel(row, col):
+        if row_dim is not None:
+            sub = field.isel({row_dim: row, facet_dim: col})
+            # bokeh has no rotated row label, so the level joins the panel's own
+            # title -- the same move _field_row makes for a field grid's row_label
+            title = f"{row_labels[row]} — {labels[col]}"
+        else:
+            sub = field.isel({facet_dim: col}) if facet_dim else field
+            title = str(labels[col])
+        return _quadmesh(
+            sub,
+            title=title,
+            cmap=seq,
+            clim=clims[row],
+            units=units,
+            geo=geo,
+            log=log,
+            font_scale=font_scale,
+        )
+
+    panels = [
+        _panel(row, col)
+        for row in range(nrows)
+        for col in range(ncols if row_dim is not None else n)
+    ]
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
 #: tab10 in matplotlib's own order — the palette ``summary._group_styles`` assigns by
 #: level index, so pinning the same hexes here keeps colours identical across renderers.
 _TAB10 = (
@@ -498,6 +612,9 @@ def render(spec, **kwargs: Any):
         "domain",
         "mark",
         "metrics",
+        # bokeh labels every panel's own axes and has no notion of borrowing a
+        # neighbour's, so there is nothing for this to switch off
+        "shared_axis_labels",
         *_STATIC_ONLY_KWARGS,
     ):
         opts.pop(drop, None)
@@ -506,6 +623,8 @@ def render(spec, **kwargs: Any):
         return _field_row(spec.single, **opts)
     if family == "field_grid":
         return _field_grid(spec.items, **opts)
+    if family == "field_facet":
+        return _field_facet(spec.single, **opts)
     if family == "target":
         return _target(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")

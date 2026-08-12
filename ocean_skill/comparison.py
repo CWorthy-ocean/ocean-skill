@@ -16,7 +16,14 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["SURFACE", "Comparison", "ComparisonSet", "compare", "is_surface_request"]
+__all__ = [
+    "SURFACE",
+    "Comparison",
+    "ComparisonSet",
+    "compare",
+    "is_surface_request",
+    "prepare_source",
+]
 
 
 #: Sentinel meaning "the model's own top level" as distinct from an explicit request
@@ -242,6 +249,65 @@ def _prepare(
     return units.convert_units(da), da.attrs.get("actual_depth")
 
 
+def prepare_source(
+    source: str,
+    variable: Any,
+    select: dict[str, Any] | None,
+    aggregate: dict[str, Any] | None,
+    *,
+    use_cache: bool = True,
+    refresh: bool = False,
+):
+    """Reduce one source to its prepared field, via the lane cache.
+
+    Keyed on this source alone, so the same model/variable/depth is prepared once
+    however many references it is compared against — the vertical transform is the
+    pipeline's most expensive step and does not depend on the other side of the
+    comparison at all. That independence is also why this is a module-level function
+    rather than a :class:`Comparison` method: a model-only
+    :class:`~ocean_skill.field.Field` wants exactly this lane and exactly this cache
+    entry, and a second copy of the keying rules would be a second chance to key them
+    differently.
+
+    Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
+    carry the variable.
+    """
+    import ocean_skill as osk
+    from ocean_skill import cache as _cache
+    from ocean_skill.catalog import resolve
+
+    key = _cache.key_for_prepared(
+        source=source,
+        variable=variable,
+        select={**(select or {}), "_aggregate": aggregate},
+    )
+    if use_cache and not refresh:
+        hit = _cache.load_field(key)
+        if hit is not None:
+            return hit
+
+    da, depth = _prepare(
+        osk.read(source),
+        resolve(source).metadata,
+        variable,
+        dict(select or {}),
+        aggregate,
+    )
+    # Computed here rather than left lazy: the vertical transform is the most
+    # expensive step in the pipeline, and a dask-backed lane re-runs it on every
+    # consumer that touches values -- the metrics, then each panel of each plot.
+    # to_zarr below computes the same graph anyway and discards the result, so
+    # this costs nothing when caching is on and saves a full recompute when a
+    # save fails or caching is off. See align() for the same move on the pair.
+    if da is not None:
+        da = da.load()
+    # A miss is cached; "this source doesn't carry this variable" is not, since
+    # that is cheap to rediscover and would otherwise persist past a fixed catalog.
+    if use_cache and da is not None:
+        _cache.save_field(key, da, depth)
+    return da, depth
+
+
 class Comparison:
     """One reference↔test comparison for a single variable at a single depth."""
 
@@ -316,47 +382,15 @@ class Comparison:
         return _cache.enabled() if self.cache is None else self.cache
 
     def _prepare_lane(self, source: str, use_cache: bool, refresh: bool):
-        """Reduce one source to its comparable 2-D field, via the lane cache.
-
-        Keyed on this source alone, so the same model/variable/depth is prepared once
-        however many references it is compared against — the vertical transform is the
-        pipeline's most expensive step and does not depend on the other side of the
-        comparison at all.
-        """
-        import ocean_skill as osk
-        from ocean_skill import cache as _cache
-        from ocean_skill.catalog import resolve
-
-        key = _cache.key_for_prepared(
-            source=source,
-            variable=self.variable,
-            select={**self.select, "_aggregate": self.aggregate},
-        )
-        if use_cache and not refresh:
-            hit = _cache.load_field(key)
-            if hit is not None:
-                return hit
-
-        da, depth = _prepare(
-            osk.read(source),
-            resolve(source).metadata,
+        """Reduce one source to its comparable 2-D field, via the lane cache."""
+        return prepare_source(
+            source,
             self.variable,
             self.select,
             self.aggregate,
+            use_cache=use_cache,
+            refresh=refresh,
         )
-        # Computed here rather than left lazy: the vertical transform is the most
-        # expensive step in the pipeline, and a dask-backed lane re-runs it on every
-        # consumer that touches values -- the metrics, then each panel of each plot.
-        # to_zarr below computes the same graph anyway and discards the result, so
-        # this costs nothing when caching is on and saves a full recompute when a
-        # save fails or caching is off. See align() for the same move on the pair.
-        if da is not None:
-            da = da.load()
-        # A miss is cached; "this source doesn't carry this variable" is not, since
-        # that is cheap to rediscover and would otherwise persist past a fixed catalog.
-        if use_cache and da is not None:
-            _cache.save_field(key, da, depth)
-        return da, depth
 
     # -- pipeline ---------------------------------------------------------------
     def align(self, *, refresh: bool = False):
@@ -655,7 +689,10 @@ def compare(
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
     ``aggregate`` names how dimensions collapse (default ``{"time": "mean"}``);
-    ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology.
+    ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology, and
+    ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep
+    an axis standing, which a comparison cannot use — see
+    :func:`ocean_skill.field.field` for the model-only path that plots those as panels.
 
     ``variables`` is required, deliberately not inferred from the sources' catalog
     metadata: a reference or test with several declared variables gives no way to
