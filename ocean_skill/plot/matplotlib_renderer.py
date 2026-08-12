@@ -16,11 +16,24 @@ import numpy as np
 
 from ocean_skill.colormaps import cmaps_for, norm_for
 from ocean_skill.plot.registry import register_renderer
+from ocean_skill.plot.typography import (
+    MIN_PT,
+    PAGE_H,
+    PAGE_W,
+    auto_figsize,
+    reference_scale,
+    type_scale,
+)
+
+# aliased: field_grid already has a row_height *parameter*, which is the caller's
+# override of exactly this
+from ocean_skill.plot.typography import row_height as _typographic_row_height
 
 __all__ = ["field_grid", "field_row", "render"]
 
-PAGE_W = 8.5  # inches; figures must fit a portrait page
-PAGE_H = 11.0
+# PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
+# which is where they are used to decide sizes; re-exported under their old names.
+__all__ += ["PAGE_H", "PAGE_W"]
 
 
 def _limits(*arrays, lo: float = 10, hi: float = 90) -> tuple[float, float]:
@@ -49,6 +62,13 @@ DEFAULT_METRIC_KEYS = ("bias", "rmse", "corr")
 # wholesale — passing e.g. title_kwargs={"fontsize": 10} doesn't require also
 # supplying every other title property. Each maps onto exactly one matplotlib/cartopy
 # call, so any kwarg that call accepts works, not just a hand-picked subset.
+#
+# Font *sizes* are deliberately absent from these dicts: they come from
+# ocean_skill.plot.typography, which derives all of them from the figure's own geometry
+# so that changing figsize (or the row count) does not silently leave eleven hand-tuned
+# point sizes wrong. _style_defaults() below folds the two together. Everything that is
+# genuinely a fixed choice — a colour, a line width, a colorbar's orientation — stays
+# here as a literal.
 #: ``y`` is pinned rather than left to matplotlib's automatic title placement, which
 #: is broken over a cartopy GeoAxES carrying gridline labels: matplotlib 3.11 places
 #: the title above the union of the axes' children's bboxes, cartopy contributes an
@@ -58,22 +78,20 @@ DEFAULT_METRIC_KEYS = ("bias", "rmse", "corr")
 #: used both by our own ``save=`` and by Jupyter's inline backend, silently crops the
 #: leftmost column out of the figure. Supplying any explicit ``y`` skips the automatic
 #: placement that computes the infinity. Identical output on 3.10, where it is a no-op.
-DEFAULT_TITLE_KWARGS: dict[str, Any] = {"fontsize": 8, "y": 1.0}
+DEFAULT_TITLE_KWARGS: dict[str, Any] = {"y": 1.0}
 DEFAULT_GRIDLINE_KWARGS: dict[str, Any] = {
     "linewidth": 0.2,
     "color": "0.6",
     "alpha": 0.6,
 }
-DEFAULT_TICK_LABEL_KWARGS: dict[str, Any] = {"size": 5}
+DEFAULT_TICK_LABEL_KWARGS: dict[str, Any] = {}
 DEFAULT_ROW_LABEL_KWARGS: dict[str, Any] = {
-    "fontsize": 7,
     "rotation": 90,
     "va": "center",
     "ha": "center",
     "weight": "normal",
 }
 DEFAULT_METRICS_KWARGS: dict[str, Any] = {
-    "fontsize": 5.5,
     "va": "bottom",
     "ha": "left",
     "bbox": {
@@ -85,39 +103,99 @@ DEFAULT_METRICS_KWARGS: dict[str, Any] = {
     },
 }
 #: field_row draws one row per figure (page-width, horizontal bars below); field_grid
-#: stacks several rows (vertical bars beside them, smaller) — same keys, different
-#: starting point.
+#: stacks several rows (vertical bars beside them) — same keys, different orientation.
+#: ``shrink`` is 1.0 in both because :func:`_align_colorbars` re-fits each bar to the
+#: panels it belongs to after the layout settles; a shrink below 1 now means "this
+#: fraction of the panels' own extent", not of the grid cell they sit in.
 DEFAULT_COLORBAR_KWARGS_ROW: dict[str, Any] = {
     "orientation": "horizontal",
     "pad": 0.04,
-    "shrink": 0.85,
+    "shrink": 1.0,
     "aspect": 30,
-    "label_size": 7,
 }
 DEFAULT_COLORBAR_KWARGS_GRID: dict[str, Any] = {
     "orientation": "vertical",
     "pad": 0.015,
-    "shrink": 0.8,
+    "shrink": 1.0,
     "aspect": 15,
-    "label_size": 6,
 }
-DEFAULT_SUPTITLE_KWARGS_ROW: dict[str, Any] = {"fontsize": 9}
-DEFAULT_SUPTITLE_KWARGS_GRID: dict[str, Any] = {"fontsize": 10}
+DEFAULT_SUPTITLE_KWARGS_ROW: dict[str, Any] = {}
+DEFAULT_SUPTITLE_KWARGS_GRID: dict[str, Any] = {}
+
+#: Reference sizes, i.e. what a default page-width ``field_row`` gets. There is no
+#: literal default dict to point at any more, so this is what the docs quote and what
+#: :func:`_nested_owner` matches option names against.
+REFERENCE_SCALE: dict[str, float] = reference_scale()
 
 #: Which nested ``*_kwargs`` dict each styling key belongs to, so an option passed one
-#: level too high can be pointed at its home rather than just rejected.
+#: level too high can be pointed at its home rather than just rejected. Built from the
+#: non-font defaults plus the font keys, since neither alone lists every valid key.
 _NESTED_KWARGS: dict[str, dict[str, Any]] = {
-    "colorbar_kwargs": {**DEFAULT_COLORBAR_KWARGS_ROW, **DEFAULT_COLORBAR_KWARGS_GRID},
-    "title_kwargs": DEFAULT_TITLE_KWARGS,
-    "gridline_kwargs": DEFAULT_GRIDLINE_KWARGS,
-    "tick_label_kwargs": DEFAULT_TICK_LABEL_KWARGS,
-    "row_label_kwargs": DEFAULT_ROW_LABEL_KWARGS,
-    "metrics_kwargs": DEFAULT_METRICS_KWARGS,
-    "suptitle_kwargs": {
-        **DEFAULT_SUPTITLE_KWARGS_ROW,
-        **DEFAULT_SUPTITLE_KWARGS_GRID,
+    "colorbar_kwargs": {
+        **DEFAULT_COLORBAR_KWARGS_ROW,
+        **DEFAULT_COLORBAR_KWARGS_GRID,
+        "label_size": REFERENCE_SCALE["colorbar_label"],
+        "tick_labelsize": REFERENCE_SCALE["colorbar_tick"],
     },
+    "title_kwargs": {**DEFAULT_TITLE_KWARGS, "fontsize": REFERENCE_SCALE["title"]},
+    "gridline_kwargs": DEFAULT_GRIDLINE_KWARGS,
+    "tick_label_kwargs": {"size": REFERENCE_SCALE["tick_label"]},
+    "row_label_kwargs": {
+        **DEFAULT_ROW_LABEL_KWARGS,
+        "fontsize": REFERENCE_SCALE["row_label"],
+    },
+    "metrics_kwargs": {
+        **DEFAULT_METRICS_KWARGS,
+        "fontsize": REFERENCE_SCALE["metrics"],
+    },
+    "suptitle_kwargs": {"fontsize": REFERENCE_SCALE["suptitle"]},
 }
+
+
+def _scale_for(
+    figsize: tuple[float, float], *, nrows: int = 1, font_scale: float = 1.0
+) -> dict[str, float]:
+    """Type scale for a figure of ``figsize`` holding ``nrows`` rows of three maps."""
+    return type_scale(figsize, ncols=3, nrows=nrows, font_scale=font_scale)
+
+
+def _style_defaults(
+    scale: dict[str, float], *, horizontal_colorbar: bool
+) -> dict[str, dict[str, Any]]:
+    """Build the seven ``*_kwargs`` defaults: fixed choices plus figure-sized type.
+
+    Returned rather than held at module level because half of each dict now depends on
+    the figure being drawn. The caller's own ``*_kwargs`` merge on top of these, so an
+    explicit ``title_kwargs={"fontsize": 11}`` still wins outright — automatic sizing is
+    a better *default*, not a new constraint.
+    """
+    cbar = dict(
+        DEFAULT_COLORBAR_KWARGS_ROW
+        if horizontal_colorbar
+        else DEFAULT_COLORBAR_KWARGS_GRID
+    )
+    # tick_labelsize joins label_size here rather than in the literal defaults because
+    # it was previously absent altogether: the bar's tick labels fell back to rcParams'
+    # 10pt while every other size in the figure was 5-9, which read as a different
+    # figure's colorbar pasted on. Every text size in the figure now comes from one
+    # scale, so that cannot recur silently.
+    cbar["label_size"] = scale["colorbar_label"]
+    cbar["tick_labelsize"] = scale["colorbar_tick"]
+    return {
+        "colorbar_kwargs": cbar,
+        "title_kwargs": {**DEFAULT_TITLE_KWARGS, "fontsize": scale["title"]},
+        "gridline_kwargs": dict(DEFAULT_GRIDLINE_KWARGS),
+        "tick_label_kwargs": {
+            **DEFAULT_TICK_LABEL_KWARGS,
+            "size": scale["tick_label"],
+        },
+        "row_label_kwargs": {
+            **DEFAULT_ROW_LABEL_KWARGS,
+            "fontsize": scale["row_label"],
+        },
+        "metrics_kwargs": {**DEFAULT_METRICS_KWARGS, "fontsize": scale["metrics"]},
+        "suptitle_kwargs": {"fontsize": scale["suptitle"]},
+    }
 
 
 def _merged(
@@ -154,7 +232,95 @@ def _draw_colorbar(
         cbar.set_label(label, **label_kw)
     if tick_kw:
         cbar.ax.tick_params(**tick_kw)
+    # Remember which panels this bar belongs to (and how it is oriented) so
+    # _align_colorbars can re-fit it to them once the layout is final.
+    cbar.ax._osk_cbar_parents = list(np.atleast_1d(ax).ravel())
+    cbar.ax._osk_cbar_horizontal = cbar_kw.get("orientation") == "horizontal"
+    cbar.ax._osk_cbar_shrink = float(cbar_kw.get("shrink", 1.0))
+    cbar.ax._osk_cbar_aspect = float(cbar_kw.get("aspect", 20))
     return cbar
+
+
+def _align_colorbars(fig, renderer=None) -> None:
+    """Re-fit every colorbar to the drawn extent of the panels it describes.
+
+    ``fig.colorbar(im, ax=...)`` under constrained_layout sizes the bar to the
+    *gridspec cell*, which is taller (or wider) than the map inside it: the cell also
+    holds the title above and the longitude labels below, and a cartopy GeoAxes has a
+    fixed aspect, so the map shrinks inside its own slot as well. A vertical bar then
+    overshoots the map at both ends — visibly so, since it is the map's own colour
+    scale and reads as its ruler.
+
+    Nothing in the layout engine expresses "match that box", so the fix is to measure
+    the panels after the layout has settled and set the bar's long axis to their union:
+    top to top, bottom to bottom, ignoring the title and axis labelling. ``shrink``
+    still applies, now as a fraction of *that* extent, centred.
+
+    Thickness then comes from ``aspect`` — but from the *shortest* bar's new length, one
+    value for every bar of the same orientation in the figure, rather than each bar's
+    own. A field row pairs one bar spanning two panels with one spanning a single panel,
+    and length/aspect applied bar-by-bar makes the long one two and a half times
+    fatter than its neighbour.
+
+    The gap to the panels is levelled the same way, and for the same reason: ``pad`` is
+    a fraction of the parent's *own* size along the direction the bar is stolen from, so
+    the two-panel bar in a field grid is padded off a span twice as wide as the
+    difference bar beside it and ends up with twice the gap. One gap in inches, the
+    widest of the group, is used for every bar of that orientation.
+
+    The layout engine is stood down first, otherwise the next draw — including the one
+    inside ``savefig`` and Jupyter's inline backend — recomputes the positions and
+    undoes this.
+    """
+    caxes = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    if not caxes:
+        return
+    if renderer is None:
+        fig.canvas.draw()
+    fig_w, fig_h = fig.get_size_inches()
+    # get_position() is the *active* position, so it reflects the shrinking a
+    # fixed-aspect GeoAxes does to itself — but only once a draw has applied it.
+    fitted = {}
+    for cax in caxes:
+        boxes = [p.get_position() for p in cax._osk_cbar_parents]
+        pos = cax.get_position()
+        if cax._osk_cbar_horizontal:
+            lo, hi = min(b.x0 for b in boxes), max(b.x1 for b in boxes)
+            # both families draw a horizontal bar *below* its panels and a vertical one
+            # to their right, so the near edge and the sign of the gap are known
+            gap_in = (min(b.y0 for b in boxes) - pos.y1) * fig_h
+            near = min(b.y0 for b in boxes)
+        else:
+            lo, hi = min(b.y0 for b in boxes), max(b.y1 for b in boxes)
+            gap_in = (pos.x0 - max(b.x1 for b in boxes)) * fig_w
+            near = max(b.x1 for b in boxes)
+        mid, half = (lo + hi) / 2.0, (hi - lo) * cax._osk_cbar_shrink / 2.0
+        fitted[cax] = (mid - half, mid + half, near, max(gap_in, 0.0))
+
+    # one thickness and one gap (both in inches) per orientation: the thickness of the
+    # shortest bar in the group, the gap of the most generously padded
+    thickness, gap = {}, {}
+    for cax, (lo, hi, _near, gap_in) in fitted.items():
+        horiz = cax._osk_cbar_horizontal
+        length_in = (hi - lo) * (fig_w if horiz else fig_h)
+        thick_in = length_in / max(cax._osk_cbar_aspect, 1e-6)
+        thickness[horiz] = min(thickness.get(horiz, thick_in), thick_in)
+        gap[horiz] = max(gap.get(horiz, gap_in), gap_in)
+
+    fig.set_layout_engine("none")
+    for cax, (lo, hi, near, _gap_in) in fitted.items():
+        # fig.colorbar() expresses `aspect` as a *box aspect* on the bar's axes, which
+        # would shrink the box we set back down to that ratio (the long axis with it,
+        # which is the one thing that must not move). We size both axes here, so the
+        # constraint has nothing left to do.
+        cax.set_box_aspect(None)
+        if cax._osk_cbar_horizontal:
+            height = thickness[True] / fig_h
+            top = near - gap[True] / fig_h
+            cax.set_position([lo, top - height, hi - lo, height])
+        else:
+            width = thickness[False] / fig_w
+            cax.set_position([near + gap[False] / fig_w, lo, width, hi - lo])
 
 
 def _draw_row(
@@ -180,6 +346,7 @@ def _draw_row(
     div_norm: Any = None,
     shared_axis_labels: bool = True,
     is_bottom_row: bool = True,
+    defaults: dict[str, dict[str, Any]] | None = None,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -193,16 +360,22 @@ def _draw_row(
     maps sharing axes, since three side-by-side copies of the same latitude labels
     say nothing three copies didn't already say once. Set ``False`` to label every
     panel's axes independently, as every version before this one did.
+
+    ``defaults`` is the caller's :func:`_style_defaults` — the font sizes it derived
+    from the figure's geometry, merged with the fixed style choices. Passed in rather
+    than recomputed because the sizes belong to the whole figure, and a row cannot see
+    how many other rows are sharing the page with it.
     """
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     import matplotlib.colors as mcolors
 
-    title_kwargs = _merged(DEFAULT_TITLE_KWARGS, title_kwargs)
-    gridline_kwargs = _merged(DEFAULT_GRIDLINE_KWARGS, gridline_kwargs)
-    tick_label_kwargs = _merged(DEFAULT_TICK_LABEL_KWARGS, tick_label_kwargs)
-    row_label_kwargs = _merged(DEFAULT_ROW_LABEL_KWARGS, row_label_kwargs)
-    metrics_kwargs = _merged(DEFAULT_METRICS_KWARGS, metrics_kwargs)
+    defaults = defaults or _style_defaults(reference_scale(), horizontal_colorbar=True)
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    gridline_kwargs = _merged(defaults["gridline_kwargs"], gridline_kwargs)
+    tick_label_kwargs = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    row_label_kwargs = _merged(defaults["row_label_kwargs"], row_label_kwargs)
+    metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
 
     t, r, d = aligned[test_name], aligned[reference_name], aligned["difference"]
     tl, rl = labels
@@ -304,13 +477,26 @@ def field_row(
     metrics_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
     shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
-    ``figsize`` defaults to a page-width row; pass your own to override.
+    ``figsize`` defaults to a page-width row as tall as the maps' own aspect ratio
+    wants, plus the room the type around them needs — see
+    :func:`~ocean_skill.plot.typography.row_height`. Pass your own to override.
     ``metric_keys`` picks which of ``metrics.compute()``'s values appear in the
     corner box (default ``bias``/``rmse``/``corr``) — any subset/order, e.g.
     ``metric_keys=("corr", "sigma_ratio")``.
+
+    Every font size — panel titles, the suptitle, latitude/longitude labels, the
+    colorbars' labels and their tick labels, the metrics box — is derived from the
+    figure's geometry by :func:`~ocean_skill.plot.typography.type_scale`, so a
+    ``figsize`` half the default gets type to match rather than three maps crushed to a
+    third of an inch by 8pt titles that no longer fit. ``font_scale`` multiplies all of
+    them together (``font_scale=1.2`` for "the same figure, larger type"), keeping their
+    proportions; a size passed explicitly in a ``*_kwargs`` dict still overrides
+    outright.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only labels the leftmost panel's latitude axis, since the other two show the
@@ -325,14 +511,32 @@ def field_row(
     ``ax.set_title()``, ``gridline_kwargs`` -> ``ax.gridlines()``,
     ``tick_label_kwargs`` -> the gridliner's ``xlabel_style``/``ylabel_style``,
     ``suptitle_kwargs`` -> ``fig.suptitle()``.
+
+    ``align_colorbars=True`` (the default) re-fits each colorbar to the drawn extent
+    of the panels it belongs to once the layout is final, so a horizontal bar spans
+    exactly its panels' left and right edges rather than the wider grid cell that also
+    holds their titles and axis labels (see :func:`_align_colorbars`). ``shrink`` then
+    means a fraction of that extent. Set ``False`` to leave placement entirely to
+    ``constrained_layout``.
     """
     import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
+    # A single row's colorbars are horizontal and sit below the maps, so they come out
+    # of the row's height rather than its width — auto_figsize has to be told, and the
+    # type scale sized against a cell that already accounts for them.
+    figsize = figsize or auto_figsize(
+        _map_aspect([{"aligned": aligned}], reference_name),
+        nrows=1,
+        font_scale=font_scale,
+        horizontal_colorbar=True,
+    )
+    scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=True)
     fig, axes = plt.subplots(
         1,
         3,
-        figsize=figsize or (PAGE_W, PAGE_W / 3.1),
+        figsize=figsize,
         subplot_kw={"projection": ccrs.PlateCarree()},
         constrained_layout=True,
     )
@@ -354,9 +558,10 @@ def field_row(
         metrics_kwargs=metrics_kwargs,
         shared_axis_labels=shared_axis_labels,
         is_bottom_row=True,
+        defaults=defaults,
     )
     _draw_colorbar(
-        fig, ims[1], axes[:2], lab, colorbar_kwargs, DEFAULT_COLORBAR_KWARGS_ROW
+        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
     )
     _draw_colorbar(
         fig,
@@ -364,13 +569,16 @@ def field_row(
         axes[2],
         f"difference {lab}",
         colorbar_kwargs,
-        DEFAULT_COLORBAR_KWARGS_ROW,
+        defaults["colorbar_kwargs"],
     )
 
     # after the suptitle, so the margin is fitted to the layout the figure ends with
     if title:
-        fig.suptitle(title, **_merged(DEFAULT_SUPTITLE_KWARGS_ROW, suptitle_kwargs))
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -483,22 +691,114 @@ def _fit_left_margin(fig, *, passes: int = 3) -> None:
         engine.set(rect=(rect[0] + gutter, rect[1], rect[2] - gutter, rect[3]))
 
 
-def _row_height(comparisons, reference_name: str, n: int) -> float:
-    """Row height (inches) matched to the map's own aspect ratio.
+#: Share of its own box one line of text may fill before :func:`_fit_text_widths`
+#: shrinks it. Not 1.0, because a title that reaches exactly to the panel's edges reads
+#: as overflowing even when it technically doesn't.
+_TEXT_FIT_FRACTION = 0.98
 
-    A fixed height leaves a tall empty band above and below wide domains — and the
-    colorbars, which span the whole cell, then tower over the maps. Sizing the row to
-    ``lon_span / lat_span`` keeps the bars the same height as the maps beside them.
+
+def _shrink_to_fit(text, limit_px: float, renderer, *, along: str = "width") -> None:
+    """Reduce ``text``'s font size until it fits ``limit_px``, no further than MIN_PT.
+
+    One shot rather than a loop: a font size is a linear scaling of the glyphs, so the
+    rendered extent is very nearly proportional to it and the first correction lands.
+    """
+    if not text.get_text() or limit_px <= 0:
+        return
+    extent = getattr(text.get_window_extent(renderer), along)
+    if extent <= limit_px or extent <= 0:
+        return
+    size = text.get_fontsize()
+    shrunk = max(size * limit_px / extent, MIN_PT)
+    if shrunk < size - 0.05:
+        text.set_fontsize(shrunk)
+
+
+def _fit_text_widths(fig, renderer=None) -> None:
+    """Shrink any single label still too long for the thing it labels.
+
+    The type scale sizes text against the *space* available (see
+    :mod:`ocean_skill.plot.typography`), which is the right default but cannot know how
+    many characters the caller will put in it. Ocean variable names and units are long
+    -- a difference bar labelled ``test − reference [mmol m-3]`` under a 2-inch panel,
+    or a CF standard name as a panel title -- and no choice of base size fixes that,
+    because the problem is one particular string rather than the scale.
+
+    So this measures the drawn result and shrinks only what actually overflows, leaving
+    everything else at the size the scale chose. Same draw-measure-adjust shape as
+    :func:`_fit_left_margin` and :func:`_align_colorbars`, and safe in the same way:
+    text can only get smaller here, which only ever frees layout space.
+
+    Runs before :func:`_align_colorbars`, which stands the layout engine down -- so the
+    redraw that follows still gets to reclaim the room a shrunken title gave back.
+    """
+    if renderer is None:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    fig_w_px = fig.get_size_inches()[0] * fig.dpi
+
+    if (suptitle := getattr(fig, "_suptitle", None)) is not None:
+        _shrink_to_fit(suptitle, fig_w_px * _TEXT_FIT_FRACTION, renderer)
+
+    for ax in fig.axes:
+        box = ax.get_window_extent(renderer)
+        if getattr(ax, "_osk_cbar_parents", None):
+            # the bar's label runs along the bar, so it is the bar's own length that
+            # bounds it -- and for a vertical bar the label is rotated, which makes its
+            # *height* the dimension that has to fit
+            horizontal = ax._osk_cbar_horizontal
+            label = (ax.xaxis if horizontal else ax.yaxis).label
+            limit = (box.width if horizontal else box.height) * _TEXT_FIT_FRACTION
+            _shrink_to_fit(
+                label, limit, renderer, along="width" if horizontal else "height"
+            )
+            continue
+        _shrink_to_fit(ax.title, box.width * _TEXT_FIT_FRACTION, renderer)
+        if (row_label := getattr(ax, "_osk_row_label", None)) is not None:
+            # rotated 90 degrees up the left edge of the row: its height is its length
+            _shrink_to_fit(
+                row_label, box.height * _TEXT_FIT_FRACTION, renderer, along="height"
+            )
+
+
+def _map_aspect(comparisons, reference_name: str) -> float:
+    """Return the maps' ``lon_span / lat_span`` — the shape a panel wants to be.
+
+    Read off the reference grid, which both renderers can see; ``clamp_aspect`` in
+    :mod:`~ocean_skill.plot.typography` bounds it, so a degenerate span here only has
+    to be caught, not corrected.
     """
     try:
         da = comparisons[0]["aligned"][reference_name]
         lon_span = float(np.ptp(np.asarray(da["lon"])))
         lat_span = float(np.ptp(np.asarray(da["lat"])))
-        aspect = np.clip(lon_span / max(lat_span, 1e-6), 0.3, 4.0)
+        return lon_span / max(lat_span, 1e-6)
     except Exception:  # pragma: no cover - fall back to a square-ish panel
-        aspect = 1.0
-    panel_w = PAGE_W / 3.6  # three panels plus colorbar gutters
-    return float(min(panel_w / aspect + 0.62, (PAGE_H - 0.8) / max(n, 1)))
+        return 1.0
+
+
+def _row_height(comparisons, reference_name: str, n: int, font_scale: float = 1.0):
+    """Row height (inches) matched to the map's own aspect ratio.
+
+    A fixed height leaves a tall empty band above and below wide domains — and the
+    colorbars, which span the whole cell, then tower over the maps. Sizing the row to
+    ``lon_span / lat_span`` keeps the bars the same height as the maps beside them.
+
+    The text above and below the map is the other term, and it is now measured in ems
+    of the type the row will actually get rather than the flat 0.62in this used to add:
+    a constant is wrong at both ends, leaving a tall row's titles adrift in white space
+    and a short row's crowded, and it made ``font_scale`` a way to squeeze the maps
+    instead of a way to enlarge the type. ``typography.row_height`` resolves the
+    circularity (the type depends on the row height it is helping decide).
+    """
+    return _typographic_row_height(
+        _map_aspect(comparisons, reference_name),
+        nrows=n,
+        ncols=3,
+        page_w=PAGE_W,
+        page_h=PAGE_H,
+        font_scale=font_scale,
+    )
 
 
 def _shared_norms(comparisons, test_name: str, reference_name: str):
@@ -547,6 +847,8 @@ def field_grid(
     suptitle_kwargs: dict[str, Any] | None = None,
     shared_limits: bool = False,
     shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -558,10 +860,17 @@ def field_grid(
     phosphate from another), so reusing one shared pair of titles for every row
     would mislabel all but the first. The top-level ``labels`` is only the fallback
     for a row that doesn't carry its own. Row height follows the map's aspect ratio
-    (override with ``row_height``), and the total is capped at the 11-inch page — or
-    set ``figsize`` to size the whole figure yourself. ``metric_keys`` picks which of
-    ``metrics.compute()``'s values appear in each row's corner box (default
-    ``bias``/``rmse``/``corr``).
+    plus the room its type needs (override with ``row_height``), and the total is
+    capped at the 11-inch page — or set ``figsize`` to size the whole figure yourself.
+    ``metric_keys`` picks which of ``metrics.compute()``'s values appear in each row's
+    corner box (default ``bias``/``rmse``/``corr``).
+
+    Font sizes are derived from the figure's geometry rather than fixed, so a grid of
+    eight rows gets smaller panel type than a grid of two without being asked, while its
+    suptitle — which labels the whole figure, not one row — does not shrink with the
+    rows. ``font_scale`` multiplies them all, and adds the height that needs; a size
+    passed explicitly in a ``*_kwargs`` dict still overrides outright. See
+    :mod:`ocean_skill.plot.typography`.
 
     ``shared_limits=True`` makes every row's colour scale (and its difference
     range) span *all* rows' data instead of each computing its own — meaningful
@@ -576,6 +885,11 @@ def field_grid(
     otherwise repeat labels a neighbour already shows. Set ``False`` to label every
     panel's axes independently, as every version before this one did.
 
+    ``align_colorbars=True`` (the default) makes each row's vertical bars start and
+    end level with that row's maps — top with the top of the axes, bottom with the
+    bottom, excluding the title above and the longitude labels below, which the grid
+    cell the bar is otherwise sized to includes. See :func:`_align_colorbars`.
+
     The ``*_kwargs`` parameters each merge onto their current defaults and map onto
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
     list; the same names mean the same thing here, applied per row.
@@ -585,11 +899,14 @@ def field_grid(
 
     n = len(comparisons)
     proj = ccrs.PlateCarree()
-    row_h = row_height or _row_height(comparisons, reference_name, n)
+    row_h = row_height or _row_height(comparisons, reference_name, n, font_scale)
+    figsize = figsize or (PAGE_W, row_h * n)
+    scale = _scale_for(figsize, nrows=n, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=False)
     fig, axes = plt.subplots(
         n,
         3,
-        figsize=figsize or (PAGE_W, row_h * n),
+        figsize=figsize,
         subplot_kw={"projection": proj},
         constrained_layout=True,
         squeeze=False,
@@ -634,9 +951,10 @@ def field_grid(
             div_norm=shared_div_norm,
             shared_axis_labels=shared_axis_labels,
             is_bottom_row=(i == n - 1),
+            defaults=defaults,
         )
         _draw_colorbar(
-            fig, ims[1], axes[i][:2], lab, colorbar_kwargs, DEFAULT_COLORBAR_KWARGS_GRID
+            fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
         )
         _draw_colorbar(
             fig,
@@ -644,13 +962,16 @@ def field_grid(
             axes[i][2],
             f"test − reference {lab}",
             colorbar_kwargs,
-            DEFAULT_COLORBAR_KWARGS_GRID,
+            defaults["colorbar_kwargs"],
         )
 
     # after the suptitle, so the margin is fitted to the layout the figure ends with
     if title:
-        fig.suptitle(title, **_merged(DEFAULT_SUPTITLE_KWARGS_GRID, suptitle_kwargs))
+        fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
+    _fit_text_widths(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)

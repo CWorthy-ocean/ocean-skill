@@ -23,6 +23,7 @@ import numpy as np
 from ocean_skill.colormaps import cmaps_for
 from ocean_skill.plot.matplotlib_renderer import DEFAULT_METRIC_KEYS
 from ocean_skill.plot.registry import register_renderer
+from ocean_skill.plot.typography import bokeh_fontsize, bokeh_scale, frame_px
 
 __all__ = ["render"]
 
@@ -54,10 +55,40 @@ def _extension():
     return hv
 
 
-def _quadmesh(da, *, title, cmap, clim, units, geo=True, log=False):
+#: Width (CSS pixels) of one interactive map panel; the height follows the data's own
+#: aspect ratio, as the static renderer's panels do.
+PANEL_WIDTH_PX = 260
+
+#: The Target diagram's frame, square because its guide rings must stay circular.
+TARGET_FRAME_PX = (400, 400)
+
+
+def _panel_geometry(da, *, font_scale: float = 1.0):
+    """``(frame_width, frame_height, fontsize)`` for one interactive map of ``da``.
+
+    A fixed 260x200 frame letterboxed exactly the domains the static renderer fits, and
+    fixed bokeh font sizes were a second set of numbers to keep in step with the static
+    ones by hand. Both now come from :mod:`ocean_skill.plot.typography`, off the same
+    aspect ratio and the same type scale, so the interactive plot is the static plot
+    drawn interactively rather than a near-miss of it.
+    """
+    try:
+        aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
+            float(np.ptp(np.asarray(da["lat"]))), 1e-6
+        )
+    except Exception:  # pragma: no cover - unlabelled coords; fall back to square
+        aspect = 1.0
+    px = frame_px(aspect, width_px=PANEL_WIDTH_PX)
+    return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
+
+
+def _quadmesh(
+    da, *, title, cmap, clim, units, geo=True, log=False, font_scale: float = 1.0
+):
     """One interactive map panel with hover readout."""
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
+    frame_w, frame_h, fontsize = _panel_geometry(da, font_scale=font_scale)
     opts = {
         "x": "lon",
         "y": "lat",
@@ -67,8 +98,9 @@ def _quadmesh(da, *, title, cmap, clim, units, geo=True, log=False):
         "colorbar": True,
         "clabel": units or "",
         "hover": True,
-        "frame_width": 260,
-        "frame_height": 200,
+        "frame_width": frame_w,
+        "frame_height": frame_h,
+        "fontsize": fontsize,
         "rasterize": False,
         "logz": log,
     }
@@ -108,6 +140,7 @@ def _field_row(
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
     row_label: str | None = None,
+    font_scale: float = 1.0,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -122,6 +155,12 @@ def _field_row(
     ``row_label`` (the variable name the static renderer draws rotated at the row's
     left edge — bokeh has no equivalent of that floating text) is prefixed onto the
     first panel's title instead, which puts it in the same place visually.
+
+    ``font_scale`` means what it means statically — every text size multiplied, their
+    proportions kept — and reaches bokeh through the same type scale (see
+    :func:`~ocean_skill.plot.typography.bokeh_fontsize`). The seven ``*_kwargs`` dicts
+    remain matplotlib-only, since each names a matplotlib call; ``font_scale`` names a
+    size, which bokeh does have.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits
@@ -154,9 +193,17 @@ def _field_row(
             units=units,
             geo=geo,
             log=log,
+            font_scale=font_scale,
         ),
         _quadmesh(
-            r, title=str(rl), cmap=seq, clim=(vmin, vmax), units=units, geo=geo, log=log
+            r,
+            title=str(rl),
+            cmap=seq,
+            clim=(vmin, vmax),
+            units=units,
+            geo=geo,
+            log=log,
+            font_scale=font_scale,
         ),
         _quadmesh(
             d,
@@ -165,6 +212,7 @@ def _field_row(
             clim=(-dmax, dmax),
             units=f"test − reference {units}",
             geo=geo,
+            font_scale=font_scale,
         ),
     ]
     row = panels[0] + panels[1] + panels[2]
@@ -181,6 +229,7 @@ def _field_grid(
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
+    font_scale: float = 1.0,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -199,6 +248,11 @@ def _field_grid(
     none. Rows in one ``compare()`` fan-out commonly come from *different*
     reference sources (nitrate from one WOA entry, phosphate from another), so
     reusing the first row's pair for every row would mislabel all but the first.
+
+    Type sizes do **not** shrink with the row count the way the static renderer's do:
+    a bokeh ``frame_width`` is fixed rather than a share of a page, so stacking more
+    rows makes the page longer instead of making each panel smaller — the thing the
+    static scale is compensating for does not happen here. ``font_scale`` still applies.
     """
     hv = _extension()
     rows = [
@@ -209,6 +263,7 @@ def _field_grid(
             shared_axes=shared_axes,
             metric_keys=metric_keys,
             row_label=it.get("row_label"),
+            font_scale=font_scale,
         )
         for it in items
     ]
@@ -257,6 +312,7 @@ def _target(
     labels="annotate",
     color_by=None,
     marker_by=None,
+    font_scale: float = 1.0,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
@@ -264,12 +320,17 @@ def _target(
     ``labels``, ``color_by`` and ``marker_by`` mean exactly what they do in
     :mod:`ocean_skill.plot.summary`, so one call renders the same way in either
     renderer — including the default (``"annotate"``), which matches the static target.
+    ``font_scale`` likewise: text is sized from the frame by the shared type scale, so
+    the point labels here and on the static target are the same size relative to the
+    diagram.
     """
     import pandas as pd
 
     from ocean_skill.plot.summary import _resolve_labels, pretty_level
 
     hv = _extension()
+    sizes = bokeh_scale(TARGET_FRAME_PX, font_scale=font_scale)
+    fontsize = bokeh_fontsize(TARGET_FRAME_PX, font_scale=font_scale)
     labels_mode = _resolve_labels(labels)
     recs = [dict(i.get("metrics", {}), label=i.get("label") or "") for i in items]
     df = pd.DataFrame(recs)
@@ -345,7 +406,11 @@ def _target(
 
     if labels_mode == "annotate":
         points = points * hv.Labels(df, kdims=["x", "y"], vdims="label").opts(
-            text_font_size="7pt", yoffset=0.06, text_color="black"
+            # bokeh's fontsize dict has no slot for a Labels element, so this one role
+            # is taken from the scale directly rather than through _BOKEH_KEYS
+            text_font_size=sizes["annotation"],
+            yoffset=0.06,
+            text_color="black",
         )
     lim = max(
         1.15 * float(np.max(np.hypot(df["x"], df["y"]))), max(circles) * 1.25, 1.2
@@ -371,9 +436,10 @@ def _target(
     return (guides * points).opts(
         # equal frame dims + data_aspect keeps the guide circles circular; fixed
         # width/height would fight the aspect and squash them into ellipses
-        frame_width=400,
-        frame_height=400,
+        frame_width=TARGET_FRAME_PX[0],
+        frame_height=TARGET_FRAME_PX[1],
         data_aspect=1,
+        fontsize=fontsize,
         xlabel="signed centred RMSD / σ_ref  (← under | over →)",
         ylabel="bias / σ_ref",
         xlim=(-lim, lim),
@@ -424,6 +490,10 @@ def render(spec, **kwargs: Any):
     for drop in (
         "figsize",
         "save",
+        # bokeh attaches a colorbar to the plot frame, so it already starts and ends
+        # level with the panel — align_colorbars is satisfied here by construction
+        # rather than ignored, hence a silent drop and not _STATIC_ONLY_KWARGS.
+        "align_colorbars",
         "row_height",
         "domain",
         "mark",

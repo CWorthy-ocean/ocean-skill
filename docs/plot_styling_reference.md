@@ -21,6 +21,12 @@ Every `*_kwargs` parameter merges with its defaults rather than replacing them
 wholesale: `title_kwargs={"fontsize": 10}` doesn't require also passing `color`,
 `weight`, etc. — those keep their default values.
 
+**You should rarely need these dicts for font sizes.** Every text size is derived from
+the figure's own geometry, so changing `figsize` or the number of rows re-sizes all of
+them together — see [Automatic sizing](#automatic-sizing). Reach for a `*_kwargs` dict
+when you want a *specific* size, colour, or weight; reach for `font_scale` when you just
+want everything bigger or smaller.
+
 ## Quick reference
 
 | Parameter | Draws | Underlying call |
@@ -39,12 +45,83 @@ for the keys you'll reach for most: `fontsize`, `color`, `weight`, `rotation`, `
 
 ---
 
+## Automatic sizing
+
+Font sizes and the default figure size are computed together, from the geometry of the
+figure being drawn ([`ocean_skill/plot/typography.py`](../ocean_skill/plot/typography.py)).
+Nothing needs configuring for this; the section is here so the behaviour isn't surprising.
+
+**Why it isn't a set of constants.** Matplotlib point sizes are absolute, and
+`constrained_layout` gives text priority over axes. A title fixed at 8pt is right for a
+page-width row and ruinous for a 4-inch one: the three maps get squeezed to about a
+third of an inch each to make room for their own labels. Nor can you fix that by
+retuning the fonts — the fonts are the cause. Sizes therefore follow the space
+available, and the figure's own default height follows the type it will carry.
+
+**How sizes relate.** Every role is one base size times fixed ratios, so they move
+together and stay in proportion. Sizes below are what a default page-width `field_row`
+gets, and are also the hand-tuned values this replaced, so existing figures look as they
+did:
+
+| Role | Default row | Scales with |
+|---|---|---|
+| panel title | 8pt | the grid **cell** |
+| suptitle | 9pt | the figure **width** (not the row count) |
+| colorbar label, row label, axis label | 7pt | the grid cell |
+| metrics box, colorbar tick labels | 6pt | the grid cell |
+| lat/lon tick labels, point annotations | 5pt | the grid cell |
+
+Panel-level type shrinks when its panel does — an eight-row grid gets ~6.4pt titles
+where a two-row grid gets ~7.6pt. The suptitle deliberately does not: it labels the
+whole figure, whose width the row count doesn't change.
+
+**`font_scale`** multiplies every size at once, keeping the proportions, and is the knob
+to reach for instead of retuning six dicts:
+
+```python
+physics.plot(font_scale=1.3)          # everything 30% larger
+physics.plot(font_scale=0.8)          # denser, for a slide
+```
+
+Because the row height is computed *from* the type, `font_scale=1.3` makes the figure
+taller rather than shrinking the maps. It works in both renderers — it names a size,
+which bokeh has, unlike the seven `*_kwargs` dicts, which name matplotlib calls.
+
+**Default `figsize`.** A row is as tall as the maps' own aspect ratio
+(`lon_span / lat_span`) wants, plus the room its type needs, capped so `n` rows still fit
+an 11-inch page. Aspect ratios beyond 0.3–4.0 are letterboxed instead of obeyed.
+Interactive frames follow the same aspect ratio, so a tall narrow domain isn't
+letterboxed in one renderer and fitted in the other. Passing `figsize` explicitly
+overrides the height *and* re-derives the type for the size you asked for.
+
+**Overlong labels.** No global size can rescue one 50-character CF standard name in a
+2-inch panel, so after the layout settles each title and colorbar label is measured
+against its own box and shrunk only if it overflows. Labels that fit keep the size the
+scale chose:
+
+```python
+# 'sea_water_potential_temperature_at_sea_floor' -> 5.1pt; 'difference' stays at 8pt
+```
+
+**Overriding.** An explicit size always wins outright — automatic sizing is a better
+default, not a new constraint:
+
+```python
+c.plot(title_kwargs={"fontsize": 14})   # exactly 14pt, whatever the geometry
+```
+
+---
+
 ## `title_kwargs`
 
 Draws each panel's title via [`Axes.set_title(lab, **title_kwargs)`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.set_title.html).
 Accepts any `Text` property plus `set_title`'s own `loc`/`pad`/`y`.
 
-**Default:** `{"fontsize": 8}`
+**Default:** `{"y": 1.0}` plus a `fontsize` **chosen from the figure's geometry** —
+8pt at the default page-width row, smaller in a tall grid, larger in a big figure.
+See [Automatic sizing](#automatic-sizing) below. `y` is pinned to work around a
+matplotlib 3.11 title-placement bug over cartopy axes; leave it alone unless you know
+you want it moved.
 
 ```python
 c.plot(title_kwargs={"fontsize": 11, "color": "darkred", "weight": "bold"})
@@ -74,9 +151,43 @@ horizontal row vs. several stacked vertical ones):
 |---|---|---|
 | `orientation` | `"horizontal"` | `"vertical"` |
 | `pad` | `0.04` | `0.015` |
-| `shrink` | `0.85` | `0.8` |
+| `shrink` | `1.0` | `1.0` |
 | `aspect` | `30` | `15` |
-| `label_size` | `7` | `6` |
+| `label_size` | *automatic* (7pt at the default row) | *automatic* |
+| `tick_labelsize` | *automatic* (6pt at the default row) | *automatic* |
+
+Both text sizes come from the shared type scale — see
+[Automatic sizing](#automatic-sizing). `tick_labelsize` used to be unset entirely, so
+the bar's numbers fell through to matplotlib's 10pt default while the titles around
+them were 8pt and the latitude labels 5pt.
+
+**Placement is refitted after the layout settles.** `fig.colorbar` sizes a bar to the
+grid *cell* its panels sit in, which also holds the title above and the longitude
+labels below — and a cartopy map shrinks inside its own slot to keep its aspect — so
+the bar overshot the map at both ends. `field_row`/`field_grid` therefore re-fit each
+bar to the drawn extent of the panels it describes: a vertical bar's top and bottom sit
+level with the top and bottom of the axes, a horizontal bar's ends with their left and
+right edges. Consequences for the keys above:
+
+- `shrink` is now a fraction of *that* extent (centred), not of the cell — hence the
+  `1.0` defaults. `shrink=0.6` gives a bar 60% of the maps' height, still centred on
+  them.
+- `aspect` still sets length:thickness, but one thickness is used for every bar of the
+  same orientation in the figure, taken from the shortest. A field row's shared-scale
+  bar spans two panels and its difference bar one; per-bar thickness made the first two
+  and a half times fatter than the second.
+- `pad` is levelled the same way, and for the same reason: it is a fraction of the
+  parent's *own* width (or height), so a grid row's shared-scale bar — padded off a
+  two-panel span — sat twice as far from its panels as the difference bar beside it.
+  One gap in inches, the widest of the group, is used for every bar of that orientation.
+- Pass `align_colorbars=False` (a top-level plot option, not a `colorbar_kwargs` key)
+  to hand placement back to `constrained_layout` entirely. The refit also stands the
+  layout engine down when it finishes, so the positions survive the redraw that
+  `savefig` and Jupyter's inline backend perform; a figure returned with the refit on
+  is laid out for good.
+- Interactive (`renderer="holoviews"`) needs none of this: bokeh attaches a colorbar to
+  the plot frame, so it is already flush with the panel. `align_colorbars` is accepted
+  and ignored there rather than warned about.
 
 ```python
 c.plot(colorbar_kwargs={
@@ -107,7 +218,8 @@ Draws the lat/lon tick **labels** (distinct from the grid lines above) via the
 `xlabel_style`/`ylabel_style` — both set to this same dict, which is any `Text`
 property (most commonly `size`/`color`/`rotation`).
 
-**Default:** `{"size": 5}`
+**Default:** a `size` **chosen from the figure's geometry** — 5pt at the default
+page-width row. See [Automatic sizing](#automatic-sizing).
 
 ```python
 c.plot(tick_label_kwargs={"size": 7, "color": "0.3"})
@@ -123,7 +235,8 @@ Any `Text` property.
 > row's first panel title, bokeh having no floating-text equivalent) — it's only
 > this **styling dict** that is matplotlib-only.
 
-**Default:** `{"fontsize": 7, "rotation": 90, "va": "center", "ha": "center", "weight": "bold"}`
+**Default:** `{"rotation": 90, "va": "center", "ha": "center", "weight": "normal"}` plus
+an automatic `fontsize` (7pt at the default page-width row).
 
 ```python
 physics.plot(row_label_kwargs={"fontsize": 9, "color": "navy"})
@@ -137,10 +250,10 @@ Any `Text` property, including `bbox` (a dict of
 [`FancyBboxPatch`](https://matplotlib.org/stable/api/_as_gen/matplotlib.patches.FancyBboxPatch.html)
 properties — `facecolor`, `alpha`, `pad`, `edgecolor`, `linewidth`).
 
-**Default:**
+**Default:** an automatic `fontsize` (6pt at the default page-width row) plus
 ```python
 {
-    "fontsize": 5.5, "va": "bottom", "ha": "left",
+    "va": "bottom", "ha": "left",
     "bbox": {"facecolor": "white", "alpha": 0.75, "pad": 2, "edgecolor": "0.6", "linewidth": 0.4},
 }
 ```
@@ -157,7 +270,9 @@ Draws the overall figure title (the `title=` argument's actual text) via
 [`Figure.suptitle(title, **suptitle_kwargs)`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html).
 Any `Text` property.
 
-**Default:** `{"fontsize": 9}` (`field_row`) / `{"fontsize": 10}` (`field_grid`)
+**Default:** an automatic `fontsize` — 9pt at the default page-width row. Unlike the
+per-panel sizes this one does **not** shrink as you add rows: it labels the whole
+figure, whose width does not change. See [Automatic sizing](#automatic-sizing).
 
 ```python
 physics.plot(title="ROMS GOM vs. WOA", suptitle_kwargs={"fontsize": 13, "weight": "bold"})
@@ -203,6 +318,22 @@ follow holoviews' own theme, not `suptitle_kwargs`).
 ```python
 physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)")                    # matplotlib
 physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)", renderer="holoviews")  # same text, interactive
+```
+
+### `font_scale`
+
+Multiplies **every** text size at once, keeping the proportions between them — the
+alternative to editing six `*_kwargs` dicts in step. Shared by both renderers (it names a
+size, not a matplotlib call) and honored by the summary diagrams too. Because the default
+figure height is computed from the type it has to carry, a larger `font_scale` makes the
+figure taller rather than squeezing the maps. See [Automatic sizing](#automatic-sizing).
+
+**Default:** `1.0`
+
+```python
+physics.plot(font_scale=1.3)                          # larger type, taller figure
+physics.plot(font_scale=1.3, renderer="holoviews")    # same, interactively
+comparisons.taylor(font_scale=0.9)
 ```
 
 ### `metric_keys`

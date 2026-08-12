@@ -344,6 +344,14 @@ class Comparison:
             self.select,
             self.aggregate,
         )
+        # Computed here rather than left lazy: the vertical transform is the most
+        # expensive step in the pipeline, and a dask-backed lane re-runs it on every
+        # consumer that touches values -- the metrics, then each panel of each plot.
+        # to_zarr below computes the same graph anyway and discards the result, so
+        # this costs nothing when caching is on and saves a full recompute when a
+        # save fails or caching is off. See align() for the same move on the pair.
+        if da is not None:
+            da = da.load()
         # A miss is cached; "this source doesn't carry this variable" is not, since
         # that is cheap to rediscover and would otherwise persist past a fixed catalog.
         if use_cache and da is not None:
@@ -353,6 +361,10 @@ class Comparison:
     # -- pipeline ---------------------------------------------------------------
     def align(self, *, refresh: bool = False):
         """Read both sources, reduce them, and regrid test onto reference.
+
+        The result is always computed, never lazy — see the ``.load()`` note below —
+        so repeat consumers (metrics, a redrawn figure) read values rather than
+        re-running the pipeline that produced them.
 
         The result is cached to disk (see :mod:`ocean_skill.cache`) and reused on a
         later call with the same sources, variable, selection and method — including
@@ -380,9 +392,14 @@ class Comparison:
             missing = self.reference_name if r is None else self.test_name
             raise KeyError(f"{self.variable!r} not available in {missing!r}")
         self._actual_depth = r_depth
+        # .load() so a computed result is a computed result: a cache hit hands back
+        # eager arrays (open_zarr(...).load()), and a miss must leave the comparison
+        # in the same state or the session that *fills* the cache is the slowest one
+        # -- every plot re-reading the sources through a graph that was already
+        # evaluated once to write the entry.
         self._aligned = _align.align(
             t, r, method=self.method, test_name="test", reference_name="reference"
-        )
+        ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
         if use_cache:

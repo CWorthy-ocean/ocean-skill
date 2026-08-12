@@ -280,10 +280,20 @@ def test_left_margin_is_refitted_when_the_layout_reserves_none(two_rows):
     left edge. Kept because the failure it recovers from is invisible in the numbers
     the renderer reports — the panels are all drawn, and only the labels outboard of
     the leftmost axes go missing.
+
+    ``align_colorbars=False`` only because the colorbar refit stands the layout engine
+    down when it is done (see ``_align_colorbars``), and staging this needs an engine
+    whose ``rect`` can still be pushed around.
     """
     from ocean_skill.plot.matplotlib_renderer import _fit_left_margin
 
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(
+            family="field_grid",
+            items=two_rows,
+            options={**dict(_TOP_LEVEL), "align_colorbars": False},
+        )
+    )
     fig.get_layout_engine().set(rect=(-0.08, 0, 1.08, 1))
     fig.canvas.draw()
     assert _leftmost_label_x(fig) < 0, "failed to stage the clipped layout"
@@ -291,6 +301,102 @@ def test_left_margin_is_refitted_when_the_layout_reserves_none(two_rows):
     _fit_left_margin(fig)
     assert _leftmost_label_x(fig) >= 0
     assert _row_label_gap(fig) > 0, "the refit must not push labels into each other"
+
+
+def _colorbar_axes(fig):
+    """Every colorbar axes, paired with the panels it describes."""
+    return [
+        (ax, parents)
+        for ax in fig.axes
+        if (parents := getattr(ax, "_osk_cbar_parents", None))
+    ]
+
+
+def test_colorbars_start_and_end_level_with_their_panels(two_rows):
+    """The bar's long axis matches the *maps*, not the cell holding their labelling.
+
+    ``fig.colorbar(im, ax=...)`` sizes the bar to the gridspec cell, which also holds
+    the title above and the longitude labels below — and a cartopy GeoAxes shrinks
+    itself inside its own slot to keep its aspect on top of that. So the bar overshot
+    the map at both ends, which reads badly for something that is the map's own ruler.
+    """
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    bars = _colorbar_axes(fig)
+    assert len(bars) == 4  # two rows x (shared scale, difference)
+    for cax, parents in bars:
+        bar, boxes = cax.get_position(), [p.get_position() for p in parents]
+        assert bar.y0 == pytest.approx(min(b.y0 for b in boxes), abs=1e-6)
+        assert bar.y1 == pytest.approx(max(b.y1 for b in boxes), abs=1e-6)
+
+
+def test_row_colorbars_span_their_panels_and_share_one_thickness():
+    """The horizontal case: left/right edges, and no fat-bar-next-to-thin-bar.
+
+    A field row pairs one bar over two panels with one over a single panel; sizing
+    each one's thickness from its own length and ``aspect`` made the first two and a
+    half times fatter than the second.
+    """
+    test, ref = _field(1.0), _field(0.0)
+    aligned = {"test": test, "reference": ref, "difference": test - ref}
+    fig = render(
+        PlotSpec(
+            family="field_row", items=[{"aligned": aligned}], options={"title": "row"}
+        )
+    )
+    bars = _colorbar_axes(fig)
+    assert len(bars) == 2
+    for cax, parents in bars:
+        bar, boxes = cax.get_position(), [p.get_position() for p in parents]
+        assert bar.x0 == pytest.approx(min(b.x0 for b in boxes), abs=1e-6)
+        assert bar.x1 == pytest.approx(max(b.x1 for b in boxes), abs=1e-6)
+    heights = {round(cax.get_position().height, 9) for cax, _ in bars}
+    assert len(heights) == 1
+
+
+def test_colorbars_sit_the_same_distance_from_their_panels(two_rows):
+    """``pad`` is a fraction of the parent's own width, so it has to be levelled too.
+
+    A grid row's shared-scale bar is padded off a two-panel span and its difference bar
+    off one panel, which left the far-right bar with roughly half the gap.
+    """
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    gaps = {
+        round(cax.get_position().x0 - max(p.get_position().x1 for p in parents), 9)
+        for cax, parents in _colorbar_axes(fig)
+    }
+    assert len(gaps) == 1
+    assert gaps.pop() > 0
+
+
+def test_colorbar_alignment_survives_a_redraw(two_rows):
+    """A later draw must not hand placement back to the layout engine.
+
+    ``savefig`` and Jupyter's inline backend both draw again after we return the
+    figure; with constrained_layout still live, that recomputes the positions and
+    silently undoes the refit.
+    """
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    before = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
+    fig.canvas.draw()
+    after = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
+    for b, a in zip(before, after, strict=True):
+        assert (a.y0, a.y1) == pytest.approx((b.y0, b.y1), abs=1e-6)
+
+
+def test_colorbar_alignment_can_be_turned_off(two_rows):
+    fig = render(
+        PlotSpec(
+            family="field_grid",
+            items=two_rows,
+            options={**dict(_TOP_LEVEL), "align_colorbars": False},
+        )
+    )
+    bars = _colorbar_axes(fig)
+    assert bars, "the parent bookkeeping is recorded either way"
+    assert any(
+        cax.get_position().y1 > max(p.get_position().y1 for p in parents) + 1e-3
+        for cax, parents in bars
+    ), "without the refit the bar should still overshoot its panels"
 
 
 def test_row_labels_are_not_bold(two_rows):

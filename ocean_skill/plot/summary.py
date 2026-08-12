@@ -23,9 +23,28 @@ from typing import Any
 
 import numpy as np
 
+from ocean_skill.plot.typography import MIN_PT, PAGE_W, type_scale
+
 __all__ = ["paired", "target", "taylor"]
 
-PAGE_W = 8.5
+#: Default figure sizes: both diagrams are square (a Taylor diagram's radius is a
+#: standard deviation and a Target's guide rings must stay circular, so neither survives
+#: a non-square canvas), and ``paired`` sets them side by side across the page.
+TAYLOR_FIGSIZE = (PAGE_W * 0.62, PAGE_W * 0.62)
+TARGET_FIGSIZE = (PAGE_W * 0.55, PAGE_W * 0.55)
+PAIRED_FIGSIZE = (PAGE_W, PAGE_W * 0.5)
+
+
+def _scale(figsize, *, ncols: int = 1, font_scale: float = 1.0) -> dict[str, float]:
+    """Type scale for a diagram of this size — see :mod:`ocean_skill.plot.typography`.
+
+    These diagrams carry seven text sizes of their own (title, axis labels, tick labels,
+    legend, point annotations, contour labels, the ring labels), which were seven more
+    constants tuned for one figure size. Same table as the field renderers use, so a
+    Taylor diagram and the field row beside it in a report agree about how big a label
+    is when both are drawn at the same size.
+    """
+    return type_scale(figsize, ncols=ncols, nrows=1, font_scale=font_scale)
 
 
 def _records(comparisons) -> list[dict[str, Any]]:
@@ -44,7 +63,7 @@ def _records(comparisons) -> list[dict[str, Any]]:
 _LABEL_OFFSETS = ((9, 6), (9, -12), (-9, 6), (-9, -12), (0, 12), (0, -15))
 
 
-def _offset_labels(ax, xs, ys, labels, size=6.5, colors=None):
+def _offset_labels(ax, xs, ys, labels, size, colors=None):
     """Annotate points, cycling offset directions to avoid overlapping labels."""
     for i, (x, y, lab) in enumerate(zip(xs, ys, labels, strict=True)):
         dx, dy = _LABEL_OFFSETS[i % len(_LABEL_OFFSETS)]
@@ -194,23 +213,56 @@ def _reference_handle():
     return Line2D([], [], ls="", marker="*", mfc="k", mec="k", ms=9, label="reference")
 
 
-def _legend_below(fig, handles, y=-0.04):
-    """Draw one key beneath the axes.
+#: Most columns a key beneath the axes is laid out in before it starts wrapping.
+_LEGEND_MAX_COLS = 5
+
+
+def _legend_below(fig, handles, size, y=-0.04):
+    """Draw one key beneath the axes, in as many columns as actually fit.
 
     Below rather than inside because these diagrams put data in every corner — Taylor
     fills the upper right at high correlation, and target points scatter around the
     origin — so any in-axes placement collides with the data for some input.
+
+    Five columns of entries is a lot of width, and the entries are whatever the
+    caller's comparisons happen to be called, which no type scale can know: ten labels
+    like ``ROMS-GOM-hindcast-run00-nitrate`` come to half again the figure's width and
+    run off both sides. That was already true at the fixed 7pt this replaced — more so,
+    since a figure-sized legend is larger — and matplotlib will not reflow one to fit.
+
+    Width is therefore bought back with *columns* before font size: the column count
+    comes down until the key fits, which keeps every entry readable, and only if a
+    single column is still too wide (one label longer than the whole figure) does the
+    text shrink, floored at ``MIN_PT``.
     """
-    fig.legend(
-        handles=handles,
-        labels=[h.get_label() for h in handles],
-        loc="lower center",
-        ncol=min(len(handles), 5),
-        fontsize=7,
-        frameon=False,
-        numpoints=1,
-        bbox_to_anchor=(0.5, y),
-    )
+
+    def draw(ncol):
+        return fig.legend(
+            handles=handles,
+            labels=[h.get_label() for h in handles],
+            loc="lower center",
+            ncol=ncol,
+            fontsize=size,
+            frameon=False,
+            numpoints=1,
+            bbox_to_anchor=(0.5, y),
+        )
+
+    limit = fig.get_size_inches()[0] * fig.dpi
+    legend = None
+    for ncol in range(min(len(handles), _LEGEND_MAX_COLS), 0, -1):
+        if legend is not None:
+            legend.remove()
+        legend = draw(ncol)
+        fig.canvas.draw()
+        width = legend.get_window_extent(fig.canvas.get_renderer()).width
+        if width <= limit or ncol == 1:
+            break
+    if legend is not None and width > limit > 0:
+        shrunk = max(size * limit / width, MIN_PT)
+        for text in legend.get_texts():
+            text.set_fontsize(shrunk)
+    return legend
 
 
 def taylor(
@@ -226,6 +278,8 @@ def taylor(
     rect: int = 111,
     labels: str | None = "legend",
     figsize: tuple[float, float] | None = None,
+    font_scale: float = 1.0,
+    scale: dict[str, float] | None = None,
 ):
     """Taylor diagram with one point per comparison.
 
@@ -242,6 +296,12 @@ def taylor(
     or ``"annotate"`` (each label written beside its marker); ``None`` for neither.
     Annotation is the better choice for a handful of points, a legend once there are
     enough that the labels would collide.
+
+    Text sizes follow the figure size rather than being fixed, so a diagram drawn at
+    twice the default is not a diagram with half-size labels; ``font_scale`` multiplies
+    them all. ``scale`` takes a ready-made :func:`_scale` result, which is how
+    :func:`paired` gives both of its panels the sizes of the figure they *share* rather
+    than the sizes each would pick alone.
     """
     import matplotlib.pyplot as plt
 
@@ -253,8 +313,10 @@ def taylor(
         raise ValueError("no comparisons to plot")
 
     refstd = 1.0 if normalize else recs[0]["std_reference"]
+    figsize = figsize or TAYLOR_FIGSIZE
+    scale = scale or _scale(figsize, font_scale=font_scale)
     if fig is None:
-        fig = plt.figure(figsize=figsize or (PAGE_W * 0.62, PAGE_W * 0.62))
+        fig = plt.figure(figsize=figsize)
     stds = [
         (r["std_test"] / r["std_reference"]) if normalize else r["std_test"]
         for r in recs
@@ -280,12 +342,18 @@ def taylor(
             label=rec["label"],
         )
     contours = dia.add_contours(levels=5, colors="0.6", linewidths=0.7)
-    plt.clabel(contours, inline=1, fontsize=6, fmt="%.2f")
+    plt.clabel(contours, inline=1, fontsize=scale["contour_label"], fmt="%.2f")
     dia.add_grid(color="0.85", linewidth=0.5)
     dia._ax.axis[:].major_ticks.set_tick_out(True)
+    for axis in dia._ax.axis.values():
+        # the floating polar axes' own correlation/stddev labelling, which mpl_toolkits
+        # leaves at the rcParams default — the one part of this diagram that would still
+        # be sized independently of the rest of it
+        axis.major_ticklabels.set_fontsize(scale["tick_label"])
+        axis.label.set_fontsize(scale["axes_label"])
 
     if labels == "legend":
-        _legend_below(fig, [*handles, _reference_handle()])
+        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
     elif labels == "annotate":
         # The aux axes are polar: a sample sits at (arccos(corr), stddev), which is
         # exactly where add_sample put it.
@@ -294,10 +362,11 @@ def taylor(
             [np.arccos(r["corr"]) for r in recs],
             stds,
             [r["label"] for r in recs],
+            scale["annotation"],
             colors=cols,
         )
     if title:
-        dia._ax.set_title(title, fontsize=9, pad=18)
+        dia._ax.set_title(title, fontsize=scale["title"], pad=18)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -317,6 +386,8 @@ def target(
     ax=None,
     labels: str | None = "annotate",
     figsize: tuple[float, float] | None = None,
+    font_scale: float = 1.0,
+    scale: dict[str, float] | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
 
@@ -329,6 +400,8 @@ def target(
     ``"annotate"`` beside each marker — exactly as for :func:`taylor`, so the two can be
     made to match. It defaults to ``"annotate"`` here because target points cluster near
     the origin when a model is good, and a label beside the marker stays readable there.
+
+    ``font_scale``/``scale`` size the text from the figure, as in :func:`taylor`.
     """
     import matplotlib.pyplot as plt
 
@@ -344,10 +417,10 @@ def target(
     point_labels = [r["label"] for r in recs]
 
     lim = max(1.15 * float(np.max(np.hypot(x, y))), max(circles) * 1.25, 1.2)
+    figsize = figsize or TARGET_FIGSIZE
+    scale = scale or _scale(figsize, font_scale=font_scale)
     if ax is None:
-        fig, ax = plt.subplots(
-            figsize=figsize or (PAGE_W * 0.55, PAGE_W * 0.55), constrained_layout=True
-        )
+        fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     else:
         fig = ax.figure
 
@@ -366,7 +439,7 @@ def target(
         ax.annotate(
             f"{radius:g}",
             (radius * 0.71, radius * 0.71),
-            fontsize=6,
+            fontsize=scale["contour_label"],
             color="0.45",
             ha="left",
             va="bottom",
@@ -388,9 +461,9 @@ def target(
             linewidth=0.6,
         )
     if labels_mode == "annotate":
-        _offset_labels(ax, x, y, point_labels, colors=cols)
+        _offset_labels(ax, x, y, point_labels, scale["annotation"], colors=cols)
     elif labels_mode == "legend":
-        _legend_below(fig, [*handles, _reference_handle()])
+        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
 
     ax.set(
         xlim=(-lim, lim),
@@ -398,12 +471,12 @@ def target(
         xlabel="signed centred RMSD / $\\sigma_{ref}$  (← under | over →)",
         ylabel="bias / $\\sigma_{ref}$",
     )
-    ax.xaxis.label.set_size(8)
-    ax.yaxis.label.set_size(8)
-    ax.tick_params(labelsize=7)
+    ax.xaxis.label.set_size(scale["axes_label"])
+    ax.yaxis.label.set_size(scale["axes_label"])
+    ax.tick_params(labelsize=scale["tick_label"])
     ax.set_aspect("equal")
     if title:
-        ax.set_title(title, fontsize=10)
+        ax.set_title(title, fontsize=scale["title"])
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -418,6 +491,7 @@ def paired(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     labels: str | None = "legend",
+    font_scale: float = 1.0,
     **kwargs,
 ):
     """Taylor and Target side by side — the pairing they are usually read as.
@@ -430,19 +504,39 @@ def paired(
     ``labels`` applies to **both** panels, since the diagrams show the same points and
     identifying them two different ways in one figure reads as two unrelated plots. With
     ``"legend"`` the key is drawn once beneath both panels rather than twice.
+
+    One type scale is computed here for the two-column figure and handed to both panels,
+    rather than each sizing itself: called alone they are square and near page width, so
+    left to themselves they would pick the type for a figure twice the size of the half
+    they actually get, and the pair would read as two plots pasted together.
     """
     import matplotlib.pyplot as plt
 
     labels = _resolve_labels(labels)
-    fig = plt.figure(figsize=figsize or (PAGE_W, PAGE_W * 0.5))
+    figsize = figsize or PAIRED_FIGSIZE
+    scale = _scale(figsize, ncols=2, font_scale=font_scale)
+    fig = plt.figure(figsize=figsize)
     # Panels never draw their own key: with "legend" it is shared (below), and with
     # "annotate" each panel labels its own markers.
     panel_labels = "annotate" if labels == "annotate" else None
     taylor(
-        comparisons, fig=fig, rect=121, labels=panel_labels, title="Taylor", **kwargs
+        comparisons,
+        fig=fig,
+        rect=121,
+        labels=panel_labels,
+        title="Taylor",
+        scale=scale,
+        **kwargs,
     )
     ax_t = fig.add_subplot(122)
-    target(comparisons, ax=ax_t, labels=panel_labels, title="Target", **kwargs)
+    target(
+        comparisons,
+        ax=ax_t,
+        labels=panel_labels,
+        title="Target",
+        scale=scale,
+        **kwargs,
+    )
 
     if labels == "legend":
         # One shared key beneath both panels, so it cannot collide with either title
@@ -450,9 +544,9 @@ def paired(
         _, _, handles = _group_styles(
             recs, kwargs.get("color_by"), kwargs.get("marker_by")
         )
-        _legend_below(fig, [*handles, _reference_handle()])
+        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
     if title:
-        fig.suptitle(title, fontsize=11)
+        fig.suptitle(title, fontsize=scale["suptitle"])
     fig.subplots_adjust(wspace=0.35)
     if save:
         save = Path(save).expanduser()
