@@ -73,9 +73,12 @@ runs.movie(renderer="holoviews")     # the same three, on a slider
 ```
 
 There is currently no way to fan a comparison out over *time* — `compare()` fans over
-variables and depths, and collapses time by default — so a comparison movie's frames are
-whatever varies across the set you built. A model-vs-data movie through time needs
-`compare(times=...)`, which is designed but not built.
+variables and depths only — so a comparison movie's frames are whatever varies across the
+set you built. A model-vs-data movie through time needs `compare(times=...)`, which is
+designed but not built.
+
+A comparison movie keeps the ~260px panels of the row it animates, since it draws three
+of them side by side; only the single-field movie takes the whole width.
 
 ## Formats
 
@@ -172,17 +175,37 @@ The two renderers differ more in form here than anywhere else, and less in inten
 |---|---|---|
 | Output | mp4 / gif file | slider over the frames |
 | `save=` | the video | a standalone `.html` page |
-| `fps=` | encoded frame rate | the play speed, with `player=True` |
+| `fps=` | encoded frame rate | the play speed, with `widget="player"` |
 | Frame label | drawn in the panel | the slider's value, and the panel title |
 | Metrics | corner box | folded into the difference panel's title |
 
+**`widget=`** picks the control (interactive only):
+
+| | |
+|---|---|
+| `"slider"` *(default)* | a `DiscreteSlider` — drag or arrow-key through the frames, labelled with the frame's own name |
+| `"player"` | play / pause / step, running at `fps` |
+| `"dropdown"` | holoviews' own default control, and the bare holoviews object rather than a panel pane |
+
+The default is a slider rather than holoviews' own choice because holoviews picks a
+*dropdown* for a string-valued dimension, and a dropdown is the wrong control for an
+ordered sequence: the next frame is two clicks and a search, and you cannot drag through
+the movie at all.
+
+A single-field movie also gets the **whole page width** (`SOLO_PANEL_WIDTH_PX`, ~680px)
+rather than the ~260px a panel gets in a row of three. It is the only panel on the page,
+so inheriting the row's width made the one thing on it the smallest thing on it. Its axis
+titles are shortened to `longitude`/`latitude` too — a ROMS coordinate's own `long_name`
+is "longitude of rho-points (degrees East)", which bokeh truncates anyway. Override
+either with `width_px=` / `axis_labels=`.
+
 Stepping is the interactive form of playing: you can hold a frame, step back one, and
 hover a cell for its value — none of which an mp4 can do. When it should just run,
-`player=True` adds a play/pause scrubber, driven at the same `fps`.
+`widget="player"` swaps the slider for a play/pause scrubber, driven at the same `fps`.
 
 ```python
 runs.movie(renderer="holoviews")                          # slider
-runs.movie(renderer="holoviews", player=True, fps=12)     # play/pause
+runs.movie(renderer="holoviews", widget="player", fps=12) # play/pause
 runs.movie(renderer="holoviews", save="depths.html")      # a page to send someone
 ```
 

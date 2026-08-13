@@ -79,8 +79,17 @@ def _extension():
 
 
 #: Width (CSS pixels) of one interactive map panel on the default canvas; the height
-#: follows the data's own aspect ratio, as the static renderer's panels do.
+#: follows the data's own aspect ratio, as the static renderer's panels do. Sized for a
+#: *row* of three panels side by side, which is what most families draw — see
+#: :data:`SOLO_PANEL_WIDTH_PX` for the one that draws a single panel. ``size``/``zoom``
+#: scale whichever of the two applies, via :func:`_canvas_factor`.
 PANEL_WIDTH_PX = 260
+
+#: Width for a family that draws **one** panel, i.e. a single-field movie. It has the
+#: whole width to itself rather than a third of it, so inheriting the row's 260 wastes
+#: most of the page and makes the one thing on it the smallest thing on it. Chosen to
+#: leave room beside it for the colorbar and the frame widget in a normal notebook.
+SOLO_PANEL_WIDTH_PX = 680
 
 #: The Target diagram's frame, square because its guide rings must stay circular.
 TARGET_FRAME_PX = (400, 400)
@@ -99,7 +108,13 @@ def _canvas_factor(size=None, zoom: float = 1.0) -> float:
     return resolve_canvas(size, zoom).width / PAGE_W
 
 
-def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
+def _panel_geometry(
+    da,
+    *,
+    font_scale: float = 1.0,
+    width_px: float = PANEL_WIDTH_PX,
+    canvas_factor: float = 1.0,
+):
     """``(frame_width, frame_height, fontsize)`` for one interactive map of ``da``.
 
     A fixed 260x200 frame letterboxed exactly the domains the static renderer fits, and
@@ -107,6 +122,10 @@ def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
     ones by hand. Both now come from :mod:`ocean_skill.plot.typography`, off the same
     aspect ratio and the same type scale, so the interactive plot is the static plot
     drawn interactively rather than a near-miss of it.
+
+    ``width_px`` is the panel's share of the page — a third of it for a row of three,
+    all of it for a lone panel (:data:`SOLO_PANEL_WIDTH_PX`). The type scale follows it,
+    so a bigger frame gets proportionally bigger labels without being told.
     """
     try:
         aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
@@ -114,7 +133,9 @@ def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
         )
     except Exception:  # pragma: no cover - unlabelled coords; fall back to square
         aspect = 1.0
-    px = frame_px(aspect, width_px=PANEL_WIDTH_PX * canvas_factor)
+    # the two compose: width_px is this family's share of the page, canvas_factor is
+    # how much bigger a canvas the caller asked for than the default one
+    px = frame_px(aspect, width_px=width_px * canvas_factor)
     return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
 
 
@@ -129,12 +150,21 @@ def _quadmesh(
     log=False,
     font_scale: float = 1.0,
     canvas_factor: float = 1.0,
+    width_px: float = PANEL_WIDTH_PX,
+    axis_labels: tuple[str, str] | None = None,
 ):
-    """One interactive map panel with hover readout."""
+    """One interactive map panel with hover readout.
+
+    ``axis_labels`` overrides the axis titles, which otherwise come from the
+    coordinates' own ``long_name``. ROMS spells those "longitude of rho-points (degrees
+    East)": accurate, twice the width of the numbers it labels, and truncated by bokeh
+    anyway — the static renderer never shows it because cartopy draws gridline labels
+    instead.
+    """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
     frame_w, frame_h, fontsize = _panel_geometry(
-        da, font_scale=font_scale, canvas_factor=canvas_factor
+        da, font_scale=font_scale, width_px=width_px, canvas_factor=canvas_factor
     )
     opts = {
         "x": "lon",
@@ -151,6 +181,8 @@ def _quadmesh(
         "rasterize": False,
         "logz": log,
     }
+    if axis_labels is not None:
+        opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
         opts |= {"geo": True, "coastline": "50m", "projection": None}
     try:
@@ -589,9 +621,11 @@ def _facet_movie(
     shared_limits: bool = True,
     every: int = 1,
     fps: int = 8,
-    player: bool = False,
+    widget: str = "slider",
     save=None,
     font_scale: float = 1.0,
+    width_px: float = SOLO_PANEL_WIDTH_PX,
+    axis_labels: tuple[str, str] | None = ("longitude", "latitude"),
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -600,6 +634,13 @@ def _facet_movie(
     place — the same field, the same labels, one panel at a time. For a long axis that
     is the more useful of the two: forty panels on a page are each too small to read,
     while forty frames are full size and a drag apart.
+
+    Being the only panel on the page, it gets the page: the frame is
+    :data:`SOLO_PANEL_WIDTH_PX` rather than the third-of-a-row every other family draws
+    at (override with ``width_px``). Axis titles are shortened for the same reason — a
+    ROMS coordinate's own ``long_name`` is "longitude of rho-points (degrees East)",
+    which bokeh truncates anyway; pass ``axis_labels=None`` to keep whatever the
+    coordinates say.
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
@@ -644,14 +685,15 @@ def _facet_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            width_px=width_px,
+            axis_labels=axis_labels,
         )
         for key, index in zip(keys, indices, strict=True)
     }
     movie = hv.HoloMap(panels, kdims=[dim])
     if title:
         movie = movie.opts(title=str(title))
-    if player:
-        movie = _scrubber(movie, fps=fps)
+    movie = _with_widget(movie, widget=widget, fps=fps, frame_dim=FRAME_DIM)
     if save:
         _save_interactive(movie, save)
     return movie
@@ -668,7 +710,7 @@ def _field_movie(
     shared_limits: bool = True,
     every: int = 1,
     fps: int = 8,
-    player: bool = False,
+    widget: str = "slider",
     save=None,
     **_,
 ):
@@ -678,8 +720,9 @@ def _field_movie(
     ``HoloMap``s — test, reference and difference — sharing one ``frame`` dimension, so
     a single widget steps all three panels together. Stepping *is* the interactive form
     of playing: you can hold a frame, go back one, and hover a cell for its value, none
-    of which an mp4 can do. ``player=True`` adds a play/pause scrubber for when you do
-    want it to run on its own, at ``fps``.
+    of which an mp4 can do. ``widget="player"`` swaps the slider for a play/pause
+    scrubber, at ``fps``, for when it should just run; ``"dropdown"`` gives holoviews'
+    own default control.
 
     The colour scale is fixed across frames exactly as it is statically (see
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
@@ -773,28 +816,47 @@ def _field_movie(
     layout = (maps[0] + maps[1] + maps[2]).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
-    if player:
-        layout = _scrubber(layout, fps=fps)
+    layout = _with_widget(layout, widget=widget, fps=fps, frame_dim=FRAME_DIM)
     if save:
         _save_interactive(layout, save)
     return layout
 
 
-def _scrubber(layout, *, fps: int):
-    """Wrap ``layout`` in a panel pane whose widget plays the frames at ``fps``.
+def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
+    """Wrap ``obj`` so its frame dimension gets the widget the caller asked for.
 
-    Holoviews' own widget for a ``HoloMap`` is a slider, which steps but does not run.
-    Panel's ``"scrubber"`` gives the same dimension a ``Player`` — play, pause, step —
-    and its interval is where ``fps`` lands interactively, so the same argument means
-    the same thing in both renderers.
+    Holoviews picks the widget itself, and for a dimension whose values are strings —
+    a date, a depth — it picks a *dropdown*. That is the wrong control for an ordered
+    sequence: stepping to the next frame is two clicks and a search rather than one
+    nudge, and dragging through the movie is impossible. Panel can be told otherwise.
+
+    ``"slider"`` (the default) is a ``DiscreteSlider``: drag it, or arrow-key through
+    the frames, with the label still reading "2010-01-29" rather than an index.
+    ``"player"`` is a ``Player`` — play, pause, step — running at ``fps``.
+    ``"dropdown"`` returns the holoviews object untouched, as every other family does.
     """
+    if widget == "dropdown":
+        return obj
+    if widget not in ("slider", "player"):
+        raise ValueError(
+            f"unknown widget {widget!r}; expected 'slider', 'player' or 'dropdown'"
+        )
     import panel as pn
 
     pn.extension()
-    pane = pn.pane.HoloViews(layout, widget_type="scrubber", widget_location="bottom")
-    for widget in pane.widget_box:
-        if hasattr(widget, "interval"):
-            widget.interval = int(1000 / max(fps, 1))
+    if widget == "player":
+        pane = pn.pane.HoloViews(obj, widget_type="scrubber", widget_location="bottom")
+    else:
+        pane = pn.pane.HoloViews(
+            obj,
+            widget_location="bottom",
+            widgets={frame_dim: pn.widgets.DiscreteSlider} if frame_dim else {},
+        )
+    for control in pane.widget_box:
+        # a Player runs at the same rate the static renderer encodes at, so `fps` means
+        # the same thing in both renderers
+        if hasattr(control, "interval"):
+            control.interval = int(1000 / max(fps, 1))
     return pane
 
 
@@ -810,7 +872,7 @@ def _save_interactive(obj, save) -> None:
             f"here, or pass renderer='matplotlib' to write {path.name}."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(obj, "save"):  # a panel pane (player=True) embeds its own widget state
+    if hasattr(obj, "save"):  # a panel pane embeds its own widget state
         obj.save(str(path), embed=True)
     else:
         import holoviews as hv
