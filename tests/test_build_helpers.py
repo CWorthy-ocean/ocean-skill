@@ -548,8 +548,15 @@ def test_cdf5_is_distinguished_from_other_netcdf3(tmp_path):
     assert _file_format(_roms_like(tmp_path / "c1.nc", "NETCDF3_CLASSIC")) == "netcdf3"
 
 
+def _reads_cdf5():
+    from ocean_skill.build import _netcdf3_reads_cdf5
+
+    return _netcdf3_reads_cdf5()
+
+
+@pytest.mark.skipif(_reads_cdf5(), reason="this virtualizarr's parser reads CDF-5")
 def test_cdf5_is_refused_with_the_conversion_command(tmp_path):
-    """Scipy — and so virtualizarr's NetCDF3Parser — reads CDF-1/CDF-2 only.
+    """The kerchunk-backed NetCDF3Parser is scipy-backed, and scipy reads CDF-1/2 only.
 
     Left to itself it dies with ``IndexError: index 0 is out of bounds`` inside scipy,
     which names neither the file nor the format. A real ROMS grid file hit this.
@@ -558,12 +565,36 @@ def test_cdf5_is_refused_with_the_conversion_command(tmp_path):
 
     files = [_roms_like(tmp_path / f"o.{i}.nc", "NETCDF4") for i in range(2)]
 
-    with pytest.raises(ValueError, match=r"CDF-5.*cannot be kerchunked") as excinfo:
+    with pytest.raises(ValueError, match=r"CDF-5.*cannot kerchunk") as excinfo:
         make_kerchunk(files, out=tmp_path / "r.json", grid=_cdf5(tmp_path / "g.nc"))
 
     assert "nccopy -k netCDF-4" in str(excinfo.value), (
         "the error must say how to fix it"
     )
+
+
+@pytest.mark.skipif(
+    not _reads_cdf5(), reason="needs virtualizarr's native netCDF3 parser"
+)
+def test_cdf5_grid_values_survive_the_reference(tmp_path):
+    """A CDF-5 grid must come back bit-identical, not merely build without raising.
+
+    The parser's whole job is byte offsets, and a wrong offset does not raise — it
+    returns plausible-looking numbers from the wrong part of the file. So this asserts
+    values against what the C library reads from the same file, not just that a
+    reference was produced.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [_roms_like(tmp_path / f"o.{i}.nc", "NETCDF4") for i in range(2)]
+    grid = _cdf5(tmp_path / "g.nc")
+
+    out = make_kerchunk(files, out=tmp_path / "r.json", grid=grid)
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    expected = xr.open_dataset(grid, engine="netcdf4")
+    assert ds.h.dtype == expected.h.dtype
+    np.testing.assert_array_equal(ds.h.values, expected.h.values)
 
 
 # ------------------------------------------------------------- tilde expansion
