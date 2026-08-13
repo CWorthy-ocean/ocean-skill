@@ -8,6 +8,8 @@ join of the two is empty, and it is the failure most of these tests exist to pin
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -174,118 +176,237 @@ def test_a_conservative_method_cannot_sample_a_point():
         )
 
 
-# -- align_series ----------------------------------------------------------------------
+# -- a station comparison, through align() -------------------------------------------
 
 
-def test_a_mid_month_product_and_a_fifteen_minute_mooring_actually_join():
-    """The load-bearing case: month-start bins against mid-month stamps.
+def monthly_station(**kwargs):
+    """Return a mooring pre-aggregated to monthly means.
 
-    Resampling only the fine lane leaves the two labelled differently and an inner join
-    finds nothing at all, which is why *both* lanes are re-binned.
+    What a comparison against a monthly product requires: the alignment refuses to
+    coarsen a reference on its own.
     """
-    out = align.align_series(monthly_grid(), station())
-    assert out.sizes["time"] == 7
-    assert int(np.isfinite(out["reference"]).sum()) == 7
-    assert int(np.isfinite(out["test"]).sum()) == 7
+    from ocean_skill import operators
+
+    raw = station(**kwargs)
+    out = operators.aggregate(raw, {"time": {"resample": "MS", "reduce": "mean"}})
+    out.attrs.update(raw.attrs)
+    return out
 
 
-def test_the_finer_lane_is_aggregated_not_sampled():
-    """The bin holds the mooring's monthly *mean*, not its value at the product's stamp.
-
-    Pins the cadence decision itself: a sawtooth whose mean over March differs from its
-    mid-March value distinguishes the two, where a smooth series would not.
-    """
-    obs = station(period=97.0)
-    out = align.align_series(monthly_grid(), obs)
-    march = float(out["reference"].sel(time="2015-03-01"))
-    assert march == pytest.approx(float(obs.sel(time="2015-03").mean()))
-    assert march != pytest.approx(
-        float(obs.sel(time="2015-03-15T00:00", method="nearest")), abs=1e-4
-    )
+def _quiet_align(test, reference, **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return align.align(test, reference, over="time", **kwargs)
 
 
-def test_the_bin_counts_are_of_original_samples():
-    """A count taken after resampling is 1 everywhere and says nothing."""
-    out = align.align_series(monthly_grid(), station())
-    assert float(out["reference_count"].sel(time="2015-03-01")) == 31 * 96
-    assert float(out["test_count"].sel(time="2015-03-01")) == 1
-
-
-def test_the_join_is_not_widened_back_out_by_the_counts():
-    """Building a Dataset aligns its members with an *outer* join.
-
-    A count array still spanning the test lane's whole record would pad the pair back
-    out with NaN, undoing the inner join and leaving metrics to reduce over mostly
-    nothing.
-    """
-    out = align.align_series(monthly_grid(), station())
-    assert out.sizes["time"] == 7
+def test_a_station_reference_is_sampled_rather_than_regridded():
+    """The one thing that differs from a gridded comparison; the rest is shared."""
+    out = _quiet_align(monthly_grid(), monthly_station())
+    assert dict(out.sizes) == {"time": 7}
+    assert set(out.data_vars) == {"test", "reference", "difference"}
+    assert out.attrs["point_method"] in ("nearest", "bilinear")
     assert not bool(np.isnan(out["reference"]).any())
+
+
+def test_a_reference_finer_than_the_test_is_refused_with_the_fix():
+    """A 15-minute mooring against a monthly product, roles as they should be.
+
+    The refusal is deliberate and not this family's: coarsening the *reference* would
+    change the thing being scored against, so it has to be asked for. The message names
+    the aggregate spec that does it, which is what ``monthly_station`` above applies.
+    """
+    with pytest.raises(ValueError, match="reference is the finer of the two"):
+        align.align(monthly_grid(), station(), over="time")
+
+
+def test_the_matching_and_the_sampling_both_go_on_the_record():
+    """Two decisions were made for the caller, so both are written down."""
+    out = _quiet_align(monthly_grid(), monthly_station())
+    assert out.attrs["match_method"] in ("nearest", "mean", "exact")
+    assert "match_reason" in out.attrs
+    assert out.attrs["scored_over"] == "time"
+    assert out.attrs["cell_km"] > 0
 
 
 def test_both_positions_survive_the_join():
     """The station's own position and the cell the test came from are both kept."""
-    out = align.align_series(monthly_grid(), station())
+    out = _quiet_align(monthly_grid(), monthly_station())
     assert float(out["lon"]) == pytest.approx(STATION[0])
-    assert float(out["test_lon"]) != pytest.approx(STATION[0])
+    assert "test_lon" in out.coords
     assert out.attrs["station_lat"] == pytest.approx(STATION[1])
 
 
-def test_an_explicit_freq_overrides_the_inferred_cadence():
-    out = align.align_series(monthly_grid(), station(), freq="YS")
-    assert out.attrs["resample_freq"] == "YS"
-    assert out.sizes["time"] == 1
+def test_mid_month_stamps_still_pair_with_month_start_bins():
+    """The trap this whole family kept tripping over.
 
-
-def test_the_cadence_is_the_median_step_not_the_mean():
-    """A mooring record spans deployment turnarounds; a mean cadence would smear.
-
-    Six months of 15-minute data with a four-month gap has a mean step of hours and a
-    median step of 15 minutes. Only the median leaves the monthly product as the coarser
-    lane, which is what sets the bins.
+    A monthly product stamped mid-month and a mooring binned to month starts share no
+    timestamp, so an exact join is empty. ``match_axis`` pairs them by nearest step
+    within a tolerance and says how far it had to shift them.
     """
-    obs = xr.concat(
-        [station(start="2015-01-01", end="2015-02-01"), station(start="2015-06-01")],
-        dim="time",
-    )
-    assert align._cadence_seconds(obs["time"]) == pytest.approx(900.0)
-    assert align.align_series(monthly_grid(), obs).attrs["resample_freq"] == "MS"
-
-
-def test_no_shared_period_says_what_each_lane_covers():
-    with pytest.raises(ValueError, match="share no period"):
-        align.align_series(
-            monthly_grid(start="1990-01-01", end="1992-01-01"), station()
-        )
-
-
-def test_a_binning_mismatch_is_reported_as_our_bug_not_the_users():
-    """Overlapping raw ranges plus an empty join can only be the binning."""
-    message = align._no_overlap_message(monthly_grid(), station(), "time", "MS")
-    assert "binning mismatch" in message
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        out = align.align(monthly_grid(mid_month=True), monthly_station(), over="time")
+    assert out.sizes["time"] == 7
+    assert any("shifting each by" in str(w.message) for w in log)
 
 
 def test_a_subsurface_reference_against_a_surface_field_warns():
     with pytest.warns(UserWarning, match="compares a subsurface record"):
-        align.align_series(monthly_grid(), station(depth=33.9))
+        align.align(monthly_grid(), monthly_station(depth=33.9), over="time")
 
 
 def test_a_near_surface_reference_does_not_warn():
     """An instrument at 1 m against a surface field needs no caveat."""
-    import warnings
-
     with warnings.catch_warnings(record=True) as log:
         warnings.simplefilter("always")
-        align.align_series(monthly_grid(), station(depth=1.0))
+        align.align(monthly_grid(), monthly_station(depth=1.0), over="time")
     assert not [w for w in log if "subsurface" in str(w.message)]
-
-
-def test_a_gridded_reference_is_refused_with_the_reason():
-    with pytest.raises(ValueError, match="needs the reference to be one location"):
-        align.align_series(monthly_grid(), monthly_grid())
 
 
 def test_two_lanes_at_different_stations_are_reported():
     """Two point lanes need no sampling — but a position mismatch is not invisible."""
     with pytest.warns(UserWarning, match="km apart"):
-        align.align_series(station(lon=STATION[0] + 1.0), station())
+        align.align(
+            monthly_station(lon=STATION[0] + 1.0), monthly_station(), over="time"
+        )
+
+
+def test_a_conservative_method_becomes_nearest_at_a_point():
+    """``Comparison`` passes the package default on every call, so it cannot warn.
+
+    An explicitly conservative method still raises (see ``sample_at``); this is only the
+    default being read sensibly rather than refused.
+    """
+    out = _quiet_align(monthly_grid(), monthly_station(), method="conservative_normed")
+    assert out.attrs["point_method"] == "nearest"
+
+
+# -- the Comparison surface: featureType chooses, and says so --------------------------
+
+
+@pytest.fixture
+def station_lanes(monkeypatch):
+    """Serve a station reference and a gridded test in place of real sources.
+
+    Mirrors ``tests/test_skill_maps.py``'s ``stub``: a comparison is built and aligned
+    without a catalog or a network, so the featureType is stated rather than read.
+    """
+    import ocean_skill.comparison as comparison
+
+    lanes = {
+        "papa": monthly_station(),
+        "product": monthly_grid(),
+        # a gridded reference, for the mixed-set case below
+        "satellite": monthly_grid(start="2014-06-01"),
+    }
+    monkeypatch.setattr(
+        comparison, "prepare_source", lambda source, *a, **k: (lanes[source], None)
+    )
+    monkeypatch.setattr(comparison, "_domain_of", lambda name: None)
+    monkeypatch.setattr(
+        comparison,
+        "_feature_type",
+        lambda source: "timeSeries" if source == "papa" else "grid",
+    )
+    return lanes
+
+
+def _comparison(reference: str = "papa", **kwargs):
+    from ocean_skill.comparison import Comparison
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = Comparison(
+            reference=reference,
+            test="product",
+            variable="sea_water_temperature",
+            cache=False,
+            **kwargs,
+        )
+        out.align()
+    return out
+
+
+def test_a_timeseries_reference_keeps_its_time_axis_without_being_asked(station_lanes):
+    """FeatureType drives the recipe — the promise README makes from the start."""
+    comparison = _comparison()
+    assert comparison.over == "time"
+    assert comparison.aligned.sizes["time"] == 7
+
+
+def test_a_station_comparison_draws_as_lines_and_says_why(station_lanes):
+    comparison = _comparison()
+    assert comparison.is_series
+    assert comparison.family == "series"
+    assert "featureType is 'timeSeries'" in comparison.family_reason
+
+
+def test_the_shape_of_the_data_can_overrule_the_featuretype(station_lanes, monkeypatch):
+    """A catalog can be wrong, and then the aligned pair is what a renderer can draw.
+
+    ``featureType: timeSeries`` on an entry that is really gridded gives a scored
+    comparison with maps, not lines — and ``family_reason`` says the scoring decided it,
+    which is how someone traces the surprise back to the entry.
+    """
+    import ocean_skill.comparison as comparison_module
+
+    lanes = {"papa": monthly_grid(start="2014-06-01"), "product": monthly_grid()}
+    monkeypatch.setattr(
+        comparison_module,
+        "prepare_source",
+        lambda source, *a, **k: (lanes[source], None),
+    )
+    comparison = _comparison()
+    assert not comparison.is_series
+    assert comparison.family == "skill_map"
+    assert "metric maps" in comparison.family_reason
+
+
+def test_an_explicit_over_wins_over_the_featuretype(station_lanes):
+    assert _comparison(over="time").over_reason == "over= as asked"
+
+
+def test_the_overall_metrics_of_a_station_are_not_area_weighted(station_lanes):
+    """One position has one cos(lat); calling that an area weighting is a claim."""
+    record = _comparison().metrics()
+    assert record["weighted"] is False
+    assert record["n"] == 7
+
+
+def test_a_station_comparison_has_no_maps_to_draw(station_lanes):
+    with pytest.raises(ValueError, match="one place"):
+        _comparison().maps("bias")
+
+
+def test_a_set_that_mixes_families_says_which_went_which_way(station_lanes):
+    """Lines and metric maps are different figures, so a set of both is refused.
+
+    Naming which comparison went which way matters more than the refusal: the usual
+    cause is one reference in a fan-out being a mooring while the rest are gridded, and
+    the reason each one gives is what points at it.
+    """
+    from ocean_skill.comparison import ComparisonSet
+
+    series = _comparison()
+    scored = _comparison(reference="satellite", over="time")
+    assert (series.family, scored.family) == ("series", "skill_map")
+    with pytest.raises(ValueError, match="different figures"):
+        ComparisonSet([series, scored]).plot()
+
+
+def test_the_depth_caveat_survives_the_reference_being_resampled():
+    """The mooring is binned to monthly means, which drops its depth *coordinate*.
+
+    Read from the variable's attrs instead, so the caveat still fires — and reports the
+    spread, since a record whose instrument moved between 9 and 34 m is the one where
+    "compared against a surface field" is most worth saying.
+    """
+    from ocean_skill import operators
+
+    raw = station(depth=None)
+    raw = raw.assign_attrs(depth_m=24.9, depth_range_m=(16.0, 39.5), units="degC")
+    monthly = operators.aggregate(raw, {"time": {"resample": "MS", "reduce": "mean"}})
+    monthly.attrs.update(raw.attrs)
+    assert "depth" not in monthly.coords
+    with pytest.warns(UserWarning, match=r"24.9 m \(varying 16-39.5 m\)"):
+        align.align(monthly_grid(), monthly, over="time")

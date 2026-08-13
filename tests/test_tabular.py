@@ -275,3 +275,27 @@ def test_a_moving_platform_is_reported_rather_than_averaged():
     lon = np.linspace(-144.3, -143.9, 96)
     with pytest.warns(UserWarning, match="trajectory"):
         tabular.to_dataset(papa_frame(lon=lon), PAPA_META)
+
+
+def test_the_depth_rides_on_the_variables_attrs_as_well_as_a_coordinate():
+    """A coordinate along time does not survive a reduction; the attrs do.
+
+    Resampling a mooring to monthly means — which a comparison against a monthly product
+    requires — drops a ``(time,)`` depth coordinate, and the depth would then be
+    invisible to the caveat about comparing it against a surface field, which is exactly
+    the record that needs it.
+    """
+    from ocean_skill import operators
+
+    pressure = np.r_[np.full(48, 9.2), np.full(48, 34.1)]
+    with pytest.warns(UserWarning, match="depth is not constant"):
+        ds = tabular.to_dataset(papa_frame(pressure=pressure), PAPA_META)
+    temperature = ds["sea_water_temperature"]
+    assert temperature.attrs["depth_m"] == pytest.approx(np.median(pressure))
+    assert temperature.attrs["depth_range_m"] == pytest.approx((9.2, 34.1))
+
+    monthly = operators.aggregate(
+        temperature, {"time": {"resample": "MS", "reduce": "mean"}}
+    )
+    assert "depth" not in monthly.coords, "the fixture no longer poses the question"
+    assert monthly.attrs["depth_m"] == pytest.approx(np.median(pressure))

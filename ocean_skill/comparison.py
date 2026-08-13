@@ -32,6 +32,44 @@ __all__ = [
 SURFACE = "surface"
 
 
+#: CF featureTypes whose data is a *place*, not a field: one position, a time axis, and
+#: nothing to draw a map of. A comparison against one of these keeps its time axis and
+#: draws as lines (the ``series`` family) — which is what "featureType drives the plot
+#: recipe" means in practice for the non-gridded half of the catalog.
+#:
+#: ``profile``, ``timeSeriesProfile`` and ``trajectory`` are deliberately absent: each
+#: needs its own recipe (a profile's axis is depth and its x is the value; a trajectory
+#: is a position that moves, so one sampling point is wrong for it), and inferring
+#: "series" for them would draw something plausible and wrong.
+POINT_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
+
+
+def _feature_type(source: str) -> str | None:
+    """Return a source's catalog featureType, or ``None`` if it is unresolvable."""
+    from ocean_skill.catalog import resolve
+
+    try:
+        return resolve(source).metadata.get("featureType")
+    except KeyError:
+        return None
+
+
+def _implied_over(reference: str) -> tuple[str | None, str]:
+    """Return ``(over, why)`` — the axis a reference's featureType asks to keep.
+
+    The featureType decides the recipe, as the README has promised since the beginning:
+    a ``timeSeries`` reference has one position and a time axis, so time is the axis
+    that survives and the comparison is a line plot rather than a map. Returning the
+    *reason* alongside is the point — the choice is then recorded on the aligned result
+    (``family_reason``), so a family that surprises someone can be traced to what
+    decided it rather than guessed at.
+    """
+    feature = _feature_type(reference)
+    if feature in POINT_FEATURE_TYPES:
+        return "time", f"the reference's featureType is {feature!r}"
+    return None, "the reference is gridded"
+
+
 def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     """Return ``(lon_min, lat_min, lon_max, lat_max)`` for a source's catalog extent.
 
@@ -335,8 +373,14 @@ def _prepare(
     # to select from (see ocean_skill.tabular.depth_of), so the depth actually compared
     # is read off the lane itself. Reported the same way as an observational level's:
     # through prepare_source, the lane cache, and the metrics row's `obs_depth`.
-    if "actual_depth" not in da.attrs and "depth" in da.coords and not da["depth"].dims:
-        da.attrs["actual_depth"] = float(da["depth"])
+    if "actual_depth" not in da.attrs:
+        if "depth" in da.coords and not da["depth"].dims:
+            da.attrs["actual_depth"] = float(da["depth"])
+        elif da.attrs.get("depth_m") is not None:
+            # A station's depth also rides on the variable's attrs, which is what is
+            # left once a reduction has dropped a coordinate along time -- so the
+            # metrics row still reports the depth the comparison was made at.
+            da.attrs["actual_depth"] = float(da.attrs["depth_m"])
     return units.convert_units(da), da.attrs.get("actual_depth")
 
 
@@ -506,6 +550,13 @@ class Comparison:
         self.select = as_select(select)
         self.aggregate = aggregate
         self.method = method
+        # An explicit over= always wins; otherwise the reference's featureType decides,
+        # since a station reference has a time axis and no map to draw. The reason is
+        # kept so the family this ends up choosing can be traced to what chose it.
+        if over is None:
+            over, self.over_reason = _implied_over(reference)
+        else:
+            self.over_reason = "over= as asked"
         self.over = over
         self.time_method = time_method
         self.tolerance = tolerance
@@ -701,6 +752,50 @@ class Comparison:
         """The axis name the aligned pair kept, as the reference names it."""
         return self.aligned.attrs.get("scored_over") if self.over else None
 
+    @property
+    def is_series(self) -> bool:
+        """Whether this comparison is a place through time rather than a field.
+
+        Read off the *aligned pair*, not off the featureType that led to it: the
+        featureType chooses the recipe, but what a renderer can draw is decided by what
+        the alignment actually produced. A station reference leaves no horizontal
+        dimension to map, whatever the catalog said — and a catalog that said the wrong
+        thing shows up here as a family that surprises someone, which is why
+        :attr:`family_reason` records both halves.
+        """
+        from ocean_skill.align import point_of
+
+        return point_of(self.aligned["reference"]) is not None
+
+    @property
+    def family(self) -> str:
+        """The plot family this comparison's own shape admits.
+
+        Three cases, in the order the data decides them: a place through time draws as
+        ``series``, a pair scored over an axis draws as ``skill_map``, and a pair of
+        single maps draws as ``field_row``. No argument selects it — the same rule
+        :meth:`ocean_skill.field.Field.plot` follows between a map and a facet grid.
+        """
+        if self.is_series:
+            return "series"
+        return "field_row" if self.over is None else "skill_map"
+
+    @property
+    def family_reason(self) -> str:
+        """Why :attr:`family` is what it is, in one sentence.
+
+        Worth carrying because two things decide it and they can disagree: the catalog's
+        featureType picks the recipe, and the aligned pair's own shape is what a
+        renderer can honour. When a comparison draws as something unexpected — a
+        ``timeSeries`` entry that is really gridded, a scored comparison that collapsed
+        to a point — this says which of the two was responsible.
+        """
+        if self.is_series:
+            return f"drawn as lines: {self.over_reason}, so the time axis is kept"
+        if self.over is not None:
+            return f"drawn as metric maps: {self.over_reason}"
+        return "drawn as test | reference | difference: no axis is being scored"
+
     def maps(self, *names: str):
         """One 2-D map per metric, each computed cell by cell along ``over``.
 
@@ -728,6 +823,13 @@ class Comparison:
 
         from ocean_skill import _stacklevel
         from ocean_skill import metrics as _metrics
+
+        if self.is_series:
+            raise ValueError(
+                "this comparison is at one place, so there is no map to make: a "
+                "per-cell metric over one cell is the number metrics() already gives. "
+                "Use .metrics() for the numbers and .plot() for the series."
+            )
 
         requested = tuple(names) or self.metric_names or _metrics.DEFAULT_MAP_METRICS
         if self.over is None:
@@ -791,13 +893,24 @@ class Comparison:
 
         if self._metrics is None:
             aligned = self.aligned
-            if self.over is not None:
+            # The mask is per *cell*: it exists so the scalar describes the same domain
+            # the maps show. A station has one cell and no maps, so there is nothing to
+            # mask and asking for them would raise.
+            if self.over is not None and not self.is_series:
                 enough = self.maps("n")["n"] >= self.min_pairs
                 aligned = aligned.where(enough)
             self._metrics = _metrics.compute(
                 aligned,
                 test_name="test",
                 reference_name="reference",
+                # A station has one latitude, so cos(lat) is a constant: the arithmetic
+                # is identical either way, but the row would claim an area weighting
+                # that never happened. What `n` counts is steps here, not cells.
+                **(
+                    {"weighted": False, "sample_noun": "time steps"}
+                    if self.is_series
+                    else {}
+                ),
                 variable=self.standard_name or str(self.variable),
                 test=self.test_name,
                 reference=self.reference_name,
@@ -834,7 +947,9 @@ class Comparison:
             # compare() fan-out commonly pairs one variable per reference source).
             "labels": (self.test_name, self.reference_name),
         }
-        if self.over is None:
+        # A scored comparison carries metric maps -- unless it is a place through time,
+        # where there is no map to carry and the series family draws the pair itself.
+        if self.over is None or self.is_series:
             return {"aligned": self.aligned, **common}
         from ocean_skill.metrics import DEFAULT_MAP_METRICS
 
@@ -856,12 +971,14 @@ class Comparison:
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        if self.over is None:
+        family = self.family
+        if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
-        # Outline the test (model) source's own declared extent, matching Abigale
-        # Wyatt's side-by-side plots — pass domain=None to suppress it.
-        kwargs.setdefault("domain", _domain_of(self.test_name))
-        family = "field_row" if self.over is None else "skill_map"
+        if family != "series":
+            # Outline the test (model) source's own declared extent, matching Abigale
+            # Wyatt's side-by-side plots — pass domain=None to suppress it. A line plot
+            # has no map to outline, and series() would refuse the option outright.
+            kwargs.setdefault("domain", _domain_of(self.test_name))
         spec = PlotSpec(family=family, items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
@@ -989,21 +1106,31 @@ class ComparisonSet:
             )
         items = self._items()
         first = self.comparisons[0]
-        scored = [c.over is not None for c in self.comparisons]
-        if any(scored) and not all(scored):
-            raise ValueError(
-                "this set mixes comparisons scored over an axis with comparisons "
-                "reduced to single maps, which are two different figures: one draws a "
-                "metric per panel, the other test | reference | difference. Plot them "
-                "separately."
+        families = {c.family for c in self.comparisons}
+        if len(families) > 1:
+            # Each family is a different figure -- a metric per panel, lines on one time
+            # axis, or test | reference | difference -- so there is nothing to draw that
+            # is all of them. Naming which comparison went which way is the point: the
+            # usual cause is one reference in the set being a station, the rest grids.
+            detail = ", ".join(
+                f"{c.label or c.test_name + ' vs ' + c.reference_name}:"
+                f" {c.family_reason}"
+                for c in self.comparisons
             )
-        if not any(scored):
+            raise ValueError(
+                f"this set mixes {sorted(families)}, which are different figures — "
+                f"{detail}. Plot them separately."
+            )
+        family = families.pop()
+        if family == "field_grid" or family == "series":
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
-        # Outlines the first row's test (model) extent; rows sharing one test source
-        # (the common case) all get the same box. Pass domain=None to suppress it, or
-        # your own bbox if rows mix test sources with different domains.
-        kwargs.setdefault("domain", _domain_of(first.test_name))
-        family = "skill_map" if any(scored) else "field_grid"
+        if family != "series":
+            # Outlines the first row's test (model) extent; rows sharing one test source
+            # (the common case) all get the same box. Pass domain=None to suppress, or
+            # your own bbox if rows mix test sources with different domains.
+            kwargs.setdefault("domain", _domain_of(first.test_name))
+        # field_row is one comparison's family; a set of them stacks as a grid.
+        family = "field_grid" if family == "field_row" else family
         return render(
             PlotSpec(family=family, items=items, options=kwargs),
             renderer=renderer,
@@ -1033,6 +1160,14 @@ class ComparisonSet:
 
         if not self.comparisons:
             raise ValueError("no comparisons to animate: every pair was skipped")
+        series = [c for c in self.comparisons if c.is_series]
+        if series:
+            raise ValueError(
+                f"{len(series)} of these comparisons are time series, which have no "
+                "frames to play: their time axis is already the x axis of the figure. "
+                "Use .plot() — a movie of a line plot would be one line drawn over and "
+                "over."
+            )
         first = self.comparisons[0]
         # a row label (drawn rotated at a grid row's left edge) and a frame label (drawn
         # in the panel, changing as the movie plays) are the same identity in two

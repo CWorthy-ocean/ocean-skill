@@ -31,7 +31,6 @@ __all__ = [
     "subset_to_bbox",
 ]
 
-
 #: Sampling methods :func:`sample_at` understands, and what each means at a point.
 #: ``nearest`` takes the containing cell's own value; the interpolating spellings weight
 #: the surrounding cells. Anything else (a conservative regrid) has no meaning against a
@@ -1017,11 +1016,18 @@ def align(
     8760 regridded fields into 365. ``time_method``/``tolerance``/``bin_anchor``/
     ``metadata`` are its arguments; what it decided is recorded in the result's attrs.
 
+    A **station reference** — one position rather than a grid, as a mooring is — has no
+    cells to regrid onto, so the test lane is *sampled* at its position instead
+    (:func:`_align_at_point`, via :func:`sample_at`). Everything before that point is
+    the same for both: the axis matching, the dimensionality check, the units. The
+    result has the same three variables on the reference's own axis, 1-D not 2-D.
+
     ``method="conservative_normed"`` (or ``"conservative"``) **area-averages** the test
     onto the reference cells, which is the right operator when the test is much finer
     than the reference (a km-scale model against a 1-degree climatology): bilinear would
     *sample* the fine field and discard subgrid structure. Cell corners are derived by
-    :func:`grid_of` when absent.
+    :func:`grid_of` when absent. Against a station it names how the lane travels to the
+    position instead — nearest cell or interpolated.
 
     ``min_coverage`` drops reference cells that the test only partly covers. Plain
     ``"conservative"`` divides by the *whole* destination cell area, so a half-covered
@@ -1030,8 +1036,6 @@ def align(
     coverage mask then removes cells too sparsely covered to be meaningful.
     """
     import xesmf as xe
-
-    from ocean_skill import units as _units
 
     # Matched *before* the regrid: the binning is what decides how many fields there are
     # to regrid, so doing it after would pay for every step of the finer lane and then
@@ -1054,28 +1058,28 @@ def align(
     _require_2d(test, "test", keep=keep)
     _require_2d(reference, "reference", keep=keep)
 
-    # Subtracting umol/kg from mmol/m3 used to yield a difference of 0.0, labelled
-    # with the reference's units and no warning at all — plausible, and wrong by the
-    # density factor. Harmonize first, and refuse outright when the two are not the
-    # same physical quantity, since no conversion can rescue that.
-    same = _units.compatible(test.attrs.get("units"), reference.attrs.get("units"))
-    if same is False:
-        raise ValueError(
-            f"cannot difference {test.attrs.get('units')!r} against "
-            f"{reference.attrs.get('units')!r}: not the same physical quantity. "
-            "Convert one first, or check the variables really do match."
-        )
-    if same:
-        test = _units.to_units(test, reference.attrs.get("units"))
-    elif same is None:
-        warnings.warn(
-            f"cannot verify units {test.attrs.get('units')!r} vs "
-            f"{reference.attrs.get('units')!r}; differencing them unchecked.",
-            stacklevel=_stacklevel.find(),
-        )
+    test = _check_units(test, reference)
 
     test = harmonize_longitude(test, convention)
     reference = harmonize_longitude(reference, convention)
+
+    # A point reference has no grid to regrid onto: the test lane is *sampled* at the
+    # station instead (see _align_at_point). Everything up to here -- the axis matching,
+    # the dimensionality check, the units -- is the same question either way, which is
+    # why the branch sits here rather than in a second align function.
+    station = point_of(reference)
+    if station is not None:
+        return _align_at_point(
+            test,
+            reference,
+            station,
+            method=method,
+            convention=convention,
+            test_name=test_name,
+            reference_name=reference_name,
+            over=over,
+            report=report,
+        )
 
     # regrid onto the overlap, not the reference's full (often global) grid
     reference = subset_to_bbox(reference, bbox_of(test), pad=pad)
@@ -1124,123 +1128,37 @@ def align(
     return out
 
 
-#: Seconds -> pandas offset alias, as tolerance bands rather than exact matches: a
-#: monthly product's steps are 28-31 days, so nothing lands on a round number. Ordered
-#: coarsest-first; ``"MS"`` is the band that matters, since a month is the one cadence
-#: with no fixed length.
-_FREQ_BANDS = (
-    (350 * 86400, 380 * 86400, "YS"),
-    (85 * 86400, 95 * 86400, "QS"),
-    (27 * 86400, 32 * 86400, "MS"),
-    (13 * 86400, 16 * 86400, "SMS"),
-    (6.5 * 86400, 7.5 * 86400, "7D"),
-)
-
-
-def _cadence_seconds(coord) -> float | None:
-    """Return the typical spacing of a time coordinate, in seconds.
-
-    The **median** step, not the mean: a mooring record spans deployment turnarounds,
-    and one multi-month gap would drag a mean cadence from 15 minutes to hours — then
-    bin the whole record at the wrong interval. Read off the coordinate index, which is
-    small and already in memory, so this is free enough to run unconditionally (the same
-    argument :func:`ocean_skill.operators._bin_counts` makes).
-    """
-    values = np.asarray(coord.values)
-    if values.size < 2:
-        return None
-    steps = np.diff(values).astype("timedelta64[ns]").astype("float64") / 1e9
-    steps = steps[steps > 0]
-    return float(np.median(steps)) if steps.size else None
-
-
-def _freq_from_seconds(seconds: float) -> str:
-    """Return the pandas offset alias closest to ``seconds``."""
-    for low, high, alias in _FREQ_BANDS:
-        if low <= seconds <= high:
-            return alias
-    if seconds < 3600:
-        return f"{max(1, round(seconds / 60))}min"
-    if seconds < 86400:
-        return f"{max(1, round(seconds / 3600))}h"
-    return f"{max(1, round(seconds / 86400))}D"
-
-
-def _time_dim(da) -> str:
-    """Return ``da``'s time dimension, by CF axis then by name."""
-    from ocean_skill import operators
-
-    dim = operators.resolve_dim(da, "T")
-    if dim is None:
-        raise ValueError(
-            "a time-series comparison needs a time axis on both lanes, and this one "
-            f"has dimensions {tuple(str(d) for d in da.dims)}."
-        )
-    return str(dim)
-
-
-def _resample(da, dim: str, freq: str, reduce: str):
-    """Bin ``da`` onto ``freq``, keeping the time axis."""
-    from ocean_skill import operators
-
-    attrs = dict(da.attrs)
-    out = operators.aggregate(da, {dim: {"resample": freq, "reduce": reduce}})
-    out.attrs.update(attrs)
-    return out
-
-
-def _coverage_span(da, dim: str) -> str:
-    """``"2013-07 to 2024-12"`` for an error message, from either datetime family."""
-    values = np.asarray(da[dim].values)
-    if values.size == 0:
-        return "nothing"
-    return f"{str(values.min())[:10]} to {str(values.max())[:10]}"
-
-
-def align_series(
+def _align_at_point(
     test,
     reference,
+    station: tuple[float, float],
     *,
-    method: str = NEAREST,
-    freq: str | None = None,
-    reduce: str = "mean",
-    convention: Literal["0-360", "-180-180"] = "-180-180",
-    test_name: str = "test",
-    reference_name: str = "reference",
+    method: str,
+    convention: str,
+    test_name: str,
+    reference_name: str,
+    over: str | None,
+    report: dict[str, Any],
 ) -> xr.Dataset:
-    """Join ``test`` to a station's ``reference`` on one time axis.
+    """Pair a gridded test lane with a station reference, on the reference's own axis.
 
-    The time-series counterpart of :func:`align`, and the same contract: ``test`` is
-    brought onto ``reference`` (so model onto data), and the result is a Dataset of
-    ``test``, ``reference`` and ``difference`` — 1-D on ``time`` here rather than 2-D on
-    a grid, so one metrics engine and one set of downstream invariants serve both.
+    The point counterpart of the regrid in :func:`align`, and the only step that
+    differs: a station has no cells to remap onto, so the test lane is **sampled** at it
+    (:func:`sample_at`, ``method="nearest"`` or ``"bilinear"``). Everything else a
+    comparison needs has already happened in :func:`align` — the axis matching, the
+    dimensionality check, the units — which is why this is a branch there rather than a
+    second alignment function with its own copy of them.
 
-    Two things happen instead of a regrid. The test lane is **sampled at the station**
-    (:func:`sample_at`, ``method=`` choosing nearest-cell or interpolated). Then both
-    lanes are **resampled onto the coarser one's cadence** and joined bin to bin — a
-    15-minute mooring against a monthly product is compared as monthly means, which is
-    honest about what the product resolves and avoids inventing 15-minute model values.
-
-    Both lanes are resampled, not just the fine one, because the labels have to match:
-    a monthly product stamped mid-month and a mooring binned to month starts share no
-    timestamp at all, and an inner join of the two is empty. Re-binning the coarse lane
-    onto the same offsets is a relabelling — its bins already hold one sample each — and
-    it removes the question of which lane was "the" one to move.
-
-    ``freq`` overrides the inferred cadence (any pandas offset alias); ``reduce`` names
-    the reduction each bin gets (``"mean"`` by default).
+    ``method`` is read the same way it is for a grid: it says how the test lane travels
+    to the reference. The package default (``"conservative_normed"``) becomes
+    ``"nearest"``, since area-averaging onto a station's zero area is not a thing; an
+    explicitly conservative method says so rather than being quietly reinterpreted.
     """
-    from ocean_skill import operators
-
-    test = _check_units(test, reference)
-
-    station = point_of(reference)
-    if station is None:
-        raise ValueError(
-            "a time-series comparison needs the reference to be one location, but its "
-            "longitude/latitude vary. Narrow it with "
-            'select={"lon": ..., "lat": ...}, or compare it as a field instead.'
-        )
+    if method.startswith("conservative"):
+        # Not a warning when it is the package default -- Comparison passes it on every
+        # call without the caller having chosen it, so warning would be noise on the
+        # common path. sample_at raises for a conservative method asked for explicitly.
+        method = NEAREST
     if point_of(test) is None:
         test = sample_at(
             test,
@@ -1250,9 +1168,9 @@ def align_series(
             subject="the test lane",
         )
     else:
-        # Already a single location -- a hand-narrowed lane, or two moorings. Nothing to
-        # sample, but the two positions are worth comparing: a select= that picked the
-        # wrong cell is otherwise invisible.
+        # Two point lanes -- a hand-narrowed test, or two moorings. Nothing to sample,
+        # but the positions are worth comparing: a select= that picked the wrong cell
+        # would otherwise be invisible.
         offset = float(_haversine_km(*point_of(test), *station))
         test.attrs.setdefault("nearest_distance_km", offset)
         if offset > 1.0:
@@ -1262,87 +1180,34 @@ def align_series(
                 "compared as if co-located.",
                 stacklevel=_stacklevel.find(),
             )
-
     _warn_if_depths_differ(test, reference)
 
-    test_dim, reference_dim = _time_dim(test), _time_dim(reference)
-    if freq is None:
-        cadences = [
-            c
-            for c in (
-                _cadence_seconds(test[test_dim]),
-                _cadence_seconds(reference[reference_dim]),
-            )
-            if c is not None
-        ]
-        if not cadences:
-            raise ValueError(
-                "cannot infer a cadence: at least one lane needs two or more time "
-                'steps. Pass freq= (e.g. freq="MS") to say what the bins should be.'
-            )
-        freq = _freq_from_seconds(max(cadences))
-
-    # Counted before resampling, or every bin holds exactly one sample -- the count of a
-    # lane already binned. What is wanted is how many *original* samples a bin covers:
-    # 2880 fifteen-minute observations in a month against the product's one.
-    counts = {
-        f"{test_name}_count": _bins_only(
-            operators._bin_counts(test[test_dim], freq), test_dim
-        ),
-        f"{reference_name}_count": _bins_only(
-            operators._bin_counts(reference[reference_dim], freq), reference_dim
-        ),
-    }
-    test = _resample(test, test_dim, freq, reduce)
-    reference = _resample(reference, reference_dim, freq, reduce)
-
-    joined_test, joined_reference = xr.align(test, reference, join="inner")
-    if joined_test.sizes.get(test_dim, 0) == 0:
-        raise ValueError(_no_overlap_message(test, reference, test_dim, freq))
-    # Reindexed onto the joined axis rather than merged as they are: building a Dataset
-    # aligns its members with an *outer* join, so a count array still spanning the test
-    # lane's whole record would silently widen the pair back out again -- undoing the
-    # inner join two lines above and padding both members with NaN.
-    counts = {
-        name: array.reindex({test_dim: joined_test[test_dim]})
-        for name, array in counts.items()
-    }
-
-    # The two lanes carry different positions -- the station's, and the grid cell the
-    # test was sampled from. Merging them under one name is a MergeError, and dropping
-    # the test's loses the offset the metrics report, so the test's are renamed. The
-    # station keeps the plain names, since the comparison is at the station.
-    joined_test = _rename_position(joined_test, test_name)
-
+    # The two lanes carry different positions -- the station's, and the cell the test
+    # came from. Merging them under one name is a MergeError, and dropping the test's
+    # loses the offset the metrics report, so the test's are renamed. The station keeps
+    # the plain names, the comparison being at the station.
+    test = _rename_position(test, test_name)
     out = xr.Dataset(
         {
-            test_name: joined_test,
-            reference_name: joined_reference,
-            "difference": joined_test - joined_reference,
-            **{k: v for k, v in counts.items()},
+            test_name: test,
+            reference_name: reference,
+            "difference": test - reference,
         }
     )
     out["difference"].attrs = {
         "long_name": f"{test_name} − {reference_name}",
-        "units": joined_reference.attrs.get("units", ""),
+        "units": reference.attrs.get("units", ""),
     }
-    for name in counts:
-        out[name].attrs = {"long_name": "samples per bin"}
-    out.attrs["mode"] = "series"
-    out.attrs["resample_freq"] = freq
-    out.attrs["resample_reduce"] = reduce
     out.attrs["station_lon"], out.attrs["station_lat"] = station
     out.attrs["point_method"] = test.attrs.get("point_method", method)
     out.attrs["lon_convention"] = convention
     for key in ("nearest_distance_km", "cell_km"):
         if key in test.attrs:
             out.attrs[key] = test.attrs[key]
+    if over is not None:
+        out.attrs["scored_over"] = over
+        out.attrs.update(report)
     return out
-
-
-def _bins_only(da, dim: str):
-    """Return ``da`` carrying its own dimension coordinate and nothing else."""
-    return da.drop_vars([c for c in da.coords if c != dim])
 
 
 def _rename_position(da, prefix: str):
@@ -1365,43 +1230,37 @@ def _warn_if_depths_differ(test, reference) -> None:
     to select from, and correctly does nothing, so asking for the surface and receiving
     30 m used to pass without comment.
     """
+    # The coordinate first, then the variable's own attrs: a depth riding along `time`
+    # does not survive a reduction (resampling a mooring to monthly means drops it), so
+    # the attrs are what is left by the time a comparison gets here -- and this caveat
+    # matters most for exactly those records, whose instrument moved.
     depth = reference.coords.get("depth")
-    if depth is None or depth.dims:
+    values = None
+    if depth is not None:
+        values = np.asarray(depth.values, dtype="float64")
+    elif reference.attrs.get("depth_m") is not None:
+        values = np.asarray([reference.attrs["depth_m"]], dtype="float64")
+    if values is None or not np.isfinite(values).any():
         return
-    value = float(depth)
+    value = float(np.nanmedian(values))
+    low, high = reference.attrs.get("depth_range_m", (None, None))
+    if low is None and values.size > 1:
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+    spread = (
+        f" (varying {low:g}-{high:g} m)"
+        if low is not None and high is not None and high - low > 1.0
+        else ""
+    )
     if abs(value) <= 5.0:
         return
     if any(name in test.coords for name in ("depth", "z", "z_rho", "lev")):
         return
     source = reference.attrs.get("depth_source") or "its own metadata"
     warnings.warn(
-        f"the reference is at {value:g} m (from {source}) while the test lane has no "
-        "vertical axis, so this compares a subsurface record against a surface field. "
+        f"the reference is at {value:g} m{spread} (from {source}) while the test lane "
+        "has no vertical axis, so this compares a subsurface record against a surface "
+        "field. "
         "Expect a depth-related bias — use a test source with a vertical axis, or "
         "state the comparison as surface-versus-depth.",
         stacklevel=_stacklevel.find(),
-    )
-
-
-def _no_overlap_message(test, reference, dim: str, freq: str) -> str:
-    """Explain an empty join, distinguishing no coverage from a labelling mismatch."""
-    spans = (
-        f"the test lane covers {_coverage_span(test, dim)} and the reference lane "
-        f"{_coverage_span(reference, dim)}"
-    )
-    base = f"no overlapping time after resampling to {freq!r}: {spans}, "
-    t0, t1 = test[dim].values.min(), test[dim].values.max()
-    r0, r1 = reference[dim].values.min(), reference[dim].values.max()
-    if t0 <= r1 and r0 <= t1:
-        # The ranges do overlap, so the bins disagree rather than the coverage --
-        # which is this function's bug, not the caller's, and should say so.
-        return (
-            base + "and those ranges do overlap — so this is a binning mismatch, not a "
-            f"coverage one. Pass freq= explicitly (the inferred {freq!r} may be wrong "
-            "for these two cadences)."
-        )
-    return (
-        base + "so the two share no period. Narrow both with "
-        'select={"time": slice(...)} to a period they both cover, or check the sources '
-        "really overlap in time."
     )

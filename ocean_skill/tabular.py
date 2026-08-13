@@ -334,6 +334,19 @@ def to_dataset(df, meta: dict[str, Any]):
             variable.attrs["units"] = unit
         variable.attrs["standard_name"] = base
         variable.attrs["source_column"] = str(column)
+        # The depth also goes on each variable's own attrs, not only on a coordinate.
+        # A coordinate along time does not survive a reduction -- resampling a mooring
+        # to monthly means drops it -- and the depth is then invisible exactly where it
+        # matters most, to the caveat about comparing it against a surface field.
+        if depth is not None:
+            variable.attrs["depth_m"] = (
+                float(depth) if np.isscalar(depth) else float(np.nanmedian(depth))
+            )
+            if not np.isscalar(depth):
+                variable.attrs["depth_range_m"] = (
+                    float(np.nanmin(depth)),
+                    float(np.nanmax(depth)),
+                )
         data[base] = variable
 
     ds = xr.Dataset(data, coords={"time": frame[time_col].to_numpy()})
