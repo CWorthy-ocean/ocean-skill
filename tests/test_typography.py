@@ -657,6 +657,90 @@ def _interactive_row(**options):
     return _bokeh_figures(render(spec, renderer="holoviews"))[0]
 
 
+#: Every family that draws maps, with a spec item shaped as its own renderer expects.
+#: ``taylor``/``target``/``paired`` are excluded: they are metric diagrams, not maps,
+#: and are square by construction rather than sized from a canvas.
+def _map_family_specs():
+    import numpy as np
+    import xarray as xr
+
+    def cube(n):
+        base = _field()
+        return xr.DataArray(
+            np.stack([base.values + i * 0.1 for i in range(n)]),
+            coords={"time": list(range(n)), "lat": base.lat, "lon": base.lon},
+            dims=("time", "lat", "lon"),
+        )
+
+    row = {"aligned": _aligned(), "units": "degC"}
+    return {
+        "field_row": [row],
+        "field_grid": [row, row],
+        "field_facet": [{"field": cube(6), "facet_dim": "time", "units": "degC"}],
+        "field_movie": [dict(row, frame_label=f"t{i}") for i in range(3)],
+        "facet_movie": [{"field": cube(4), "facet_dim": "time", "units": "degC"}],
+    }
+
+
+def _drawn_width(family, items, **options):
+    """Figure width (inches) for a static family; unwraps the movies' FuncAnimation."""
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    out = render(
+        PlotSpec(family=family, items=items, options=options), renderer="matplotlib"
+    )
+    fig = getattr(out, "_fig", out)  # the movie families return an animation
+    width = float(fig.get_size_inches()[0])
+    plt.close(fig)
+    return width
+
+
+@pytest.mark.parametrize("family", list(_map_family_specs()))
+def test_size_and_zoom_reach_every_map_family(family):
+    """The knobs have to land on all of them, not just the two they started on.
+
+    ``size``/``zoom`` were added to ``field_row`` and ``field_grid`` and then extended
+    family by family, which left ``field_facet``, ``field_movie`` and ``facet_movie``
+    without them. A caller who had learnt ``zoom=1.4`` on a grid got a ``TypeError`` on
+    a facet, and silence interactively, where those functions take ``**_``. All five now
+    size from the same canvas.
+    """
+    items = _map_family_specs()[family]
+    assert _drawn_width(family, items, zoom=1.5) > _drawn_width(family, items)
+    assert _drawn_width(family, items, size="slide") == pytest.approx(
+        tg.CANVASES["slide"].width
+    )
+
+
+@pytest.mark.parametrize("family", list(_map_family_specs()))
+def test_size_and_zoom_reach_every_map_family_interactively(family):
+    """Standing rule: a plot option lands in both renderers or in neither."""
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    def frame_width(**options):
+        obj = render(
+            PlotSpec(family=family, items=_map_family_specs()[family], options=options),
+            renderer="holoviews",
+        )
+        # the movies come back wrapped in a slider: unwrap to the holoviews object
+        for attr in ("object", "objects"):
+            if not hasattr(obj, "traverse") and hasattr(obj, attr):
+                inner = getattr(obj, attr)
+                obj = inner[0] if isinstance(inner, list | tuple) and inner else inner
+        if hasattr(obj, "keys") and hasattr(obj, "__getitem__"):
+            try:  # a map of frames: any single frame carries the geometry
+                obj = obj[next(iter(obj.keys()))]
+            except Exception:
+                pass
+        return _bokeh_figures(obj)[0].frame_width
+
+    assert frame_width(zoom=1.5) > frame_width()
+
+
 def test_size_and_zoom_reach_the_interactive_renderer_too():
     """Standing rule: a plot option lands in both renderers or in neither.
 
@@ -763,6 +847,55 @@ class _Rec:
         }
 
 
+def test_a_fixed_proportion_diagram_fits_inside_a_canvas_rather_than_filling_it():
+    """A square cannot fill 16:9, so ``size`` means *fit inside* for these.
+
+    ``size="page"`` must come out at exactly the reviewed default, and a capped canvas
+    must bind on height as well as width. Scaling by the width ratio alone (13.33/8.5 =
+    1.57x) is what the interactive Target did, and it only avoided overflowing a 7.5in
+    slide by luck.
+    """
+    default = (5.0, 5.0)
+    assert tg.diagram_scale_factor(default, size="page") == pytest.approx(1.0)
+    assert tg.diagram_scale_factor(default, zoom=1.5) == pytest.approx(1.5)
+
+    slide = tg.CANVASES["slide"]
+    factor = tg.diagram_scale_factor(default, size="slide")
+    assert factor < slide.width / tg.PAGE_W, "the height must bind, not just the width"
+    assert default[1] * factor <= slide.max_height - tg.SUPTITLE_ALLOWANCE + 1e-9
+
+
+@pytest.mark.parametrize("diagram", ["taylor", "target", "paired"])
+def test_the_summary_diagrams_take_size_and_zoom_in_both_renderers(diagram):
+    """The asymmetry was mine: the interactive Target took them, the static one did not.
+
+    Same call, different acceptance by renderer, which is the thing the both-renderers
+    rule exists to prevent. ``paired``/``taylor`` are matplotlib-only by design (bokeh
+    has no floating polar axis), so there "both renderers" means the delegation path.
+    """
+    from ocean_skill.plot import summary
+
+    class Rec:
+        label = "run"
+
+        def metrics(self):
+            return dict(
+                bias=0.1, rmse=0.4, corr=0.9, crmsd=0.3, std_test=1.1, std_reference=1.0
+            )
+
+    fn = getattr(summary, diagram)
+    plain = fn([Rec()], title="T")
+    bigger = fn([Rec()], title="T", zoom=1.5)
+    assert bigger.get_size_inches()[0] == pytest.approx(
+        1.5 * plain.get_size_inches()[0]
+    )
+    # and a slide's height caps it rather than the width running away with it
+    slide = fn([Rec()], title="T", size="slide")
+    assert slide.get_size_inches()[1] <= (
+        tg.CANVASES["slide"].max_height - tg.SUPTITLE_ALLOWANCE + 1e-9
+    )
+
+
 def test_summary_scale_accepts_a_partial_override():
     """``scale=`` is these diagrams' only per-role override, so it must take one role.
 
@@ -814,6 +947,51 @@ def test_a_four_metric_grid_is_laid_out_by_the_domains_own_shape():
     assert tg.facet_layout(4, 4.0) == (1, 4), "a wide domain stacks"
     assert tg.facet_layout(4, 1.4) == (2, 2), "a squarish one goes 2x2"
     assert tg.facet_layout(4, 0.35) == (4, 1), "a tall one spreads"
+
+
+def test_facet_layout_folds_to_the_canvas_it_will_be_drawn_on():
+    """The canvas has to be load-bearing here, not just a figure size.
+
+    ``facet_layout`` scores each candidate grid by how close its *cell* is to the shape
+    the map wants, and the cell shape depends on the canvas. Scored against a portrait
+    page a sequence of wide maps stacks into a column — right for a report, and exactly
+    wrong for a slide, where the same panels want to spread across 16:9. Before the
+    canvas reached this function every family folded as if it were going on a page.
+    """
+    page, slide = tg.CANVASES["page"], tg.CANVASES["slide"]
+    # six squarish panels: 2 across on a page, 3 across on a slide
+    assert tg.facet_layout(6, 1.385, canvas=page) == (2, 3)
+    assert tg.facet_layout(6, 1.385, canvas=slide) == (3, 2)
+    # a wide domain stacks on a page and pairs up on a slide
+    assert tg.facet_layout(6, 3.0, canvas=page) == (1, 6)
+    assert tg.facet_layout(6, 3.0, canvas=slide) == (2, 3)
+    # a narrow canvas has room for only one column
+    assert tg.facet_layout(6, 1.385, canvas=tg.CANVASES["column"]) == (1, 6)
+
+
+def test_an_uncapped_canvas_still_folds_but_never_squeezes():
+    """``size="free"`` has no height to match, so the page's is used for *scoring* only.
+
+    The figure itself is then free to grow past the page — which is the whole point of
+    an uncapped canvas, and what ``facet_figsize`` previously could not express because
+    its caller spelled the height as ``canvas.max_height or PAGE_H``.
+    """
+    free, page = tg.CANVASES["free"], tg.CANVASES["page"]
+    assert tg.facet_layout(9, 1.385, canvas=free) == tg.facet_layout(
+        9, 1.385, canvas=page
+    )
+
+    tall = tg.facet_figsize(0.5, nrows=6, ncols=1, canvas=free)[1]
+    capped = tg.facet_figsize(0.5, nrows=6, ncols=1, canvas=page)[1]
+    assert capped <= tg.PAGE_H - tg.SUPTITLE_ALLOWANCE
+    assert tall > capped, "an uncapped canvas should grow rather than squeeze"
+
+
+def test_zoom_scales_a_facet_figure():
+    plain = tg.facet_figsize(1.385, nrows=3, ncols=3)
+    big = tg.facet_figsize(1.385, nrows=3, ncols=3, canvas=tg.resolve_canvas(zoom=1.5))
+    assert big[0] == pytest.approx(1.5 * plain[0])
+    assert big[1] > plain[1]
 
 
 def test_a_grid_with_a_bar_in_every_cell_still_fits_the_page():

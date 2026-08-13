@@ -23,7 +23,12 @@ from typing import Any
 
 import numpy as np
 
-from ocean_skill.plot.typography import MIN_PT, PAGE_W, type_scale
+from ocean_skill.plot.typography import (
+    MIN_PT,
+    PAGE_W,
+    diagram_scale_factor,
+    type_scale,
+)
 
 __all__ = ["paired", "target", "taylor"]
 
@@ -57,6 +62,19 @@ def _scale(
     """
     scale = type_scale(figsize, ncols=ncols, nrows=1, font_scale=font_scale)
     return {**scale, **(override or {})}
+
+
+def _diagram_figsize(default, *, size=None, zoom: float = 1.0):
+    """Scale a diagram's default figure size onto the canvas ``size``/``zoom`` name.
+
+    These figures have fixed proportions — Taylor and Target are square because a radius
+    is a standard deviation and the rings must stay circular, and ``paired`` is the two
+    side by side — so they *fit inside* a canvas rather than taking its shape. See
+    :func:`~ocean_skill.plot.typography.diagram_scale_factor`; ``size="page"`` leaves
+    the default untouched.
+    """
+    factor = diagram_scale_factor(default, size=size, zoom=zoom)
+    return (default[0] * factor, default[1] * factor)
 
 
 def _records(comparisons) -> list[dict[str, Any]]:
@@ -335,6 +353,8 @@ def taylor(
     labels: str | None = "legend",
     figsize: tuple[float, float] | None = None,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     scale: dict[str, float] | None = None,
 ):
     """Taylor diagram with one point per comparison.
@@ -369,7 +389,7 @@ def taylor(
         raise ValueError("no comparisons to plot")
 
     refstd = 1.0 if normalize else recs[0]["std_reference"]
-    figsize = figsize or TAYLOR_FIGSIZE
+    figsize = figsize or _diagram_figsize(TAYLOR_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, font_scale=font_scale, override=scale)
     if fig is None:
         fig = plt.figure(figsize=figsize)
@@ -443,6 +463,8 @@ def target(
     labels: str | None = "annotate",
     figsize: tuple[float, float] | None = None,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     scale: dict[str, float] | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
@@ -473,7 +495,7 @@ def target(
     point_labels = [r["label"] for r in recs]
 
     lim = max(1.15 * float(np.max(np.hypot(x, y))), max(circles) * 1.25, 1.2)
-    figsize = figsize or TARGET_FIGSIZE
+    figsize = figsize or _diagram_figsize(TARGET_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, font_scale=font_scale, override=scale)
     owns_figure = ax is None
     if owns_figure:
@@ -558,6 +580,8 @@ def paired(
     figsize: tuple[float, float] | None = None,
     labels: str | None = "legend",
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     scale: dict[str, float] | None = None,
     **kwargs,
 ):
@@ -583,7 +607,7 @@ def paired(
     import matplotlib.pyplot as plt
 
     labels = _resolve_labels(labels)
-    figsize = figsize or PAIRED_FIGSIZE
+    figsize = figsize or _diagram_figsize(PAIRED_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, ncols=2, font_scale=font_scale, override=scale)
     fig = plt.figure(figsize=figsize)
     # Panels never draw their own key: with "legend" it is shared (below), and with

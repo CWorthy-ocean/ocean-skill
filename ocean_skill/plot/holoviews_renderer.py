@@ -36,6 +36,7 @@ from ocean_skill.plot.typography import (
     PAGE_W,
     bokeh_fontsize,
     bokeh_scale,
+    diagram_scale_factor,
     frame_px,
     resolve_canvas,
 )
@@ -411,6 +412,7 @@ def _field_facet(
     from ocean_skill.plot.typography import facet_layout
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     field = item["field"]
     facet_dim = item.get("facet_dim")
     row_dim = item.get("row_dim")
@@ -451,7 +453,9 @@ def _field_facet(
     if row_dim is not None:
         ncols = n
     elif ncols is None:
-        ncols, _nrows = facet_layout(n, _aspect_of(field))
+        ncols, _nrows = facet_layout(
+            n, _aspect_of(field), canvas=resolve_canvas(size, zoom)
+        )
     ncols = max(int(ncols), 1)
 
     def _panel(row, col):
@@ -472,7 +476,7 @@ def _field_facet(
             geo=geo,
             log=log,
             font_scale=font_scale,
-            canvas_factor=_canvas_factor(size, zoom),
+            canvas_factor=factor,
         )
 
     panels = [
@@ -546,7 +550,9 @@ def _skill_map(
         ncols = len(names)
     elif ncols is None:
         ncols, _nrows = facet_layout(
-            len(names), _aspect_of(items[0]["skill"][names[0]])
+            len(names),
+            _aspect_of(items[0]["skill"][names[0]]),
+            canvas=resolve_canvas(size, zoom),
         )
     ncols = max(int(ncols), 1)
     factor = _canvas_factor(size, zoom)
@@ -666,6 +672,7 @@ def _facet_movie(
     )
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     field = item["field"]
     facet_dim = _one_facet_axis(field, item.get("facet_dim"))
     indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
@@ -696,8 +703,8 @@ def _facet_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=factor,
             width_px=width_px,
-            canvas_factor=_canvas_factor(size, zoom),
             axis_labels=axis_labels,
         )
         for key, index in zip(keys, indices, strict=True)
@@ -752,6 +759,7 @@ def _field_movie(
     from ocean_skill.plot.matplotlib_renderer import _limits, _select_frames
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     if not items:
         raise ValueError("a movie needs at least one frame, got none")
     items = _select_frames(list(items), every)
@@ -805,7 +813,7 @@ def _field_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
-            canvas_factor=_canvas_factor(size, zoom),
+            canvas_factor=factor,
         )
         panels[1][key] = _quadmesh(
             aligned["reference"],
@@ -816,7 +824,7 @@ def _field_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
-            canvas_factor=_canvas_factor(size, zoom),
+            canvas_factor=factor,
         )
         panels[2][key] = _quadmesh(
             aligned["difference"],
@@ -826,7 +834,7 @@ def _field_movie(
             units=f"test − reference {units}",
             geo=geo,
             font_scale=font_scale,
-            canvas_factor=_canvas_factor(size, zoom),
+            canvas_factor=factor,
         )
 
     maps = [hv.HoloMap(p, kdims=[dim]) for p in panels]
@@ -1150,10 +1158,14 @@ def _target(
     """
     import pandas as pd
 
-    from ocean_skill.plot.summary import _resolve_labels, pretty_level
+    from ocean_skill.plot.summary import TARGET_FIGSIZE, _resolve_labels, pretty_level
 
     hv = _extension()
-    factor = _canvas_factor(size, zoom)
+    # diagram_scale_factor, not _canvas_factor: this figure is square by construction
+    # (its rings have to stay circular), so it *fits inside* the canvas rather than
+    # taking its shape. The width-only ratio ignored the canvas height, so size="slide"
+    # gave a square that only happened not to overflow a 7.5in slide.
+    factor = diagram_scale_factor(TARGET_FIGSIZE, size=size, zoom=zoom)
     # not `frame`: that name is taken below for a per-group slice of the DataFrame
     frame_size = (TARGET_FRAME_PX[0] * factor, TARGET_FRAME_PX[1] * factor)
     sizes = bokeh_scale(frame_size, font_scale=font_scale)
