@@ -1698,15 +1698,20 @@ def _one_facet_axis(field, facet_dim: str | None) -> str:
     refuse the same fields for the same stated reason.
     """
     if facet_dim is None:
+        got = ", ".join(f"{d}={field.sizes[d]}" for d in field.dims) or "no dimensions"
         raise ValueError(
-            "a movie needs an axis to play, but this field is a single map — every "
-            "axis was collapsed, either by an aggregate= that reduces them all or by a "
-            "select= that picked one value. Leave time standing:\n"
+            f"a movie needs an axis to play, but this field is a single map ({got}) — "
+            "every axis was collapsed, either by an aggregate= that reduces them all "
+            "or by a select= that picked one value. Leave time standing:\n"
             "  aggregate=None (or {})                                    every step\n"
             '  aggregate={"time": {"resample": "1MS", "reduce": "mean"}}  one per '
             "month\n"
             '  aggregate={"time": {"groupby": "month", "reduce": "mean"}} a '
             "climatology\n"
+            "Inspect what you actually got with `.data` (a DataArray) or "
+            "`.facet_dims`, and if it disagrees with the call, re-prepare with "
+            "`.prepare(refresh=True)` — a lane cached under an older meaning of "
+            "aggregate= is the one way this can surprise you.\n"
             "Or use .plot() for the single map you have."
         )
     if facet_dim not in field.dims:
