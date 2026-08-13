@@ -458,10 +458,16 @@ def test_a_remote_url_survives_path_normalization():
 # with h5py's "file signature not found", which names neither the file nor the reason.
 
 
-def _roms_like(path, fmt, value=1.0):
+def _roms_like(path, fmt, value=1.0, t0=0.0):
+    """One output file holding two half-daily records starting at ``t0``.
+
+    ``t0`` matters whenever several of these are concatenated: real output files
+    continue the series rather than restarting it, and make_kerchunk now warns about
+    an axis that does not strictly increase.
+    """
     xr.Dataset(
         {"NO3": (("ocean_time", "eta_rho", "xi_rho"), np.full((2, 4, 5), value))},
-        coords={"ocean_time": ("ocean_time", [0.0, 43200.0], {"units": "second"})},
+        coords={"ocean_time": ("ocean_time", [t0, t0 + 43200.0], {"units": "second"})},
     ).to_netcdf(path, format=fmt)
     return path
 
@@ -495,7 +501,8 @@ def test_a_netcdf3_grid_merges_into_netcdf4_output(tmp_path):
     from ocean_skill.build import make_kerchunk
 
     files = [
-        _roms_like(tmp_path / f"out.{i}.nc", "NETCDF4", value=i + 1) for i in range(2)
+        _roms_like(tmp_path / f"out.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0)
+        for i in range(2)
     ]
     grid = _grid(tmp_path / "grid.nc", "NETCDF3_CLASSIC")
 
@@ -519,7 +526,9 @@ def test_a_netcdf3_grid_merges_into_netcdf4_output(tmp_path):
 def test_every_format_combination_builds(tmp_path, out_fmt, grid_fmt):
     from ocean_skill.build import make_kerchunk
 
-    files = [_roms_like(tmp_path / f"o.{i}.nc", out_fmt) for i in range(2)]
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", out_fmt, t0=i * 86400.0) for i in range(2)
+    ]
     out = make_kerchunk(
         files, out=tmp_path / "r.json", grid=_grid(tmp_path / "g.nc", grid_fmt)
     )
@@ -563,7 +572,9 @@ def test_cdf5_is_refused_with_the_conversion_command(tmp_path):
     """
     from ocean_skill.build import make_kerchunk
 
-    files = [_roms_like(tmp_path / f"o.{i}.nc", "NETCDF4") for i in range(2)]
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", t0=i * 86400.0) for i in range(2)
+    ]
 
     with pytest.raises(ValueError, match=r"CDF-5.*cannot kerchunk") as excinfo:
         make_kerchunk(files, out=tmp_path / "r.json", grid=_cdf5(tmp_path / "g.nc"))
@@ -586,7 +597,9 @@ def test_cdf5_grid_values_survive_the_reference(tmp_path):
     """
     from ocean_skill.build import make_kerchunk
 
-    files = [_roms_like(tmp_path / f"o.{i}.nc", "NETCDF4") for i in range(2)]
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", t0=i * 86400.0) for i in range(2)
+    ]
     grid = _cdf5(tmp_path / "g.nc")
 
     out = make_kerchunk(files, out=tmp_path / "r.json", grid=grid)
@@ -595,6 +608,90 @@ def test_cdf5_grid_values_survive_the_reference(tmp_path):
     expected = xr.open_dataset(grid, engine="netcdf4")
     assert ds.h.dtype == expected.h.dtype
     np.testing.assert_array_equal(ds.h.values, expected.h.values)
+
+
+# --------------------------------------------------- disordered concat axis
+
+# `combine="nested"` joins in the order given and checks nothing, so globbing two
+# output streams into one call yields an axis that runs forward, jumps back, and runs
+# forward again — and the store reads back without complaint. The real case mixed ROMS
+# `cdr` averages with `rst` restarts: the restarts hold two records each, and their
+# second one repeated a cdr timestamp exactly. Averages and instantaneous snapshots
+# then share a coordinate, which no later reader can untangle.
+
+
+def test_a_well_ordered_series_says_nothing(tmp_path):
+    """The warning is worthless if the ordinary multi-file build also trips it."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", t0=i * 86400.0) for i in range(3)
+    ]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        make_kerchunk(files, out=tmp_path / "r.json")
+
+    assert not [w for w in caught if "not strictly increasing" in str(w.message)]
+
+
+def test_two_streams_in_one_reference_are_warned_about(tmp_path):
+    """The cdr + rst shape: a second stream repeating the first stream's times."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"cdr.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+    files += [
+        _roms_like(tmp_path / f"rst.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+
+    with pytest.warns(UserWarning, match="not strictly increasing") as caught:
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    message = str(caught[0].message)
+    assert "ocean_time" in message, "the offending variable must be named"
+    assert "4 files" in message
+    assert "one reference per stream" in message, "say what to do about it"
+
+    # Warned about, not repaired: every record is still there, in file order.
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 8
+
+
+def test_the_warning_names_a_date_not_a_raw_roms_time(tmp_path):
+    """ROMS times are seconds since an epoch stated only in the long_name.
+
+    "first at index 4 (410313150.0)" tells you nothing about *when* the axis doubled
+    back, which is the one thing you need to identify the offending stream.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    def roms_times(path, times):
+        xr.Dataset(
+            {"NO3": (("ocean_time", "eta_rho", "xi_rho"), np.ones((2, 4, 5)))},
+            coords={
+                "ocean_time": (
+                    "ocean_time",
+                    times,
+                    {"units": "second", "long_name": "Time since 2000/01/01"},
+                )
+            },
+        ).to_netcdf(path)
+        return path
+
+    day = 86400.0
+    files = [
+        roms_times(tmp_path / "a.nc", [0.0, day]),
+        roms_times(tmp_path / "b.nc", [0.0, day]),
+    ]
+
+    with pytest.warns(UserWarning, match="not strictly increasing") as caught:
+        make_kerchunk(files, out=tmp_path / "r.json")
+
+    assert "2000-01-01T00:00:00" in str(caught[0].message)
 
 
 # ------------------------------------------------------------- tilde expansion
@@ -636,7 +733,9 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
 
     (fake_home / "runs").mkdir()
     for i in range(2):
-        _roms_like(fake_home / "runs" / f"o.{i}.nc", "NETCDF4", value=i + 1)
+        _roms_like(
+            fake_home / "runs" / f"o.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0
+        )
     _grid(fake_home / "grid.nc", "NETCDF4")
 
     # Building at all is the assertion: before the fix this raised obstore's
