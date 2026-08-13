@@ -14,6 +14,7 @@ The public API is intentionally small:
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
     osk.compare(reference=..., test=..., variables=[...],
                 aggregate={"time": "mean"}).plot()   # no default reduction: say so
+    osk.compare(..., over="time").plot()             # score against time, cell by cell
     osk.field(source, variable, select=...)          # one source, no reference
 
     osk.cache.info()             # processed intermediates are cached; where, how big
