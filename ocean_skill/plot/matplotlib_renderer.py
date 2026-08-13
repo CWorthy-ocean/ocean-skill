@@ -487,8 +487,14 @@ def _draw_map(
             ls="--",
             zorder=4,
         )
-    if label is not None:
-        ax.set_title(label, **title_kwargs)
+    # Always set_title, even to "": the point is not the text but the explicit ``y`` in
+    # title_kwargs, which clears matplotlib's ``_autotitlepos`` and so skips the
+    # automatic placement that goes infinite over a cartopy GeoAxes (see
+    # DEFAULT_TITLE_KWARGS). An axes that never had set_title called keeps automatic
+    # placement, reports a NaN tight bbox on matplotlib 3.11, and is dropped from
+    # ``bbox_inches="tight"`` -- which is every panel below the top row of a two-axis
+    # facet grid, where the label is deliberately None.
+    ax.set_title(label or "", **title_kwargs)
     return im
 
 

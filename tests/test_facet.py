@@ -521,6 +521,32 @@ def test_one_colorbar_per_depth_row(daily):
     assert all(len(b._osk_cbar_parents) == 6 for b in bars)
 
 
+def test_untitled_panels_still_pin_their_title_position(daily):
+    """Every panel must skip matplotlib's automatic title placement, titled or not.
+
+    Over a cartopy GeoAxes carrying gridline labels, matplotlib 3.11 computes an
+    infinite title ``y``, which makes the axes report a NaN tight bbox and drop out of
+    ``bbox_inches="tight"`` — silently, since the maps that survive look intact. The
+    explicit ``y`` in DEFAULT_TITLE_KWARGS disarms it by clearing ``_autotitlepos``,
+    but only on an axes ``set_title`` was actually called on; the twelve panels below
+    the top row of a 3x6 grid are deliberately untitled and used not to be.
+
+    Asserts the private ``_autotitlepos`` because that flag *is* the mechanism — the
+    drawn output is identical on matplotlib 3.10, so nothing visible distinguishes a
+    protected figure from a vulnerable one until the version that breaks.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = render(
+        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
+    )
+    panels = _mpl_panels(fig)
+    untitled = [ax for ax in panels if not ax.get_title()]
+    assert len(untitled) == 12, "the rows below the top should carry no month title"
+    assert all(ax._autotitlepos is False for ax in panels)
+
+
 def test_shared_limits_collapses_to_one_scale_and_one_bar(daily):
     import matplotlib
     from matplotlib.collections import QuadMesh
