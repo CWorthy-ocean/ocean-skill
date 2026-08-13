@@ -53,6 +53,7 @@ __all__ = [
     "metric_panels",
     "metric_value_text",
     "render",
+    "series",
     "skill_map",
 ]
 
@@ -138,6 +139,11 @@ DEFAULT_FRAME_LABEL_KWARGS: dict[str, Any] = {
     "family": "monospace",
     "bbox": dict(DEFAULT_METRICS_KWARGS["bbox"]),
 }
+#: A series panel's lines and its legend. Separate dicts so ``line_kwargs`` can carry
+#: anything ``Axes.plot`` takes without colliding with the legend's own keys.
+DEFAULT_LINE_KWARGS: dict[str, Any] = {"linewidth": 1.2}
+DEFAULT_LEGEND_KWARGS: dict[str, Any] = {"frameon": False}
+
 #: field_row draws one row per figure (page-width, horizontal bars below); field_grid
 #: stacks several rows (vertical bars beside them) — same keys, different orientation.
 #: ``shrink`` is 1.0 in both because :func:`_align_colorbars` re-fits each bar to the
@@ -197,6 +203,11 @@ _NESTED_KWARGS: dict[str, dict[str, Any]] = {
         "fontsize": REFERENCE_SCALE["frame_label"],
     },
     "suptitle_kwargs": {"fontsize": REFERENCE_SCALE["suptitle"]},
+    # Last deliberately: _nested_owner takes the first dict claiming a key, and these
+    # two share several with the map families' dicts (`color`, `alpha` and `linewidth`
+    # are gridline options too). At the end they answer only for keys nothing else has.
+    "legend_kwargs": {**DEFAULT_LEGEND_KWARGS, "fontsize": REFERENCE_SCALE["legend"]},
+    "line_kwargs": dict(DEFAULT_LINE_KWARGS),
 }
 
 
@@ -216,6 +227,8 @@ _SIZE_KEYS: dict[str, tuple[str, ...]] = {
     "metrics_kwargs": ("fontsize", "size"),
     "suptitle_kwargs": ("fontsize", "size"),
     "colorbar_kwargs": ("label_size",),
+    "legend_kwargs": ("fontsize", "size"),
+    "line_kwargs": (),
 }
 
 
@@ -270,6 +283,8 @@ def _style_defaults(
             "fontsize": scale["frame_label"],
         },
         "suptitle_kwargs": {"fontsize": scale["suptitle"]},
+        "legend_kwargs": dict(DEFAULT_LEGEND_KWARGS),
+        "line_kwargs": dict(DEFAULT_LINE_KWARGS),
     }
 
 
@@ -599,6 +614,331 @@ def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return ""
     return f"{value:.3g}"
+
+
+#: Where a statistics box sits inside its corner, in axes coordinates.
+_CORNER_XY = {
+    "upper left": (0.02, 0.98, "left", "top"),
+    "upper right": (0.98, 0.98, "right", "top"),
+    "lower left": (0.02, 0.02, "left", "bottom"),
+    "lower right": (0.98, 0.02, "right", "bottom"),
+}
+
+
+def _date_axis(ax, scale: dict[str, float], tick_label_kwargs) -> None:
+    """Label a time axis concisely, without rotating it.
+
+    ``ConciseDateFormatter`` exists so a date axis does not need the 45-degree tilt, and
+    ``fig.autofmt_xdate()`` — the usual reflex — both rotates *and* hides all but the
+    bottom axes in a way that fights an explicit ``sharex``.
+    """
+    import matplotlib.dates as mdates
+
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.tick_params(axis="both", **{**{"labelsize": scale["tick_label"]}, **{}})
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if tick_label_kwargs:
+            label.set(**tick_label_kwargs)
+
+
+#: How a series panel draws a line. ``mark`` is a family-independent concept here (a map
+#: family's marks are "pcolormesh"/"contourf"/"scatter"), which is why this family is
+#: named `series` rather than `line`.
+SERIES_MARKS = ("line", "line+marker", "marker", "step")
+
+
+def _draw_series_lines(
+    ax, lines, line_kwargs: dict[str, Any], *, mark: str = "line"
+) -> list:
+    """Draw one panel's lines, marking a subsample rather than every point."""
+    from ocean_skill.plot.series import time_values
+    from ocean_skill.plot.style import markevery_indices
+
+    drawn = []
+    for line in lines:
+        values = line.spec.values
+        kwargs: dict[str, Any] = {}
+        wants_marker = mark in ("line+marker", "marker") or line.marker is not None
+        if wants_marker:
+            # Every sample marked is a filled band rather than a line, so a subsample is
+            # marked -- the same indices bokeh gets, having no `markevery` of its own.
+            kwargs = {
+                "marker": line.marker or "o",
+                "markevery": markevery_indices(int(values.sizes[values.dims[0]])),
+                "markersize": 4,
+            }
+        if mark == "marker":
+            kwargs["linestyle"] = "none"
+        (artist,) = ax.plot(
+            time_values(values),
+            np.asarray(values.values, dtype="float64"),
+            color=line.color,
+            label=line.label,
+            drawstyle="steps-mid" if mark == "step" else "default",
+            **{"linestyle": line.linestyle, **kwargs},
+            **line_kwargs,
+        )
+        drawn.append(artist)
+    return drawn
+
+
+def _metrics_box(ax, panel, metrics_kwargs: dict[str, Any]) -> None:
+    """Put the statistics box in the corner :mod:`ocean_skill.plot.series` measured."""
+    if not panel.metrics_text:
+        return
+    x, y, ha, va = _CORNER_XY.get(panel.metrics_corner, _CORNER_XY["upper left"])
+    kwargs = {**metrics_kwargs, "ha": ha, "va": va}
+    ax._osk_metrics_text = ax.text(
+        x, y, panel.metrics_text, transform=ax.transAxes, zorder=5, **kwargs
+    )
+
+
+def _warn_if_overplotted(layout, canvas: Canvas | None) -> None:
+    """Say so before drawing when a figure is being asked for more than it can show.
+
+    Before rather than after, unlike :func:`_warn_if_cramped`: the counts are known from
+    the layout, so there is no reason to spend the render first. Both still draw — the
+    caller may be exporting at ``size="free"`` and know exactly what they asked for.
+    """
+    import warnings
+
+    height = getattr(canvas, "max_height", None)
+    if height is None or len(layout.panels) <= 1:
+        return
+    per_panel = (height - SUPTITLE_ALLOWANCE) / len(layout.panels)
+    if per_panel < 1.0:
+        warnings.warn(
+            f"{len(layout.panels)} panels on a canvas capped at {height:.1f}in leaves "
+            f"{per_panel:.2f}in each, less than the labelling needs. Drawing anyway; "
+            'size="free" lets the figure grow instead.',
+            stacklevel=_stacklevel.find(),
+        )
+
+
+def series(
+    items,
+    *,
+    title: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
+    secondary_y: bool = True,
+    encode: dict[str, str | None] | None = None,
+    residual: bool = False,
+    metrics_loc: str = "auto",
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    mark: str = "line",
+    legend: bool = True,
+    ylim: tuple[float, float] | None = None,
+    panel_aspect: float | None = None,
+    labels: tuple[str, str] | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    fit_text: bool = True,
+    shared_axis_labels: bool = True,
+    title_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+    line_kwargs: dict[str, Any] | None = None,
+):
+    """Draw time series: one panel per group, both lanes of each comparison overlaid.
+
+    The line counterpart of :func:`field_grid`, and the family a comparison whose lanes
+    reduce to one time axis gets by default. ``reference`` is drawn solid and ``test``
+    dashed — by *role*, so model-versus-model works the same way and reverses when the
+    roles do — with colour carrying the variable and markers a varying depth. See
+    :mod:`ocean_skill.plot.style` for the whole policy and ``encode=`` for overriding a
+    channel.
+
+    Composition follows the defaults in :func:`ocean_skill.plot.series.compose`: one
+    variable overlays in a single panel, two put the second on a right-hand y axis
+    (``secondary_y=False`` to stack them instead), three or more become one row each.
+    ``rows=``/``cols=`` facet on ``variable``/``source``/``depth``/``comparison``
+    instead; one or the other, not both.
+
+    ``residual=True`` adds a short ``test − reference`` strip under each panel, sharing
+    its time axis. It is off by default: a difference *map* needs a panel of its own
+    because it needs its own colour scale, while a difference *series* is a note on the
+    panel above it, and drawing it always would double the axes on every figure.
+
+    Sized like every other family — ``size``/``zoom``/``figsize``, type from geometry
+    (:mod:`ocean_skill.plot.typography`) — with the statistics box placed in whichever
+    corner the data leaves emptiest, since a line panel, unlike a map, does not fill
+    its axes.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot import series as _series_layout
+    from ocean_skill.plot.typography import (
+        RESIDUAL_FRACTION,
+        SERIES_ASPECT,
+        SERIES_OVERHEAD,
+        SERIES_PANEL_W_FRACTION,
+    )
+
+    if mark not in SERIES_MARKS:
+        raise ValueError(
+            f"mark={mark!r} is not a series mark; expected one of {SERIES_MARKS}. "
+            '(A map family\'s marks -- "pcolormesh", "contourf", "scatter" -- draw a '
+            "field, not a line.)"
+        )
+    layout = _series_layout.compose(
+        items,
+        rows=rows,
+        cols=cols,
+        secondary_y=secondary_y,
+        encode=encode,
+        residual=residual,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    canvas = resolve_canvas(size, zoom)
+    _warn_if_overplotted(layout, canvas)
+    aspect = panel_aspect or SERIES_ASPECT
+    figsize = figsize or auto_figsize(
+        aspect,
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        panel_w_fraction=SERIES_PANEL_W_FRACTION,
+        overhead=SERIES_OVERHEAD,
+    )
+    # figure_ncols pins the *suptitle* to the reference grid: a one-column figure asking
+    # for the figure base off its own cell gets a 17pt suptitle where every other figure
+    # in the same report has 9. Same fix field_facet carries.
+    scale = type_scale(
+        figsize,
+        ncols=layout.ncols,
+        nrows=layout.nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=False)
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    tick_label_kwargs = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    legend_kwargs = _merged(defaults["legend_kwargs"], legend_kwargs)
+    line_kwargs = _merged(defaults["line_kwargs"], line_kwargs)
+
+    heights = []
+    for _ in layout.panels:
+        heights.append(1.0)
+        if residual:
+            heights.append(RESIDUAL_FRACTION)
+    fig, axes = plt.subplots(
+        nrows=len(heights) if layout.ncols == 1 else 1,
+        ncols=layout.ncols,
+        figsize=figsize,
+        sharex=shared_axis_labels,
+        squeeze=False,
+        gridspec_kw={"height_ratios": heights} if layout.ncols == 1 else None,
+        layout="constrained",
+    )
+    flat = list(axes.ravel())
+
+    per_panel: list[tuple[Any, list]] = []
+    for index, panel in enumerate(layout.panels):
+        ax = flat[index * (2 if residual else 1)]
+        handles = _draw_series_lines(ax, panel.lines, line_kwargs, mark=mark)
+        per_panel.append((ax, handles))
+        ax.set_title(
+            panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
+        )
+        ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        if panel.secondary:
+            twin = ax.twinx()
+            handles += _draw_series_lines(twin, panel.secondary, line_kwargs, mark=mark)
+            per_panel[-1] = (ax, handles)
+            twin.set_ylabel(panel.secondary_ylabel or "", fontsize=scale["axes_label"])
+            twin.tick_params(labelsize=scale["tick_label"])
+        _metrics_box(ax, panel, metrics_kwargs)
+        _date_axis(ax, scale, tick_label_kwargs)
+        if panel.residual:
+            strip = flat[index * 2 + 1]
+            _draw_series_lines(strip, panel.residual, line_kwargs, mark=mark)
+            strip.axhline(0.0, color="0.7", linewidth=0.7, zorder=1)
+            # Spelled exactly as field_grid labels its difference colorbar, so the two
+            # families name the same quantity the same way.
+            units = panel.ylabel.partition("[")[2].rstrip("]")
+            # Wrapped, not one line: the strip is a third of a panel high, and a rotated
+            # label of this length on it is either shrunk to nothing or clipped.
+            strip.set_ylabel(
+                "test − reference" + (f"\n[{units}]" if units else ""),
+                fontsize=scale["axes_label"],
+            )
+            _date_axis(strip, scale, tick_label_kwargs)
+
+    bottom = flat[-1]
+    bottom.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+    if title:
+        fig.suptitle(title, **suptitle_kwargs)
+    if legend:
+        _series_legend(fig, per_panel, layout, scale, legend_kwargs)
+    _warn_if_cramped(
+        fig,
+        ncols=layout.ncols,
+        canvas=canvas,
+        nrows=layout.nrows,
+        panels=[ax for ax in flat if ax.lines],
+    )
+    if fit_text:
+        _fit_text_widths(fig)
+    if save:
+        fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
+def _without_font(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """``kwargs`` without its font-size key, which is passed explicitly."""
+    return {k: v for k, v in kwargs.items() if k not in ("fontsize", "size")}
+
+
+def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
+    """Draw one key below the figure when every panel shares it, else one per panel.
+
+    A shared key below is what a report wants, and it is also the one thing bokeh cannot
+    do (it has no figure-level legend) — the stated divergence for this family. The
+    *entries* are identical in both renderers either way; only their placement is not.
+
+    Per-panel keys carry that panel's own lines, not the figure's: with one variable per
+    panel, a shared key would list every variable under each of them.
+    """
+    from ocean_skill.plot.summary import _legend_below
+
+    if layout.shared_legend and len(layout.panels) > 1:
+        seen: dict[str, Any] = {}
+        for _, handles in per_panel:
+            for handle in handles:
+                seen.setdefault(handle.get_label(), handle)
+        if seen:
+            _legend_below(fig, list(seen.values()), scale["legend"])
+        return
+    for (ax, handles), panel in zip(per_panel, layout.panels, strict=True):
+        if not handles:
+            continue
+        seen = {}
+        for handle in handles:
+            seen.setdefault(handle.get_label(), handle)
+        # An explicit corner, not loc="best": "best" minimises overlap with the *data*
+        # and knows nothing about the statistics box, which is how the two came to be
+        # drawn on top of each other. compose() ranks the corners and hands out two.
+        ax.legend(
+            list(seen.values()),
+            list(seen.keys()),
+            loc=panel.legend_corner,
+            fontsize=scale["legend"],
+            **legend_kwargs,
+        )
 
 
 def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
@@ -984,7 +1324,12 @@ _CRAMPED_PANEL_FRACTION = 0.5
 
 
 def _warn_if_cramped(
-    fig, ncols: int = 3, *, canvas: Canvas | None = None, nrows: int = 1
+    fig,
+    ncols: int = 3,
+    *,
+    canvas: Canvas | None = None,
+    nrows: int = 1,
+    panels=None,
 ) -> None:
     """Say so when the canvas cannot hold its own labelling, and which knob to turn.
 
@@ -1001,11 +1346,17 @@ def _warn_if_cramped(
     * **height-capped with many rows** — the figure is as tall as its canvas allows and
       the rows are splitting what is left. Widening does nothing here; lifting the cap
       (``size="free"``) or drawing fewer rows per figure does.
+
+    ``panels`` names the axes to measure, for a family whose panels are not maps.
     """
     import warnings
 
     fig_w, fig_h = fig.get_size_inches()
-    panels = [ax for ax in fig.axes if hasattr(ax, "projection")]
+    # A map panel is identified by its projection; a line panel has none, so a family
+    # whose panels are not maps has to say which axes to measure -- without that this
+    # returned silently and the cap went unenforced for it.
+    if panels is None:
+        panels = [ax for ax in fig.axes if hasattr(ax, "projection")]
     if not panels or fig_w <= 0:
         return
     cell_w = fig_w / max(ncols, 1)
@@ -2495,7 +2846,7 @@ def _nested_owner(key: str) -> str | None:
 
 @functools.cache
 def _top_level_options() -> frozenset[str]:
-    """Every keyword a map family accepts directly, rather than inside a dict.
+    """Every keyword a top-level family accepts directly, rather than inside a dict.
 
     Read off the signatures rather than listed, so adding a parameter cannot leave this
     behind — which is exactly how ``size`` came to be misreported as a nested key.
@@ -2504,7 +2855,7 @@ def _top_level_options() -> frozenset[str]:
 
     return frozenset(
         name
-        for fn in (field_row, field_grid, field_facet, skill_map)
+        for fn in (field_row, field_grid, field_facet, series, skill_map)
         for name in inspect.signature(fn).parameters
     )
 
@@ -2564,6 +2915,8 @@ def render(spec, **kwargs: Any):
         _check_options(field_movie, opts)
     elif family == "facet_movie":
         _check_options(facet_movie, opts)
+    elif family == "series":
+        _check_options(series, opts)
     elif family == "skill_map":
         _check_options(skill_map, opts)
 
@@ -2604,6 +2957,8 @@ def render(spec, **kwargs: Any):
         return field_grid(spec.items, **opts)
     if family == "field_movie":
         return field_movie(spec.items, **opts)
+    if family == "series":
+        return series(spec.items, **opts)
     if family in ("taylor", "target", "paired"):
         # summary families work from metric records, which the spec carries per item
         fn = {"taylor": taylor, "target": target, "paired": paired}[family]

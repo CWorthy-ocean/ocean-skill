@@ -216,7 +216,14 @@ def _prepare(
     a bare ``.mean("time")`` chokes on whatever non-numeric fields ride along (ROMS'
     ``spherical`` flag), so "variable not found" must fail closed.
     """
-    from ocean_skill import operators, roms, units
+    from ocean_skill import operators, roms, tabular, units
+
+    # A point source arrives as a DataFrame (osk.read's contract for a station), and
+    # everything from resolve_variable down speaks xarray. Converting here rather than
+    # in read() keeps that contract, and rather than in align() because a Field over one
+    # station wants the same lane and never reaches align.
+    if tabular.is_frame(obj):
+        obj = tabular.to_dataset(obj, meta)
 
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
     surface = is_surface_request(depth)
@@ -324,6 +331,12 @@ def _prepare(
     # Now the vertical reduction, on whatever the vertical selection left: one level
     # (already collapsed), several interpolated levels, or a weighted band.
     da = operators.aggregate(da, _vertical_only(agg))
+    # A station carries its instrument depth as a scalar coordinate rather than an axis
+    # to select from (see ocean_skill.tabular.depth_of), so the depth actually compared
+    # is read off the lane itself. Reported the same way as an observational level's:
+    # through prepare_source, the lane cache, and the metrics row's `obs_depth`.
+    if "actual_depth" not in da.attrs and "depth" in da.coords and not da["depth"].dims:
+        da.attrs["actual_depth"] = float(da["depth"])
     return units.convert_units(da), da.attrs.get("actual_depth")
 
 

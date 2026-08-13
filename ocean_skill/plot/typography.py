@@ -473,6 +473,38 @@ def clamp_aspect(aspect: float) -> float:
 SUPTITLE_ALLOWANCE = 0.35
 
 
+#: What a *series* (line) panel wants, the counterparts of the map constants above.
+#:
+#: There is no data aspect to read for a line panel — x is time and y is a physical
+#: quantity, so its shape is a design choice rather than a measurement, which is the
+#: honest replacement for a map's ``lon_span / lat_span``. 2.6 is a shade wider than
+#: the 3:1 a page-width row of three maps gives each of them, which suits a time axis
+#: carrying years of dates.
+#:
+#: ``SERIES_PANEL_W_FRACTION`` is well above :data:`PANEL_W_FRACTION` because no
+#: colorbar takes width — only the y-axis label and its tick labels do, ~0.8in of a
+#: page. Measured off drawn figures: a page-width panel comes out 7.71in of 8.5.
+#:
+#: ``SERIES_OVERHEAD`` is :data:`ROW_OVERHEAD`'s counterpart: a title above, date labels
+#: and the axis label below. **Measured, not assumed** — but not by the plateau sweep
+#: :data:`ROW_OVERHEAD` used, which does not apply here: a map panel stops growing once
+#: its aspect ratio is satisfied, and a line panel, having no aspect to satisfy, keeps
+#: taking whatever height is left. Sweeping 1.2-4.2in of row height gives a slack
+#: that rises slowly from 0.74in to 0.86in — the growth being the type itself — and
+#: 2.9 em + 0.19in fits both ends to within 0.02in. The seed of 1.6 em borrowed from
+#: ``ROW_OVERHEAD`` under-provisioned by ~0.3in, which is not a squeezed panel here (a
+#: line panel has no minimum) but a figure a third of an inch shorter per row than the
+#: aspect asked for.
+SERIES_ASPECT = 2.6
+SERIES_PANEL_W_FRACTION = 0.90
+SERIES_OVERHEAD = (2.9, 0.19)
+
+#: Height of a residual strip as a fraction of the panel it sits under. A difference
+#: *map* is a third panel of equal weight because it needs its own colour scale; a
+#: difference *series* is conventionally a thin strip below the data it belongs to.
+RESIDUAL_FRACTION = 0.35
+
+
 def row_height(
     aspect: float,
     *,
@@ -482,6 +514,7 @@ def row_height(
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
     panel_w_fraction: float | None = None,
+    overhead: tuple[float, float] | None = None,
 ) -> float:
     """Height (inches) of one row of maps: the map, plus the type around it.
 
@@ -493,6 +526,11 @@ def row_height(
     settles it. Since the base grows as the cell's size to the power 0.6 and the
     overhead is only a fraction of the row, each pass moves the answer by a fraction of
     the last, so three agree to well under a tenth of a point.
+
+    ``overhead`` overrides which ``(em, fixed inches)`` pair is charged for the text
+    around the panel, for a family whose panel is not a map at all — a series panel has
+    a title and date labels but no colorbar stack (:data:`SERIES_OVERHEAD`). Left
+    ``None`` it follows ``horizontal_colorbar``, so every map family is unaffected.
 
     ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being the
     colorbar and labelling. It is a parameter rather than a constant because a facet
@@ -519,7 +557,9 @@ def row_height(
             else PANEL_W_FRACTION
         )
     panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
-    em, fixed = ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
+    em, fixed = overhead or (
+        ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
+    )
     height = panel_h
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height)) * font_scale
@@ -673,11 +713,13 @@ def auto_figsize(
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
     panel_w_fraction: float = PANEL_W_FRACTION,
+    overhead: tuple[float, float] | None = None,
 ) -> tuple[float, float]:
     """Figure size for ``nrows`` rows of maps of the given aspect ratio on ``canvas``.
 
     Thin wrapper over :func:`row_height`: the width is the canvas', and the height is as
-    many rows as asked for.
+    many rows as asked for. ``overhead`` is passed through for a non-map family; see
+    :func:`row_height`.
     """
     canvas = canvas or CANVASES[DEFAULT_SIZE]
     height = row_height(
@@ -688,6 +730,7 @@ def auto_figsize(
         font_scale=font_scale,
         horizontal_colorbar=horizontal_colorbar,
         panel_w_fraction=panel_w_fraction,
+        overhead=overhead,
     )
     return (canvas.width, height * max(nrows, 1))
 

@@ -43,6 +43,8 @@ want everything bigger or smaller.
 | [`metrics_kwargs`](#metrics_kwargs) | the bias/rmse/corr corner box | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
+| [`legend_kwargs`](#legend_kwargs) | a `series` panel's key (`series` only) | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -676,3 +678,84 @@ dimension, split it across figures.
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
 a colour block and a marker block. Same groups, one legend instead of two.
+
+---
+
+## The `series` family (time series)
+
+A comparison whose two lanes reduce to one time axis draws as lines rather than maps:
+`reference` solid, `test` dashed, on one panel with a statistics box and a key.
+
+```python
+osk.compare(reference="ooi-gp03flma-rim01-02-ctdmog040", test="oceansoda_ethz",
+            variables=["temperature"]).plot()
+```
+
+### Which channel carries what
+
+Deterministic, so a figure reads the same way every time and adding a source or a
+variable does the expected thing:
+
+| Channel | Default field | Notes |
+|---|---|---|
+| line style | **role** (not a field) | `reference` solid, `test` dashed — always |
+| colour | `variable` | one colour per variable, shared by both lanes of a pair |
+| dash pattern *within* the test side | `source` | a second model takes `:`, a third `-.` |
+| marker | `depth` | drawn only when depth actually varies, on ~20 samples per line |
+
+`role` beats everything: model-versus-model gives the baseline solid and the candidate
+dashed, and swapping which is the `reference` swaps the two.
+
+`encode=` moves a channel onto another field, or switches it off:
+
+```python
+.plot(encode={"linestyle": "depth"})   # dash pattern by depth instead of by source
+.plot(encode={"marker": None})         # no markers, whatever depth does
+```
+
+### Composition
+
+| Distinct variables | Default |
+|---|---|
+| one | one panel, every source overlaid |
+| two | one panel, the second variable on a right-hand y axis |
+| three or more | one row per variable |
+
+`secondary_y=False` stacks the two-variable case instead. `rows=` or `cols=` (one, not
+both) facet on `variable`, `source`, `reference`, `depth` or `comparison`.
+
+### `series`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `residual` | `False` | adds a short `test − reference` strip under each panel, sharing its time axis |
+| `mark` | `"line"` | `"line+marker"`, `"marker"` or `"step"` |
+| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
+| `legend` | `True` | draw the key at all |
+| `ylim` | `None` | y limits for every panel |
+| `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
+
+### `line_kwargs`
+
+Anything [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html)
+takes, applied to every line — `linewidth`, `alpha`, `zorder`. Colour and line style come
+from the policy above and are not overridable here (use `encode=`).
+
+### `legend_kwargs`
+
+Anything [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html)
+takes except `loc`, which the layout chooses so the key cannot land on the statistics box.
+
+### Static versus interactive
+
+Both renderers draw the same lines, colours, dash patterns, titles, axis labels and key
+*entries*. Two differences, both deliberate:
+
+* **Where the key goes.** When every panel shares one set of entries, the static renderer
+  draws a single key below the figure; bokeh has no figure-level legend, so it always
+  draws one inside each panel.
+* **Where the statistics box goes.** Statically it is pinned to the panel's corner;
+  interactively it is an `hv.Text` in data coordinates, so it pans and zooms with the data.
+
+`line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
+static renderer, which warns rather than absorbing them silently.
