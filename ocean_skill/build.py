@@ -522,6 +522,128 @@ def guess_feature_type(ds) -> tuple[str, str]:
     return ("timeSeriesProfile" if has_z else "timeSeries"), "inferred"
 
 
+# ------------------------------------------------------------------------ resolution
+
+#: km per degree of latitude (mean meridional degree on the WGS84 ellipsoid).
+_KM_PER_DEG = 111.195
+
+#: featureTypes with a horizontal grid. Everything else is a point, a profile or a
+#: track, where a "horizontal resolution" would describe nothing.
+_GRIDDED_FEATURE_TYPES = frozenset({"grid"})
+
+#: fraction by which spacings may vary and still count as evenly spaced.
+_REGULAR_TOL = 0.01
+
+
+def _spacing(values) -> tuple[float, bool] | None:
+    """Median absolute spacing of a coordinate, and whether it is even.
+
+    The median rather than the mean because composite products are not evenly
+    spaced and the mean quietly launders that: MODIS 8-day bins restart every
+    January 1, so one bin a year spans 5 days, and hourly model output has
+    outages. The median reports the spacing that actually dominates, and the
+    ``regular`` flag says whether reporting a single number was honest at all.
+    """
+    import numpy as np
+
+    arr = np.asarray(values)
+    arr = arr[np.isfinite(arr)] if np.issubdtype(arr.dtype, np.floating) else arr
+    if arr.ndim > 1:  # curvilinear: step along the axis that actually varies
+        arr = arr[0, :] if arr.shape[1] > 1 else arr[:, 0]
+    if arr.size < 2:
+        return None
+    diffs = np.abs(np.diff(np.asarray(arr, dtype="float64")))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    if not diffs.size:
+        return None
+    median = float(np.median(diffs))
+    if median <= 0:
+        return None
+    regular = bool(np.all(np.abs(diffs - median) <= _REGULAR_TOL * median))
+    return median, regular
+
+
+def _iso_duration(seconds: float) -> str:
+    """Seconds -> an ISO-8601 duration, snapped to the period a product means.
+
+    Composite periods are never exact — a "monthly" mean steps 28-31 days and a
+    "daily" one drifts by minutes when the files are stamped at acquisition time —
+    so a literal conversion would render P1M as P30DT10H27M and make two monthly
+    products look like different cadences.
+    """
+    days = seconds / 86400.0
+    if 27 <= days <= 32:
+        return "P1M"
+    if 355 <= days <= 375:
+        return "P1Y"
+    if days >= 1:
+        rounded = round(days)
+        return f"P{rounded:g}D" if abs(days - rounded) <= 0.05 * days else f"P{days:.1f}D"
+    hours = seconds / 3600.0
+    if hours >= 1:
+        return f"PT{round(hours):g}H"
+    minutes = seconds / 60.0
+    return f"PT{round(minutes):g}M" if minutes >= 1 else f"PT{round(seconds):g}S"
+
+
+def _resolution_metadata(ds, coords: dict[str, Any], feature_type: str) -> dict[str, Any]:
+    """Horizontal, temporal and vertical resolution, derived from the axes themselves.
+
+    Read rather than believed, for the same reason the extents are: products
+    misdeclare it. CoastWatch's Metop-C ASCAT product advertises 0.25 degrees in
+    both its title and ``geospatial_lat_resolution`` while its latitude axis steps
+    0.3333; AVISO's ``erdTAgeo1day`` is titled "1 Day Composite" and steps about six
+    days. A catalog that copied the attribute would have published both.
+
+    Horizontal resolution is recorded only for gridded sources. A moored time series
+    has a location, not a spacing, and storing one would invite a
+    ``find(resolution=...)`` to rank buoys against satellites.
+    """
+    import numpy as np
+
+    md: dict[str, Any] = {}
+
+    if feature_type in _GRIDDED_FEATURE_TYPES:
+        for kind, key in (("latitude", "lat"), ("longitude", "lon")):
+            coord = coords.get(kind)
+            if coord is None:
+                continue
+            if (found := _spacing(coord)) is None:
+                continue
+            step, regular = found
+            md[f"grid_resolution_{key}_deg"] = round(step, 6)
+            md[f"grid_{key}_regular"] = regular
+        # One scalar to sort and filter on. Latitude, because a degree of longitude
+        # shrinks with cos(lat) and a global product would otherwise report a
+        # resolution that is only true at the equator.
+        if (lat_deg := md.get("grid_resolution_lat_deg")) is not None:
+            md["grid_resolution_km"] = round(lat_deg * _KM_PER_DEG, 3)
+
+    if (time_coord := coords.get("time")) is not None:
+        decoded = _decode_times(ds, time_coord)
+        if decoded is not None and decoded.size > 1:
+            as_seconds = np.asarray(decoded, dtype="datetime64[s]").astype("float64")
+            if (found := _spacing(as_seconds)) is not None:
+                step, regular = found
+                md["time_resolution_s"] = round(step, 3)
+                md["time_resolution"] = _iso_duration(step)
+                md["time_regular"] = regular
+
+    if (vertical := coords.get("vertical")) is not None:
+        arr = np.asarray(vertical)
+        if arr.ndim == 1 and arr.size > 1:
+            md["vertical_levels"] = int(arr.size)
+            diffs = np.abs(np.diff(np.asarray(arr, dtype="float64")))
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            if diffs.size:
+                # A range, not a scalar: ocean level spacing is stretched by design
+                # (GLORYS is ~1 m at the surface and ~450 m at depth), so one number
+                # would be wrong nearly everywhere.
+                md["vertical_resolution_min"] = round(float(diffs.min()), 3)
+                md["vertical_resolution_max"] = round(float(diffs.max()), 3)
+    return md
+
+
 # --------------------------------------------------------------------------- THREDDS
 
 
@@ -865,6 +987,7 @@ def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
     ftype, source = guess_feature_type(ds)
     md["featureType"] = ftype
     md["featureType_source"] = source
+    md.update(_resolution_metadata(ds, coords, ftype))
     md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
     return md
 
