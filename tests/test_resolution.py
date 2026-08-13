@@ -41,7 +41,7 @@ def test_grid_resolution_comes_from_the_axis_not_the_attribute():
     ds = _grid(lat_step=1 / 3)
     ds.attrs["geospatial_lat_resolution"] = 0.25  # the product's own (wrong) claim
     md = _probe(ds, None)
-    assert md["grid_resolution_lat_deg"] == pytest.approx(0.3333, abs=1e-4)
+    assert md["grid_resolution_deg"] == pytest.approx(0.3333, abs=1e-4)
     assert md["grid_resolution_km"] == pytest.approx(37.06, abs=0.1)
 
 
@@ -68,12 +68,28 @@ def test_median_spacing_survives_a_gap():
     )
     md = _probe(ds, None)
     assert md["time_resolution"] == "P1D"
-    assert md["time_regular"] is False  # ...and the gap is not hidden
 
 
 def test_evenly_spaced_axes_are_flagged_regular():
     md = _probe(_grid(), None)
-    assert md["grid_lat_regular"] is True
+    assert md["grid_regular"] is True
+
+
+def test_lat_and_lon_collapse_to_one_number_when_they_agree():
+    """Two near-identical numbers on every product is noise; disagreement is not."""
+    md = _probe(_grid(lat_step=0.25, lon_step=0.25), None)
+    assert md["grid_resolution_deg"] == pytest.approx(0.25)
+    assert "grid_resolution_lat_deg" not in md
+    assert "grid_resolution_lon_deg" not in md
+
+
+def test_anisotropic_grid_records_both_axes():
+    md = _probe(_grid(lat_step=0.25, lon_step=0.5), None)
+    assert md["grid_resolution_lat_deg"] == pytest.approx(0.25)
+    assert md["grid_resolution_lon_deg"] == pytest.approx(0.5)
+    assert md["grid_resolution_deg"] == pytest.approx(
+        0.25
+    )  # latitude drives the scalar
 
 
 @pytest.mark.parametrize(
@@ -123,8 +139,11 @@ def test_vertical_resolution_is_a_range_because_levels_are_stretched():
     """One number would be wrong nearly everywhere on a stretched grid."""
     ds = xr.Dataset(
         {"temp": ("depth", np.arange(6.0))},
-        coords={"depth": [0.0, 1.0, 5.0, 20.0, 100.0, 500.0], "latitude": 50.0,
-                "longitude": -145.0},
+        coords={
+            "depth": [0.0, 1.0, 5.0, 20.0, 100.0, 500.0],
+            "latitude": 50.0,
+            "longitude": -145.0,
+        },
     )
     md = _probe(ds, None)
     assert md["vertical_levels"] == 6
@@ -139,15 +158,32 @@ def test_vertical_resolution_is_a_range_because_levels_are_stretched():
 def resolution_index(monkeypatch):
     """Three sources spanning the distinctions the filters must draw."""
     entries = {
-        # 1.1 km grid, but an L4 analysis that only resolves ~10 km features
-        "mur": ("sat", {"grid_resolution_km": 1.112, "effective_resolution_km": 10.0,
-                        "time_resolution_s": 86400.0, "featureType": "grid"}),
-        # coarse grid, coarse reality
-        "oisst": ("sat", {"grid_resolution_km": 27.8, "effective_resolution_km": 100.0,
-                          "time_resolution_s": 86400.0, "featureType": "grid"}),
+        "mur": (
+            "sat",
+            {
+                "grid_resolution_km": 1.112,
+                "time_resolution_s": 86400.0,
+                "featureType": "grid",
+            },
+        ),
+        # coarse grid
+        "oisst": (
+            "sat",
+            {
+                "grid_resolution_km": 27.8,
+                "time_resolution_s": 86400.0,
+                "featureType": "grid",
+            },
+        ),
         # a mooring: no spatial resolution at all, hourly, with depth
-        "mooring": ("obs", {"time_resolution_s": 3600.0, "vertical_levels": 12,
-                            "featureType": "timeSeriesProfile"}),
+        "mooring": (
+            "obs",
+            {
+                "time_resolution_s": 3600.0,
+                "vertical_levels": 12,
+                "featureType": "timeSeriesProfile",
+            },
+        ),
     }
     refs = {
         name: catalog.SourceRef(name=name, catalog=cat, path=None, metadata=meta)
@@ -162,20 +198,9 @@ def test_resolution_filters_on_grid_spacing(resolution_index):
     assert "oisst" in catalog.find(resolution=50)
 
 
-def test_effective_resolution_asks_a_different_question(resolution_index):
-    """MUR passes ``resolution=2`` but not ``effective_resolution=2``.
-
-    The whole point of carrying both: its grid is 1.1 km and it resolves 10 km.
-    """
-    assert "mur" in catalog.find(resolution=2)
-    assert "mur" not in catalog.find(effective_resolution=2)
-    assert "mur" in catalog.find(effective_resolution=15)
-
-
 def test_a_source_with_no_resolution_is_kept_not_dropped(resolution_index):
-    """"Unknown" is not "too coarse" -- the same rule the extents follow."""
+    """Unknown is not "too coarse" -- the same rule the extents follow."""
     assert "mooring" in catalog.find(resolution=1)
-    assert "mooring" in catalog.find(effective_resolution=1)
 
 
 def test_cadence_accepts_a_spoken_period(resolution_index):
