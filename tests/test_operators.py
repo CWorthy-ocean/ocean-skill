@@ -540,3 +540,107 @@ def test_a_plain_cf_name_the_source_lacks_is_still_filtered():
     ):
         comparison.compare(reference=["modis"], test=["modis"], variables=[nitrate])
     assert formed == []
+
+
+# --------------------------------------------------------- ranges on a descending axis
+#
+# ``.sel`` with a slice follows the coordinate's *stored* order, so a range written
+# low-to-high against a north-to-south axis selects nothing — silently. Satellite L3
+# products are all stored that way (MODIS latitude runs 89.979 to -89.979), so this was
+# not an edge case: every `select={"lat": ...}` against one came back empty.
+
+
+def _gridded(lat, lon=(-98.0, -96.0, -94.0, -92.0)):
+    """Build a field on the given latitude order, letting a test pick the direction."""
+    lat, lon = np.asarray(lat, dtype=float), np.asarray(lon, dtype=float)
+    return xr.DataArray(
+        np.arange(lat.size * lon.size, dtype=float).reshape(lat.size, lon.size),
+        dims=("lat", "lon"),
+        coords={"lat": lat, "lon": lon},
+    )
+
+
+NORTH_TO_SOUTH = np.arange(40.0, 9.0, -5.0)  # 40, 35, 30, 25, 20, 15, 10
+SOUTH_TO_NORTH = NORTH_TO_SOUTH[::-1]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [{"min": 20, "max": 30}, slice(20, 30)],
+    ids=["dict", "slice"],
+)
+@pytest.mark.parametrize(
+    ("order", "name"),
+    [(NORTH_TO_SOUTH, "descending"), (SOUTH_TO_NORTH, "ascending")],
+    ids=["descending", "ascending"],
+)
+def test_a_range_selects_the_same_band_whichever_way_the_axis_runs(spec, order, name):
+    picked = select(_gridded(order), {"lat": spec})
+    assert sorted(picked["lat"].values) == [20.0, 25.0, 30.0], name
+
+
+def test_bounds_written_backwards_keep_working_on_a_descending_axis():
+    """The workaround people already had for this must not become the new bug.
+
+    Anyone who discovered the empty result and reversed their bounds to fix it had
+    working code; normalizing the range rather than blindly flipping it keeps both
+    spellings meaning the same thing.
+    """
+    picked = select(_gridded(NORTH_TO_SOUTH), {"lat": slice(30, 20)})
+    assert sorted(picked["lat"].values) == [20.0, 25.0, 30.0]
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        ({"min": 30}, [30.0, 35.0, 40.0]),
+        ({"max": 20}, [10.0, 15.0, 20.0]),
+    ],
+    ids=["min-only", "max-only"],
+)
+def test_a_one_sided_bound_flips_too(spec, expected):
+    picked = select(_gridded(NORTH_TO_SOUTH), {"lat": spec})
+    assert sorted(picked["lat"].values) == expected
+
+
+def test_a_descending_time_axis_is_handled_the_same_way():
+    """Not only latitude: some products are written newest-first.
+
+    Note the bounds here are timestamps rather than the partial-date strings
+    ``select`` accepts elsewhere. Partial-string slicing goes through pandas, which
+    refuses it outright on a decreasing DatetimeIndex — a limitation upstream of this
+    orientation fix, not something it can reach.
+    """
+    times = xr.date_range("2012-01-01", periods=10, freq="D")[::-1]
+    field = xr.DataArray(
+        np.arange(10, dtype=float), dims=("time",), coords={"time": times}
+    )
+    picked = select(field, {"time": {"min": times[6], "max": times[4]}})
+    assert picked.sizes["time"] == 3
+
+
+def test_a_range_against_a_dimension_with_no_coordinate_is_refused():
+    """``.sel`` would fall back to positional indexing and answer a different question.
+
+    ROMS is what makes this reachable: it ships no coordinate variables, so ``s_rho``
+    and an undecoded ``time`` are bare dimensions. Asking for 0-50 m and getting cells
+    0 and 1 is a wrong answer that looks like a right one.
+    """
+    field = xr.DataArray(np.zeros((3, 40)), dims=("time", "s_rho"))
+    with pytest.raises(ValueError) as excinfo:
+        select(field, {"s_rho": {"min": 0, "max": 50}})
+    message = str(excinfo.value)
+    assert "no coordinate values" in message
+    assert "positional" in message, "say what would have happened instead"
+    assert ".isel()" in message, "and how to ask for positions on purpose"
+
+
+def test_a_scalar_against_a_bare_dimension_is_still_allowed():
+    """Only ranges are refused: "the first level" is how xarray reads a scalar."""
+    field = xr.DataArray(np.arange(12.0).reshape(3, 4), dims=("time", "s_rho"))
+    assert select(field, {"s_rho": 0}).sizes == {"time": 3}
+
+
+def test_a_single_valued_axis_has_no_direction_to_get_wrong():
+    field = _gridded([25.0])
+    assert select(field, {"lat": {"min": 20, "max": 30}}).sizes["lat"] == 1

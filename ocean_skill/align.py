@@ -76,21 +76,6 @@ def harmonize_longitude(obj, convention: Literal["0-360", "-180-180"] = "-180-18
     return out
 
 
-def _oriented_slice(obj, dim: str, low: float, high: float) -> slice:
-    """Return a slice ordered to match ``dim``'s own direction.
-
-    ``.sel`` with a slice follows the coordinate's stored order, so ``slice(16, 32)``
-    against a **descending** axis selects nothing at all — silently, returning an
-    empty array rather than raising. Satellite L3 products are stored north-to-south
-    (MODIS runs 89.979 to -89.979), so this is the common case, not an exotic one:
-    it turned every model-vs-MODIS comparison into an ``IndexError`` deep in the
-    corner-derivation code, with nothing pointing at latitude ordering.
-    """
-    values = np.asarray(obj[dim])
-    descending = values.size > 1 and values[0] > values[-1]
-    return slice(high, low) if descending else slice(low, high)
-
-
 #: Degrees of margin kept around the test's own extent when the reference is cropped to
 #: it. Named rather than repeated because two places crop with it and they must agree: a
 #: lane pre-cropped with a *smaller* pad than :func:`align` uses would silently hand the
@@ -101,19 +86,24 @@ DEFAULT_PAD = 1.0
 def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max) plus ``pad``.
 
-    Honours each axis's stored direction (see :func:`_oriented_slice`), and refuses
-    to return an empty result: no overlap at all means the two sources do not cover
-    the same region, which is worth saying plainly rather than failing later.
+    Honours each axis's stored direction (see
+    :func:`ocean_skill.operators.oriented_slice` — the same rule ``select`` applies to a
+    caller's own range, and deliberately the same code, since a bbox and a ``select``
+    band are the same question asked twice), and refuses to return an empty result: no
+    overlap at all means the two sources do not cover the same region, which is worth
+    saying plainly rather than failing later.
     """
+    from ocean_skill.operators import oriented_slice
+
     lon, lat = _lon_name(obj), _lat_name(obj)
     if lon is None or lat is None:
         return obj
     lon_min, lat_min, lon_max, lat_max = bbox
     sel = {}
     if lon in obj.dims:
-        sel[lon] = _oriented_slice(obj, lon, lon_min - pad, lon_max + pad)
+        sel[lon] = oriented_slice(obj, lon, slice(lon_min - pad, lon_max + pad))
     if lat in obj.dims:
-        sel[lat] = _oriented_slice(obj, lat, lat_min - pad, lat_max + pad)
+        sel[lat] = oriented_slice(obj, lat, slice(lat_min - pad, lat_max + pad))
     if not sel:
         return obj
     out = obj.sel(**sel)

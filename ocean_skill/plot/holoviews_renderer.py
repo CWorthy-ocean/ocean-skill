@@ -380,6 +380,8 @@ def _field_facet(
     ncols: int | None = None,
     shared_limits: bool = False,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -470,6 +472,7 @@ def _field_facet(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=_canvas_factor(size, zoom),
         )
 
     panels = [
@@ -632,6 +635,8 @@ def _facet_movie(
     font_scale: float = 1.0,
     width_px: float = SOLO_PANEL_WIDTH_PX,
     axis_labels: tuple[str, str] | None = ("longitude", "latitude"),
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -692,6 +697,7 @@ def _facet_movie(
             log=log,
             font_scale=font_scale,
             width_px=width_px,
+            canvas_factor=_canvas_factor(size, zoom),
             axis_labels=axis_labels,
         )
         for key, index in zip(keys, indices, strict=True)
@@ -718,6 +724,8 @@ def _field_movie(
     fps: int = 8,
     widget: str = "slider",
     save=None,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -797,6 +805,7 @@ def _field_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=_canvas_factor(size, zoom),
         )
         panels[1][key] = _quadmesh(
             aligned["reference"],
@@ -807,6 +816,7 @@ def _field_movie(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=_canvas_factor(size, zoom),
         )
         panels[2][key] = _quadmesh(
             aligned["difference"],
@@ -816,6 +826,7 @@ def _field_movie(
             units=f"test − reference {units}",
             geo=geo,
             font_scale=font_scale,
+            canvas_factor=_canvas_factor(size, zoom),
         )
 
     maps = [hv.HoloMap(p, kdims=[dim]) for p in panels]

@@ -49,6 +49,7 @@ __all__ = [
     "REDUCERS",
     "aggregate",
     "combine",
+    "oriented_slice",
     "register_derived",
     "register_reducer",
     "resolve_dim",
@@ -255,6 +256,79 @@ def resolve_dim(obj, name: str) -> str | None:
     return None
 
 
+def _descending(obj, dim: str) -> bool:
+    """Whether ``dim``'s coordinate is stored high-to-low.
+
+    ``False`` for a bare dimension: with no coordinate there is no order to read, and
+    ``.sel`` with a slice would not work on it anyway.
+    """
+    import numpy as np
+
+    if dim not in obj.coords:
+        return False
+    values = np.asarray(obj[dim].values)
+    return bool(values.size > 1 and values[0] > values[-1])
+
+
+def oriented_slice(obj, dim: str, value: slice) -> slice:
+    """Return ``value`` as a *range*, ordered to match ``dim``'s own stored direction.
+
+    ``.sel`` with a slice follows the coordinate's stored order, so ``slice(20, 30)``
+    against a **descending** axis selects nothing at all — silently, an empty array
+    rather than an error. Satellite L3 products are stored north-to-south (MODIS
+    latitude runs 89.979 to -89.979), so this is the common case, not an exotic one:
+    ``select={"lat": {"min": 20, "max": 30}}`` against any of them came back empty.
+
+    Both spellings of a range are accepted and mean the same thing, on either kind of
+    axis: the bounds are normalized low-to-high first, then flipped if the axis
+    descends. That matters for compatibility as much as convenience — anyone who had
+    already worked around this by writing the bounds backwards keeps working, rather
+    than being broken by the fix.
+
+    One-sided bounds flip too: ``{"min": 20}`` on a north-to-south axis becomes
+    ``slice(None, 20)``, which is still "latitude 20 and above".
+
+    :func:`ocean_skill.align.subset_to_bbox` calls this too, for the bbox it crops a
+    reference to: a bounding box and a ``select`` band are the same question asked
+    twice, so they are one function rather than two kept in step by hand.
+    """
+    lo, hi = value.start, value.stop
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo  # written high-to-low; a range is a range either way
+    return (
+        slice(hi, lo, value.step)
+        if _descending(obj, dim)
+        else slice(lo, hi, value.step)
+    )
+
+
+def _require_coordinate(obj, dim: str, asked: str) -> None:
+    """Refuse a *range* against a dimension that carries no coordinate values.
+
+    ``.sel`` on a dimension with no coordinate falls back to positional indexing, so
+    ``{"depth": {"min": 0, "max": 50}}`` against a bare axis quietly returns the first
+    *index* rather than the first fifty metres — a wrong answer wearing a right one's
+    clothes, and one that gets worse the more the axis' values differ from its indices.
+    ROMS is the source that makes this reachable: it ships no coordinate variables at
+    all, so ``s_rho`` and an undecoded ``time`` are bare dimensions.
+
+    A scalar is deliberately left alone. There the fallback is at least *arguably* what
+    was meant (``{"s_rho": 0}`` reading as "the first level" is how xarray behaves
+    everywhere), and narrowing that is a separate decision from refusing a range.
+    """
+    if dim in obj.coords:
+        return
+    raise ValueError(
+        f"cannot select a range along {asked!r}: {dim!r} is a dimension of size "
+        f"{obj.sizes[dim]} with no coordinate values, so there is nothing for a "
+        "min/max to be measured against — xarray would fall back to positional "
+        "indexing and hand back the first few *indices* instead. Give the axis a "
+        "coordinate first (for a ROMS run, a catalog reference_date decodes time, and "
+        "the vertical is reached with select={'depth': ...} rather than by s-level), "
+        "or index by position yourself with .isel() on the data."
+    )
+
+
 def select(obj, spec: dict[str, Any] | None):
     """Subset ``obj`` along each dimension in ``spec``. Returns it unchanged if empty.
 
@@ -276,8 +350,14 @@ def select(obj, spec: dict[str, Any] | None):
     - a scalar — exact if present, otherwise the nearest value, because a float
       coordinate almost never matches exactly and failing on that is unhelpful.
 
+    A range — either spelling — is honoured on a **descending** axis as well as an
+    ascending one; see :func:`oriented_slice` for why that needs saying, and why a
+    satellite product is where it bites.
+
     Dimensions absent from ``obj`` are skipped, so one spec can be shared across
-    variables that do not all carry the same axes.
+    variables that do not all carry the same axes. A dimension that is *present* but
+    carries no coordinate is a different case and a range against it is refused — see
+    :func:`_require_coordinate`.
     """
     for name, value in (spec or {}).items():
         dim = resolve_dim(obj, name)
@@ -285,6 +365,9 @@ def select(obj, spec: dict[str, Any] | None):
             continue
         if isinstance(value, dict):
             value = slice(value.get("min"), value.get("max"))
+        if isinstance(value, slice):
+            _require_coordinate(obj, dim, name)
+            value = oriented_slice(obj, dim, value)
         if isinstance(value, slice | list | tuple):
             obj = obj.sel({dim: value})
             continue
