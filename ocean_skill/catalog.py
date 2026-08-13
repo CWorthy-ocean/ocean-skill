@@ -251,6 +251,60 @@ def _matches_period(meta: dict[str, Any], wanted: str) -> bool:
     return period == _MONTH_ALIASES.get(wanted, wanted) or wanted in period
 
 
+#: spoken cadences -> seconds, so ``cadence="daily"`` need not be written "P1D".
+_CADENCE_ALIASES: dict[str, float] = {
+    "hourly": 3600.0,
+    "6-hourly": 21600.0,
+    "6hourly": 21600.0,
+    "daily": 86400.0,
+    "weekly": 604800.0,
+    "8-day": 8 * 86400.0,
+    "8day": 8 * 86400.0,
+    "monthly": 30.4375 * 86400.0,
+    "annual": 365.25 * 86400.0,
+    "yearly": 365.25 * 86400.0,
+}
+
+
+def _as_range(spec, aliases: dict[str, float] | None = None):
+    """Normalize a filter to ``(low, high)``.
+
+    A bare number is an upper bound, because that is what people mean: asking for
+    ``resolution=5`` means "5 km or finer", never "exactly 5". A 2-tuple is a
+    closed range, and a word is looked up in ``aliases`` and matched within a
+    factor to absorb the difference between a nominal month and 30.44 days.
+    """
+    if isinstance(spec, str):
+        if aliases is None:
+            raise TypeError(f"expected a number or (low, high), got {spec!r}")
+        key = spec.strip().lower()
+        if key not in aliases:
+            raise ValueError(
+                f"unknown cadence {spec!r}; try one of {sorted(aliases)} or a number of seconds"
+            )
+        target = aliases[key]
+        return target * 0.75, target * 1.25
+    if isinstance(spec, tuple | list):
+        low, high = spec
+        return (float(low) if low is not None else None,
+                float(high) if high is not None else None)
+    return None, float(spec)
+
+
+def _matches_range(value, spec, aliases: dict[str, float] | None = None) -> bool:
+    """Whether ``value`` falls in ``spec``; an unknown value is **kept**.
+
+    Same rule the extents follow: a source that never declared the quantity has
+    not said it is outside the range, and dropping un-probed entries would hide
+    exactly the sources a search exists to surface.
+    """
+    if value is None:
+        return True
+    low, high = _as_range(spec, aliases)
+    value = float(value)
+    return not ((low is not None and value < low) or (high is not None and value > high))
+
+
 def _haystack(source: str, ref) -> str:
     """Everything about a source that is worth matching free text against.
 
@@ -360,6 +414,10 @@ def find(
     featureType: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
     time: tuple[str, str] | None = None,
+    resolution: float | tuple[float | None, float | None] | None = None,
+    effective_resolution: float | tuple[float | None, float | None] | None = None,
+    cadence: str | float | tuple[float | None, float | None] | None = None,
+    vertical: bool | None = None,
 ) -> list[str]:
     """Search discovered sources by name and metadata; return matching source names.
 
@@ -376,6 +434,10 @@ def find(
         osk.find(climatology=False)                  # exclude climatologies
         osk.find(bbox=(-98, 18, -80, 31))            # Gulf of Mexico
         osk.find(time=("2012-01-01", "2012-02-01"))
+        osk.find(resolution=5)                       # grid spacing 5 km or finer
+        osk.find(effective_resolution=25)            # *actually* resolves 25 km
+        osk.find(cadence="daily")                    # or "hourly", "monthly", P1D
+        osk.find(vertical=True)                      # has a depth axis
 
     ``text`` is the catch-all: each whitespace-separated term must appear somewhere
     in the source's name, its catalog's name, or any of its metadata — title,
@@ -402,6 +464,23 @@ def find(
     ``bbox`` is ``(lon_min, lat_min, lon_max, lat_max)`` and both it and ``time``
     test for *overlap*, not containment — a global climatology matches a regional
     box.
+
+    ``resolution`` and ``effective_resolution`` are both in km and are **not the
+    same question**. ``resolution`` is grid spacing, derived from the axis.
+    ``effective_resolution`` is the scale of the smallest feature the data can
+    actually resolve, which for any interpolated L4 analysis is coarser — often by
+    an order of magnitude. MUR SST is published on a 0.01 degree grid (1.1 km) but
+    resolves features of about 10 km; DUACS altimetry is gridded at 0.25 degrees
+    yet resolves roughly 200 km wavelengths at midlatitude. Someone filtering
+    ``resolution=2`` and concluding they can see 2 km fronts in MUR would be wrong,
+    so ask with ``effective_resolution`` whenever the question is about what the
+    data can *see* rather than how it is stored. It is a curated value: absent
+    unless a product documents one, and absent means unknown, not fine.
+
+    A bare number is an upper bound — ``resolution=5`` means "5 km or finer" — and a
+    2-tuple is a closed range. ``cadence`` additionally accepts a word (``"daily"``,
+    ``"hourly"``, ``"monthly"``) matched within 25%, because a monthly product steps
+    28-31 days and no exact number of seconds would match it.
 
     ``climatology`` takes ``True``/``False`` to include or exclude climatologies, or
     a period to name one: ``"January"``, ``"jan"``, ``"01"`` and ``"month01"`` are
@@ -443,6 +522,20 @@ def find(
         if featureType and meta.get("featureType") != featureType:
             continue
         if bbox is not None and _bbox_overlaps(meta, bbox) is False:
+            continue
+        if resolution is not None and not _matches_range(
+            meta.get("grid_resolution_km"), resolution
+        ):
+            continue
+        if effective_resolution is not None and not _matches_range(
+            meta.get("effective_resolution_km"), effective_resolution
+        ):
+            continue
+        if cadence is not None and not _matches_range(
+            meta.get("time_resolution_s"), cadence, _CADENCE_ALIASES
+        ):
+            continue
+        if vertical is not None and bool(meta.get("vertical_levels")) is not vertical:
             continue
         if time is not None:
             # A climatology is excluded from a time search, not treated as unknown.
