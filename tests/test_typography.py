@@ -833,3 +833,70 @@ def test_a_grid_with_a_bar_in_every_cell_still_fits_the_page():
         4.0, nrows=4, ncols=1, panel_w_fraction=tg.FACET_PANEL_W_FRACTION
     )[1]
     assert shared > height, "0.88 of the cell is a taller figure, not a wider map"
+
+
+# -- the series family -----------------------------------------------------------------
+
+
+def test_row_height_overhead_override_is_a_no_op_by_default():
+    """The map families must be untouched by the parameter the series family needs."""
+    from ocean_skill.plot.typography import ROW_OVERHEAD, row_height
+
+    plain = row_height(2.0, nrows=2)
+    explicit = row_height(2.0, nrows=2, overhead=ROW_OVERHEAD)
+    assert plain == pytest.approx(explicit)
+
+
+def test_a_series_figure_stays_inside_the_page_cap():
+    from ocean_skill.plot.typography import (
+        PAGE_H,
+        SERIES_ASPECT,
+        SERIES_OVERHEAD,
+        SERIES_PANEL_W_FRACTION,
+        auto_figsize,
+        resolve_canvas,
+    )
+
+    _, height = auto_figsize(
+        SERIES_ASPECT,
+        nrows=6,
+        ncols=1,
+        canvas=resolve_canvas("page"),
+        panel_w_fraction=SERIES_PANEL_W_FRACTION,
+        overhead=SERIES_OVERHEAD,
+    )
+    assert height <= PAGE_H
+
+
+def test_a_one_column_series_grid_does_not_get_a_giant_suptitle():
+    """``figure_ncols`` pins the suptitle to the reference grid, as field_facet does.
+
+    Without it, a one-column figure asks for the *figure* base off its own cell — three
+    times as wide as a cell of the three-map row everything is calibrated against — and
+    gets a suptitle twice the size of every other figure in the same report.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    from ocean_skill.plot.matplotlib_renderer import series
+    from ocean_skill.plot.typography import reference_scale
+
+    time = pd.date_range("2015-01-01", periods=24, freq="MS")
+    da = xr.DataArray(
+        np.arange(24.0), coords={"time": time}, dims="time", attrs={"units": "degC"}
+    ).assign_coords(lon=-144.0, lat=50.0)
+    aligned = xr.Dataset({"reference": da, "test": da + 1, "difference": da * 0 + 1})
+    item = {
+        "aligned": aligned,
+        "metrics": {"bias": 1.0},
+        "units": "degC",
+        "standard_name": "sea_water_temperature",
+        "labels": ("model", "obs"),
+    }
+    fig = series([item], title="a title")
+    drawn = fig._suptitle.get_fontsize()
+    assert drawn == pytest.approx(reference_scale()["suptitle"], abs=1.5)

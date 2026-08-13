@@ -25,9 +25,18 @@ __all__ = [
     "harmonize_longitude",
     "is_composite",
     "match_axis",
+    "point_of",
     "resolve_match_method",
+    "sample_at",
     "subset_to_bbox",
 ]
+
+#: Sampling methods :func:`sample_at` understands, and what each means at a point.
+#: ``nearest`` takes the containing cell's own value; the interpolating spellings weight
+#: the surrounding cells. Anything else (a conservative regrid) has no meaning against a
+#: zero-area target — see :func:`sample_at`.
+NEAREST = "nearest"
+_INTERPOLATING = ("bilinear", "linear")
 
 
 def _lon_name(obj) -> str | None:
@@ -190,6 +199,228 @@ def grid_of(obj, bounds: bool = False) -> xr.Dataset:
     else:
         raise ValueError(f"cannot derive bounds for lon/lat with ndim {lon.ndim}")
     return grid
+
+
+def _single_value(obj, name: str, tol: float = 1e-6) -> float | None:
+    """Return the one value ``obj[name]`` takes, or ``None`` if it varies."""
+    values = np.asarray(obj[name], dtype="float64").ravel()
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    if finite.size > 1 and float(np.ptp(finite)) > tol:
+        return None
+    return float(finite[0])
+
+
+def point_of(obj) -> tuple[float, float] | None:
+    """Return ``(lon, lat)`` when ``obj`` sits at one place, else ``None``.
+
+    Both "is this a point?" and "where?", because every caller needs them together: a
+    station lane is recognized *by* having one position, and the position is then what
+    the other lane gets sampled at. A field whose lon/lat vary returns ``None``.
+    """
+    lon_name, lat_name = _lon_name(obj), _lat_name(obj)
+    if lon_name is None or lat_name is None:
+        return None
+    lon, lat = _single_value(obj, lon_name), _single_value(obj, lat_name)
+    return None if lon is None or lat is None else (lon, lat)
+
+
+def _wrap_lon(lon: float, convention: str) -> float:
+    """Put a single longitude in ``convention``, as :func:`harmonize_longitude` does."""
+    return lon % 360 if convention == "0-360" else ((lon + 180) % 360) - 180
+
+
+def _haversine_km(lon1, lat1, lon2, lat2):
+    """Great-circle distance in km, elementwise.
+
+    A plain Euclidean distance in *degrees* is not a distance: a degree of longitude is
+    64 km at Station Papa's latitude and 111 km at the equator, so the cell it picks can
+    be tens of km further away than the nearest one. Verified at 50 N: degrees pick a
+    cell 100 km away where this picks one at 71.5 km.
+    """
+    r = 6371.0088
+    p1, p2 = np.deg2rad(lat1), np.deg2rad(lat2)
+    dp, dl = p2 - p1, np.deg2rad(lon2 - lon1)
+    a = np.sin(dp / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return 2 * r * np.arcsin(np.sqrt(a))
+
+
+def _cell_km(obj, lon_name: str, lat_name: str) -> float:
+    """Return a representative cell diagonal in km, for reporting an offset against.
+
+    Read off the coordinates themselves rather than trusted from metadata, so it is
+    right for a subset grid and for a curvilinear one. A median over the whole grid is
+    enough: this only ever scales a warning threshold.
+    """
+    lon, lat = np.asarray(obj[lon_name]), np.asarray(obj[lat_name])
+    mid = float(np.nanmedian(lat))
+    if lon.ndim == 1 and lat.ndim == 1:
+        dx = float(np.nanmedian(np.abs(np.diff(lon)))) if lon.size > 1 else 0.0
+        dy = float(np.nanmedian(np.abs(np.diff(lat)))) if lat.size > 1 else 0.0
+    else:
+        dx = (
+            float(np.nanmedian(np.abs(np.diff(lon, axis=-1))))
+            if lon.shape[-1] > 1
+            else 0.0
+        )
+        dy = (
+            float(np.nanmedian(np.abs(np.diff(lat, axis=0))))
+            if lat.shape[0] > 1
+            else 0.0
+        )
+    km_x = dx * 111.32 * float(np.cos(np.deg2rad(mid)))
+    km_y = dy * 110.57
+    return float(np.hypot(km_x, km_y))
+
+
+def _nearest_indices(lon_2d, lat_2d, lon: float, lat: float) -> tuple[int, ...]:
+    """Return indices of the closest cell centre, by great-circle distance."""
+    distance = _haversine_km(lon_2d, lat_2d, lon, lat)
+    return np.unravel_index(int(np.nanargmin(distance)), distance.shape)
+
+
+def sample_at(
+    obj,
+    lon: float,
+    lat: float,
+    *,
+    method: str = NEAREST,
+    convention: Literal["0-360", "-180-180"] = "-180-180",
+    subject: str = "the test lane",
+):
+    """Return ``obj`` at one location: the nearest cell, or interpolated to the point.
+
+    Both are supported because which one is right depends on the question.
+    ``method="nearest"`` invents nothing and never mixes a masked neighbour into the
+    answer, so it is the default; ``method="bilinear"`` (or ``"linear"``) removes the
+    grid-offset step that makes a coarse product look biased at a point, at the cost of
+    a value no cell actually holds.
+
+    Longitudes are harmonized *and* the target is wrapped to match, since a −144.2
+    station against a 0-360 grid is the silent-empty-overlap case this module exists to
+    prevent. The offset between the requested position and the grid — ``0`` when
+    interpolating — is recorded as ``nearest_distance_km`` in the result's attrs
+    alongside ``cell_km``, and warned about when it exceeds one cell.
+
+    Missing data is reported rather than routed around: an all-missing result raises
+    instead of quietly relocating to the closest wet cell, which for a station near a
+    coast or a mask edge is a different body of water.
+    """
+    lon_name, lat_name = _lon_name(obj), _lat_name(obj)
+    if lon_name is None or lat_name is None:
+        raise ValueError(
+            f"{subject} has no longitude/latitude coordinate, so it cannot be sampled "
+            "at a station. Check the source's coordinate names."
+        )
+    obj = harmonize_longitude(obj, convention)
+    lon = _wrap_lon(lon, convention)
+
+    lon_values, lat_values = np.asarray(obj[lon_name]), np.asarray(obj[lat_name])
+    rectilinear = (
+        lon_values.ndim == 1
+        and lat_values.ndim == 1
+        and lon_name in obj.dims
+        and lat_name in obj.dims
+    )
+    cell_km = _cell_km(obj, lon_name, lat_name)
+
+    if method == NEAREST:
+        if rectilinear:
+            out = obj.sel({lon_name: lon, lat_name: lat}, method="nearest")
+        else:
+            iy, ix = _nearest_indices(lon_values, lat_values, lon, lat)
+            dims = obj[lon_name].dims
+            out = obj.isel({str(dims[0]): int(iy), str(dims[1]): int(ix)})
+        offset = float(
+            _haversine_km(float(out[lon_name]), float(out[lat_name]), lon, lat)
+        )
+    elif method in _INTERPOLATING:
+        if rectilinear:
+            out = obj.interp({lon_name: lon, lat_name: lat})
+        else:
+            out = _interp_curvilinear(obj, lon_name, lat_name, lon, lat)
+        offset = 0.0
+    else:
+        raise ValueError(
+            f"{method!r} cannot sample at a point: a conservative regrid area-averages "
+            "onto a destination cell, and a station has no area. Use "
+            'method="nearest" (the containing cell) or method="bilinear" '
+            "(interpolated to the position)."
+        )
+
+    if not bool(np.isfinite(out).any()):
+        remedy = (
+            'Use method="nearest" if a neighbouring cell being masked is what did it.'
+            if method in _INTERPOLATING
+            else "The station may sit in a masked cell; check the source covers it."
+        )
+        raise ValueError(
+            f"{subject} has no valid data at ({lon:g}, {lat:g}) — the "
+            f"{'interpolated' if method in _INTERPOLATING else 'nearest'} value is "
+            f"missing everywhere (offset {offset:.1f} km, cell ~{cell_km:.1f} km). "
+            + remedy
+        )
+    if offset > cell_km > 0:
+        warnings.warn(
+            f"{subject}'s nearest cell is {offset:.1f} km from ({lon:g}, {lat:g}), "
+            f"more than one cell away (~{cell_km:.1f} km) — the station may be outside "
+            "the source's coverage, or in a hole in it.",
+            stacklevel=_stacklevel.find(),
+        )
+    out.attrs["nearest_distance_km"] = offset
+    out.attrs["cell_km"] = cell_km
+    out.attrs["point_method"] = method
+    return out
+
+
+def _interp_curvilinear(obj, lon_name: str, lat_name: str, lon: float, lat: float):
+    """Bilinearly interpolate a curvilinear grid to one point, via xesmf.
+
+    The same library the map path regrids with (``locstream_out`` is its point mode), so
+    a point sample and a regridded map agree by construction rather than by two
+    implementations happening to match. ROMS is why this exists: ``lon_rho``/``lat_rho``
+    are 2-D, so xarray's own ``.interp`` has no orthogonal axes to work along.
+    """
+    import xesmf as xe
+
+    src = _as_xesmf(obj)
+    target = xr.Dataset({"lon": ("point", [lon]), "lat": ("point", [lat])})
+    regridder = xe.Regridder(
+        grid_of(src), target, "bilinear", locstream_out=True, unmapped_to_nan=True
+    )
+    out = regridder(src, keep_attrs=True).isel(point=0, drop=True)
+    return out.assign_coords({"lon": lon, "lat": lat})
+
+
+def _check_units(test, reference):
+    """Return ``test`` in the reference's units, refusing an impossible difference.
+
+    Subtracting umol/kg from mmol/m3 used to yield a difference of 0.0, labelled with
+    the reference's units and no warning at all — plausible, and wrong by the density
+    factor. Harmonize first, and refuse outright when the two are not the same physical
+    quantity, since no conversion can rescue that.
+
+    Shared by both alignment paths: a mooring against a model has exactly the same
+    hazard as a climatology against one, and only the *joining* differs.
+    """
+    from ocean_skill import units as _units
+
+    same = _units.compatible(test.attrs.get("units"), reference.attrs.get("units"))
+    if same is False:
+        raise ValueError(
+            f"cannot difference {test.attrs.get('units')!r} against "
+            f"{reference.attrs.get('units')!r}: not the same physical quantity. "
+            "Convert one first, or check the variables really do match."
+        )
+    if same:
+        return _units.to_units(test, reference.attrs.get("units"))
+    warnings.warn(
+        f"cannot verify units {test.attrs.get('units')!r} vs "
+        f"{reference.attrs.get('units')!r}; differencing them unchecked.",
+        stacklevel=_stacklevel.find(),
+    )
+    return test
 
 
 def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
@@ -785,11 +1016,18 @@ def align(
     8760 regridded fields into 365. ``time_method``/``tolerance``/``bin_anchor``/
     ``metadata`` are its arguments; what it decided is recorded in the result's attrs.
 
+    A **station reference** — one position rather than a grid, as a mooring is — has no
+    cells to regrid onto, so the test lane is *sampled* at its position instead
+    (:func:`_align_at_point`, via :func:`sample_at`). Everything before that point is
+    the same for both: the axis matching, the dimensionality check, the units. The
+    result has the same three variables on the reference's own axis, 1-D not 2-D.
+
     ``method="conservative_normed"`` (or ``"conservative"``) **area-averages** the test
     onto the reference cells, which is the right operator when the test is much finer
     than the reference (a km-scale model against a 1-degree climatology): bilinear would
     *sample* the fine field and discard subgrid structure. Cell corners are derived by
-    :func:`grid_of` when absent.
+    :func:`grid_of` when absent. Against a station it names how the lane travels to the
+    position instead — nearest cell or interpolated.
 
     ``min_coverage`` drops reference cells that the test only partly covers. Plain
     ``"conservative"`` divides by the *whole* destination cell area, so a half-covered
@@ -798,8 +1036,6 @@ def align(
     coverage mask then removes cells too sparsely covered to be meaningful.
     """
     import xesmf as xe
-
-    from ocean_skill import units as _units
 
     # Matched *before* the regrid: the binning is what decides how many fields there are
     # to regrid, so doing it after would pay for every step of the finer lane and then
@@ -822,28 +1058,28 @@ def align(
     _require_2d(test, "test", keep=keep)
     _require_2d(reference, "reference", keep=keep)
 
-    # Subtracting umol/kg from mmol/m3 used to yield a difference of 0.0, labelled
-    # with the reference's units and no warning at all — plausible, and wrong by the
-    # density factor. Harmonize first, and refuse outright when the two are not the
-    # same physical quantity, since no conversion can rescue that.
-    same = _units.compatible(test.attrs.get("units"), reference.attrs.get("units"))
-    if same is False:
-        raise ValueError(
-            f"cannot difference {test.attrs.get('units')!r} against "
-            f"{reference.attrs.get('units')!r}: not the same physical quantity. "
-            "Convert one first, or check the variables really do match."
-        )
-    if same:
-        test = _units.to_units(test, reference.attrs.get("units"))
-    elif same is None:
-        warnings.warn(
-            f"cannot verify units {test.attrs.get('units')!r} vs "
-            f"{reference.attrs.get('units')!r}; differencing them unchecked.",
-            stacklevel=_stacklevel.find(),
-        )
+    test = _check_units(test, reference)
 
     test = harmonize_longitude(test, convention)
     reference = harmonize_longitude(reference, convention)
+
+    # A point reference has no grid to regrid onto: the test lane is *sampled* at the
+    # station instead (see _align_at_point). Everything up to here -- the axis matching,
+    # the dimensionality check, the units -- is the same question either way, which is
+    # why the branch sits here rather than in a second align function.
+    station = point_of(reference)
+    if station is not None:
+        return _align_at_point(
+            test,
+            reference,
+            station,
+            method=method,
+            convention=convention,
+            test_name=test_name,
+            reference_name=reference_name,
+            over=over,
+            report=report,
+        )
 
     # regrid onto the overlap, not the reference's full (often global) grid
     reference = subset_to_bbox(reference, bbox_of(test), pad=pad)
@@ -890,3 +1126,141 @@ def align(
         out.attrs["coverage_time_invariant"] = over not in getattr(coverage, "dims", ())
         out.attrs.update(report)
     return out
+
+
+def _align_at_point(
+    test,
+    reference,
+    station: tuple[float, float],
+    *,
+    method: str,
+    convention: str,
+    test_name: str,
+    reference_name: str,
+    over: str | None,
+    report: dict[str, Any],
+) -> xr.Dataset:
+    """Pair a gridded test lane with a station reference, on the reference's own axis.
+
+    The point counterpart of the regrid in :func:`align`, and the only step that
+    differs: a station has no cells to remap onto, so the test lane is **sampled** at it
+    (:func:`sample_at`, ``method="nearest"`` or ``"bilinear"``). Everything else a
+    comparison needs has already happened in :func:`align` — the axis matching, the
+    dimensionality check, the units — which is why this is a branch there rather than a
+    second alignment function with its own copy of them.
+
+    ``method`` is read the same way it is for a grid: it says how the test lane travels
+    to the reference. The package default (``"conservative_normed"``) becomes
+    ``"nearest"``, since area-averaging onto a station's zero area is not a thing; an
+    explicitly conservative method says so rather than being quietly reinterpreted.
+    """
+    if method.startswith("conservative"):
+        # Not a warning when it is the package default -- Comparison passes it on every
+        # call without the caller having chosen it, so warning would be noise on the
+        # common path. sample_at raises for a conservative method asked for explicitly.
+        method = NEAREST
+    if point_of(test) is None:
+        test = sample_at(
+            test,
+            *station,
+            method=method,
+            convention=convention,
+            subject="the test lane",
+        )
+    else:
+        # Two point lanes -- a hand-narrowed test, or two moorings. Nothing to sample,
+        # but the positions are worth comparing: a select= that picked the wrong cell
+        # would otherwise be invisible.
+        offset = float(_haversine_km(*point_of(test), *station))
+        test.attrs.setdefault("nearest_distance_km", offset)
+        if offset > 1.0:
+            warnings.warn(
+                f"the two lanes are {offset:.1f} km apart: the test lane sits at "
+                f"{point_of(test)} and the reference at {station}. They are being "
+                "compared as if co-located.",
+                stacklevel=_stacklevel.find(),
+            )
+    _warn_if_depths_differ(test, reference)
+
+    # The two lanes carry different positions -- the station's, and the cell the test
+    # came from. Merging them under one name is a MergeError, and dropping the test's
+    # loses the offset the metrics report, so the test's are renamed. The station keeps
+    # the plain names, the comparison being at the station.
+    test = _rename_position(test, test_name)
+    out = xr.Dataset(
+        {
+            test_name: test,
+            reference_name: reference,
+            "difference": test - reference,
+        }
+    )
+    out["difference"].attrs = {
+        "long_name": f"{test_name} − {reference_name}",
+        "units": reference.attrs.get("units", ""),
+    }
+    out.attrs["station_lon"], out.attrs["station_lat"] = station
+    out.attrs["point_method"] = test.attrs.get("point_method", method)
+    out.attrs["lon_convention"] = convention
+    for key in ("nearest_distance_km", "cell_km"):
+        if key in test.attrs:
+            out.attrs[key] = test.attrs[key]
+    if over is not None:
+        out.attrs["scored_over"] = over
+        out.attrs.update(report)
+    return out
+
+
+def _rename_position(da, prefix: str):
+    """Rename a sampled lane's own lon/lat so they can sit beside the station's."""
+    renames = {
+        name: f"{prefix}_{axis}"
+        for name, axis in ((_lon_name(da), "lon"), (_lat_name(da), "lat"))
+        if name is not None
+    }
+    return da.rename(renames) if renames else da
+
+
+def _warn_if_depths_differ(test, reference) -> None:
+    """Say so when a surface-only test lane is being compared against a deep reference.
+
+    This is the step that creates the situation, so this is where it is said: the
+    reference lane knows its instrument depth and the test lane knows whether it has a
+    vertical axis at all, but only here are both in view. It also closes a silent path —
+    ``compare(depths=("surface",))`` reaches a station lane, finds no vertical dimension
+    to select from, and correctly does nothing, so asking for the surface and receiving
+    30 m used to pass without comment.
+    """
+    # The coordinate first, then the variable's own attrs: a depth riding along `time`
+    # does not survive a reduction (resampling a mooring to monthly means drops it), so
+    # the attrs are what is left by the time a comparison gets here -- and this caveat
+    # matters most for exactly those records, whose instrument moved.
+    depth = reference.coords.get("depth")
+    values = None
+    if depth is not None:
+        values = np.asarray(depth.values, dtype="float64")
+    elif reference.attrs.get("depth_m") is not None:
+        values = np.asarray([reference.attrs["depth_m"]], dtype="float64")
+    if values is None or not np.isfinite(values).any():
+        return
+    value = float(np.nanmedian(values))
+    low, high = reference.attrs.get("depth_range_m", (None, None))
+    if low is None and values.size > 1:
+        low, high = float(np.nanmin(values)), float(np.nanmax(values))
+    spread = (
+        f" (varying {low:g}-{high:g} m)"
+        if low is not None and high is not None and high - low > 1.0
+        else ""
+    )
+    if abs(value) <= 5.0:
+        return
+    if any(name in test.coords for name in ("depth", "z", "z_rho", "lev")):
+        return
+    source = reference.attrs.get("depth_source") or "its own metadata"
+    warnings.warn(
+        f"the reference is at {value:g} m{spread} (from {source}) while the test lane "
+        "has no vertical axis, so this compares a subsurface record against a surface "
+        "field. "
+        "Expect a depth-related bias — use a test source with a vertical axis, or "
+        "state the comparison as surface-versus-depth.",
+        stacklevel=_stacklevel.find(),
+    )

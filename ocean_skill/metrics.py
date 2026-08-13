@@ -416,6 +416,7 @@ def compute(
     weighted: bool = True,
     min_samples: int = 30,
     names: Iterable[str] | None = None,
+    sample_noun: str = "valid cells",
     **extra: Any,
 ) -> dict[str, Any]:
     """Compute the standard metric set for a test/reference pair.
@@ -429,6 +430,12 @@ def compute(
     ``names`` narrows the set to particular metrics; by default every registered one is
     reported, in :data:`REGISTRY` order. For the same metrics as *maps* rather than
     numbers, see :func:`evaluate`.
+
+    ``sample_noun`` is what ``n`` counts, for the thin-sample warning to say. Cells, for
+    a pair of maps; ``"time steps"`` for a station's series, where the sparse-coverage
+    explanation would be about the wrong thing entirely. The caller names it because
+    only the caller knows what it aligned — inferring it from the dimensions here would
+    put that knowledge in the wrong module.
     """
     res, used_weights = _evaluate(
         aligned,
@@ -446,10 +453,15 @@ def compute(
     rec["weighted"] = bool(used_weights is not None)
     rec.update(extra)
     if rec.get("n", min_samples) < min_samples:
+        why = (
+            "Usually the reference has sparse coverage over this domain (GLODAP, for "
+            "instance, is an open-ocean product and masks most marginal seas)."
+            if sample_noun == "valid cells"
+            else "Usually the two records overlap over only a short period, or the "
+            "binning left few of them — see the aligned pair's attrs for what matched."
+        )
         warnings.warn(
-            f"only {rec['n']} valid cells: metrics are weakly constrained. Usually the "
-            "reference has sparse coverage over this domain (GLODAP, for instance, is "
-            "an open-ocean product and masks most marginal seas).",
+            f"only {rec['n']} {sample_noun}: metrics are weakly constrained. {why}",
             stacklevel=2,
         )
     return rec

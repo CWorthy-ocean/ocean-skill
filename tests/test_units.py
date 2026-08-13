@@ -257,3 +257,84 @@ def test_genuinely_disjoint_sources_say_so():
     far_north = _global_grid(np.linspace(90, -90, 181)).sel(lat=slice(80, 70))
     with pytest.raises(ValueError, match="no overlap"):
         _align.align(_gom_curvilinear(), far_north, method="bilinear")
+
+
+# -- salinity spellings ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("spelling", ["ppt", "PPT", "ppth", "psu", "PSU"])
+def test_parts_per_thousand_spellings_are_salinity_not_pico_pints(spelling):
+    """``ppt`` parses as *pico-pint* in pint — a real unit, dimensionally wrong.
+
+    Silently so: ``compatible("1e-3", "ppt")`` came back ``False``, which made a
+    mooring-versus-product salinity comparison refuse to run rather than convert.
+    OceanSODA-ETHZ writes ``ppt``; the OOI CTDs write ``1e-3``.
+    """
+    assert u.parse(spelling).dimensionality == u.parse("1").dimensionality
+    assert u.compatible("1e-3", spelling) is True
+    assert u.compatible(spelling, "g/kg") is True
+
+
+# -- QC flags are never the measurement ------------------------------------------------
+
+
+def _flagged(name: str, standard_name: str = "sea_water_potential_temperature"):
+    """Build a dataset whose only variable is a flag *claiming* a data standard_name.
+
+    Not a straw man: this is how the cf-xarray path is reached, since it matches on the
+    ``standard_name`` attribute rather than the variable's name, so no anchored name
+    pattern closes it. Verified to match without the guard below.
+    """
+    return xr.Dataset(
+        {name: (("time",), np.ones(3), {"standard_name": standard_name})},
+        coords={"time": [1, 2, 3]},
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sea_water_temperature_qc_agg",
+        "sea_water_temperature_qc_tests",
+        "temperature_qc",
+        "qc_temperature",
+        "sea_water_temperature_qartod",
+        "sea_water_temperature_flag",
+    ],
+)
+def test_a_qc_flag_never_satisfies_a_request_for_the_measurement(name):
+    with pytest.warns(UserWarning, match="QC flag"):
+        assert u.find_variable(_flagged(name), "temperature") is None
+
+
+def test_a_flag_named_after_the_variable_is_no_match_either():
+    """The other route in, closed already by the vocabulary's anchored patterns.
+
+    Kept as a test because the two protections are independent: this one works on the
+    *name*, the guard above on a claimed ``standard_name`` attribute.
+    """
+    ds = xr.Dataset(
+        {"sea_water_temperature_qc_agg": (("time",), np.ones(3))},
+        coords={"time": [1, 2, 3]},
+    )
+    assert u.find_variable(ds, "temperature") is None
+
+
+def test_asking_for_a_flag_by_name_still_finds_it():
+    """The rule is about *substituting* a flag, not about hiding one."""
+    ds = _flagged("sea_water_temperature_qc_agg", "sea_water_temperature_qc_agg")
+    found = u.find_variable(ds, "sea_water_temperature_qc_agg")
+    assert found is not None and found.name == "sea_water_temperature_qc_agg"
+
+
+def test_a_name_merely_containing_the_letters_qc_is_not_a_flag():
+    """Tokens, not substrings — otherwise a legitimate name is caught too."""
+    assert not u.is_qc_name("qcm_index")
+    assert not u.is_qc_name("sea_water_qcx")
+    assert u.is_qc_name("sea_water_temperature_qc_agg")
+
+
+def test_the_real_variable_still_wins_when_both_are_present():
+    ds = _flagged("sea_water_temperature_qc_agg")
+    ds["sea_water_temperature"] = ds["sea_water_temperature_qc_agg"] * 2
+    assert u.find_variable(ds, "temperature").name == "sea_water_temperature"

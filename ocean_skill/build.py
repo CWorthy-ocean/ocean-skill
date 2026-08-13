@@ -992,10 +992,6 @@ def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
     return md
 
 
-#: Columns that are coordinates, not comparable data — excluded from standard_names.
-_TABULAR_COORD_NAMES = {"time", "latitude", "longitude", "z", "depth", "altitude"}
-
-
 def _probe_dataframe(df) -> dict[str, Any]:
     """Return the tabular counterpart of :func:`_probe` above.
 
@@ -1008,10 +1004,14 @@ def _probe_dataframe(df) -> dict[str, Any]:
     ``<name>_qc_agg``/``<name>_qc_tests`` QARTOD pair alongside a column is
     recognized and excluded (it describes a variable rather than being one), the
     same modifier-exclusion :func:`_probe` applies to a Dataset's auxiliary fields.
-    """
-    import re
 
+    That column vocabulary lives in :mod:`ocean_skill.tabular`, which is also what
+    *reads* such a table into xarray — one spelling of the convention, so a catalog
+    entry cannot describe a frame differently from how the pipeline later opens it.
+    """
     import pandas as pd
+
+    from ocean_skill.tabular import COORD_COLUMNS, is_qc_column, split_units
 
     md: dict[str, Any] = {}
 
@@ -1045,11 +1045,10 @@ def _probe_dataframe(df) -> dict[str, Any]:
     std: dict[str, str] = {}
     units: dict[str, str] = {}
     for col in df.columns:
-        if str(col).endswith(("_qc_agg", "_qc_tests")):
+        if is_qc_column(col):
             continue
-        m = re.match(r"^(.+) \((.+)\)$", str(col))
-        base, unit = (m.group(1), m.group(2)) if m else (str(col), None)
-        if base in _TABULAR_COORD_NAMES:
+        base, unit = split_units(col)
+        if base in COORD_COLUMNS:
             continue
         std[col] = base
         if unit:

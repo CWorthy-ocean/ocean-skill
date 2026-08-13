@@ -71,6 +71,30 @@ scored[0].maps("rmse", "n")           # any registered metric, as an xr.Dataset
 scored.metrics()                      # the same numbers over space *and* time
 ```
 
+When the reference is a **place** rather than a field — a mooring, a station — there is no
+map to draw: the comparison is that place through time, and it draws as lines. Nothing
+extra to ask for, because the catalog already says so (`featureType: timeSeries`), and
+each comparison records what decided its figure in `family_reason`:
+
+```python
+papa = osk.compare(
+    reference="ooi-gp03flma-rim01-02-ctdmog040",   # a Station Papa CTD
+    test="oceansoda_ethz",                          # a monthly gridded product
+    variables=["temperature"],
+    # the mooring samples every 15 minutes and the product is monthly, so say how the
+    # mooring is binned — coarsening the *reference* is never done silently
+    aggregate={"time": {"resample": "MS", "reduce": "mean"}},
+)
+
+papa.plot()                           # reference solid, test dashed, on one time axis
+papa.plot(renderer="holoviews")       # the same lines, with hover
+papa[0].family_reason                 # why this drew as lines and not as maps
+```
+
+The model lane is *sampled at the station* — the nearest cell by default,
+`method="bilinear"` to interpolate to the position — and the offset between the station
+and the grid is reported in the aligned result's attrs, since at 1° it is ~55 km.
+
 Roles are set at compare time rather than in the catalog, so comparing two *models*
 is the same call with a different `reference`:
 

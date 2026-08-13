@@ -23,6 +23,12 @@ def read(source: str | SourceRef, **kwargs: Any):
     ----------
     source
         An entry name (``"glodap"`` or ``"catalog:name"``) or a :class:`SourceRef`.
+    **kwargs
+        Reader keywords, overriding the entry's own. The one that earns this is
+        ``constraints=`` on an ERDDAP table: a mooring's whole record is a large
+        download, and ``osk.read(entry, constraints={"time>=": "2015-01-01"})``
+        subsets it *server-side*, where a later ``select={"time": ...}`` cannot.
+        These used to be accepted and silently discarded.
     """
     import intake
 
@@ -30,7 +36,10 @@ def read(source: str | SourceRef, **kwargs: Any):
     meta = ref.metadata
 
     cat = intake.from_yaml_file(str(ref.path))
-    obj = cat[ref.name].read()
+    entry = cat[ref.name]
+    # An intake v2 entry is called to re-parameterize it; calling it with nothing would
+    # also work but reads oddly, so only when there is something to say.
+    obj = entry(**kwargs).read() if kwargs else entry.read()
 
     if meta.get("model") == "roms" or meta.get("loader") == "ocean_skill.roms":
         from ocean_skill import roms

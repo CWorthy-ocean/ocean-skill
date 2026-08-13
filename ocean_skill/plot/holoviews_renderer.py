@@ -66,6 +66,12 @@ _STATIC_ONLY_KWARGS = {
     # a movie's frame label is an Axes.text statically; here it is the slider's own
     # value and a panel title, neither of which takes matplotlib Text properties
     "frame_label_kwargs",
+    # the series family's line and legend styling: both are matplotlib call signatures
+    # (Axes.plot, Axes.legend), and bokeh's equivalents take neither. The *policy* they
+    # would tweak -- which line is solid, which colour, where the key goes -- is honored
+    # here; only the raw keyword pass-through is not.
+    "legend_kwargs",
+    "line_kwargs",
 }
 
 
@@ -910,6 +916,206 @@ _BOKEH_MARKERS = (
 )
 
 
+#: Width (CSS pixels) of one interactive series panel on the default canvas — wider than
+#: a map panel, since a time axis carrying years of dates needs the room.
+SERIES_WIDTH_PX = 620
+
+#: Corner name -> bokeh's ``legend_position``, so the key lands where the static
+#: renderer puts it (both read it off ``Panel.legend_corner``).
+_BOKEH_LEGEND_POSITION = {
+    "upper left": "top_left",
+    "upper right": "top_right",
+    "lower left": "bottom_left",
+    "lower right": "bottom_right",
+}
+
+
+def _series_geometry(*, font_scale: float = 1.0, canvas_factor: float = 1.0, aspect):
+    """``(frame_width, frame_height, fontsize)`` for one interactive series panel.
+
+    The line counterpart of :func:`_panel_geometry`, which reads a map's aspect off its
+    lon/lat span. A line panel has no such ratio to read — x is time and y is a physical
+    quantity — so the family's chosen aspect is passed in instead.
+    """
+    px = frame_px(aspect, width_px=SERIES_WIDTH_PX * canvas_factor)
+    return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
+
+
+def _series_curve(hv, line, dimensions, *, mark: str):
+    """Return one line as a bokeh element, marked where the static renderer marks it."""
+    from ocean_skill.plot.series import time_values
+    from ocean_skill.plot.style import markevery_indices
+
+    values = line.spec.values
+    x = time_values(values)
+    y = np.asarray(values.values, dtype="float64")
+    element = hv.Curve((x, y), *dimensions, label=line.label).opts(
+        color=line.color, line_dash=line.line_dash, line_width=1.4
+    )
+    if mark == "step":
+        element = element.opts(interpolation="steps-mid")
+    if mark == "marker":
+        element = hv.Scatter((x, y), *dimensions, label=line.label).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    elif line.marker is not None or mark == "line+marker":
+        # bokeh's Curve has no `markevery`, so the markers are their own overlay -- on
+        # the *same* indices the static renderer uses, or the two would mark different
+        # samples of one line.
+        keep = markevery_indices(len(x))
+        element = element * hv.Scatter((x[keep], y[keep]), *dimensions).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    return element
+
+
+def _series(
+    items,
+    title=None,
+    rows=None,
+    cols=None,
+    secondary_y=True,
+    encode=None,
+    residual=False,
+    metrics_loc="auto",
+    metric_keys=DEFAULT_METRIC_KEYS,
+    legend=True,
+    ylim=None,
+    panel_aspect=None,
+    labels=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    mark: str = "line",
+    **_,
+):
+    """Draw the ``series`` family interactively — the same layout, drawn with bokeh.
+
+    Composition, styling, labels, titles and the statistics text all come from
+    :mod:`ocean_skill.plot.series` and :mod:`ocean_skill.plot.style`, the same as the
+    static renderer, so the two cannot disagree about anything but the drawing call.
+
+    Two things differ, both stated rather than silent: the key is drawn inside each
+    panel (bokeh has no figure-level legend, so a shared key below the figure is not
+    available), and the statistics box is an ``hv.Text`` in data coordinates, so it pans
+    and zooms with the data instead of staying pinned to the axes.
+    """
+    hv = _extension()
+
+    from ocean_skill.plot.series import compose
+    from ocean_skill.plot.typography import SERIES_ASPECT
+
+    layout = compose(
+        items,
+        rows=rows,
+        cols=cols,
+        secondary_y=secondary_y,
+        encode=encode,
+        residual=residual,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    width, height, fontsize = _series_geometry(
+        font_scale=font_scale,
+        canvas_factor=_canvas_factor(size, zoom),
+        aspect=panel_aspect or SERIES_ASPECT,
+    )
+    plots = []
+    for panel in layout.panels:
+        x_dim = hv.Dimension("time", label="time")
+        # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
+        # "name [unit]", and the two renderers must print one axis label, not two.
+        y_dim = hv.Dimension("value", label=panel.ylabel)
+        overlay = hv.Overlay(
+            [_series_curve(hv, line, (x_dim, y_dim), mark=mark) for line in panel.lines]
+        )
+        if panel.secondary:
+            second = hv.Dimension("secondary", label=panel.secondary_ylabel or "")
+            overlay = overlay * hv.Overlay(
+                [
+                    _series_curve(hv, line, (x_dim, second), mark=mark)
+                    for line in panel.secondary
+                ]
+            )
+        if panel.metrics_text:
+            overlay = overlay * _series_metrics_text(hv, panel)
+        plot = overlay.opts(
+            hv.opts.Curve(
+                frame_width=width,
+                frame_height=height,
+                fontsize=fontsize,
+                show_grid=True,
+                tools=["hover"],
+            ),
+            hv.opts.Overlay(
+                title=panel.title,
+                show_legend=bool(legend),
+                legend_position=_BOKEH_LEGEND_POSITION.get(
+                    panel.legend_corner, "top_right"
+                ),
+                multi_y=bool(panel.secondary),
+                fontsize=fontsize,
+            ),
+        )
+        if ylim is not None:
+            plot = plot.opts(hv.opts.Curve(ylim=tuple(ylim)))
+        plots.append(plot)
+        if panel.residual:
+            strip = hv.Overlay(
+                [
+                    _series_curve(
+                        hv,
+                        line,
+                        (x_dim, hv.Dimension("residual", label="test − reference")),
+                        mark=mark,
+                    )
+                    for line in panel.residual
+                ]
+            ) * hv.HLine(0.0).opts(color="0.7", line_width=1)
+            plots.append(
+                strip.opts(
+                    hv.opts.Curve(
+                        frame_width=width,
+                        frame_height=int(height * 0.35),
+                        fontsize=fontsize,
+                    ),
+                    hv.opts.Overlay(show_legend=False, fontsize=fontsize),
+                )
+            )
+
+    out = hv.Layout(plots).cols(layout.ncols)
+    return out.opts(title=title or "")
+
+
+def _series_metrics_text(hv, panel):
+    """Return the statistics box as an ``hv.Text``, in the corner ``compose`` chose.
+
+    Placed in *data* coordinates, which is the one real cost of the interactive form:
+    the box pans and zooms with the data rather than staying pinned to the panel. bokeh
+    has no axes-fraction annotation, and folding the numbers into the title — what the
+    map families do here — is not available either, since the title is reserved for
+    identity.
+    """
+    from ocean_skill.plot.series import time_values
+
+    values = panel.lines[0].spec.values
+    x = time_values(values)
+    ys = np.concatenate(
+        [np.asarray(line.spec.values.values, dtype="float64") for line in panel.lines]
+    )
+    low, high = float(np.nanmin(ys)), float(np.nanmax(ys))
+    vertical, horizontal = panel.metrics_corner.split()
+    x_at = x[int(0.02 * (len(x) - 1))] if horizontal == "left" else x[-1]
+    y_at = high if vertical == "upper" else low
+    return hv.Text(
+        x_at,
+        y_at,
+        panel.metrics_text,
+        halign=horizontal,
+        valign="top" if vertical == "upper" else "bottom",
+    )
+
+
 def _target(
     items,
     title=None,
@@ -1096,7 +1302,12 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
 
-    # options the static renderer understands but bokeh has no use for
+    # options the static renderer understands but bokeh has no use for. Split by family
+    # because this list is *not* universal: `mark` is meaningless for a map here (bokeh
+    # draws a quadmesh either way) and load-bearing for a line panel, which honors
+    # mark="line+marker"/"step". Dropped for every family, it would be accepted and
+    # silently discarded for the one that implements it -- the exact failure
+    # tests/test_renderers.py exists to catch.
     drops = [
         "figsize",
         # bokeh attaches a colorbar to the plot frame, so it already starts and ends
@@ -1115,6 +1326,10 @@ def render(spec, **kwargs: Any):
         "shared_axis_labels",
         *_STATIC_ONLY_KWARGS,
     ]
+    if family == "series":
+        # A line panel has no colormap, no map and no fixed axes, so the map-only drops
+        # do not apply to it -- and `mark` and `metrics_kwargs` do.
+        drops = [d for d in drops if d not in ("mark", "metrics")]
     if family not in _MOVIES:
         # a movie is the only family with something to write here (a standalone HTML
         # page, the interactive counterpart of an mp4) and the only one that plays at a
@@ -1133,6 +1348,8 @@ def render(spec, **kwargs: Any):
         return _field_movie(spec.items, **opts)
     if family == "facet_movie":
         return _facet_movie(spec.single, **opts)
+    if family == "series":
+        return _series(spec.items, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
     if family == "target":
