@@ -1752,6 +1752,8 @@ def field_facet(
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -1796,6 +1798,7 @@ def field_facet(
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
+    canvas = resolve_canvas(size, zoom)
     for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
         if value is not None and value not in field.dims:
             raise ValueError(
@@ -1822,7 +1825,7 @@ def field_facet(
             )
         nrows, ncols = int(field.sizes[row_dim]), n
     elif ncols is None:
-        ncols, nrows = facet_layout(n, aspect)
+        ncols, nrows = facet_layout(n, aspect, canvas=canvas)
     else:
         ncols = max(int(ncols), 1)
         nrows = -(-n // ncols)
@@ -1839,6 +1842,7 @@ def field_facet(
         # with two axes only the top row is titled, so the rows below need a gap
         # rather than a title's worth of room as well
         title_every_row=row_dim is None,
+        canvas=canvas,
         font_scale=font_scale,
     )
     scale = type_scale(
@@ -2127,12 +2131,7 @@ def skill_map(
         panels = [(row, name) for row in range(nrows) for name in names]
     else:
         if ncols is None:
-            ncols, nrows = facet_layout(
-                len(names),
-                aspect,
-                page_w=canvas.width,
-                page_h=canvas.max_height or PAGE_H,
-            )
+            ncols, nrows = facet_layout(len(names), aspect, canvas=canvas)
         else:
             ncols = max(int(ncols), 1)
             nrows = -(-len(names) // ncols)
@@ -2158,8 +2157,10 @@ def skill_map(
         # every panel is a different metric, so every row carries its own titles --
         # except when the rows are comparisons and the columns repeat down the page
         title_every_row=not stacked,
-        page_w=canvas.width,
-        page_h=canvas.max_height if canvas.max_height is not None else PAGE_H,
+        # the canvas whole, rather than its width and a height defaulted to the page:
+        # that spelling silently capped size="free" at the page, which is the one thing
+        # an uncapped canvas is for
+        canvas=canvas,
         # PANEL_W_FRACTION, not FACET_PANEL_W_FRACTION: 0.88 is the allowance for a grid
         # whose panels *share* one bar and so have nothing beside them. A bar in every
         # cell is what 0.72 describes, and getting this backwards silently squeezes the
@@ -2496,6 +2497,8 @@ def field_movie(
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
     progress: bool = True,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
@@ -2551,14 +2554,25 @@ def field_movie(
         )
 
     first = frames[0]
+    # Exactly what field_row decides, and for the reason in this function's docstring: a
+    # frame is meant to *be* that row. Hardcoding True here made that false for anything
+    # not wide — a tall domain's bars sat below the maps in the movie and beside them in
+    # the still, with the figure reshaped to match.
+    aspect = _map_aspect(frames, reference_name)
+    horizontal = colorbar_is_horizontal(
+        aspect,
+        default_horizontal=True,
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
     figsize = figsize or auto_figsize(
-        _map_aspect(frames, reference_name),
+        aspect,
         nrows=1,
+        canvas=resolve_canvas(size, zoom),
         font_scale=font_scale,
-        horizontal_colorbar=True,
+        horizontal_colorbar=horizontal,
     )
     scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
-    defaults = _style_defaults(scale, horizontal_colorbar=True)
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
     proj = ccrs.PlateCarree()
 
     seq_norm = div_norm = None
@@ -2706,6 +2720,8 @@ def facet_movie(
     frame_label: bool = True,
     shared_limits: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
     progress: bool = True,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
@@ -2744,7 +2760,13 @@ def facet_movie(
     # horizontal bar beneath it, a tall one a vertical bar beside it. Same rule
     # field_facet applies to its grid, which for a single cell *is* the map.
     horizontal = aspect > 1.0
-    figsize = figsize or facet_figsize(aspect, nrows=1, ncols=1, font_scale=font_scale)
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=1,
+        ncols=1,
+        canvas=resolve_canvas(size, zoom),
+        font_scale=font_scale,
+    )
     scale = type_scale(
         figsize,
         ncols=1,

@@ -253,6 +253,56 @@ def test_no_frames_at_all_is_refused():
         _movie([])
 
 
+def _tall_frame(index: int) -> dict:
+    """Build a frame whose domain is taller than wide (a coastal strip, aspect ~0.2)."""
+    frame = _frame(index)
+    lon = np.linspace(-98, -95.5, 10)  # 2.5 deg across against 8 deg of latitude
+    frame["aligned"] = {
+        key: da.assign_coords(lon=lon) for key, da in frame["aligned"].items()
+    }
+    return frame
+
+
+def _bar_orientation(fig) -> str:
+    bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    assert bars, "no colorbars were recorded"
+    return "horizontal" if bars[0]._osk_cbar_horizontal else "vertical"
+
+
+def test_a_movie_frame_is_laid_out_exactly_like_the_still_row():
+    """This function's docstring promises it; for a tall domain it used not to hold.
+
+    ``field_row`` picks its colorbar orientation from the map's aspect ratio, but
+    ``field_movie`` hardcoded horizontal. Below about 0.8 the two disagreed: the movie
+    put the bars under the maps and reshaped the figure to fit them, where the still put
+    them beside. Since a frame is documented as being the row that ``field_row`` draws,
+    drawn by the same code, that is a broken promise rather than a matter of taste.
+
+    Checked on a tall domain because the default fixture is wide (aspect 1.25) and would
+    have passed throughout.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_row
+
+    tall = [_tall_frame(i) for i in range(2)]
+    still = field_row(tall[0]["aligned"], units="mmol m-3", title="t")
+    movie_fig = _movie(tall)._fig
+
+    assert _bar_orientation(movie_fig) == _bar_orientation(still) == "vertical"
+    # and the figure the frames are drawn into matches the still's shape
+    assert tuple(movie_fig.get_size_inches()) == pytest.approx(
+        tuple(still.get_size_inches()), rel=0.02
+    )
+
+
+def test_a_movie_still_honours_an_explicit_colorbar_orientation():
+    """The caller's own choice wins, and sizes the figure — as it does for a row."""
+    tall = [_tall_frame(i) for i in range(2)]
+    beside = _movie(tall)._fig
+    below = _movie(tall, colorbar_kwargs={"orientation": "horizontal"})._fig
+    assert _bar_orientation(below) == "horizontal"
+    assert below.get_size_inches()[1] > beside.get_size_inches()[1]
+
+
 def test_frames_on_different_grids_are_refused(frames):
     """Frames share one figure, so a grid that changes mid-movie has nowhere to go."""
     coarse = _field(0.0, shape=(6, 8))
