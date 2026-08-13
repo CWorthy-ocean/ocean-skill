@@ -271,10 +271,20 @@ def test_frames_on_different_grids_are_refused(frames):
 # --- the interactive counterpart ----------------------------------------------------
 
 
+def _hv(obj):
+    """Return the holoviews object, whether or not panel wraps it for its widget.
+
+    The movie families return a ``pn.pane.HoloViews`` by default, because holoviews'
+    own control for a string-valued dimension is a dropdown; ``widget="dropdown"``
+    returns the bare object. Both carry the same plot underneath.
+    """
+    return getattr(obj, "object", obj)
+
+
 def _holomaps(obj):
     import holoviews as hv
 
-    return [el for el in obj.traverse() if isinstance(el, hv.HoloMap)]
+    return [el for el in _hv(obj).traverse() if isinstance(el, hv.HoloMap)]
 
 
 def test_the_interactive_movie_puts_every_frame_on_one_slider(frames):
@@ -327,7 +337,7 @@ def test_the_interactive_titles_carry_the_frame_and_the_metrics(frames):
     import holoviews as hv
     from bokeh.plotting import figure
 
-    obj = _interactive(frames)
+    obj = _hv(_interactive(frames))
     titles = [
         f.title.text for f in hv.render(obj, backend="bokeh").select({"type": figure})
     ]
@@ -348,14 +358,36 @@ def test_the_interactive_movie_refuses_a_video_extension(frames, tmp_path):
         _interactive(frames, save=tmp_path / "movie.mp4")
 
 
-def test_a_player_is_available_for_when_it_should_just_run(frames):
+def test_the_frames_get_a_slider_not_a_dropdown(frames):
+    """An ordered sequence wants a control you can drag, not one you search.
+
+    Holoviews picks a dropdown for a string-valued dimension, which makes stepping to
+    the next frame two clicks and makes dragging through the movie impossible.
+    """
     import panel as pn
 
-    pane = _interactive(frames, player=True, fps=4)
+    pane = _interactive(frames)
     assert isinstance(pane, pn.pane.HoloViews)
+    assert [type(w).__name__ for w in pane.widget_box] == ["DiscreteSlider"]
+
+
+def test_a_player_is_available_for_when_it_should_just_run(frames):
+    pane = _interactive(frames, widget="player", fps=4)
     players = [w for w in pane.widget_box if hasattr(w, "interval")]
-    assert players, "player=True has to produce a widget that plays"
-    assert players[0].interval == 250
+    assert players, "widget='player' has to produce a widget that plays"
+    assert players[0].interval == 250, "and it plays at the fps the static side encodes"
+
+
+def test_the_holoviews_default_control_is_still_reachable(frames):
+    """``dropdown`` returns the bare holoviews object, as every other family does."""
+    import holoviews as hv
+
+    assert isinstance(_interactive(frames, widget="dropdown"), hv.Layout)
+
+
+def test_an_unknown_widget_is_refused(frames):
+    with pytest.raises(ValueError, match="unknown widget"):
+        _interactive(frames, widget="knob")
 
 
 def test_static_only_styling_still_warns_here(frames):
@@ -505,20 +537,21 @@ def test_a_second_facet_axis_is_refused_rather_than_animated():
 
 
 def test_the_interactive_field_movie_puts_the_facet_axis_on_a_slider():
-    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
+    movie = _hv(_facet_film(_run(5), renderer="holoviews", domain=None))
     assert [d.name for d in movie.kdims] == ["frame"]
     assert list(movie.keys()) == [f"2012-01-0{i}" for i in range(1, 6)]
 
 
 def test_the_interactive_field_movie_fixes_one_colour_scale():
-    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
+    movie = _hv(_facet_film(_run(5), renderer="holoviews", domain=None))
     assert len({_clim(el) for el in movie.values()}) == 1
 
 
 def test_both_renderers_agree_on_the_field_movie_scale():
     field = _run(5)
     static = _facet_film(field, domain=None)._fig.axes[0].collections[0].norm
-    interactive = _clim(next(iter(_facet_film(field, renderer="holoviews").values())))
+    movie = _hv(_facet_film(field, renderer="holoviews"))
+    interactive = _clim(next(iter(movie.values())))
     assert interactive == pytest.approx((static.vmin, static.vmax))
 
 
