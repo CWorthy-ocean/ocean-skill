@@ -578,7 +578,8 @@ def _iso_duration(seconds: float) -> str:
         return "P1Y"
     if days >= 1:
         rounded = round(days)
-        return f"P{rounded:g}D" if abs(days - rounded) <= 0.05 * days else f"P{days:.1f}D"
+        close = abs(days - rounded) <= 0.05 * days
+        return f"P{rounded:g}D" if close else f"P{days:.1f}D"
     hours = seconds / 3600.0
     if hours >= 1:
         return f"PT{round(hours):g}H"
@@ -586,7 +587,9 @@ def _iso_duration(seconds: float) -> str:
     return f"PT{round(minutes):g}M" if minutes >= 1 else f"PT{round(seconds):g}S"
 
 
-def _resolution_metadata(ds, coords: dict[str, Any], feature_type: str) -> dict[str, Any]:
+def _resolution_metadata(
+    ds, coords: dict[str, Any], feature_type: str
+) -> dict[str, Any]:
     """Horizontal, temporal and vertical resolution, derived from the axes themselves.
 
     Read rather than believed, for the same reason the extents are: products
@@ -604,30 +607,40 @@ def _resolution_metadata(ds, coords: dict[str, Any], feature_type: str) -> dict[
     md: dict[str, Any] = {}
 
     if feature_type in _GRIDDED_FEATURE_TYPES:
+        steps: dict[str, float] = {}
+        regular = True
         for kind, key in (("latitude", "lat"), ("longitude", "lon")):
-            coord = coords.get(kind)
-            if coord is None:
+            if (coord := coords.get(kind)) is None:
                 continue
             if (found := _spacing(coord)) is None:
                 continue
-            step, regular = found
-            md[f"grid_resolution_{key}_deg"] = round(step, 6)
-            md[f"grid_{key}_regular"] = regular
-        # One scalar to sort and filter on. Latitude, because a degree of longitude
-        # shrinks with cos(lat) and a global product would otherwise report a
-        # resolution that is only true at the equator.
-        if (lat_deg := md.get("grid_resolution_lat_deg")) is not None:
+            steps[key], even = found
+            regular &= even
+        if steps:
+            lat_deg = steps.get("lat", steps.get("lon"))
+            # Latitude drives the scalar: a degree of longitude shrinks with cos(lat),
+            # so a global product reporting its lon spacing would state a resolution
+            # true only at the equator.
+            md["grid_resolution_deg"] = round(lat_deg, 6)
             md["grid_resolution_km"] = round(lat_deg * _KM_PER_DEG, 3)
+            md["grid_regular"] = regular
+            # Both axes recorded only when they disagree -- on every product checked
+            # they match, so carrying two near-identical numbers everywhere buys
+            # nothing, while an anisotropic grid is worth seeing.
+            if len(steps) == 2 and not np.isclose(
+                steps["lat"], steps["lon"], rtol=1e-3
+            ):
+                md["grid_resolution_lat_deg"] = round(steps["lat"], 6)
+                md["grid_resolution_lon_deg"] = round(steps["lon"], 6)
 
     if (time_coord := coords.get("time")) is not None:
         decoded = _decode_times(ds, time_coord)
         if decoded is not None and decoded.size > 1:
             as_seconds = np.asarray(decoded, dtype="datetime64[s]").astype("float64")
             if (found := _spacing(as_seconds)) is not None:
-                step, regular = found
+                step, _even = found
                 md["time_resolution_s"] = round(step, 3)
                 md["time_resolution"] = _iso_duration(step)
-                md["time_regular"] = regular
 
     if (vertical := coords.get("vertical")) is not None:
         arr = np.asarray(vertical)
@@ -836,6 +849,16 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     dap = ("griddap", "dodsc", "opendap")
     if any(token in low for token in dap) or low.endswith(".nc.dods"):
         return readers.XArrayDatasetReader(datatypes.OpenDAP(url=str(url)), **kwargs)
+
+    # An ARCO Zarr store, which the HDF5 branch below would hand to h5netcdf and fail
+    # on. ``engine`` is set here rather than left to the caller so that passing it in
+    # ``reader_kwargs`` is not required; note that Copernicus Marine's stores are Zarr
+    # **v2** and zarr-python 3 probes for v3 first, so those need
+    # ``reader_kwargs={"zarr_format": 2}`` -- without it the 403 from the v3 probe
+    # surfaces as an authentication failure rather than a version mismatch.
+    if low.endswith(".zarr") or ".zarr/" in low:
+        data = datatypes.Zarr(url=str(url), storage_options=so)
+        return readers.XArrayDatasetReader(data, engine="zarr", **kwargs)
 
     # Anything fsspec has to open (a remote URL, or a cache/chain like
     # "simplecache::https://...") arrives as a *file object*, which the netcdf4 C
