@@ -1957,9 +1957,12 @@ def field_facet(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit: see _fit_text_widths, whose whole point is that it
+    # measures each label against the box it will *end up* in
     if align_colorbars:
         _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -2617,9 +2620,13 @@ def field_movie(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit — see _fit_text_widths. It matters more here than
+    # on a still: every frame is drawn into this one layout, so a label clipped by
+    # measuring it against a pre-alignment bar is clipped for the whole movie.
     if align_colorbars:
         _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
 
     metrics_text = getattr(axes[2], "_osk_metrics_text", None)
     keys = (test_name, reference_name, "difference")
@@ -2806,8 +2813,10 @@ def facet_movie(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit — see _fit_text_widths and the note in field_movie
     _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
 
     proj = ccrs.PlateCarree()
     artists = [im]

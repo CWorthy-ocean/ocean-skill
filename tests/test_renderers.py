@@ -708,3 +708,106 @@ def test_the_interactive_renderer_warns_instead_of_swallowing(two_rows):
             PlotSpec(family="field_grid", items=two_rows, options={"label_size": 9}),
             renderer="holoviews",
         )
+
+
+# --- size= / zoom= reach the interactive renderer too --------------------------------
+#
+# ``size``/``zoom`` are inches statically, which bokeh has no notion of, so they arrive
+# as a ratio against the page and scale the frame in pixels (``_canvas_factor``). Every
+# interactive family takes ``**_``, so one that simply forgot to name them absorbed them
+# in silence and drew the default size — accepted, dropped, no warning, no clue.
+
+
+def _hv_frame_widths(obj) -> list[int]:
+    """Every rendered bokeh figure's frame width, in CSS pixels.
+
+    ``getattr(obj, "object", obj)`` unwraps the ``pn.pane.HoloViews`` the movie families
+    return for their widget (see ``tests/test_movie.py::_hv``); every other family hands
+    back the bare holoviews object already.
+    """
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    plot = hv.render(getattr(obj, "object", obj), backend="bokeh")
+    return [f.frame_width for f in plot.select({"type": figure}) if f.frame_width]
+
+
+def _facet_field() -> xr.DataArray:
+    """Build a four-period field: the payload the facet families take."""
+    times = xr.date_range("2012-01-01", periods=4, freq="MS")
+    base = _field(0.0)
+    return xr.concat([base + i for i in range(4)], dim="time").assign_coords(time=times)
+
+
+_INTERACTIVE_FAMILIES = {
+    "field_row": lambda: [
+        _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
+    ],
+    "field_grid": lambda: [
+        _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
+    ],
+    "skill_map": lambda: [_skill_item()],
+    "field_facet": lambda: [
+        {
+            "field": _facet_field(),
+            "facet_dim": "time",
+            "units": "mmol m-3",
+            "standard_name": None,
+        }
+    ],
+    "facet_movie": lambda: [
+        {
+            "field": _facet_field(),
+            "facet_dim": "time",
+            "units": "mmol m-3",
+            "standard_name": None,
+        }
+    ],
+    "field_movie": lambda: [
+        {
+            **_item("mole_concentration_of_nitrate_in_sea_water", "woa", "n"),
+            "frame_label": "Jan 2012",
+        },
+        {
+            **_item("mole_concentration_of_nitrate_in_sea_water", "woa", "n"),
+            "frame_label": "Feb 2012",
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+def test_zoom_grows_the_interactive_frame_in_every_family(family):
+    """A family that forgets to name ``zoom`` absorbs it into ``**_``, silently."""
+    items = _INTERACTIVE_FAMILIES[family]()
+    plain = _hv_frame_widths(
+        render(PlotSpec(family=family, items=items), renderer="holoviews")
+    )
+    zoomed = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"zoom": 2.0}),
+            renderer="holoviews",
+        )
+    )
+    assert plain and len(zoomed) == len(plain), family
+    assert all(z > p for z, p in zip(zoomed, plain, strict=True)), (
+        f"{family}: zoom= was accepted and dropped ({plain} -> {zoomed})"
+    )
+
+
+@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+def test_a_named_canvas_reaches_the_interactive_frame_too(family):
+    items = _INTERACTIVE_FAMILIES[family]()
+    page = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"size": "page"}),
+            renderer="holoviews",
+        )
+    )
+    column = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"size": "column"}),
+            renderer="holoviews",
+        )
+    )
+    assert all(c < p for c, p in zip(column, page, strict=True)), family
