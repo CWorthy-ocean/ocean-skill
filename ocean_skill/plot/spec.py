@@ -33,6 +33,7 @@ FAMILIES = (
     "field_facet",
     "field_movie",
     "facet_movie",
+    "skill_map",
     "taylor",
     "target",
     "paired",
@@ -55,7 +56,11 @@ class PlotSpec:
         rather than a pair, so there is no aligned trio to carry. ``facet_movie``
         carries that same single item, being ``field_facet`` played rather than laid
         out; ``field_movie`` carries ``field_grid``'s list, one entry per frame, each
-        optionally naming its ``frame_label``.
+        optionally naming its ``frame_label``. ``skill_map`` is the other exception: its
+        items carry ``skill`` (a Dataset of one 2-D map per metric) and ``metric_names``
+        in place of ``aligned``, because its panels are *metrics of* a comparison rather
+        than the comparison's own fields — the ``metrics`` record is still there, as the
+        overall value each panel is annotated with.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.

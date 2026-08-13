@@ -28,6 +28,8 @@ from ocean_skill.plot.typography import (
     MIN_PT,
     PAGE_H,
     PAGE_W,
+    PANEL_W_FRACTION,
+    PANEL_W_FRACTION_HORIZONTAL_CBAR,
     REFERENCE_GRID,
     SUPTITLE_ALLOWANCE,
     Canvas,
@@ -42,7 +44,17 @@ from ocean_skill.plot.typography import (
 # override of exactly this
 from ocean_skill.plot.typography import row_height as _typographic_row_height
 
-__all__ = ["facet_labels", "field_facet", "field_grid", "field_row", "render"]
+__all__ = [
+    "facet_labels",
+    "field_facet",
+    "field_grid",
+    "field_row",
+    "metric_panel_titles",
+    "metric_panels",
+    "metric_value_text",
+    "render",
+    "skill_map",
+]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
 # which is where they are used to decide sizes; re-exported under their old names.
@@ -573,6 +585,22 @@ def _draw_row(
     return ims, (f"[{units}]" if units else "")
 
 
+def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
+    """Return one metric's value formatted for a label, or ``""`` if there isn't one.
+
+    Bools are excluded rather than formatted: ``isinstance(True, int)`` is ``True`` in
+    Python, so a naive numeric test renders the metric record's ``weighted`` flag as
+    ``1`` — a plausible-looking number that is not a metric at all.
+
+    Shared with the interactive renderer, which puts the same value in a panel title
+    instead of a box, so the two cannot disagree about what a metric reads as.
+    """
+    value = (metrics or {}).get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return ""
+    return f"{value:.3g}"
+
+
 def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     """Return the corner box's text: one ``key=value`` line per requested metric.
 
@@ -582,9 +610,9 @@ def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     if not metrics:
         return ""
     return "\n".join(
-        f"{k}={metrics[k]:.3g}"
-        for k in metric_keys
-        if isinstance(metrics.get(k), int | float)
+        f"{key}={text}"
+        for key in metric_keys
+        if (text := metric_value_text(metrics, key))
     )
 
 
@@ -1582,6 +1610,327 @@ def field_facet(
     return fig
 
 
+def metric_panels(skill, requested=None) -> list[str]:
+    """Resolve and validate the metrics to draw from a skill Dataset.
+
+    A requested metric the Dataset does not carry **raises**, naming what it does carry.
+    Dropping the panel instead would be invisible: a figure of three maps where four
+    were asked for looks exactly like a figure of three maps. Which metrics exist is a
+    data-layer question — each is a full reduction over the scored axis and cannot be
+    conjured at draw time — so the message points there rather than at a plot option.
+
+    Shared with the interactive renderer, so both refuse the same request the same way.
+    """
+    available = [
+        name
+        for name, da in skill.data_vars.items()
+        if da.ndim == 2 and da.dtype.kind in "fiu"
+    ]
+    if requested is None:
+        return available
+    names = [requested] if isinstance(requested, str) else list(requested)
+    missing = [name for name in names if name not in available]
+    if missing:
+        raise ValueError(
+            f"no pointwise map for {missing} — this comparison computed "
+            f"{available}. Which metrics are computed is decided when the maps are "
+            'prepared, not when they are drawn: pass metrics=("bias", "corr", ...) to '
+            "compare() (or to Comparison.maps()) to add them."
+        )
+    return names
+
+
+def metric_panel_titles(names) -> list[str]:
+    """Return the panel titles for a list of metrics.
+
+    The metric's own key, which is how every metric is already spelled in the corner
+    box, in the CSV and in :data:`ocean_skill.metrics.REGISTRY` — one name for one thing
+    across the whole package. Its own function so a prettier spelling later ("σ ratio")
+    lands in both renderers at once, the way :func:`facet_labels` does for facet panels.
+    """
+    return [str(name) for name in names]
+
+
+def metric_arrays(skill, names) -> dict[str, Any]:
+    """Return the values each metric's colour limits should be derived from.
+
+    Usually the metric's own map. The exception is a
+    :data:`~ocean_skill.colormaps.METRIC_LIMIT_GROUPS` pair — ``mean_test`` with
+    ``mean_reference``, ``std_test`` with ``std_reference`` — which get the *pooled*
+    values of both members, because they are one physical quantity for two fields and a
+    per-panel scale would make the only comparison worth making impossible to read.
+    """
+    from ocean_skill.colormaps import METRIC_LIMIT_GROUPS
+
+    grouped = {name: group for group in METRIC_LIMIT_GROUPS for name in group}
+    out = {}
+    for name in names:
+        members = [
+            member for member in grouped.get(name, (name,)) if member in skill.data_vars
+        ]
+        out[name] = np.concatenate(
+            [np.asarray(skill[member]).ravel() for member in members]
+        )
+    return out
+
+
+def skill_map(
+    items: list[dict[str, Any]],
+    *,
+    metric_names: tuple[str, ...] | None = None,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    domain: tuple[float, float, float, float] | None = None,
+    ncols: int | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+):
+    """Draw one map per skill metric: where the model agrees, metric by metric.
+
+    The figure for a comparison scored over an axis (``compare(..., over="time")``).
+    Every panel is the *same* comparison judged by a different measure, each computed
+    cell by cell along that axis — so bias says where the model runs high or low,
+    correlation where it tracks the observations through time, and the variability
+    ratio where it is over- or under-dispersed. There is no test/reference/difference
+    row here because there is nothing to set beside anything: the maps *are* it.
+
+    Each panel therefore gets **its own colour scale and its own colorbar**, unlike
+    :func:`field_facet`, whose panels share one because they are one quantity at
+    different times. Bias and a dimensionless correlation have no shared scale to have,
+    and there is deliberately no ``shared_limits`` to ask for one. The colours come from
+    :func:`ocean_skill.colormaps.metric_colors`, which both renderers call, so a bias
+    panel is symmetric about zero and a correlation panel spans (−1, 1) whichever
+    backend drew it.
+
+    Each panel is also annotated with that metric's **overall** value — the same number
+    reduced over space *and* the scored axis together, from ``metrics``' record — in
+    the corner box a comparison row uses for the same purpose. The map and the single
+    number are the same statistic at two resolutions, and reading one without the other
+    is how a good average hides a bad region.
+
+    Several items (a :func:`compare` fan-out) become rows: metrics across, comparisons
+    down, each row named at its left edge as :func:`field_grid`'s are. With a single
+    item the panels are one series with no inherent order, so the grid is free and
+    ``ncols`` defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads
+    the orientation off the domain's shape exactly as :func:`field_facet` does.
+
+    ``metric_names`` picks and orders the panels from what the item carries; a name it
+    does not carry raises (see :func:`metric_panels`). Every other parameter means
+    what it means in :func:`field_facet`.
+    """
+    import warnings
+
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot.typography import facet_figsize, facet_layout
+
+    if not items:
+        raise ValueError("skill_map needs at least one comparison, got none")
+    names = metric_panels(items[0]["skill"], metric_names)
+    if not names:
+        raise ValueError(
+            "this comparison carries no 2-D metric maps to draw. It was probably not "
+            'scored over an axis: build it with compare(..., over="time").'
+        )
+    for item in items[1:]:  # every row must be able to fill every column
+        metric_panels(item["skill"], names)
+
+    titles = metric_panel_titles(names)
+    aspect = _aspect_of(items[0]["skill"][names[0]])
+    canvas = resolve_canvas(size, zoom)
+    stacked = len(items) > 1
+    if stacked:
+        # two axes fix the grid, as field_facet's row_dim does: metrics across, one row
+        # per comparison. An ncols disagreeing with that would drop panels.
+        if ncols is not None and int(ncols) != len(names):
+            raise ValueError(
+                f"ncols={ncols} contradicts a {len(items)}-comparison set: the grid is "
+                f"{len(items)} x {len(names)} (one column per metric), so there is no "
+                "column count left to choose."
+            )
+        nrows, ncols = len(items), len(names)
+        panels = [(row, name) for row in range(nrows) for name in names]
+    else:
+        if ncols is None:
+            ncols, nrows = facet_layout(
+                len(names),
+                aspect,
+                page_w=canvas.width,
+                page_h=canvas.max_height or PAGE_H,
+            )
+        else:
+            ncols = max(int(ncols), 1)
+            nrows = -(-len(names) // ncols)
+        panels = [(0, name) for name in names]
+
+    # Vertical, one per panel -- and *not* through colorbar_is_horizontal, which forces
+    # horizontal above a 2.5 aspect (a Gulf-shaped domain) and would put a bar stack
+    # under every row at ~1in of fixed height, which facet_figsize cannot charge for.
+    horizontal = str((colorbar_kwargs or {}).get("orientation", "vertical")).startswith(
+        "h"
+    )
+    if horizontal:
+        warnings.warn(
+            "colorbar_kwargs={'orientation': 'horizontal'} puts a bar under every "
+            "panel, but this family's height is not re-charged for that (see "
+            "facet_figsize), so the maps may be squeezed. Pass figsize= or zoom=.",
+            stacklevel=_stacklevel.find(),
+        )
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=nrows,
+        ncols=ncols,
+        # every panel is a different metric, so every row carries its own titles --
+        # except when the rows are comparisons and the columns repeat down the page
+        title_every_row=not stacked,
+        page_w=canvas.width,
+        page_h=canvas.max_height if canvas.max_height is not None else PAGE_H,
+        # PANEL_W_FRACTION, not FACET_PANEL_W_FRACTION: 0.88 is the allowance for a grid
+        # whose panels *share* one bar and so have nothing beside them. A bar in every
+        # cell is what 0.72 describes, and getting this backwards silently squeezes the
+        # maps -- the failure typography's own commentary is about.
+        panel_w_fraction=(
+            PANEL_W_FRACTION_HORIZONTAL_CBAR if horizontal else PANEL_W_FRACTION
+        ),
+        font_scale=font_scale,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        # the suptitle spans the page, so it is sized as every other family's is rather
+        # than off this grid's column count -- see type_scale
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    # FACET_COLORBAR_ASPECT is deliberately *not* applied: it exists for one bar
+    # refitted across every row, and each bar here spans exactly one panel -- which is
+    # what the grid default already describes.
+    merged_title = _merged(defaults["title_kwargs"], title_kwargs)
+    merged_gridline = _merged(defaults["gridline_kwargs"], gridline_kwargs)
+    merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
+    merged_metrics = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes.ravel())
+    arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+
+    for i, (row_index, name) in enumerate(panels):
+        ax = flat[i]
+        row, col = divmod(i, ncols)
+        item = items[row_index]
+        colors = metric_colors(
+            name,
+            arrays[row_index][name],
+            standard_name=item.get("standard_name"),
+        )
+        # Below the top row of a stacked grid every panel repeats its column's metric;
+        # the comparison is named down the left edge instead.
+        label = titles[names.index(name)] if (not stacked or row == 0) else None
+        im = _draw_map(
+            ax,
+            item["skill"][name],
+            label=label,
+            cmap=colors.cmap,
+            norm=colors.norm(),
+            mark=mark,
+            domain=domain,
+            gridline_kwargs=merged_gridline,
+            tick_label_kwargs=merged_tick,
+            title_kwargs=merged_title,
+            left_labels=(col == 0) if shared_axis_labels else None,
+            # the bottom row is ragged when the metrics do not fill the grid, so the
+            # question is "is there a panel below me?", not "am I in the last row?"
+            bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
+        )
+        if label is not None:
+            ax.title._osk_size_pinned = title_pinned
+        if col == 0 and stacked and item.get("row_label"):
+            _add_row_label(ax, item["row_label"], merged_row_label)
+            ax._osk_row_label._osk_size_pinned = _pinned(
+                row_label_kwargs, "row_label_kwargs"
+            )
+        # the metric's overall value, in the same corner box a comparison row uses for
+        # the same reason -- stashed on the axes as that one is
+        overall = _metrics_text(item.get("metrics"), (name,))
+        if overall:
+            ax._osk_metrics_text = ax.text(
+                0.02,
+                0.02,
+                overall,
+                transform=ax.transAxes,
+                zorder=5,
+                **merged_metrics,
+            )
+        _draw_colorbar(
+            fig,
+            im,
+            ax,
+            _units_label(item["skill"][name]),
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+        )
+
+    # Cells past the last panel carry no map and so no label artists — hidden rather
+    # than deleted, which keeps the drawn panels on the grid they were sized for.
+    for ax in flat[len(panels) :]:
+        ax.set_visible(False)
+
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _fit_left_margin(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+        _clear_row_labels(fig)
+    _warn_if_cramped(fig, ncols, canvas=canvas, nrows=nrows)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def _units_label(da) -> str:
+    """Return one metric map's colorbar label: its units, or nothing for a number.
+
+    Units go on each panel's own bar rather than into its title, because unlike
+    :func:`field_facet` every panel here has a bar of its own and a title copy would
+    say it twice.
+    """
+    units = str(da.attrs.get("units", "") or "")
+    return f"[{units}]" if units else ""
+
+
 #: Output formats :func:`field_movie` writes, and which matplotlib writer does each.
 #: A gif needs nothing beyond Pillow, which matplotlib already requires, so it always
 #: works; mp4 goes through ffmpeg, an external binary that may not be installed.
@@ -2146,7 +2495,7 @@ def _nested_owner(key: str) -> str | None:
 
 @functools.cache
 def _top_level_options() -> frozenset[str]:
-    """Every keyword ``field_row``/``field_grid`` accept directly, not inside a dict.
+    """Every keyword a map family accepts directly, rather than inside a dict.
 
     Read off the signatures rather than listed, so adding a parameter cannot leave this
     behind — which is exactly how ``size`` came to be misreported as a nested key.
@@ -2155,7 +2504,7 @@ def _top_level_options() -> frozenset[str]:
 
     return frozenset(
         name
-        for fn in (field_row, field_grid)
+        for fn in (field_row, field_grid, field_facet, skill_map)
         for name in inspect.signature(fn).parameters
     )
 
@@ -2215,6 +2564,8 @@ def render(spec, **kwargs: Any):
         _check_options(field_movie, opts)
     elif family == "facet_movie":
         _check_options(facet_movie, opts)
+    elif family == "skill_map":
+        _check_options(skill_map, opts)
 
     if family == "field_facet":
         item = spec.single
@@ -2247,6 +2598,8 @@ def render(spec, **kwargs: Any):
             metrics=item.get("metrics"),
             **opts,
         )
+    if family == "skill_map":
+        return skill_map(spec.items, **opts)
     if family == "field_grid":
         return field_grid(spec.items, **opts)
     if family == "field_movie":

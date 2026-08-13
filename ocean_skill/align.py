@@ -11,14 +11,23 @@ serves both gridded and point comparisons.
 from __future__ import annotations
 
 import warnings
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import xarray as xr
 
 from ocean_skill import _stacklevel
 
-__all__ = ["align", "grid_of", "harmonize_longitude", "subset_to_bbox"]
+__all__ = [
+    "align",
+    "axis_edges",
+    "grid_of",
+    "harmonize_longitude",
+    "is_composite",
+    "match_axis",
+    "resolve_match_method",
+    "subset_to_bbox",
+]
 
 
 def _lon_name(obj) -> str | None:
@@ -73,7 +82,14 @@ def _oriented_slice(obj, dim: str, low: float, high: float) -> slice:
     return slice(high, low) if descending else slice(low, high)
 
 
-def subset_to_bbox(obj, bbox, pad: float = 1.0):
+#: Degrees of margin kept around the test's own extent when the reference is cropped to
+#: it. Named rather than repeated because two places crop with it and they must agree: a
+#: lane pre-cropped with a *smaller* pad than :func:`align` uses would silently hand the
+#: comparison a narrower reference than the same call without the pre-crop.
+DEFAULT_PAD = 1.0
+
+
+def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max) plus ``pad``.
 
     Honours each axis's stored direction (see :func:`_oriented_slice`), and refuses
@@ -176,7 +192,7 @@ def grid_of(obj, bounds: bool = False) -> xr.Dataset:
     return grid
 
 
-def _require_2d(da, role: str) -> None:
+def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
     """Raise a useful error if ``da`` still carries a dimension beyond lat/lon.
 
     A leftover axis means the selection or aggregation did not collapse it — most
@@ -184,6 +200,11 @@ def _require_2d(da, role: str) -> None:
     fields where a single reference field is expected, or the ``resample`` spelling
     of the same idea. Without this, xesmf fails much later with a shape mismatch
     that says nothing about the cause.
+
+    ``keep`` names the axes a caller has *asked* to survive — the axis a comparison is
+    scoring ``over``, which it reduces itself once the pair is aligned. Anything beyond
+    those is still refused: a pointwise metric reduces over the axes it was given, and
+    there is nothing it could do with a further one.
     """
     # The horizontal dims are whatever lon/lat are defined *on* — not necessarily
     # named lat/lon: a curvilinear ROMS field is (eta_rho, xi_rho) with 2-D lon/lat
@@ -191,18 +212,546 @@ def _require_2d(da, role: str) -> None:
     lon, lat = _lon_name(da), _lat_name(da)
     if lon is None or lat is None:
         return  # nothing to measure against; let the regridder complain instead
-    spatial = set(da[lon].dims) | set(da[lat].dims)
+    spatial = set(da[lon].dims) | set(da[lat].dims) | set(keep)
     extra = [str(d) for d in da.dims if d not in spatial]
-    if extra:
+    if not extra:
+        return
+    if keep:
         raise ValueError(
-            f"the {role} field still has {extra} beyond its horizontal axes, so it "
-            "is not a single map. Collapse it with aggregate= (e.g. "
-            '{"time": "mean"}) or narrow it with select= (e.g. {"time": "2012-01"}); '
-            'a groupby such as {"groupby": "month"} -- or a resample such as '
-            '{"resample": "1MS"} -- deliberately keeps a dimension and cannot be '
-            "compared against a single field. To plot those panels as they are, "
-            "use a model-only field() rather than a comparison."
+            f"the {role} field has {extra} beyond its horizontal axes and the "
+            f"{list(keep)} it is being scored over, so a pointwise metric has nothing "
+            "to do with it: it reduces over the axis it was given and draws the rest "
+            "as a map. Collapse it with aggregate= (e.g. "
+            f'{{"{extra[0]}": "mean"}}), narrow it with select=, or score over it too '
+            "by naming it in over=."
         )
+    raise ValueError(
+        f"the {role} field still has {extra} beyond its horizontal axes, so it "
+        "is not a single map. Collapse it with aggregate= (e.g. "
+        '{"time": "mean"}) or narrow it with select= (e.g. {"time": "2012-01"}); '
+        'a groupby such as {"groupby": "month"} -- or a resample such as '
+        '{"resample": "1MS"} -- deliberately keeps a dimension and cannot be '
+        "compared against a single field. To plot those panels as they are, "
+        "use a model-only field() rather than a comparison, or score against the "
+        'axis pointwise with compare(..., over="time").'
+    )
+
+
+# ------------------------------------------------------------------- axis alignment
+
+#: How much finer one lane must be before its steps are *averaged into* the other's bins
+#: rather than paired with them one-for-one. Below this the two are the same cadence
+#: stamped differently — a ROMS daily average at 12:00 against an L3 daily composite
+#: stamped 00:00 — and rebinning would only relabel what pairing already matches.
+COARSER_BY = 1.5
+
+#: Fraction of the coarser cadence a nearest-match reaches across when the caller names
+#: no tolerance. Half a bin, so at most one candidate can claim each stamp and the
+#: pairing is unambiguous rather than merely closest.
+NEAREST_TOLERANCE_FRACTION = 0.5
+
+#: Matched steps below which a pointwise metric is worth warning about: a correlation
+#: over five time steps is noise wearing a number's clothes.
+MIN_OVERLAP = 10
+
+#: Words a catalog ``period`` uses for an instantaneous product rather than a composite.
+_SNAPSHOT_PERIODS = ("snapshot", "instantaneous", "instant", "point")
+
+
+def _axis_floats(da, axis: str, role: str) -> np.ndarray:
+    """Return the axis' coordinate as float64 seconds (times), or its own units.
+
+    Seconds rather than nanoseconds deliberately: ns since 1970 is ~1.3e18, well past
+    float64's exactly-representable range, so a round trip through it jitters stamps by
+    hundreds of nanoseconds. Seconds are exact and nothing here needs finer.
+    """
+    if axis not in da.coords:
+        raise ValueError(
+            f"the {role} lane's {axis!r} is a bare dimension with no coordinate, so "
+            "there is nothing to match against: pairing by position would line up step "
+            "0 with step 0 for no reason at all. For a ROMS run this is usually a "
+            "dataset opened with decode_times=False — give the catalog entry a "
+            "reference_date (or time_coord) so the axis carries real dates."
+        )
+    arr = np.asarray(da[axis].values)
+    if arr.dtype.kind == "M":
+        return arr.astype("datetime64[s]").astype("float64")
+    if arr.dtype.kind in "iuf":
+        return arr.astype("float64")
+    raise ValueError(
+        f"the {role} lane's {axis!r} is a {arr.dtype} axis (cftime, most likely: a "
+        "model run on a 360-day or noleap calendar). It cannot be matched against real "
+        "calendar dates — the overlap would come out empty with nothing to say why. "
+        'Convert it first with .convert_calendar("standard").'
+    )
+
+
+def _cadence(values: np.ndarray) -> float | None:
+    """Median absolute spacing of an axis, or ``None`` if it cannot be measured.
+
+    The median rather than the mean, for the reason :func:`ocean_skill.build._spacing`
+    gives: composite products are not evenly spaced — MODIS 8-day bins restart every
+    1 January, so one bin a year is short — and the mean quietly launders that.
+    """
+    diffs = np.abs(np.diff(values))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    return float(np.median(diffs)) if diffs.size else None
+
+
+def axis_edges(values: np.ndarray, *, anchor: str = "center") -> np.ndarray:
+    """Bin edges for an axis whose product does not declare its own.
+
+    ``anchor="center"`` treats each value as the middle of its bin, so the edges are the
+    midpoints between neighbours with the two ends extrapolated — which is
+    :func:`_corners_1d`, the same operation applied to longitude and latitude, and
+    deliberately the same code so that "cell edges" has one definition here.
+
+    ``anchor="start"`` treats each value as the *beginning* of its bin instead, which is
+    how many composite products stamp themselves: a daily L3 file labelled with midnight
+    covers that whole day, not the twelve hours either side of midnight. The distinction
+    is not cosmetic — getting it wrong misassigns half of every bin's steps — so
+    :func:`infer_bin_anchor` reads it off the stamps rather than assuming one.
+    """
+    values = np.asarray(values, dtype="float64")
+    if values.size < 2:
+        raise ValueError(
+            "cannot derive bin edges from a single step: there is no spacing to "
+            "measure. Name a tolerance= and the steps will be paired instead of binned."
+        )
+    if anchor == "center":
+        return _corners_1d(values)
+    step = float(np.median(np.diff(values)))
+    if anchor == "start":
+        return np.concatenate([values, [values[-1] + step]])
+    if anchor == "end":
+        return np.concatenate([[values[0] - step], values])
+    raise ValueError(f"unknown anchor {anchor!r}; expected 'center', 'start' or 'end'")
+
+
+def infer_bin_anchor(values) -> str:
+    """Whether an axis stamps the *start* of each bin or its *middle*.
+
+    Read off the stamps, which say more than they look like they do. A product labelling
+    a bin with its first instant lands on a period boundary — midnight for a daily or
+    8-day composite, the first of the month for a monthly one — while a product that
+    labels the middle deliberately does not: WOA and OceanSODA stamp the 15th, a ROMS
+    daily average noon. So "is every stamp on its period's boundary?" answers it, and
+    answers it correctly for both spellings of the same product.
+
+    This matters most where it is least visible. Hourly model output averaged into
+    centre-anchored bins around a midnight-stamped daily satellite composite would put
+    noon-to-noon in a box labelled with the date — half of every day's data in the wrong
+    bin, with nothing in the result to show it. Falls back to ``"center"`` for a numeric
+    (non-calendar) axis and for sub-daily bins, where the offset is below anything the
+    comparison resolves.
+    """
+    arr = np.asarray(values)
+    if arr.dtype.kind != "M":
+        return "center"
+    import pandas as pd
+
+    stamps = pd.DatetimeIndex(arr)
+    cadence = _cadence(arr.astype("datetime64[s]").astype("float64"))
+    if cadence is None:
+        return "center"
+    days = cadence / 86400.0
+    if days >= 27:  # monthly or longer: the boundary is the first of the month
+        return "start" if bool(stamps.is_month_start.all()) else "center"
+    if days >= 0.9:  # daily or a multi-day composite: the boundary is midnight
+        return "start" if bool((stamps.normalize() == stamps).all()) else "center"
+    return "center"
+
+
+def is_composite(da, axis: str, metadata: dict | None = None) -> bool | None:
+    """Whether the values on ``axis`` are averages over a period or instants.
+
+    ``None`` means nothing says. Read in order from the CF ``cell_methods`` attribute
+    (``"time: mean"`` is a composite, ``"time: point"`` an instant) and then from the
+    catalog entry's ``period``, which the MODIS builder writes.
+    """
+    methods = str(da.attrs.get("cell_methods", ""))
+    for token in (f"{axis}:", "time:", "T:"):
+        if token in methods:
+            tail = methods.split(token, 1)[1].strip().split()[:1]
+            word = tail[0].rstrip(",;") if tail else ""
+            if word == "point":
+                return False
+            if word in ("mean", "sum", "average", "maximum", "minimum", "median"):
+                return True
+    period = (metadata or {}).get("period")
+    if period:
+        return str(period).lower() not in _SNAPSHOT_PERIODS
+    return None
+
+
+def resolve_match_method(
+    test_values: np.ndarray,
+    reference_values: np.ndarray,
+    *,
+    composite: bool | None,
+    tolerance: float | None = None,
+    calendar: bool = True,
+) -> tuple[str, str, float | None]:
+    """Decide how the test's axis should be brought onto the reference's.
+
+    The temporal counterpart of choosing a regrid method, and settled the same way: the
+    reference is the frame, the test is what moves, and how it moves depends on which is
+    coarser. A materially finer test is **averaged into** the reference's bins — the
+    analogue of ``conservative_normed``, and the reason it is a default rather than
+    something to ask for: nobody has to request area-averaging in space either. Against
+    an instantaneous reference the test is **sampled** at the nearest step instead, the
+    analogue of ``bilinear``.
+
+    A reference finer than the test is refused rather than resolved. Coarsening the
+    reference would alter the thing being scored against, and this package never touches
+    the reference silently.
+
+    Returns ``(method, reason, tolerance)``; the reason is recorded in the aligned
+    result's attrs so the choice is on paper rather than in someone's memory.
+    """
+    ct, cr = _cadence(test_values), _cadence(reference_values)
+    if ct is None or cr is None:
+        # one lane is a single step: there is nothing to bin, only something to pair
+        known = ct or cr
+        if known is None:
+            return "exact", "neither lane has a measurable cadence", None
+        return (
+            "nearest",
+            "one lane has a single step, so its counterpart is sampled at it",
+            tolerance if tolerance is not None else NEAREST_TOLERANCE_FRACTION * known,
+        )
+    if cr * COARSER_BY <= ct:
+        raise ValueError(
+            f"the reference steps every {_duration(cr, calendar)} and the test every "
+            f"{_duration(ct, calendar)}, so the reference is the finer of the two. "
+            "Averaging it down to the test's cadence would change what is being "
+            "scored against, which is not something this will do on its own. Coarsen "
+            'reference deliberately (aggregate={"time": {"resample": "'
+            f'{_pandas_freq(ct)}", "reduce": "mean"}}) or swap the roles so the finer '
+            "product is the test."
+        )
+    if ct * COARSER_BY <= cr:
+        if composite is False:
+            return (
+                "nearest",
+                f"the reference is an instantaneous product every "
+                f"{_duration(cr, calendar)}; the test steps every "
+                f"{_duration(ct, calendar)} and is sampled at those instants",
+                tolerance if tolerance is not None else NEAREST_TOLERANCE_FRACTION * cr,
+            )
+        return (
+            "mean",
+            f"the test steps every {_duration(ct, calendar)} and the reference every "
+            f"{_duration(cr, calendar)}, so the test is averaged into its bins",
+            tolerance,
+        )
+    return (
+        "nearest",
+        f"both lanes step about every {_duration(cr, calendar)}, so their steps are "
+        "paired rather than rebinned",
+        tolerance
+        if tolerance is not None
+        else NEAREST_TOLERANCE_FRACTION * max(ct, cr),
+    )
+
+
+def _duration(seconds: float | None, calendar: bool = True) -> str:
+    """Spell a step along the axis the way a person would say it.
+
+    ``calendar=False`` for an axis that is not time — a depth in metres — where the
+    value is its own unit and calling it seconds would be a plain lie.
+    """
+    if seconds is None:
+        return "unknown"
+    if not calendar:
+        return f"{seconds:g}"
+    days = seconds / 86400.0
+    if 27 <= days <= 32:
+        return "month"
+    if 355 <= days <= 375:
+        return "year"
+    if days >= 1:
+        return f"{days:.3g} day{'s' if round(days, 3) != 1 else ''}"
+    hours = seconds / 3600.0
+    if hours >= 1:
+        return f"{hours:.3g} hour{'s' if round(hours, 3) != 1 else ''}"
+    return f"{seconds:.3g} s"
+
+
+def _pandas_freq(seconds: float) -> str:
+    """Return a pandas resample alias for a cadence, for use in an error message."""
+    days = seconds / 86400.0
+    if 27 <= days <= 32:
+        return "1MS"
+    if days >= 1:
+        return f"{max(round(days), 1)}D"
+    return f"{max(round(seconds / 3600.0), 1)}h"
+
+
+def _sorted_on(da, axis: str):
+    """Return ``da`` with ``axis`` ascending: every step below assumes that order."""
+    values = np.asarray(da[axis].values)
+    if values.size > 1 and values[0] > values[-1]:
+        return da.sortby(axis)
+    return da
+
+
+def match_axis(
+    test,
+    reference,
+    *,
+    over: str,
+    method: str = "auto",
+    tolerance: float | None = None,
+    min_overlap: int = MIN_OVERLAP,
+    metadata: dict | None = None,
+    bin_anchor: str = "auto",
+):
+    """Bring the test's ``over`` axis onto the reference's, and report what it took.
+
+    Direction is the same rule alignment follows everywhere here: **test → reference**.
+    The reference's axis is the frame and nothing is done to it, except that steps it
+    ends up with no test data for are dropped — an all-NaN step contributes nothing to a
+    metric and would make the difference field say something untrue about it.
+
+    Returns ``(test, reference, report)`` with both lanes on one axis, named as the
+    reference names it. Everything measured for the report is measured on the
+    *coordinate*, never by walking the data: the counts are index arithmetic and stay
+    free even when the lanes are a year of daily maps.
+    """
+    from ocean_skill.operators import resolve_dim
+
+    tdim, rdim = resolve_dim(test, over), resolve_dim(reference, over)
+    for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
+        if dim is None or dim not in lane.dims:
+            raise ValueError(
+                f"the {role} lane has no {over!r} axis to score over (its dimensions "
+                f"are {list(lane.dims)}). For a comparison of single maps, leave over= "
+                "unset."
+            )
+    test, reference = _sorted_on(test, tdim), _sorted_on(reference, rdim)
+    tf = _axis_floats(test, tdim, "test")
+    rf = _axis_floats(reference, rdim, "reference")
+    # captured before matching: a failure to match empties the lanes, and the spans are
+    # exactly what the message about it has to say
+    spans = (_span(test, tdim), _span(reference, rdim))
+
+    reason = f"method={method!r} as asked"
+    if method == "auto":
+        method, reason, tolerance = resolve_match_method(
+            tf,
+            rf,
+            composite=is_composite(reference, rdim, metadata),
+            tolerance=tolerance,
+        )
+        if is_composite(reference, rdim, metadata) is None and method == "mean":
+            warnings.warn(
+                "nothing on the reference says whether its steps are period averages "
+                "or instantaneous — no CF cell_methods on the variable, no 'period' in "
+                "its catalog entry — so it is taken to be a composite and the test is "
+                f"averaged into its bins ({reason}). Pass time_method='nearest' if the "
+                "reference is really a series of snapshots, or give the catalog entry "
+                "a period (or the variable a cell_methods) to settle it for good.",
+                stacklevel=_stacklevel.find(),
+            )
+
+    report: dict[str, Any] = {"match_method": method, "match_reason": reason}
+    if tolerance is not None:
+        report["match_tolerance"] = float(tolerance)
+
+    if method == "mean":
+        test, reference, extra = _match_by_mean(
+            test, reference, tdim, rdim, tf, rf, bin_anchor
+        )
+        report.update(extra)
+    elif method == "nearest":
+        test, reference, extra = _match_by_nearest(
+            test, reference, tdim, rdim, tf, rf, tolerance
+        )
+        report.update(extra)
+    elif method == "exact":
+        test, reference, extra = _match_exactly(test, reference, tdim, rdim)
+        report.update(extra)
+    else:
+        raise ValueError(
+            f"unknown time_method {method!r}; expected 'auto', 'mean', 'nearest' or "
+            "'exact'"
+        )
+
+    matched = int(reference.sizes[rdim])
+    # both lanes now name the axis as the reference names it -- test -> reference again
+    report["axis"] = rdim
+    report["n_matched"] = matched
+    if matched == 0:
+        raise ValueError(
+            f"no overlap along {over!r}: the test spans {spans[0]} and the reference "
+            f"{spans[1]}, matched with {method!r}. Check the two really cover the same "
+            "period; a tolerance= widens a nearest match, and select= narrows either "
+            "side to a period they share."
+        )
+    if matched < min_overlap:
+        warnings.warn(
+            f"only {matched} steps matched along {over!r}. A pointwise metric is a "
+            "statistic over exactly those steps, so a correlation from this few is "
+            "noise. Widen the period with select=, or reduce it to a single map and "
+            "use a plain comparison.",
+            stacklevel=_stacklevel.find(),
+        )
+    return test, reference, report
+
+
+def _span(da, dim: str) -> str:
+    """``first to last`` along ``dim``, for an error message."""
+    if dim not in da.coords or da.sizes.get(dim, 0) == 0:
+        return "an unlabelled axis"
+    values = np.asarray(da[dim].values)
+    return f"{values[0]} to {values[-1]}"
+
+
+def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor):
+    """Average the test's steps into the reference's bins."""
+    if bin_anchor == "auto":
+        bin_anchor = infer_bin_anchor(reference[rdim].values)
+    edges = axis_edges(rf, anchor=bin_anchor)
+
+    which = np.searchsorted(edges, tf, side="right") - 1
+    inside = (which >= 0) & (which < rf.size)
+    stamps = np.asarray(reference[rdim].values)
+    if not inside.any():
+        # nothing to group: hand back empty lanes, and match_axis raises with the spans
+        empty = test.isel({tdim: []})
+        if tdim != rdim:
+            empty = empty.rename({tdim: rdim})
+        return (
+            empty,
+            reference.isel({rdim: []}),
+            {"bin_anchor": bin_anchor, "steps_outside_bins": int(tf.size)},
+        )
+    label = xr.DataArray(stamps[which[inside]], dims=(tdim,), name="_osk_bin")
+    attrs = dict(test.attrs)
+    grouped = test.isel({tdim: inside}).groupby(label).mean(tdim)
+    # a reduction drops attrs, and `units` has to survive: align() checks it next
+    grouped.attrs = attrs
+    grouped = grouped.rename({"_osk_bin": rdim})
+    filled = np.asarray(grouped[rdim].values)
+    reference = reference.sel({rdim: filled})
+
+    counts = np.bincount(which[inside], minlength=rf.size)
+    typical = float(np.median(counts[counts > 0])) if (counts > 0).any() else 0.0
+    from ocean_skill.operators import SHORT_BIN_FRACTION
+
+    short = int(((counts > 0) & (counts < SHORT_BIN_FRACTION * typical)).sum())
+    empty = int((counts == 0).sum())
+    if empty:
+        warnings.warn(
+            f"{empty} of the reference's {rf.size} steps had no test data in their bin "
+            "and were dropped. An all-NaN step scores nothing and would make the "
+            "difference field claim otherwise.",
+            stacklevel=_stacklevel.find(),
+        )
+    if short:
+        warnings.warn(
+            f"{short} of the reference's bins caught fewer than "
+            f"{SHORT_BIN_FRACTION:.0%} of the usual {typical:g} test steps, so those "
+            "steps are averages over part of a period labelled like a whole one — "
+            "usually the first and last bin of the selection. Narrow select= to whole "
+            "periods to drop them.",
+            stacklevel=_stacklevel.find(),
+        )
+    return (
+        grouped,
+        reference,
+        {
+            "bin_anchor": bin_anchor,
+            "steps_outside_bins": int((~inside).sum()),
+            "bins_empty": empty,
+            "bins_short": short,
+            "steps_per_bin": typical,
+        },
+    )
+
+
+def _match_by_nearest(test, reference, tdim, rdim, tf, rf, tolerance, calendar=True):
+    """Pair each reference step with the nearest test step within ``tolerance``."""
+    import pandas as pd
+
+    index = pd.Index(tf)
+    pos = index.get_indexer(
+        rf, method="nearest", **({"tolerance": tolerance} if tolerance else {})
+    )
+    keep = pos >= 0
+    test = test.isel({tdim: pos[keep]})
+    reference = reference.isel({rdim: keep})
+    offsets = np.abs(tf[pos[keep]] - rf[keep]) if keep.any() else np.empty(0)
+    # the reference's own stamps become the shared axis: test -> reference, here too
+    attrs = dict(test.attrs)
+    test = test.assign_coords({tdim: np.asarray(reference[rdim].values)})
+    if tdim != rdim:
+        test = test.rename({tdim: rdim})
+    test.attrs = attrs
+    if offsets.size and float(offsets.max()) > 0:
+        warnings.warn(
+            f"paired {int(keep.sum())} steps by nearest match, shifting each by up to "
+            f"{_duration(float(offsets.max()), calendar)} (typically "
+            f"{_duration(float(np.median(offsets)), calendar)}). The two products "
+            "stamp the same period differently; the pairing is in the result's attrs.",
+            stacklevel=_stacklevel.find(),
+        )
+    unmatched = int((~keep).sum())
+    if unmatched:
+        warnings.warn(
+            f"{unmatched} reference steps had no test step within "
+            f"{_duration(tolerance, calendar)} and were dropped.",
+            stacklevel=_stacklevel.find(),
+        )
+    return (
+        test,
+        reference,
+        {
+            "steps_unmatched": unmatched,
+            "offset_max": float(offsets.max()) if offsets.size else 0.0,
+            "offset_median": float(np.median(offsets)) if offsets.size else 0.0,
+        },
+    )
+
+
+def _match_exactly(test, reference, tdim, rdim):
+    """Inner-join the two lanes on identical axis values.
+
+    ``exclude`` is load-bearing: without it xarray also inner-joins the horizontal
+    coordinates, and two lanes on different grids — which is the whole reason a regrid
+    follows — come back empty. That is the silent-empty-overlap failure this module
+    exists to prevent, arriving by a different door.
+    """
+    if tdim != rdim:
+        test = test.rename({tdim: rdim})
+    exclude = (set(test.dims) | set(reference.dims)) - {rdim}
+    test, reference = xr.align(test, reference, join="inner", exclude=exclude)
+    return test, reference, {}
+
+
+def _coverage(regridder, src, over: str | None):
+    """Regrid a field of ones over the test's valid cells: the fraction covered.
+
+    With a surviving axis this is one extra regrid *per step*, which is worth avoiding
+    when it buys nothing. A model's missing cells are its land mask, which does not
+    move, so the mask is checked for invariance along ``over`` — exactly, with
+    ``any == all``, not assumed — and collapsed to one step when it holds. The 2-D
+    result broadcasts back over every step, which is what a static mask means. A mask
+    that genuinely does move pays for the per-step version and says so.
+    """
+    finite = np.isfinite(src)
+    if over is not None and over in finite.dims:
+        if src.chunks is None and bool((finite.any(over) == finite.all(over)).all()):
+            one = finite.isel({over: 0}, drop=True)
+            return regridder(xr.ones_like(src.isel({over: 0}, drop=True)).where(one))
+        warnings.warn(
+            f"the test's valid cells change along {over!r}, so coverage is computed "
+            f"for every one of its {src.sizes[over]} steps rather than once. Expected "
+            "of a field with a moving mask; surprising for a model land mask.",
+            stacklevel=_stacklevel.find(),
+        )
+    return regridder(xr.ones_like(src).where(finite))
 
 
 def align(
@@ -211,16 +760,30 @@ def align(
     *,
     method: str = "bilinear",
     convention: Literal["0-360", "-180-180"] = "-180-180",
-    pad: float = 1.0,
+    pad: float = DEFAULT_PAD,
     min_coverage: float = 0.5,
     test_name: str = "test",
     reference_name: str = "reference",
+    over: str | None = None,
+    time_method: str = "auto",
+    tolerance: float | None = None,
+    min_overlap: int = MIN_OVERLAP,
+    metadata: dict | None = None,
+    bin_anchor: str = "auto",
 ) -> xr.Dataset:
     """Regrid ``test`` onto ``reference``'s grid; return both plus their difference.
 
     Both inputs should be 2-D (lat/lon) DataArrays — select time/depth beforehand.
     Returns a Dataset with ``test``, ``reference`` and ``difference`` (test − reference)
     on the reference grid.
+
+    ``over`` names one axis that is *allowed to survive* — the axis a caller is going to
+    score the pair over, cell by cell (see
+    :func:`ocean_skill.metrics.evaluate`). The two lanes are then matched along it first
+    (:func:`match_axis`) and regridded after, which is both the correct order and much
+    the cheaper one: averaging hourly output into daily bins before the regrid turns
+    8760 regridded fields into 365. ``time_method``/``tolerance``/``bin_anchor``/
+    ``metadata`` are its arguments; what it decided is recorded in the result's attrs.
 
     ``method="conservative_normed"`` (or ``"conservative"``) **area-averages** the test
     onto the reference cells, which is the right operator when the test is much finer
@@ -238,8 +801,26 @@ def align(
 
     from ocean_skill import units as _units
 
-    _require_2d(test, "test")
-    _require_2d(reference, "reference")
+    # Matched *before* the regrid: the binning is what decides how many fields there are
+    # to regrid, so doing it after would pay for every step of the finer lane and then
+    # throw most of them away.
+    report: dict[str, Any] = {}
+    if over is not None:
+        test, reference, report = match_axis(
+            test,
+            reference,
+            over=over,
+            method=time_method,
+            tolerance=tolerance,
+            min_overlap=min_overlap,
+            metadata=metadata,
+            bin_anchor=bin_anchor,
+        )
+        over = str(report.pop("axis", over))
+
+    keep = () if over is None else (over,)
+    _require_2d(test, "test", keep=keep)
+    _require_2d(reference, "reference", keep=keep)
 
     # Subtracting umol/kg from mmol/m3 used to yield a difference of 0.0, labelled
     # with the reference's units and no warning at all — plausible, and wrong by the
@@ -280,8 +861,7 @@ def align(
     # Coverage = the same regrid applied to a field of ones over the valid test cells.
     coverage = None
     if min_coverage:
-        ones = xr.ones_like(src).where(np.isfinite(src))
-        coverage = regridder(ones)
+        coverage = _coverage(regridder, src, over)
         regridded = regridded.where(coverage >= min_coverage)
 
     out = xr.Dataset(
@@ -303,4 +883,10 @@ def align(
     out.attrs["regrid_method"] = method
     out.attrs["lon_convention"] = convention
     out.attrs["min_coverage"] = min_coverage
+    if over is not None:
+        # what the matching decided, and what it cost, recorded beside how the regrid
+        # was done -- both are choices a reader of the numbers is entitled to see
+        out.attrs["scored_over"] = over
+        out.attrs["coverage_time_invariant"] = over not in getattr(coverage, "dims", ())
+        out.attrs.update(report)
     return out

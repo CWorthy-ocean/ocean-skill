@@ -11,7 +11,7 @@ is the interactive form of playing — you can hold a frame, step back, and hove
 for its value — with an optional play/pause scrubber for when it should just run.
 
 Implemented: ``field_row``, ``field_grid``, ``field_facet``, ``field_movie``,
-``facet_movie`` and ``target``. **Taylor is delegated back to
+``facet_movie``, ``skill_map`` and ``target``. **Taylor is delegated back to
 matplotlib**: it is drawn on a floating polar axis (``mpl_toolkits.axisartist``) that
 bokeh has no equivalent for, and rebuilding the curved correlation axis from primitives
 is a project in itself rather than a port. ``paired`` therefore returns a static Taylor
@@ -27,7 +27,10 @@ from typing import Any
 import numpy as np
 
 from ocean_skill.colormaps import cmaps_for
-from ocean_skill.plot.matplotlib_renderer import DEFAULT_METRIC_KEYS
+from ocean_skill.plot.matplotlib_renderer import (
+    DEFAULT_METRIC_KEYS,
+    metric_value_text,
+)
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.typography import (
     PAGE_W,
@@ -165,14 +168,15 @@ def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
     Same numbers as the static renderer's corner box (see
     ``matplotlib_renderer._draw_row``), folded into the difference panel's title
     instead — bokeh has no equivalent of a free-floating text-box annotation that
-    survives pan/zoom/resize as cleanly as a title does.
+    survives pan/zoom/resize as cleanly as a title does. Formatted through the same
+    shared helper, so a metric reads identically in either renderer.
     """
     if not metrics:
         return ""
     return ", ".join(
-        f"{k}={metrics[k]:.3g}"
-        for k in metric_keys
-        if isinstance(metrics.get(k), int | float)
+        f"{key}={text}"
+        for key in metric_keys
+        if (text := metric_value_text(metrics, key))
     )
 
 
@@ -435,6 +439,104 @@ def _field_facet(
         for row in range(nrows)
         for col in range(ncols if row_dim is not None else n)
     ]
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
+def _skill_map(
+    items,
+    geo=True,
+    shared_axes: bool = True,
+    title: str | None = None,
+    ncols: int | None = None,
+    metric_names=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    **_,
+):
+    """One interactive map per skill metric: the interactive twin of ``skill_map``.
+
+    Every commitment the static family makes holds here, because both come from the same
+    two shared functions. Which metrics may be drawn, and the message when one was never
+    computed, come from :func:`~ocean_skill.plot.matplotlib_renderer.metric_panels`; the
+    colours and limits come from :func:`ocean_skill.colormaps.metric_colors`, so a bias
+    panel is symmetric about zero and a correlation panel spans (−1, 1) in either
+    backend. The column count comes from the shared
+    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
+    same panels the same way.
+
+    Each metric's **overall** value — reduced over space and the scored axis together —
+    joins its panel's title, which is the same substitution :func:`_field_row` makes
+    for a comparison's corner box: bokeh has no free-floating annotation that survives
+    pan/zoom as cleanly as a title. Units stay on each panel's own colorbar, as they do
+    statically.
+    """
+    from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot.matplotlib_renderer import (
+        _aspect_of,
+        metric_arrays,
+        metric_panel_titles,
+        metric_panels,
+    )
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    items = list(items)
+    if not items:
+        raise ValueError("skill_map needs at least one comparison, got none")
+    names = metric_panels(items[0]["skill"], metric_names)
+    if not names:
+        raise ValueError(
+            "this comparison carries no 2-D metric maps to draw. It was probably not "
+            'scored over an axis: build it with compare(..., over="time").'
+        )
+    for item in items[1:]:
+        metric_panels(item["skill"], names)
+
+    titles = metric_panel_titles(names)
+    stacked = len(items) > 1
+    if stacked:
+        ncols = len(names)
+    elif ncols is None:
+        ncols, _nrows = facet_layout(
+            len(names), _aspect_of(items[0]["skill"][names[0]])
+        )
+    ncols = max(int(ncols), 1)
+    factor = _canvas_factor(size, zoom)
+    arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+
+    panels = []
+    for row, item in enumerate(items):
+        for name in names:
+            colors = metric_colors(
+                name, arrays[row][name], standard_name=item.get("standard_name")
+            )
+            base = titles[names.index(name)]
+            # bokeh has no rotated row label, so the comparison joins the panel's own
+            # title -- the same move _field_row makes for a field grid's row_label
+            if stacked and item.get("row_label"):
+                base = f"{item['row_label']} — {base}"
+            value = metric_value_text(item.get("metrics"), name)
+            panels.append(
+                _quadmesh(
+                    item["skill"][name],
+                    title=f"{base} ({value})" if value else base,
+                    cmap=colors.cmap,
+                    clim=colors.clim(),
+                    units=str(item["skill"][name].attrs.get("units", "") or ""),
+                    geo=geo,
+                    log=colors.log,
+                    font_scale=font_scale,
+                    canvas_factor=factor,
+                )
+            )
+
     layout = panels[0]
     for extra in panels[1:]:
         layout = layout + extra
@@ -969,6 +1071,8 @@ def render(spec, **kwargs: Any):
         return _field_movie(spec.items, **opts)
     if family == "facet_movie":
         return _facet_movie(spec.single, **opts)
+    if family == "skill_map":
+        return _skill_map(spec.items, **opts)
     if family == "target":
         return _target(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")

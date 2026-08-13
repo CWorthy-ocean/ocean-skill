@@ -187,9 +187,12 @@ def _require_reduced(da, role: str, source: str) -> None:
         "other reduction\n"
         f'  select={{"{extra[0]}": <one value>}}    or narrow it to a single value '
         "instead\n"
+        f'  over="{extra[0]}"                     or keep it and score against it, '
+        "cell by cell\n"
         "There is no default reduction: a comparison will not average an axis you did "
-        "not ask it to. To keep the axis and look at one source over it, use "
-        "osk.field() rather than a comparison."
+        "not ask it to. The third line gives a map per metric instead of one map per "
+        "field; to keep the axis and look at one source over it, use osk.field() "
+        "rather than a comparison."
     )
 
 
@@ -324,6 +327,13 @@ def _prepare(
     return units.convert_units(da), da.attrs.get("actual_depth")
 
 
+#: Size (bytes) past which :func:`prepare_source` says so before loading a lane. Not a
+#: cap: a year of daily output really is that large and refusing to read it would be
+#: worse than taking a while over it. But the load is eager (see below), so an extra
+#: axis nobody meant to keep is worth catching before the memory is spent, not after.
+LOAD_WARN_BYTES = 2 * 1024**3
+
+
 def prepare_source(
     source: str,
     variable: Any,
@@ -333,6 +343,7 @@ def prepare_source(
     use_cache: bool = True,
     refresh: bool = False,
     require_reduced: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -351,7 +362,19 @@ def prepare_source(
     tolerate is the one a field exists to draw. Checked here rather than by the caller
     because here is the only place it is free — dimensions are known from the lazy
     graph, so an unreduced lane is refused before the ``.load()`` below spends the
-    vertical transform on every step of it.
+    vertical transform on every step of it. It is checked on a cache *hit* too: the key
+    below does not include it, deliberately (the same field is the same field), so an
+    entry written by a caller that tolerates a surviving axis would otherwise let a
+    caller that does not sail straight past its own gate.
+
+    ``bbox`` crops the lane to ``(lon_min, lat_min, lon_max, lat_max)`` plus
+    :data:`ocean_skill.align.DEFAULT_PAD` *before* the load below, and joins the cache
+    key. :func:`ocean_skill.align.align` does this crop anyway, but only once both lanes
+    are in memory — fine for a single global map, the dominant cost for a global product
+    that kept a long time axis. Passing the test lane's own extent here changes nothing
+    about the result and a great deal about the peak memory. It does cost this
+    lane its cross-model reuse (a reference cropped to one model's domain is not the one
+    another model wants), which is why the caller passes it only when it is worth that.
 
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
@@ -360,14 +383,20 @@ def prepare_source(
     from ocean_skill import cache as _cache
     from ocean_skill.catalog import resolve
 
+    key_select: dict[str, Any] = {**(select or {}), "_aggregate": aggregate}
+    if bbox is not None:
+        # rounded so that float noise in an extent does not fragment the cache
+        key_select["_bbox"] = [round(float(b), 4) for b in bbox]
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
-        select={**(select or {}), "_aggregate": aggregate},
+        select=key_select,
     )
     if use_cache and not refresh:
         hit = _cache.load_field(key)
         if hit is not None:
+            if hit[0] is not None and require_reduced:
+                _require_reduced(hit[0], require_reduced, source)
             return hit
 
     da, depth = _prepare(
@@ -380,6 +409,23 @@ def prepare_source(
     if da is not None and require_reduced:
         # before .load(), while it is still free -- see the docstring
         _require_reduced(da, require_reduced, source)
+    if da is not None and bbox is not None:
+        from ocean_skill.align import subset_to_bbox
+
+        da = subset_to_bbox(da, bbox)
+    if da is not None and da.nbytes > LOAD_WARN_BYTES:
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        warnings.warn(
+            f"reading {source!r} into memory as {da.nbytes / 1024**3:.1f} GB "
+            f"({dict(da.sizes)}). Narrow it with select= (e.g. "
+            '{"time": "2012"}), coarsen it with aggregate= (e.g. '
+            '{"time": {"resample": "1MS", "reduce": "mean"}}), or accept the wait — '
+            "this happens once per lane per process, and the result is cached.",
+            stacklevel=_stacklevel.find(),
+        )
     # Computed here rather than left lazy: the vertical transform is the most
     # expensive step in the pipeline, and a dask-backed lane re-runs it on every
     # consumer that touches values -- the metrics, then each panel of each plot.
@@ -395,8 +441,23 @@ def prepare_source(
     return da, depth
 
 
+#: Valid pairs a cell needs before its metrics are reported. Named apart from
+#: ``metrics.compute``'s ``min_samples`` on purpose: that one counts *cells over space*
+#: and wants a few dozen, this counts *time steps at one cell* and wants a handful. One
+#: word for two quantities in one call signature is how the wrong one gets passed.
+DEFAULT_MIN_PAIRS = 5
+
+
 class Comparison:
-    """One reference↔test comparison for a single variable at a single depth."""
+    """One reference↔test comparison for a single variable at a single depth.
+
+    Ordinarily both sources are reduced to a single map and the comparison is that pair
+    plus their difference. Naming an axis in ``over`` instead keeps that axis: the lanes
+    are matched along it (:func:`ocean_skill.align.match_axis`), and every metric is
+    then computed *cell by cell* along it, giving a map of bias, a map of correlation.
+    So the axis a comparison normally refuses becomes the one it scores against, and the
+    figure stops being test-vs-reference and becomes a panel per metric (:meth:`maps`).
+    """
 
     def __init__(
         self,
@@ -407,6 +468,12 @@ class Comparison:
         select: dict[str, Any] | None = None,
         aggregate: dict[str, Any] | None = None,
         method: str = "conservative_normed",
+        over: str | None = None,
+        time_method: str = "auto",
+        tolerance: float | None = None,
+        bin_anchor: str = "auto",
+        min_pairs: int = DEFAULT_MIN_PAIRS,
+        metrics: tuple[str, ...] | None = None,
         label: str | None = None,
         cache: bool | None = None,
     ):
@@ -426,12 +493,19 @@ class Comparison:
         self.select = as_select(select)
         self.aggregate = aggregate
         self.method = method
+        self.over = over
+        self.time_method = time_method
+        self.tolerance = tolerance
+        self.bin_anchor = bin_anchor
+        self.min_pairs = min_pairs
+        self.metric_names = tuple(metrics) if metrics else None
         self.label = label
         # None = follow the global setting (on unless osk.cache.disable()); an
         # explicit True/False overrides it for this comparison only.
         self.cache = cache
         self._aligned = None
         self._metrics = None
+        self._maps = None
         self._actual_depth = None
 
     @property
@@ -454,11 +528,26 @@ class Comparison:
     def _cache_key(self) -> str:
         from ocean_skill import cache as _cache
 
+        # The matching knobs join the key the way `_aggregate` does -- smuggled into
+        # `select` rather than added to key_for's signature, since they narrow *which*
+        # aligned pair this is by exactly the same logic. `min_pairs` deliberately stays
+        # out: it masks the metric maps, which are cheap and not cached, and leaves the
+        # aligned pair itself untouched.
+        extra = (
+            {}
+            if self.over is None
+            else {
+                "_over": self.over,
+                "_time_method": self.time_method,
+                "_tolerance": self.tolerance,
+                "_bin_anchor": self.bin_anchor,
+            }
+        )
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
             variable=self.variable,
-            select={**self.select, "_aggregate": self.aggregate},
+            select={**self.select, "_aggregate": self.aggregate, **extra},
             method=self.method,
         )
 
@@ -469,13 +558,23 @@ class Comparison:
         return _cache.enabled() if self.cache is None else self.cache
 
     def _prepare_lane(
-        self, source: str, use_cache: bool, refresh: bool, role: str = "test"
+        self,
+        source: str,
+        use_cache: bool,
+        refresh: bool,
+        role: str = "test",
+        bbox: tuple[float, float, float, float] | None = None,
     ):
-        """Reduce one source to its comparable 2-D field, via the lane cache.
+        """Reduce one source to its comparable field, via the lane cache.
 
         ``role`` names the lane in the error raised if the reduction left it more than a
         map — the one thing a comparison's use of :func:`prepare_source` needs that a
-        field's does not.
+        field's does not. With ``over`` set that check is *not* wanted: the axis it
+        would refuse is the one this comparison exists to score against, and
+        :func:`ocean_skill.align.align` still refuses any further one.
+
+        ``bbox`` crops the lane before it is read into memory; see
+        :func:`prepare_source`.
         """
         return prepare_source(
             source,
@@ -484,7 +583,8 @@ class Comparison:
             self.aggregate,
             use_cache=use_cache,
             refresh=refresh,
-            require_reduced=role,
+            require_reduced=None if self.over else role,
+            bbox=bbox,
         )
 
     # -- pipeline ---------------------------------------------------------------
@@ -515,10 +615,20 @@ class Comparison:
                 self._actual_depth = hit.attrs.get("actual_depth")
                 return self._aligned
 
-        r, r_depth = self._prepare_lane(
-            self.reference_name, use_cache, refresh, role="reference"
-        )
+        # The test lane goes first when an axis is being kept, so the reference can be
+        # cropped to its extent *before* being read (see prepare_source's bbox=).
+        # align() crops it anyway, but only once both lanes are in memory, and a product
+        # that kept a year of daily maps is the wrong thing to hold whole. Exact, not an
+        # approximation: the bbox and the pad are the ones align() would have used.
         t, _ = self._prepare_lane(self.test_name, use_cache, refresh, role="test")
+        bbox = None
+        if self.over is not None and t is not None:
+            from ocean_skill.align import bbox_of
+
+            bbox = bbox_of(t)
+        r, r_depth = self._prepare_lane(
+            self.reference_name, use_cache, refresh, role="reference", bbox=bbox
+        )
         if r is None or t is None:
             missing = self.reference_name if r is None else self.test_name
             raise KeyError(f"{self.variable!r} not available in {missing!r}")
@@ -529,7 +639,16 @@ class Comparison:
         # -- every plot re-reading the sources through a graph that was already
         # evaluated once to write the entry.
         self._aligned = _align.align(
-            t, r, method=self.method, test_name="test", reference_name="reference"
+            t,
+            r,
+            method=self.method,
+            test_name="test",
+            reference_name="reference",
+            over=self.over,
+            time_method=self.time_method,
+            tolerance=self.tolerance,
+            bin_anchor=self.bin_anchor,
+            metadata=self._reference_metadata(),
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
@@ -546,13 +665,124 @@ class Comparison:
 
     data = aligned  # alias: prepared arrays for bespoke plotting
 
+    def _reference_metadata(self) -> dict[str, Any] | None:
+        """Return the reference's catalog metadata, or ``None`` if it will not resolve.
+
+        Only the axis matching wants it — a ``period`` there says whether the
+        reference's steps are averages or instants — and a stubbed or unregistered
+        source should not be a reason a comparison cannot run.
+        """
+        from ocean_skill.catalog import resolve
+
+        try:
+            return resolve(self.reference_name).metadata
+        except Exception:
+            # Any resolution failure is the same failure here: an unknown source, an
+            # unreadable catalog, a stub in a test. None is a reason a comparison
+            # cannot run — the metadata only refines a default the matching can reach
+            # on its own, and which it says out loud when it has to.
+            return None
+
+    @property
+    def _scored_axis(self) -> str | None:
+        """The axis name the aligned pair kept, as the reference names it."""
+        return self.aligned.attrs.get("scored_over") if self.over else None
+
+    def maps(self, *names: str):
+        """One 2-D map per metric, each computed cell by cell along ``over``.
+
+        The pointwise counterpart of :meth:`metrics`: the same registry entries
+        (:data:`ocean_skill.metrics.REGISTRY`), reduced over the scored axis alone
+        instead of over everything, so ``bias`` becomes *where* the model is biased and
+        ``corr`` becomes *where* it tracks the observations. Defaults to
+        :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`; any registered name works.
+
+        Not area-weighted, and that is not an omission: one cell's series sits at one
+        latitude, so cos(lat) is a constant that cancels out of every metric here. The
+        weighting belongs to the space-and-time scalar in :meth:`metrics`, which is
+        exactly where it is applied.
+
+        Cells with fewer than ``min_pairs`` valid pairs are masked in *every* map (the
+        ``n`` map excepted, being the count itself): a correlation from three cloud-free
+        days is noise, and a figure where ``bias`` and ``corr`` cover different cells
+        cannot be read. How many cells that removed is a warning, not something written
+        on the figure.
+        """
+        import warnings
+
+        import numpy as np
+        import xarray as xr
+
+        from ocean_skill import _stacklevel
+        from ocean_skill import metrics as _metrics
+
+        requested = tuple(names) or self.metric_names or _metrics.DEFAULT_MAP_METRICS
+        if self.over is None:
+            raise ValueError(
+                "metric maps need an axis to score along, and this comparison reduced "
+                'them all. Build it with over= (e.g. compare(..., over="time")) to '
+                "keep the time axis and score against it cell by cell."
+            )
+        if self._maps is not None and set(requested) <= set(self._maps.data_vars):
+            return self._maps[list(requested)]
+
+        axis = self._scored_axis
+        wanted = tuple(dict.fromkeys((*requested, "n")))
+        evaluated = _metrics.evaluate(
+            self.aligned,
+            wanted,
+            dim=axis,
+            test_name="test",
+            reference_name="reference",
+            weighted=False,
+        )
+        counts = evaluated["n"]
+        enough = counts >= self.min_pairs
+        maps = xr.Dataset(
+            {
+                name: (value if name == "n" else value.where(enough))
+                for name, value in evaluated.items()
+            }
+        )
+        covered = int((counts > 0).sum())
+        dropped = covered - int(enough.sum())
+        if covered and dropped:
+            median = (
+                float(np.median(counts.values[counts.values >= self.min_pairs]))
+                if enough.any()
+                else 0.0
+            )
+            warnings.warn(
+                f"{dropped} of {covered} cells with any data had fewer than "
+                f"{self.min_pairs} valid pairs along {axis!r} and are masked in every "
+                f"metric map ({dropped / covered:.0%} of the covered domain; the cells "
+                f"that remain have a median of {median:g} pairs). Cloud-gapped "
+                "references do this; lower min_pairs to keep them, at the cost of "
+                "metrics computed from very short series.",
+                stacklevel=_stacklevel.find(),
+            )
+        self._maps = maps
+        return maps[list(requested)]
+
     def metrics(self, **extra: Any) -> dict[str, Any]:
-        """Compute (and cache) the metric record for this comparison."""
+        """Compute (and cache) the metric record for this comparison.
+
+        Every dimension is reduced, so this is one number per metric for the whole
+        comparison — and when an axis is being scored ``over``, that means *space and
+        that axis together*: the overall value the maps in :meth:`maps` decompose. It is
+        computed on the same cells those maps show (the ``min_pairs`` mask applies here
+        too), or the number printed beside a figure would describe a different domain
+        from the figure.
+        """
         from ocean_skill import metrics as _metrics
 
         if self._metrics is None:
+            aligned = self.aligned
+            if self.over is not None:
+                enough = self.maps("n")["n"] >= self.min_pairs
+                aligned = aligned.where(enough)
             self._metrics = _metrics.compute(
-                self.aligned,
+                aligned,
                 test_name="test",
                 reference_name="reference",
                 variable=self.standard_name or str(self.variable),
@@ -561,6 +791,11 @@ class Comparison:
                 depth=self.select.get("depth", SURFACE),
                 obs_depth=self._actual_depth,
                 regrid=self.method,
+                **(
+                    {"over": self.over, "min_pairs": self.min_pairs}
+                    if self.over
+                    else {}
+                ),
                 **extra,
             )
         return self._metrics
@@ -570,9 +805,13 @@ class Comparison:
         return self.aligned["difference"]
 
     def as_item(self) -> dict[str, Any]:
-        """Return this comparison as a spec item (aligned pair plus metadata)."""
-        return {
-            "aligned": self.aligned,
+        """Return this comparison as a spec item.
+
+        Two shapes, because a scored comparison is a different figure: with ``over`` set
+        the item carries the metric maps and the overall record that annotates them, and
+        with it unset the aligned trio the ``test | reference | difference`` row draws.
+        """
+        common = {
             "metrics": self.metrics(),
             "units": self.aligned["reference"].attrs.get("units"),
             "standard_name": self.standard_name,
@@ -582,9 +821,21 @@ class Comparison:
             # compare() fan-out commonly pairs one variable per reference source).
             "labels": (self.test_name, self.reference_name),
         }
+        if self.over is None:
+            return {"aligned": self.aligned, **common}
+        from ocean_skill.metrics import DEFAULT_MAP_METRICS
+
+        names = tuple(self.metric_names or DEFAULT_MAP_METRICS)
+        return {"skill": self.maps(*names), "metric_names": names, **common}
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Render as a ``test | reference | difference`` row.
+        """Render as a ``test | reference | difference`` row, or as metric maps.
+
+        Which of the two follows from the comparison, not from an argument: a pair
+        reduced to single maps has a test, a reference and a difference to show, while
+        one scored ``over`` an axis has a map per metric and nothing to set beside it.
+        That is the same choice :meth:`ocean_skill.field.Field.plot` makes between a
+        single map and a facet grid — the data decides the family.
 
         Goes through the renderer registry, so ``renderer="holoviews"`` gives the
         interactive version of the same plot with no other change.
@@ -592,11 +843,13 @@ class Comparison:
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        kwargs.setdefault("labels", (self.test_name, self.reference_name))
+        if self.over is None:
+            kwargs.setdefault("labels", (self.test_name, self.reference_name))
         # Outline the test (model) source's own declared extent, matching Abigale
         # Wyatt's side-by-side plots — pass domain=None to suppress it.
         kwargs.setdefault("domain", _domain_of(self.test_name))
-        spec = PlotSpec(family="field_row", items=[self.as_item()], options=kwargs)
+        family = "field_row" if self.over is None else "skill_map"
+        spec = PlotSpec(family=family, items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
     def save(
@@ -626,10 +879,11 @@ class Comparison:
         )
 
     def __repr__(self) -> str:
+        scored = f" over {self.over}" if self.over else ""
         return (
             f"<Comparison {_variable_label(self.variable)[:24]} "
             f"{self.test_name} vs {self.reference_name} "
-            f"@ {_depth_label(self.select.get('depth', SURFACE))}>"
+            f"@ {_depth_label(self.select.get('depth', SURFACE))}{scored}>"
         )
 
 
@@ -704,25 +958,41 @@ class ComparisonSet:
         return [{**c.as_item(), "row_label": c.label} for c in self.comparisons]
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Render all comparisons as stacked rows in one figure."""
+        """Render all comparisons as stacked rows in one figure.
+
+        A set whose comparisons were scored ``over`` an axis has metric maps rather than
+        an aligned trio per row, so it draws the ``skill_map`` family instead: metrics
+        across the columns, comparisons down the rows, exactly as ``field_grid`` stacks
+        rows for the unscored case.
+        """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        items = self._items()
         if not self.comparisons:
             raise ValueError(
                 "no comparisons to plot: every pair was skipped. Check that the "
                 "reference actually offers the requested variables (its catalog "
                 "metadata lists them under 'variables')."
             )
+        items = self._items()
         first = self.comparisons[0]
-        kwargs.setdefault("labels", (first.test_name, first.reference_name))
+        scored = [c.over is not None for c in self.comparisons]
+        if any(scored) and not all(scored):
+            raise ValueError(
+                "this set mixes comparisons scored over an axis with comparisons "
+                "reduced to single maps, which are two different figures: one draws a "
+                "metric per panel, the other test | reference | difference. Plot them "
+                "separately."
+            )
+        if not any(scored):
+            kwargs.setdefault("labels", (first.test_name, first.reference_name))
         # Outlines the first row's test (model) extent; rows sharing one test source
         # (the common case) all get the same box. Pass domain=None to suppress it, or
         # your own bbox if rows mix test sources with different domains.
         kwargs.setdefault("domain", _domain_of(first.test_name))
+        family = "skill_map" if any(scored) else "field_grid"
         return render(
-            PlotSpec(family="field_grid", items=items, options=kwargs),
+            PlotSpec(family=family, items=items, options=kwargs),
             renderer=renderer,
         )
 
@@ -807,6 +1077,12 @@ def compare(
     select: dict[str, Any] | None = None,
     aggregate: dict[str, Any] | None = None,
     method: str = "conservative_normed",
+    over: str | None = None,
+    time_method: str = "auto",
+    tolerance: float | None = None,
+    bin_anchor: str = "auto",
+    min_pairs: int = DEFAULT_MIN_PAIRS,
+    metrics: tuple[str, ...] | None = None,
     skip_missing: bool = True,
     cache: bool | None = None,
     refresh: bool = False,
@@ -832,8 +1108,19 @@ def compare(
 
     ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology and
     ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep an
-    axis standing, which a comparison still cannot use — see
-    :func:`ocean_skill.field.field` for the model-only path that plots those as panels.
+    axis standing, which a comparison cannot use unless it is told to *score against* it
+    — see :func:`ocean_skill.field.field` for the model-only path that plots those as
+    panels.
+
+    ``over`` is the third answer to "what happens to the time axis", and the one for a
+    reference that varies in time as well as space. ``over="time"`` keeps the axis,
+    matches the two lanes along it (:func:`ocean_skill.align.match_axis` — a finer test
+    is averaged into the reference's bins) and computes every metric *cell by cell*
+    along it, so the figure becomes one map per metric with the overall value beside it.
+    ``over="Z"`` does the same down each water column.
+    ``time_method``/``tolerance``/``bin_anchor`` tune the matching, ``min_pairs`` how
+    many pairs a cell needs before it is reported, and ``metrics`` which maps are
+    computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
 
     ``variables`` is required, deliberately not inferred from the sources' catalog
     metadata: a reference or test with several declared variables gives no way to
@@ -956,6 +1243,12 @@ def compare(
                         select=sel,
                         aggregate=aggregate,
                         method=method,
+                        over=over,
+                        time_method=time_method,
+                        tolerance=tolerance,
+                        bin_anchor=bin_anchor,
+                        min_pairs=min_pairs,
+                        metrics=metrics,
                         label=label,
                         cache=cache,
                     )

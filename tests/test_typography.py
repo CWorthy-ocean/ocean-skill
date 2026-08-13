@@ -800,3 +800,36 @@ def test_the_summary_key_clears_the_axis_labels_at_any_level():
             if not label.get_text():
                 continue
             assert key.y1 <= label.get_window_extent(renderer).y0 + 1.0, font_scale
+
+
+def test_a_four_metric_grid_is_laid_out_by_the_domains_own_shape():
+    """The ``skill_map`` family rests on this, and on the sizing that follows from it.
+
+    Four metric panels have no inherent order, so nothing about the fold carries
+    meaning and the aspect ratio decides it — a wide Gulf box stacks down the page one
+    panel per row, a tall California box spreads across. Pinned because a hardcoded 2x2
+    would halve the panel width for the wide case, and the difference is invisible in a
+    figure that still draws every panel.
+    """
+    assert tg.facet_layout(4, 4.0) == (1, 4), "a wide domain stacks"
+    assert tg.facet_layout(4, 1.4) == (2, 2), "a squarish one goes 2x2"
+    assert tg.facet_layout(4, 0.35) == (4, 1), "a tall one spreads"
+
+
+def test_a_grid_with_a_bar_in_every_cell_still_fits_the_page():
+    """``skill_map`` charges ``PANEL_W_FRACTION``, not the shared-bar allowance.
+
+    Every panel there carries its own colorbar, so it keeps the 0.72 of its cell that a
+    ``field_grid`` row does rather than the 0.88 a facet grid's shared bar leaves. This
+    checks the resulting figure is still inside the page it has to fit.
+    """
+    width, height = tg.facet_figsize(
+        4.0, nrows=4, ncols=1, panel_w_fraction=tg.PANEL_W_FRACTION
+    )
+    assert width == tg.PAGE_W
+    assert height <= tg.PAGE_H - tg.SUPTITLE_ALLOWANCE
+    # and the maps get materially more height than the shared-bar allowance implies
+    shared = tg.facet_figsize(
+        4.0, nrows=4, ncols=1, panel_w_fraction=tg.FACET_PANEL_W_FRACTION
+    )[1]
+    assert shared > height, "0.88 of the cell is a taller figure, not a wider map"

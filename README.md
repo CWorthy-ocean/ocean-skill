@@ -54,6 +54,23 @@ depths.movie(save="depths.mp4")       # the same three, played  (.gif also works
 depths.movie(renderer="holoviews")    # the same three, on a slider
 ```
 
+When the reference varies in **time** as well as space — a satellite record rather than a
+climatology — averaging it away answers a different question. Name the axis instead and
+every metric is computed cell by cell along it, giving a map per metric with its overall
+value beside it (see [docs/skill_maps.md](docs/skill_maps.md)):
+
+```python
+scored = osk.compare(
+    reference="modis_chl_daily", test="GOM_bgc", variables=["chlorophyll"],
+    select={"time": slice("2012-01", "2012-06")},
+    over="time",                      # keep the axis and score against it
+)
+
+scored.plot()                         # bias | crmsd | corr | sigma_ratio, as maps
+scored[0].maps("rmse", "n")           # any registered metric, as an xr.Dataset
+scored.metrics()                      # the same numbers over space *and* time
+```
+
 Roles are set at compare time rather than in the catalog, so comparing two *models*
 is the same call with a different `reference`:
 

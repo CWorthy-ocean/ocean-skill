@@ -1,14 +1,16 @@
 # Plot styling reference
 
-`field_row`/`field_grid`/`field_facet` (and `Comparison.plot()`/`ComparisonSet.plot()`/
-`Field.plot()`, which forward arbitrary kwargs to them) expose **7 style parameters**,
+`field_row`/`field_grid`/`field_facet`/`skill_map` (and `Comparison.plot()`/
+`ComparisonSet.plot()`/`Field.plot()`, which forward arbitrary kwargs to them) expose
+**7 style parameters**,
 each a dict that merges onto a
 built-in default and is unpacked straight into one specific matplotlib/cartopy call —
 so any keyword that call accepts works, not just a hand-picked subset. An eighth,
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
 no per-frame label on a still. A few more parameters aren't styling dicts at all
-(`title`, `metric_keys`, `shared_limits`, `shared_axis_labels`, `shared_axes`) — see
-[Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
+(`title`, `metric_keys`, `metric_names`, `shared_limits`, `shared_axis_labels`,
+`shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
+of this doc.
 
 > **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
 > matplotlib or cartopy call, so none of them do anything with `renderer="holoviews"`
@@ -512,12 +514,53 @@ than merely inconsistent — see
 `frame_label_kwargs`, `player` (interactive) and `progress`. They are documented together
 in [Movies](movies.md), since they only mean anything once there is more than one frame.
 
-### `ncols` (`field_facet` only)
+### `metric_names` (`skill_map` only)
+
+Which pointwise metric maps become panels, and in what order — `metric_names=("corr",
+"bias")` draws those two, in that order. Honored by **both** renderers.
+
+Not to be confused with two neighbours it sits between:
+
+| Parameter | Family | Means |
+|---|---|---|
+| `metric_names` | `skill_map` | which metrics get a **panel** |
+| `metric_keys` | `field_row`/`field_grid` | which scalars appear in the **corner box** |
+| `metrics` | (item payload) | the overall scalar **record** itself |
+
+A name the comparison never computed pointwise **raises**, naming what it did compute:
+dropping the panel would be invisible, since a figure of three maps looks exactly like a
+figure of three maps. Which metrics exist is decided when the maps are prepared —
+`compare(..., over="time", metrics=("bias", "rmse", ...))` — because each is a full
+reduction over the scored axis and cannot be conjured at draw time. `skill_map` therefore
+accepts no `metric_keys`: one metric per panel leaves nothing to select.
+
+### One colorbar per panel (`skill_map` only)
+
+Every other map family gives a colour scale to a *row* (`field_row`, `field_grid`) or to
+the *whole grid* (`field_facet`), because in each case the panels sharing it are the same
+quantity. `skill_map`'s panels are different quantities — a bias in mmol m-3, a
+dimensionless correlation, a variability ratio — so each carries **its own scale and its
+own bar**, and there is deliberately no `shared_limits` to ask for one.
+
+The colours come from
+[`colormaps.metric_colors`](../ocean_skill/colormaps.py), which both renderers call, so a
+bias panel is diverging and symmetric about zero, a correlation panel spans a fixed
+(−1, 1), a variability ratio centres on 1, and an error magnitude pins its low end at 0 —
+identically in either backend. Edit `_METRIC_CMAPS`/`_METRIC_RANGES` there to change any
+of it, the same way `_SEQUENTIAL_CMAPS`/`_RANGES` work for variables.
+
+Because the bars are vertical and per-panel, this family charges `PANEL_W_FRACTION` of
+each cell to the map rather than the wider allowance a shared bar leaves. Passing
+`colorbar_kwargs={"orientation": "horizontal"}` is honored but warns: the grid's *height*
+is not re-charged for a bar under every panel, so pass `figsize=`/`zoom=` with it.
+
+### `ncols` (`field_facet` and `skill_map`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
 [`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
 from the domain's own aspect ratio, because a grid that suits a wide box is wrong for a
-tall one and vice versa. A Gulf-of-Mexico box stacks down the page one panel per row; a
+tall one and vice versa (`skill_map` uses the same rule for the same reason — four
+metrics have no inherent order, so nothing about the fold carries meaning). A Gulf-of-Mexico box stacks down the page one panel per row; a
 California-Current box spreads across it. Blank cells are charged for, so an ordered
 series doesn't end up scattered through a mostly empty grid just because those cells
 happened to be the right shape.
