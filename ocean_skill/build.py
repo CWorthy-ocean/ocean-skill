@@ -310,6 +310,47 @@ def detect_concat(file) -> tuple[str, tuple[str, ...]]:
     return result
 
 
+def _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths):
+    """Warn when the concatenated coordinate is not strictly increasing.
+
+    ``combine="nested"`` joins in the order given, so nothing checks that the result
+    makes sense as a series: two output streams globbed into one call produce an axis
+    that runs forward, jumps back, and runs forward again, and the store reads back
+    without complaint. A real case mixed ROMS ``cdr`` averages with ``rst`` restart
+    files — the restarts each hold two records, and their second one repeated a cdr
+    timestamp exactly.
+
+    Warns rather than sorting or dropping, deliberately: the duplicates are a symptom
+    of the wrong files being combined, and a silently repaired axis would hide that
+    while leaving averaged and instantaneous fields sharing a coordinate. See
+    :func:`build_kerchunk` for building one reference per stream, which is the fix.
+    """
+    import numpy as np
+
+    for name in loadable_variables:
+        var = vds.variables.get(name)
+        if var is None or var.dims != (concat_dim,) or var.size < 2:
+            continue
+        steps = np.diff(np.asarray(var.values))
+        repeats = int((steps == 0).sum())
+        backwards = int((steps < 0).sum())
+        if not (repeats or backwards):
+            continue
+        first = int(np.argmax(steps <= 0)) + 1
+        # Raw ROMS times are seconds since an epoch named only in the long_name, so
+        # the bare number says nothing about *when* the axis doubled back.
+        decoded = _decode_times(vds, var)
+        at = decoded[first] if decoded is not None else var.values[first].item()
+        warnings.warn(
+            f"{name} is not strictly increasing across the {len(paths)} files "
+            f"concatenated on {concat_dim!r}: {repeats} repeated and {backwards} "
+            f"out-of-order step(s), first at index {first} ({at}). "
+            "Combining more than one output stream is the usual cause — build one "
+            "reference per stream instead. Nothing was reordered or dropped.",
+            stacklevel=3,
+        )
+
+
 def make_kerchunk(
     files,
     out: str | Path,
@@ -374,6 +415,7 @@ def make_kerchunk(
             concat_dim=concat_dim,
             loadable_variables=list(loadable_variables),
         )
+        _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
 
         if grid is not None:
             gurl, gstore = _store_for(grid)
