@@ -48,6 +48,7 @@ that keeps ocean-skill self-sufficient.
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib
 import warnings
 from pathlib import Path
@@ -193,10 +194,10 @@ _MAGIC = {
     b"\x89HDF": "hdf5",
     b"CDF\x01": "netcdf3",
     b"CDF\x02": "netcdf3",
-    # CDF-5 is netCDF-3's 64-bit-data variant, called out separately because nothing
-    # here reads it: virtualizarr's NetCDF3Parser is scipy-backed, and scipy supports
-    # CDF-1/CDF-2 only. It dies with "index 0 is out of bounds" deep in scipy, which
-    # says nothing about the format, so _parser_for rejects it up front instead.
+    # CDF-5 is netCDF-3's 64-bit-data variant, kept distinct from "netcdf3" because
+    # whether it can be read at all depends on which virtualizarr is installed: the
+    # kerchunk-backed NetCDF3Parser is scipy-backed and scipy supports CDF-1/CDF-2
+    # only, while the native parser reads all three. See _netcdf3_reads_cdf5.
     b"CDF\x05": "cdf5",
 }
 
@@ -218,24 +219,45 @@ def _file_format(target) -> str | None:
     return _MAGIC.get(head)
 
 
+@functools.cache
+def _netcdf3_reads_cdf5() -> bool:
+    """Whether the installed ``NetCDF3Parser`` can read CDF-5.
+
+    Two implementations ship under that name. The older one wraps
+    ``kerchunk.netCDF3.NetCDF3ToZarr``, which subclasses scipy's header reader and so
+    inherits scipy's CDF-1/CDF-2-only support; the native one parses the header itself
+    and handles all three classic formats. Probing for the native module's
+    ``_parse_header`` rather than comparing versions because the change is unreleased
+    (VirtualiZarr PR #1086), so there is no version number to compare against yet.
+
+    Replace this with a version floor in ``environment.yml`` once a release carries it.
+    """
+    try:
+        netcdf3 = importlib.import_module("virtualizarr.parsers.netcdf3")
+    except ImportError:  # pragma: no cover - virtualizarr is a hard dependency
+        return False
+    return hasattr(netcdf3, "_parse_header")
+
+
 def _parser_for(target):
     """Return the virtualizarr parser matching ``target``'s container format.
 
-    Raises on CDF-5, which nothing in the stack can read — better than the
-    ``IndexError`` deep in the parser that it otherwise produces.
+    Raises on CDF-5 when the installed parser cannot read it, which is better than the
+    ``IndexError`` deep inside scipy that it otherwise produces — that error names
+    neither the file nor the format.
     """
     from virtualizarr.parsers import HDFParser, NetCDF3Parser
 
     fmt = _file_format(target)
-    if fmt == "cdf5":
+    if fmt == "cdf5" and not _netcdf3_reads_cdf5():
         raise ValueError(
-            f"{target} is netCDF-3 CDF-5 (64-bit data), which cannot be kerchunked: "
-            "virtualizarr's NetCDF3Parser is scipy-backed and scipy reads CDF-1/CDF-2 "
-            "only. Convert it first, then pass the converted file:\n"
+            f"{target} is netCDF-3 CDF-5 (64-bit data), which this virtualizarr "
+            "cannot kerchunk: its NetCDF3Parser is scipy-backed and scipy reads "
+            "CDF-1/CDF-2 only. Convert it first, then pass the converted file:\n"
             f"    nccopy -k netCDF-4 {target} converted.nc\n"
             "(ncdump -k names the format of any file.)"
         )
-    return NetCDF3Parser() if fmt == "netcdf3" else HDFParser()
+    return NetCDF3Parser() if fmt in ("netcdf3", "cdf5") else HDFParser()
 
 
 def detect_concat(file) -> tuple[str, tuple[str, ...]]:
