@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 
 from ocean_skill import _stacklevel
+from ocean_skill.cf import find_coord
 
 __all__ = [
     "align",
@@ -45,6 +46,14 @@ def _lon_name(obj) -> str | None:
         if nm in obj.coords or nm in getattr(obj, "variables", {}):
             return nm
     return None
+
+
+def _time_name(obj) -> str | None:
+    """Name of the time coordinate, via cf-xarray with a plain-name fallback."""
+    coord = find_coord(obj, "time")
+    if coord is not None:
+        return str(coord.name)
+    return next((nm for nm in ("time", "ocean_time") if nm in obj.coords), None)
 
 
 def _lat_name(obj) -> str | None:
@@ -151,6 +160,46 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
             f"{lat_max:g}). Check the two sources really overlap in space."
         )
     return out
+
+
+def time_span_of(obj, pad_steps: float = 1.0):
+    """``(start, stop)`` of ``obj``'s time axis, or ``None`` if it has none.
+
+    The temporal counterpart of :func:`bbox_of`, and wanted for the same reason: a
+    reference cropped to the test's *region* but not to its *window* is still the
+    whole record. MUR against one year of a regional model is 5462x6251 per step —
+    a manageable map, and 2.2 TB once all 8838 daily steps come with it.
+
+    Padded by one of the test's own steps on each side so nearest-neighbour matching
+    at the first and last times still has a candidate to reach for; a single-time
+    test gets no pad, having no step to measure.
+    """
+    name = _time_name(obj)
+    if name is None or obj.sizes.get(name, 0) == 0:
+        return None
+    values = np.asarray(obj[name])
+    lo, hi = values.min(), values.max()
+    if values.size > 1 and pad_steps:
+        step = np.median(np.diff(np.sort(values)))
+        lo, hi = lo - pad_steps * step, hi + pad_steps * step
+    return lo, hi
+
+
+def subset_to_time(obj, window):
+    """Crop ``obj`` to ``window`` along its time axis, if it has one.
+
+    Unlike :func:`subset_to_bbox` an empty result is *not* an error here: a
+    climatology or a static field legitimately shares no calendar span with the
+    test, and the comparison's own time handling reports that far more precisely
+    than a crop can.
+    """
+    from ocean_skill.operators import oriented_slice
+
+    name = _time_name(obj)
+    if name is None or window is None or name not in obj.dims:
+        return obj
+    out = obj.sel({name: oriented_slice(obj, name, slice(window[0], window[1]))})
+    return obj if out.sizes.get(name, 0) == 0 else out
 
 
 def bbox_of(obj) -> tuple[float, float, float, float]:
