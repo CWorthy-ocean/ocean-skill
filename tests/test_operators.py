@@ -710,3 +710,75 @@ def test_a_bbox_straddling_the_seam_says_so_rather_than_dropping_half():
     ref = _lonlat_grid(np.arange(-180, 181, 1.0), np.arange(-90, 91, 1.0))
     with pytest.raises(ValueError, match="cannot be cropped to one slice"):
         subset_to_bbox(ref, (170.0, -5.0, 190.0, 5.0))
+
+
+# -- cropping the reference to the test's time window -------------------------
+
+
+def _daily_maps(start, periods, freq="D"):
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    return xr.DataArray(
+        np.zeros((periods, 4, 5)),
+        dims=("time", "latitude", "longitude"),
+        coords={
+            "time": pd.date_range(start, periods=periods, freq=freq),
+            "latitude": np.arange(4.0),
+            "longitude": np.arange(5.0),
+        },
+    )
+
+
+def test_the_reference_is_cropped_to_the_test_window():
+    """Cropping the region but not the window still reads the whole record.
+
+    MUR over a regional model's footprint is a workable map per step, and 2.2 TB
+    across its 8838 daily ones.
+    """
+    from ocean_skill.align import subset_to_time, time_span_of
+
+    ref = _daily_maps("2012-01-01", 1096)
+    test = _daily_maps("2013-06-15", 3, freq="MS")
+    out = subset_to_time(ref, time_span_of(test))
+    assert out.sizes["time"] < 200  # a season, not three years
+    assert out.time.values[0] < test.time.values[0]  # padded on both sides
+    assert out.time.values[-1] > test.time.values[-1]
+
+
+def test_a_single_time_test_gets_no_pad():
+    """There is no step to measure, so the span is the instant itself."""
+    from ocean_skill.align import time_span_of
+
+    lo, hi = time_span_of(_daily_maps("2013-06-15", 3, freq="MS").isel(time=[0]))
+    assert lo == hi
+
+
+def test_a_source_with_no_time_axis_is_left_alone():
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill.align import subset_to_time, time_span_of
+
+    static = xr.DataArray(
+        np.zeros((4, 5)),
+        dims=("latitude", "longitude"),
+        coords={"latitude": np.arange(4.0), "longitude": np.arange(5.0)},
+    )
+    assert time_span_of(static) is None
+    window = time_span_of(_daily_maps("2013-06-15", 3, freq="MS"))
+    assert subset_to_time(static, window).shape == static.shape
+
+
+def test_a_reference_sharing_no_span_is_kept_not_emptied():
+    """A climatology legitimately shares no calendar span with the test.
+
+    Unlike the bbox crop this is not an error: the comparison's own time handling
+    reports it far more precisely than a crop can.
+    """
+    from ocean_skill.align import subset_to_time, time_span_of
+
+    clim = _daily_maps("1990-01-01", 10)
+    window = time_span_of(_daily_maps("2013-06-15", 3, freq="MS"))
+    assert subset_to_time(clim, window).sizes["time"] == 10

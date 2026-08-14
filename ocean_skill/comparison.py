@@ -430,6 +430,7 @@ def prepare_source(
     refresh: bool = False,
     require_reduced: str | None = None,
     bbox: tuple[float, float, float, float] | None = None,
+    time_window: tuple[Any, Any] | None = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -499,6 +500,10 @@ def prepare_source(
         from ocean_skill.align import subset_to_bbox
 
         da = subset_to_bbox(da, bbox)
+    if da is not None and time_window is not None:
+        from ocean_skill.align import subset_to_time
+
+        da = subset_to_time(da, time_window)
     if da is not None and da.nbytes > LOAD_WARN_BYTES:
         import warnings
 
@@ -657,6 +662,7 @@ class Comparison:
         refresh: bool,
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
+        time_window: tuple[Any, Any] | None = None,
     ):
         """Reduce one source to its comparable field, via the lane cache.
 
@@ -678,6 +684,7 @@ class Comparison:
             refresh=refresh,
             require_reduced=None if self.over else role,
             bbox=bbox,
+            time_window=time_window,
         )
 
     # -- pipeline ---------------------------------------------------------------
@@ -715,12 +722,22 @@ class Comparison:
         # approximation: the bbox and the pad are the ones align() would have used.
         t, _ = self._prepare_lane(self.test_name, use_cache, refresh, role="test")
         bbox = None
+        window = None
         if self.over is not None and t is not None:
-            from ocean_skill.align import bbox_of
+            from ocean_skill.align import bbox_of, time_span_of
 
             bbox = bbox_of(t)
+            # ...and the same crop along time. Cropping the region but not the window
+            # still reads the whole record: MUR over a regional model's footprint is a
+            # workable map per step and 2.2 TB across its 8838 daily ones.
+            window = time_span_of(t)
         r, r_depth = self._prepare_lane(
-            self.reference_name, use_cache, refresh, role="reference", bbox=bbox
+            self.reference_name,
+            use_cache,
+            refresh,
+            role="reference",
+            bbox=bbox,
+            time_window=window,
         )
         if r is None or t is None:
             missing = self.reference_name if r is None else self.test_name
