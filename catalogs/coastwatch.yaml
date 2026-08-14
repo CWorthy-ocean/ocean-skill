@@ -1,0 +1,1362 @@
+aliases:
+  NOAA_DHW: NOAA_DHW
+  NWW3_Global_Best: NWW3_Global_Best
+  erdMBsstd1day: erdMBsstd1day
+  erdMH1cflh1day_R2022NRT: erdMH1cflh1day_R2022NRT
+  erdMH1cflh1day_R2022SQ: erdMH1cflh1day_R2022SQ
+  erdMH1chla1day_R2022NRT: erdMH1chla1day_R2022NRT
+  erdMH1chla1day_R2022SQ: erdMH1chla1day_R2022SQ
+  erdMH1sstd1day_R2022NRTMasked: erdMH1sstd1day_R2022NRTMasked
+  erdMH1sstd1day_R2022SQMasked: erdMH1sstd1day_R2022SQMasked
+  erdMPIC1day_R2022NRT: erdMPIC1day_R2022NRT
+  erdMPIC1day_R2022SQ: erdMPIC1day_R2022SQ
+  erdMPOC1day_R2022NRT: erdMPOC1day_R2022NRT
+  erdMPOC1day_R2022SQ: erdMPOC1day_R2022SQ
+  erdMWchla1day: erdMWchla1day
+  erdMWsstd1day: erdMWsstd1day
+  erdQCwindproducts1day: erdQCwindproducts1day
+  jplMURSST41: jplMURSST41
+  jplMURSST41anom1day: jplMURSST41anom1day
+  jplMURSST41clim: jplMURSST41clim
+  jplMURSST41mday: jplMURSST41mday
+  jplMURSST42: jplMURSST42
+  ncdcOisst21Agg: ncdcOisst21Agg
+  nceiErsstv5: nceiErsstv5
+  nesdisVHNsstDaily: nesdisVHNsstDaily
+  noaacwNPPN20S3ASCIDINEOF2kmDaily: noaacwNPPN20S3ASCIDINEOF2kmDaily
+  noaacwNPPN20S3AkdSCIDINEOF2kmDaily: noaacwNPPN20S3AkdSCIDINEOF2kmDaily
+  noaacwNPPN20S3AspmSCIDINEOF2kmDaily: noaacwNPPN20S3AspmSCIDINEOF2kmDaily
+  nsidcG02202v6nh1day: nsidcG02202v6nh1day
+  nsidcG02202v6sh1day: nsidcG02202v6sh1day
+  productivity_viirs_snpp_daily: productivity_viirs_snpp_daily
+  productivity_viirs_snpp_nrt_daily: productivity_viirs_snpp_nrt_daily
+data:
+  006820152a107b4a:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/ncdcOisst21Agg
+    metadata: {}
+    user_parameters: {}
+  023272a9d8c912a9:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMPOC1day_R2022SQ
+    metadata: {}
+    user_parameters: {}
+  046d383412f9170e:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1chla1day_R2022NRT
+    metadata: {}
+    user_parameters: {}
+  079da09b05ffd125:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMPOC1day_R2022NRT
+    metadata: {}
+    user_parameters: {}
+  08cb2099f3a5effd:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMWchla1day
+    metadata: {}
+    user_parameters: {}
+  1cc40db9257c2971:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41anom1day
+    metadata: {}
+    user_parameters: {}
+  20e1a926e5121012:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://pae-paha.pacioos.hawaii.edu/erddap/griddap/dhw_5km
+    metadata: {}
+    user_parameters: {}
+  2a04d0f1b4e880df:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/nceiErsstv5
+    metadata: {}
+    user_parameters: {}
+  48bd567d11d1d45f:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/noaacwNPPN20S3AspmSCIDINEOF2kmDaily
+    metadata: {}
+    user_parameters: {}
+  4beee02c2cb43bc9:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1cflh1day_R2022NRT
+    metadata: {}
+    user_parameters: {}
+  4c52ac58a5538626:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1cflh1day_R2022SQ
+    metadata: {}
+    user_parameters: {}
+  57b7ca32430d974e:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1sstd1day_R2022NRTMasked
+    metadata: {}
+    user_parameters: {}
+  5db46470278ed3cb:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMPIC1day_R2022SQ
+    metadata: {}
+    user_parameters: {}
+  71ab8c86110443a4:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdQCwindproducts1day
+    metadata: {}
+    user_parameters: {}
+  7ac09350ebbe7b31:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global
+    metadata: {}
+    user_parameters: {}
+  7cdadcd67a90589c:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMBsstd1day
+    metadata: {}
+    user_parameters: {}
+  7eef378e7f98740e:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/nsidcG02202v6sh1day
+    metadata: {}
+    user_parameters: {}
+  80cc2b4ec033d410:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1sstd1day_R2022SQMasked
+    metadata: {}
+    user_parameters: {}
+  933d2bf9dcd7660b:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41mday
+    metadata: {}
+    user_parameters: {}
+  9cb3c86498d9c586:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41
+    metadata: {}
+    user_parameters: {}
+  a658c255ba5b8770:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/noaacwNPPN20S3AkdSCIDINEOF2kmDaily
+    metadata: {}
+    user_parameters: {}
+  af0517ce378e8f51:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMWsstd1day
+    metadata: {}
+    user_parameters: {}
+  affe1b63f632d43c:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST42
+    metadata: {}
+    user_parameters: {}
+  c6ee89b91e9182ae:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMPIC1day_R2022NRT
+    metadata: {}
+    user_parameters: {}
+  cc2c6951af8d79ff:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/productivity_viirs_snpp_nrt_daily
+    metadata: {}
+    user_parameters: {}
+  ce7500eb137cd444:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41clim
+    metadata: {}
+    user_parameters: {}
+  cf0e5812f655a6ac:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1chla1day_R2022SQ
+    metadata: {}
+    user_parameters: {}
+  cf39eb2e28ecc097:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/noaacwNPPN20S3ASCIDINEOF2kmDaily
+    metadata: {}
+    user_parameters: {}
+  d54665ebaed23093:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/productivity_viirs_snpp_daily
+    metadata: {}
+    user_parameters: {}
+  f606af808edd448d:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/nsidcG02202v6nh1day
+    metadata: {}
+    user_parameters: {}
+  f7d49a80b8d586fd:
+    datatype: intake.readers.datatypes:OpenDAP
+    kwargs:
+      options: {}
+      url: https://coastwatch.pfeg.noaa.gov/erddap/griddap/nesdisVHNsstDaily
+    metadata: {}
+    user_parameters: {}
+entries:
+  NOAA_DHW:
+    kwargs:
+      args:
+      - '{data(20e1a926e5121012)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9749984741211
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      standard_names:
+        CRW_SEAICE: sea_ice_area_fraction
+        CRW_SST: sea_surface_temperature
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '1985-04-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  NWW3_Global_Best:
+    kwargs:
+      args:
+      - '{data(7ac09350ebbe7b31)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 77.5
+      geospatial_lat_min: -77.5
+      geospatial_lon_max: 359.5
+      geospatial_lon_min: 0.0
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.5
+      grid_resolution_km: 55.597
+      lon_convention: 0-360
+      standard_names:
+        Tdir: sea_surface_wave_from_direction_at_variance_spectral_density_maximum
+        Thgt: sea_surface_wave_significant_height
+        Tper: sea_surface_wave_period_at_variance_spectral_density_maximum
+        sdir: sea_surface_swell_wave_from_direction
+        shgt: sea_surface_swell_wave_significant_height
+        sper: sea_surface_swell_wave_period
+        wdir: sea_surface_wind_wave_from_direction
+        whgt: sea_surface_wind_wave_significant_height
+        wper: sea_surface_wind_wave_period
+      time_coverage_end: '2026-08-19'
+      time_coverage_start: '2017-01-01'
+      time_resolution: PT1H
+      time_resolution_s: 3600.0
+      variables:
+      - sea_surface_swell_wave_from_direction
+      - sea_surface_swell_wave_period
+      - sea_surface_swell_wave_significant_height
+      - sea_surface_wave_from_direction_at_variance_spectral_density_maximum
+      - sea_surface_wave_period_at_variance_spectral_density_maximum
+      - sea_surface_wave_significant_height
+      - sea_surface_wind_wave_from_direction
+      - sea_surface_wind_wave_period
+      - sea_surface_wind_wave_significant_height
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMBsstd1day:
+    kwargs:
+      args:
+      - '{data(7cdadcd67a90589c)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 65.0
+      geospatial_lat_min: -45.0
+      geospatial_lon_max: 320.0
+      geospatial_lon_min: 120.0
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.025
+      grid_resolution_km: 2.78
+      lon_convention: 0-360
+      standard_names:
+        sst: sea_surface_temperature
+      time_coverage_end: '2026-08-11'
+      time_coverage_start: '2006-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1cflh1day_R2022NRT:
+    kwargs:
+      args:
+      - '{data(4beee02c2cb43bc9)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2022-03-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1cflh1day_R2022SQ:
+    kwargs:
+      args:
+      - '{data(4c52ac58a5538626)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2026-05-30'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1chla1day_R2022NRT:
+    kwargs:
+      args:
+      - '{data(046d383412f9170e)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        chlorophyll: mass_concentration_of_chlorophyll_in_sea_water
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2022-03-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1chla1day_R2022SQ:
+    kwargs:
+      args:
+      - '{data(cf0e5812f655a6ac)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+      time_coverage_end: '2026-05-30'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1sstd1day_R2022NRTMasked:
+    kwargs:
+      args:
+      - '{data(57b7ca32430d974e)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916
+      geospatial_lat_min: -89.97918
+      geospatial_lon_max: 179.9792
+      geospatial_lon_min: -179.9792
+      grid_regular: true
+      grid_resolution_deg: 0.04167
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        sstMasked: sea_surface_temperature
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2019-11-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMH1sstd1day_R2022SQMasked:
+    kwargs:
+      args:
+      - '{data(80cc2b4ec033d410)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916
+      geospatial_lat_min: -89.97918
+      geospatial_lon_max: 179.9792
+      geospatial_lon_min: -179.9792
+      grid_regular: true
+      grid_resolution_deg: 0.04167
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        sstMasked: sea_surface_temperature
+      time_coverage_end: '2026-06-30'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMPIC1day_R2022NRT:
+    kwargs:
+      args:
+      - '{data(c6ee89b91e9182ae)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2022-03-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMPIC1day_R2022SQ:
+    kwargs:
+      args:
+      - '{data(5db46470278ed3cb)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2025-10-31'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMPOC1day_R2022NRT:
+    kwargs:
+      args:
+      - '{data(079da09b05ffd125)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2022-03-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMPOC1day_R2022SQ:
+    kwargs:
+      args:
+      - '{data(023272a9d8c912a9)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      time_coverage_end: '2026-05-30'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMWchla1day:
+    kwargs:
+      args:
+      - '{data(08cb2099f3a5effd)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 51.0
+      geospatial_lat_min: 22.0
+      geospatial_lon_max: 255.0
+      geospatial_lon_min: 205.0
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.0125
+      grid_resolution_km: 1.39
+      lon_convention: 0-360
+      standard_names:
+        chlorophyll: concentration_of_chlorophyll_in_sea_water
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2002-07-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - concentration_of_chlorophyll_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdMWsstd1day:
+    kwargs:
+      args:
+      - '{data(af0517ce378e8f51)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 51.0
+      geospatial_lat_min: 22.0
+      geospatial_lon_max: 255.0
+      geospatial_lon_min: 205.0
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.0125
+      grid_resolution_km: 1.39
+      lon_convention: 0-360
+      standard_names:
+        sst: sea_surface_temperature
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2002-06-24'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  erdQCwindproducts1day:
+    kwargs:
+      args:
+      - '{data(71ab8c86110443a4)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.833333
+      geospatial_lat_min: -89.833154
+      geospatial_lon_max: 179.832974
+      geospatial_lon_min: -179.833333
+      geospatial_vertical_max: 10.0
+      geospatial_vertical_min: 10.0
+      grid_regular: true
+      grid_resolution_deg: 0.333333
+      grid_resolution_km: 37.065
+      lon_convention: -180-180
+      standard_names:
+        divergence: divergence_of_wind
+        stress_u: surface_downward_eastward_stress
+        stress_v: surface_downward_northward_stress
+        wind_direction: wind_from_direction
+        wind_speed: wind_speed
+        wind_u: eastward_wind
+        wind_v: northward_wind
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2021-09-03'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - divergence_of_wind
+      - eastward_wind
+      - northward_wind
+      - surface_downward_eastward_stress
+      - surface_downward_northward_stress
+      - wind_from_direction
+      - wind_speed
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  jplMURSST41:
+    kwargs:
+      args:
+      - '{data(9cb3c86498d9c586)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98999786376953
+      geospatial_lat_min: -89.98999786376953
+      geospatial_lon_max: 180.0
+      geospatial_lon_min: -179.99000549316406
+      grid_regular: true
+      grid_resolution_deg: 0.01
+      grid_resolution_km: 1.112
+      lon_convention: -180-180
+      standard_names:
+        analysed_sst: sea_surface_foundation_temperature
+        mask: land_binary_mask
+        sea_ice_fraction: sea_ice_area_fraction
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2002-06-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - land_binary_mask
+      - sea_ice_area_fraction
+      - sea_surface_foundation_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  jplMURSST41anom1day:
+    kwargs:
+      args:
+      - '{data(1cc40db9257c2971)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98999786376953
+      geospatial_lat_min: -89.98999786376953
+      geospatial_lon_max: 180.0
+      geospatial_lon_min: -179.99000549316406
+      grid_regular: true
+      grid_resolution_deg: 0.01
+      grid_resolution_km: 1.112
+      lon_convention: -180-180
+      standard_names:
+        mask: land_binary_mask
+        sstAnom: sea_surface_foundation_temperature_anomaly
+      time_coverage_end: '2026-08-11'
+      time_coverage_start: '2002-06-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - land_binary_mask
+      - sea_surface_foundation_temperature_anomaly
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  jplMURSST41clim:
+    kwargs:
+      args:
+      - '{data(ce7500eb137cd444)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98999786376953
+      geospatial_lat_min: -89.98999786376953
+      geospatial_lon_max: 180.0
+      geospatial_lon_min: -179.99000549316406
+      grid_regular: true
+      grid_resolution_deg: 0.01
+      grid_resolution_km: 1.112
+      lon_convention: -180-180
+      standard_names:
+        mean_sst: sea_surface_foundation_temperature
+      variables:
+      - sea_surface_foundation_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  jplMURSST41mday:
+    kwargs:
+      args:
+      - '{data(933d2bf9dcd7660b)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98999786376953
+      geospatial_lat_min: -89.98999786376953
+      geospatial_lon_max: 180.0
+      geospatial_lon_min: -179.99000549316406
+      grid_regular: true
+      grid_resolution_deg: 0.01
+      grid_resolution_km: 1.112
+      lon_convention: -180-180
+      standard_names:
+        mask: land_binary_mask
+        sst: sea_surface_foundation_temperature
+      time_coverage_end: '2026-07-16'
+      time_coverage_start: '2002-06-16'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - land_binary_mask
+      - sea_surface_foundation_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  jplMURSST42:
+    kwargs:
+      args:
+      - '{data(affe1b63f632d43c)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      standard_names:
+        analysed_sst: sea_surface_foundation_temperature
+        mask: land_binary_mask
+        sea_ice_fraction: sea_ice_area_fraction
+        sst_anomaly: surface_temperature_anomaly
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2002-09-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - land_binary_mask
+      - sea_ice_area_fraction
+      - sea_surface_foundation_temperature
+      - surface_temperature_anomaly
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  ncdcOisst21Agg:
+    kwargs:
+      args:
+      - '{data(006820152a107b4a)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: zlev
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 359.875
+      geospatial_lon_min: 0.125
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: 0-360
+      standard_names:
+        anom: surface_temperature_anomaly
+        ice: sea_ice_area_fraction
+        sst: sea_surface_temperature
+      time_coverage_end: '2026-07-29'
+      time_coverage_start: '1981-09-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_surface_temperature
+      - surface_temperature_anomaly
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  nceiErsstv5:
+    kwargs:
+      args:
+      - '{data(2a04d0f1b4e880df)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 88.0
+      geospatial_lat_min: -88.0
+      geospatial_lon_max: 358.0
+      geospatial_lon_min: 0.0
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 2.0
+      grid_resolution_km: 222.39
+      lon_convention: 0-360
+      standard_names:
+        sst: sea_surface_temperature
+      time_coverage_end: '2026-07-15'
+      time_coverage_start: '1854-01-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  nesdisVHNsstDaily:
+    kwargs:
+      args:
+      - '{data(f7d49a80b8d586fd)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.75625000000001
+      geospatial_lat_min: -89.75625000000001
+      geospatial_lon_max: 179.98124999999996
+      geospatial_lon_min: -179.98125000000002
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.0375
+      grid_resolution_km: 4.17
+      lon_convention: -180-180
+      standard_names:
+        sea_surface_temperature: sea_surface_temperature
+      time_coverage_end: '2026-08-12'
+      time_coverage_start: '2020-01-15'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_temperature
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  noaacwNPPN20S3ASCIDINEOF2kmDaily:
+    kwargs:
+      args:
+      - '{data(cf39eb2e28ecc097)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98958587646484
+      geospatial_lat_min: -89.98958587646484
+      geospatial_lon_max: 179.98960876464844
+      geospatial_lon_min: -179.9895782470703
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.020836
+      grid_resolution_km: 2.317
+      lon_convention: -180-180
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_a_in_sea_water
+      time_coverage_end: '2026-08-02'
+      time_coverage_start: '2018-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  noaacwNPPN20S3AkdSCIDINEOF2kmDaily:
+    kwargs:
+      args:
+      - '{data(a658c255ba5b8770)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98958587646484
+      geospatial_lat_min: -89.98958587646484
+      geospatial_lon_max: 179.98960876464844
+      geospatial_lon_min: -179.9895782470703
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.020836
+      grid_resolution_km: 2.317
+      lon_convention: -180-180
+      standard_names:
+        kd_490: diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+      time_coverage_end: '2026-08-02'
+      time_coverage_start: '2018-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  noaacwNPPN20S3AspmSCIDINEOF2kmDaily:
+    kwargs:
+      args:
+      - '{data(48bd567d11d1d45f)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: altitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.98958587646484
+      geospatial_lat_min: -89.98958587646484
+      geospatial_lon_max: 179.98960876464844
+      geospatial_lon_min: -179.9895782470703
+      geospatial_vertical_max: 0.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.020836
+      grid_resolution_km: 2.317
+      lon_convention: -180-180
+      standard_names:
+        spm: suspended particulate matter
+      time_coverage_end: '2026-08-02'
+      time_coverage_start: '2018-01-02'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - suspended particulate matter
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  nsidcG02202v6nh1day:
+    kwargs:
+      args:
+      - '{data(f606af808edd448d)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: x
+        Y: y
+      duplicate_standard_names:
+        cdr_seaice_conc_interp_temporal_flag: status_flag
+        cdr_seaice_conc_qa_flag: status_flag
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 5837500.0
+      geospatial_lat_min: -5337500.0
+      geospatial_lon_max: 3737500.0
+      geospatial_lon_min: -3837500.0
+      grid_regular: true
+      grid_resolution_deg: 25000.0
+      grid_resolution_km: 2779875.0
+      lon_convention: 0-360
+      standard_names:
+        cdr_seaice_conc: sea_ice_area_fraction
+        cdr_seaice_conc_interp_spatial_flag: status_flag
+      time_coverage_end: '2026-08-06'
+      time_coverage_start: '1978-10-25'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  nsidcG02202v6sh1day:
+    kwargs:
+      args:
+      - '{data(7eef378e7f98740e)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: x
+        Y: y
+      duplicate_standard_names:
+        cdr_seaice_conc_interp_temporal_flag: status_flag
+        cdr_seaice_conc_qa_flag: status_flag
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 4337500.0
+      geospatial_lat_min: -3937500.0
+      geospatial_lon_max: 3937500.0
+      geospatial_lon_min: -3937500.0
+      grid_regular: true
+      grid_resolution_deg: 25000.0
+      grid_resolution_km: 2779875.0
+      lon_convention: 0-360
+      standard_names:
+        cdr_seaice_conc: sea_ice_area_fraction
+        cdr_seaice_conc_interp_spatial_flag: status_flag
+      time_coverage_end: '2026-08-06'
+      time_coverage_start: '1978-10-25'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  productivity_viirs_snpp_daily:
+    kwargs:
+      args:
+      - '{data(d54665ebaed23093)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97915649414062
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9792022705078
+      geospatial_lon_min: -179.9792022705078
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+        par: surface_downwelling_photosynthetic_photon_flux_in_air
+        productivity: net_primary_productivity_of_carbon
+        sea_surface_temperature: sea_surface_temperature
+      time_coverage_end: '2026-05-31'
+      time_coverage_start: '2012-01-19'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+      - net_primary_productivity_of_carbon
+      - sea_surface_temperature
+      - surface_downwelling_photosynthetic_photon_flux_in_air
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+  productivity_viirs_snpp_nrt_daily:
+    kwargs:
+      args:
+      - '{data(cc2c6951af8d79ff)}'
+      chunks: {}
+      decode_times: false
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97915649414062
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9792022705078
+      geospatial_lon_min: -179.9792022705078
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      standard_names:
+        chlor_a: mass_concentration_of_chlorophyll_in_sea_water
+        par: surface_downwelling_photosynthetic_photon_flux_in_air
+        productivity: net_primary_productivity_of_carbon
+        sea_surface_temperature: sea_surface_temperature
+      time_coverage_end: '2026-08-11'
+      time_coverage_start: '2024-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_in_sea_water
+      - net_primary_productivity_of_carbon
+      - sea_surface_temperature
+      - surface_downwelling_photosynthetic_photon_flux_in_air
+    output_instance: xarray:Dataset
+    reader: intake.readers.readers:XArrayDatasetReader
+    user_parameters: {}
+metadata:
+  featureTypes:
+  - grid
+  geospatial_lat_max: 5837500.0
+  geospatial_lat_min: -5337500.0
+  geospatial_lon_max: 3937500.0
+  geospatial_lon_min: -3937500.0
+  geospatial_vertical_max: 10.0
+  geospatial_vertical_min: 0.0
+  standard_names:
+  - concentration_of_chlorophyll_in_sea_water
+  - diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+  - divergence_of_wind
+  - eastward_wind
+  - land_binary_mask
+  - mass_concentration_of_chlorophyll_a_in_sea_water
+  - mass_concentration_of_chlorophyll_in_sea_water
+  - net_primary_productivity_of_carbon
+  - northward_wind
+  - sea_ice_area_fraction
+  - sea_surface_foundation_temperature
+  - sea_surface_foundation_temperature_anomaly
+  - sea_surface_swell_wave_from_direction
+  - sea_surface_swell_wave_period
+  - sea_surface_swell_wave_significant_height
+  - sea_surface_temperature
+  - sea_surface_wave_from_direction_at_variance_spectral_density_maximum
+  - sea_surface_wave_period_at_variance_spectral_density_maximum
+  - sea_surface_wave_significant_height
+  - sea_surface_wind_wave_from_direction
+  - sea_surface_wind_wave_period
+  - sea_surface_wind_wave_significant_height
+  - status_flag
+  - surface_downward_eastward_stress
+  - surface_downward_northward_stress
+  - surface_downwelling_photosynthetic_photon_flux_in_air
+  - surface_temperature_anomaly
+  - suspended particulate matter
+  - wind_from_direction
+  - wind_speed
+  time_coverage_end: '2026-08-19'
+  time_coverage_start: '1854-01-01'
+  title: NOAA CoastWatch
+user_parameters: {}
+version: 2
