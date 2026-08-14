@@ -1313,6 +1313,39 @@ def _fit_text_widths(fig, renderer=None) -> None:
             )
 
 
+def _centre_suptitle(fig, renderer=None) -> None:
+    """Centre the suptitle over the panels rather than over the canvas.
+
+    matplotlib centres a suptitle on the *figure*, which is the same thing as centring
+    it over the panels only when the panels fill the figure's width. A tall facet grid
+    is where they do not: one narrow column of maps beside a vertical colorbar on a
+    page-width canvas leaves the drawn block well right of centre, and a title at
+    ``x=0.5`` sits off in the margin to the left of everything it names.
+
+    Measured after the layout has settled, since that is when the panels are where they
+    will be drawn. Colorbar axes are left out of the span deliberately — the title names
+    the field, and the bar is scenery beside it — and a figure whose panels *are*
+    centred lands back on 0.5, so this costs the common case nothing but a measurement.
+    """
+    sup = getattr(fig, "_suptitle", None)
+    if sup is None or not sup.get_text():
+        return
+    if renderer is None:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    boxes = [
+        ax.get_window_extent(renderer)
+        for ax in fig.axes
+        if ax.get_visible() and not getattr(ax, "_osk_cbar_parents", None)
+    ]
+    if not boxes:  # pragma: no cover - a figure with nothing but a colorbar
+        return
+    width = fig.get_size_inches()[0] * fig.dpi
+    centre = (min(b.x0 for b in boxes) + max(b.x1 for b in boxes)) / 2 / width
+    if np.isfinite(centre):
+        sup.set_x(float(centre))
+
+
 def _aspect_of(da) -> float:
     """Return one field's ``lon_span / lat_span`` — the shape a panel wants to be."""
     try:
@@ -1663,10 +1696,11 @@ def facet_labels(coord) -> list[str]:
     the coordinate alone, and are deliberately labelled so that the figure says which
     one it is:
 
-    * timestamps (a ``resample``) -> ``"Jan 2012"``. The year is not optional here: it
-      is the only thing on the page distinguishing six consecutive months from six
-      months of a climatology, and a reader who cannot tell those apart is reading the
-      wrong figure without knowing it.
+    * timestamps (a ``resample``) -> ``"Jan 2012"``, refined by :func:`_distinct` to
+      ``"2012-01-16"`` (and further) when a month is not enough to tell one panel from
+      the next. The year is not optional here: it is the only thing on the page
+      distinguishing six consecutive months from six months of a climatology, and a
+      reader who cannot tell those apart is reading the wrong figure without knowing it.
     * integer months (``{"groupby": "month"}``) -> ``"Jan"``, no year, because there
       isn't one — the panel is every January of the record.
     * a vertical level -> ``"50 m"``. Taken through ``abs`` because the model's own
@@ -1683,9 +1717,11 @@ def facet_labels(coord) -> list[str]:
         # covers numpy datetime64 and cftime alike, which is why this goes through
         # xarray's accessor rather than pandas or datetime directly -- a ROMS run on a
         # 360-day calendar carries cftime objects that pd.Timestamp cannot parse.
-        return [str(v) for v in coord.dt.strftime("%b %Y").values]
+        month_labels = [str(v) for v in coord.dt.strftime("%b %Y").values]
     except (TypeError, AttributeError):
-        pass
+        month_labels = None
+    if month_labels is not None:
+        return _distinct(coord, month_labels)
     if name == "month":
         try:
             return [calendar.month_abbr[int(v)] for v in values]
@@ -1699,25 +1735,30 @@ def facet_labels(coord) -> list[str]:
     return [str(v) for v in values]
 
 
-def frame_labels(coord) -> list[str]:
-    """Return a movie's frame labels: :func:`facet_labels`, refined until they differ.
+#: Datetime spellings tried in turn when the one before it leaves two panels — or two
+#: frames — saying the same thing. Coarsest first: a label is as short as it can be
+#: while still naming which panel it sits above.
+_FINER_TIME_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M")
 
-    A facet grid's panels are almost always a reduction — six monthly means, twelve
-    climatological months — so ``"%b %Y"`` names them exactly. A movie is as often the
-    *unreduced* axis: every step of a run, which at daily cadence gives 31 panels all
-    called ``Jan 2012`` and at hourly cadence 744. On a still that is merely a repeated
-    caption; interactively the labels are the slider's values, and duplicates collapse
-    frames on top of each other silently.
 
-    So this starts from :func:`facet_labels` — a monthly movie is labelled exactly as
-    the equivalent grid is, which is the point — and escalates the resolution only when
-    the labels would not tell one frame from another. Non-datetime axes (levels,
-    seasons) come back unchanged, having nothing finer to fall back to.
+def _distinct(coord, labels) -> list[str]:
+    """Return ``labels``, spelled finer until no two panels carry the same one.
+
+    ``"%b %Y"`` names a reduction exactly — six monthly means, twelve climatological
+    months — and is what a reader wants above a panel that *is* a month. It is wrong
+    the moment the axis is finer than the label: three days of January selected out of
+    a run come out as three panels all called ``Jan 2012``, and a month of daily output
+    as 31. Statically that is a caption repeated over panels that differ; interactively
+    the labels are the slider's values, and duplicates collapse frames on top of each
+    other silently.
+
+    So the coarse spelling stands wherever it distinguishes the panels, and the
+    resolution escalates only where it does not. Non-datetime axes (levels, seasons)
+    come back unchanged, having nothing finer to fall back to.
     """
-    labels = facet_labels(coord)
     if len(set(labels)) == len(labels):
         return labels
-    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M"):
+    for fmt in _FINER_TIME_FORMATS:
         try:
             # same accessor facet_labels uses, so cftime calendars work here too
             finer = [str(v) for v in coord.dt.strftime(fmt).values]
@@ -1727,6 +1768,41 @@ def frame_labels(coord) -> list[str]:
         if len(set(finer)) == len(finer):
             break
     return labels
+
+
+def frame_labels(coord) -> list[str]:
+    """Return a movie's frame labels: exactly the panel titles the grid would carry.
+
+    A movie is its facet grid played rather than laid out, so its frames are labelled by
+    :func:`facet_labels` — including that function's refinement of a datetime axis too
+    fine for ``"%b %Y"``, which movies need more often than grids do (every step of a
+    run is a frame) but which is the same rule either way. Kept as its own name because
+    the movie paths read better for it and both renderers call it.
+    """
+    return facet_labels(coord)
+
+
+def field_title(standard_name) -> str:
+    """The suptitle a one-field figure carries when the caller has not named one.
+
+    The panels say *when*; nothing on the figure said *what*. A colorbar reading
+    ``[mmol/m^3]`` narrows it to a concentration and no further, and the file the figure
+    came from is not on the page, so a saved alkalinity figure and a saved nitrate one
+    were indistinguishable once they left the session that drew them.
+
+    Spelled through :func:`ocean_skill.vars.short_name`, as every legend and axis label
+    in the package is — the same field must not be ``alkalinity`` on one figure and
+    ``sea_water_alkalinity_expressed_as_mole_equivalent`` on the next. A field with no
+    CF name to shorten (a derived expression, say) gets no title rather than a guess;
+    ``title=""`` suppresses it explicitly, and ``title="..."`` still wins outright.
+
+    Only the one-source families default this. A comparison's rows already name their
+    variable down the left edge, and a grid of several would have no single name to
+    carry.
+    """
+    from ocean_skill.plot.summary import pretty_level
+
+    return pretty_level("variable", standard_name) if standard_name else ""
 
 
 def field_facet(
@@ -1784,10 +1860,14 @@ def field_facet(
 
     Panel titles come from the facet coordinate itself (see :func:`facet_labels`), so a
     consecutive-month figure is labelled ``Jan 2012`` and a climatology ``Jan``, and the
-    two cannot be confused for one another on the page. With a ``row_dim`` the titles
-    appear on the top row only — every row below shows the same months — and each row is
-    named down the left edge instead (``50 m``), the same rotated label
-    :func:`field_grid` uses.
+    two cannot be confused for one another on the page. An axis finer than its label —
+    three days of a January, say — is spelled out far enough to tell the panels apart
+    (``2013-01-16``), since a title that names every panel names none. With a ``row_dim``
+    the titles appear on the top row only — every row below shows the same months — and
+    each row is named down the left edge instead (``50 m``), the same rotated label
+    :func:`field_grid` uses. The panels having said *when*, the suptitle says *what*: it
+    defaults to the variable's short name (see :func:`field_title`), and ``title=""``
+    drops it.
 
     The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
@@ -1799,6 +1879,7 @@ def field_facet(
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
     canvas = resolve_canvas(size, zoom)
+    title = field_title(standard_name) if title is None else title
     for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
         if value is not None and value not in field.dims:
             raise ValueError(
@@ -1967,6 +2048,9 @@ def field_facet(
         _align_colorbars(fig)
     _fit_text_widths(fig)
     _clear_row_labels(fig)
+    # last, for the same reason: the panels have to be where they will be drawn before
+    # the title can be centred over them
+    _centre_suptitle(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -2738,9 +2822,14 @@ def facet_movie(
 
     Frame labels come from the facet coordinate through :func:`frame_labels`, so they
     are spelled exactly as the static panels' titles are — ``Jan 2012`` for consecutive
-    months, ``Jan`` for a climatology, ``50 m`` for a level — except where that would
-    not tell one frame from another, since a movie is as often over the unreduced axis
-    as over a reduction.
+    months, ``Jan`` for a climatology, ``50 m`` for a level — including where a month is
+    too coarse to tell one frame from another, which a movie runs into more often than a
+    grid does, being as often over the unreduced axis as over a reduction.
+
+    The suptitle likewise says what the frame labels do not: it defaults to the
+    variable's short name (see :func:`field_title`), as :func:`field_facet`'s does, and
+    ``title=""`` drops it. It stays fixed while the frames play, being the one thing
+    about the figure that does not change.
 
     ``row_dim`` has no counterpart: a movie has one axis to play, and two facet axes
     would need one to become the panels — which is what :func:`field_facet` is for.
@@ -2752,6 +2841,7 @@ def facet_movie(
 
     from ocean_skill.plot.typography import REFERENCE_GRID, facet_figsize
 
+    title = field_title(standard_name) if title is None else title
     facet_dim = _one_facet_axis(field, facet_dim)
     indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
     labels = frame_labels(field[facet_dim]) if facet_dim in field.coords else None
@@ -2839,6 +2929,7 @@ def facet_movie(
     _align_colorbars(fig)
     _fit_text_widths(fig)
     _clear_row_labels(fig)
+    _centre_suptitle(fig)
 
     proj = ccrs.PlateCarree()
     artists = [im]

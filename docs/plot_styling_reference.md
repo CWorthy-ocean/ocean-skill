@@ -399,6 +399,13 @@ physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)")                    # mat
 physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)", renderer="holoviews")  # same text, interactive
 ```
 
+The one-source families — `Field.plot()` and `Field.movie()` — **default** it to the
+variable's short name (`alkalinity`), the panels having said *when* but nothing having
+said *what*. Pass `title=""` to drop it, or any string to replace it. On an interactive
+movie the name joins each frame's label (`alkalinity — 2013-01-16`) instead, bokeh's
+only title there being the panel's own. Comparison families still draw no title unless
+given one: their rows are already named down the left edge.
+
 ### `font_scale`
 
 Multiplies **every** text size at once, keeping the proportions between them — the

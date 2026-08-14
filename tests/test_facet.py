@@ -156,6 +156,28 @@ def test_the_panels_say_which_reduction_made_them(daily):
     assert facet_labels(climatology["month"])[:2] == ["Jan", "Feb"]
 
 
+def test_panels_finer_than_a_month_are_titled_finer_than_a_month(daily):
+    """Three days of one January are three panels, so they need three titles.
+
+    The unreduced case: ``select={"time": [d1, d2, d3]}`` leaves the model's own time
+    axis standing, where ``"%b %Y"`` names the month all three share and none of the
+    panels. A title that fits every panel identifies none of them.
+    """
+    from ocean_skill.plot.matplotlib_renderer import facet_labels
+
+    days = select(daily, {"time": slice("2012-01-16", "2012-01-18")})
+    assert facet_labels(days["time"]) == ["2012-01-16", "2012-01-17", "2012-01-18"]
+
+
+def test_both_renderers_title_submonthly_panels_by_day(daily):
+    """The labels reach the page, statically and interactively alike."""
+    days = select(daily, {"time": slice("2012-01-16", "2012-01-18")})
+    spec = PlotSpec(family="field_facet", items=[_item(days, "time")])
+    expected = {"2012-01-16", "2012-01-17", "2012-01-18"}
+    assert set(_mpl_titles(render(spec))) == expected
+    assert set(_hv_titles(render(spec, renderer="holoviews"))) == expected
+
+
 # --- a partial period is reported ----------------------------------------------------
 
 
@@ -256,6 +278,84 @@ def test_matplotlib_draws_one_panel_per_period(daily):
         "May 2012",
         "Jun 2012",
     ]
+
+
+def test_the_figure_names_the_variable_it_draws(daily):
+    """The panels say *when*; without this nothing says *what*.
+
+    A colorbar reading ``[mmol m-3]`` narrows a saved figure to "some concentration",
+    and the source it came from is not on the page — so an alkalinity figure and a
+    nitrate one were indistinguishable once out of the session that drew them.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    field = aggregate(daily, MONTHLY)
+    fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]))
+    assert fig._suptitle.get_text() == "nitrate"
+    # the short name every legend and axis label in the package uses, not the CF one
+    assert NITRATE not in fig._suptitle.get_text()
+
+
+def test_the_variable_name_is_a_default_and_not_a_fixture(daily):
+    """An explicit title wins outright, and an empty one drops the suptitle."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    field = aggregate(daily, MONTHLY)
+    spec = PlotSpec(family="field_facet", items=[_item(field, "time")])
+    assert render(spec, title="GOM run, 2012")._suptitle.get_text() == "GOM run, 2012"
+    assert render(spec, title="")._suptitle is None
+
+
+def test_the_interactive_twin_names_the_variable_too(daily):
+    """Both renderers spell the field the same way — the shared field_title.
+
+    Asserted on the rendered document rather than the options dict: bokeh draws a
+    layout's title as a ``Div`` above the grid, and "the option was set" is not the
+    same claim as "the name is on the page".
+    """
+    import holoviews as hv
+    from bokeh.models import Div
+
+    field = aggregate(daily, MONTHLY)
+    spec = PlotSpec(family="field_facet", items=[_item(field, "time")])
+    doc = hv.render(render(spec, renderer="holoviews"), backend="bokeh")
+    assert any("nitrate" in d.text for d in doc.select({"type": Div}))
+
+
+def test_the_title_sits_over_the_panels_not_over_the_canvas(daily):
+    """A tall grid's maps are not centred on the page, and the title follows them.
+
+    One narrow column of maps beside a vertical colorbar leaves the drawn block well
+    right of the figure's middle, where matplotlib puts a suptitle. Unmoved, the title
+    lands in the left margin, naming nothing.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    field = aggregate(daily, MONTHLY)
+    fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]), ncols=1)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    width = fig.get_size_inches()[0] * fig.dpi
+    panels = [
+        ax.get_window_extent(renderer)
+        for ax in fig.axes
+        if ax.get_visible() and not getattr(ax, "_osk_cbar_parents", None)
+    ]
+    middle = (min(b.x0 for b in panels) + max(b.x1 for b in panels)) / 2 / width
+    assert fig._suptitle.get_position()[0] == pytest.approx(middle, abs=0.01)
+
+
+def test_a_field_with_no_cf_name_gets_no_title_rather_than_a_guess(daily):
+    """A derived expression has no standard_name to shorten; silence beats invention."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    field = aggregate(daily, MONTHLY)
+    item = {**_item(field, "time"), "standard_name": None}
+    assert render(PlotSpec(family="field_facet", items=[item]))._suptitle is None
 
 
 def test_every_panel_shares_one_colour_scale(daily):

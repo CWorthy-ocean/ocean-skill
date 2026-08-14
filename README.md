@@ -133,7 +133,10 @@ osk.compare(reference="woa23_nitrate_month01", test="GOM_bgc", variables=[NITRAT
 
 `resample` gives consecutive periods (`Jan 2012`, `Feb 2012`, …); `{"groupby": "month"}`
 gives a climatology (`Jan`, `Feb`, …, every January of the record in one panel). The
-panels label themselves differently, so the two can't be confused on the page. A
+panels label themselves differently, so the two can't be confused on the page, and an
+axis finer than its label says so — three days of one January are titled `2012-01-16`
+rather than `Jan 2012` three times over. The figure's own title names the variable
+(`nitrate`), since the panels say when but nothing else says what; `title=""` drops it. A
 selection that starts or ends mid-period warns, since those panels average over part of
 a month but are labelled like whole ones. The grid's orientation follows the domain's
 aspect ratio — a wide box stacks down the page, a tall one spreads across it.

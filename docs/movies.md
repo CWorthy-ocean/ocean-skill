@@ -44,12 +44,13 @@ opposite directions: a handful of monthly means are best seen at once, side by s
 where a month of daily output is 31 panels too small to read and 31 frames a drag apart.
 
 Frame labels come from the facet coordinate, spelled as the static panel titles are —
-`Jan 2012` for consecutive months, `Jan` for a climatology, `50 m` for a level — except
+`Jan 2012` for consecutive months, `Jan` for a climatology, `50 m` for a level — including
 where that wouldn't tell one frame from another. A movie is as often over the *unreduced*
 axis, where every step of January is one month; there the label refines itself to
-`2012-01-05`, or to the minute if that is what separates two frames. Statically a
-repeated label is only a repeated caption, but interactively the labels *are* the
-slider's values, and duplicates would collapse frames on top of each other silently.
+`2012-01-05`, or to the minute if that is what separates two frames. Panels refine the
+same way, for the same reason: a title that fits every panel names none of them. It
+matters most on a slider, though, where the labels *are* the frames' keys and duplicates
+would collapse frames on top of each other silently.
 
 A movie plays **one** axis. If the reduction leaves two standing (`select={"depth": [0,
 50, 100]}` beside a monthly `aggregate`) there is no single sequence to play, and the

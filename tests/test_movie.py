@@ -522,14 +522,15 @@ def test_a_field_movie_labels_its_frames_like_the_facet_grid_titles(tmp_path):
 def test_frame_labels_get_finer_when_a_month_is_not_enough():
     """31 frames all called 'Jan 2012' would be a slider that loses 30 of them.
 
-    facet_labels is right for the reduction it was written for (monthly means), and a
-    movie is as often over the raw axis, so the label has to refine itself.
+    ``"%b %Y"`` is right for the reduction it was written for (monthly means), and a
+    movie is as often over the raw axis, so the label has to refine itself — the same
+    refinement a facet grid of the same axis gets, which is why the two agree here.
     """
     from ocean_skill.plot.matplotlib_renderer import facet_labels, frame_labels
 
     daily = _run(31)
-    assert len(set(facet_labels(daily["time"]))) == 1  # the case being guarded
     labels = frame_labels(daily["time"])
+    assert labels == facet_labels(daily["time"])
     assert len(set(labels)) == 31
     assert labels[0] == "2012-01-01"
 
@@ -590,6 +591,35 @@ def test_the_interactive_field_movie_puts_the_facet_axis_on_a_slider():
     movie = _hv(_facet_film(_run(5), renderer="holoviews", domain=None))
     assert [d.name for d in movie.kdims] == ["frame"]
     assert list(movie.keys()) == [f"2012-01-0{i}" for i in range(1, 6)]
+
+
+def test_a_field_movie_names_its_variable_in_both_renderers():
+    """The frames say when; the variable name says what — as on the facet grid.
+
+    Where it sits differs by necessity, not by choice: matplotlib has a suptitle above
+    the map, bokeh's only title is the panel's own, so there the name joins the frame
+    label rather than replacing it.
+    """
+    ani = _facet_film(_run(3), domain=None)
+    assert ani._fig._suptitle.get_text() == "nitrate"
+
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
+    titles = [
+        f.title.text
+        for el in movie.values()
+        for f in hv.render(el, backend="bokeh").select({"type": figure})
+    ]
+    assert titles[0] == "nitrate — 2012-01-01"
+    assert len(set(titles)) == 3, "the name must join the frame labels, not replace them"
+
+
+def test_an_explicit_movie_title_still_wins():
+    ani = _facet_film(_run(3), domain=None, title="GOM run")
+    assert ani._fig._suptitle.get_text() == "GOM run"
+    assert _facet_film(_run(3), domain=None, title="")._fig._suptitle is None
 
 
 def test_the_interactive_field_movie_fixes_one_colour_scale():
