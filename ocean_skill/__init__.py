@@ -16,6 +16,8 @@ The public API is intentionally small:
                 aggregate={"time": "mean"}).plot()   # no default reduction: say so
     osk.compare(..., over="time").plot()             # score against time, cell by cell
     osk.field(source, variable, select=...)          # one source, no reference
+    osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
+                                                     # pooled onto Taylor + target
 
     osk.cache.info()             # processed intermediates are cached; where, how big
     osk.outputs.info()           # where figures + metrics get written
@@ -23,7 +25,7 @@ The public API is intentionally small:
 
 from ocean_skill import cache, outputs
 from ocean_skill.catalog import catalogs, describe, find
-from ocean_skill.comparison import Comparison, compare
+from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.field import Field, field
 from ocean_skill.sources import read
 
@@ -31,6 +33,7 @@ __version__ = "0.0.1"
 
 __all__ = [
     "Comparison",
+    "ComparisonSet",
     "Field",
     "__version__",
     "cache",
@@ -41,4 +44,5 @@ __all__ = [
     "find",
     "outputs",
     "read",
+    "summary",
 ]

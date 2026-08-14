@@ -67,6 +67,14 @@ class PlotSpec:
         than the comparison's own fields — the ``metrics`` record is still there, as the
         overall value each panel is annotated with.
 
+        The summary families (``taylor``, ``target``, ``paired``) are the smallest
+        items of all: ``metrics`` and ``label``, with no field payload at all. That is
+        not a subset of the others but the whole of what a diagram of points reads, and
+        it is what lets those families pool comparisons the map families could not share
+        a figure with — a scored map, an unscored one and a station series are all one
+        record of scalars here. See
+        :meth:`ocean_skill.comparison.ComparisonSet._metric_items`.
+
         ``series`` carries ``field_grid``'s list too, with each ``aligned`` 1-D on
         ``time`` rather than 2-D on a grid (position and depth riding as scalar
         coordinates). Its items are *not* one per row, unlike ``field_grid``'s: the
