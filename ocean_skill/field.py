@@ -165,13 +165,23 @@ class Field:
 
     def as_item(self) -> dict[str, Any]:
         """Return this field as a spec item."""
+        from ocean_skill.comparison import _VERTICAL_KEYS, SURFACE, _depth_label
+
         row_dim, facet_dim = self.facet_dims
+        # the vertical selection, spelled for a label ("surface", "50 m"). A renderer
+        # cannot recover it from the field once the transform has collapsed the axis,
+        # and a plot of one level that does not say which level is a plot of nothing in
+        # particular -- see the interactive movie's title.
+        requested = next(
+            (self.select[k] for k in _VERTICAL_KEYS if k in self.select), SURFACE
+        )
         return {
             "field": self.data,
             "facet_dim": facet_dim,
             "row_dim": row_dim,
             "units": self.data.attrs.get("units"),
             "standard_name": self.standard_name,
+            "depth": _depth_label(requested),
             "label": self.label or self.source,
         }
 
