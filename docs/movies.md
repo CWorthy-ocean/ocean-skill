@@ -193,6 +193,49 @@ The default is a slider rather than holoviews' own choice because holoviews pick
 ordered sequence: the next frame is two clicks and a search, and you cannot drag through
 the movie at all.
 
+### Why the interactive movie is quick
+
+Three things, all of which the obvious implementation gets wrong on a real model grid:
+
+**Frames are drawn on demand.** The obvious construction — a `HoloMap` holding every
+frame — materializes the whole movie before showing one, and embeds all of it in the
+page. A 60-frame surface field on a 150×200 grid is 1.8M quads in the browser, which
+opens slowly and then answers the slider slowly or not at all. A `DynamicMap` draws the
+frame you are looking at and no others, so opening costs one frame however many there
+are. The trade is that it needs the kernel alive, which is why `save=` has to render
+every frame on the way out.
+
+**`hover=False` by default.** A hover readout makes bokeh hit-test every quad. That is
+worth paying on one map you are reading values off, and pure cost on a movie you are
+watching. `hover=True` brings it back.
+
+**`rasterize="auto"`.** Past ~100k cells a frame, datashader renders the mesh to an image
+instead of shipping every quad. On a 400×550 grid that is **210 MB → 4.4 MB** and
+**31s → 1s** to save:
+
+| | raw mesh | rasterized |
+|---|---|---|
+| payload per frame | 59.7 MB | 1.7 MB |
+| 5-frame HTML | 210.4 MB | 4.4 MB |
+| time to save | 31.5s | 1.0s |
+
+Below the threshold the raw mesh is kept, because it stays sharp when you zoom in.
+Rasterizing is applied eagerly (holoviews cannot nest one lazy operation inside
+another), so zooming magnifies the image rather than re-aggregating — pass
+`rasterize=False` for a field small enough to explore that way, or `True` to force it.
+
+### Looks
+
+`tiles=` puts a basemap under the field — `tiles="EsriTerrain"`, `"CartoLight"`, or any
+[geoviews tile source](https://geoviews.org/user_guide/Working_with_Bokeh.html). Off by
+default: the browser fetches them, so a notebook that has to work offline cannot rely on
+them.
+
+The panel title says **what** as well as **when** — `GOM_bgc: alkalinity, surface —
+2010-01-29`. The variable comes from the CF standard name via `vars.short_name`, the
+depth from the `select` that produced the field, the source from its label; any part that
+isn't known is left out, and `title=` overrides the lot while keeping the frame stamp.
+
 A single-field movie also gets the **whole page width** (`SOLO_PANEL_WIDTH_PX`, ~680px)
 rather than the ~260px a panel gets in a row of three. It is the only panel on the page,
 so inheriting the row's width made the one thing on it the smallest thing on it. Its axis

@@ -159,6 +159,9 @@ def _quadmesh(
     canvas_factor: float = 1.0,
     width_px: float = PANEL_WIDTH_PX,
     axis_labels: tuple[str, str] | None = None,
+    hover: bool = True,
+    rasterize: bool = False,
+    tiles: str | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -181,17 +184,38 @@ def _quadmesh(
         "title": title,
         "colorbar": True,
         "clabel": units or "",
-        "hover": True,
+        "hover": hover,
         "frame_width": frame_w,
         "frame_height": frame_h,
         "fontsize": fontsize,
-        "rasterize": False,
+        "rasterize": rasterize,
         "logz": log,
     }
+    if rasterize:
+        # hvplot returns rasterize=True as a *lazy* DynamicMap so that zooming
+        # re-aggregates at the new extent. Holoviews cannot nest one DynamicMap inside
+        # another, and a movie's frames are already one (see _frame_map), so the
+        # aggregation is applied eagerly here instead. The cost is that zooming
+        # magnifies the rasterized image rather than re-aggregating the mesh underneath
+        # it — pass rasterize=False for a field small enough to zoom into properly.
+        opts["dynamic"] = False
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
         opts |= {"geo": True, "coastline": "50m", "projection": None}
+        if tiles:
+            # a basemap gives the eye real coastline and terrain where the field is
+            # masked, which the 50m outline cannot. Web tiles are fetched by the
+            # browser, hence opt-in: a notebook that has to work offline cannot have
+            # them on by default.
+            opts["tiles"] = tiles
+            opts.pop("projection", None)
+            # Known limitation: a tile layer carries the whole world's extent, so the
+            # view opens wider than the domain and the field sits in the middle of it.
+            # Constraining it with xlim/ylim in degrees does *not* work — with tiles the
+            # plot is in Web Mercator, and lon/lat limits silently drop the field
+            # altogether rather than framing it. Zooming re-frames it fine; a real fix
+            # means projecting the bounds, which is not worth the risk of a blank map.
     try:
         return da.hvplot.quadmesh(**opts)
     except Exception:  # pragma: no cover - geoviews/cartopy unavailable
@@ -610,6 +634,104 @@ def _skill_map(
 FRAME_DIM = "frame"
 
 
+#: Cell count past which ``rasterize="auto"`` turns datashader on. Above roughly this,
+#: bokeh is being asked to ship and hit-test more quads than a screen has pixels, so
+#: rendering server-side to an image is both faster and no less accurate — the mesh was
+#: never resolvable at that size anyway. Below it, the raw mesh is sharper on zoom.
+RASTERIZE_ABOVE_CELLS = 100_000
+
+
+def _check_tiles(tiles: str | None) -> str | None:
+    """Return ``tiles`` once confirmed to name a real tile source.
+
+    A typo is otherwise reported as ``"cannot swap from dimension 'lon'"`` from deep
+    inside hvplot's projection handling, which names neither the argument at fault nor
+    anything a reader could act on.
+    """
+    if not tiles or tiles is True:
+        return tiles
+    try:
+        from geoviews import tile_sources
+    except ImportError:  # pragma: no cover - geoviews ships in environment.yml
+        return tiles
+    known = sorted(tile_sources.tile_sources)
+    if tiles not in known:
+        raise ValueError(
+            f"unknown tile source {tiles!r}. geoviews offers: {', '.join(known)}"
+        )
+    return tiles
+
+
+def _should_rasterize(da, rasterize) -> bool:
+    """Resolve ``rasterize=True/False/"auto"`` for one frame.
+
+    ``"auto"`` is a real choice rather than a hedge: the right answer depends on the
+    mesh, and a movie of a model field is usually far past the size where shipping every
+    quad to the browser stops being sensible, while the small synthetic grids in the
+    tests are far below it. Datashader is optional, so a missing one means False rather
+    than an import error at draw time.
+    """
+    if rasterize != "auto":
+        return bool(rasterize)
+    if int(np.prod(da.shape)) <= RASTERIZE_ABOVE_CELLS:
+        return False
+    try:
+        import datashader  # noqa: F401
+    except ImportError:  # pragma: no cover - datashader is present in environment.yml
+        warnings.warn(
+            f"{int(np.prod(da.shape)):,} cells per frame would be worth rasterizing, "
+            "but datashader is not installed; drawing the raw mesh instead "
+            "(conda install -c conda-forge datashader).",
+            stacklevel=2,
+        )
+        return False
+    return True
+
+
+def _frame_map(keys: list[str], draw, *, frame_dim: str | None = None):
+    """Return a ``DynamicMap`` over ``keys`` that draws frames on demand.
+
+    The obvious construction — a ``HoloMap`` holding every frame — materializes the
+    whole movie before the first one appears, and then ships all of it to the browser.
+    For a real model field that is the difference between a plot and a hang: a 60-frame
+    surface field on a 150x200 grid is 1.8M quads embedded in the page, which opens
+    slowly and then answers the slider slowly or not at all.
+
+    A ``DynamicMap`` renders the frame you are looking at and no others, so opening
+    costs one frame however many there are. The trade is that it needs the kernel
+    alive — which a notebook has and a saved HTML page does not, so
+    :func:`_save_interactive` materializes it again on the way out.
+    """
+    import holoviews as hv
+
+    dim = hv.Dimension(frame_dim or FRAME_DIM, values=keys)
+    index = {key: i for i, key in enumerate(keys)}
+    return hv.DynamicMap(lambda frame: draw(index[frame]), kdims=[dim])
+
+
+def _subject(item: dict[str, Any]) -> str:
+    """Return what the movie is *of*: variable, depth and source, as the item has them.
+
+    A frame label alone ("2010-01-29") says which frame you are looking at and nothing
+    about what it shows — fine on a figure with a caption, thin on a plot you scrolled
+    back to a week later. The static renderer has a suptitle for this; here the panel
+    title is the only place, so it carries both, and ``title=`` still overrides.
+
+    Every part is optional, because an item assembled by hand may carry none of them.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_title
+
+    # field_title is the package's one spelling of "which variable is this" (it goes
+    # through vars.short_name, as every legend and axis label does); the depth and the
+    # source are what a movie can add to it, having only the panel title to say them in
+    parts = [field_title(item.get("standard_name")), item.get("depth")]
+    subject = ", ".join(str(p) for p in parts if p)
+    source = item.get("label")
+    if source and subject:
+        return f"{source}: {subject}"
+    return subject or (str(source) if source else "")
+
+
 def _unique_keys(labels) -> list[str]:
     """Make slider values unique, since a ``HoloMap`` key identifies a frame.
 
@@ -653,6 +775,9 @@ def _facet_movie(
     axis_labels: tuple[str, str] | None = ("longitude", "latitude"),
     size=None,
     zoom: float = 1.0,
+    hover: bool = False,
+    rasterize: bool | str = "auto",
+    tiles: str | None = None,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -662,6 +787,9 @@ def _facet_movie(
     is the more useful of the two: forty panels on a page are each too small to read,
     while forty frames are full size and a drag apart.
 
+    Frames are drawn on demand (see :func:`_frame_map`), so opening the movie costs one
+    frame however many there are.
+
     Being the only panel on the page, it gets the page: the frame is
     :data:`SOLO_PANEL_WIDTH_PX` rather than the third-of-a-row every other family draws
     at (override with ``width_px``). Axis titles are shortened for the same reason — a
@@ -669,27 +797,41 @@ def _facet_movie(
     which bokeh truncates anyway; pass ``axis_labels=None`` to keep whatever the
     coordinates say.
 
+    Three knobs exist because a movie is watched rather than inspected, and the defaults
+    that suit a single still do not suit a hundred frames of a model grid:
+
+    * ``hover=False`` — a hover readout makes bokeh hit-test every quad. Worth it on one
+      map you are reading values off; pure cost on a movie you are watching. Pass
+      ``True`` to get it back.
+    * ``rasterize="auto"`` — render the mesh to an image with datashader once it is
+      bigger than :data:`RASTERIZE_ABOVE_CELLS`. See :func:`_should_rasterize`.
+    * ``tiles`` — a basemap under the field, e.g. ``tiles="EsriTerrain"`` or
+      ``"CartoLight"`` (any :mod:`geoviews.tile_sources` name). Off by default because
+      the browser fetches them, which a notebook working offline cannot rely on.
+
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
     in the field.
 
-    The variable's name joins each frame's title (``alkalinity — 2013-01-16``) rather
-    than sitting above the movie as the static suptitle does: bokeh's only title here is
-    the panel's own, and a fixed one set on the ``HoloMap`` would replace the frame
-    labels instead of joining them. Same substitution :func:`_field_row` makes for a row
-    label. An explicit ``title=`` still replaces the frame labels outright, which is what
-    asking for one title over a movie means; ``title=""`` leaves the labels bare.
+    What the movie is *of* joins each frame's title (``GOM_bgc: alkalinity, surface —
+    2013-01-16``) rather than sitting above it as the static suptitle does: bokeh's only
+    title here is the panel's own, and a fixed one set on the map would replace the
+    frame labels rather than joining them. Same substitution :func:`_field_row` makes
+    for a row label. The variable is spelled by
+    :func:`~ocean_skill.plot.matplotlib_renderer.field_title`, so it reads the same here
+    as on a static figure; the depth and source are what a movie adds, having nowhere
+    else to put them. An explicit ``title=`` replaces the subject outright and
+    ``title=""`` leaves the frame labels bare.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
         _limits,
         _one_facet_axis,
         _select_frames,
-        field_title,
         frame_labels,
     )
 
-    hv = _extension()
+    _extension()
     factor = _canvas_factor(size, zoom)
     field = item["field"]
     facet_dim = _one_facet_axis(field, item.get("facet_dim"))
@@ -709,13 +851,18 @@ def _facet_movie(
     vmin, vmax = _limits(scope)
     if log:
         vmin = max(vmin, 1e-6)
+    raster = _should_rasterize(field.isel({facet_dim: indices[0]}), rasterize)
+    tiles = _check_tiles(tiles)
+    subject = _subject(item) if title is None else title
 
-    name = field_title(standard_name) if title is None else ""
-    dim = hv.Dimension(FRAME_DIM, values=keys)
-    panels = {
-        key: _quadmesh(
-            field.isel({facet_dim: index}),
-            title=f"{name} — {key}" if name else key,
+    def draw(position: int):
+        frame = field.isel({facet_dim: indices[position]})
+        return _quadmesh(
+            frame,
+            # what is being shown, then which frame of it — the subject stays put while
+            # the timestamp changes, so the eye is not re-reading the whole title every
+            # frame to find the part that moved
+            title=f"{subject} — {keys[position]}" if subject else keys[position],
             cmap=seq,
             clim=(vmin, vmax),
             units=units,
@@ -725,12 +872,12 @@ def _facet_movie(
             canvas_factor=factor,
             width_px=width_px,
             axis_labels=axis_labels,
+            hover=hover,
+            rasterize=raster,
+            tiles=tiles,
         )
-        for key, index in zip(keys, indices, strict=True)
-    }
-    movie = hv.HoloMap(panels, kdims=[dim])
-    if title:
-        movie = movie.opts(title=str(title))
+
+    movie = _frame_map(keys, draw)
     movie = _with_widget(movie, widget=widget, fps=fps, frame_dim=FRAME_DIM)
     if save:
         _save_interactive(movie, save)
@@ -752,6 +899,8 @@ def _field_movie(
     save=None,
     size=None,
     zoom: float = 1.0,
+    hover: bool = False,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -793,6 +942,7 @@ def _field_movie(
     # One clim for the whole movie, from every frame or just the first. Computed here
     # rather than per panel because _quadmesh is called once per frame per panel and
     # would otherwise re-derive a different scale for each.
+    raster = _should_rasterize(items[0]["aligned"]["reference"], rasterize)
     scope = items if shared_limits else items[:1]
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
@@ -814,38 +964,43 @@ def _field_movie(
         or 1.0
     )
 
-    dim = hv.Dimension(FRAME_DIM, values=keys)
-    panels: list[dict[str, Any]] = [{}, {}, {}]
-    for key, item in zip(keys, items, strict=True):
+    def draw(position: int, panel: int):
+        item = items[position]
         aligned = item["aligned"]
         tl, rl = item.get("labels") or labels
+        if panel == 0:
+            # the frame label goes on the test panel's title as well as on the slider:
+            # the static renderer draws it in the panel, and a saved page is read the
+            # same way a figure is
+            return _quadmesh(
+                aligned["test"],
+                title=f"{keys[position]} — {tl}",
+                cmap=seq,
+                clim=(vmin, vmax),
+                units=units,
+                geo=geo,
+                log=log,
+                font_scale=font_scale,
+                canvas_factor=factor,
+                hover=hover,
+                rasterize=raster,
+            )
+        if panel == 1:
+            return _quadmesh(
+                aligned["reference"],
+                title=str(rl),
+                cmap=seq,
+                clim=(vmin, vmax),
+                units=units,
+                geo=geo,
+                log=log,
+                font_scale=font_scale,
+                canvas_factor=factor,
+                hover=hover,
+                rasterize=raster,
+            )
         summary = _metrics_summary(item.get("metrics"), metric_keys)
-        # the frame label goes on the test panel's title as well as on the slider: the
-        # static renderer draws it in the panel, and a saved HTML page is read the same
-        # way a figure is
-        panels[0][key] = _quadmesh(
-            aligned["test"],
-            title=f"{key} — {tl}",
-            cmap=seq,
-            clim=(vmin, vmax),
-            units=units,
-            geo=geo,
-            log=log,
-            font_scale=font_scale,
-            canvas_factor=factor,
-        )
-        panels[1][key] = _quadmesh(
-            aligned["reference"],
-            title=str(rl),
-            cmap=seq,
-            clim=(vmin, vmax),
-            units=units,
-            geo=geo,
-            log=log,
-            font_scale=font_scale,
-            canvas_factor=factor,
-        )
-        panels[2][key] = _quadmesh(
+        return _quadmesh(
             aligned["difference"],
             title=f"difference ({summary})" if summary else "difference",
             cmap=div,
@@ -854,9 +1009,12 @@ def _field_movie(
             geo=geo,
             font_scale=font_scale,
             canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         )
 
-    maps = [hv.HoloMap(p, kdims=[dim]) for p in panels]
+    # three maps over one shared frame dimension, so a single widget steps all three
+    maps = [_frame_map(keys, lambda i, p=panel: draw(i, p)) for panel in range(3)]
     layout = (maps[0] + maps[1] + maps[2]).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
@@ -905,8 +1063,16 @@ def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
 
 
 def _save_interactive(obj, save) -> None:
-    """Write ``obj`` to a standalone HTML page, refusing formats bokeh cannot write."""
+    """Write ``obj`` to a standalone HTML page, refusing formats bokeh cannot write.
+
+    A page has no kernel behind it, so the laziness that makes a movie open quickly in a
+    notebook (see :func:`_frame_map`) has to be paid back here: every frame is rendered
+    and embedded. That is the whole movie in one file, and it grows with the frame count
+    — which is exactly why the static renderer's mp4 exists.
+    """
     from pathlib import Path
+
+    import holoviews as hv
 
     path = Path(save).expanduser()
     if path.suffix.lower() not in (".html", ".htm"):
@@ -916,12 +1082,12 @@ def _save_interactive(obj, save) -> None:
             f"here, or pass renderer='matplotlib' to write {path.name}."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(obj, "save"):  # a panel pane embeds its own widget state
+    if hasattr(obj, "save"):  # a panel pane; embed=True evaluates every frame
         obj.save(str(path), embed=True)
     else:
-        import holoviews as hv
-
-        hv.save(obj, str(path))
+        # a bare DynamicMap cannot be serialized lazily either -- materialize it into
+        # the HoloMap it would have been, which is what hv.save can write
+        hv.save(hv.HoloMap(obj) if isinstance(obj, hv.DynamicMap) else obj, str(path))
     print(f"ocean-skill: interactive movie written to {path}")
 
 
