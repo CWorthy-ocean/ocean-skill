@@ -463,17 +463,29 @@ def prepare_source(
     lane its cross-model reuse (a reference cropped to one model's domain is not the one
     another model wants), which is why the caller passes it only when it is worth that.
 
+    ``time_window`` is the same idea along time: ``(start, stop)`` the lane is cropped
+    to, and part of the cache key for the same reason ``bbox`` is. A skill map derives
+    it from its test lane (see :meth:`Comparison.align`), so the caller knows the window
+    before this reads anything — which is what lets it reach an ERDDAP table as a
+    server-side constraint rather than as a crop applied to a record already downloaded.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
     import ocean_skill as osk
     from ocean_skill import cache as _cache
     from ocean_skill.catalog import resolve
+    from ocean_skill.sources import erddap_constraints
 
     key_select: dict[str, Any] = {**(select or {}), "_aggregate": aggregate}
     if bbox is not None:
         # rounded so that float noise in an extent does not fragment the cache
         key_select["_bbox"] = [round(float(b), 4) for b in bbox]
+    if time_window is not None:
+        # A cropped lane is not the uncropped one, and two test lanes over the same
+        # region but different years share a `_bbox`. Without this they would share an
+        # entry as well, and the second would be served the first one's window.
+        key_select["_time_window"] = [str(w) for w in time_window]
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -486,9 +498,15 @@ def prepare_source(
                 _require_reduced(hit[0], require_reduced, source)
             return hit
 
+    # An ERDDAP table is fetched whole in one request, so the time narrowing below has
+    # to travel with the request rather than follow it -- see erddap_constraints, which
+    # returns nothing for every other kind of source. The same `select` is applied in
+    # memory regardless, so this changes the size of the download and nothing else.
+    meta = resolve(source).metadata
+    constraints = erddap_constraints(meta, select, time_window)
     da, depth = _prepare(
-        osk.read(source),
-        resolve(source).metadata,
+        osk.read(source, constraints=constraints) if constraints else osk.read(source),
+        meta,
         variable,
         dict(select or {}),
         aggregate,

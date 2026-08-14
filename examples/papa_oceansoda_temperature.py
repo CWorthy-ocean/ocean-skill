@@ -17,10 +17,13 @@ buried here:
 * **Position.** The product's 1-degree cell centre nearest the mooring is ~55 km away.
   That is just what a 1-degree cell is, and it is recorded in the aligned attrs
   (``nearest_distance_km``) rather than swallowed.
-* **The download.** ERDDAP has no way to give part of a table unless asked, so the read
-  is constrained to the period below. Without ``constraints=`` the whole twelve-year
-  record comes down; with it, two years is quick. The lane cache keeps it a one-time
-  cost either way.
+* **The download.** ERDDAP hands back a table whole, so a read narrowed afterwards has
+  already been paid for: the twelve-year record comes down to have two years kept. The
+  ``select=`` below therefore travels *with* the request as a server-side constraint
+  rather than following it — ``osk.compare`` does that itself for an ERDDAP entry, and
+  the explicit ``constraints=`` on the direct read is the same thing said by hand. The
+  catalog still advertises the mooring's full 2013-2025 span, which is what
+  ``osk.find(time=...)`` searches on; only the request is narrow.
 
 Swapping in a ROMS run covering Papa is a one-line change: point ``TEST`` at it. The
 model lane is sampled at the station whether it is 1-degree and rectilinear or
@@ -41,7 +44,8 @@ TEST = "oceansoda_ethz"
 PERIOD = ("2015-01-01", "2017-01-01")
 
 # Server-side, so the read is two years rather than twelve. osk.read forwards these to
-# the ERDDAP reader; a select= would only narrow what has already been downloaded.
+# the ERDDAP reader verbatim; the compare below reaches the same constraints from its
+# own select=, so this spelling is only needed when reading the station on its own.
 constraints = {"time>=": PERIOD[0], "time<=": PERIOD[1]}
 station = osk.read(REFERENCE, constraints=constraints)
 print(f"{REFERENCE}: {len(station)} rows over {PERIOD[0]} to {PERIOD[1]}")
