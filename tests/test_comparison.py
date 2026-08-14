@@ -193,3 +193,99 @@ def test_depth_label():
     assert _depth_label(SURFACE) == "surface"
     assert _depth_label(0) == "0 m"
     assert _depth_label(100.0) == "100 m"
+
+
+# -- narrowing an ERDDAP lane before it is downloaded -------------------------
+
+
+@pytest.fixture
+def station():
+    """Build a year of daily station data, standing in for a moored ERDDAP table."""
+    import pandas as pd
+
+    time = pd.date_range("2015-01-01", periods=365, freq="D")
+    return xr.Dataset(
+        {"temp": ("time", np.arange(365, dtype=float))}, coords={"time": time}
+    )
+
+
+@pytest.fixture
+def lane(monkeypatch, station):
+    """Run ``prepare_source`` against ``station``, capturing what reached ``read``."""
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import prepare_source
+
+    seen: list[dict] = []
+
+    def run(meta, select=None, aggregate=None, **kwargs):
+        monkeypatch.setattr(
+            osk, "read", lambda name, **kw: (seen.append(kw), station)[1]
+        )
+        monkeypatch.setattr(
+            catalog, "resolve", lambda name: SimpleNamespace(metadata=meta)
+        )
+        da, _ = prepare_source(
+            "mooring", "temp", select, aggregate, use_cache=False, **kwargs
+        )
+        return da, seen[-1]
+
+    return run
+
+
+#: An ERDDAP tabledap entry's metadata, as `intake_erddap` writes it into a catalog.
+TABLEDAP = {"tabledap": "https://example.org/erddap/tabledap/mooring"}
+
+
+def test_a_time_select_reaches_an_erddap_read_as_a_constraint(lane):
+    """The whole point: ERDDAP fetches the table whole, so `select` must travel with it.
+
+    Before this the request went out unconstrained and the twelve-year record came down
+    to be trimmed in memory -- the download the caller believed they had narrowed.
+    """
+    da, kwargs = lane(TABLEDAP, select={"time": slice("2015-02-01", "2015-02-28")})
+    assert kwargs["constraints"] == {
+        "time>=": "2015-02-01T00:00:00Z",
+        "time<=": "2015-02-28T23:59:59Z",
+    }
+    # ...and the in-memory select still runs, so the result does not depend on whether
+    # the server honoured the constraint. The fixture ignores it and returns the year.
+    assert da.sizes["time"] == 28
+
+
+def test_a_derived_window_reaches_an_erddap_read_as_a_constraint(lane):
+    """`over=` works the test lane's span out itself, then cropped *after* the read."""
+    window = (np.datetime64("2015-03-01"), np.datetime64("2015-03-31"))
+    da, kwargs = lane(TABLEDAP, select=None, aggregate=None, time_window=window)
+    assert kwargs["constraints"] == {
+        "time>=": "2015-03-01T00:00:00Z",
+        "time<=": "2015-03-31T00:00:00Z",
+    }
+    assert da.sizes["time"] == 31
+
+
+def test_a_non_erddap_lane_is_read_exactly_as_before(lane):
+    """The gate: a lazily-opened gridded source neither needs this nor sees it."""
+    da, kwargs = lane({}, select={"time": slice("2015-02-01", "2015-02-28")})
+    assert kwargs == {}
+    assert da.sizes["time"] == 28
+
+
+def test_two_windows_over_one_source_do_not_share_a_cache_entry(monkeypatch, station):
+    """A cropped lane is not the uncropped one, and `_bbox` alone did not say so."""
+    from ocean_skill.cache import key_for_prepared
+
+    keys = {
+        key_for_prepared(
+            source="mooring",
+            variable="temp",
+            select={"_aggregate": None, "_time_window": [str(w) for w in window]},
+        )
+        for window in (
+            (np.datetime64("2015-03-01"), np.datetime64("2015-03-31")),
+            (np.datetime64("2016-03-01"), np.datetime64("2016-03-31")),
+        )
+    }
+    assert len(keys) == 2
