@@ -11,7 +11,7 @@ is the interactive form of playing — you can hold a frame, step back, and hove
 for its value — with an optional play/pause scrubber for when it should just run.
 
 Implemented: ``field_row``, ``field_grid``, ``field_facet``, ``field_movie``,
-``facet_movie`` and ``target``. **Taylor is delegated back to
+``facet_movie``, ``skill_map`` and ``target``. **Taylor is delegated back to
 matplotlib**: it is drawn on a floating polar axis (``mpl_toolkits.axisartist``) that
 bokeh has no equivalent for, and rebuilding the curved correlation axis from primitives
 is a project in itself rather than a port. ``paired`` therefore returns a static Taylor
@@ -27,12 +27,16 @@ from typing import Any
 import numpy as np
 
 from ocean_skill.colormaps import cmaps_for
-from ocean_skill.plot.matplotlib_renderer import DEFAULT_METRIC_KEYS
+from ocean_skill.plot.matplotlib_renderer import (
+    DEFAULT_METRIC_KEYS,
+    metric_value_text,
+)
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.typography import (
     PAGE_W,
     bokeh_fontsize,
     bokeh_scale,
+    diagram_scale_factor,
     frame_px,
     resolve_canvas,
 )
@@ -63,6 +67,12 @@ _STATIC_ONLY_KWARGS = {
     # a movie's frame label is an Axes.text statically; here it is the slider's own
     # value and a panel title, neither of which takes matplotlib Text properties
     "frame_label_kwargs",
+    # the series family's line and legend styling: both are matplotlib call signatures
+    # (Axes.plot, Axes.legend), and bokeh's equivalents take neither. The *policy* they
+    # would tweak -- which line is solid, which colour, where the key goes -- is honored
+    # here; only the raw keyword pass-through is not.
+    "legend_kwargs",
+    "line_kwargs",
 }
 
 
@@ -76,8 +86,17 @@ def _extension():
 
 
 #: Width (CSS pixels) of one interactive map panel on the default canvas; the height
-#: follows the data's own aspect ratio, as the static renderer's panels do.
+#: follows the data's own aspect ratio, as the static renderer's panels do. Sized for a
+#: *row* of three panels side by side, which is what most families draw — see
+#: :data:`SOLO_PANEL_WIDTH_PX` for the one that draws a single panel. ``size``/``zoom``
+#: scale whichever of the two applies, via :func:`_canvas_factor`.
 PANEL_WIDTH_PX = 260
+
+#: Width for a family that draws **one** panel, i.e. a single-field movie. It has the
+#: whole width to itself rather than a third of it, so inheriting the row's 260 wastes
+#: most of the page and makes the one thing on it the smallest thing on it. Chosen to
+#: leave room beside it for the colorbar and the frame widget in a normal notebook.
+SOLO_PANEL_WIDTH_PX = 680
 
 #: The Target diagram's frame, square because its guide rings must stay circular.
 TARGET_FRAME_PX = (400, 400)
@@ -96,7 +115,13 @@ def _canvas_factor(size=None, zoom: float = 1.0) -> float:
     return resolve_canvas(size, zoom).width / PAGE_W
 
 
-def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
+def _panel_geometry(
+    da,
+    *,
+    font_scale: float = 1.0,
+    width_px: float = PANEL_WIDTH_PX,
+    canvas_factor: float = 1.0,
+):
     """``(frame_width, frame_height, fontsize)`` for one interactive map of ``da``.
 
     A fixed 260x200 frame letterboxed exactly the domains the static renderer fits, and
@@ -104,6 +129,10 @@ def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
     ones by hand. Both now come from :mod:`ocean_skill.plot.typography`, off the same
     aspect ratio and the same type scale, so the interactive plot is the static plot
     drawn interactively rather than a near-miss of it.
+
+    ``width_px`` is the panel's share of the page — a third of it for a row of three,
+    all of it for a lone panel (:data:`SOLO_PANEL_WIDTH_PX`). The type scale follows it,
+    so a bigger frame gets proportionally bigger labels without being told.
     """
     try:
         aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
@@ -111,7 +140,9 @@ def _panel_geometry(da, *, font_scale: float = 1.0, canvas_factor: float = 1.0):
         )
     except Exception:  # pragma: no cover - unlabelled coords; fall back to square
         aspect = 1.0
-    px = frame_px(aspect, width_px=PANEL_WIDTH_PX * canvas_factor)
+    # the two compose: width_px is this family's share of the page, canvas_factor is
+    # how much bigger a canvas the caller asked for than the default one
+    px = frame_px(aspect, width_px=width_px * canvas_factor)
     return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
 
 
@@ -126,12 +157,24 @@ def _quadmesh(
     log=False,
     font_scale: float = 1.0,
     canvas_factor: float = 1.0,
+    width_px: float = PANEL_WIDTH_PX,
+    axis_labels: tuple[str, str] | None = None,
+    hover: bool = True,
+    rasterize: bool = False,
+    tiles: str | None = None,
 ):
-    """One interactive map panel with hover readout."""
+    """One interactive map panel with hover readout.
+
+    ``axis_labels`` overrides the axis titles, which otherwise come from the
+    coordinates' own ``long_name``. ROMS spells those "longitude of rho-points (degrees
+    East)": accurate, twice the width of the numbers it labels, and truncated by bokeh
+    anyway — the static renderer never shows it because cartopy draws gridline labels
+    instead.
+    """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
     frame_w, frame_h, fontsize = _panel_geometry(
-        da, font_scale=font_scale, canvas_factor=canvas_factor
+        da, font_scale=font_scale, width_px=width_px, canvas_factor=canvas_factor
     )
     opts = {
         "x": "lon",
@@ -141,15 +184,38 @@ def _quadmesh(
         "title": title,
         "colorbar": True,
         "clabel": units or "",
-        "hover": True,
+        "hover": hover,
         "frame_width": frame_w,
         "frame_height": frame_h,
         "fontsize": fontsize,
-        "rasterize": False,
+        "rasterize": rasterize,
         "logz": log,
     }
+    if rasterize:
+        # hvplot returns rasterize=True as a *lazy* DynamicMap so that zooming
+        # re-aggregates at the new extent. Holoviews cannot nest one DynamicMap inside
+        # another, and a movie's frames are already one (see _frame_map), so the
+        # aggregation is applied eagerly here instead. The cost is that zooming
+        # magnifies the rasterized image rather than re-aggregating the mesh underneath
+        # it — pass rasterize=False for a field small enough to zoom into properly.
+        opts["dynamic"] = False
+    if axis_labels is not None:
+        opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
         opts |= {"geo": True, "coastline": "50m", "projection": None}
+        if tiles:
+            # a basemap gives the eye real coastline and terrain where the field is
+            # masked, which the 50m outline cannot. Web tiles are fetched by the
+            # browser, hence opt-in: a notebook that has to work offline cannot have
+            # them on by default.
+            opts["tiles"] = tiles
+            opts.pop("projection", None)
+            # Known limitation: a tile layer carries the whole world's extent, so the
+            # view opens wider than the domain and the field sits in the middle of it.
+            # Constraining it with xlim/ylim in degrees does *not* work — with tiles the
+            # plot is in Web Mercator, and lon/lat limits silently drop the field
+            # altogether rather than framing it. Zooming re-frames it fine; a real fix
+            # means projecting the bounds, which is not worth the risk of a blank map.
     try:
         return da.hvplot.quadmesh(**opts)
     except Exception:  # pragma: no cover - geoviews/cartopy unavailable
@@ -165,14 +231,15 @@ def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
     Same numbers as the static renderer's corner box (see
     ``matplotlib_renderer._draw_row``), folded into the difference panel's title
     instead — bokeh has no equivalent of a free-floating text-box annotation that
-    survives pan/zoom/resize as cleanly as a title does.
+    survives pan/zoom/resize as cleanly as a title does. Formatted through the same
+    shared helper, so a metric reads identically in either renderer.
     """
     if not metrics:
         return ""
     return ", ".join(
-        f"{k}={metrics[k]:.3g}"
-        for k in metric_keys
-        if isinstance(metrics.get(k), int | float)
+        f"{key}={text}"
+        for key in metric_keys
+        if (text := metric_value_text(metrics, key))
     )
 
 
@@ -338,6 +405,8 @@ def _field_facet(
     ncols: int | None = None,
     shared_limits: bool = False,
     font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -348,7 +417,11 @@ def _field_facet(
     exactly the change the figure exists to show. Panel titles come from the facet
     coordinate through the shared :func:`~ocean_skill.plot.matplotlib_renderer.
     facet_labels`, so a consecutive-month figure says ``Jan 2012`` here too and cannot
-    be mistaken for the climatology that says ``Jan``.
+    be mistaken for the climatology that says ``Jan`` — and three days of one January
+    say ``2013-01-16`` here too rather than repeating a month three times. The layout's
+    own title defaults to the variable's short name, from the shared
+    :func:`~ocean_skill.plot.matplotlib_renderer.field_title`, so the two renderers name
+    the same field the same way; ``title=""`` drops it.
 
     The column count also comes from the shared
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
@@ -363,10 +436,16 @@ def _field_facet(
     :func:`_field_row` makes for a field grid's ``row_label``.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _aspect_of, _limits, facet_labels
+    from ocean_skill.plot.matplotlib_renderer import (
+        _aspect_of,
+        _limits,
+        facet_labels,
+        field_title,
+    )
     from ocean_skill.plot.typography import facet_layout
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     field = item["field"]
     facet_dim = item.get("facet_dim")
     row_dim = item.get("row_dim")
@@ -379,6 +458,7 @@ def _field_facet(
     nrows = int(field.sizes[row_dim]) if row_dim else 1
     units = item.get("units") or ""
     standard_name = item.get("standard_name")
+    title = field_title(standard_name) if title is None else title
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
 
@@ -407,7 +487,9 @@ def _field_facet(
     if row_dim is not None:
         ncols = n
     elif ncols is None:
-        ncols, _nrows = facet_layout(n, _aspect_of(field))
+        ncols, _nrows = facet_layout(
+            n, _aspect_of(field), canvas=resolve_canvas(size, zoom)
+        )
     ncols = max(int(ncols), 1)
 
     def _panel(row, col):
@@ -428,6 +510,7 @@ def _field_facet(
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=factor,
         )
 
     panels = [
@@ -444,11 +527,209 @@ def _field_facet(
     return layout
 
 
+def _skill_map(
+    items,
+    geo=True,
+    shared_axes: bool = True,
+    title: str | None = None,
+    ncols: int | None = None,
+    metric_names=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    **_,
+):
+    """One interactive map per skill metric: the interactive twin of ``skill_map``.
+
+    Every commitment the static family makes holds here, because both come from the same
+    two shared functions. Which metrics may be drawn, and the message when one was never
+    computed, come from :func:`~ocean_skill.plot.matplotlib_renderer.metric_panels`; the
+    colours and limits come from :func:`ocean_skill.colormaps.metric_colors`, so a bias
+    panel is symmetric about zero and a correlation panel spans (−1, 1) in either
+    backend. The column count comes from the shared
+    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
+    same panels the same way.
+
+    Each metric's **overall** value — reduced over space and the scored axis together —
+    joins its panel's title, which is the same substitution :func:`_field_row` makes
+    for a comparison's corner box: bokeh has no free-floating annotation that survives
+    pan/zoom as cleanly as a title. Units stay on each panel's own colorbar, as they do
+    statically.
+    """
+    from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot.matplotlib_renderer import (
+        _aspect_of,
+        metric_arrays,
+        metric_panel_titles,
+        metric_panels,
+    )
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    items = list(items)
+    if not items:
+        raise ValueError("skill_map needs at least one comparison, got none")
+    names = metric_panels(items[0]["skill"], metric_names)
+    if not names:
+        raise ValueError(
+            "this comparison carries no 2-D metric maps to draw. It was probably not "
+            'scored over an axis: build it with compare(..., over="time").'
+        )
+    for item in items[1:]:
+        metric_panels(item["skill"], names)
+
+    titles = metric_panel_titles(names)
+    stacked = len(items) > 1
+    if stacked:
+        ncols = len(names)
+    elif ncols is None:
+        ncols, _nrows = facet_layout(
+            len(names),
+            _aspect_of(items[0]["skill"][names[0]]),
+            canvas=resolve_canvas(size, zoom),
+        )
+    ncols = max(int(ncols), 1)
+    factor = _canvas_factor(size, zoom)
+    arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+
+    panels = []
+    for row, item in enumerate(items):
+        for name in names:
+            colors = metric_colors(
+                name, arrays[row][name], standard_name=item.get("standard_name")
+            )
+            base = titles[names.index(name)]
+            # bokeh has no rotated row label, so the comparison joins the panel's own
+            # title -- the same move _field_row makes for a field grid's row_label
+            if stacked and item.get("row_label"):
+                base = f"{item['row_label']} — {base}"
+            value = metric_value_text(item.get("metrics"), name)
+            panels.append(
+                _quadmesh(
+                    item["skill"][name],
+                    title=f"{base} ({value})" if value else base,
+                    cmap=colors.cmap,
+                    clim=colors.clim(),
+                    units=str(item["skill"][name].attrs.get("units", "") or ""),
+                    geo=geo,
+                    log=colors.log,
+                    font_scale=font_scale,
+                    canvas_factor=factor,
+                )
+            )
+
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
 #: Name of the dimension a movie's frames vary along, i.e. what the slider is labelled.
 #: A movie's frames are usually time steps, but not necessarily — the static renderer
 #: calls the per-frame text a ``frame_label`` for the same reason — so the neutral name
 #: is the honest one.
 FRAME_DIM = "frame"
+
+
+#: Cell count past which ``rasterize="auto"`` turns datashader on. Above roughly this,
+#: bokeh is being asked to ship and hit-test more quads than a screen has pixels, so
+#: rendering server-side to an image is both faster and no less accurate — the mesh was
+#: never resolvable at that size anyway. Below it, the raw mesh is sharper on zoom.
+RASTERIZE_ABOVE_CELLS = 100_000
+
+
+def _check_tiles(tiles: str | None) -> str | None:
+    """Return ``tiles`` once confirmed to name a real tile source.
+
+    A typo is otherwise reported as ``"cannot swap from dimension 'lon'"`` from deep
+    inside hvplot's projection handling, which names neither the argument at fault nor
+    anything a reader could act on.
+    """
+    if not tiles or tiles is True:
+        return tiles
+    try:
+        from geoviews import tile_sources
+    except ImportError:  # pragma: no cover - geoviews ships in environment.yml
+        return tiles
+    known = sorted(tile_sources.tile_sources)
+    if tiles not in known:
+        raise ValueError(
+            f"unknown tile source {tiles!r}. geoviews offers: {', '.join(known)}"
+        )
+    return tiles
+
+
+def _should_rasterize(da, rasterize) -> bool:
+    """Resolve ``rasterize=True/False/"auto"`` for one frame.
+
+    ``"auto"`` is a real choice rather than a hedge: the right answer depends on the
+    mesh, and a movie of a model field is usually far past the size where shipping every
+    quad to the browser stops being sensible, while the small synthetic grids in the
+    tests are far below it. Datashader is optional, so a missing one means False rather
+    than an import error at draw time.
+    """
+    if rasterize != "auto":
+        return bool(rasterize)
+    if int(np.prod(da.shape)) <= RASTERIZE_ABOVE_CELLS:
+        return False
+    try:
+        import datashader  # noqa: F401
+    except ImportError:  # pragma: no cover - datashader is present in environment.yml
+        warnings.warn(
+            f"{int(np.prod(da.shape)):,} cells per frame would be worth rasterizing, "
+            "but datashader is not installed; drawing the raw mesh instead "
+            "(conda install -c conda-forge datashader).",
+            stacklevel=2,
+        )
+        return False
+    return True
+
+
+def _frame_map(keys: list[str], draw, *, frame_dim: str | None = None):
+    """Return a ``DynamicMap`` over ``keys`` that draws frames on demand.
+
+    The obvious construction — a ``HoloMap`` holding every frame — materializes the
+    whole movie before the first one appears, and then ships all of it to the browser.
+    For a real model field that is the difference between a plot and a hang: a 60-frame
+    surface field on a 150x200 grid is 1.8M quads embedded in the page, which opens
+    slowly and then answers the slider slowly or not at all.
+
+    A ``DynamicMap`` renders the frame you are looking at and no others, so opening
+    costs one frame however many there are. The trade is that it needs the kernel
+    alive — which a notebook has and a saved HTML page does not, so
+    :func:`_save_interactive` materializes it again on the way out.
+    """
+    import holoviews as hv
+
+    dim = hv.Dimension(frame_dim or FRAME_DIM, values=keys)
+    index = {key: i for i, key in enumerate(keys)}
+    return hv.DynamicMap(lambda frame: draw(index[frame]), kdims=[dim])
+
+
+def _subject(item: dict[str, Any]) -> str:
+    """Return what the movie is *of*: variable, depth and source, as the item has them.
+
+    A frame label alone ("2010-01-29") says which frame you are looking at and nothing
+    about what it shows — fine on a figure with a caption, thin on a plot you scrolled
+    back to a week later. The static renderer has a suptitle for this; here the panel
+    title is the only place, so it carries both, and ``title=`` still overrides.
+
+    Every part is optional, because an item assembled by hand may carry none of them.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_title
+
+    # field_title is the package's one spelling of "which variable is this" (it goes
+    # through vars.short_name, as every legend and axis label does); the depth and the
+    # source are what a movie can add to it, having only the panel title to say them in
+    parts = [field_title(item.get("standard_name")), item.get("depth")]
+    subject = ", ".join(str(p) for p in parts if p)
+    source = item.get("label")
+    if source and subject:
+        return f"{source}: {subject}"
+    return subject or (str(source) if source else "")
 
 
 def _unique_keys(labels) -> list[str]:
@@ -487,9 +768,16 @@ def _facet_movie(
     shared_limits: bool = True,
     every: int = 1,
     fps: int = 8,
-    player: bool = False,
+    widget: str = "slider",
     save=None,
     font_scale: float = 1.0,
+    width_px: float = SOLO_PANEL_WIDTH_PX,
+    axis_labels: tuple[str, str] | None = ("longitude", "latitude"),
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = False,
+    rasterize: bool | str = "auto",
+    tiles: str | None = None,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -499,9 +787,41 @@ def _facet_movie(
     is the more useful of the two: forty panels on a page are each too small to read,
     while forty frames are full size and a drag apart.
 
+    Frames are drawn on demand (see :func:`_frame_map`), so opening the movie costs one
+    frame however many there are.
+
+    Being the only panel on the page, it gets the page: the frame is
+    :data:`SOLO_PANEL_WIDTH_PX` rather than the third-of-a-row every other family draws
+    at (override with ``width_px``). Axis titles are shortened for the same reason — a
+    ROMS coordinate's own ``long_name`` is "longitude of rho-points (degrees East)",
+    which bokeh truncates anyway; pass ``axis_labels=None`` to keep whatever the
+    coordinates say.
+
+    Three knobs exist because a movie is watched rather than inspected, and the defaults
+    that suit a single still do not suit a hundred frames of a model grid:
+
+    * ``hover=False`` — a hover readout makes bokeh hit-test every quad. Worth it on one
+      map you are reading values off; pure cost on a movie you are watching. Pass
+      ``True`` to get it back.
+    * ``rasterize="auto"`` — render the mesh to an image with datashader once it is
+      bigger than :data:`RASTERIZE_ABOVE_CELLS`. See :func:`_should_rasterize`.
+    * ``tiles`` — a basemap under the field, e.g. ``tiles="EsriTerrain"`` or
+      ``"CartoLight"`` (any :mod:`geoviews.tile_sources` name). Off by default because
+      the browser fetches them, which a notebook working offline cannot rely on.
+
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
     in the field.
+
+    What the movie is *of* joins each frame's title (``GOM_bgc: alkalinity, surface —
+    2013-01-16``) rather than sitting above it as the static suptitle does: bokeh's only
+    title here is the panel's own, and a fixed one set on the map would replace the
+    frame labels rather than joining them. Same substitution :func:`_field_row` makes
+    for a row label. The variable is spelled by
+    :func:`~ocean_skill.plot.matplotlib_renderer.field_title`, so it reads the same here
+    as on a static figure; the depth and source are what a movie adds, having nowhere
+    else to put them. An explicit ``title=`` replaces the subject outright and
+    ``title=""`` leaves the frame labels bare.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
@@ -511,7 +831,8 @@ def _facet_movie(
         frame_labels,
     )
 
-    hv = _extension()
+    _extension()
+    factor = _canvas_factor(size, zoom)
     field = item["field"]
     facet_dim = _one_facet_axis(field, item.get("facet_dim"))
     indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
@@ -530,26 +851,34 @@ def _facet_movie(
     vmin, vmax = _limits(scope)
     if log:
         vmin = max(vmin, 1e-6)
+    raster = _should_rasterize(field.isel({facet_dim: indices[0]}), rasterize)
+    tiles = _check_tiles(tiles)
+    subject = _subject(item) if title is None else title
 
-    dim = hv.Dimension(FRAME_DIM, values=keys)
-    panels = {
-        key: _quadmesh(
-            field.isel({facet_dim: index}),
-            title=key,
+    def draw(position: int):
+        frame = field.isel({facet_dim: indices[position]})
+        return _quadmesh(
+            frame,
+            # what is being shown, then which frame of it — the subject stays put while
+            # the timestamp changes, so the eye is not re-reading the whole title every
+            # frame to find the part that moved
+            title=f"{subject} — {keys[position]}" if subject else keys[position],
             cmap=seq,
             clim=(vmin, vmax),
             units=units,
             geo=geo,
             log=log,
             font_scale=font_scale,
+            canvas_factor=factor,
+            width_px=width_px,
+            axis_labels=axis_labels,
+            hover=hover,
+            rasterize=raster,
+            tiles=tiles,
         )
-        for key, index in zip(keys, indices, strict=True)
-    }
-    movie = hv.HoloMap(panels, kdims=[dim])
-    if title:
-        movie = movie.opts(title=str(title))
-    if player:
-        movie = _scrubber(movie, fps=fps)
+
+    movie = _frame_map(keys, draw)
+    movie = _with_widget(movie, widget=widget, fps=fps, frame_dim=FRAME_DIM)
     if save:
         _save_interactive(movie, save)
     return movie
@@ -566,8 +895,12 @@ def _field_movie(
     shared_limits: bool = True,
     every: int = 1,
     fps: int = 8,
-    player: bool = False,
+    widget: str = "slider",
     save=None,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = False,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -576,8 +909,9 @@ def _field_movie(
     ``HoloMap``s — test, reference and difference — sharing one ``frame`` dimension, so
     a single widget steps all three panels together. Stepping *is* the interactive form
     of playing: you can hold a frame, go back one, and hover a cell for its value, none
-    of which an mp4 can do. ``player=True`` adds a play/pause scrubber for when you do
-    want it to run on its own, at ``fps``.
+    of which an mp4 can do. ``widget="player"`` swaps the slider for a play/pause
+    scrubber, at ``fps``, for when it should just run; ``"dropdown"`` gives holoviews'
+    own default control.
 
     The colour scale is fixed across frames exactly as it is statically (see
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
@@ -593,6 +927,7 @@ def _field_movie(
     from ocean_skill.plot.matplotlib_renderer import _limits, _select_frames
 
     hv = _extension()
+    factor = _canvas_factor(size, zoom)
     if not items:
         raise ValueError("a movie needs at least one frame, got none")
     items = _select_frames(list(items), every)
@@ -607,6 +942,7 @@ def _field_movie(
     # One clim for the whole movie, from every frame or just the first. Computed here
     # rather than per panel because _quadmesh is called once per frame per panel and
     # would otherwise re-derive a different scale for each.
+    raster = _should_rasterize(items[0]["aligned"]["reference"], rasterize)
     scope = items if shared_limits else items[:1]
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
@@ -628,36 +964,43 @@ def _field_movie(
         or 1.0
     )
 
-    dim = hv.Dimension(FRAME_DIM, values=keys)
-    panels: list[dict[str, Any]] = [{}, {}, {}]
-    for key, item in zip(keys, items, strict=True):
+    def draw(position: int, panel: int):
+        item = items[position]
         aligned = item["aligned"]
         tl, rl = item.get("labels") or labels
+        if panel == 0:
+            # the frame label goes on the test panel's title as well as on the slider:
+            # the static renderer draws it in the panel, and a saved page is read the
+            # same way a figure is
+            return _quadmesh(
+                aligned["test"],
+                title=f"{keys[position]} — {tl}",
+                cmap=seq,
+                clim=(vmin, vmax),
+                units=units,
+                geo=geo,
+                log=log,
+                font_scale=font_scale,
+                canvas_factor=factor,
+                hover=hover,
+                rasterize=raster,
+            )
+        if panel == 1:
+            return _quadmesh(
+                aligned["reference"],
+                title=str(rl),
+                cmap=seq,
+                clim=(vmin, vmax),
+                units=units,
+                geo=geo,
+                log=log,
+                font_scale=font_scale,
+                canvas_factor=factor,
+                hover=hover,
+                rasterize=raster,
+            )
         summary = _metrics_summary(item.get("metrics"), metric_keys)
-        # the frame label goes on the test panel's title as well as on the slider: the
-        # static renderer draws it in the panel, and a saved HTML page is read the same
-        # way a figure is
-        panels[0][key] = _quadmesh(
-            aligned["test"],
-            title=f"{key} — {tl}",
-            cmap=seq,
-            clim=(vmin, vmax),
-            units=units,
-            geo=geo,
-            log=log,
-            font_scale=font_scale,
-        )
-        panels[1][key] = _quadmesh(
-            aligned["reference"],
-            title=str(rl),
-            cmap=seq,
-            clim=(vmin, vmax),
-            units=units,
-            geo=geo,
-            log=log,
-            font_scale=font_scale,
-        )
-        panels[2][key] = _quadmesh(
+        return _quadmesh(
             aligned["difference"],
             title=f"difference ({summary})" if summary else "difference",
             cmap=div,
@@ -665,40 +1008,71 @@ def _field_movie(
             units=f"test − reference {units}",
             geo=geo,
             font_scale=font_scale,
+            canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         )
 
-    maps = [hv.HoloMap(p, kdims=[dim]) for p in panels]
+    # three maps over one shared frame dimension, so a single widget steps all three
+    maps = [_frame_map(keys, lambda i, p=panel: draw(i, p)) for panel in range(3)]
     layout = (maps[0] + maps[1] + maps[2]).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
-    if player:
-        layout = _scrubber(layout, fps=fps)
+    layout = _with_widget(layout, widget=widget, fps=fps, frame_dim=FRAME_DIM)
     if save:
         _save_interactive(layout, save)
     return layout
 
 
-def _scrubber(layout, *, fps: int):
-    """Wrap ``layout`` in a panel pane whose widget plays the frames at ``fps``.
+def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
+    """Wrap ``obj`` so its frame dimension gets the widget the caller asked for.
 
-    Holoviews' own widget for a ``HoloMap`` is a slider, which steps but does not run.
-    Panel's ``"scrubber"`` gives the same dimension a ``Player`` — play, pause, step —
-    and its interval is where ``fps`` lands interactively, so the same argument means
-    the same thing in both renderers.
+    Holoviews picks the widget itself, and for a dimension whose values are strings —
+    a date, a depth — it picks a *dropdown*. That is the wrong control for an ordered
+    sequence: stepping to the next frame is two clicks and a search rather than one
+    nudge, and dragging through the movie is impossible. Panel can be told otherwise.
+
+    ``"slider"`` (the default) is a ``DiscreteSlider``: drag it, or arrow-key through
+    the frames, with the label still reading "2010-01-29" rather than an index.
+    ``"player"`` is a ``Player`` — play, pause, step — running at ``fps``.
+    ``"dropdown"`` returns the holoviews object untouched, as every other family does.
     """
+    if widget == "dropdown":
+        return obj
+    if widget not in ("slider", "player"):
+        raise ValueError(
+            f"unknown widget {widget!r}; expected 'slider', 'player' or 'dropdown'"
+        )
     import panel as pn
 
     pn.extension()
-    pane = pn.pane.HoloViews(layout, widget_type="scrubber", widget_location="bottom")
-    for widget in pane.widget_box:
-        if hasattr(widget, "interval"):
-            widget.interval = int(1000 / max(fps, 1))
+    if widget == "player":
+        pane = pn.pane.HoloViews(obj, widget_type="scrubber", widget_location="bottom")
+    else:
+        pane = pn.pane.HoloViews(
+            obj,
+            widget_location="bottom",
+            widgets={frame_dim: pn.widgets.DiscreteSlider} if frame_dim else {},
+        )
+    for control in pane.widget_box:
+        # a Player runs at the same rate the static renderer encodes at, so `fps` means
+        # the same thing in both renderers
+        if hasattr(control, "interval"):
+            control.interval = int(1000 / max(fps, 1))
     return pane
 
 
 def _save_interactive(obj, save) -> None:
-    """Write ``obj`` to a standalone HTML page, refusing formats bokeh cannot write."""
+    """Write ``obj`` to a standalone HTML page, refusing formats bokeh cannot write.
+
+    A page has no kernel behind it, so the laziness that makes a movie open quickly in a
+    notebook (see :func:`_frame_map`) has to be paid back here: every frame is rendered
+    and embedded. That is the whole movie in one file, and it grows with the frame count
+    — which is exactly why the static renderer's mp4 exists.
+    """
     from pathlib import Path
+
+    import holoviews as hv
 
     path = Path(save).expanduser()
     if path.suffix.lower() not in (".html", ".htm"):
@@ -708,12 +1082,12 @@ def _save_interactive(obj, save) -> None:
             f"here, or pass renderer='matplotlib' to write {path.name}."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    if hasattr(obj, "save"):  # a panel pane (player=True) embeds its own widget state
+    if hasattr(obj, "save"):  # a panel pane; embed=True evaluates every frame
         obj.save(str(path), embed=True)
     else:
-        import holoviews as hv
-
-        hv.save(obj, str(path))
+        # a bare DynamicMap cannot be serialized lazily either -- materialize it into
+        # the HoloMap it would have been, which is what hv.save can write
+        hv.save(hv.HoloMap(obj) if isinstance(obj, hv.DynamicMap) else obj, str(path))
     print(f"ocean-skill: interactive movie written to {path}")
 
 
@@ -746,6 +1120,206 @@ _BOKEH_MARKERS = (
 )
 
 
+#: Width (CSS pixels) of one interactive series panel on the default canvas — wider than
+#: a map panel, since a time axis carrying years of dates needs the room.
+SERIES_WIDTH_PX = 620
+
+#: Corner name -> bokeh's ``legend_position``, so the key lands where the static
+#: renderer puts it (both read it off ``Panel.legend_corner``).
+_BOKEH_LEGEND_POSITION = {
+    "upper left": "top_left",
+    "upper right": "top_right",
+    "lower left": "bottom_left",
+    "lower right": "bottom_right",
+}
+
+
+def _series_geometry(*, font_scale: float = 1.0, canvas_factor: float = 1.0, aspect):
+    """``(frame_width, frame_height, fontsize)`` for one interactive series panel.
+
+    The line counterpart of :func:`_panel_geometry`, which reads a map's aspect off its
+    lon/lat span. A line panel has no such ratio to read — x is time and y is a physical
+    quantity — so the family's chosen aspect is passed in instead.
+    """
+    px = frame_px(aspect, width_px=SERIES_WIDTH_PX * canvas_factor)
+    return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
+
+
+def _series_curve(hv, line, dimensions, *, mark: str):
+    """Return one line as a bokeh element, marked where the static renderer marks it."""
+    from ocean_skill.plot.series import time_values
+    from ocean_skill.plot.style import markevery_indices
+
+    values = line.spec.values
+    x = time_values(values)
+    y = np.asarray(values.values, dtype="float64")
+    element = hv.Curve((x, y), *dimensions, label=line.label).opts(
+        color=line.color, line_dash=line.line_dash, line_width=1.4
+    )
+    if mark == "step":
+        element = element.opts(interpolation="steps-mid")
+    if mark == "marker":
+        element = hv.Scatter((x, y), *dimensions, label=line.label).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    elif line.marker is not None or mark == "line+marker":
+        # bokeh's Curve has no `markevery`, so the markers are their own overlay -- on
+        # the *same* indices the static renderer uses, or the two would mark different
+        # samples of one line.
+        keep = markevery_indices(len(x))
+        element = element * hv.Scatter((x[keep], y[keep]), *dimensions).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    return element
+
+
+def _series(
+    items,
+    title=None,
+    rows=None,
+    cols=None,
+    secondary_y=True,
+    encode=None,
+    residual=False,
+    metrics_loc="auto",
+    metric_keys=DEFAULT_METRIC_KEYS,
+    legend=True,
+    ylim=None,
+    panel_aspect=None,
+    labels=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    mark: str = "line",
+    **_,
+):
+    """Draw the ``series`` family interactively — the same layout, drawn with bokeh.
+
+    Composition, styling, labels, titles and the statistics text all come from
+    :mod:`ocean_skill.plot.series` and :mod:`ocean_skill.plot.style`, the same as the
+    static renderer, so the two cannot disagree about anything but the drawing call.
+
+    Two things differ, both stated rather than silent: the key is drawn inside each
+    panel (bokeh has no figure-level legend, so a shared key below the figure is not
+    available), and the statistics box is an ``hv.Text`` in data coordinates, so it pans
+    and zooms with the data instead of staying pinned to the axes.
+    """
+    hv = _extension()
+
+    from ocean_skill.plot.series import compose
+    from ocean_skill.plot.typography import SERIES_ASPECT
+
+    layout = compose(
+        items,
+        rows=rows,
+        cols=cols,
+        secondary_y=secondary_y,
+        encode=encode,
+        residual=residual,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    width, height, fontsize = _series_geometry(
+        font_scale=font_scale,
+        canvas_factor=_canvas_factor(size, zoom),
+        aspect=panel_aspect or SERIES_ASPECT,
+    )
+    plots = []
+    for panel in layout.panels:
+        x_dim = hv.Dimension("time", label="time")
+        # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
+        # "name [unit]", and the two renderers must print one axis label, not two.
+        y_dim = hv.Dimension("value", label=panel.ylabel)
+        overlay = hv.Overlay(
+            [_series_curve(hv, line, (x_dim, y_dim), mark=mark) for line in panel.lines]
+        )
+        if panel.secondary:
+            second = hv.Dimension("secondary", label=panel.secondary_ylabel or "")
+            overlay = overlay * hv.Overlay(
+                [
+                    _series_curve(hv, line, (x_dim, second), mark=mark)
+                    for line in panel.secondary
+                ]
+            )
+        if panel.metrics_text:
+            overlay = overlay * _series_metrics_text(hv, panel)
+        plot = overlay.opts(
+            hv.opts.Curve(
+                frame_width=width,
+                frame_height=height,
+                fontsize=fontsize,
+                show_grid=True,
+                tools=["hover"],
+            ),
+            hv.opts.Overlay(
+                title=panel.title,
+                show_legend=bool(legend),
+                legend_position=_BOKEH_LEGEND_POSITION.get(
+                    panel.legend_corner, "top_right"
+                ),
+                multi_y=bool(panel.secondary),
+                fontsize=fontsize,
+            ),
+        )
+        if ylim is not None:
+            plot = plot.opts(hv.opts.Curve(ylim=tuple(ylim)))
+        plots.append(plot)
+        if panel.residual:
+            strip = hv.Overlay(
+                [
+                    _series_curve(
+                        hv,
+                        line,
+                        (x_dim, hv.Dimension("residual", label="test − reference")),
+                        mark=mark,
+                    )
+                    for line in panel.residual
+                ]
+            ) * hv.HLine(0.0).opts(color="0.7", line_width=1)
+            plots.append(
+                strip.opts(
+                    hv.opts.Curve(
+                        frame_width=width,
+                        frame_height=int(height * 0.35),
+                        fontsize=fontsize,
+                    ),
+                    hv.opts.Overlay(show_legend=False, fontsize=fontsize),
+                )
+            )
+
+    out = hv.Layout(plots).cols(layout.ncols)
+    return out.opts(title=title or "")
+
+
+def _series_metrics_text(hv, panel):
+    """Return the statistics box as an ``hv.Text``, in the corner ``compose`` chose.
+
+    Placed in *data* coordinates, which is the one real cost of the interactive form:
+    the box pans and zooms with the data rather than staying pinned to the panel. bokeh
+    has no axes-fraction annotation, and folding the numbers into the title — what the
+    map families do here — is not available either, since the title is reserved for
+    identity.
+    """
+    from ocean_skill.plot.series import time_values
+
+    values = panel.lines[0].spec.values
+    x = time_values(values)
+    ys = np.concatenate(
+        [np.asarray(line.spec.values.values, dtype="float64") for line in panel.lines]
+    )
+    low, high = float(np.nanmin(ys)), float(np.nanmax(ys))
+    vertical, horizontal = panel.metrics_corner.split()
+    x_at = x[int(0.02 * (len(x) - 1))] if horizontal == "left" else x[-1]
+    y_at = high if vertical == "upper" else low
+    return hv.Text(
+        x_at,
+        y_at,
+        panel.metrics_text,
+        halign=horizontal,
+        valign="top" if vertical == "upper" else "bottom",
+    )
+
+
 def _target(
     items,
     title=None,
@@ -769,10 +1343,14 @@ def _target(
     """
     import pandas as pd
 
-    from ocean_skill.plot.summary import _resolve_labels, pretty_level
+    from ocean_skill.plot.summary import TARGET_FIGSIZE, _resolve_labels, pretty_level
 
     hv = _extension()
-    factor = _canvas_factor(size, zoom)
+    # diagram_scale_factor, not _canvas_factor: this figure is square by construction
+    # (its rings have to stay circular), so it *fits inside* the canvas rather than
+    # taking its shape. The width-only ratio ignored the canvas height, so size="slide"
+    # gave a square that only happened not to overflow a 7.5in slide.
+    factor = diagram_scale_factor(TARGET_FIGSIZE, size=size, zoom=zoom)
     # not `frame`: that name is taken below for a per-group slice of the DataFrame
     frame_size = (TARGET_FRAME_PX[0] * factor, TARGET_FRAME_PX[1] * factor)
     sizes = bokeh_scale(frame_size, font_scale=font_scale)
@@ -932,7 +1510,12 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
 
-    # options the static renderer understands but bokeh has no use for
+    # options the static renderer understands but bokeh has no use for. Split by family
+    # because this list is *not* universal: `mark` is meaningless for a map here (bokeh
+    # draws a quadmesh either way) and load-bearing for a line panel, which honors
+    # mark="line+marker"/"step". Dropped for every family, it would be accepted and
+    # silently discarded for the one that implements it -- the exact failure
+    # tests/test_renderers.py exists to catch.
     drops = [
         "figsize",
         # bokeh attaches a colorbar to the plot frame, so it already starts and ends
@@ -951,6 +1534,10 @@ def render(spec, **kwargs: Any):
         "shared_axis_labels",
         *_STATIC_ONLY_KWARGS,
     ]
+    if family == "series":
+        # A line panel has no colormap, no map and no fixed axes, so the map-only drops
+        # do not apply to it -- and `mark` and `metrics_kwargs` do.
+        drops = [d for d in drops if d not in ("mark", "metrics")]
     if family not in _MOVIES:
         # a movie is the only family with something to write here (a standalone HTML
         # page, the interactive counterpart of an mp4) and the only one that plays at a
@@ -969,6 +1556,10 @@ def render(spec, **kwargs: Any):
         return _field_movie(spec.items, **opts)
     if family == "facet_movie":
         return _facet_movie(spec.single, **opts)
+    if family == "series":
+        return _series(spec.items, **opts)
+    if family == "skill_map":
+        return _skill_map(spec.items, **opts)
     if family == "target":
         return _target(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")

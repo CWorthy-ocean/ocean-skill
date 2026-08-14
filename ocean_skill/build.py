@@ -48,6 +48,7 @@ that keeps ocean-skill self-sufficient.
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib
 import warnings
 from pathlib import Path
@@ -193,10 +194,10 @@ _MAGIC = {
     b"\x89HDF": "hdf5",
     b"CDF\x01": "netcdf3",
     b"CDF\x02": "netcdf3",
-    # CDF-5 is netCDF-3's 64-bit-data variant, called out separately because nothing
-    # here reads it: virtualizarr's NetCDF3Parser is scipy-backed, and scipy supports
-    # CDF-1/CDF-2 only. It dies with "index 0 is out of bounds" deep in scipy, which
-    # says nothing about the format, so _parser_for rejects it up front instead.
+    # CDF-5 is netCDF-3's 64-bit-data variant, kept distinct from "netcdf3" because
+    # whether it can be read at all depends on which virtualizarr is installed: the
+    # kerchunk-backed NetCDF3Parser is scipy-backed and scipy supports CDF-1/CDF-2
+    # only, while the native parser reads all three. See _netcdf3_reads_cdf5.
     b"CDF\x05": "cdf5",
 }
 
@@ -218,24 +219,45 @@ def _file_format(target) -> str | None:
     return _MAGIC.get(head)
 
 
+@functools.cache
+def _netcdf3_reads_cdf5() -> bool:
+    """Whether the installed ``NetCDF3Parser`` can read CDF-5.
+
+    Two implementations ship under that name. The older one wraps
+    ``kerchunk.netCDF3.NetCDF3ToZarr``, which subclasses scipy's header reader and so
+    inherits scipy's CDF-1/CDF-2-only support; the native one parses the header itself
+    and handles all three classic formats. Probing for the native module's
+    ``_parse_header`` rather than comparing versions because the change is unreleased
+    (VirtualiZarr PR #1086), so there is no version number to compare against yet.
+
+    Replace this with a version floor in ``environment.yml`` once a release carries it.
+    """
+    try:
+        netcdf3 = importlib.import_module("virtualizarr.parsers.netcdf3")
+    except ImportError:  # pragma: no cover - virtualizarr is a hard dependency
+        return False
+    return hasattr(netcdf3, "_parse_header")
+
+
 def _parser_for(target):
     """Return the virtualizarr parser matching ``target``'s container format.
 
-    Raises on CDF-5, which nothing in the stack can read — better than the
-    ``IndexError`` deep in the parser that it otherwise produces.
+    Raises on CDF-5 when the installed parser cannot read it, which is better than the
+    ``IndexError`` deep inside scipy that it otherwise produces — that error names
+    neither the file nor the format.
     """
     from virtualizarr.parsers import HDFParser, NetCDF3Parser
 
     fmt = _file_format(target)
-    if fmt == "cdf5":
+    if fmt == "cdf5" and not _netcdf3_reads_cdf5():
         raise ValueError(
-            f"{target} is netCDF-3 CDF-5 (64-bit data), which cannot be kerchunked: "
-            "virtualizarr's NetCDF3Parser is scipy-backed and scipy reads CDF-1/CDF-2 "
-            "only. Convert it first, then pass the converted file:\n"
+            f"{target} is netCDF-3 CDF-5 (64-bit data), which this virtualizarr "
+            "cannot kerchunk: its NetCDF3Parser is scipy-backed and scipy reads "
+            "CDF-1/CDF-2 only. Convert it first, then pass the converted file:\n"
             f"    nccopy -k netCDF-4 {target} converted.nc\n"
             "(ncdump -k names the format of any file.)"
         )
-    return NetCDF3Parser() if fmt == "netcdf3" else HDFParser()
+    return NetCDF3Parser() if fmt in ("netcdf3", "cdf5") else HDFParser()
 
 
 def detect_concat(file) -> tuple[str, tuple[str, ...]]:
@@ -286,6 +308,47 @@ def detect_concat(file) -> tuple[str, tuple[str, ...]]:
     if handle is not None:
         handle.close()
     return result
+
+
+def _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths):
+    """Warn when the concatenated coordinate is not strictly increasing.
+
+    ``combine="nested"`` joins in the order given, so nothing checks that the result
+    makes sense as a series: two output streams globbed into one call produce an axis
+    that runs forward, jumps back, and runs forward again, and the store reads back
+    without complaint. A real case mixed ROMS ``cdr`` averages with ``rst`` restart
+    files — the restarts each hold two records, and their second one repeated a cdr
+    timestamp exactly.
+
+    Warns rather than sorting or dropping, deliberately: the duplicates are a symptom
+    of the wrong files being combined, and a silently repaired axis would hide that
+    while leaving averaged and instantaneous fields sharing a coordinate. See
+    :func:`build_kerchunk` for building one reference per stream, which is the fix.
+    """
+    import numpy as np
+
+    for name in loadable_variables:
+        var = vds.variables.get(name)
+        if var is None or var.dims != (concat_dim,) or var.size < 2:
+            continue
+        steps = np.diff(np.asarray(var.values))
+        repeats = int((steps == 0).sum())
+        backwards = int((steps < 0).sum())
+        if not (repeats or backwards):
+            continue
+        first = int(np.argmax(steps <= 0)) + 1
+        # Raw ROMS times are seconds since an epoch named only in the long_name, so
+        # the bare number says nothing about *when* the axis doubled back.
+        decoded = _decode_times(vds, var)
+        at = decoded[first] if decoded is not None else var.values[first].item()
+        warnings.warn(
+            f"{name} is not strictly increasing across the {len(paths)} files "
+            f"concatenated on {concat_dim!r}: {repeats} repeated and {backwards} "
+            f"out-of-order step(s), first at index {first} ({at}). "
+            "Combining more than one output stream is the usual cause — build one "
+            "reference per stream instead. Nothing was reordered or dropped.",
+            stacklevel=3,
+        )
 
 
 def make_kerchunk(
@@ -352,6 +415,7 @@ def make_kerchunk(
             concat_dim=concat_dim,
             loadable_variables=list(loadable_variables),
         )
+        _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
 
         if grid is not None:
             gurl, gstore = _store_for(grid)
@@ -1015,10 +1079,6 @@ def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
     return md
 
 
-#: Columns that are coordinates, not comparable data — excluded from standard_names.
-_TABULAR_COORD_NAMES = {"time", "latitude", "longitude", "z", "depth", "altitude"}
-
-
 def _probe_dataframe(df) -> dict[str, Any]:
     """Return the tabular counterpart of :func:`_probe` above.
 
@@ -1031,10 +1091,14 @@ def _probe_dataframe(df) -> dict[str, Any]:
     ``<name>_qc_agg``/``<name>_qc_tests`` QARTOD pair alongside a column is
     recognized and excluded (it describes a variable rather than being one), the
     same modifier-exclusion :func:`_probe` applies to a Dataset's auxiliary fields.
-    """
-    import re
 
+    That column vocabulary lives in :mod:`ocean_skill.tabular`, which is also what
+    *reads* such a table into xarray — one spelling of the convention, so a catalog
+    entry cannot describe a frame differently from how the pipeline later opens it.
+    """
     import pandas as pd
+
+    from ocean_skill.tabular import COORD_COLUMNS, is_qc_column, split_units
 
     md: dict[str, Any] = {}
 
@@ -1068,11 +1132,10 @@ def _probe_dataframe(df) -> dict[str, Any]:
     std: dict[str, str] = {}
     units: dict[str, str] = {}
     for col in df.columns:
-        if str(col).endswith(("_qc_agg", "_qc_tests")):
+        if is_qc_column(col):
             continue
-        m = re.match(r"^(.+) \((.+)\)$", str(col))
-        base, unit = (m.group(1), m.group(2)) if m else (str(col), None)
-        if base in _TABULAR_COORD_NAMES:
+        base, unit = split_units(col)
+        if base in COORD_COLUMNS:
             continue
         std[col] = base
         if unit:

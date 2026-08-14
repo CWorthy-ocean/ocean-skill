@@ -48,7 +48,16 @@ __all__ = [
 #: Bumped when the stored layout changes in a way that makes old entries wrong to
 #: reuse. Part of every key, so a bump orphans stale entries instead of loading
 #: them into a pipeline that now expects something different.
-_FORMAT_VERSION = 1
+#:
+#: **2** — removing the default aggregation (see
+#: :data:`ocean_skill.comparison.NO_AGGREGATION`) changed what an existing key *means*
+#: without changing the key: a lane keyed on ``_aggregate: None`` held a time *mean*
+#: before and holds every step after, so every pre-change entry now answers a different
+#: question than the one it was filed under. That is the case this counter exists for,
+#: and the one it is easiest to miss — the stored layout is untouched and nothing fails
+#: loudly; a stale hit simply returns a single map where the caller now expects an axis,
+#: and the error surfaces somewhere else entirely (a movie with nothing to animate).
+_FORMAT_VERSION = 2
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline

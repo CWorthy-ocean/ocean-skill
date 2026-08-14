@@ -142,6 +142,22 @@ or, for a single call, `refresh=True` (recompute and overwrite) or `cache=False`
 (bypass disk entirely). Changing the variable, depth, sources, or regrid method all
 change the key on their own — those need no special handling.
 
+### Scored comparisons are bigger entries
+
+A comparison scored over an axis (`compare(..., over="time")` — see
+[Skill maps](skill_maps.md)) caches the same way, but its aligned pair holds every matched
+step rather than one map, so an entry is as many times larger as there are steps. That is
+still the right thing to cache: the expensive part is regridding each of those steps, and
+the metric maps derived from them are cheap enough to recompute on the spot. `over`, the
+matching method, the tolerance and the bin anchoring all join the key, so a scored pair and
+a plain one never collide. `min_pairs` deliberately does not: it masks the maps and leaves
+the aligned pair untouched.
+
+The reference *lane* of a scored comparison is also keyed differently, because it is
+cropped to the model's own extent before it is read (which is what keeps a global product
+from being held whole). One consequence: that lane is not shared with a different model the
+way an uncropped one is.
+
 ## Controls
 
 | What | How |

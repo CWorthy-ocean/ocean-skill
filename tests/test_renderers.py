@@ -10,6 +10,8 @@ every row in an interactive grid carried the *first* row's reference name.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -245,7 +247,9 @@ def _leftmost_label_x(fig) -> float:
 
 
 def test_left_labels_stay_on_the_canvas(two_rows):
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
+    )
     assert _leftmost_label_x(fig) >= 0
 
 
@@ -259,7 +263,9 @@ def test_every_panel_survives_a_tight_bbox_crop(two_rows):
     automatic title placement over a gridline-labelled GeoAxes put the title at
     y=inf, so its extent was NaN and it poisoned the axes bbox containing it.
     """
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
+    )
     renderer = fig.canvas.get_renderer()
     for ax in fig.axes:
         bbox = ax.get_tightbbox(renderer)
@@ -320,7 +326,9 @@ def test_colorbars_start_and_end_level_with_their_panels(two_rows):
     itself inside its own slot to keep its aspect on top of that. So the bar overshot
     the map at both ends, which reads badly for something that is the map's own ruler.
     """
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
+    )
     bars = _colorbar_axes(fig)
     assert len(bars) == 4  # two rows x (shared scale, difference)
     for cax, parents in bars:
@@ -359,7 +367,9 @@ def test_colorbars_sit_the_same_distance_from_their_panels(two_rows):
     A grid row's shared-scale bar is padded off a two-panel span and its difference bar
     off one panel, which left the far-right bar with roughly half the gap.
     """
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
+    )
     gaps = {
         round(cax.get_position().x0 - max(p.get_position().x1 for p in parents), 9)
         for cax, parents in _colorbar_axes(fig)
@@ -375,7 +385,9 @@ def test_colorbar_alignment_survives_a_redraw(two_rows):
     figure; with constrained_layout still live, that recomputes the positions and
     silently undoes the refit.
     """
-    fig = render(PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)))
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
+    )
     before = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
     fig.canvas.draw()
     after = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
@@ -440,6 +452,220 @@ def test_row_label_styling_is_still_overridable(two_rows):
     assert _row_label_gap(fig) > 0, "a bigger label must still clear the ticks"
 
 
+# --- skill_map: one panel per metric, in both renderers ------------------------------
+#
+# Structurally the opposite of a facet grid on the one point that matters: those panels
+# share a colour scale because they are one quantity at different times, while these
+# cannot, being different quantities entirely. So the assertions below are the mirror
+# images of test_facet.py's — one bar per panel, no two panels on one scale.
+
+_SKILL_METRICS = ("bias", "crmsd", "corr", "sigma_ratio")
+
+
+def _skill_dataset(names=_SKILL_METRICS, offset: float = 0.0) -> xr.Dataset:
+    """One 2-D map per metric, with the sign and range each metric really has."""
+    shape = (8, 10)
+    ramp = np.linspace(0, 1, 80).reshape(shape)
+    values = {
+        # genuinely signed, or the symmetric-limits assertion cannot fail
+        "bias": (ramp - 0.5) * 2.0 + offset,
+        "crmsd": ramp * 1.5 + 0.1,  # strictly positive
+        "corr": 0.6 + 0.35 * ramp,  # a realistic band well inside (-1, 1)
+        "sigma_ratio": 0.7 + 0.6 * ramp,
+        "rmse": ramp * 2.0 + 0.2,
+        "n": np.round(ramp * 20 + 4),
+    }
+    units = {"bias": "mmol m-3", "crmsd": "mmol m-3", "rmse": "mmol m-3", "n": "count"}
+    return xr.Dataset(
+        {
+            name: _field(0.0)
+            .copy(data=values[name])
+            .assign_attrs(units=units.get(name, ""))
+            for name in names
+        }
+    )
+
+
+def _skill_item(row_label: str = "nitrate", offset: float = 0.0) -> dict:
+    """One spec item shaped as ``Comparison.as_item()`` builds it for a scored pair."""
+    return {
+        "skill": _skill_dataset(offset=offset),
+        "metric_names": _SKILL_METRICS,
+        "metrics": {
+            "bias": 0.125,
+            "crmsd": 0.5,
+            "corr": 0.98,
+            "sigma_ratio": 1.1,
+            "weighted": True,
+        },
+        "units": "mmol m-3",
+        "standard_name": "mole_concentration_of_nitrate_in_sea_water",
+        "labels": ("GOM_bgc", "modis_chl"),
+        "row_label": row_label,
+    }
+
+
+@pytest.fixture
+def skill_item():
+    return _skill_item()
+
+
+def _skill_spec(items, **options):
+    return PlotSpec(
+        family="skill_map",
+        items=items if isinstance(items, list) else [items],
+        options=options,
+    )
+
+
+def test_skill_map_draws_the_same_panels_in_both_renderers(skill_item):
+    """The parity contract: same panels, same titles, whichever backend drew them.
+
+    Compared as sets because bokeh's document order is its own business (see
+    ``test_facet.py``); the *count* and the *names* are what both renderers owe.
+    """
+    static = _matplotlib_panel_titles(render(_skill_spec(skill_item)))
+    interactive = _holoviews_panel_titles(
+        render(_skill_spec(skill_item), renderer="holoviews")
+    )
+    assert static == list(_SKILL_METRICS)
+    assert len(interactive) == len(_SKILL_METRICS)
+    assert {title.split(" (")[0] for title in interactive} == set(_SKILL_METRICS)
+
+
+def test_the_overall_value_reaches_the_static_corner_box(skill_item):
+    """The map and the single number are one statistic at two resolutions."""
+    fig = render(_skill_spec(skill_item))
+    boxes = {
+        ax.get_title(): ax._osk_metrics_text.get_text()
+        for ax in fig.axes
+        if getattr(ax, "_osk_metrics_text", None) is not None
+    }
+    assert boxes["bias"] == "bias=0.125"
+    assert boxes["corr"] == "corr=0.98"
+    assert len(boxes) == len(_SKILL_METRICS), "every panel is annotated"
+
+
+def test_the_overall_value_reaches_the_interactive_title(skill_item):
+    titles = _holoviews_panel_titles(
+        render(_skill_spec(skill_item), renderer="holoviews")
+    )
+    assert "bias (0.125)" in titles
+    assert "corr (0.98)" in titles
+
+
+def test_the_weighted_flag_is_never_rendered_as_a_number(skill_item):
+    """``isinstance(True, int)`` is True, so a naive numeric test would print it."""
+    item = {**skill_item, "metric_names": ("bias", "weighted")}
+    with pytest.raises(ValueError, match="no pointwise map"):
+        render(_skill_spec(item, metric_names=("bias", "weighted")))
+
+
+def test_skill_map_draws_one_colorbar_per_panel(skill_item):
+    """The inverse of ``field_facet``'s single shared bar, and the reason why.
+
+    Bias in mmol m-3 and a dimensionless correlation have no shared scale to have, so
+    each panel carries its own — and each bar describes exactly one panel.
+    """
+    fig = render(_skill_spec(skill_item))
+    bars = _colorbar_axes(fig)
+    assert len(bars) == len(_SKILL_METRICS)
+    assert all(len(parents) == 1 for _, parents in bars)
+
+
+def test_no_two_metric_panels_share_a_colour_scale(skill_item):
+    """And each metric's limits are its own: pinned, symmetric or fixed as it needs."""
+    from matplotlib.collections import QuadMesh
+
+    fig = render(_skill_spec(skill_item))
+    norms = {}
+    for ax in fig.axes:
+        if not ax.get_title():
+            continue
+        mesh = next(c for c in ax.collections if isinstance(c, QuadMesh))
+        norms[ax.get_title()] = (mesh.norm.vmin, mesh.norm.vmax)
+    assert len(set(norms.values())) == len(_SKILL_METRICS), "scales must not coincide"
+    assert norms["crmsd"][0] == 0.0, "a magnitude's zero is pinned"
+    assert norms["bias"][0] == pytest.approx(-norms["bias"][1]), "bias is symmetric"
+    assert norms["corr"] == (-1.0, 1.0), "correlation has an absolute scale"
+    assert sum(norms["sigma_ratio"]) == pytest.approx(2.0), "the ratio centres on 1"
+
+
+def test_units_go_on_each_panels_own_colorbar_not_its_title(skill_item):
+    fig = render(_skill_spec(skill_item))
+    labels = {}
+    for cax, parents in _colorbar_axes(fig):
+        labels[parents[0].get_title()] = cax.get_ylabel() or cax.get_xlabel()
+    assert labels["bias"] == "[mmol m-3]"
+    assert labels["corr"] == "", "a correlation has no units to print"
+    assert all("mmol" not in title for title in labels), "and no title repeats them"
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+def test_metric_names_selects_and_orders_the_panels(skill_item, renderer):
+    spec = _skill_spec(skill_item, metric_names=("corr", "bias"))
+    drawn = render(spec, renderer=renderer)
+    titles = (
+        _matplotlib_panel_titles(drawn)
+        if renderer == "matplotlib"
+        else [t.split(" (")[0] for t in _holoviews_panel_titles(drawn)]
+    )
+    assert len(titles) == 2
+    assert set(titles) == {"corr", "bias"}
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+def test_a_metric_that_was_never_computed_is_refused(skill_item, renderer):
+    """Dropping the panel would be invisible: three maps look like three maps."""
+    with pytest.raises(ValueError) as excinfo:
+        render(_skill_spec(skill_item, metric_names=("bias", "mae")), renderer=renderer)
+    message = str(excinfo.value)
+    assert "mae" in message
+    assert "metrics=" in message, "the data-layer knob has to be named"
+
+
+def test_metric_keys_is_not_a_skill_map_option(skill_item):
+    """One metric per panel leaves nothing for the corner box to select."""
+    with pytest.raises(TypeError) as excinfo:
+        render(_skill_spec(skill_item, metric_keys=("bias",)))
+    assert "metric_names" in str(excinfo.value), "and the right option is named"
+
+
+def test_several_comparisons_become_rows_of_metrics(skill_item):
+    items = [_skill_item("nitrate"), _skill_item("phosphate", offset=0.4)]
+    fig = render(_skill_spec(items))
+    titles = _matplotlib_panel_titles(fig)
+    assert titles == list(_SKILL_METRICS), "titled once, on the top row"
+    labels = [
+        ax._osk_row_label.get_text()
+        for ax in fig.axes
+        if getattr(ax, "_osk_row_label", None) is not None
+    ]
+    assert labels == ["nitrate", "phosphate"]
+    assert len(_colorbar_axes(fig)) == 2 * len(_SKILL_METRICS)
+
+
+def test_skill_map_panels_are_not_squeezed(skill_item):
+    """Catches the one sizing mistake nothing else here would notice.
+
+    ``facet_figsize`` defaults to ``FACET_PANEL_W_FRACTION`` (0.88), the allowance for
+    a grid whose panels *share* one colorbar and so have nothing beside them. A bar in
+    every cell needs ``PANEL_W_FRACTION`` (0.72), and every other assertion in this file
+    passes either way — the maps are simply smaller.
+    """
+    from ocean_skill.plot.typography import PANEL_W_FRACTION
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # _warn_if_cramped must not fire
+        fig = render(_skill_spec(skill_item))
+    fig.canvas.draw()
+    fig_w = fig.get_size_inches()[0]
+    panels = [ax for ax in fig.axes if ax.get_title()]
+    ncols = len({round(ax.get_position().x0, 3) for ax in panels})
+    widest = max(ax.get_position().width for ax in panels) * fig_w
+    assert widest >= 0.9 * PANEL_W_FRACTION * fig_w / ncols
+
+
 # ------------------------------------------------------- misplaced styling options
 
 
@@ -482,3 +708,106 @@ def test_the_interactive_renderer_warns_instead_of_swallowing(two_rows):
             PlotSpec(family="field_grid", items=two_rows, options={"label_size": 9}),
             renderer="holoviews",
         )
+
+
+# --- size= / zoom= reach the interactive renderer too --------------------------------
+#
+# ``size``/``zoom`` are inches statically, which bokeh has no notion of, so they arrive
+# as a ratio against the page and scale the frame in pixels (``_canvas_factor``). Every
+# interactive family takes ``**_``, so one that simply forgot to name them absorbed them
+# in silence and drew the default size — accepted, dropped, no warning, no clue.
+
+
+def _hv_frame_widths(obj) -> list[int]:
+    """Every rendered bokeh figure's frame width, in CSS pixels.
+
+    ``getattr(obj, "object", obj)`` unwraps the ``pn.pane.HoloViews`` the movie families
+    return for their widget (see ``tests/test_movie.py::_hv``); every other family hands
+    back the bare holoviews object already.
+    """
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    plot = hv.render(getattr(obj, "object", obj), backend="bokeh")
+    return [f.frame_width for f in plot.select({"type": figure}) if f.frame_width]
+
+
+def _facet_field() -> xr.DataArray:
+    """Build a four-period field: the payload the facet families take."""
+    times = xr.date_range("2012-01-01", periods=4, freq="MS")
+    base = _field(0.0)
+    return xr.concat([base + i for i in range(4)], dim="time").assign_coords(time=times)
+
+
+_INTERACTIVE_FAMILIES = {
+    "field_row": lambda: [
+        _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
+    ],
+    "field_grid": lambda: [
+        _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
+    ],
+    "skill_map": lambda: [_skill_item()],
+    "field_facet": lambda: [
+        {
+            "field": _facet_field(),
+            "facet_dim": "time",
+            "units": "mmol m-3",
+            "standard_name": None,
+        }
+    ],
+    "facet_movie": lambda: [
+        {
+            "field": _facet_field(),
+            "facet_dim": "time",
+            "units": "mmol m-3",
+            "standard_name": None,
+        }
+    ],
+    "field_movie": lambda: [
+        {
+            **_item("mole_concentration_of_nitrate_in_sea_water", "woa", "n"),
+            "frame_label": "Jan 2012",
+        },
+        {
+            **_item("mole_concentration_of_nitrate_in_sea_water", "woa", "n"),
+            "frame_label": "Feb 2012",
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+def test_zoom_grows_the_interactive_frame_in_every_family(family):
+    """A family that forgets to name ``zoom`` absorbs it into ``**_``, silently."""
+    items = _INTERACTIVE_FAMILIES[family]()
+    plain = _hv_frame_widths(
+        render(PlotSpec(family=family, items=items), renderer="holoviews")
+    )
+    zoomed = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"zoom": 2.0}),
+            renderer="holoviews",
+        )
+    )
+    assert plain and len(zoomed) == len(plain), family
+    assert all(z > p for z, p in zip(zoomed, plain, strict=True)), (
+        f"{family}: zoom= was accepted and dropped ({plain} -> {zoomed})"
+    )
+
+
+@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+def test_a_named_canvas_reaches_the_interactive_frame_too(family):
+    items = _INTERACTIVE_FAMILIES[family]()
+    page = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"size": "page"}),
+            renderer="holoviews",
+        )
+    )
+    column = _hv_frame_widths(
+        render(
+            PlotSpec(family=family, items=items, options={"size": "column"}),
+            renderer="holoviews",
+        )
+    )
+    assert all(c < p for c, p in zip(column, page, strict=True)), family

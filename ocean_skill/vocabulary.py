@@ -163,10 +163,21 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "standard_name": (
             "diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water"
         ),
+            # The surface-only spelling, used by every gridded surface product we
+            # carry (OceanSODA-ETHZ's `temperature`, catalogs/oceansoda.yaml). Not a
+            # different quantity: the sampling depth is a property of where the
+            # measurement was taken, which a comparison reports separately (the
+            # metrics row's `obs_depth`, and align_series' depth caveat) rather than
+            # by refusing to pair a mooring with a surface field.
+            "sea_surface_temperature",
+        ],
     },
     "salinity": {
         "standard_name": "sea_water_practical_salinity",
-        "aliases": ["sea_water_salinity"],  # near-identical; see "temperature" above
+        "aliases": [
+            "sea_water_salinity",  # near-identical; see "temperature" above
+            "sea_surface_salinity",  # the surface spelling, as for temperature
+        ],
     },
     "ssh": {
         "standard_name": "sea_surface_height_above_geoid",

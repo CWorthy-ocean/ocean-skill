@@ -253,6 +253,56 @@ def test_no_frames_at_all_is_refused():
         _movie([])
 
 
+def _tall_frame(index: int) -> dict:
+    """Build a frame whose domain is taller than wide (a coastal strip, aspect ~0.2)."""
+    frame = _frame(index)
+    lon = np.linspace(-98, -95.5, 10)  # 2.5 deg across against 8 deg of latitude
+    frame["aligned"] = {
+        key: da.assign_coords(lon=lon) for key, da in frame["aligned"].items()
+    }
+    return frame
+
+
+def _bar_orientation(fig) -> str:
+    bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    assert bars, "no colorbars were recorded"
+    return "horizontal" if bars[0]._osk_cbar_horizontal else "vertical"
+
+
+def test_a_movie_frame_is_laid_out_exactly_like_the_still_row():
+    """This function's docstring promises it; for a tall domain it used not to hold.
+
+    ``field_row`` picks its colorbar orientation from the map's aspect ratio, but
+    ``field_movie`` hardcoded horizontal. Below about 0.8 the two disagreed: the movie
+    put the bars under the maps and reshaped the figure to fit them, where the still put
+    them beside. Since a frame is documented as being the row that ``field_row`` draws,
+    drawn by the same code, that is a broken promise rather than a matter of taste.
+
+    Checked on a tall domain because the default fixture is wide (aspect 1.25) and would
+    have passed throughout.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_row
+
+    tall = [_tall_frame(i) for i in range(2)]
+    still = field_row(tall[0]["aligned"], units="mmol m-3", title="t")
+    movie_fig = _movie(tall)._fig
+
+    assert _bar_orientation(movie_fig) == _bar_orientation(still) == "vertical"
+    # and the figure the frames are drawn into matches the still's shape
+    assert tuple(movie_fig.get_size_inches()) == pytest.approx(
+        tuple(still.get_size_inches()), rel=0.02
+    )
+
+
+def test_a_movie_still_honours_an_explicit_colorbar_orientation():
+    """The caller's own choice wins, and sizes the figure — as it does for a row."""
+    tall = [_tall_frame(i) for i in range(2)]
+    beside = _movie(tall)._fig
+    below = _movie(tall, colorbar_kwargs={"orientation": "horizontal"})._fig
+    assert _bar_orientation(below) == "horizontal"
+    assert below.get_size_inches()[1] > beside.get_size_inches()[1]
+
+
 def test_frames_on_different_grids_are_refused(frames):
     """Frames share one figure, so a grid that changes mid-movie has nowhere to go."""
     coarse = _field(0.0, shape=(6, 8))
@@ -271,10 +321,30 @@ def test_frames_on_different_grids_are_refused(frames):
 # --- the interactive counterpart ----------------------------------------------------
 
 
+def _hv(obj):
+    """Return the holoviews object, whether or not panel wraps it for its widget.
+
+    The movie families return a ``pn.pane.HoloViews`` by default, because holoviews'
+    own control for a string-valued dimension is a dropdown; ``widget="dropdown"``
+    returns the bare object. Both carry the same plot underneath.
+    """
+    return getattr(obj, "object", obj)
+
+
 def _holomaps(obj):
     import holoviews as hv
 
-    return [el for el in obj.traverse() if isinstance(el, hv.HoloMap)]
+    return [el for el in _hv(obj).traverse() if isinstance(el, hv.HoloMap)]
+
+
+def _keys(frame_map) -> list[str]:
+    """Return the frame values a lazy map declares without having drawn any."""
+    return list(frame_map.kdims[0].values)
+
+
+def _frames(frame_map) -> list:
+    """Return every frame, materialized — a DynamicMap draws none until asked."""
+    return [frame_map[key] for key in _keys(frame_map)]
 
 
 def test_the_interactive_movie_puts_every_frame_on_one_slider(frames):
@@ -282,7 +352,7 @@ def test_the_interactive_movie_puts_every_frame_on_one_slider(frames):
     assert len(maps) == 3, "test, reference and difference each need a HoloMap"
     for holomap in maps:
         assert [d.name for d in holomap.kdims] == ["frame"]
-        assert len(holomap.keys()) == len(frames)
+        assert len(_keys(holomap)) == len(frames)
 
 
 def test_the_interactive_slider_keeps_the_frames_in_order(frames):
@@ -292,7 +362,7 @@ def test_the_interactive_slider_keeps_the_frames_in_order(frames):
     or runs would be reordered alphabetically into nonsense.
     """
     holomap = _holomaps(_interactive(frames))[0]
-    assert list(holomap.keys()) == [f["frame_label"] for f in frames]
+    assert _keys(holomap) == [f["frame_label"] for f in frames]
 
 
 def _clim(element) -> tuple[float, float]:
@@ -312,14 +382,14 @@ def _clim(element) -> tuple[float, float]:
 def test_the_interactive_movie_fixes_one_colour_scale_too(frames):
     """Parity with the static side: dragging the slider must not move the ruler."""
     holomap = _holomaps(_interactive(frames))[0]
-    clims = {_clim(el) for el in holomap.values()}
+    clims = {_clim(el) for el in _frames(holomap)}
     assert len(clims) == 1, f"the scale moves between frames: {clims}"
 
 
 def test_the_interactive_and_static_scales_agree(frames):
     """The two renderers must put the same numbers on the bar, not merely fix one."""
     holomap = _holomaps(_interactive(frames))[0]
-    interactive = _clim(next(iter(holomap.values())))
+    interactive = _clim(_frames(holomap)[0])
     assert interactive == pytest.approx(_norms(_movie(frames))[0])
 
 
@@ -327,7 +397,7 @@ def test_the_interactive_titles_carry_the_frame_and_the_metrics(frames):
     import holoviews as hv
     from bokeh.plotting import figure
 
-    obj = _interactive(frames)
+    obj = _hv(_interactive(frames))
     titles = [
         f.title.text for f in hv.render(obj, backend="bokeh").select({"type": figure})
     ]
@@ -348,14 +418,36 @@ def test_the_interactive_movie_refuses_a_video_extension(frames, tmp_path):
         _interactive(frames, save=tmp_path / "movie.mp4")
 
 
-def test_a_player_is_available_for_when_it_should_just_run(frames):
+def test_the_frames_get_a_slider_not_a_dropdown(frames):
+    """An ordered sequence wants a control you can drag, not one you search.
+
+    Holoviews picks a dropdown for a string-valued dimension, which makes stepping to
+    the next frame two clicks and makes dragging through the movie impossible.
+    """
     import panel as pn
 
-    pane = _interactive(frames, player=True, fps=4)
+    pane = _interactive(frames)
     assert isinstance(pane, pn.pane.HoloViews)
+    assert [type(w).__name__ for w in pane.widget_box] == ["DiscreteSlider"]
+
+
+def test_a_player_is_available_for_when_it_should_just_run(frames):
+    pane = _interactive(frames, widget="player", fps=4)
     players = [w for w in pane.widget_box if hasattr(w, "interval")]
-    assert players, "player=True has to produce a widget that plays"
-    assert players[0].interval == 250
+    assert players, "widget='player' has to produce a widget that plays"
+    assert players[0].interval == 250, "and it plays at the fps the static side encodes"
+
+
+def test_the_holoviews_default_control_is_still_reachable(frames):
+    """``dropdown`` returns the bare holoviews object, as every other family does."""
+    import holoviews as hv
+
+    assert isinstance(_interactive(frames, widget="dropdown"), hv.Layout)
+
+
+def test_an_unknown_widget_is_refused(frames):
+    with pytest.raises(ValueError, match="unknown widget"):
+        _interactive(frames, widget="knob")
 
 
 def test_static_only_styling_still_warns_here(frames):
@@ -371,24 +463,32 @@ def test_static_only_styling_still_warns_here(frames):
 # ways and a reader will compare them.
 
 
-def _run(days: int = 6, *, depths=None) -> xr.DataArray:
-    """``days`` of daily output, optionally with a depth axis left standing too."""
+def _run(
+    days: int = 6, *, depths=None, shape: tuple[int, int] = (12, 20)
+) -> xr.DataArray:
+    """``days`` of daily output, optionally with a depth axis left standing too.
+
+    ``shape`` is the horizontal grid: small by default, since most of these tests care
+    about structure rather than size — but the rasterize threshold is a question about
+    size, so it has to be reachable.
+    """
     import pandas as pd
 
     rng = np.random.default_rng(0)
+    ny, nx = shape
     coords = {
         "time": pd.date_range("2012-01-01", periods=days, freq="D"),
-        "lat": np.linspace(18, 31, 12),
-        "lon": np.linspace(-98, -80, 20),
+        "lat": np.linspace(18, 31, ny),
+        "lon": np.linspace(-98, -80, nx),
     }
     dims = ("time", "lat", "lon")
-    shape = (days, 12, 20)
+    full = (days, ny, nx)
     if depths is not None:
         coords["depth"] = list(depths)
         dims = ("time", "depth", "lat", "lon")
-        shape = (days, len(depths), 12, 20)
+        full = (days, len(depths), ny, nx)
     return xr.DataArray(
-        rng.normal(5.0, 1.0, shape),
+        rng.normal(5.0, 1.0, full).astype("float32"),
         dims=dims,
         coords=coords,
         attrs={"units": "mmol m-3"},
@@ -440,14 +540,15 @@ def test_a_field_movie_labels_its_frames_like_the_facet_grid_titles(tmp_path):
 def test_frame_labels_get_finer_when_a_month_is_not_enough():
     """31 frames all called 'Jan 2012' would be a slider that loses 30 of them.
 
-    facet_labels is right for the reduction it was written for (monthly means), and a
-    movie is as often over the raw axis, so the label has to refine itself.
+    ``"%b %Y"`` is right for the reduction it was written for (monthly means), and a
+    movie is as often over the raw axis, so the label has to refine itself — the same
+    refinement a facet grid of the same axis gets, which is why the two agree here.
     """
     from ocean_skill.plot.matplotlib_renderer import facet_labels, frame_labels
 
     daily = _run(31)
-    assert len(set(facet_labels(daily["time"]))) == 1  # the case being guarded
     labels = frame_labels(daily["time"])
+    assert labels == facet_labels(daily["time"])
     assert len(set(labels)) == 31
     assert labels[0] == "2012-01-01"
 
@@ -505,25 +606,164 @@ def test_a_second_facet_axis_is_refused_rather_than_animated():
 
 
 def test_the_interactive_field_movie_puts_the_facet_axis_on_a_slider():
-    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
+    movie = _hv(_facet_film(_run(5), renderer="holoviews", domain=None))
     assert [d.name for d in movie.kdims] == ["frame"]
-    assert list(movie.keys()) == [f"2012-01-0{i}" for i in range(1, 6)]
+    assert _keys(movie) == [f"2012-01-0{i}" for i in range(1, 6)]
+
+
+def test_a_field_movie_names_its_variable_in_both_renderers():
+    """The frames say when; the variable name says what — as on the facet grid.
+
+    Where it sits differs by necessity, not by choice: matplotlib has a suptitle above
+    the map, bokeh's only title is the panel's own, so there the name joins the frame
+    label rather than replacing it.
+    """
+    ani = _facet_film(_run(3), domain=None)
+    assert ani._fig._suptitle.get_text() == "nitrate"
+
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
+    titles = [
+        f.title.text
+        for el in _frames(movie)  # lazy: a DynamicMap has drawn none until asked
+        for f in hv.render(el, backend="bokeh").select({"type": figure})
+    ]
+    # the variable is spelled by the same field_title the static suptitle uses; the
+    # interactive title carries the depth and source as well, having nowhere else to
+    # put them, where the static figure has a suptitle *and* a facet grid around it
+    assert titles[0].startswith("GOM_bgc: nitrate")
+    assert titles[0].endswith(" — 2012-01-01")
+    assert len(set(titles)) == 3, "the name must join the labels, not replace them"
+
+
+def test_an_explicit_movie_title_still_wins():
+    ani = _facet_film(_run(3), domain=None, title="GOM run")
+    assert ani._fig._suptitle.get_text() == "GOM run"
+    assert _facet_film(_run(3), domain=None, title="")._fig._suptitle is None
 
 
 def test_the_interactive_field_movie_fixes_one_colour_scale():
-    movie = _facet_film(_run(5), renderer="holoviews", domain=None)
-    assert len({_clim(el) for el in movie.values()}) == 1
+    movie = _hv(_facet_film(_run(5), renderer="holoviews", domain=None))
+    assert len({_clim(el) for el in _frames(movie)}) == 1
 
 
 def test_both_renderers_agree_on_the_field_movie_scale():
     field = _run(5)
     static = _facet_film(field, domain=None)._fig.axes[0].collections[0].norm
-    interactive = _clim(next(iter(_facet_film(field, renderer="holoviews").values())))
+    movie = _hv(_facet_film(field, renderer="holoviews"))
+    interactive = _clim(_frames(movie)[0])
     assert interactive == pytest.approx((static.vmin, static.vmax))
 
 
 def test_every_thins_a_field_movie_too():
     assert _facet_film(_run(10), every=3, domain=None)._save_count == 4
+
+
+def test_frames_are_drawn_on_demand_not_up_front():
+    """The fix for a movie that opened slowly and then would not step.
+
+    A HoloMap materializes every frame before showing one and embeds them all in the
+    page; for a real model field that is millions of quads in the browser. Opening must
+    cost one frame however many there are.
+    """
+    movie = _hv(_facet_film(_run(40), renderer="holoviews", domain=None))
+    assert len(_keys(movie)) == 40
+    assert len(movie.data) == 0, "frames were drawn before anything asked for them"
+    _ = movie[_keys(movie)[7]]
+    assert len(movie.data) == 1, "asking for one frame drew more than one"
+
+
+def test_hover_is_off_by_default_and_available_on_request():
+    """Hover makes bokeh hit-test every quad — worth it on a still, not on a movie."""
+
+    def tools(**options):
+        movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None, **options))
+        mesh = next(
+            n for n in _frames(movie)[0].traverse() if getattr(n, "vdims", None)
+        )
+        return mesh.opts.get("plot").kwargs.get("tools", [])
+
+    assert not tools()
+    assert tools(hover=True)
+
+
+def test_a_big_mesh_is_rasterized_and_a_small_one_is_not():
+    """``rasterize="auto"``: past ~100k cells, ship an image rather than every quad.
+
+    Datashader turns the mesh into an ``Image``; below the threshold the raw
+    ``QuadMesh`` is kept, which stays sharp when you zoom into it.
+    """
+    from ocean_skill.plot.holoviews_renderer import RASTERIZE_ABOVE_CELLS
+
+    def element_kinds(shape):
+        movie = _hv(
+            _facet_film(_run(3, shape=shape), renderer="holoviews", domain=None)
+        )
+        return [type(n).__name__ for n in _frames(movie)[0].traverse()]
+
+    small = (12, 20)
+    big = (400, 550)
+    assert small[0] * small[1] < RASTERIZE_ABOVE_CELLS < big[0] * big[1]
+    assert "QuadMesh" in element_kinds(small)
+    assert "Image" in element_kinds(big), "a large mesh was not rasterized"
+
+
+def test_rasterizing_does_not_nest_two_dynamic_maps():
+    """Regression: hvplot returns rasterize=True lazily, and holoviews cannot nest it.
+
+    The frames are already a DynamicMap, so the datashader operation has to be applied
+    eagerly (``dynamic=False``) — without that, rendering raises "Nesting a DynamicMap
+    inside a DynamicMap is not supported" only once something tries to draw it.
+    """
+    import holoviews as hv
+
+    movie = _hv(
+        _facet_film(_run(2, shape=(400, 550)), renderer="holoviews", domain=None)
+    )
+    hv.render(_frames(movie)[0], backend="bokeh")  # must not raise
+
+
+def test_tiles_put_a_basemap_under_the_field():
+    """Opt-in, because the browser fetches them — but they have to actually arrive."""
+    movie = _hv(
+        _facet_film(_run(3), renderer="holoviews", domain=None, tiles="EsriTerrain")
+    )
+    kinds = [type(n).__name__ for n in _frames(movie)[0].traverse()]
+    assert "WMTS" in kinds, kinds
+
+
+def test_a_mistyped_tile_source_says_which_ones_exist():
+    """Hvplot's own failure for this is "cannot swap from dimension 'lon'"."""
+    with pytest.raises(ValueError, match="unknown tile source"):
+        _facet_film(_run(2), renderer="holoviews", domain=None, tiles="EsriTerain")
+
+
+def test_the_title_says_what_is_being_shown_as_well_as_when():
+    """A frame label alone says which frame, and nothing about what it is a frame of."""
+    item = _facet_item(_run(3))
+    item |= {"depth": "surface", "label": "GOM_bgc"}
+    movie = _hv(
+        render(
+            PlotSpec(family="facet_movie", items=[item], options={"domain": None}),
+            renderer="holoviews",
+        )
+    )
+    mesh = next(n for n in _frames(movie)[0].traverse() if getattr(n, "vdims", None))
+    title = mesh.opts.get("plot").kwargs["title"]
+    assert "nitrate" in title, title  # the variable, via vars.short_name
+    assert "surface" in title, title  # the depth
+    assert "GOM_bgc" in title, title  # the source
+    assert "2012-01-01" in title, title  # and still which frame
+
+
+def test_an_explicit_title_still_wins(frames):
+    movie = _hv(
+        _facet_film(_run(3), renderer="holoviews", domain=None, title="my own title")
+    )
+    mesh = next(n for n in _frames(movie)[0].traverse() if getattr(n, "vdims", None))
+    assert mesh.opts.get("plot").kwargs["title"].startswith("my own title")
 
 
 def test_field_movie_routes_through_the_facet_movie_family(monkeypatch):

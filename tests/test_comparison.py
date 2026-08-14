@@ -162,6 +162,32 @@ def test_a_reduced_lane_passes_the_check(gom_bgc):
     _require_reduced(da, "test", "GOM_bgc")  # must not raise
 
 
+def test_a_cached_lane_is_still_checked_for_reduction(monkeypatch, gom_bgc):
+    """The lane cache is shared between callers that disagree about a surviving axis.
+
+    ``key_for_prepared`` deliberately excludes ``require_reduced`` — the same field is
+    the same field however it is about to be used — so a lane entry written by a caller
+    that keeps the time axis (a ``Field``, or a comparison scoring ``over="time"``) must
+    not let a plain comparison past its own gate on the way back out.
+    """
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import prepare_source
+
+    ds, meta = gom_bgc
+    monkeypatch.setattr(osk, "read", lambda name: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
+
+    kept, _ = prepare_source("GOM_bgc", OXYGEN_PER_MASS, None, None)
+    assert "time" in kept.dims, "the tolerant caller keeps the axis and fills the cache"
+
+    with pytest.raises(ValueError, match="GOM_bgc") as excinfo:
+        prepare_source("GOM_bgc", OXYGEN_PER_MASS, None, None, require_reduced="test")
+    assert "time=" in str(excinfo.value)
+
+
 def test_depth_label():
     assert _depth_label(None) == "surface"
     assert _depth_label(SURFACE) == "surface"

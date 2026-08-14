@@ -54,6 +54,47 @@ depths.movie(save="depths.mp4")       # the same three, played  (.gif also works
 depths.movie(renderer="holoviews")    # the same three, on a slider
 ```
 
+When the reference varies in **time** as well as space — a satellite record rather than a
+climatology — averaging it away answers a different question. Name the axis instead and
+every metric is computed cell by cell along it, giving a map per metric with its overall
+value beside it (see [docs/skill_maps.md](docs/skill_maps.md)):
+
+```python
+scored = osk.compare(
+    reference="modis_chl_daily", test="GOM_bgc", variables=["chlorophyll"],
+    select={"time": slice("2012-01", "2012-06")},
+    over="time",                      # keep the axis and score against it
+)
+
+scored.plot()                         # bias | crmsd | corr | sigma_ratio, as maps
+scored[0].maps("rmse", "n")           # any registered metric, as an xr.Dataset
+scored.metrics()                      # the same numbers over space *and* time
+```
+
+When the reference is a **place** rather than a field — a mooring, a station — there is no
+map to draw: the comparison is that place through time, and it draws as lines. Nothing
+extra to ask for, because the catalog already says so (`featureType: timeSeries`), and
+each comparison records what decided its figure in `family_reason`:
+
+```python
+papa = osk.compare(
+    reference="ooi-gp03flma-rim01-02-ctdmog040",   # a Station Papa CTD
+    test="oceansoda_ethz",                          # a monthly gridded product
+    variables=["temperature"],
+    # the mooring samples every 15 minutes and the product is monthly, so say how the
+    # mooring is binned — coarsening the *reference* is never done silently
+    aggregate={"time": {"resample": "MS", "reduce": "mean"}},
+)
+
+papa.plot()                           # reference solid, test dashed, on one time axis
+papa.plot(renderer="holoviews")       # the same lines, with hover
+papa[0].family_reason                 # why this drew as lines and not as maps
+```
+
+The model lane is *sampled at the station* — the nearest cell by default,
+`method="bilinear"` to interpolate to the position — and the offset between the station
+and the grid is reported in the aligned result's attrs, since at 1° it is ~55 km.
+
 Roles are set at compare time rather than in the catalog, so comparing two *models*
 is the same call with a different `reference`:
 
@@ -62,6 +103,25 @@ runs = osk.compare(reference="run_baseline", test="run_new", variables=[NITRATE]
 runs.summary()                        # Taylor + target diagrams side by side
 runs.write_metrics("metrics/")        # tidy CSV, one row per comparison
 ```
+
+Comparisons you already have go onto one diagram without being rebuilt — pool any mix
+of sets and single comparisons, which is often the only way to get them onto one figure
+at all, since a pool may span several references or aggregations:
+
+```python
+osk.summary([nutrients, depths, one_off])            # Taylor + target, pooled
+osk.summary({"hindcast": nutrients, "forecast": v2}) # or name the groups yourself
+osk.summary(nutrients, kind="taylor")                # just the one diagram
+pooled = nutrients + depths                          # a real set: .metrics(), .save()
+```
+
+Points are named by whatever varies across the pool (variable, depth, model,
+reference), so two fan-outs that each called a point `surface` stay distinguishable —
+and the comparisons themselves are untouched, keeping the labels their own figures
+draw. Unlike `.plot()`, a pool may freely mix a station time series with a gridded
+field: a metrics record is a handful of scalars either way, and both diagrams normalize
+by the reference's standard deviation, so points are comparable across variables and
+units.
 
 One source alone just plots — `osk.field` is the same pipeline without a reference,
 most useful when the reduction leaves a time axis standing, which becomes the panels:
@@ -92,7 +152,10 @@ osk.compare(reference="woa23_nitrate_month01", test="GOM_bgc", variables=[NITRAT
 
 `resample` gives consecutive periods (`Jan 2012`, `Feb 2012`, …); `{"groupby": "month"}`
 gives a climatology (`Jan`, `Feb`, …, every January of the record in one panel). The
-panels label themselves differently, so the two can't be confused on the page. A
+panels label themselves differently, so the two can't be confused on the page, and an
+axis finer than its label says so — three days of one January are titled `2012-01-16`
+rather than `Jan 2012` three times over. The figure's own title names the variable
+(`nitrate`), since the panels say when but nothing else says what; `title=""` drops it. A
 selection that starts or ends mid-period warns, since those panels average over part of
 a month but are labelled like whole ones. The grid's orientation follows the domain's
 aspect ratio — a wide box stacks down the page, a tall one spreads across it.

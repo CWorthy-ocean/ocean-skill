@@ -28,6 +28,8 @@ from ocean_skill.plot.typography import (
     MIN_PT,
     PAGE_H,
     PAGE_W,
+    PANEL_W_FRACTION,
+    PANEL_W_FRACTION_HORIZONTAL_CBAR,
     REFERENCE_GRID,
     SUPTITLE_ALLOWANCE,
     Canvas,
@@ -42,7 +44,18 @@ from ocean_skill.plot.typography import (
 # override of exactly this
 from ocean_skill.plot.typography import row_height as _typographic_row_height
 
-__all__ = ["facet_labels", "field_facet", "field_grid", "field_row", "render"]
+__all__ = [
+    "facet_labels",
+    "field_facet",
+    "field_grid",
+    "field_row",
+    "metric_panel_titles",
+    "metric_panels",
+    "metric_value_text",
+    "render",
+    "series",
+    "skill_map",
+]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
 # which is where they are used to decide sizes; re-exported under their old names.
@@ -126,6 +139,11 @@ DEFAULT_FRAME_LABEL_KWARGS: dict[str, Any] = {
     "family": "monospace",
     "bbox": dict(DEFAULT_METRICS_KWARGS["bbox"]),
 }
+#: A series panel's lines and its legend. Separate dicts so ``line_kwargs`` can carry
+#: anything ``Axes.plot`` takes without colliding with the legend's own keys.
+DEFAULT_LINE_KWARGS: dict[str, Any] = {"linewidth": 1.2}
+DEFAULT_LEGEND_KWARGS: dict[str, Any] = {"frameon": False}
+
 #: field_row draws one row per figure (page-width, horizontal bars below); field_grid
 #: stacks several rows (vertical bars beside them) — same keys, different orientation.
 #: ``shrink`` is 1.0 in both because :func:`_align_colorbars` re-fits each bar to the
@@ -185,6 +203,11 @@ _NESTED_KWARGS: dict[str, dict[str, Any]] = {
         "fontsize": REFERENCE_SCALE["frame_label"],
     },
     "suptitle_kwargs": {"fontsize": REFERENCE_SCALE["suptitle"]},
+    # Last deliberately: _nested_owner takes the first dict claiming a key, and these
+    # two share several with the map families' dicts (`color`, `alpha` and `linewidth`
+    # are gridline options too). At the end they answer only for keys nothing else has.
+    "legend_kwargs": {**DEFAULT_LEGEND_KWARGS, "fontsize": REFERENCE_SCALE["legend"]},
+    "line_kwargs": dict(DEFAULT_LINE_KWARGS),
 }
 
 
@@ -204,6 +227,8 @@ _SIZE_KEYS: dict[str, tuple[str, ...]] = {
     "metrics_kwargs": ("fontsize", "size"),
     "suptitle_kwargs": ("fontsize", "size"),
     "colorbar_kwargs": ("label_size",),
+    "legend_kwargs": ("fontsize", "size"),
+    "line_kwargs": (),
 }
 
 
@@ -258,6 +283,8 @@ def _style_defaults(
             "fontsize": scale["frame_label"],
         },
         "suptitle_kwargs": {"fontsize": scale["suptitle"]},
+        "legend_kwargs": dict(DEFAULT_LEGEND_KWARGS),
+        "line_kwargs": dict(DEFAULT_LINE_KWARGS),
     }
 
 
@@ -460,8 +487,14 @@ def _draw_map(
             ls="--",
             zorder=4,
         )
-    if label is not None:
-        ax.set_title(label, **title_kwargs)
+    # Always set_title, even to "": the point is not the text but the explicit ``y`` in
+    # title_kwargs, which clears matplotlib's ``_autotitlepos`` and so skips the
+    # automatic placement that goes infinite over a cartopy GeoAxes (see
+    # DEFAULT_TITLE_KWARGS). An axes that never had set_title called keeps automatic
+    # placement, reports a NaN tight bbox on matplotlib 3.11, and is dropped from
+    # ``bbox_inches="tight"`` -- which is every panel below the top row of a two-axis
+    # facet grid, where the label is deliberately None.
+    ax.set_title(label or "", **title_kwargs)
     return im
 
 
@@ -573,6 +606,347 @@ def _draw_row(
     return ims, (f"[{units}]" if units else "")
 
 
+def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
+    """Return one metric's value formatted for a label, or ``""`` if there isn't one.
+
+    Bools are excluded rather than formatted: ``isinstance(True, int)`` is ``True`` in
+    Python, so a naive numeric test renders the metric record's ``weighted`` flag as
+    ``1`` — a plausible-looking number that is not a metric at all.
+
+    Shared with the interactive renderer, which puts the same value in a panel title
+    instead of a box, so the two cannot disagree about what a metric reads as.
+    """
+    value = (metrics or {}).get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return ""
+    return f"{value:.3g}"
+
+
+#: Where a statistics box sits inside its corner, in axes coordinates.
+_CORNER_XY = {
+    "upper left": (0.02, 0.98, "left", "top"),
+    "upper right": (0.98, 0.98, "right", "top"),
+    "lower left": (0.02, 0.02, "left", "bottom"),
+    "lower right": (0.98, 0.02, "right", "bottom"),
+}
+
+
+def _date_axis(ax, scale: dict[str, float], tick_label_kwargs) -> None:
+    """Label a time axis concisely, without rotating it.
+
+    ``ConciseDateFormatter`` exists so a date axis does not need the 45-degree tilt, and
+    ``fig.autofmt_xdate()`` — the usual reflex — both rotates *and* hides all but the
+    bottom axes in a way that fights an explicit ``sharex``.
+    """
+    import matplotlib.dates as mdates
+
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.tick_params(axis="both", **{**{"labelsize": scale["tick_label"]}, **{}})
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if tick_label_kwargs:
+            label.set(**tick_label_kwargs)
+
+
+#: How a series panel draws a line. ``mark`` is a family-independent concept here (a map
+#: family's marks are "pcolormesh"/"contourf"/"scatter"), which is why this family is
+#: named `series` rather than `line`.
+SERIES_MARKS = ("line", "line+marker", "marker", "step")
+
+
+def _draw_series_lines(
+    ax, lines, line_kwargs: dict[str, Any], *, mark: str = "line"
+) -> list:
+    """Draw one panel's lines, marking a subsample rather than every point."""
+    from ocean_skill.plot.series import time_values
+    from ocean_skill.plot.style import markevery_indices
+
+    drawn = []
+    for line in lines:
+        values = line.spec.values
+        kwargs: dict[str, Any] = {}
+        wants_marker = mark in ("line+marker", "marker") or line.marker is not None
+        if wants_marker:
+            # Every sample marked is a filled band rather than a line, so a subsample is
+            # marked -- the same indices bokeh gets, having no `markevery` of its own.
+            kwargs = {
+                "marker": line.marker or "o",
+                "markevery": markevery_indices(int(values.sizes[values.dims[0]])),
+                "markersize": 4,
+            }
+        if mark == "marker":
+            kwargs["linestyle"] = "none"
+        (artist,) = ax.plot(
+            time_values(values),
+            np.asarray(values.values, dtype="float64"),
+            color=line.color,
+            label=line.label,
+            drawstyle="steps-mid" if mark == "step" else "default",
+            **{"linestyle": line.linestyle, **kwargs},
+            **line_kwargs,
+        )
+        drawn.append(artist)
+    return drawn
+
+
+def _metrics_box(ax, panel, metrics_kwargs: dict[str, Any]) -> None:
+    """Put the statistics box in the corner :mod:`ocean_skill.plot.series` measured."""
+    if not panel.metrics_text:
+        return
+    x, y, ha, va = _CORNER_XY.get(panel.metrics_corner, _CORNER_XY["upper left"])
+    kwargs = {**metrics_kwargs, "ha": ha, "va": va}
+    ax._osk_metrics_text = ax.text(
+        x, y, panel.metrics_text, transform=ax.transAxes, zorder=5, **kwargs
+    )
+
+
+def _warn_if_overplotted(layout, canvas: Canvas | None) -> None:
+    """Say so before drawing when a figure is being asked for more than it can show.
+
+    Before rather than after, unlike :func:`_warn_if_cramped`: the counts are known from
+    the layout, so there is no reason to spend the render first. Both still draw — the
+    caller may be exporting at ``size="free"`` and know exactly what they asked for.
+    """
+    import warnings
+
+    height = getattr(canvas, "max_height", None)
+    if height is None or len(layout.panels) <= 1:
+        return
+    per_panel = (height - SUPTITLE_ALLOWANCE) / len(layout.panels)
+    if per_panel < 1.0:
+        warnings.warn(
+            f"{len(layout.panels)} panels on a canvas capped at {height:.1f}in leaves "
+            f"{per_panel:.2f}in each, less than the labelling needs. Drawing anyway; "
+            'size="free" lets the figure grow instead.',
+            stacklevel=_stacklevel.find(),
+        )
+
+
+def series(
+    items,
+    *,
+    title: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
+    secondary_y: bool = True,
+    encode: dict[str, str | None] | None = None,
+    residual: bool = False,
+    metrics_loc: str = "auto",
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    mark: str = "line",
+    legend: bool = True,
+    ylim: tuple[float, float] | None = None,
+    panel_aspect: float | None = None,
+    labels: tuple[str, str] | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    fit_text: bool = True,
+    shared_axis_labels: bool = True,
+    title_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+    line_kwargs: dict[str, Any] | None = None,
+):
+    """Draw time series: one panel per group, both lanes of each comparison overlaid.
+
+    The line counterpart of :func:`field_grid`, and the family a comparison whose lanes
+    reduce to one time axis gets by default. ``reference`` is drawn solid and ``test``
+    dashed — by *role*, so model-versus-model works the same way and reverses when the
+    roles do — with colour carrying the variable and markers a varying depth. See
+    :mod:`ocean_skill.plot.style` for the whole policy and ``encode=`` for overriding a
+    channel.
+
+    Composition follows the defaults in :func:`ocean_skill.plot.series.compose`: one
+    variable overlays in a single panel, two put the second on a right-hand y axis
+    (``secondary_y=False`` to stack them instead), three or more become one row each.
+    ``rows=``/``cols=`` facet on ``variable``/``source``/``depth``/``comparison``
+    instead; one or the other, not both.
+
+    ``residual=True`` adds a short ``test − reference`` strip under each panel, sharing
+    its time axis. It is off by default: a difference *map* needs a panel of its own
+    because it needs its own colour scale, while a difference *series* is a note on the
+    panel above it, and drawing it always would double the axes on every figure.
+
+    Sized like every other family — ``size``/``zoom``/``figsize``, type from geometry
+    (:mod:`ocean_skill.plot.typography`) — with the statistics box placed in whichever
+    corner the data leaves emptiest, since a line panel, unlike a map, does not fill
+    its axes.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot import series as _series_layout
+    from ocean_skill.plot.typography import (
+        RESIDUAL_FRACTION,
+        SERIES_ASPECT,
+        SERIES_OVERHEAD,
+        SERIES_PANEL_W_FRACTION,
+    )
+
+    if mark not in SERIES_MARKS:
+        raise ValueError(
+            f"mark={mark!r} is not a series mark; expected one of {SERIES_MARKS}. "
+            '(A map family\'s marks -- "pcolormesh", "contourf", "scatter" -- draw a '
+            "field, not a line.)"
+        )
+    layout = _series_layout.compose(
+        items,
+        rows=rows,
+        cols=cols,
+        secondary_y=secondary_y,
+        encode=encode,
+        residual=residual,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    canvas = resolve_canvas(size, zoom)
+    _warn_if_overplotted(layout, canvas)
+    aspect = panel_aspect or SERIES_ASPECT
+    figsize = figsize or auto_figsize(
+        aspect,
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        panel_w_fraction=SERIES_PANEL_W_FRACTION,
+        overhead=SERIES_OVERHEAD,
+    )
+    # figure_ncols pins the *suptitle* to the reference grid: a one-column figure asking
+    # for the figure base off its own cell gets a 17pt suptitle where every other figure
+    # in the same report has 9. Same fix field_facet carries.
+    scale = type_scale(
+        figsize,
+        ncols=layout.ncols,
+        nrows=layout.nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=False)
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    tick_label_kwargs = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    legend_kwargs = _merged(defaults["legend_kwargs"], legend_kwargs)
+    line_kwargs = _merged(defaults["line_kwargs"], line_kwargs)
+
+    heights = []
+    for _ in layout.panels:
+        heights.append(1.0)
+        if residual:
+            heights.append(RESIDUAL_FRACTION)
+    fig, axes = plt.subplots(
+        nrows=len(heights) if layout.ncols == 1 else 1,
+        ncols=layout.ncols,
+        figsize=figsize,
+        sharex=shared_axis_labels,
+        squeeze=False,
+        gridspec_kw={"height_ratios": heights} if layout.ncols == 1 else None,
+        layout="constrained",
+    )
+    flat = list(axes.ravel())
+
+    per_panel: list[tuple[Any, list]] = []
+    for index, panel in enumerate(layout.panels):
+        ax = flat[index * (2 if residual else 1)]
+        handles = _draw_series_lines(ax, panel.lines, line_kwargs, mark=mark)
+        per_panel.append((ax, handles))
+        ax.set_title(
+            panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
+        )
+        ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        if panel.secondary:
+            twin = ax.twinx()
+            handles += _draw_series_lines(twin, panel.secondary, line_kwargs, mark=mark)
+            per_panel[-1] = (ax, handles)
+            twin.set_ylabel(panel.secondary_ylabel or "", fontsize=scale["axes_label"])
+            twin.tick_params(labelsize=scale["tick_label"])
+        _metrics_box(ax, panel, metrics_kwargs)
+        _date_axis(ax, scale, tick_label_kwargs)
+        if panel.residual:
+            strip = flat[index * 2 + 1]
+            _draw_series_lines(strip, panel.residual, line_kwargs, mark=mark)
+            strip.axhline(0.0, color="0.7", linewidth=0.7, zorder=1)
+            # Spelled exactly as field_grid labels its difference colorbar, so the two
+            # families name the same quantity the same way.
+            units = panel.ylabel.partition("[")[2].rstrip("]")
+            # Wrapped, not one line: the strip is a third of a panel high, and a rotated
+            # label of this length on it is either shrunk to nothing or clipped.
+            strip.set_ylabel(
+                "test − reference" + (f"\n[{units}]" if units else ""),
+                fontsize=scale["axes_label"],
+            )
+            _date_axis(strip, scale, tick_label_kwargs)
+
+    bottom = flat[-1]
+    bottom.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+    if title:
+        fig.suptitle(title, **suptitle_kwargs)
+    if legend:
+        _series_legend(fig, per_panel, layout, scale, legend_kwargs)
+    _warn_if_cramped(
+        fig,
+        ncols=layout.ncols,
+        canvas=canvas,
+        nrows=layout.nrows,
+        panels=[ax for ax in flat if ax.lines],
+    )
+    if fit_text:
+        _fit_text_widths(fig)
+    if save:
+        fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
+def _without_font(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """``kwargs`` without its font-size key, which is passed explicitly."""
+    return {k: v for k, v in kwargs.items() if k not in ("fontsize", "size")}
+
+
+def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
+    """Draw one key below the figure when every panel shares it, else one per panel.
+
+    A shared key below is what a report wants, and it is also the one thing bokeh cannot
+    do (it has no figure-level legend) — the stated divergence for this family. The
+    *entries* are identical in both renderers either way; only their placement is not.
+
+    Per-panel keys carry that panel's own lines, not the figure's: with one variable per
+    panel, a shared key would list every variable under each of them.
+    """
+    from ocean_skill.plot.summary import _legend_below
+
+    if layout.shared_legend and len(layout.panels) > 1:
+        seen: dict[str, Any] = {}
+        for _, handles in per_panel:
+            for handle in handles:
+                seen.setdefault(handle.get_label(), handle)
+        if seen:
+            _legend_below(fig, list(seen.values()), scale["legend"])
+        return
+    for (ax, handles), panel in zip(per_panel, layout.panels, strict=True):
+        if not handles:
+            continue
+        seen = {}
+        for handle in handles:
+            seen.setdefault(handle.get_label(), handle)
+        # An explicit corner, not loc="best": "best" minimises overlap with the *data*
+        # and knows nothing about the statistics box, which is how the two came to be
+        # drawn on top of each other. compose() ranks the corners and hands out two.
+        ax.legend(
+            list(seen.values()),
+            list(seen.keys()),
+            loc=panel.legend_corner,
+            fontsize=scale["legend"],
+            **legend_kwargs,
+        )
+
+
 def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     """Return the corner box's text: one ``key=value`` line per requested metric.
 
@@ -582,9 +956,9 @@ def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     if not metrics:
         return ""
     return "\n".join(
-        f"{k}={metrics[k]:.3g}"
-        for k in metric_keys
-        if isinstance(metrics.get(k), int | float)
+        f"{key}={text}"
+        for key in metric_keys
+        if (text := metric_value_text(metrics, key))
     )
 
 
@@ -939,6 +1313,39 @@ def _fit_text_widths(fig, renderer=None) -> None:
             )
 
 
+def _centre_suptitle(fig, renderer=None) -> None:
+    """Centre the suptitle over the panels rather than over the canvas.
+
+    matplotlib centres a suptitle on the *figure*, which is the same thing as centring
+    it over the panels only when the panels fill the figure's width. A tall facet grid
+    is where they do not: one narrow column of maps beside a vertical colorbar on a
+    page-width canvas leaves the drawn block well right of centre, and a title at
+    ``x=0.5`` sits off in the margin to the left of everything it names.
+
+    Measured after the layout has settled, since that is when the panels are where they
+    will be drawn. Colorbar axes are left out of the span deliberately — the title names
+    the field, and the bar is scenery beside it — and a figure whose panels *are*
+    centred lands back on 0.5, so this costs the common case nothing but a measurement.
+    """
+    sup = getattr(fig, "_suptitle", None)
+    if sup is None or not sup.get_text():
+        return
+    if renderer is None:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    boxes = [
+        ax.get_window_extent(renderer)
+        for ax in fig.axes
+        if ax.get_visible() and not getattr(ax, "_osk_cbar_parents", None)
+    ]
+    if not boxes:  # pragma: no cover - a figure with nothing but a colorbar
+        return
+    width = fig.get_size_inches()[0] * fig.dpi
+    centre = (min(b.x0 for b in boxes) + max(b.x1 for b in boxes)) / 2 / width
+    if np.isfinite(centre):
+        sup.set_x(float(centre))
+
+
 def _aspect_of(da) -> float:
     """Return one field's ``lon_span / lat_span`` — the shape a panel wants to be."""
     try:
@@ -956,7 +1363,12 @@ _CRAMPED_PANEL_FRACTION = 0.5
 
 
 def _warn_if_cramped(
-    fig, ncols: int = 3, *, canvas: Canvas | None = None, nrows: int = 1
+    fig,
+    ncols: int = 3,
+    *,
+    canvas: Canvas | None = None,
+    nrows: int = 1,
+    panels=None,
 ) -> None:
     """Say so when the canvas cannot hold its own labelling, and which knob to turn.
 
@@ -973,11 +1385,17 @@ def _warn_if_cramped(
     * **height-capped with many rows** — the figure is as tall as its canvas allows and
       the rows are splitting what is left. Widening does nothing here; lifting the cap
       (``size="free"``) or drawing fewer rows per figure does.
+
+    ``panels`` names the axes to measure, for a family whose panels are not maps.
     """
     import warnings
 
     fig_w, fig_h = fig.get_size_inches()
-    panels = [ax for ax in fig.axes if hasattr(ax, "projection")]
+    # A map panel is identified by its projection; a line panel has none, so a family
+    # whose panels are not maps has to say which axes to measure -- without that this
+    # returned silently and the cap went unenforced for it.
+    if panels is None:
+        panels = [ax for ax in fig.axes if hasattr(ax, "projection")]
     if not panels or fig_w <= 0:
         return
     cell_w = fig_w / max(ncols, 1)
@@ -1278,10 +1696,11 @@ def facet_labels(coord) -> list[str]:
     the coordinate alone, and are deliberately labelled so that the figure says which
     one it is:
 
-    * timestamps (a ``resample``) -> ``"Jan 2012"``. The year is not optional here: it
-      is the only thing on the page distinguishing six consecutive months from six
-      months of a climatology, and a reader who cannot tell those apart is reading the
-      wrong figure without knowing it.
+    * timestamps (a ``resample``) -> ``"Jan 2012"``, refined by :func:`_distinct` to
+      ``"2012-01-16"`` (and further) when a month is not enough to tell one panel from
+      the next. The year is not optional here: it is the only thing on the page
+      distinguishing six consecutive months from six months of a climatology, and a
+      reader who cannot tell those apart is reading the wrong figure without knowing it.
     * integer months (``{"groupby": "month"}``) -> ``"Jan"``, no year, because there
       isn't one — the panel is every January of the record.
     * a vertical level -> ``"50 m"``. Taken through ``abs`` because the model's own
@@ -1298,9 +1717,11 @@ def facet_labels(coord) -> list[str]:
         # covers numpy datetime64 and cftime alike, which is why this goes through
         # xarray's accessor rather than pandas or datetime directly -- a ROMS run on a
         # 360-day calendar carries cftime objects that pd.Timestamp cannot parse.
-        return [str(v) for v in coord.dt.strftime("%b %Y").values]
+        month_labels = [str(v) for v in coord.dt.strftime("%b %Y").values]
     except (TypeError, AttributeError):
-        pass
+        month_labels = None
+    if month_labels is not None:
+        return _distinct(coord, month_labels)
     if name == "month":
         try:
             return [calendar.month_abbr[int(v)] for v in values]
@@ -1314,25 +1735,30 @@ def facet_labels(coord) -> list[str]:
     return [str(v) for v in values]
 
 
-def frame_labels(coord) -> list[str]:
-    """Return a movie's frame labels: :func:`facet_labels`, refined until they differ.
+#: Datetime spellings tried in turn when the one before it leaves two panels — or two
+#: frames — saying the same thing. Coarsest first: a label is as short as it can be
+#: while still naming which panel it sits above.
+_FINER_TIME_FORMATS = ("%Y-%m-%d", "%Y-%m-%d %H:%M")
 
-    A facet grid's panels are almost always a reduction — six monthly means, twelve
-    climatological months — so ``"%b %Y"`` names them exactly. A movie is as often the
-    *unreduced* axis: every step of a run, which at daily cadence gives 31 panels all
-    called ``Jan 2012`` and at hourly cadence 744. On a still that is merely a repeated
-    caption; interactively the labels are the slider's values, and duplicates collapse
-    frames on top of each other silently.
 
-    So this starts from :func:`facet_labels` — a monthly movie is labelled exactly as
-    the equivalent grid is, which is the point — and escalates the resolution only when
-    the labels would not tell one frame from another. Non-datetime axes (levels,
-    seasons) come back unchanged, having nothing finer to fall back to.
+def _distinct(coord, labels) -> list[str]:
+    """Return ``labels``, spelled finer until no two panels carry the same one.
+
+    ``"%b %Y"`` names a reduction exactly — six monthly means, twelve climatological
+    months — and is what a reader wants above a panel that *is* a month. It is wrong
+    the moment the axis is finer than the label: three days of January selected out of
+    a run come out as three panels all called ``Jan 2012``, and a month of daily output
+    as 31. Statically that is a caption repeated over panels that differ; interactively
+    the labels are the slider's values, and duplicates collapse frames on top of each
+    other silently.
+
+    So the coarse spelling stands wherever it distinguishes the panels, and the
+    resolution escalates only where it does not. Non-datetime axes (levels, seasons)
+    come back unchanged, having nothing finer to fall back to.
     """
-    labels = facet_labels(coord)
     if len(set(labels)) == len(labels):
         return labels
-    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M"):
+    for fmt in _FINER_TIME_FORMATS:
         try:
             # same accessor facet_labels uses, so cftime calendars work here too
             finer = [str(v) for v in coord.dt.strftime(fmt).values]
@@ -1342,6 +1768,41 @@ def frame_labels(coord) -> list[str]:
         if len(set(finer)) == len(finer):
             break
     return labels
+
+
+def frame_labels(coord) -> list[str]:
+    """Return a movie's frame labels: exactly the panel titles the grid would carry.
+
+    A movie is its facet grid played rather than laid out, so its frames are labelled by
+    :func:`facet_labels` — including that function's refinement of a datetime axis too
+    fine for ``"%b %Y"``, which movies need more often than grids do (every step of a
+    run is a frame) but which is the same rule either way. Kept as its own name because
+    the movie paths read better for it and both renderers call it.
+    """
+    return facet_labels(coord)
+
+
+def field_title(standard_name) -> str:
+    """The suptitle a one-field figure carries when the caller has not named one.
+
+    The panels say *when*; nothing on the figure said *what*. A colorbar reading
+    ``[mmol/m^3]`` narrows it to a concentration and no further, and the file the figure
+    came from is not on the page, so a saved alkalinity figure and a saved nitrate one
+    were indistinguishable once they left the session that drew them.
+
+    Spelled through :func:`ocean_skill.vars.short_name`, as every legend and axis label
+    in the package is — the same field must not be ``alkalinity`` on one figure and
+    ``sea_water_alkalinity_expressed_as_mole_equivalent`` on the next. A field with no
+    CF name to shorten (a derived expression, say) gets no title rather than a guess;
+    ``title=""`` suppresses it explicitly, and ``title="..."`` still wins outright.
+
+    Only the one-source families default this. A comparison's rows already name their
+    variable down the left edge, and a grid of several would have no single name to
+    carry.
+    """
+    from ocean_skill.plot.summary import pretty_level
+
+    return pretty_level("variable", standard_name) if standard_name else ""
 
 
 def field_facet(
@@ -1367,6 +1828,8 @@ def field_facet(
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -1397,10 +1860,14 @@ def field_facet(
 
     Panel titles come from the facet coordinate itself (see :func:`facet_labels`), so a
     consecutive-month figure is labelled ``Jan 2012`` and a climatology ``Jan``, and the
-    two cannot be confused for one another on the page. With a ``row_dim`` the titles
-    appear on the top row only — every row below shows the same months — and each row is
-    named down the left edge instead (``50 m``), the same rotated label
-    :func:`field_grid` uses.
+    two cannot be confused for one another on the page. An axis finer than its label —
+    three days of a January, say — is spelled out far enough to tell the panels apart
+    (``2013-01-16``), since a title that names every panel names none. With a ``row_dim``
+    the titles appear on the top row only — every row below shows the same months — and
+    each row is named down the left edge instead (``50 m``), the same rotated label
+    :func:`field_grid` uses. The panels having said *when*, the suptitle says *what*: it
+    defaults to the variable's short name (see :func:`field_title`), and ``title=""``
+    drops it.
 
     The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
@@ -1411,6 +1878,8 @@ def field_facet(
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
+    canvas = resolve_canvas(size, zoom)
+    title = field_title(standard_name) if title is None else title
     for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
         if value is not None and value not in field.dims:
             raise ValueError(
@@ -1437,7 +1906,7 @@ def field_facet(
             )
         nrows, ncols = int(field.sizes[row_dim]), n
     elif ncols is None:
-        ncols, nrows = facet_layout(n, aspect)
+        ncols, nrows = facet_layout(n, aspect, canvas=canvas)
     else:
         ncols = max(int(ncols), 1)
         nrows = -(-n // ncols)
@@ -1454,6 +1923,7 @@ def field_facet(
         # with two axes only the top row is titled, so the rows below need a gap
         # rather than a title's worth of room as well
         title_every_row=row_dim is None,
+        canvas=canvas,
         font_scale=font_scale,
     )
     scale = type_scale(
@@ -1572,14 +2042,338 @@ def field_facet(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit: see _fit_text_widths, whose whole point is that it
+    # measures each label against the box it will *end up* in
     if align_colorbars:
         _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
+    # last, for the same reason: the panels have to be where they will be drawn before
+    # the title can be centred over them
+    _centre_suptitle(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save, dpi=150, bbox_inches="tight")
     return fig
+
+
+def metric_panels(skill, requested=None) -> list[str]:
+    """Resolve and validate the metrics to draw from a skill Dataset.
+
+    A requested metric the Dataset does not carry **raises**, naming what it does carry.
+    Dropping the panel instead would be invisible: a figure of three maps where four
+    were asked for looks exactly like a figure of three maps. Which metrics exist is a
+    data-layer question — each is a full reduction over the scored axis and cannot be
+    conjured at draw time — so the message points there rather than at a plot option.
+
+    Shared with the interactive renderer, so both refuse the same request the same way.
+    """
+    available = [
+        name
+        for name, da in skill.data_vars.items()
+        if da.ndim == 2 and da.dtype.kind in "fiu"
+    ]
+    if requested is None:
+        return available
+    names = [requested] if isinstance(requested, str) else list(requested)
+    missing = [name for name in names if name not in available]
+    if missing:
+        raise ValueError(
+            f"no pointwise map for {missing} — this comparison computed "
+            f"{available}. Which metrics are computed is decided when the maps are "
+            'prepared, not when they are drawn: pass metrics=("bias", "corr", ...) to '
+            "compare() (or to Comparison.maps()) to add them."
+        )
+    return names
+
+
+def metric_panel_titles(names) -> list[str]:
+    """Return the panel titles for a list of metrics.
+
+    The metric's own key, which is how every metric is already spelled in the corner
+    box, in the CSV and in :data:`ocean_skill.metrics.REGISTRY` — one name for one thing
+    across the whole package. Its own function so a prettier spelling later ("σ ratio")
+    lands in both renderers at once, the way :func:`facet_labels` does for facet panels.
+    """
+    return [str(name) for name in names]
+
+
+def metric_arrays(skill, names) -> dict[str, Any]:
+    """Return the values each metric's colour limits should be derived from.
+
+    Usually the metric's own map. The exception is a
+    :data:`~ocean_skill.colormaps.METRIC_LIMIT_GROUPS` pair — ``mean_test`` with
+    ``mean_reference``, ``std_test`` with ``std_reference`` — which get the *pooled*
+    values of both members, because they are one physical quantity for two fields and a
+    per-panel scale would make the only comparison worth making impossible to read.
+    """
+    from ocean_skill.colormaps import METRIC_LIMIT_GROUPS
+
+    grouped = {name: group for group in METRIC_LIMIT_GROUPS for name in group}
+    out = {}
+    for name in names:
+        members = [
+            member for member in grouped.get(name, (name,)) if member in skill.data_vars
+        ]
+        out[name] = np.concatenate(
+            [np.asarray(skill[member]).ravel() for member in members]
+        )
+    return out
+
+
+def skill_map(
+    items: list[dict[str, Any]],
+    *,
+    metric_names: tuple[str, ...] | None = None,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    domain: tuple[float, float, float, float] | None = None,
+    ncols: int | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+):
+    """Draw one map per skill metric: where the model agrees, metric by metric.
+
+    The figure for a comparison scored over an axis (``compare(..., over="time")``).
+    Every panel is the *same* comparison judged by a different measure, each computed
+    cell by cell along that axis — so bias says where the model runs high or low,
+    correlation where it tracks the observations through time, and the variability
+    ratio where it is over- or under-dispersed. There is no test/reference/difference
+    row here because there is nothing to set beside anything: the maps *are* it.
+
+    Each panel therefore gets **its own colour scale and its own colorbar**, unlike
+    :func:`field_facet`, whose panels share one because they are one quantity at
+    different times. Bias and a dimensionless correlation have no shared scale to have,
+    and there is deliberately no ``shared_limits`` to ask for one. The colours come from
+    :func:`ocean_skill.colormaps.metric_colors`, which both renderers call, so a bias
+    panel is symmetric about zero and a correlation panel spans (−1, 1) whichever
+    backend drew it.
+
+    Each panel is also annotated with that metric's **overall** value — the same number
+    reduced over space *and* the scored axis together, from ``metrics``' record — in
+    the corner box a comparison row uses for the same purpose. The map and the single
+    number are the same statistic at two resolutions, and reading one without the other
+    is how a good average hides a bad region.
+
+    Several items (a :func:`compare` fan-out) become rows: metrics across, comparisons
+    down, each row named at its left edge as :func:`field_grid`'s are. With a single
+    item the panels are one series with no inherent order, so the grid is free and
+    ``ncols`` defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads
+    the orientation off the domain's shape exactly as :func:`field_facet` does.
+
+    ``metric_names`` picks and orders the panels from what the item carries; a name it
+    does not carry raises (see :func:`metric_panels`). Every other parameter means
+    what it means in :func:`field_facet`.
+    """
+    import warnings
+
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot.typography import facet_figsize, facet_layout
+
+    if not items:
+        raise ValueError("skill_map needs at least one comparison, got none")
+    names = metric_panels(items[0]["skill"], metric_names)
+    if not names:
+        raise ValueError(
+            "this comparison carries no 2-D metric maps to draw. It was probably not "
+            'scored over an axis: build it with compare(..., over="time").'
+        )
+    for item in items[1:]:  # every row must be able to fill every column
+        metric_panels(item["skill"], names)
+
+    titles = metric_panel_titles(names)
+    aspect = _aspect_of(items[0]["skill"][names[0]])
+    canvas = resolve_canvas(size, zoom)
+    stacked = len(items) > 1
+    if stacked:
+        # two axes fix the grid, as field_facet's row_dim does: metrics across, one row
+        # per comparison. An ncols disagreeing with that would drop panels.
+        if ncols is not None and int(ncols) != len(names):
+            raise ValueError(
+                f"ncols={ncols} contradicts a {len(items)}-comparison set: the grid is "
+                f"{len(items)} x {len(names)} (one column per metric), so there is no "
+                "column count left to choose."
+            )
+        nrows, ncols = len(items), len(names)
+        panels = [(row, name) for row in range(nrows) for name in names]
+    else:
+        if ncols is None:
+            ncols, nrows = facet_layout(len(names), aspect, canvas=canvas)
+        else:
+            ncols = max(int(ncols), 1)
+            nrows = -(-len(names) // ncols)
+        panels = [(0, name) for name in names]
+
+    # Vertical, one per panel -- and *not* through colorbar_is_horizontal, which forces
+    # horizontal above a 2.5 aspect (a Gulf-shaped domain) and would put a bar stack
+    # under every row at ~1in of fixed height, which facet_figsize cannot charge for.
+    horizontal = str((colorbar_kwargs or {}).get("orientation", "vertical")).startswith(
+        "h"
+    )
+    if horizontal:
+        warnings.warn(
+            "colorbar_kwargs={'orientation': 'horizontal'} puts a bar under every "
+            "panel, but this family's height is not re-charged for that (see "
+            "facet_figsize), so the maps may be squeezed. Pass figsize= or zoom=.",
+            stacklevel=_stacklevel.find(),
+        )
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=nrows,
+        ncols=ncols,
+        # every panel is a different metric, so every row carries its own titles --
+        # except when the rows are comparisons and the columns repeat down the page
+        title_every_row=not stacked,
+        # the canvas whole, rather than its width and a height defaulted to the page:
+        # that spelling silently capped size="free" at the page, which is the one thing
+        # an uncapped canvas is for
+        canvas=canvas,
+        # PANEL_W_FRACTION, not FACET_PANEL_W_FRACTION: 0.88 is the allowance for a grid
+        # whose panels *share* one bar and so have nothing beside them. A bar in every
+        # cell is what 0.72 describes, and getting this backwards silently squeezes the
+        # maps -- the failure typography's own commentary is about.
+        panel_w_fraction=(
+            PANEL_W_FRACTION_HORIZONTAL_CBAR if horizontal else PANEL_W_FRACTION
+        ),
+        font_scale=font_scale,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        # the suptitle spans the page, so it is sized as every other family's is rather
+        # than off this grid's column count -- see type_scale
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    # FACET_COLORBAR_ASPECT is deliberately *not* applied: it exists for one bar
+    # refitted across every row, and each bar here spans exactly one panel -- which is
+    # what the grid default already describes.
+    merged_title = _merged(defaults["title_kwargs"], title_kwargs)
+    merged_gridline = _merged(defaults["gridline_kwargs"], gridline_kwargs)
+    merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
+    merged_metrics = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes.ravel())
+    arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+
+    for i, (row_index, name) in enumerate(panels):
+        ax = flat[i]
+        row, col = divmod(i, ncols)
+        item = items[row_index]
+        colors = metric_colors(
+            name,
+            arrays[row_index][name],
+            standard_name=item.get("standard_name"),
+        )
+        # Below the top row of a stacked grid every panel repeats its column's metric;
+        # the comparison is named down the left edge instead.
+        label = titles[names.index(name)] if (not stacked or row == 0) else None
+        im = _draw_map(
+            ax,
+            item["skill"][name],
+            label=label,
+            cmap=colors.cmap,
+            norm=colors.norm(),
+            mark=mark,
+            domain=domain,
+            gridline_kwargs=merged_gridline,
+            tick_label_kwargs=merged_tick,
+            title_kwargs=merged_title,
+            left_labels=(col == 0) if shared_axis_labels else None,
+            # the bottom row is ragged when the metrics do not fill the grid, so the
+            # question is "is there a panel below me?", not "am I in the last row?"
+            bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
+        )
+        if label is not None:
+            ax.title._osk_size_pinned = title_pinned
+        if col == 0 and stacked and item.get("row_label"):
+            _add_row_label(ax, item["row_label"], merged_row_label)
+            ax._osk_row_label._osk_size_pinned = _pinned(
+                row_label_kwargs, "row_label_kwargs"
+            )
+        # the metric's overall value, in the same corner box a comparison row uses for
+        # the same reason -- stashed on the axes as that one is
+        overall = _metrics_text(item.get("metrics"), (name,))
+        if overall:
+            ax._osk_metrics_text = ax.text(
+                0.02,
+                0.02,
+                overall,
+                transform=ax.transAxes,
+                zorder=5,
+                **merged_metrics,
+            )
+        _draw_colorbar(
+            fig,
+            im,
+            ax,
+            _units_label(item["skill"][name]),
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+        )
+
+    # Cells past the last panel carry no map and so no label artists — hidden rather
+    # than deleted, which keeps the drawn panels on the grid they were sized for.
+    for ax in flat[len(panels) :]:
+        ax.set_visible(False)
+
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _fit_left_margin(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+        _clear_row_labels(fig)
+    _warn_if_cramped(fig, ncols, canvas=canvas, nrows=nrows)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def _units_label(da) -> str:
+    """Return one metric map's colorbar label: its units, or nothing for a number.
+
+    Units go on each panel's own bar rather than into its title, because unlike
+    :func:`field_facet` every panel here has a bar of its own and a title copy would
+    say it twice.
+    """
+    units = str(da.attrs.get("units", "") or "")
+    return f"[{units}]" if units else ""
 
 
 #: Output formats :func:`field_movie` writes, and which matplotlib writer does each.
@@ -1698,15 +2492,20 @@ def _one_facet_axis(field, facet_dim: str | None) -> str:
     refuse the same fields for the same stated reason.
     """
     if facet_dim is None:
+        got = ", ".join(f"{d}={field.sizes[d]}" for d in field.dims) or "no dimensions"
         raise ValueError(
-            "a movie needs an axis to play, but this field is a single map — every "
-            "axis was collapsed, either by an aggregate= that reduces them all or by a "
-            "select= that picked one value. Leave time standing:\n"
+            f"a movie needs an axis to play, but this field is a single map ({got}) — "
+            "every axis was collapsed, either by an aggregate= that reduces them all "
+            "or by a select= that picked one value. Leave time standing:\n"
             "  aggregate=None (or {})                                    every step\n"
             '  aggregate={"time": {"resample": "1MS", "reduce": "mean"}}  one per '
             "month\n"
             '  aggregate={"time": {"groupby": "month", "reduce": "mean"}} a '
             "climatology\n"
+            "Inspect what you actually got with `.data` (a DataArray) or "
+            "`.facet_dims`, and if it disagrees with the call, re-prepare with "
+            "`.prepare(refresh=True)` — a lane cached under an older meaning of "
+            "aggregate= is the one way this can surprise you.\n"
             "Or use .plot() for the single map you have."
         )
     if facet_dim not in field.dims:
@@ -1782,6 +2581,8 @@ def field_movie(
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
     progress: bool = True,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
@@ -1837,14 +2638,25 @@ def field_movie(
         )
 
     first = frames[0]
+    # Exactly what field_row decides, and for the reason in this function's docstring: a
+    # frame is meant to *be* that row. Hardcoding True here made that false for anything
+    # not wide — a tall domain's bars sat below the maps in the movie and beside them in
+    # the still, with the figure reshaped to match.
+    aspect = _map_aspect(frames, reference_name)
+    horizontal = colorbar_is_horizontal(
+        aspect,
+        default_horizontal=True,
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
     figsize = figsize or auto_figsize(
-        _map_aspect(frames, reference_name),
+        aspect,
         nrows=1,
+        canvas=resolve_canvas(size, zoom),
         font_scale=font_scale,
-        horizontal_colorbar=True,
+        horizontal_colorbar=horizontal,
     )
     scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
-    defaults = _style_defaults(scale, horizontal_colorbar=True)
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
     proj = ccrs.PlateCarree()
 
     seq_norm = div_norm = None
@@ -1906,9 +2718,13 @@ def field_movie(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit — see _fit_text_widths. It matters more here than
+    # on a still: every frame is drawn into this one layout, so a label clipped by
+    # measuring it against a pre-alignment bar is clipped for the whole movie.
     if align_colorbars:
         _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
 
     metrics_text = getattr(axes[2], "_osk_metrics_text", None)
     keys = (test_name, reference_name, "difference")
@@ -1988,6 +2804,8 @@ def facet_movie(
     frame_label: bool = True,
     shared_limits: bool = True,
     font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
     progress: bool = True,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
@@ -2004,9 +2822,14 @@ def facet_movie(
 
     Frame labels come from the facet coordinate through :func:`frame_labels`, so they
     are spelled exactly as the static panels' titles are — ``Jan 2012`` for consecutive
-    months, ``Jan`` for a climatology, ``50 m`` for a level — except where that would
-    not tell one frame from another, since a movie is as often over the unreduced axis
-    as over a reduction.
+    months, ``Jan`` for a climatology, ``50 m`` for a level — including where a month is
+    too coarse to tell one frame from another, which a movie runs into more often than a
+    grid does, being as often over the unreduced axis as over a reduction.
+
+    The suptitle likewise says what the frame labels do not: it defaults to the
+    variable's short name (see :func:`field_title`), as :func:`field_facet`'s does, and
+    ``title=""`` drops it. It stays fixed while the frames play, being the one thing
+    about the figure that does not change.
 
     ``row_dim`` has no counterpart: a movie has one axis to play, and two facet axes
     would need one to become the panels — which is what :func:`field_facet` is for.
@@ -2018,6 +2841,7 @@ def facet_movie(
 
     from ocean_skill.plot.typography import REFERENCE_GRID, facet_figsize
 
+    title = field_title(standard_name) if title is None else title
     facet_dim = _one_facet_axis(field, facet_dim)
     indices = _select_frames(list(range(int(field.sizes[facet_dim]))), every)
     labels = frame_labels(field[facet_dim]) if facet_dim in field.coords else None
@@ -2026,7 +2850,13 @@ def facet_movie(
     # horizontal bar beneath it, a tall one a vertical bar beside it. Same rule
     # field_facet applies to its grid, which for a single cell *is* the map.
     horizontal = aspect > 1.0
-    figsize = figsize or facet_figsize(aspect, nrows=1, ncols=1, font_scale=font_scale)
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=1,
+        ncols=1,
+        canvas=resolve_canvas(size, zoom),
+        font_scale=font_scale,
+    )
     scale = type_scale(
         figsize,
         ncols=1,
@@ -2095,8 +2925,11 @@ def facet_movie(
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
     _fit_left_margin(fig)
-    _fit_text_widths(fig)
+    # alignment first, then the fit — see _fit_text_widths and the note in field_movie
     _align_colorbars(fig)
+    _fit_text_widths(fig)
+    _clear_row_labels(fig)
+    _centre_suptitle(fig)
 
     proj = ccrs.PlateCarree()
     artists = [im]
@@ -2141,7 +2974,7 @@ def _nested_owner(key: str) -> str | None:
 
 @functools.cache
 def _top_level_options() -> frozenset[str]:
-    """Every keyword ``field_row``/``field_grid`` accept directly, not inside a dict.
+    """Every keyword a top-level family accepts directly, rather than inside a dict.
 
     Read off the signatures rather than listed, so adding a parameter cannot leave this
     behind — which is exactly how ``size`` came to be misreported as a nested key.
@@ -2150,7 +2983,7 @@ def _top_level_options() -> frozenset[str]:
 
     return frozenset(
         name
-        for fn in (field_row, field_grid)
+        for fn in (field_row, field_grid, field_facet, series, skill_map)
         for name in inspect.signature(fn).parameters
     )
 
@@ -2210,6 +3043,10 @@ def render(spec, **kwargs: Any):
         _check_options(field_movie, opts)
     elif family == "facet_movie":
         _check_options(facet_movie, opts)
+    elif family == "series":
+        _check_options(series, opts)
+    elif family == "skill_map":
+        _check_options(skill_map, opts)
 
     if family == "field_facet":
         item = spec.single
@@ -2242,10 +3079,14 @@ def render(spec, **kwargs: Any):
             metrics=item.get("metrics"),
             **opts,
         )
+    if family == "skill_map":
+        return skill_map(spec.items, **opts)
     if family == "field_grid":
         return field_grid(spec.items, **opts)
     if family == "field_movie":
         return field_movie(spec.items, **opts)
+    if family == "series":
+        return series(spec.items, **opts)
     if family in ("taylor", "target", "paired"):
         # summary families work from metric records, which the spec carries per item
         fn = {"taylor": taylor, "target": target, "paired": paired}[family]

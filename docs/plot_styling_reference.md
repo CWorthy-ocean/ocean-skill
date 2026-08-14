@@ -1,14 +1,16 @@
 # Plot styling reference
 
-`field_row`/`field_grid`/`field_facet` (and `Comparison.plot()`/`ComparisonSet.plot()`/
-`Field.plot()`, which forward arbitrary kwargs to them) expose **7 style parameters**,
+`field_row`/`field_grid`/`field_facet`/`skill_map` (and `Comparison.plot()`/
+`ComparisonSet.plot()`/`Field.plot()`, which forward arbitrary kwargs to them) expose
+**7 style parameters**,
 each a dict that merges onto a
 built-in default and is unpacked straight into one specific matplotlib/cartopy call —
 so any keyword that call accepts works, not just a hand-picked subset. An eighth,
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
 no per-frame label on a still. A few more parameters aren't styling dicts at all
-(`title`, `metric_keys`, `shared_limits`, `shared_axis_labels`, `shared_axes`) — see
-[Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
+(`title`, `metric_keys`, `metric_names`, `shared_limits`, `shared_axis_labels`,
+`shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
+of this doc.
 
 > **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
 > matplotlib or cartopy call, so none of them do anything with `renderer="holoviews"`
@@ -41,6 +43,8 @@ want everything bigger or smaller.
 | [`metrics_kwargs`](#metrics_kwargs) | the bias/rmse/corr corner box | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
+| [`legend_kwargs`](#legend_kwargs) | a `series` panel's key (`series` only) | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -395,6 +399,13 @@ physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)")                    # mat
 physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)", renderer="holoviews")  # same text, interactive
 ```
 
+The one-source families — `Field.plot()` and `Field.movie()` — **default** it to the
+variable's short name (`alkalinity`), the panels having said *when* but nothing having
+said *what*. Pass `title=""` to drop it, or any string to replace it. On an interactive
+movie the name joins each frame's label (`alkalinity — 2013-01-16`) instead, bokeh's
+only title there being the panel's own. Comparison families still draw no title unless
+given one: their rows are already named down the left edge.
+
 ### `font_scale`
 
 Multiplies **every** text size at once, keeping the proportions between them — the
@@ -512,12 +523,53 @@ than merely inconsistent — see
 `frame_label_kwargs`, `player` (interactive) and `progress`. They are documented together
 in [Movies](movies.md), since they only mean anything once there is more than one frame.
 
-### `ncols` (`field_facet` only)
+### `metric_names` (`skill_map` only)
+
+Which pointwise metric maps become panels, and in what order — `metric_names=("corr",
+"bias")` draws those two, in that order. Honored by **both** renderers.
+
+Not to be confused with two neighbours it sits between:
+
+| Parameter | Family | Means |
+|---|---|---|
+| `metric_names` | `skill_map` | which metrics get a **panel** |
+| `metric_keys` | `field_row`/`field_grid` | which scalars appear in the **corner box** |
+| `metrics` | (item payload) | the overall scalar **record** itself |
+
+A name the comparison never computed pointwise **raises**, naming what it did compute:
+dropping the panel would be invisible, since a figure of three maps looks exactly like a
+figure of three maps. Which metrics exist is decided when the maps are prepared —
+`compare(..., over="time", metrics=("bias", "rmse", ...))` — because each is a full
+reduction over the scored axis and cannot be conjured at draw time. `skill_map` therefore
+accepts no `metric_keys`: one metric per panel leaves nothing to select.
+
+### One colorbar per panel (`skill_map` only)
+
+Every other map family gives a colour scale to a *row* (`field_row`, `field_grid`) or to
+the *whole grid* (`field_facet`), because in each case the panels sharing it are the same
+quantity. `skill_map`'s panels are different quantities — a bias in mmol m-3, a
+dimensionless correlation, a variability ratio — so each carries **its own scale and its
+own bar**, and there is deliberately no `shared_limits` to ask for one.
+
+The colours come from
+[`colormaps.metric_colors`](../ocean_skill/colormaps.py), which both renderers call, so a
+bias panel is diverging and symmetric about zero, a correlation panel spans a fixed
+(−1, 1), a variability ratio centres on 1, and an error magnitude pins its low end at 0 —
+identically in either backend. Edit `_METRIC_CMAPS`/`_METRIC_RANGES` there to change any
+of it, the same way `_SEQUENTIAL_CMAPS`/`_RANGES` work for variables.
+
+Because the bars are vertical and per-panel, this family charges `PANEL_W_FRACTION` of
+each cell to the map rather than the wider allowance a shared bar leaves. Passing
+`colorbar_kwargs={"orientation": "horizontal"}` is honored but warns: the grid's *height*
+is not re-charged for a bar under every panel, so pass `figsize=`/`zoom=` with it.
+
+### `ncols` (`field_facet` and `skill_map`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
 [`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
 from the domain's own aspect ratio, because a grid that suits a wide box is wrong for a
-tall one and vice versa. A Gulf-of-Mexico box stacks down the page one panel per row; a
+tall one and vice versa (`skill_map` uses the same rule for the same reason — four
+metrics have no inherent order, so nothing about the fold carries meaning). A Gulf-of-Mexico box stacks down the page one panel per row; a
 California-Current box spreads across it. Blank cells are charged for, so an ordered
 series doesn't end up scattered through a mostly empty grid just because those cells
 happened to be the right shape.
@@ -633,3 +685,84 @@ dimension, split it across figures.
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
 a colour block and a marker block. Same groups, one legend instead of two.
+
+---
+
+## The `series` family (time series)
+
+A comparison whose two lanes reduce to one time axis draws as lines rather than maps:
+`reference` solid, `test` dashed, on one panel with a statistics box and a key.
+
+```python
+osk.compare(reference="ooi-gp03flma-rim01-02-ctdmog040", test="oceansoda_ethz",
+            variables=["temperature"]).plot()
+```
+
+### Which channel carries what
+
+Deterministic, so a figure reads the same way every time and adding a source or a
+variable does the expected thing:
+
+| Channel | Default field | Notes |
+|---|---|---|
+| line style | **role** (not a field) | `reference` solid, `test` dashed — always |
+| colour | `variable` | one colour per variable, shared by both lanes of a pair |
+| dash pattern *within* the test side | `source` | a second model takes `:`, a third `-.` |
+| marker | `depth` | drawn only when depth actually varies, on ~20 samples per line |
+
+`role` beats everything: model-versus-model gives the baseline solid and the candidate
+dashed, and swapping which is the `reference` swaps the two.
+
+`encode=` moves a channel onto another field, or switches it off:
+
+```python
+.plot(encode={"linestyle": "depth"})   # dash pattern by depth instead of by source
+.plot(encode={"marker": None})         # no markers, whatever depth does
+```
+
+### Composition
+
+| Distinct variables | Default |
+|---|---|
+| one | one panel, every source overlaid |
+| two | one panel, the second variable on a right-hand y axis |
+| three or more | one row per variable |
+
+`secondary_y=False` stacks the two-variable case instead. `rows=` or `cols=` (one, not
+both) facet on `variable`, `source`, `reference`, `depth` or `comparison`.
+
+### `series`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `residual` | `False` | adds a short `test − reference` strip under each panel, sharing its time axis |
+| `mark` | `"line"` | `"line+marker"`, `"marker"` or `"step"` |
+| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
+| `legend` | `True` | draw the key at all |
+| `ylim` | `None` | y limits for every panel |
+| `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
+
+### `line_kwargs`
+
+Anything [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html)
+takes, applied to every line — `linewidth`, `alpha`, `zorder`. Colour and line style come
+from the policy above and are not overridable here (use `encode=`).
+
+### `legend_kwargs`
+
+Anything [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html)
+takes except `loc`, which the layout chooses so the key cannot land on the statistics box.
+
+### Static versus interactive
+
+Both renderers draw the same lines, colours, dash patterns, titles, axis labels and key
+*entries*. Two differences, both deliberate:
+
+* **Where the key goes.** When every panel shares one set of entries, the static renderer
+  draws a single key below the figure; bokeh has no figure-level legend, so it always
+  draws one inside each panel.
+* **Where the statistics box goes.** Statically it is pinned to the panel's corner;
+  interactively it is an `hv.Text` in data coordinates, so it pans and zooms with the data.
+
+`line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
+static renderer, which warns rather than absorbing them silently.

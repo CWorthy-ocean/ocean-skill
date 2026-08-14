@@ -56,6 +56,14 @@ _FIXED_SPELLINGS = {
     "degree celsius": "degC",
     "practical salinity units": "PSU",
     "practical_salinity_units": "PSU",
+    # Parts-per-thousand spellings for salinity. `ppt` has to be listed because pint
+    # reads it as *pico-pint* -- a real unit, dimensionally wrong, and silently so:
+    # compatible("1e-3", "ppt") came back False, which made a mooring-versus-product
+    # salinity comparison refuse to run at all (OceanSODA-ETHZ writes `ppt`).
+    "ppt": "PSU",
+    "ppth": "PSU",
+    "parts per thousand": "PSU",
+    "psu": "PSU",  # pint's own `psu` works; here so a stray case never reaches it
 }
 
 #: ``micro-mol`` -> ``micromol``: UDUNITS hyphenates SI prefixes, pint does not.
@@ -220,7 +228,42 @@ def convert_units(da, target: str = "mmol/m^3", rho: float = RHO_SEAWATER):
     return da
 
 
-def _match_name(ds, standard_name: str) -> str | None:
+#: Name components that mark a variable as a *flag about* a measurement rather than the
+#: measurement. Matched as whole `_`-delimited tokens, not substrings: "qc" inside a
+#: legitimate name (``qcm_index``) is not a flag, and excluding it would be worse than
+#: the problem being solved.
+_QC_TOKENS = frozenset({"qc", "qartod", "flag", "flags"})
+
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def is_qc_name(name) -> bool:
+    """Whether ``name`` looks like a QC flag rather than a measurement."""
+    return bool(_QC_TOKENS & set(_TOKEN_SPLIT.split(str(name).lower())))
+
+
+def _warn_if_only_a_flag_matched(ds, standard_name: str) -> None:
+    """Say a QC flag was the sole match, rather than reporting a bare "not found".
+
+    "This dataset does not have temperature" is confusing when the file plainly contains
+    ``sea_water_temperature_qc_agg``, so the reason the match was refused is named. Only
+    reached once nothing else matched, so it costs a second lookup on the failure path
+    and nothing on the common one.
+    """
+    try:
+        candidate = str(ds.cf[standard_name].name)
+    except (KeyError, AttributeError):
+        return
+    if is_qc_name(candidate):
+        warnings.warn(
+            f"{standard_name!r} is not in this dataset; the closest match, "
+            f"{candidate!r}, is a QC flag rather than the measurement it flags, so it "
+            "is being ignored. Ask for it by name if the flags are what you want.",
+            stacklevel=_stacklevel.find(),
+        )
+
+
+def _match_name(ds, standard_name: str, *, allow_qc: bool = False) -> str | None:
     """Return ``ds``'s own name for ``standard_name``, ignoring case, else ``None``.
 
     An exact hit wins outright; only failing that is a case-insensitive sweep run,
@@ -236,6 +279,8 @@ def _match_name(ds, standard_name: str) -> str | None:
         return standard_name
     lowered = standard_name.lower()
     hits = [str(v) for v in ds.variables if str(v).lower() == lowered]
+    if not allow_qc:
+        hits = [h for h in hits if not is_qc_name(h)]
     if len(hits) > 1:
         raise ValueError(
             f"{standard_name!r} matches {sorted(hits)} in this dataset, which differ "
@@ -278,11 +323,29 @@ def find_variable(ds, name: str):
     than silently choosing one.
     """
     standard_name = resolve_name(name)
-    found_name = _match_name(ds, standard_name)
+    # A request that names a flag gets a flag; a request that names a measurement never
+    # does. Station tables carry `<var>_qc_agg`/`<var>_qc_tests` companions, and gridded
+    # products carry flag variables that sometimes claim the *same* standard_name as the
+    # data they flag -- which is a path into cf-xarray below that no anchored pattern
+    # closes, since it matches on the attribute rather than the name.
+    allow_qc = is_qc_name(name) or is_qc_name(standard_name)
+    found_name = _match_name(ds, standard_name, allow_qc=allow_qc)
     if found_name is None:
+        # Flags are made *invisible* to the search rather than fatal when one matches:
+        # a dataset can carry both a flag claiming the canonical standard_name and the
+        # real variable under an alias spelling, and the real one has to still win.
+        searchable = (
+            ds
+            if allow_qc
+            else ds.drop_vars(
+                [str(v) for v in ds.variables if is_qc_name(v)], errors="ignore"
+            )
+        )
         try:
-            found_name = ds.cf[standard_name].name
+            found_name = str(searchable.cf[standard_name].name)
         except KeyError:
+            if not allow_qc:
+                _warn_if_only_a_flag_matched(ds, standard_name)
             return None
     da = ds[found_name]
 

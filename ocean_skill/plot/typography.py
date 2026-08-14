@@ -74,6 +74,7 @@ __all__ = [
     "bokeh_scale",
     "clamp_aspect",
     "colorbar_is_horizontal",
+    "diagram_scale_factor",
     "facet_figsize",
     "facet_layout",
     "frame_px",
@@ -264,6 +265,35 @@ def _base(length_in: float) -> float:
     """Return the base point size for a cell ``length_in`` inches across."""
     raw = BASE_PT_AT_1IN * max(length_in, 1e-3) ** BASE_EXPONENT
     return min(max(raw, MIN_BASE_PT), MAX_BASE_PT)
+
+
+def diagram_scale_factor(
+    default_figsize: tuple[float, float],
+    *,
+    size=None,
+    zoom: float = 1.0,
+) -> float:
+    """How far a *fixed-proportion* figure can be scaled to sit on a canvas.
+
+    A grid of maps can take a canvas' shape: it re-folds its panels and fills it. Some
+    figures cannot. A Taylor diagram's radius is a standard deviation and a Target's
+    rings must stay circular, so both are square by construction, and ``paired`` is the
+    two side by side at a fixed 2:1. There is no honest way to make a square fill 16:9,
+    so ``size`` cannot mean "become this shape" for them.
+
+    It means *fit inside* instead: keep the diagram's own proportions and scale by the
+    largest factor the canvas admits in both directions. ``size="page"`` is then exactly
+    1.0, so the reviewed defaults are unchanged, and ``size="slide"`` gives the biggest
+    square a slide has room for rather than one that overflows it — which is what the
+    width ratio alone gave, having ignored the canvas height entirely.
+    """
+    canvas = resolve_canvas(size, zoom)
+    height = default_figsize[1]  # only the height can bind; width scales by definition
+    factor = canvas.width / PAGE_W
+    if canvas.max_height is not None and height > 0:
+        room = max(canvas.max_height - SUPTITLE_ALLOWANCE, 1e-3)
+        factor = min(factor, room / height)
+    return float(factor)
 
 
 def type_scale(
@@ -473,6 +503,38 @@ def clamp_aspect(aspect: float) -> float:
 SUPTITLE_ALLOWANCE = 0.35
 
 
+#: What a *series* (line) panel wants, the counterparts of the map constants above.
+#:
+#: There is no data aspect to read for a line panel — x is time and y is a physical
+#: quantity, so its shape is a design choice rather than a measurement, which is the
+#: honest replacement for a map's ``lon_span / lat_span``. 2.6 is a shade wider than
+#: the 3:1 a page-width row of three maps gives each of them, which suits a time axis
+#: carrying years of dates.
+#:
+#: ``SERIES_PANEL_W_FRACTION`` is well above :data:`PANEL_W_FRACTION` because no
+#: colorbar takes width — only the y-axis label and its tick labels do, ~0.8in of a
+#: page. Measured off drawn figures: a page-width panel comes out 7.71in of 8.5.
+#:
+#: ``SERIES_OVERHEAD`` is :data:`ROW_OVERHEAD`'s counterpart: a title above, date labels
+#: and the axis label below. **Measured, not assumed** — but not by the plateau sweep
+#: :data:`ROW_OVERHEAD` used, which does not apply here: a map panel stops growing once
+#: its aspect ratio is satisfied, and a line panel, having no aspect to satisfy, keeps
+#: taking whatever height is left. Sweeping 1.2-4.2in of row height gives a slack
+#: that rises slowly from 0.74in to 0.86in — the growth being the type itself — and
+#: 2.9 em + 0.19in fits both ends to within 0.02in. The seed of 1.6 em borrowed from
+#: ``ROW_OVERHEAD`` under-provisioned by ~0.3in, which is not a squeezed panel here (a
+#: line panel has no minimum) but a figure a third of an inch shorter per row than the
+#: aspect asked for.
+SERIES_ASPECT = 2.6
+SERIES_PANEL_W_FRACTION = 0.90
+SERIES_OVERHEAD = (2.9, 0.19)
+
+#: Height of a residual strip as a fraction of the panel it sits under. A difference
+#: *map* is a third panel of equal weight because it needs its own colour scale; a
+#: difference *series* is conventionally a thin strip below the data it belongs to.
+RESIDUAL_FRACTION = 0.35
+
+
 def row_height(
     aspect: float,
     *,
@@ -482,6 +544,7 @@ def row_height(
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
     panel_w_fraction: float | None = None,
+    overhead: tuple[float, float] | None = None,
 ) -> float:
     """Height (inches) of one row of maps: the map, plus the type around it.
 
@@ -493,6 +556,11 @@ def row_height(
     settles it. Since the base grows as the cell's size to the power 0.6 and the
     overhead is only a fraction of the row, each pass moves the answer by a fraction of
     the last, so three agree to well under a tenth of a point.
+
+    ``overhead`` overrides which ``(em, fixed inches)`` pair is charged for the text
+    around the panel, for a family whose panel is not a map at all — a series panel has
+    a title and date labels but no colorbar stack (:data:`SERIES_OVERHEAD`). Left
+    ``None`` it follows ``horizontal_colorbar``, so every map family is unaffected.
 
     ``panel_w_fraction`` is how much of its cell the map itself gets, the rest being the
     colorbar and labelling. It is a parameter rather than a constant because a facet
@@ -519,7 +587,9 @@ def row_height(
             else PANEL_W_FRACTION
         )
     panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
-    em, fixed = ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
+    em, fixed = overhead or (
+        ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal_colorbar else ROW_OVERHEAD
+    )
     height = panel_h
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height)) * font_scale
@@ -582,8 +652,7 @@ def facet_figsize(
     nrows: int,
     ncols: int,
     title_every_row: bool = True,
-    page_w: float = PAGE_W,
-    page_h: float = PAGE_H,
+    canvas: Canvas | None = None,
     font_scale: float = 1.0,
     panel_w_fraction: float = FACET_PANEL_W_FRACTION,
 ) -> tuple[float, float]:
@@ -599,12 +668,13 @@ def facet_figsize(
     size, the font size comes from the cell size, and the cell size is what is being
     solved for. Three passes settle it for the same reason.
 
-    Capped at the page less :data:`SUPTITLE_ALLOWANCE`. A one-column grid of wide maps
-    hits that cap and is squeezed exactly as it was before this function existed, so
-    the saving only appears where the figure was not page-limited to begin with —
-    which is where the slack actually was.
+    Capped by the canvas, if the canvas caps its height at all. A one-column grid of
+    wide maps hits that cap and is squeezed, exactly as before this function existed, so
+    the saving only appears where the figure was not canvas-limited to begin with, which
+    is where the slack was. An uncapped canvas (``size="free"``) never squeezes.
     """
-    cell_w = page_w / max(ncols, 1)
+    canvas = canvas or CANVASES[DEFAULT_SIZE]
+    cell_w = canvas.width / max(ncols, 1)
     panel_h = cell_w * panel_w_fraction / clamp_aspect(aspect)
     nrows = max(nrows, 1)
     # the shared decorations are charged once; each further row adds only a gap, plus a
@@ -618,15 +688,16 @@ def facet_figsize(
     for _ in range(3):
         base = _base(math.sqrt(cell_w * height / nrows)) * font_scale
         height = panel_h * nrows + em * base / 72.0 + fixed
-    return (page_w, float(min(height, page_h - SUPTITLE_ALLOWANCE)))
+    if canvas.max_height is not None:
+        height = min(height, canvas.max_height - SUPTITLE_ALLOWANCE)
+    return (canvas.width, float(height))
 
 
 def facet_layout(
     n: int,
     aspect: float,
     *,
-    page_w: float = PAGE_W,
-    page_h: float = PAGE_H,
+    canvas: Canvas | None = None,
     blank_weight: float = BLANK_CELL_WEIGHT,
 ) -> tuple[int, int]:
     """Return ``(ncols, nrows)`` for ``n`` panels of a map with the given aspect ratio.
@@ -644,19 +715,27 @@ def facet_layout(
     normally an ordered series and a grid with a third of its cells empty reads as a
     bug in a way that a merely imperfect aspect ratio does not.
 
-    The page height available is the page less :data:`SUPTITLE_ALLOWANCE`, matching
-    :func:`row_height`, so the layout is chosen against the space the figure will
-    actually be drawn into.
+    The shape being matched is the ``canvas``, less :data:`SUPTITLE_ALLOWANCE`, so the
+    layout is chosen against the space the figure will actually be drawn into. That
+    makes the canvas load-bearing rather than cosmetic: scored against a portrait page,
+    a sequence of wide maps stacks into a column: right for a report and exactly wrong
+    for ``size="slide"``, where the same panels want to spread across 16:9.
+
+    An uncapped canvas (``size="free"``) has no height to match, so the page's is used
+    for scoring. The figure is still free to grow; only the *choice of grid* needs a
+    target shape, and "as tall as it likes" gives none.
     """
     if n <= 0:
         raise ValueError(f"a facet grid needs at least one panel, got {n}")
+    canvas = canvas or CANVASES[DEFAULT_SIZE]
     want = clamp_aspect(aspect)
-    usable_h = max(page_h - SUPTITLE_ALLOWANCE, 1e-3)
+    height = canvas.max_height if canvas.max_height is not None else PAGE_H
+    usable_h = max(height - SUPTITLE_ALLOWANCE, 1e-3)
 
     best, best_cost = (1, n), math.inf
     for ncols in range(1, n + 1):
         nrows = math.ceil(n / ncols)
-        cell_aspect = (page_w / ncols) / (usable_h / nrows)
+        cell_aspect = (canvas.width / ncols) / (usable_h / nrows)
         cells = ncols * nrows
         cost = abs(math.log(cell_aspect / want)) + blank_weight * (cells - n) / cells
         if cost < best_cost:
@@ -673,11 +752,13 @@ def auto_figsize(
     font_scale: float = 1.0,
     horizontal_colorbar: bool = False,
     panel_w_fraction: float = PANEL_W_FRACTION,
+    overhead: tuple[float, float] | None = None,
 ) -> tuple[float, float]:
     """Figure size for ``nrows`` rows of maps of the given aspect ratio on ``canvas``.
 
     Thin wrapper over :func:`row_height`: the width is the canvas', and the height is as
-    many rows as asked for.
+    many rows as asked for. ``overhead`` is passed through for a non-map family; see
+    :func:`row_height`.
     """
     canvas = canvas or CANVASES[DEFAULT_SIZE]
     height = row_height(
@@ -688,6 +769,7 @@ def auto_figsize(
         font_scale=font_scale,
         horizontal_colorbar=horizontal_colorbar,
         panel_w_fraction=panel_w_fraction,
+        overhead=overhead,
     )
     return (canvas.width, height * max(nrows, 1))
 
