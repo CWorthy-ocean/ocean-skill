@@ -253,7 +253,7 @@ entries:
     kwargs:
       args:
       - '{data(20e1a926e5121012)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -287,7 +287,7 @@ entries:
     kwargs:
       args:
       - '{data(7ac09350ebbe7b31)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -338,7 +338,7 @@ entries:
     kwargs:
       args:
       - '{data(7cdadcd67a90589c)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -373,7 +373,7 @@ entries:
     kwargs:
       args:
       - '{data(4beee02c2cb43bc9)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -401,7 +401,7 @@ entries:
     kwargs:
       args:
       - '{data(4c52ac58a5538626)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -429,7 +429,7 @@ entries:
     kwargs:
       args:
       - '{data(046d383412f9170e)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -461,7 +461,7 @@ entries:
     kwargs:
       args:
       - '{data(cf0e5812f655a6ac)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -493,7 +493,7 @@ entries:
     kwargs:
       args:
       - '{data(57b7ca32430d974e)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -525,7 +525,7 @@ entries:
     kwargs:
       args:
       - '{data(80cc2b4ec033d410)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -557,7 +557,7 @@ entries:
     kwargs:
       args:
       - '{data(c6ee89b91e9182ae)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -585,7 +585,7 @@ entries:
     kwargs:
       args:
       - '{data(5db46470278ed3cb)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -613,7 +613,7 @@ entries:
     kwargs:
       args:
       - '{data(079da09b05ffd125)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -641,7 +641,7 @@ entries:
     kwargs:
       args:
       - '{data(023272a9d8c912a9)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -669,7 +669,7 @@ entries:
     kwargs:
       args:
       - '{data(08cb2099f3a5effd)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -704,7 +704,7 @@ entries:
     kwargs:
       args:
       - '{data(af0517ce378e8f51)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -739,7 +739,7 @@ entries:
     kwargs:
       args:
       - '{data(71ab8c86110443a4)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -786,7 +786,7 @@ entries:
     kwargs:
       args:
       - '{data(9cb3c86498d9c586)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -822,7 +822,7 @@ entries:
     kwargs:
       args:
       - '{data(1cc40db9257c2971)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -856,7 +856,7 @@ entries:
     kwargs:
       args:
       - '{data(ce7500eb137cd444)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -883,7 +883,7 @@ entries:
     kwargs:
       args:
       - '{data(933d2bf9dcd7660b)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -917,7 +917,7 @@ entries:
     kwargs:
       args:
       - '{data(affe1b63f632d43c)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -955,7 +955,7 @@ entries:
     kwargs:
       args:
       - '{data(006820152a107b4a)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -994,7 +994,7 @@ entries:
     kwargs:
       args:
       - '{data(2a04d0f1b4e880df)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1029,7 +1029,7 @@ entries:
     kwargs:
       args:
       - '{data(f7d49a80b8d586fd)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1064,7 +1064,7 @@ entries:
     kwargs:
       args:
       - '{data(cf39eb2e28ecc097)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1099,7 +1099,7 @@ entries:
     kwargs:
       args:
       - '{data(a658c255ba5b8770)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1134,7 +1134,7 @@ entries:
     kwargs:
       args:
       - '{data(48bd567d11d1d45f)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1169,7 +1169,7 @@ entries:
     kwargs:
       args:
       - '{data(f606af808edd448d)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1206,7 +1206,7 @@ entries:
     kwargs:
       args:
       - '{data(7eef378e7f98740e)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1243,7 +1243,7 @@ entries:
     kwargs:
       args:
       - '{data(d54665ebaed23093)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
@@ -1281,7 +1281,7 @@ entries:
     kwargs:
       args:
       - '{data(cc2c6951af8d79ff)}'
-      chunks: {}
+      chunks: auto
       decode_times: false
     metadata:
       axes:
