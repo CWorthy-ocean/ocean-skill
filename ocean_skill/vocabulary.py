@@ -110,6 +110,18 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # the module docstring on why that is an alias here and not its own tier
         "aliases": [
             "sea_water_temperature",
+            # Satellite SST, in the three flavours GHRSST distinguishes. They are
+            # *not* identical: skin is the radiometric top micron, subskin the top
+            # millimetre, and foundation the temperature free of diurnal warming --
+            # skin and foundation can differ by a few tenths of a degree on a calm
+            # sunny afternoon. They are aliased here for the same reason
+            # sea_water_temperature is: without it every satellite SST product is
+            # invisible to find(variable="temperature"), which was the whole point
+            # of asking. MUR alone declares sea_surface_foundation_temperature.
+            "sea_surface_foundation_temperature",
+            "sea_surface_temperature",
+            "sea_surface_subskin_temperature",
+            "sea_surface_skin_temperature",
             # The surface-only spelling, used by every gridded surface product we
             # carry (OceanSODA-ETHZ's `temperature`, catalogs/oceansoda.yaml). Not a
             # different quantity: the sampling depth is a property of where the
@@ -117,6 +129,47 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # metrics row's `obs_depth`, and align_series' depth caveat) rather than
             # by refusing to pair a mooring with a surface field.
             "sea_surface_temperature",
+        ],
+    },
+    "sea_ice": {
+        # NSIDC's CDR (cdr_seaice_conc) and the ice field bundled into MUR, OISST
+        # and the Geo-Polar blend all declare this one name.
+        "standard_name": "sea_ice_area_fraction",
+    },
+    "sea_level_anomaly": {
+        # Deliberately not an alias of "ssh": DUACS ships both, and they are
+        # different quantities -- adt is height above the geoid, sla is the
+        # departure from a mean surface. Aliasing them would let compare() pair a
+        # ~1 m field against a ~0.1 m one and call it agreement.
+        "standard_name": "sea_surface_height_above_sea_level",
+    },
+    "eastward_velocity": {
+        "standard_name": "sea_water_x_velocity",
+        "aliases": [
+            "eastward_sea_water_velocity",
+            # DUACS/MULTIOBS ugos and ugosa. The "_assuming_sea_level_for_geoid"
+            # form is the one computed from sla rather than adt.
+            "surface_geostrophic_eastward_sea_water_velocity",
+            "surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid",
+        ],
+    },
+    "northward_velocity": {
+        "standard_name": "sea_water_y_velocity",
+        "aliases": [
+            "northward_sea_water_velocity",
+            "surface_geostrophic_northward_sea_water_velocity",
+            "surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid",
+        ],
+    },
+    "eastward_wind": {"standard_name": "eastward_wind"},
+    "northward_wind": {"standard_name": "northward_wind"},
+    "wind_speed": {"standard_name": "wind_speed"},
+    "kd490": {
+        # Verified from CoastWatch's VIIRS kd_490: "diffuse_", not the "volume_"
+        # spelling the CF table also carries.
+        "standard_name": (
+            "diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water"
+        ),
         ],
     },
     "salinity": {
