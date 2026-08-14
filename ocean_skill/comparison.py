@@ -24,6 +24,7 @@ __all__ = [
     "compare",
     "is_surface_request",
     "prepare_source",
+    "summary",
 ]
 
 
@@ -163,6 +164,20 @@ def _variable_label(spec: Any) -> str:
     return f"{how}({'+'.join(map(str, names))})"
 
 
+def _short_variable_label(spec: Any) -> str:
+    """Return a variable's name as a point label, short where the vocabulary knows one.
+
+    :func:`_variable_label` is the fallback rather than the rule because it only knows
+    how to strip a CF name apart, while :func:`ocean_skill.vars.short_name` knows what
+    the package calls things — and a combination spec has no short name to look up.
+    Shared by :func:`compare` and :func:`_pooled_labels` so a set's own labels and a
+    pooled set's relabelling cannot drift apart.
+    """
+    from ocean_skill.vars import short_name
+
+    return short_name(spec) if isinstance(spec, str) else _variable_label(spec)
+
+
 #: Keys naming the vertical axis in a `select`, in any accepted spelling.
 _VERTICAL_KEYS = frozenset({"depth", "Z", "vertical", "z"})
 
@@ -175,6 +190,20 @@ def _vertical_only(agg: dict[str, Any] | None) -> dict[str, Any]:
 def _without_vertical(agg: dict[str, Any] | None) -> dict[str, Any]:
     """Return the part of an aggregation spec for every axis but the vertical."""
     return {k: v for k, v in (agg or {}).items() if k not in _VERTICAL_KEYS}
+
+
+def _selected_depth(select: dict[str, Any]) -> Any:
+    """Return what a ``select`` asks for vertically, whichever spelling it used.
+
+    ``compare`` writes ``"depth"``, but a ``Comparison`` built directly keeps the
+    ``select`` it was given, and ``{"Z": 100}`` is as valid there as anywhere else. For
+    labels the difference is not cosmetic: reading only ``"depth"`` reports a comparison
+    at 100 m as ``surface``, and two comparisons at different depths as the same point.
+    """
+    for key in ("depth", "Z", "z", "vertical"):
+        if key in select:
+            return select[key]
+    return SURFACE
 
 
 #: What ``aggregate=None`` means: **reduce nothing**. There is deliberately no default
@@ -1013,15 +1042,196 @@ class Comparison:
         return (
             f"<Comparison {_variable_label(self.variable)[:24]} "
             f"{self.test_name} vs {self.reference_name} "
-            f"@ {_depth_label(self.select.get('depth', SURFACE))}{scored}>"
+            f"@ {_depth_label(_selected_depth(self.select))}{scored}>"
         )
 
 
-class ComparisonSet:
-    """A set of comparisons: stacked rows in one figure, one tidy metrics table."""
+def _identity(c) -> tuple:
+    """Return what makes two comparisons the same one: their whole specification.
 
-    def __init__(self, comparisons: list[Comparison]):
-        self.comparisons = comparisons
+    Built from the object's own attributes rather than from ``c._cache_key``, which
+    hashes very nearly this but exists to name a zarr store — pooling has no business
+    depending on the cache's format version or on what it deliberately leaves out.
+    """
+    return (
+        getattr(c, "test_name", None),
+        getattr(c, "reference_name", None),
+        repr(getattr(c, "variable", None)),
+        repr(getattr(c, "select", None)),
+        repr(getattr(c, "aggregate", None)),
+        getattr(c, "method", None),
+        getattr(c, "over", None),
+        getattr(c, "time_method", None),
+        getattr(c, "tolerance", None),
+        getattr(c, "bin_anchor", None),
+    )
+
+
+def _flatten(objs: Any) -> list[Comparison]:
+    """Collect comparisons out of whatever shape they were handed in, dropping repeats.
+
+    Accepts a :class:`Comparison`, a :class:`ComparisonSet`, a mapping of either, or any
+    nesting of those, because "the comparisons I already have" is rarely one tidy list —
+    it is a couple of ``compare()`` results and a one-off or two.
+
+    Exact repeats are dropped rather than drawn twice: two sets built for different
+    figures commonly share a pair (a nutrients fan-out and a depth fan-out both hold
+    ``no3 @ surface``), and pooling them would put one marker exactly on top of another,
+    add a duplicate key entry, and duplicate a row in :meth:`ComparisonSet.metrics`.
+    """
+    out: list[Comparison] = []
+    seen: set[tuple] = set()
+    dropped = 0
+
+    def add(obj: Any) -> None:
+        nonlocal dropped
+        if isinstance(obj, ComparisonSet):
+            for c in obj:
+                add(c)
+            return
+        if isinstance(obj, dict):
+            for v in obj.values():
+                add(v)
+            return
+        if hasattr(obj, "metrics") and hasattr(obj, "as_item"):
+            key = _identity(obj)
+            if key in seen:
+                dropped += 1
+                return
+            seen.add(key)
+            out.append(obj)
+            return
+        if isinstance(obj, str) or not hasattr(obj, "__iter__"):
+            raise TypeError(
+                f"expected comparisons, got {obj!r}. Pass a Comparison, a "
+                "ComparisonSet (what compare() returns), a list of either, or a "
+                "{name: comparisons} dict."
+            )
+        for item in obj:
+            add(item)
+
+    add(objs)
+    if dropped:
+        print(f"  pooled: dropped {dropped} duplicate comparison(s)")
+    return out
+
+
+#: Dimensions a pooled label can be built from, in the order they are spelled, paired
+#: with how to read each one off a comparison. The same four a metrics record carries,
+#: so ``color_by``/``marker_by`` can group by anything a label can name.
+_LABEL_DIMS: tuple[tuple[str, Any], ...] = (
+    ("variable", lambda c: _short_variable_label(c.variable)),
+    ("depth", lambda c: _depth_label(_selected_depth(c.select))),
+    ("test", lambda c: c.test_name),
+    ("reference", lambda c: c.reference_name),
+)
+
+
+def _pooled_labels(comparisons: list[Comparison]) -> list[str]:
+    """Name each point by what distinguishes it *within this pool*.
+
+    :func:`compare` labels only what varies across its own fan-out, which is right for
+    the set it built and wrong the moment that set is pooled with another: two calls
+    that each fanned over depth both produce a point labelled ``surface``. So the same
+    rule is applied again over the pooled comparisons, where the varying dimension may
+    now be the model or the reference rather than the depth.
+
+    Dimensions are added only while they are still doing work — in priority order, each
+    kept only if it tells more points apart than the label already did, and stopped as
+    soon as every point is distinct. Naming every varying dimension instead produces
+    labels like ``nitrate 0 m woa23_nitrate_month07 woa23_nitrate_month01``, where the
+    sources vary in lockstep with the variable and so say nothing the first word did not
+    — and a legend of those is unreadable at any type size.
+
+    With nothing varying — the same pair at the same depth, differing only in how it was
+    aggregated — there is no dimension to name, and each comparison keeps the label it
+    came with. Anything still colliding after that is suffixed rather than left
+    ambiguous; a diagram with two points called the same thing is unreadable.
+    """
+    if not comparisons:
+        return []
+
+    def spell(dims) -> list[str]:
+        return [" ".join(str(read(c)) for _, read in dims) for c in comparisons]
+
+    chosen: list[tuple[str, Any]] = []
+    apart = 1  # points the label currently tells apart; one label, one group
+    for dim in _LABEL_DIMS:
+        if apart == len(comparisons):
+            break
+        gain = len(set(spell([*chosen, dim])))
+        if gain > apart:
+            chosen.append(dim)
+            apart = gain
+    if not chosen:
+        return [c.label or _short_variable_label(c.variable) for c in comparisons]
+    labels = spell(chosen)
+
+    counts: dict[str, int] = {}
+    collided = False
+    for i, lab in enumerate(labels):
+        counts[lab] = counts.get(lab, 0) + 1
+        if counts[lab] > 1:
+            labels[i] = f"{lab} ({counts[lab]})"
+            collided = True
+    if collided:
+        print(
+            "  pooled: some comparisons differ only in something a label cannot name "
+            "(aggregation, region); suffixed them to keep the points apart"
+        )
+    return labels
+
+
+def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]:
+    """Label a ``{name: comparisons}`` pool by its keys rather than by a rule.
+
+    Your key is what disambiguates across groups, so a group's members keep their own
+    labels and get the key in front of them. A group of one is labelled with the key
+    alone — ``{"run A": c}`` means the point is called ``run A``, not ``run A: no3``.
+    """
+    comparisons: list[Comparison] = []
+    labels: list[str] = []
+    for name, obj in mapping.items():
+        members = _flatten(obj)
+        for c in members:
+            own = c.label or _short_variable_label(c.variable)
+            labels.append(str(name) if len(members) == 1 else f"{name}: {own}")
+        comparisons += members
+    return comparisons, labels
+
+
+class ComparisonSet:
+    """A set of comparisons: stacked rows in one figure, one tidy metrics table.
+
+    Also how comparisons you already have are pooled onto one summary diagram — the
+    constructor takes any nesting of comparisons and sets, and ``+`` joins two sets:
+
+        pooled = nutrients + depths        # relabelled by what varies across the pool
+        osk.ComparisonSet({"hindcast": a, "forecast": b})   # or name the groups
+    """
+
+    def __init__(
+        self,
+        comparisons: Any,
+        *,
+        labels: list[str] | None = None,
+    ):
+        if isinstance(comparisons, dict):
+            if labels is not None:
+                raise TypeError(
+                    "pass either a {name: comparisons} dict or labels=, not both — "
+                    "the dict's keys are already the labels"
+                )
+            self.comparisons, labels = _named_labels(comparisons)
+        else:
+            self.comparisons = _flatten(comparisons)
+        if labels is not None and len(labels) != len(self.comparisons):
+            raise ValueError(
+                f"labels has {len(labels)} entries for {len(self.comparisons)} "
+                "comparisons — there must be one per comparison"
+            )
+        #: Per-comparison label overrides, or None to use each comparison's own.
+        self.labels = list(labels) if labels is not None else None
 
     def __len__(self) -> int:
         return len(self.comparisons)
@@ -1031,6 +1241,29 @@ class ComparisonSet:
 
     def __getitem__(self, i):
         return self.comparisons[i]
+
+    def __add__(self, other: Any) -> ComparisonSet:
+        """Pool two sets into one, relabelled by what varies across the pool.
+
+        List-like ``+``, because a set is a container (it has ``__len__``, ``__iter__``
+        and ``__getitem__``) — nothing here is added to anything numerically. Combining
+        *variables* is a different operation with its own spelling; see
+        :mod:`ocean_skill.operators`.
+        """
+        pooled = _flatten([self.comparisons, other])
+        return ComparisonSet(pooled, labels=_pooled_labels(pooled))
+
+    def _label_for(self, i: int) -> Any:
+        """Return this set's label for comparison ``i``: its override, else the own one.
+
+        Overriding here rather than writing onto the comparison is the whole reason
+        pooling is safe to do with objects you already have: a comparison pooled into a
+        summary keeps the label its own set draws as a row label and its own movie draws
+        as a frame label.
+        """
+        if self.labels is not None:
+            return self.labels[i]
+        return self.comparisons[i].label
 
     def metrics(self):
         """Return every comparison's metrics as a tidy DataFrame (one row each)."""
@@ -1085,7 +1318,26 @@ class ComparisonSet:
 
     def _items(self) -> list[dict[str, Any]]:
         """Spec items for every comparison in the set."""
-        return [{**c.as_item(), "row_label": c.label} for c in self.comparisons]
+        items = []
+        for i, c in enumerate(self.comparisons):
+            label = self._label_for(i)
+            items.append({**c.as_item(), "label": label, "row_label": label})
+        return items
+
+    def _metric_items(self) -> list[dict[str, Any]]:
+        """Spec items carrying only what a summary diagram reads: metrics and a label.
+
+        The summary families are the one place :meth:`_items` is more than is needed and
+        the extra costs real work: for a set scored ``over`` an axis, ``as_item`` builds
+        a metric map per comparison (:meth:`Comparison.maps`) that a Taylor or target
+        point never looks at. Both renderers take exactly ``metrics`` and ``label`` off
+        these items — see ``matplotlib_renderer._Record`` and the interactive target —
+        so this is the whole contract, not a subset of it.
+        """
+        return [
+            {"metrics": c.metrics(), "label": self._label_for(i)}
+            for i, c in enumerate(self.comparisons)
+        ]
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render all comparisons as stacked rows in one figure.
@@ -1188,7 +1440,7 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="taylor", items=self._items(), options=kwargs),
+            PlotSpec(family="taylor", items=self._metric_items(), options=kwargs),
             renderer=renderer,
         )
 
@@ -1198,7 +1450,7 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="target", items=self._items(), options=kwargs),
+            PlotSpec(family="target", items=self._metric_items(), options=kwargs),
             renderer=renderer,
         )
 
@@ -1208,12 +1460,65 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="paired", items=self._items(), options=kwargs),
+            PlotSpec(family="paired", items=self._metric_items(), options=kwargs),
             renderer=renderer,
         )
 
     def __repr__(self) -> str:
         return f"<ComparisonSet: {len(self)} comparisons>"
+
+
+#: What ``summary(kind=...)`` names, and the set method each one is.
+_SUMMARY_KINDS = {"both": "summary", "taylor": "taylor", "target": "target"}
+
+
+def summary(
+    comparisons: Any,
+    *,
+    kind: str = "both",
+    renderer: str = "matplotlib",
+    **kwargs: Any,
+):
+    """Summarize comparisons you already have on one diagram.
+
+    The counterpart to :func:`compare`, for the case where the comparisons exist: a
+    nutrients fan-out, a depth fan-out, a one-off pair, pooled onto a single Taylor
+    and/or target diagram without re-expressing them as one ``compare()`` call — which
+    is often impossible anyway, since a pool may mix references, aggregations, or a
+    station with a grid::
+
+        osk.summary([nutrients, depths, c])
+        osk.summary({"hindcast": nutrients, "forecast": other}, kind="taylor")
+
+    Pooling is safe here in a way it is not for :meth:`ComparisonSet.plot`, which
+    refuses a set mixing plot families: a metrics record is a handful of scalars whether
+    the comparison was a map, a scored map or a station series, and both diagrams
+    normalize by the reference's standard deviation, so unlike a figure of fields these
+    points are comparable across variables and units.
+
+    ``kind`` picks the diagram — ``"both"`` (Taylor and target side by side),
+    ``"taylor"`` or ``"target"``. It is not ``renderer``, which sits beside it and picks
+    static, interactive, or ``"both"`` of *those*; the two words mean different things
+    and both take that value.
+
+    Points are named by what varies across the pool, or by your own names if
+    ``comparisons`` is a ``{name: comparisons}`` dict. Either way the comparisons
+    themselves are untouched — see :meth:`ComparisonSet._label_for`. Remaining keyword
+    arguments go to the diagram (``color_by``, ``marker_by``, ``labels``, ``title``,
+    ``save``, ...); see :mod:`ocean_skill.plot.summary`.
+    """
+    if kind not in _SUMMARY_KINDS:
+        raise ValueError(
+            f"kind={kind!r} is not one of {tuple(_SUMMARY_KINDS)} — 'both' draws "
+            "Taylor and target side by side, 'taylor' or 'target' just the one. "
+            "(To choose static vs interactive, use renderer=.)"
+        )
+    if isinstance(comparisons, dict):
+        pooled = ComparisonSet(comparisons)  # keys are the labels
+    else:
+        members = _flatten(comparisons)
+        pooled = ComparisonSet(members, labels=_pooled_labels(members))
+    return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **kwargs)
 
 
 def compare(
@@ -1290,7 +1595,6 @@ def compare(
     selection rather than on file contents.
     """
     from ocean_skill.catalog import resolve
-    from ocean_skill.vars import short_name
     from ocean_skill.vocabulary import equivalent_names, resolve_and_report
 
     # depths defaults to the vertical entry already in `select`, if any, so the two
@@ -1372,11 +1676,7 @@ def compare(
                     sel["depth"] = d
                     # Label only what varies across the set: repeating the variable
                     # name on every point of a single-variable fan-out just collides.
-                    short = (
-                        short_name(var)
-                        if isinstance(var, str)
-                        else (_variable_label(var))
-                    )
+                    short = _short_variable_label(var)
                     many_vars, many_depths = len(variables) > 1, len(depths) > 1
                     if many_vars and many_depths:
                         label = f"{short} {_depth_label(d)}"

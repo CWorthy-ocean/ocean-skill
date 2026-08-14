@@ -54,6 +54,10 @@ scored.taylor()             # still works: these are the same numbers
 scored.save("gom_vs_modis") # figure + CSV, same layout as any other comparison
 ```
 
+Because they are the same numbers, a scored set pools with an unscored one on a single
+diagram — `osk.summary([scored, surface_nutrients])` — even though the two cannot share
+a figure of *fields*. Only the metrics record travels, so nothing recomputes the maps.
+
 `renderer="holoviews"` gives the interactive version of the same figure, with the overall
 value in each panel's title instead of its corner.
 

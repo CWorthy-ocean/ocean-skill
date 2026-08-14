@@ -104,6 +104,25 @@ runs.summary()                        # Taylor + target diagrams side by side
 runs.write_metrics("metrics/")        # tidy CSV, one row per comparison
 ```
 
+Comparisons you already have go onto one diagram without being rebuilt — pool any mix
+of sets and single comparisons, which is often the only way to get them onto one figure
+at all, since a pool may span several references or aggregations:
+
+```python
+osk.summary([nutrients, depths, one_off])            # Taylor + target, pooled
+osk.summary({"hindcast": nutrients, "forecast": v2}) # or name the groups yourself
+osk.summary(nutrients, kind="taylor")                # just the one diagram
+pooled = nutrients + depths                          # a real set: .metrics(), .save()
+```
+
+Points are named by whatever varies across the pool (variable, depth, model,
+reference), so two fan-outs that each called a point `surface` stay distinguishable —
+and the comparisons themselves are untouched, keeping the labels their own figures
+draw. Unlike `.plot()`, a pool may freely mix a station time series with a gridded
+field: a metrics record is a handful of scalars either way, and both diagrams normalize
+by the reference's standard deviation, so points are comparable across variables and
+units.
+
 One source alone just plots — `osk.field` is the same pipeline without a reference,
 most useful when the reduction leaves a time axis standing, which becomes the panels:
 

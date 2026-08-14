@@ -74,7 +74,27 @@ print(
     )
 )
 
-# 5. The escape hatch: prepared arrays for a bespoke figure --------------------
+# 5. SUMMARIZING what is already built -----------------------------------------
+# Nothing here re-reads or re-aligns anything: a summary diagram needs only each
+# comparison's metrics record, so the three objects above go straight onto one figure.
+# They could not share a *field* figure — different variables, different depths — but
+# both diagrams normalize by the reference's standard deviation, so as points they are
+# directly comparable.
+print(f"\n5. pooled  : {osk.ComparisonSet([nutrients, depths, c])}")
+osk.summary(
+    [nutrients, depths, c],
+    title="Everything above, on one diagram",
+    save=OUT / "5_summary.png",
+)
+# Points are labelled by whatever varies across the pool. Name the groups instead when
+# the split you care about is the one you made rather than one the specs reveal:
+osk.summary(
+    {"by variable": nutrients, "by depth": depths},
+    kind="taylor",
+    save=OUT / "5_summary_named.png",
+)
+
+# 6. The escape hatch: prepared arrays for a bespoke figure --------------------
 aligned = depths[0].aligned  # test / reference / difference on a common grid
-print(f"\n5. escape hatch: {list(aligned.data_vars)} on {dict(aligned.sizes)}")
+print(f"\n6. escape hatch: {list(aligned.data_vars)} on {dict(aligned.sizes)}")
 print(f"   wrote figures + metrics to {OUT}/")
