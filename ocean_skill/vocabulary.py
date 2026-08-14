@@ -119,16 +119,15 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # invisible to find(variable="temperature"), which was the whole point
             # of asking. MUR alone declares sea_surface_foundation_temperature.
             "sea_surface_foundation_temperature",
+            # The plain surface spelling, used by every gridded surface product we
+            # carry (OceanSODA-ETHZ's `temperature`, catalogs/oceansoda.yaml, as well
+            # as the CoastWatch L3 and Geo-Polar SST fields). The sampling depth is a
+            # property of where the measurement was taken, which a comparison reports
+            # separately (the metrics row's `obs_depth`, and align_series' depth
+            # caveat) rather than by refusing to pair a mooring with a surface field.
             "sea_surface_temperature",
             "sea_surface_subskin_temperature",
             "sea_surface_skin_temperature",
-            # The surface-only spelling, used by every gridded surface product we
-            # carry (OceanSODA-ETHZ's `temperature`, catalogs/oceansoda.yaml). Not a
-            # different quantity: the sampling depth is a property of where the
-            # measurement was taken, which a comparison reports separately (the
-            # metrics row's `obs_depth`, and align_series' depth caveat) rather than
-            # by refusing to pair a mooring with a surface field.
-            "sea_surface_temperature",
         ],
     },
     "sea_ice": {
@@ -170,7 +169,6 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "standard_name": (
             "diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water"
         ),
-        ],
     },
     "salinity": {
         "standard_name": "sea_water_practical_salinity",
