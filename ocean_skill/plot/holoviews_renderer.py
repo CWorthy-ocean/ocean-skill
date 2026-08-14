@@ -393,7 +393,11 @@ def _field_facet(
     exactly the change the figure exists to show. Panel titles come from the facet
     coordinate through the shared :func:`~ocean_skill.plot.matplotlib_renderer.
     facet_labels`, so a consecutive-month figure says ``Jan 2012`` here too and cannot
-    be mistaken for the climatology that says ``Jan``.
+    be mistaken for the climatology that says ``Jan`` — and three days of one January
+    say ``2013-01-16`` here too rather than repeating a month three times. The layout's
+    own title defaults to the variable's short name, from the shared
+    :func:`~ocean_skill.plot.matplotlib_renderer.field_title`, so the two renderers name
+    the same field the same way; ``title=""`` drops it.
 
     The column count also comes from the shared
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
@@ -408,7 +412,12 @@ def _field_facet(
     :func:`_field_row` makes for a field grid's ``row_label``.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _aspect_of, _limits, facet_labels
+    from ocean_skill.plot.matplotlib_renderer import (
+        _aspect_of,
+        _limits,
+        facet_labels,
+        field_title,
+    )
     from ocean_skill.plot.typography import facet_layout
 
     hv = _extension()
@@ -425,6 +434,7 @@ def _field_facet(
     nrows = int(field.sizes[row_dim]) if row_dim else 1
     units = item.get("units") or ""
     standard_name = item.get("standard_name")
+    title = field_title(standard_name) if title is None else title
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
 
@@ -662,12 +672,20 @@ def _facet_movie(
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
     in the field.
+
+    The variable's name joins each frame's title (``alkalinity — 2013-01-16``) rather
+    than sitting above the movie as the static suptitle does: bokeh's only title here is
+    the panel's own, and a fixed one set on the ``HoloMap`` would replace the frame
+    labels instead of joining them. Same substitution :func:`_field_row` makes for a row
+    label. An explicit ``title=`` still replaces the frame labels outright, which is what
+    asking for one title over a movie means; ``title=""`` leaves the labels bare.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
         _limits,
         _one_facet_axis,
         _select_frames,
+        field_title,
         frame_labels,
     )
 
@@ -692,11 +710,12 @@ def _facet_movie(
     if log:
         vmin = max(vmin, 1e-6)
 
+    name = field_title(standard_name) if title is None else ""
     dim = hv.Dimension(FRAME_DIM, values=keys)
     panels = {
         key: _quadmesh(
             field.isel({facet_dim: index}),
-            title=key,
+            title=f"{name} — {key}" if name else key,
             cmap=seq,
             clim=(vmin, vmax),
             units=units,
