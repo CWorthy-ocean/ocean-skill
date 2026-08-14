@@ -83,6 +83,31 @@ def harmonize_longitude(obj, convention: Literal["0-360", "-180-180"] = "-180-18
 DEFAULT_PAD = 1.0
 
 
+def _bbox_lon_in_convention(values, lon_min: float, lon_max: float):
+    """Re-express a bbox's longitudes in whichever convention ``values`` uses.
+
+    A bbox is a pair of bare numbers, so it carries no convention of its own — and
+    the two sources in a comparison need not agree. Cropping a ±180 reference to a
+    0-360 test's box asks for longitudes 190 to 250 on an axis that stops at 180 and
+    gets an empty slice, which reads as "these do not overlap" when in fact one of
+    them is global. Both MUR (±180) and a North Pacific model (0-360) are ordinary
+    choices, so the mismatch is the common case rather than the exotic one.
+
+    Returns the pair unchanged when both already agree, or when the box lies in
+    0-180 where the two conventions coincide.
+    """
+    finite = np.asarray(values)[np.isfinite(values)]
+    if not finite.size:
+        return lon_min, lon_max
+    obj_is_0360 = float(np.nanmax(finite)) > 180.0
+    box_is_0360 = max(lon_min, lon_max) > 180.0
+    if obj_is_0360 == box_is_0360:
+        return lon_min, lon_max
+    if obj_is_0360:
+        return lon_min % 360, lon_max % 360
+    return ((lon_min + 180) % 360) - 180, ((lon_max + 180) % 360) - 180
+
+
 def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max) plus ``pad``.
 
@@ -99,6 +124,17 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     if lon is None or lat is None:
         return obj
     lon_min, lat_min, lon_max, lat_max = bbox
+    lon_min, lon_max = _bbox_lon_in_convention(obj[lon], lon_min, lon_max)
+    if lon_min > lon_max:
+        # Contiguous in the box's own convention, split in the reference's: the box
+        # straddles the seam (0/360, or the antimeridian). Slicing either half would
+        # silently drop the other, so say so rather than compare against a fragment.
+        raise ValueError(
+            f"the test's longitude range crosses {lon} = "
+            f"{'0/360' if float(np.nanmax(obj[lon])) > 180 else '+/-180'} in the "
+            "reference's convention, so it cannot be cropped to one slice. Convert "
+            "one source with ocean_skill.align.to_convention() before comparing."
+        )
     sel = {}
     if lon in obj.dims:
         sel[lon] = oriented_slice(obj, lon, slice(lon_min - pad, lon_max + pad))

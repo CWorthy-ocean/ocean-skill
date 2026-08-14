@@ -644,3 +644,69 @@ def test_a_scalar_against_a_bare_dimension_is_still_allowed():
 def test_a_single_valued_axis_has_no_direction_to_get_wrong():
     field = _gridded([25.0])
     assert select(field, {"lat": {"min": 20, "max": 30}}).sizes["lat"] == 1
+
+
+# -- bbox longitude conventions -----------------------------------------------
+
+
+def _lonlat_grid(lons, lats):
+    import numpy as np
+    import xarray as xr
+
+    return xr.Dataset(
+        {"sst": (("latitude", "longitude"), np.zeros((len(lats), len(lons))))},
+        coords={"latitude": lats, "longitude": lons},
+    )
+
+
+def test_a_0_360_bbox_crops_a_180_reference():
+    """A global reference must not read as "no overlap" against a 0-360 test.
+
+    MUR is on +/-180 and a North Pacific model on 0-360; cropping the first to the
+    second's box asked for longitudes 190-250 on an axis stopping at 180, and the
+    empty slice was reported as the two sources not overlapping.
+    """
+    import numpy as np
+
+    from ocean_skill.align import subset_to_bbox
+
+    ref = _lonlat_grid(np.arange(-180, 181, 1.0), np.arange(-90, 91, 1.0))
+    out = subset_to_bbox(ref, (190.268, 13.2256, 250.771, 65.8473))
+    assert out.sizes["longitude"] > 0
+    assert out.longitude.min() < -100 and out.longitude.max() < 0
+
+
+def test_a_180_bbox_crops_a_0_360_reference():
+    import numpy as np
+
+    from ocean_skill.align import subset_to_bbox
+
+    ref = _lonlat_grid(np.arange(0, 360, 1.0), np.arange(-90, 91, 1.0))
+    out = subset_to_bbox(ref, (-169.7, 13.2, -109.2, 65.8))
+    assert out.longitude.min() >= 180
+
+
+def test_a_bbox_already_in_the_same_convention_is_untouched():
+    import numpy as np
+
+    from ocean_skill.align import subset_to_bbox
+
+    ref = _lonlat_grid(np.arange(-180, 181, 1.0), np.arange(-90, 91, 1.0))
+    out = subset_to_bbox(ref, (10.0, -5.0, 50.0, 20.0))  # valid in both conventions
+    assert float(out.longitude.min()) == 9.0
+    assert float(out.longitude.max()) == 51.0
+
+
+def test_a_bbox_straddling_the_seam_says_so_rather_than_dropping_half():
+    """Contiguous in the box's convention, split in the reference's.
+
+    Slicing either half would quietly compare against a fragment of the region.
+    """
+    import numpy as np
+    import pytest
+
+    from ocean_skill.align import subset_to_bbox
+
+    ref = _lonlat_grid(np.arange(-180, 181, 1.0), np.arange(-90, 91, 1.0))
+    with pytest.raises(ValueError, match="cannot be cropped to one slice"):
+        subset_to_bbox(ref, (170.0, -5.0, 190.0, 5.0))
