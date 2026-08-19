@@ -733,14 +733,23 @@ def discover_opendap_files(
 ) -> list[str]:
     """List data-access URLs under a THREDDS/Hyrax OPeNDAP directory.
 
-    Many OPeNDAP servers (NASA's ``oceandata.sci.gsfc.nasa.gov`` among them, which
-    runs Hyrax) serve a THREDDS-compatible ``catalog.xml`` alongside every directory
-    listing — this fetches and parses it rather than scraping the HTML page. Returns
-    one URL per leaf dataset (a real file, not a sub-directory) whose filename matches
-    ``pattern`` (:mod:`fnmatch` syntax), built by joining its own directory with the
-    dataset's own name — the same form the directory's own browser links use, which
-    is more reliable across servers than trusting the catalog's declared service base
-    (Hyrax installations have been seen to point it at the wrong path).
+    Both server families publish a THREDDS ``catalog.xml`` for every directory —
+    this fetches and parses it rather than scraping the HTML page, so the browser
+    catalog URL (``.../catalog/path/catalog.html``) can be pasted in directly.
+    Returns one OPeNDAP URL per leaf dataset (a real file, not a sub-directory)
+    whose filename matches ``pattern`` (:mod:`fnmatch` syntax). The two families
+    place data differently, and each leaf says which it is:
+
+    - A true THREDDS Data Server (NCEI's ``thredds-ocean``, for example) serves
+      catalogs under ``/catalog/`` but data under a separate OPeNDAP service base
+      (``/thredds-ocean/dodsC/``); its leaves carry the data path in a ``urlPath``
+      attribute, which is joined onto that declared base.
+    - Hyrax (NASA's ``oceandata.sci.gsfc.nasa.gov``) serves ``catalog.xml``
+      alongside the data itself and its leaves have no ``urlPath`` attribute, so
+      the URL is the directory joined with the dataset's own name — the same form
+      the directory's browser links use, which is more reliable than Hyrax's
+      declared service base (installations have been seen to point it at the
+      wrong path).
 
     Parameters
     ----------
@@ -767,26 +776,48 @@ def discover_opendap_files(
     import fnmatch
     import xml.etree.ElementTree as ET
     from collections import deque
+    from urllib.parse import urljoin, urlsplit
     from urllib.request import urlopen
 
     ns = {"t": "http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"}
+
+    for suffix in ("catalog.html", "catalog.xml"):
+        directory_url = directory_url.removesuffix(suffix)
 
     def _list_one(url: str):
         base = url.rstrip("/") + "/"
         with urlopen(base + "catalog.xml", timeout=30) as resp:
             root = ET.fromstring(resp.read())
+        service_base = next(
+            (
+                svc.attrib["base"]
+                for svc in root.iter(f"{{{ns['t']}}}service")
+                if svc.attrib.get("serviceType", "").lower() == "opendap"
+                and svc.attrib.get("base")
+            ),
+            None,
+        )
+        origin = "{0.scheme}://{0.netloc}".format(urlsplit(base))
         files, subdirs = [], []
         # A leaf file carries <dataSize>; a <catalogRef> is a sub-directory link
         # (followed only if recurse=True) — everything else (the outer wrapping
         # <dataset>) is neither and is skipped.
         for ds in root.iter(f"{{{ns['t']}}}dataset"):
             name = ds.attrib.get("name", "")
-            if ds.find("t:dataSize", ns) is not None and fnmatch.fnmatch(name, pattern):
+            if ds.find("t:dataSize", ns) is None or not fnmatch.fnmatch(name, pattern):
+                continue
+            url_path = ds.attrib.get("urlPath")
+            if url_path and service_base:  # TDS leaf; Hyrax leaves have no urlPath
+                files.append(
+                    urljoin(origin, service_base.rstrip("/") + "/")
+                    + url_path.lstrip("/")
+                )
+            else:
                 files.append(base + name)
         for ref in root.iter(f"{{{ns['t']}}}catalogRef"):
             href = ref.attrib.get("{http://www.w3.org/1999/xlink}href", "")
             if href:
-                subdirs.append(base + href.removesuffix("catalog.xml"))
+                subdirs.append(urljoin(base, href).removesuffix("catalog.xml"))
         return files, subdirs
 
     if not recurse:
