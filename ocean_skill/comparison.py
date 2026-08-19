@@ -296,6 +296,12 @@ def _prepare(
     surface = is_surface_request(depth)
     band = is_depth_band(depth)
     agg = NO_AGGREGATION if aggregate is None else aggregate
+    # A registered calculator (mixed layer depth, ...) reads the whole water column
+    # itself and returns a field with no vertical axis at all -- there is nothing
+    # left for the surface/to_depth/depth_band machinery below to do, and a depth
+    # selection alongside one is a contradiction worth saying so about rather than
+    # silently ignoring (see the ValueError below).
+    calculated = isinstance(variable, dict) and "calculate" in variable
 
     da = operators.resolve_variable(obj, variable)
     if da is None:
@@ -312,7 +318,16 @@ def _prepare(
     da = operators.select(da, horizontal)
     da = operators.aggregate(da, _without_vertical(agg))
 
-    if meta.get("model") == "roms":
+    if calculated:
+        if depth is not None:
+            raise ValueError(
+                f"{variable!r} is a registered calculator, which already reduces "
+                "the vertical axis itself (mixed layer depth is a single number per "
+                "water column, not a level of one) -- select={'depth': ...} does not "
+                "apply to it. Drop the depth key, or select on one of the plain "
+                "variables it is computed from instead."
+            )
+    elif meta.get("model") == "roms":
         # The vertical transform needs a Dataset carrying the grid; a DataArray
         # brings its coordinates (h, mask, Cs_r, ...) along, so this round trip
         # keeps everything roms.surface/to_depth reads.

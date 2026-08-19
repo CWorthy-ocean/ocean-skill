@@ -430,10 +430,30 @@ def test_spec_names_flattens_a_nested_spec_to_its_leaves():
     assert spec_names({"ratio": [{"sum": ["a", "b"]}, "c"]}) == [["a", "b", "c"]]
 
 
-def test_a_genuinely_custom_formula_still_needs_registering(abc):
+def test_an_unregistered_formula_still_needs_registering(abc):
     """Arithmetic is data; a real formula (MLD, EKE) is code and says so."""
     with pytest.raises(NotImplementedError, match="register a calculator"):
-        resolve_variable(abc, {"calculate": "mld"})
+        resolve_variable(abc, {"calculate": "eke"})
+
+
+def test_mld_is_registered_and_dispatches_by_method():
+    """The formula this whole mechanism was designed for is no longer a stub.
+
+    Exercised through resolve_variable rather than against `abc` (2-D, no vertical
+    axis): a real calculator needs the water column ocean_skill.mld.mld.py's own
+    tests build, so this only checks that {"calculate": "mld"} reaches
+    ocean_skill.mld.calculate_mld rather than raising -- see tests/test_mld.py for
+    the formula itself.
+    """
+    import ocean_skill.mld  # noqa: F401  (registers CALCULATORS["mld"])
+    from ocean_skill.operators import CALCULATORS
+
+    assert "mld" in CALCULATORS
+    # calculate_mld raises before ever touching `ds` when method is missing, so
+    # None stands in for "a dataset" here -- the water-column fixture this formula
+    # actually needs lives in tests/test_mld.py.
+    with pytest.raises(KeyError, match="mld needs method"):
+        resolve_variable(None, {"calculate": "mld"})
 
 
 def test_compare_pairs_each_variable_with_the_stream_that_has_it():

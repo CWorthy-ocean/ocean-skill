@@ -57,6 +57,7 @@ REGISTRY: dict[str, VarInfo] = {
     "mass_concentration_of_chlorophyll_a_in_sea_water": VarInfo(
         "mass_concentration_of_chlorophyll_a_in_sea_water", units="mg m-3"
     ),
+    "ocean_mixed_layer_thickness": VarInfo("ocean_mixed_layer_thickness", units="m"),
 }
 
 

@@ -196,6 +196,17 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "concentration_of_chlorophyll_in_sea_water",
         ],
     },
+    "mld": {
+        "standard_name": "ocean_mixed_layer_thickness",
+        # Two ways to reach the same standard_name: ROMS' own KPP boundary-layer
+        # depth (build.py's ROMS_STANDARD_NAMES maps `hbls` here directly) is the
+        # model's own diagnostic, while {"calculate": "mld", "method": ...}
+        # (ocean_skill.mld) computes it offline from T/S by a chosen criterion.
+        # Both are legitimately "the model's MLD" and share the CF name on purpose
+        # -- comparing them against each other is exactly the useful thing to do,
+        # not a collision to avoid.
+        "aliases": ["mixed_layer_depth", "mixed_layer_thickness"],
+    },
 }
 
 

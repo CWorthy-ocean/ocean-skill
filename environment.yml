@@ -28,6 +28,8 @@ dependencies:
   - xgcm
   - xesmf            # pulls esmpy (conda-only)
   - xoak
+  - gsw              # TEOS-10 potential density, scoped to ocean_skill.mld's density
+                      # criteria -- imported inside the calculator body, not core
   # --- metrics ---
   - xskillscore
   # --- plotting (static + interactive) ---
@@ -46,6 +48,8 @@ dependencies:
   # --- virtual zarr / references ---
   - kerchunk
   - fsspec
+  - aiohttp           # fsspec's http(s):// filesystem needs this for remote reads
+  - requests          # ditto -- some fsspec/pooch remote-fetch paths use this instead
   - zarr
   # --- dev tooling ---
   - ruff>=0.12
