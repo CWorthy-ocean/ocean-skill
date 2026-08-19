@@ -754,3 +754,129 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
     assert "~" not in str(built)
     assert built.exists()
     assert built.is_relative_to(fake_home / "refs")
+
+
+# --------------------------------------------------------------- discover_opendap_files
+#
+# The two THREDDS families place data differently: a true THREDDS Data Server (TDS,
+# e.g. NCEI) catalogs under /catalog/ but serves data under a separate OPeNDAP
+# service base, marking each leaf with a urlPath attribute; Hyrax (e.g. NASA
+# oceandata) serves catalog.xml alongside the data and its leaves carry no urlPath.
+# Both shapes are canned here so neither can silently regress.
+
+TDS_CATALOG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<catalog xmlns="http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
+         xmlns:xlink="http://www.w3.org/1999/xlink" version="1.2">
+  <service name="all" serviceType="compound" base="/thredds-ocean/">
+    <service name="dap" serviceType="OPeNDAP" base="/thredds-ocean/dodsC/" />
+    <service name="http" serviceType="HTTPServer" base="/thredds-ocean/fileServer/" />
+  </service>
+  <dataset name="DATA/WHOTS/">
+    <dataset name="OS_WHOTS_2024_R_M-1.nc"
+             urlPath="ndbc/oceansites/DATA/WHOTS/OS_WHOTS_2024_R_M-1.nc">
+      <dataSize units="Kbytes">392.7</dataSize>
+    </dataset>
+    <dataset name="readme.txt" urlPath="ndbc/oceansites/DATA/WHOTS/readme.txt">
+      <dataSize units="Kbytes">1.0</dataSize>
+    </dataset>
+    <catalogRef xlink:href="sub/catalog.xml" xlink:title="sub" name="" />
+  </dataset>
+</catalog>"""
+
+TDS_SUBCATALOG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<catalog xmlns="http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
+         xmlns:xlink="http://www.w3.org/1999/xlink" version="1.2">
+  <service name="dap" serviceType="OPeNDAP" base="/thredds-ocean/dodsC/" />
+  <dataset name="sub/">
+    <dataset name="OS_WHOTS_2023_R_M-1.nc"
+             urlPath="ndbc/oceansites/DATA/WHOTS/sub/OS_WHOTS_2023_R_M-1.nc">
+      <dataSize units="Kbytes">100.0</dataSize>
+    </dataset>
+  </dataset>
+</catalog>"""
+
+HYRAX_CATALOG = b"""<?xml version="1.0" encoding="UTF-8"?>
+<thredds:catalog xmlns:thredds="http://www.unidata.ucar.edu/namespaces/thredds/InvCatalog/v1.0"
+                 xmlns:xlink="http://www.w3.org/1999/xlink">
+  <thredds:service name="dap" serviceType="OPeNDAP" base="/opendap/hyrax"/>
+  <thredds:dataset name="/MODISA/L3SMI/2003/0101">
+    <thredds:dataset name="AQUA_MODIS.20030101.L3m.DAY.CHL.chlor_a.9km.nc"
+                     ID="/opendap/hyrax/MODISA/L3SMI/2003/0101/AQUA_MODIS.20030101.L3m.DAY.CHL.chlor_a.9km.nc">
+      <thredds:dataSize units="bytes">4966941</thredds:dataSize>
+      <thredds:access serviceName="dap"
+                      urlPath="/MODISA/L3SMI/2003/0101/AQUA_MODIS.20030101.L3m.DAY.CHL.chlor_a.9km.nc"/>
+    </thredds:dataset>
+  </thredds:dataset>
+</thredds:catalog>"""
+
+
+@pytest.fixture
+def fake_thredds(monkeypatch):
+    """Serve canned catalog.xml bodies keyed by URL; record what was fetched."""
+    import io
+    import urllib.request
+
+    pages: dict[str, bytes] = {}
+    fetched: list[str] = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(url, timeout=None):
+        fetched.append(url)
+        if url not in pages:
+            raise AssertionError(f"unexpected fetch: {url}")
+        return _Resp(pages[url])
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return pages, fetched
+
+
+def test_discover_tds_joins_urlpath_onto_opendap_service(fake_thredds):
+    """TDS leaves resolve under /dodsC/, not under the /catalog/ browse path."""
+    from ocean_skill.build import discover_opendap_files
+
+    pages, _ = fake_thredds
+    pages[
+        "https://www.ncei.noaa.gov/thredds-ocean/catalog/ndbc/oceansites/DATA/WHOTS/catalog.xml"
+    ] = TDS_CATALOG
+
+    # The browser URL (catalog.html) is what a person has on hand — pasted as-is.
+    urls = discover_opendap_files(
+        "https://www.ncei.noaa.gov/thredds-ocean/catalog/ndbc/oceansites/DATA/WHOTS/catalog.html"
+    )
+    assert urls == [
+        "https://www.ncei.noaa.gov/thredds-ocean/dodsC/ndbc/oceansites/DATA/WHOTS/OS_WHOTS_2024_R_M-1.nc"
+    ]
+
+
+def test_discover_tds_recurses_through_catalogref(fake_thredds):
+    from ocean_skill.build import discover_opendap_files
+
+    pages, _ = fake_thredds
+    root = "https://www.ncei.noaa.gov/thredds-ocean/catalog/ndbc/oceansites/DATA/WHOTS/"
+    pages[root + "catalog.xml"] = TDS_CATALOG
+    pages[root + "sub/catalog.xml"] = TDS_SUBCATALOG
+
+    urls = discover_opendap_files(root, recurse=True)
+    assert (
+        "https://www.ncei.noaa.gov/thredds-ocean/dodsC/ndbc/oceansites/DATA/WHOTS/sub/OS_WHOTS_2023_R_M-1.nc"
+        in urls
+    )
+    assert len(urls) == 2
+
+
+def test_discover_hyrax_still_joins_directory_with_name(fake_thredds):
+    """Hyrax's declared service base is untrustworthy — base+name must survive."""
+    from ocean_skill.build import discover_opendap_files
+
+    pages, _ = fake_thredds
+    base = "http://oceandata.sci.gsfc.nasa.gov/opendap/MODISA/L3SMI/2003/0101/"
+    pages[base + "catalog.xml"] = HYRAX_CATALOG
+
+    urls = discover_opendap_files(base, pattern="*.chlor_a.9km.nc")
+    assert urls == [base + "AQUA_MODIS.20030101.L3m.DAY.CHL.chlor_a.9km.nc"]
