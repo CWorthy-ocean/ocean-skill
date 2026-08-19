@@ -18,6 +18,7 @@ import pytest
 import xarray as xr
 
 from ocean_skill.build import (
+    _reader_for,
     _resolve_files,
     add_catalog,
     add_source,
@@ -448,6 +449,44 @@ def test_a_remote_url_survives_path_normalization():
     assert _is_remote(url)
     key, _store = _store_for(url)
     assert key == url, "the registry key doubles as the URL virtualizarr opens"
+
+
+# --------------------------------------------------------------- engine selection
+
+
+def test_reader_for_picks_h5netcdf_remote_and_netcdf4_local(tmp_path):
+    """Default engine choice, unchanged by the override support below."""
+    local = tmp_path / "f.nc"
+    xr.Dataset({"chlor_a": (("lat",), np.ones(3))}).to_netcdf(local)
+
+    remote_reader = _reader_for("https://example.org/data/f.nc")
+    assert remote_reader.kwargs["engine"] == "h5netcdf"
+
+    local_reader = _reader_for(str(local))
+    assert local_reader.kwargs["engine"] == "netcdf4"
+
+
+def test_an_explicit_engine_in_reader_kwargs_overrides_the_default(tmp_path):
+    """A classic-format (netCDF3) file over a remote-shaped URL needs ``scipy``.
+
+    ``h5netcdf`` only reads netCDF4/HDF5, so the auto-detected default fails on a
+    classic-format file no matter the transport. Before the fix, passing
+    ``engine`` through ``reader_kwargs`` collided with the ``engine=`` already
+    baked into ``_reader_for``'s call and raised
+    ``TypeError: got multiple values for keyword argument 'engine'``.
+    """
+    classic = tmp_path / "classic.nc"
+    xr.Dataset({"chlor_a": (("lat", "lon"), np.ones((4, 5)))}).to_netcdf(
+        classic, format="NETCDF3_CLASSIC"
+    )
+    url = "file://" + str(classic)
+
+    cat = new_catalog()
+    reader = add_source(cat, "classic", url, reader_kwargs={"engine": "scipy"}, probe=False)
+
+    assert reader.kwargs["engine"] == "scipy"
+    ds = cat["classic"].read()
+    assert float(ds.chlor_a.isel(lat=0, lon=0)) == 1.0
 
 
 # ------------------------------------------------------------- container formats
