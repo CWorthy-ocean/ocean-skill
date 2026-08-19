@@ -34,6 +34,20 @@ def isolated_cache(tmp_path):
         fsspec.config.conf[protocol] = conf
 
 
+@pytest.fixture(autouse=True)
+def fast_probe_retries(monkeypatch):
+    """Take the sleep out of probe retries so failure-path tests stay instant.
+
+    The build probes with :data:`ocean_skill.build.PROBE_RETRIES` re-attempts and real
+    backoff; a test whose read never recovers would otherwise wait out that backoff.
+    Zeroing only the wait keeps the retry *count* — and every assertion about it —
+    exactly as in production.
+    """
+    from ocean_skill import build
+
+    monkeypatch.setattr(build, "PROBE_RETRY_BACKOFF", 0.0)
+
+
 @pytest.fixture
 def isolated_catalogs(tmp_path, monkeypatch):
     """Point catalog discovery at an isolated temp dir holding one intake v2 catalog.
