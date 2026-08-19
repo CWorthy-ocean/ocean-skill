@@ -361,6 +361,54 @@ def test_add_catalog_tolerates_one_bad_entry_in_a_sweep(prebuilt, tmp_path):
     type(prebuilt["a"]).read = real
 
 
+def test_probe_retries_a_transient_read_then_succeeds(tmp_path):
+    """A flaky server's read that recovers on a later try must not cost the entry."""
+    from ocean_skill import build
+
+    path = tmp_path / "x.nc"
+    xr.Dataset({"v": (("i",), np.ones(3))}).to_netcdf(path)
+
+    cat = new_catalog()
+    reader = build._reader_for(str(path))
+    real_read = reader.read
+    calls = {"n": 0}
+
+    def flaky_then_ok(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 3:  # first two attempts 500, third succeeds
+            raise RuntimeError("server hiccup 500")
+        return real_read(*a, **k)
+
+    reader.read = flaky_then_ok
+    with pytest.warns(UserWarning, match="retrying"):
+        build._attach(cat, "flaky", reader, probe=True, name_map=None, metadata={})
+
+    assert calls["n"] == 3  # two retries, then the read landed
+    assert list(cat) == ["flaky"]  # and the entry is in the catalog
+
+
+def test_probe_retries_are_bounded_then_give_up(tmp_path, monkeypatch):
+    """A read that never recovers is retried PROBE_RETRIES times, then propagates."""
+    from ocean_skill import build
+
+    monkeypatch.setattr(build, "PROBE_RETRIES", 2)
+    path = tmp_path / "x.nc"
+    xr.Dataset({"v": (("i",), np.ones(3))}).to_netcdf(path)
+
+    reader = build._reader_for(str(path))
+    calls = {"n": 0}
+
+    def always_fails(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("still down")
+
+    reader.read = always_fails
+    with pytest.warns(UserWarning, match="retrying"):
+        with pytest.raises(RuntimeError, match="still down"):
+            build._attach(new_catalog(), "dead", reader, probe=True, name_map=None, metadata={})
+    assert calls["n"] == 3  # the initial attempt plus PROBE_RETRIES=2 more
+
+
 def test_time_coverage_falls_back_to_global_attributes(tmp_path):
     """MODIS L3-mapped files carry no time axis but do declare their coverage.
 

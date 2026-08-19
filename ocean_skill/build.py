@@ -1224,6 +1224,58 @@ def _is_catalog(obj) -> bool:
     )
 
 
+# How probing rides out a flaky remote server. A probe opens each source once, and
+# against a server like CalOOS's `sensors.erddap` that read fails now and then for
+# reasons that clear on their own -- a 500, a read timeout, a dropped connection. So
+# the probe re-attempts a failed read this many times, waiting PROBE_RETRY_BACKOFF
+# seconds and doubling each attempt, before the failure counts. Set at module scope
+# rather than as a per-call argument so `build_catalog(discovered, out, probe=True)`
+# needs nothing extra; assign `osk.build.PROBE_RETRIES = 0` to switch it off, or turn
+# it up for an especially unreliable server. Retries only ever cost time on a read
+# that was already failing, so a local build never pays for them.
+PROBE_RETRIES = 3
+PROBE_RETRY_BACKOFF = 1.0
+
+
+def _read_with_retries(reader, name):
+    """Call ``reader.read()``, re-attempting a transient failure a few times.
+
+    A remote sweep against a flaky server — CalOOS's ``sensors.erddap`` is the case
+    in point — fails a read now and then for reasons that clear on their own: a 500,
+    a read timeout, a dropped connection. This re-attempts such a read with
+    exponential backoff (:data:`PROBE_RETRIES` times, :data:`PROBE_RETRY_BACKOFF`
+    seconds and doubling) before giving up, so one server hiccup does not cost a
+    dataset that would have opened on the very next try.
+
+    Only the *read* is retried, never the metadata derivation that follows it: a read
+    failure is the network-shaped one worth re-attempting, whereas a probe failure is
+    deterministic and would fail identically on every attempt. The counts are read
+    from the module globals on each call, so setting ``PROBE_RETRIES = 0`` restores
+    the plain single-attempt behaviour everywhere.
+    """
+    import time
+
+    attempt = 0
+    while True:
+        try:
+            return reader.read()
+        except FileNotFoundError:
+            # A missing path is a typo, not a server hiccup: it will be missing on
+            # every retry, so fail fast rather than sleeping through backoff for it.
+            raise
+        except Exception as exc:
+            if attempt >= PROBE_RETRIES:
+                raise
+            wait = PROBE_RETRY_BACKOFF * 2**attempt
+            warnings.warn(
+                f"read of {name!r} failed ({exc}); retrying in {wait:g}s "
+                f"(attempt {attempt + 1} of {PROBE_RETRIES})",
+                stacklevel=3,
+            )
+            time.sleep(wait)
+            attempt += 1
+
+
 def _attach(cat, name, reader, *, probe, name_map, metadata):
     """Probe a reader, attach metadata, and put it in ``cat`` under ``name``.
 
@@ -1236,13 +1288,16 @@ def _attach(cat, name, reader, *, probe, name_map, metadata):
     * the source cannot be **read** — a typo'd path, a dead URL. The entry is
       unusable, so this propagates and the caller decides (``skip_errors``).
       Swallowing it would bank a dead entry whose failure surfaces much later, far
-      from the typo that caused it.
+      from the typo that caused it. A *transient* read failure gets a few more
+      chances first (see :func:`_read_with_retries`), since on a flaky remote server
+      the read that raised here often succeeds moments later.
     * the source reads but cannot be **probed** — odd axes, no recognizable
       coordinates. "Could not derive metadata" is not "this entry is invalid": it
       still reads fine, it is only less searchable. That warns and keeps the entry.
     """
     if probe:
-        data = reader.read()  # unreadable => unusable; let the caller decide
+        # unreadable => unusable; let the caller decide, but retry a transient failure first
+        data = _read_with_retries(reader, name)
         try:
             reader.metadata.update(_probe(data, name_map))
         except Exception as exc:
@@ -1294,7 +1349,9 @@ def add_source(
         Open the source once to derive extents/axes/variables/featureType. Opening is
         cheap locally; for remote sources it costs one round-trip per entry at build
         time (never at read time). Set ``False`` to skip it — worth doing when the
-        source is large and a cache would download the whole file just to look.
+        source is large and a cache would download the whole file just to look. A
+        probe read that fails transiently is re-attempted first (see
+        :data:`PROBE_RETRIES`), so a flaky remote server does not cost the entry.
     storage_options
         fsspec options, e.g. ``{"simplecache": {"cache_storage": "./cache"}}`` paired
         with a ``simplecache::https://...`` URL.
@@ -1349,6 +1406,11 @@ def add_sources(
     which matters when the list is long and remote: one flaky OPeNDAP URL should
     not discard a build that has already opened twenty others. It is off by default
     so a silently short catalog is never the quiet outcome.
+
+    A *transient* probe read is re-attempted before it counts as a failure (see
+    :data:`PROBE_RETRIES`) — the complement to ``skip_errors``, which decides what to
+    do once every retry is spent. On a flaky server the two go together: retry the
+    reads that will recover, skip the few that genuinely will not.
 
     Returns ``{name: reader}`` for the entries actually added.
     """
@@ -1426,6 +1488,11 @@ def build_catalog(
     the same options, and :func:`save`. See :func:`add_sources` for per-source
     overrides and ``skip_errors``; ``catalog_metadata`` adds catalog-level keys
     beyond ``title``.
+
+    Probing already re-attempts a transient read (see :data:`PROBE_RETRIES`), so a
+    plain ``build_catalog(discovered, out, probe=True)`` rides out a flaky server's
+    hiccups with nothing extra at the call site. Pair it with ``skip_errors=True``
+    when a live sweep may still contain a few entries that never open at all.
     """
     cat = new_catalog(title=title or Path(out).stem, **(catalog_metadata or {}))
     add_sources(cat, sources, skip_errors=skip_errors, **shared)
@@ -1524,6 +1591,11 @@ def add_catalog(
     (``intake_erddap.ERDDAPCatalogReader`` is the motivating case), and nothing here
     knows anything about that protocol: *building* is inherently source-specific,
     *enriching* never is.
+
+    A transient probe read is already re-attempted before ``skip_errors`` retires the
+    entry (see :data:`PROBE_RETRIES`) — the pairing that makes a flaky-server sweep
+    like CalOOS's land most of its datasets: retry the reads that recover, skip only
+    those that truly do not.
     """
     # skip_errors=True preserves this function's long-standing behaviour: a live
     # server sweep always has a few datasets that will not open, and losing the
