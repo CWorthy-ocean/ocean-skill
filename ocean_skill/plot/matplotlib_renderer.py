@@ -1708,11 +1708,21 @@ def facet_labels(coord) -> list[str]:
       ``-depths``) while the depth the caller asked for, and the one a reader expects
       on a label, is positive-down.
     * anything else (``{"groupby": "season"}`` gives ``"DJF"``) -> its own value.
+
+    A ``level_labels`` attr on the coordinate wins outright: it is how a mixed
+    vertical selection (``["surface", 50, 100]``) says its ``z=0.0`` row is the
+    model's own surface and not an interpolated 0 m — the coordinate itself must stay
+    numeric for the lane cache, so the spelling rides here (see
+    :func:`ocean_skill.comparison._surface_and_levels`). Honoured only at full
+    length: a subset of the axis no longer knows which label belongs to which level.
     """
     import calendar
 
     name = str(coord.name)
     values = list(np.atleast_1d(coord.values))
+    labels = coord.attrs.get("level_labels")
+    if labels is not None and len(labels) == len(values):
+        return [str(lb) for lb in labels]
     try:
         # covers numpy datetime64 and cftime alike, which is why this goes through
         # xarray's accessor rather than pandas or datetime directly -- a ROMS run on a

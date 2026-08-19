@@ -156,6 +156,27 @@ def test_the_panels_say_which_reduction_made_them(daily):
     assert facet_labels(climatology["month"])[:2] == ["Jan", "Feb"]
 
 
+def test_a_level_labels_attr_wins_the_row_labels():
+    """A mixed vertical selection says its ``z=0.0`` row is the surface, not 0 m.
+
+    The coordinate itself must stay numeric (the lane cache is zarr), so
+    ``["surface", 50, 100]`` rides its spelling in a ``level_labels`` attr — see
+    ``ocean_skill.comparison._surface_and_levels``. Honoured only at full length: a
+    subset no longer knows which label belongs to which level, and falls back to the
+    numeric spelling rather than mislabelling a row.
+    """
+    from ocean_skill.plot.matplotlib_renderer import facet_labels
+
+    z = xr.DataArray(
+        [0.0, -50.0, -100.0],
+        dims="z",
+        name="z",
+        attrs={"level_labels": ["surface", "50 m", "100 m"]},
+    )
+    assert facet_labels(z) == ["surface", "50 m", "100 m"]
+    assert facet_labels(z.isel(z=[1, 2])) == ["50 m", "100 m"]
+
+
 def test_panels_finer_than_a_month_are_titled_finer_than_a_month(daily):
     """Three days of one January are three panels, so they need three titles.
 

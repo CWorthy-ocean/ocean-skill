@@ -166,6 +166,42 @@ def test_a_single_interpolated_level_collapses_by_itself(roms_column):
     assert "z" not in da.dims
 
 
+def test_surface_mixes_into_a_depth_list(roms_column):
+    """``["surface", 50, 80]`` keeps three levels, in that order, honestly labelled.
+
+    "surface" is the native top cell and the numbers are interpolated levels — no
+    single vertical operation makes both, so this is the assembled case. The surface
+    layer must be *identical* to what the scalar ``"surface"`` request gives, or the
+    same word would mean two different fields depending on the spelling around it.
+    """
+    ds, meta = roms_column
+    da, _ = _prepare(ds, meta, "chl", {"depth": ["surface", 50.0, 80.0]}, {})
+    assert list(da.z.values) == [0.0, -50.0, -80.0], "requested order, surface first"
+    assert da.z.attrs["level_labels"] == ["surface", "50 m", "80 m"]
+
+    surf, _ = _prepare(ds, meta, "chl", {"depth": "surface"}, {})
+    assert bool((da.isel(z=0) == surf).all())
+
+    # requested order is kept even with the surface in the middle
+    da, _ = _prepare(ds, meta, "chl", {"depth": [50.0, "surface", 80.0]}, {})
+    assert list(da.z.values) == [-50.0, 0.0, -80.0]
+    assert da.z.attrs["level_labels"] == ["50 m", "surface", "80 m"]
+
+
+def test_a_mixed_list_survives_until_aggregate_collapses_it(roms_column):
+    """Select narrows, aggregate collapses -- same contract as a band."""
+    ds, meta = roms_column
+    da, _ = _prepare(ds, meta, "chl", {"depth": ["surface", 50.0]}, {"Z": "mean"})
+    assert set(da.dims) == {"eta_rho", "xi_rho"}
+
+
+def test_a_bad_depth_spelling_names_the_accepted_forms(roms_column):
+    """``float("bottom")``'s own error names neither the parameter nor the fix."""
+    ds, meta = roms_column
+    with pytest.raises(ValueError, match=r"cannot read .* as a depth selection"):
+        _prepare(ds, meta, "chl", {"depth": ["bottom", 50]}, {})
+
+
 def test_a_band_and_the_surface_are_different_operations(roms_column):
     """On the shelf the top cell is ~1 m, so a 0-10 m mean must not equal it."""
     ds, meta = roms_column
@@ -205,9 +241,25 @@ def test_a_band_between_levels_falls_back_to_the_nearest():
     assert float(da) == pytest.approx(1.0)
 
 
+def test_surface_in_a_list_takes_the_nearest_observational_level():
+    """On a product at standard levels, "surface" means what it means as a scalar."""
+    ds = xr.Dataset(
+        {"v": (("depth", "lat", "lon"), np.arange(12.0).reshape(3, 2, 2))},
+        coords={"depth": [0.0, 10.0, 50.0], "lat": [1.0, 2.0], "lon": [1.0, 2.0]},
+    )
+    da, _ = _prepare(ds, {}, "v", {"depth": ["surface", 50]}, {})
+    assert list(da.depth.values) == [0.0, 50.0]
+
+
 @pytest.mark.parametrize(
     ("depth", "label"),
-    [("surface", "surface"), (100, "100 m"), ({"min": 0, "max": 10}, "0-10 m")],
+    [
+        ("surface", "surface"),
+        (100, "100 m"),
+        ({"min": 0, "max": 10}, "0-10 m"),
+        ([50, 100], "50 m, 100 m"),
+        (["surface", 50, 100], "surface, 50 m, 100 m"),
+    ],
 )
 def test_depth_labels_read_well(depth, label):
     assert _depth_label(depth) == label

@@ -146,11 +146,17 @@ def is_surface_request(depth: Any) -> bool:
 
 
 def _depth_label(depth: Any) -> str:
-    """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``."""
+    """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``.
+
+    A list — several levels kept as facet rows — spells each element by the same
+    rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``.
+    """
     if is_surface_request(depth):
         return SURFACE
     if is_depth_band(depth):
         return f"{float(depth['min']):g}-{float(depth['max']):g} m"
+    if isinstance(depth, list | tuple):
+        return ", ".join(_depth_label(d) for d in depth)
     return f"{float(depth):g} m"
 
 
@@ -204,6 +210,52 @@ def _selected_depth(select: dict[str, Any]) -> Any:
         if key in select:
             return select[key]
     return SURFACE
+
+
+def _surface_and_levels(sub, meta, name: str, depths) -> Any:
+    """Assemble a ``z`` axis mixing the model's own surface with interpolated levels.
+
+    ``select={"depth": ["surface", 50, 100]}`` asks for levels no single vertical
+    operation can produce: ``"surface"`` is the native top cell
+    (:func:`ocean_skill.roms.surface` — interpolating to 0 m is NaN wherever the top
+    cell centre sits deeper), while the numbers are fixed levels via
+    :func:`ocean_skill.roms.to_depth`. So the two are computed separately and
+    concatenated along ``z`` in the order asked for.
+
+    The surface layer sits at ``z=0.0`` — a coordinate value, not a claim it was
+    interpolated there. The coordinate has to stay numeric (the lane cache is zarr,
+    which cannot hold a mixed-type axis), so the honest spelling rides in a
+    ``level_labels`` attr instead, which row labels read
+    (:func:`ocean_skill.plot.matplotlib_renderer.facet_labels`).
+    """
+    import xarray as xr
+
+    from ocean_skill import roms
+
+    numeric = [float(d) for d in depths if not is_surface_request(d)]
+    levels = roms.to_depth(sub, meta, numeric)[name] if numeric else None
+    top = roms.surface(sub, meta)[name]
+    if levels is not None:
+        # expand_dims puts z first where the transform put it last; concat needs one
+        # order, and the transform's is the one the numeric-only path already has.
+        top = top.expand_dims("z").transpose(*levels.dims)
+    else:
+        top = top.expand_dims("z")
+    top = top.assign_coords(z=[0.0])
+
+    pieces, i = [], 0
+    for d in depths:
+        if is_surface_request(d):
+            pieces.append(top)
+        else:
+            pieces.append(levels.isel(z=[i]))
+            i += 1
+    # drop_conflicts rather than the default first-wins: the transform can shed
+    # attrs the surface layer kept (units), and which piece comes first is the
+    # caller's ordering, not a fact about the field.
+    da = xr.concat(pieces, dim="z", combine_attrs="drop_conflicts")
+    da["z"].attrs["level_labels"] = [_depth_label(d) for d in depths]
+    return da.to_dataset(name=name)
 
 
 #: What ``aggregate=None`` means: **reduce nothing**. There is deliberately no default
@@ -355,14 +407,27 @@ def _prepare(
             # A *selection*: keeps the cells and their thickness weights, so the
             # vertical aggregation below decides how to collapse them.
             sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
+        elif isinstance(depth, list | tuple) and any(
+            is_surface_request(d) for d in depth
+        ):
+            # "surface" beside numbers, e.g. ["surface", 50, 100]: no single
+            # vertical operation produces that, so the levels are assembled.
+            sub = _surface_and_levels(sub, meta, name, depth)
         else:
             # A list interpolates to several levels in one field, which the vertical
             # aggregation then collapses; a scalar gives one level and no axis.
-            targets = (
-                [float(d) for d in depth]
-                if isinstance(depth, list | tuple)
-                else float(depth)
-            )
+            try:
+                targets = (
+                    [float(d) for d in depth]
+                    if isinstance(depth, list | tuple)
+                    else float(depth)
+                )
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"cannot read {depth!r} as a depth selection: use metres (50), "
+                    '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
+                    'metres and "surface" (["surface", 50, 100]).'
+                ) from None
             sub = roms.to_depth(sub, meta, targets)
         da = sub[name]
         # Squeeze only a single interpolated level: a scalar depth request collapses
@@ -397,7 +462,13 @@ def _prepare(
                 da.attrs = attrs
                 da.attrs["actual_depth"] = float(np.mean(levels[list(inside)]))
             elif isinstance(depth, list | tuple):
-                keep = [int(np.abs(levels - float(d)).argmin()) for d in depth]
+                # "surface" in a list means what it means as a scalar here: the
+                # nearest standard level to 0 m (products report at real levels, so
+                # the row honestly labels itself with the level it is).
+                targets = [
+                    0.0 if is_surface_request(d) else float(d) for d in depth
+                ]
+                keep = [int(np.abs(levels - t).argmin()) for t in targets]
                 attrs = dict(da.attrs)
                 da = da.isel({zname: keep})
                 da.attrs = attrs
