@@ -27,6 +27,7 @@ from typing import Any
 from ocean_skill._display import Text
 
 __all__ = [
+    "SourceNames",
     "SourceRef",
     "catalog_metadata",
     "catalog_names",
@@ -409,6 +410,27 @@ def _time_overlaps(meta: dict[str, Any], window) -> bool | None:
     return _overlaps(have[0], have[1], want[0], want[1])
 
 
+class SourceNames(list):
+    """What :func:`find` returns: a plain list of source names, plus ``.map()``.
+
+    Still a ``list`` in every way that matters — indexing, iteration, ``in``,
+    equality with a bare list — so nothing downstream changes. The one addition
+    makes the common flow read as one line::
+
+        osk.find(variable="nitrate").map()   # where are they?
+
+    For the cases with no query to hang a method on ("map everything", "map this
+    catalog"), :func:`ocean_skill.plot.locations.map_datasets` is the same map as
+    a standalone call.
+    """
+
+    def map(self, **kwargs):
+        """Map where these sources are; see :func:`ocean_skill.plot.locations.map_datasets`."""
+        from ocean_skill.plot.locations import map_datasets
+
+        return map_datasets(self, **kwargs)
+
+
 def find(
     *,
     text: str | list[str] | None = None,
@@ -422,7 +444,7 @@ def find(
     resolution: float | tuple[float | None, float | None] | None = None,
     cadence: str | float | tuple[float | None, float | None] | None = None,
     vertical: bool | None = None,
-) -> list[str]:
+) -> SourceNames:
     """Search discovered sources by name and metadata; return matching source names.
 
     Only the filters given are applied::
@@ -491,12 +513,16 @@ def find(
     "outside", and excluding un-probed entries would quietly hide the very sources
     a search is meant to surface. Probe a catalog if you want its entries filtered
     on geography or time.
+
+    The result is a :class:`SourceNames` — a plain list of names that additionally
+    offers ``.map()``, drawing where the matches are on a map from their catalog
+    metadata alone.
     """
     from ocean_skill.vocabulary import equivalent_names
 
     terms = _as_terms(text) if text is not None else None
 
-    out: list[str] = []
+    out = SourceNames()
     for source, ref in discover().items():
         meta = ref.metadata
         if terms and not _matches_text(source, ref, terms):

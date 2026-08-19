@@ -25,6 +25,7 @@ from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, norm_for
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.typography import (
+    FACET_PANEL_W_FRACTION,
     MIN_PT,
     PAGE_H,
     PAGE_W,
@@ -49,6 +50,7 @@ __all__ = [
     "field_facet",
     "field_grid",
     "field_row",
+    "locations",
     "metric_panel_titles",
     "metric_panels",
     "metric_value_text",
@@ -433,6 +435,34 @@ def _add_row_label(ax, text: str, row_label_kwargs: dict[str, Any]) -> None:
     )
 
 
+def _basemap(
+    ax,
+    *,
+    gridline_kwargs: dict[str, Any],
+    tick_label_kwargs: dict[str, Any],
+    left_labels: bool | None = None,
+    bottom_labels: bool | None = None,
+):
+    """Land fill, coastlines and labelled gridlines — what every map panel shares.
+
+    Extracted from :func:`_draw_map` so a family with no field to draw (the
+    ``locations`` map) still gets exactly this package's basemap rather than a
+    near-copy that drifts. Returns the gridliner.
+    """
+    import cartopy.feature as cfeature
+
+    ax.add_feature(cfeature.LAND, facecolor="0.85", zorder=2)
+    ax.coastlines(linewidth=0.4, zorder=3)
+    gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
+    gl.top_labels = gl.right_labels = False
+    if left_labels is not None:
+        gl.left_labels = left_labels
+    if bottom_labels is not None:
+        gl.bottom_labels = bottom_labels
+    gl.xlabel_style = gl.ylabel_style = dict(tick_label_kwargs)
+    return gl
+
+
 def _draw_map(
     ax,
     da,
@@ -461,21 +491,18 @@ def _draw_map(
     explicitly, which is how a grid shows each axis once.
     """
     import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
 
     proj = ccrs.PlateCarree()
     draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
     kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
     im = draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
-    ax.add_feature(cfeature.LAND, facecolor="0.85", zorder=2)
-    ax.coastlines(linewidth=0.4, zorder=3)
-    gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
-    gl.top_labels = gl.right_labels = False
-    if left_labels is not None:
-        gl.left_labels = left_labels
-    if bottom_labels is not None:
-        gl.bottom_labels = bottom_labels
-    gl.xlabel_style = gl.ylabel_style = dict(tick_label_kwargs)
+    _basemap(
+        ax,
+        gridline_kwargs=gridline_kwargs,
+        tick_label_kwargs=tick_label_kwargs,
+        left_labels=left_labels,
+        bottom_labels=bottom_labels,
+    )
     if domain:
         lo0, la0, lo1, la1 = domain
         ax.plot(
@@ -2948,6 +2975,170 @@ def facet_movie(
     )
 
 
+def locations(
+    items,
+    *,
+    title: str | None = None,
+    extent: tuple[float, float, float, float] | None = None,
+    legend: bool = True,
+    marker_size: float = 80.0,
+    tiles: str | bool | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+):
+    """Map where catalog datasets are: markers for stations, dashed boxes for grids.
+
+    Items come from :func:`ocean_skill.plot.locations.build_items` — pure catalog
+    metadata, so there is no field, no colormap and no colorbar here; colour keys
+    the featureType instead, off the shared constants in
+    :mod:`ocean_skill.plot.locations`, and the legend is the key to it.
+
+    ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
+    ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
+    :func:`~ocean_skill.plot.locations.map_datasets`). ``tiles`` is accepted so
+    ``renderer="both"`` can pass one set of options, but web tiles are the
+    interactive renderer's; here it warns and draws the usual coastline basemap.
+    """
+    import warnings
+
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, TAB10, _style_index
+    from ocean_skill.plot.summary import _MARKERS
+
+    if tiles:
+        warnings.warn(
+            "tiles= only affects the interactive renderer; the static map draws "
+            "coastlines. Pass renderer='holoviews' for a web basemap.",
+            stacklevel=_stacklevel.find(),
+        )
+
+    if extent is None:
+        from ocean_skill.plot.locations import _default_extent
+
+        extent = _default_extent(items)
+    lon0, lat0, lon1, lat1 = (float(v) for v in extent)
+
+    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
+    canvas = resolve_canvas(size, zoom)
+    if figsize is None:
+        # one panel, no colorbar: the facet fraction (a shared-bar grid's) is the
+        # closest existing answer to "the map keeps nearly the whole cell"
+        figsize = auto_figsize(
+            aspect,
+            nrows=1,
+            ncols=1,
+            canvas=canvas,
+            font_scale=font_scale,
+            panel_w_fraction=FACET_PANEL_W_FRACTION,
+        )
+    scale = type_scale(figsize, ncols=1, nrows=1, font_scale=font_scale)
+
+    proj = ccrs.PlateCarree()
+    fig, ax = plt.subplots(
+        figsize=figsize, subplot_kw={"projection": proj}, layout="constrained"
+    )
+    if (lon0, lat0, lon1, lat1) == (-180.0, -90.0, 180.0, 90.0):
+        ax.set_global()
+    else:
+        ax.set_extent((lon0, lon1, lat0, lat1), crs=proj)
+    _basemap(
+        ax,
+        gridline_kwargs=_merged(DEFAULT_GRIDLINE_KWARGS, gridline_kwargs),
+        tick_label_kwargs=_merged(
+            {**DEFAULT_TICK_LABEL_KWARGS, "size": scale["tick_label"]},
+            tick_label_kwargs,
+        ),
+    )
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        groups.setdefault(item["featureType"], []).append(item)
+    ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
+    ordered += [ft for ft in groups if ft not in FEATURE_TYPE_ORDER]
+
+    handles = []
+    for feature_type in ordered:
+        index = _style_index(feature_type)
+        color = TAB10[index % len(TAB10)]
+        marker = _MARKERS[index % len(_MARKERS)]
+        points = [i for i in groups[feature_type] if i["kind"] == "point"]
+        extents = [i for i in groups[feature_type] if i["kind"] == "extent"]
+        if points:
+            ax.scatter(
+                [p["lon"] for p in points],
+                [p["lat"] for p in points],
+                transform=proj,
+                color=color,
+                marker=marker,
+                s=marker_size,
+                edgecolor="white",
+                linewidth=0.7,
+                zorder=5,
+            )
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    linestyle="",
+                    marker=marker,
+                    markersize=8,
+                    color=color,
+                    markeredgecolor="white",
+                    label=feature_type,
+                )
+            )
+        if extents:
+            for item in extents:
+                for lo, la, hi, ha in item["bboxes"]:
+                    ax.plot(
+                        [lo, hi, hi, lo, lo],
+                        [la, la, ha, ha, la],
+                        transform=proj,
+                        color=color,
+                        lw=1.0,
+                        ls="--",
+                        zorder=4,
+                    )
+            handles.append(
+                Line2D([], [], linestyle="--", color=color, label=feature_type)
+            )
+
+    if legend and handles:
+        # framed, unlike the series default: this key floats over a map, and
+        # unbacked text over coastlines and extent boxes is unreadable
+        ax.legend(
+            handles=handles,
+            **_merged(
+                {
+                    "frameon": True,
+                    "framealpha": 0.85,
+                    "edgecolor": "0.6",
+                    "fontsize": scale["legend"],
+                },
+                legend_kwargs,
+            ),
+        )
+    ax.set_title(
+        title or "",
+        **_merged(
+            {**DEFAULT_TITLE_KWARGS, "fontsize": scale["title"]}, title_kwargs
+        ),
+    )
+    if save:
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def _nested_owner(key: str) -> str | None:
     """Which ``*_kwargs`` dict ``key`` belongs inside, if any.
 
@@ -2983,7 +3174,7 @@ def _top_level_options() -> frozenset[str]:
 
     return frozenset(
         name
-        for fn in (field_row, field_grid, field_facet, series, skill_map)
+        for fn in (field_row, field_grid, field_facet, series, skill_map, locations)
         for name in inspect.signature(fn).parameters
     )
 
@@ -3047,6 +3238,8 @@ def render(spec, **kwargs: Any):
         _check_options(series, opts)
     elif family == "skill_map":
         _check_options(skill_map, opts)
+    elif family == "locations":
+        _check_options(locations, opts)
 
     if family == "field_facet":
         item = spec.single
@@ -3081,6 +3274,8 @@ def render(spec, **kwargs: Any):
         )
     if family == "skill_map":
         return skill_map(spec.items, **opts)
+    if family == "locations":
+        return locations(spec.items, **opts)
     if family == "field_grid":
         return field_grid(spec.items, **opts)
     if family == "field_movie":
