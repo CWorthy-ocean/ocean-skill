@@ -164,6 +164,22 @@ def test_near_identical_quantities_resolve_as_plain_aliases():
     assert len(caught) == 1  # the usual "resolved to ..." notice, nothing extra
 
 
+@pytest.mark.parametrize("spelling", ["Fe", "fe", "FE"])
+def test_short_symbol_alias_resolves_whole_name_any_case(spelling):
+    """ROMS/MARBL's `Fe` reaches iron whatever the case, but only as the whole name."""
+    assert vocabulary.resolve_name(spelling) == (
+        "mole_concentration_of_dissolved_iron_in_sea_water"
+    )
+
+
+@pytest.mark.parametrize("not_iron", ["felix", "ferric", "Fe_flux"])
+def test_short_symbol_alias_is_not_a_prefix_match(not_iron):
+    """A name merely starting with the symbol is a different variable, not iron."""
+    assert vocabulary.resolve_name(not_iron) == not_iron
+    assert not vocabulary.is_known(not_iron)
+    assert find_variable(_tiny(not_iron), "iron") is None
+
+
 @pytest.mark.parametrize(
     "stored_as",
     [
