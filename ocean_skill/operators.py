@@ -44,12 +44,15 @@ import warnings
 from typing import Any
 
 __all__ = [
+    "CALCULATOR_INPUTS",
+    "CALCULATORS",
     "COMBINERS",
     "DERIVED",
     "REDUCERS",
     "aggregate",
     "combine",
     "oriented_slice",
+    "register_calculator",
     "register_derived",
     "register_reducer",
     "resolve_dim",
@@ -90,6 +93,43 @@ def register_reducer(name: str):
 
     def decorate(fn):
         REDUCERS[name] = fn
+        return fn
+
+    return decorate
+
+
+#: Registered derived diagnostics -- the ``{"calculate": name}`` half of a variable
+#: spec (see :func:`resolve_variable`). Empty until something registers into it
+#: (:mod:`ocean_skill.mld` does, at import time), which is why ``{"calculate": "mld"}``
+#: still raises "register a calculator first" if that module is never imported.
+#: Signature: ``fn(ds, **kwargs) -> DataArray``.
+CALCULATORS: dict[str, Any] = {}
+
+#: A calculator's own report of which standard_names it needs, as a function of its
+#: spec (minus ``calculate``/``standard_name``) -- e.g. MLD needs temperature *and*
+#: salinity for a density criterion but temperature alone for a temperature one, which
+#: :func:`spec_names` cannot know without asking. Optional: a calculator that skips
+#: this is simply invisible to catalog pre-filtering, exactly as before it registered.
+#: Signature: ``fn(spec: dict) -> list[list[str]]``, the same shape :func:`spec_names`
+#: returns for everything else.
+CALCULATOR_INPUTS: dict[str, Any] = {}
+
+
+def register_calculator(name: str, *, inputs: Any = None):
+    """Register a derived diagnostic -- a real formula, not an operator dispatch.
+
+    Unlike :data:`COMBINERS`/:data:`REDUCERS`, a calculator needs the whole dataset
+    (not just the arrays a spec names), because a genuine formula like MLD reads
+    variables the spec never mentions (temperature *and* salinity for a density
+    criterion) and needs coordinates :func:`resolve_variable` does not have (the
+    depth axis). Use as a decorator; pass ``inputs=`` to register into
+    :data:`CALCULATOR_INPUTS` at the same time.
+    """
+
+    def decorate(fn):
+        CALCULATORS[name] = fn
+        if inputs is not None:
+            CALCULATOR_INPUTS[name] = inputs
         return fn
 
     return decorate
@@ -141,7 +181,11 @@ def resolve_variable(ds, spec: Any):
       :data:`DERIVED`, which expands to its stored spec;
     - ``{"<combiner>": [names]}`` — e.g. ``{"sum": ["spChl", "diatChl", "diazChl"]}``,
       optionally with ``standard_name`` naming the result;
-    - ``{"calculate": name}`` — a registered derived diagnostic (not yet populated).
+    - ``{"calculate": name}`` — a registered derived diagnostic (:data:`CALCULATORS`;
+      e.g. ``{"calculate": "mld", "method": "density_threshold"}``, see
+      :mod:`ocean_skill.mld`), given the whole dataset rather than named arrays,
+      because a genuine formula needs variables and coordinates the spec never
+      mentions.
 
     **A combination falls back to its ``standard_name``.** The two sides of a
     comparison rarely store a quantity the same way: MARBL splits chlorophyll into
@@ -168,9 +212,17 @@ def resolve_variable(ds, spec: Any):
     spec = dict(spec)
     standard_name = spec.pop("standard_name", None)
     if "calculate" in spec:
-        raise NotImplementedError(
-            f"derived diagnostic {spec['calculate']!r}: register a calculator first"
-        )
+        spec = dict(spec)
+        name = spec.pop("calculate")
+        if name not in CALCULATORS:
+            raise NotImplementedError(
+                f"derived diagnostic {name!r}: register a calculator first"
+            )
+        out = CALCULATORS[name](ds, **spec)
+        if standard_name:
+            out = out.rename(standard_name)
+            out.attrs["standard_name"] = standard_name
+        return out
 
     how, names = next(iter(spec.items()))
     # Recurse, so a component may itself be a combination -- ``{"ratio":
@@ -398,8 +450,18 @@ def spec_names(spec: Any) -> list[list[str]]:
         return []
     spec = dict(spec)
     standard_name = spec.pop("standard_name", None)
-    spec.pop("calculate", None)
-    options = [_leaf_names(names) for names in spec.values()]
+    if "calculate" in spec:
+        # The remaining keys are the calculator's own kwargs (`method`, `threshold`,
+        # ...), not name-lists -- treating them as such the way a combination's
+        # components are treated would hand `_leaf_names` a string to iterate
+        # character-by-character or a float it cannot iterate at all. A calculator
+        # that registered an `inputs` function is asked instead; one that didn't is
+        # simply invisible to catalog pre-filtering, same as before it registered.
+        name = spec.pop("calculate")
+        inputs_fn = CALCULATOR_INPUTS.get(name)
+        options = list(inputs_fn(spec)) if inputs_fn is not None else []
+    else:
+        options = [_leaf_names(names) for names in spec.values()]
     if standard_name:
         options.append([standard_name])
     return options

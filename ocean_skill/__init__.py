@@ -24,6 +24,7 @@ The public API is intentionally small:
 """
 
 from ocean_skill import cache, outputs
+from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.field import Field, field
