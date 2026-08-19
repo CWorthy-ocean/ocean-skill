@@ -904,7 +904,9 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
 
     if low.endswith((".parquet", ".json")):
         data = datatypes.HDF5(url=str(url))  # placeholder type; engine drives the read
-        return readers.XArrayDatasetReader(data, engine="kerchunk", chunks={}, **kwargs)
+        kwargs.setdefault("engine", "kerchunk")
+        kwargs.setdefault("chunks", {})
+        return readers.XArrayDatasetReader(data, **kwargs)
     # ERDDAP griddap *is* a DAP endpoint, so xarray opens it the same way — but the URL
     # says neither "opendap" nor "dods", and without this it falls through to the
     # NetCDF branch and fails. griddap matters because one griddap dataset is the whole
@@ -922,16 +924,21 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     # surfaces as an authentication failure rather than a version mismatch.
     if low.endswith(".zarr") or ".zarr/" in low:
         data = datatypes.Zarr(url=str(url), storage_options=so)
-        return readers.XArrayDatasetReader(data, engine="zarr", **kwargs)
+        kwargs.setdefault("engine", "zarr")
+        return readers.XArrayDatasetReader(data, **kwargs)
 
     # Anything fsspec has to open (a remote URL, or a cache/chain like
     # "simplecache::https://...") arrives as a *file object*, which the netcdf4 C
     # backend rejects outright. h5netcdf reads file objects, so it is the right engine
-    # for those; keep netcdf4 for plain local paths, where it is faster.
+    # for those; keep netcdf4 for plain local paths, where it is faster. An explicit
+    # ``engine`` in ``reader_kwargs`` overrides this auto-detection — e.g. a remote
+    # *classic-format* netCDF3 file (magic ``CDF\x01``) needs ``engine="scipy"``,
+    # since h5netcdf can only read netCDF4/HDF5.
     remote = "://" in str(url)
-    engine = "h5netcdf" if remote else "netcdf4"
+    kwargs.setdefault("engine", "h5netcdf" if remote else "netcdf4")
+    kwargs.setdefault("chunks", {})
     data = datatypes.HDF5(url=str(url), storage_options=so)
-    return readers.XArrayDatasetReader(data, engine=engine, chunks={}, **kwargs)
+    return readers.XArrayDatasetReader(data, **kwargs)
 
 
 def _roms_metadata(ds) -> dict[str, Any]:
