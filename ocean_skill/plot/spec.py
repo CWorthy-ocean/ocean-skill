@@ -42,6 +42,7 @@ FAMILIES = (
     "taylor",
     "target",
     "paired",
+    "locations",
 )
 
 
@@ -81,6 +82,12 @@ class PlotSpec:
         family bins them into panels by variable and overlays them by source (see
         :func:`ocean_skill.plot.series.compose`), so one item is a pair of lines rather
         than a row.
+
+        ``locations`` carries no field payload at all: one item per catalog *source*,
+        with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``
+        for the extent kind, and pre-formatted hover strings — built by
+        :func:`ocean_skill.plot.locations.build_items` from catalog metadata alone,
+        so drawing the map never opens a dataset.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.

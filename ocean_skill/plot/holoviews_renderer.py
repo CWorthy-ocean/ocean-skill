@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from ocean_skill.colormaps import cmaps_for
+from ocean_skill.plot.locations import TAB10 as _TAB10
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
     metric_value_text,
@@ -1091,20 +1092,9 @@ def _save_interactive(obj, save) -> None:
     print(f"ocean-skill: interactive movie written to {path}")
 
 
-#: tab10 in matplotlib's own order — the palette ``summary._group_styles`` assigns by
-#: level index, so pinning the same hexes here keeps colours identical across renderers.
-_TAB10 = (
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#7f7f7f",
-    "#bcbd22",
-    "#17becf",
-)
+# _TAB10 — tab10 in matplotlib's own order, the palette ``summary._group_styles``
+# assigns by level index — is imported at the top from ocean_skill.plot.locations,
+# which now pins the hexes for both renderers so colours stay identical across them.
 
 #: matplotlib marker → bokeh marker, in the same order as ``summary._MARKERS``, so a
 #: diagram keeps its shapes when the same call is rendered interactively.
@@ -1472,6 +1462,158 @@ def _target(
     )
 
 
+def _locations(
+    items,
+    *,
+    title: str | None = None,
+    extent: tuple[float, float, float, float] | None = None,
+    tiles: str | bool | None = "CartoLight",
+    legend: bool = True,
+    marker_size: float = 9.0,
+    size=None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    **_,
+):
+    """Interactive dataset-location map: hoverable markers and extent boxes.
+
+    Items come from :func:`ocean_skill.plot.locations.build_items`; hovering any
+    marker (or a grid's dashed extent rectangle) reads that dataset's metadata —
+    the :data:`~ocean_skill.plot.locations.HOVER_FIELDS` record, pre-formatted by
+    the builder so both renderers agree on it.
+
+    Web tiles are on by default (``"CartoLight"``): a locations map exists to be
+    panned and zoomed into, which bare 50m coastlines serve poorly. Pass
+    ``tiles=None`` for the offline coastline basemap the other map families
+    default to. Extent boxes are plain ``hv.Rectangles`` deliberately —
+    ``gv.Rectangles`` + hover crashes in geoviews's bokeh hover handling (its
+    ``_process_hover_geo`` assumes two kdims) — so with tiles on, their corners
+    (and the ``extent`` limits) are projected to Web Mercator here, since plain
+    holoviews elements take no part in geoviews's automatic projection. Lon/lat
+    limits on a tiled plot silently blank it (see :func:`_quadmesh`); projecting
+    the bounds is the real fix, and lets the map open framed on the datasets
+    rather than at world extent.
+    """
+    import geoviews as gv
+    import pandas as pd
+    from bokeh.models import HoverTool
+
+    from ocean_skill.plot.locations import (
+        FEATURE_TYPE_ORDER,
+        HOVER_FIELDS,
+        _style_index,
+    )
+
+    hv = _extension()
+    if tiles is True:
+        tiles = "CartoLight"
+    tiles = _check_tiles(tiles or None)
+
+    def hover_tool():
+        # A fresh HoverTool per element — a bokeh model belongs to one renderer.
+        # Explicit tooltips rather than bokeh's defaults, which would append the
+        # kdims: raw Web Mercator metres for a rectangle corner under tiles.
+        return HoverTool(tooltips=[(f, f"@{{{f}}}") for f in HOVER_FIELDS])
+
+    def to_mercator(lons, lats):
+        import cartopy.crs as ccrs
+
+        pts = ccrs.GOOGLE_MERCATOR.transform_points(
+            ccrs.PlateCarree(),
+            np.asarray(lons, dtype=float),
+            # Web Mercator diverges at the poles; clamp to its own limit
+            np.clip(np.asarray(lats, dtype=float), -85.06, 85.06),
+        )
+        return pts[:, 0], pts[:, 1]
+
+    if extent is None:
+        from ocean_skill.plot.locations import _default_extent
+
+        extent = _default_extent(items)
+    lon0, lat0, lon1, lat1 = (float(v) for v in extent)
+    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
+    px = frame_px(aspect, width_px=SOLO_PANEL_WIDTH_PX * _canvas_factor(size, zoom))
+    fontsize = bokeh_fontsize(px, font_scale=font_scale)
+
+    if tiles:
+        from geoviews import tile_sources
+
+        overlay = tile_sources.tile_sources[tiles]
+    else:
+        overlay = gv.feature.coastline.opts(scale="50m")
+
+    rect_rows = [
+        {"lon0": lo, "lat0": la, "lon1": hi, "lat1": ha}
+        | {field: item[field] for field in HOVER_FIELDS}
+        for item in items
+        if item["kind"] == "extent"
+        for lo, la, hi, ha in item["bboxes"]
+    ]
+    if rect_rows:
+        rect_df = pd.DataFrame(rect_rows)
+        if tiles:
+            for lon_col, lat_col in (("lon0", "lat0"), ("lon1", "lat1")):
+                rect_df[lon_col], rect_df[lat_col] = to_mercator(
+                    rect_df[lon_col], rect_df[lat_col]
+                )
+        overlay = overlay * hv.Rectangles(
+            rect_df,
+            kdims=["lon0", "lat0", "lon1", "lat1"],
+            vdims=list(HOVER_FIELDS),
+            label="grid",
+        ).opts(
+            fill_alpha=0,
+            line_dash="dashed",
+            line_color=_TAB10[_style_index("grid") % len(_TAB10)],
+            line_width=1.5,
+            tools=[hover_tool()],
+            show_legend=legend,
+        )
+
+    point_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] == "point":
+            point_groups.setdefault(item["featureType"], []).append(item)
+    ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in point_groups]
+    ordered += [ft for ft in point_groups if ft not in FEATURE_TYPE_ORDER]
+    for feature_type in ordered:
+        index = _style_index(feature_type)
+        frame = pd.DataFrame(point_groups[feature_type])[
+            ["lon", "lat", *HOVER_FIELDS]
+        ]
+        # One element per featureType with a fixed colour, as the Target diagram
+        # groups its points — it is also what gives the legend one entry per type.
+        overlay = overlay * gv.Points(
+            frame,
+            kdims=["lon", "lat"],
+            vdims=list(HOVER_FIELDS),
+            label=feature_type,
+        ).opts(
+            color=_TAB10[index % len(_TAB10)],
+            marker=_BOKEH_MARKERS[index % len(_BOKEH_MARKERS)],
+            size=marker_size,
+            tools=[hover_tool()],
+            line_color="white",
+            line_width=1,
+            show_legend=legend,
+        )
+
+    opts: dict[str, Any] = {
+        "frame_width": px[0],
+        "frame_height": px[1],
+        "fontsize": fontsize,
+        "title": title or "",
+    }
+    if legend:
+        opts["legend_position"] = "right"
+    if tiles:
+        xs, ys = to_mercator([lon0, lon1], [lat0, lat1])
+        opts["xlim"], opts["ylim"] = (xs[0], xs[1]), (ys[0], ys[1])
+    else:
+        opts["xlim"], opts["ylim"] = (lon0, lon1), (lat0, lat1)
+    return overlay.opts(**opts)
+
+
 def render(spec, **kwargs: Any):
     """Draw a :class:`PlotSpec` interactively; delegate families bokeh cannot do."""
     opts = {**spec.options, **kwargs}
@@ -1560,6 +1702,8 @@ def render(spec, **kwargs: Any):
         return _series(spec.items, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
+    if family == "locations":
+        return _locations(spec.items, **opts)
     if family == "target":
         return _target(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")

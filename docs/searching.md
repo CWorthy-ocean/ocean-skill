@@ -172,6 +172,29 @@ osk.find(name="papa", bbox=GULF)                       #  0  wrong ocean
 
 That last pair is the clean demonstration: same name filter, two different boxes.
 
+## Seeing where they are
+
+Any result maps in one line — from the catalog metadata alone, so nothing is
+opened or read:
+
+```python
+osk.find(variable="nitrate").map()          # where every match is, on one map
+osk.map_datasets()                          # everything discoverable
+osk.map_datasets(catalog="OOI*")            # one catalog
+osk.find(name="papa").map(renderer="holoviews")  # interactive
+```
+
+Moorings, profiles and tracks draw as markers at their declared position; gridded
+datasets draw as dashed extent rectangles — both coloured by `featureType`, with a
+legend. The interactive version opens on a web basemap (pass `tiles=None` to work
+offline, or any other `geoviews.tile_sources` name) and hovering any marker or
+extent box reads that dataset's record: name, catalog, featureType, variables, time
+coverage, cadence, resolution, depth, institution, title.
+
+A source that declares no extent cannot be placed, so it is skipped with one
+warning naming it — the mapping counterpart of the "unknown is kept" rule above.
+Probe the catalog to fill extents in.
+
 ## One gotcha: glob vs substring
 
 A wildcard makes `name` a **whole-name glob**, shell-style. Without one it is a

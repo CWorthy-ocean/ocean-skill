@@ -44,7 +44,7 @@ want everything bigger or smaller.
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
-| [`legend_kwargs`](#legend_kwargs) | a `series` panel's key (`series` only) | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
+| [`legend_kwargs`](#legend_kwargs) | a `series` panel's key, or the `locations` map's | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -766,3 +766,29 @@ Both renderers draw the same lines, colours, dash patterns, titles, axis labels 
 
 `line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
 static renderer, which warns rather than absorbing them silently.
+
+## The `locations` family (dataset map)
+
+`osk.map_datasets()` / `osk.find(...).map()` draw where catalog datasets *are*, from
+metadata alone — no field, so no colormap, no colorbar and no `mark`. Colour keys the
+`featureType` (markers for stations/profiles/tracks, dashed extent boxes for grids),
+and the legend is the key to it.
+
+### `locations`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `extent` | frames every item | `(lon_min, lat_min, lon_max, lat_max)`, the same bbox shape `find(bbox=...)` takes |
+| `legend` | `True` | draw the featureType key at all |
+| `marker_size` | `80` static / `9` interactive | station marker size (matplotlib points² / bokeh pixels) |
+| `tiles` | `"CartoLight"` (interactive only) | any `geoviews.tile_sources` name; `None` for the offline coastline basemap. The static renderer accepts-and-warns so `renderer="both"` can share one set of options |
+
+Of the styling dicts, `title_kwargs`, `gridline_kwargs`, `tick_label_kwargs` and
+`legend_kwargs` apply (static renderer only, as ever); the rest describe things this
+family does not draw. `size`/`zoom`/`figsize`/`font_scale`/`save` work as everywhere
+else.
+
+Interactively, hovering any marker or extent box reads that dataset's record — name,
+catalog, featureType, variables, time coverage, cadence, resolution, depth,
+institution, title — pre-formatted by `ocean_skill.plot.locations.build_items`, which
+is also where entries with no declared geospatial extent are skipped with a warning.

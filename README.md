@@ -26,6 +26,7 @@ import ocean_skill as osk
 
 osk.catalogs                          # every source discovered, across all catalogs
 osk.find(variable="nitrate")          # search by variable, bbox, time, name, free text
+osk.find(variable="nitrate").map()    # ...and where the matches are, on one map
 osk.describe("woa23_nitrate_month01") # full metadata for one source
 
 NITRATE = "mole_concentration_of_nitrate_in_sea_water"

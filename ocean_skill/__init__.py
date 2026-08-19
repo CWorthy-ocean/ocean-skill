@@ -10,6 +10,8 @@ The public API is intentionally small:
     import ocean_skill as osk
     osk.catalogs                 # discovered catalogs / sources
     osk.find(variable=...)       # search sources across catalogs
+    osk.find(variable=...).map() # ... and map where the matches are
+    osk.map_datasets()           # map every discovered dataset (metadata only)
     osk.describe("glodap")       # metadata for one source, or one whole catalog
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
     osk.compare(reference=..., test=..., variables=[...],
@@ -28,6 +30,7 @@ from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"]
 from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.field import Field, field
+from ocean_skill.plot.locations import map_datasets
 from ocean_skill.sources import read
 
 __version__ = "0.0.1"
@@ -43,6 +46,7 @@ __all__ = [
     "describe",
     "field",
     "find",
+    "map_datasets",
     "outputs",
     "read",
     "summary",
