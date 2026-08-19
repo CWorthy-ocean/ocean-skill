@@ -72,6 +72,26 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "standard_name": "mole_concentration_of_silicate_in_sea_water",
         "aliases": ["moles_of_silicate_per_unit_mass_in_sea_water"],
     },
+    "ammonium": {
+        "standard_name": "mole_concentration_of_ammonium_in_sea_water",
+        "aliases": [
+            "moles_of_ammonium_per_unit_mass_in_sea_water",  # WOA/GLODAP per-mass form
+            "NH4",  # ROMS/MARBL's own tracer name; see the `Fe` note below on matching
+        ],
+    },
+    "iron": {
+        "standard_name": "mole_concentration_of_dissolved_iron_in_sea_water",
+        "aliases": [
+            # WOA/GLODAP's per-mass spelling, the same per-volume/per-mass split the
+            # other nutrients above carry.
+            "moles_of_dissolved_iron_per_unit_mass_in_sea_water",
+            # ROMS/MARBL's own tracer name (build.py's ROMS_STANDARD_NAMES maps `Fe`
+            # here). Short, but matched whole -- the index is an exact lookup and the
+            # cf-xarray pattern is anchored, so `Fe`/`fe`/`FE` resolve while a name
+            # merely starting with them (e.g. `felix`) does not.
+            "Fe",
+        ],
+    },
     "oxygen": {
         "standard_name": (
             "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
@@ -159,6 +179,15 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "surface_geostrophic_northward_sea_water_velocity",
             "surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid",
         ],
+    },
+    "upward_velocity": {
+        # ROMS' vertical velocity `w` (build.py's ROMS_STANDARD_NAMES). `w` is a
+        # single letter but matched whole (see the `Fe` note), so only a variable
+        # named exactly `w`/`W` resolves, not one merely starting with it. The
+        # horizontal siblings above deliberately carry no `u`/`v` short name yet; add
+        # them alongside this if the model-momentum triple is ever wanted as a set.
+        "standard_name": "upward_sea_water_velocity",
+        "aliases": ["w"],
     },
     "eastward_wind": {"standard_name": "eastward_wind"},
     "northward_wind": {"standard_name": "northward_wind"},
