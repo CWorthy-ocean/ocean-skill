@@ -84,6 +84,53 @@ Parquet remains the better target for very large references (JSON holds every ch
 record in memory); use it there and re-open on failure. For a few thousand daily files,
 JSON is fine.
 
+## Chunk size: the manifest inherits the source file's layout
+
+A kerchunk reference does not choose a chunk shape — it records whatever the source
+file already has. ROMS writes one time record per output file with the full water
+column in it, so a variable shaped `(time, s_rho, eta_rho, xi_rho)` with 100 vertical
+levels becomes a manifest with **one chunk of ~1.3 GiB per time step**, and every
+downstream reader (dask, `xr.open_dataset(..., chunks={})`, `osk.compare`) inherits
+that as the unit it reads — reading it, or reducing over it before narrowing it down,
+pulls the whole thing into memory. `reader_kwargs={"chunks": ...}` on a catalog entry
+cannot fix this: dask chunks smaller than the *storage* chunk still fetch and decode
+the whole storage chunk per task, so a smaller dask chunk only adds read
+amplification, never shrinks the actual I/O.
+
+`make_kerchunk`/`build_kerchunk` split the manifest itself instead, which is possible
+because an **uncompressed** chunk's bytes are one contiguous run: any leading axis
+already down to one chunk (time, typically) makes the next axis (the vertical)
+contiguous too, so it can be cut into byte-range sub-chunks with no data movement.
+On by default (`target_chunk_mb=128`, splitting only the leading dims — never the
+horizontal), or requested explicitly:
+
+```python
+make_kerchunk(files, "refs/gom_bgc.parquet", grid=GRID, subchunk={"s_rho": 5})
+# (1, 100, 962, 1858) float64 (1.33 GiB) -> (1, 5, 962, 1858) (~68 MB)
+```
+
+**This does not extend to compressed output.** A compressed chunk is the unit its
+codec decompresses — there is no byte range inside it that means anything on its own,
+so `subchunk=`/`target_chunk_mb` silently leave a compressed variable's chunks as
+stored (a warning names it). If future model output is written compressed, the chunk
+shape has to be chosen **when the file is written**, not fixed up afterward: compression
+already forces chunked (not contiguous) storage, so the choice is unavoidable at that
+point anyway — picking something like `(1, 5-10 levels, full eta, full xi)` avoids
+recreating the same one-chunk-per-timestep problem permanently. A file already written
+with oversized compressed chunks can be repacked (`nccopy -c ocean_time/1,s_rho/5,... -d
+4`, or `h5repack`) at the cost of rewriting it once.
+
+A different (non-manifest) technique for compressed sub-chunk reads exists —
+[CNES's `chunkindex`](https://github.com/CNES/netCDFchunkindex), described in
+[Penard et al., GMD 19:1519 (2026)](https://gmd.copernicus.org/articles/19/1519/2026/):
+a sidecar index of zlib re-entry points lets a reader decompress just the covering
+segment of a compressed chunk. It is real and it works, but it is a standalone
+h5py-based reader with no xarray/dask/zarr/kerchunk integration, no packaging, and
+deflate-only support (shuffle costs it ~2×) — a watch item, not something this
+package depends on. The zarr v3 sharding this project's icechunk conversion
+(see `environment.yml`) would eventually offer is the integrated equivalent: small,
+independently-compressed inner chunks inside larger storage objects.
+
 ## Verifying a server before a long build
 
 Worth thirty seconds before kerchunking thousands of files:

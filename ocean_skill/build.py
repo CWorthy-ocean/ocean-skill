@@ -398,6 +398,8 @@ def make_kerchunk(
     keep: str = "all",
     fmt: str | None = None,
     tolerant_attrs: bool = True,
+    subchunk: dict[str, int] | None = None,
+    target_chunk_mb: float | None = 128.0,
 ) -> Path:
     """Build a kerchunk reference over ``files``, optionally merging in a grid file.
 
@@ -425,6 +427,30 @@ def make_kerchunk(
         afterward and will warn about any overlap *between* files (e.g. a restart
         stream re-covering time an earlier run already wrote) — this only removes
         the within-file duplication, not that.
+    target_chunk_mb
+        Automatic manifest subchunking, on by default: any *uncompressed* variable
+        whose stored chunk exceeds this many megabytes is split (see
+        :func:`_auto_subchunk_spec`) along its leading dims only -- for ROMS-shaped
+        output, that means time and/or the vertical, never the horizontal. A
+        one-time-record-per-file chunk of ``(1, 100, 962, 1858)`` float64 (1.33 GiB)
+        becomes ``(1, 5, 962, 1858)`` (~68 MB) at the default. Pass ``None`` to
+        disable and keep whatever chunk grid the source files carry, unsplit.
+        Silently leaves a compressed variable's chunks alone (splitting a
+        compressed chunk is not possible after the fact — see ``subchunk`` below).
+    subchunk
+        Explicit manifest subchunking: ``{dim: resulting_chunk_length}``, the same
+        shape as ``ds.chunk()``. Layers on top of (and overrides, per dim named)
+        whatever ``target_chunk_mb`` chose automatically. Splitting only ever works
+        along a variable's *outermost* dims -- once every dim before the one named
+        is already a single chunk, that dim's bytes are contiguous and can be cut;
+        a dim in the middle needs the ones before it named too (the error says so).
+        This is why automatic mode never touches the trailing two (horizontal)
+        dims, but ``subchunk`` can if a caller has reason to, e.g.
+        ``{"eta_rho": 200}``. Raises on a spec that does not fit the store (wrong
+        divisor, or a dim that is not actually outermost) rather than skipping —
+        unlike a compressed variable, a bad request is something the caller can
+        fix. Values are byte-identical to an unsplit build either way; only the
+        read granularity changes.
 
     Notes
     -----
@@ -492,6 +518,16 @@ def make_kerchunk(
                 combine_attrs="drop_conflicts",
             )
 
+    spec = (
+        _auto_subchunk_spec(vds, target_chunk_mb * 1024**2)
+        if target_chunk_mb is not None
+        else {}
+    )
+    if subchunk:
+        spec = {**spec, **subchunk}  # explicit wins per dim named; auto fills the rest
+    if spec:
+        vds = _subchunk(vds, spec)
+
     out = Path(out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     vds.vz.to_kerchunk(str(out), format=fmt or _kerchunk_format(out))
@@ -506,6 +542,231 @@ def _kerchunk_format(out: Path) -> str:
     much later as ``IsADirectoryError`` when something tries to read it back.
     """
     return "json" if out.suffix.lower() == ".json" else "parquet"
+
+
+# ------------------------------------------------------------------------- subchunking
+
+
+def _uncompressed(marr) -> bool:
+    """Whether a :class:`~virtualizarr.manifests.ManifestArray`'s chunks are raw bytes.
+
+    A stored chunk can only be split into byte-range sub-chunks if it carries no
+    compression: an endian-only ``BytesCodec`` is fine (that's what an uncompressed
+    HDF5 variable -- or a big-endian netCDF3 one -- carries), but any shuffle/deflate
+    codec riding after it means the chunk is one opaque compressed blob, and splitting
+    its byte range would slice into the compressed stream rather than the data.
+    """
+    import zarr
+
+    codecs = marr.metadata.codecs
+    return len(codecs) == 1 and isinstance(codecs[0], zarr.codecs.BytesCodec)
+
+
+def _split_marr_axis(
+    marr, axis: int, new_size: int, *, name: str, dim: str, dims: tuple[str, ...]
+):
+    """Split one axis of a ManifestArray's chunk grid into ``new_size``-length pieces.
+
+    Works because a stored chunk is one contiguous run of bytes in C (row-major)
+    order: once every axis before ``axis`` is already size 1 in the chunk grid, the
+    bytes along ``axis`` are contiguous too, and can be cut into equal sub-ranges by
+    offset arithmetic alone -- no bytes are read or moved, only the manifest's
+    (path, offset, length) triples change. Everything after ``axis`` rides along
+    unchanged in every sub-chunk. ``dims`` is ``marr``'s dimension names (``.zarray``
+    metadata does not reliably carry them), used only to spell a clear error.
+
+    Raises rather than skips on a bad request: an ineligible (compressed, inlined)
+    variable is filtered out by the caller before this is ever reached (see
+    :func:`_subchunk`), so reaching here with something unsplittable means the
+    *request* was wrong, not the file -- worth failing loudly on rather than quietly
+    doing nothing.
+    """
+    import numpy as np
+    from virtualizarr.manifests import ChunkManifest, ManifestArray
+    from virtualizarr.manifests.utils import copy_and_replace_metadata
+
+    chunks = marr.metadata.chunks
+    length = chunks[axis]
+    if length % new_size != 0:
+        raise ValueError(
+            f"{name!r}: subchunk={{{dim!r}: {new_size}}} does not divide its stored "
+            f"chunk length along {dim!r} ({length}) evenly."
+        )
+    factor = length // new_size
+    if factor == 1:
+        return marr  # already at (or coarser than) the requested size
+    if any(c != 1 for c in chunks[:axis]):
+        leading = dict(zip(dims[:axis], chunks[:axis], strict=True))
+        raise ValueError(
+            f"{name!r}: cannot subchunk {dim!r} on its own -- its chunk grid is not "
+            f"size 1 along the dims before it ({leading}), so those bytes are not "
+            "yet contiguous along this axis alone. This is the shape a "
+            "*contiguously*-stored (unchunked) file carries: add the leading "
+            f"dim(s) to subchunk= too, e.g. {{'{dims[axis - 1]}': 1, {dim!r}: "
+            f"{new_size}}}."
+        )
+
+    man = marr.manifest
+    if man._inlined:
+        raise ValueError(
+            f"{name!r} has inlined chunk data; subchunk= only rewrites byte-range "
+            "references into the source file, so an inlined variable cannot be "
+            "split."
+        )
+    paths, offsets, lengths = man._paths, man._offsets, man._lengths
+    itemsize = marr.dtype.itemsize
+    tail_shape = chunks[axis + 1 :]
+    tail = int(np.prod(tail_shape, dtype=np.int64)) if tail_shape else 1
+    sub_len = new_size * tail * itemsize
+
+    # Every present chunk must be exactly prod(chunk_shape) * itemsize: a compressed
+    # chunk's length varies record to record (that's what _uncompressed already
+    # rules out), but this catches anything else unexpected -- a partial edge chunk,
+    # say -- before it corrupts the split rather than after.
+    expected = int(np.prod(chunks, dtype=np.int64)) * itemsize
+    present = paths != ""
+    if present.any() and not bool(np.all(lengths[present] == expected)):
+        raise ValueError(
+            f"{name!r}: not every stored chunk is exactly {expected} bytes -- "
+            "refusing to subchunk it (an unexpectedly-shaped or partial chunk)."
+        )
+
+    g = paths.shape[axis]
+    new_paths = np.repeat(paths, factor, axis=axis)
+    new_lengths = np.full(new_paths.shape, np.uint64(sub_len), dtype=np.uint64)
+    bcast_shape = [1] * paths.ndim
+    bcast_shape[axis] = g * factor
+    increments = (
+        np.tile(np.arange(factor, dtype=np.uint64), g) * np.uint64(sub_len)
+    ).reshape(bcast_shape)
+    new_offsets = np.repeat(offsets, factor, axis=axis) + increments
+
+    new_manifest = ChunkManifest.from_arrays(
+        paths=new_paths, offsets=new_offsets, lengths=new_lengths, validate_paths=False
+    )
+    new_chunks = list(chunks)
+    new_chunks[axis] = new_size
+    new_metadata = copy_and_replace_metadata(marr.metadata, new_chunks=new_chunks)
+    return ManifestArray(metadata=new_metadata, chunkmanifest=new_manifest)
+
+
+def _subchunk(vds, spec):
+    """Split each eligible variable's manifest chunks along the dims named in ``spec``.
+
+    ``spec`` gives the *resulting* chunk length along each dim, ``ds.chunk()``-style
+    -- e.g. ``{"s_rho": 5}`` turns a chunk of 100 into 20 pieces of 5. Applied per
+    variable, dim by dim in ascending axis-index order (outermost first): splitting
+    an axis needs every axis before it already collapsed to one chunk (see
+    :func:`_split_marr_axis`), which is exactly why a contiguously-stored file needs
+    its leading (record) dim named in ``spec`` too, ahead of the vertical.
+
+    A variable that carries none of the named dims, or is not itself a
+    :class:`~virtualizarr.manifests.ManifestArray` (a merged grid field, a
+    ``loadable_variables`` entry already read into memory), passes through
+    untouched. One that is compressed, or has inlined chunk data, is skipped with a
+    warning rather than failing the whole build: that is a property of the source
+    file the caller cannot change by asking differently, unlike a bad ``spec``
+    (wrong dim, wrong divisor), which still raises.
+    """
+    from virtualizarr.manifests import ManifestArray
+
+    out = vds.copy()
+    for name, var in vds.variables.items():
+        marr = var.data
+        if not isinstance(marr, ManifestArray):
+            continue
+        axes = sorted(
+            (var.dims.index(d), d, size) for d, size in spec.items() if d in var.dims
+        )
+        if not axes:
+            continue
+        if marr.manifest._inlined:
+            warnings.warn(
+                f"{name!r} has inlined chunk data and was left as stored -- "
+                "subchunk= only rewrites byte-range references into the source "
+                "file.",
+                stacklevel=2,
+            )
+            continue
+        if not _uncompressed(marr):
+            warnings.warn(
+                f"{name!r} is compressed and was left as stored -- a compressed "
+                "chunk is the unit its codec decompresses, so it cannot be split "
+                "after the fact. Choose a smaller chunk shape when the file "
+                "itself is written instead.",
+                stacklevel=2,
+            )
+            continue
+        for axis, dim, size in axes:
+            marr = _split_marr_axis(
+                marr, axis, size, name=name, dim=dim, dims=var.dims
+            )
+        out[name].data = marr
+    return out
+
+
+def _auto_subchunk_spec(vds, target_bytes: float) -> dict[str, int]:
+    """Derive a ``subchunk=`` spec that brings the largest chunk under ``target_bytes``.
+
+    Automatic mode never touches the trailing two dims of a variable (the
+    horizontal, for anything gridded) -- only the leading ones, time and/or depth in
+    practice -- since those are what a user might reasonably want split without
+    being asked, and a store is rarely written chunked across latitude/longitude in
+    a way splitting could even help with. Works from the single worst-case variable
+    (the biggest uncompressed, non-inlined chunk in the store): walks its dims
+    outside-in, and for each picks the largest divisor of that dim's current chunk
+    length that gets the chunk under target -- the coarsest split that works, not
+    the finest -- moving to the next dim only if that one alone was not enough.
+
+    Returns ``{}`` (no-op) if nothing needs splitting, or if the store has no
+    eligible variable at all (all compressed, or none over target).
+    """
+    import numpy as np
+    from virtualizarr.manifests import ManifestArray
+
+    worst: tuple[str, tuple[str, ...], list[int], int, int] | None = None
+    for name, var in vds.variables.items():
+        marr = var.data
+        if not isinstance(marr, ManifestArray):
+            continue
+        if marr.manifest._inlined or not _uncompressed(marr):
+            continue
+        itemsize = marr.dtype.itemsize
+        nbytes = int(np.prod(marr.metadata.chunks, dtype=np.int64)) * itemsize
+        if worst is None or nbytes > worst[4]:
+            worst = (name, var.dims, list(marr.metadata.chunks), itemsize, nbytes)
+
+    if worst is None or worst[4] <= target_bytes:
+        return {}
+
+    name, dims, chunks, itemsize, nbytes = worst
+    spec: dict[str, int] = {}
+    for axis in range(max(len(dims) - 2, 0)):
+        if int(np.prod(chunks, dtype=np.int64)) * itemsize <= target_bytes:
+            break
+        length = chunks[axis]
+        best = None
+        for new_size in range(length, 0, -1):
+            if length % new_size:
+                continue
+            trial = chunks.copy()
+            trial[axis] = new_size
+            if int(np.prod(trial, dtype=np.int64)) * itemsize <= target_bytes:
+                best = new_size
+                break
+        chunks[axis] = best if best is not None else 1
+        if chunks[axis] != length:
+            spec[dims[axis]] = chunks[axis]
+
+    if int(np.prod(chunks, dtype=np.int64)) * itemsize > target_bytes:
+        warnings.warn(
+            f"{name!r}'s chunk ({nbytes / 1024**2:.0f} MB) could not be brought "
+            f"under target_chunk_mb={target_bytes / 1024**2:.0f} by splitting its "
+            "leading dims alone -- pass an explicit subchunk= naming a horizontal "
+            "dim to go further, or accept the remaining size.",
+            stacklevel=2,
+        )
+    return spec
 
 
 def _decode_times(ds, var):
@@ -1611,11 +1872,13 @@ def build_kerchunk(
         (which is why they do not live in :mod:`ocean_skill.cache`).
     **kerchunk_kwargs
         Forwarded to :func:`make_kerchunk` (``concat_dim``, ``loadable_variables``,
-        ``keep``, ``fmt``, ``tolerant_attrs``). Model differences belong here, as
-        arguments — the defaults are detected per file, so nothing needs to know a
-        model by name. Applied to every stream in this call, so a restart stream
-        needing ``keep="latest-per-file"`` goes in its own call, merged with
-        ``|`` — see the module docstring.
+        ``keep``, ``fmt``, ``tolerant_attrs``, ``target_chunk_mb``, ``subchunk``).
+        Model differences belong here, as arguments — the defaults are detected per
+        file, so nothing needs to know a model by name. Applied to every stream in
+        this call, so a restart stream needing ``keep="latest-per-file"`` goes in
+        its own call, merged with ``|`` — see the module docstring. Likewise a
+        stream whose variables need a different ``subchunk=`` (different vertical
+        axis length, say) than the rest.
     """
     out_dir = Path(out_dir).expanduser()
     resolved = {name: _resolve_files(spec, root) for name, spec in streams.items()}

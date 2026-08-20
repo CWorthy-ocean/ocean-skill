@@ -549,6 +549,19 @@ def _prepare(
     if da is None:
         return None, None
 
+    # A plain surface request is a free isel -- unlike to_depth/depth_band/to_sigma0,
+    # it needs no grid attached and no water column, just the top s-level -- so it is
+    # worth taking *before* the non-vertical reduction below, not after. Left in the
+    # usual place (inside the elif meta.get("model") == "roms" ladder further down),
+    # the reduction would run over every s_rho level a source happens to store, only
+    # for the ladder to throw all but the top one away; the isel there becomes a
+    # no-op once it has already happened here. Hoisted only for the plain scalar
+    # case -- a band, a level list, or an isopycnal slice all still need the full
+    # column, so they are left for the ladder.
+    if not calculated and sigma is None and surface and meta.get("model") == "roms":
+        name = da.name or "field"
+        da = roms.surface(da.to_dataset(name=name), meta)[name]
+
     # Order matters twice over. Selection precedes reduction, or "the mean of
     # January" would average the whole record. And the *non-vertical* reduction runs
     # before the vertical step, so an expensive s-coordinate transform sees as few
@@ -626,6 +639,10 @@ def _prepare(
             )
             sub = roms.to_sigma0(sub, meta, targets)
         elif surface:
+            # A no-op when the hoist above already ran (s_dim is gone from sub's dims,
+            # so roms.surface's own guard skips the isel) -- kept unconditional rather
+            # than tracked with a flag, since re-entering an already-surfaced dataset
+            # costs nothing and one fewer branch is one fewer thing to keep in sync.
             sub = roms.surface(sub, meta)
         elif band:
             # A band is averaged over native cells with thickness weights, not
@@ -729,6 +746,63 @@ def _prepare(
     return units.convert_units(da), da.attrs.get("actual_depth")
 
 
+#: Size (bytes) past which a source's largest *storage* chunk is worth a warning, before
+#: :func:`_prepare` ever runs. Unlike :data:`LOAD_WARN_BYTES` below, which inspects the
+#: field :func:`_prepare` hands back -- already reduced to whatever ``select``/
+#: ``aggregate`` left standing, routinely megabytes -- this looks at the chunk dask
+#: actually has to read: for a kerchunk reference over per-timestep ROMS output, one
+#: whole time record's full water column. A reduction that runs before a selection
+#: narrows it (see the ordering note in :func:`_prepare`) pulls every one of those into
+#: memory at once, on however many threads dask has -- exactly the failure
+#: ``LOAD_WARN_BYTES`` cannot see coming, since by the time it looks the damage (or the
+#: kernel) is already done.
+CHUNK_WARN_BYTES = 512 * 1024**2
+
+
+def _warn_if_chunk_is_large(obj: Any, source: str) -> None:
+    """Warn once if a variable in ``obj`` stores a chunk over :data:`CHUNK_WARN_BYTES`.
+
+    Runs on whatever :func:`ocean_skill.read` returned, before :func:`_prepare`
+    reduces anything. Silently does nothing for a source with no ``data_vars`` at
+    all -- a DataFrame station, a read that returned ``None`` -- and for one with
+    no dask-backed variables (already loaded into memory, nothing left for a chunk
+    to hide behind).
+    """
+    data_vars = getattr(obj, "data_vars", None)
+    if data_vars is None:
+        return
+    worst_bytes = 0
+    worst_name = None
+    for name, da in data_vars.items():
+        if da.chunks is None:
+            continue
+        max_elems = 1
+        for sizes in da.chunks:
+            max_elems *= max(sizes)
+        nbytes = max_elems * da.dtype.itemsize
+        if nbytes > worst_bytes:
+            worst_bytes, worst_name = nbytes, name
+    if worst_bytes > CHUNK_WARN_BYTES:
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        warnings.warn(
+            f"{source!r}'s {worst_name!r} is stored in chunks up to "
+            f"{worst_bytes / 1024**2:.0f} MB. Reading it -- and any reduction that "
+            "runs before a selection narrows it, such as a time mean ahead of a "
+            "depth pick -- pulls that much into memory per chunk, times however "
+            "many chunks the reduction touches at once. If the store is "
+            "uncompressed, rebuild its kerchunk reference with a smaller chunk "
+            "grid (ocean_skill.build.make_kerchunk(..., target_chunk_mb=...) or "
+            "subchunk={...}). A compressed store can't be split after the fact -- "
+            "repack the source files with smaller chunks (nccopy/h5repack) "
+            "instead, or limit concurrency in the meantime with "
+            "dask.config.set(num_workers=...).",
+            stacklevel=_stacklevel.find(),
+        )
+
+
 #: Size (bytes) past which :func:`prepare_source` says so before loading a lane. Not a
 #: cap: a year of daily output really is that large and refusing to read it would be
 #: worse than taking a while over it. But the load is eager (see below), so an extra
@@ -820,13 +894,9 @@ def prepare_source(
     # memory regardless, so this changes the size of the download and nothing else.
     meta = resolve(source).metadata
     constraints = erddap_constraints(meta, select, time_window)
-    da, depth = _prepare(
-        osk.read(source, constraints=constraints) if constraints else osk.read(source),
-        meta,
-        variable,
-        dict(select or {}),
-        aggregate,
-    )
+    obj = osk.read(source, constraints=constraints) if constraints else osk.read(source)
+    _warn_if_chunk_is_large(obj, source)
+    da, depth = _prepare(obj, meta, variable, dict(select or {}), aggregate)
     if da is not None and require_reduced:
         # before .load(), while it is still free -- see the docstring
         _require_reduced(da, require_reduced, source)
