@@ -61,7 +61,7 @@ dependencies:
       - "intake>=2"          # Take2; user-proven
       - intake-erddap        # rewritten for intake 2 by the user
       - cf_pandas            # intake-erddap hard-imports this; not pulled in as a dep
-      - virtualizarr         # build kerchunk references
+      - "git+https://github.com/TomNicholas/VirtualiZarr.git@native-netcdf3-parser"  # PR #1086 (unmerged): native netCDF3 parser, adds CDF5 support
       - xcmocean             # colormap <-> variable logic
       - xroms                # ROMS vertical-coord engine (standardize on later)
       - ioos_qc              # QARTOD (Phase 3)
