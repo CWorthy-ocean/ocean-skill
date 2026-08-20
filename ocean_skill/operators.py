@@ -437,6 +437,13 @@ def select(obj, spec: dict[str, Any] | None):
     variables that do not all carry the same axes. A dimension that is *present* but
     carries no coordinate is a different case and a range against it is refused — see
     :func:`_require_coordinate`.
+
+    A key naming an axis that only exists *after* :func:`aggregate` runs — a groupby
+    renames its dim to the grouping key, ``time`` becoming ``month`` — is skipped here
+    too, the same as any other absent axis. :func:`ocean_skill.comparison._prepare`
+    gives such a key a second try once the aggregate has run, via
+    :func:`ocean_skill.comparison._select_horizontal_then_aggregate`; this function
+    itself only ever sees one axis's-worth of dimensions at a time.
     """
     for name, value in (spec or {}).items():
         dim = resolve_dim(obj, name)
