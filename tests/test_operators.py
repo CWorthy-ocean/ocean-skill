@@ -346,14 +346,16 @@ def test_select_falls_back_to_nearest_for_an_inexact_scalar(two_months):
 def test_select_snaps_a_full_timestamp_to_the_nearest_step(two_months):
     """An instant behaves like a scalar: output is stamped at offsets the caller
     cannot be expected to know, so 02:00 on midnight-stamped data means the
-    nearest step, not a KeyError."""
+    nearest step, not a KeyError.
+    """
     got = select(two_months, {"time": "2012-01-30T02:00:00"})
     assert pd.Timestamp(got.time.values) == pd.Timestamp("2012-01-30")
 
 
 def test_select_snaps_a_missing_day_on_daily_data(two_months):
     """A date at the axis's own resolution is one step's worth of time — an
-    instant — even without the clock part; five-daily output between steps."""
+    instant — even without the clock part; five-daily output between steps.
+    """
     gappy = two_months.isel(time=slice(None, None, 5))  # Jan 1, 6, 11, ...
     got = select(gappy, {"time": "2012-01-04"})
     assert pd.Timestamp(got.time.values) == pd.Timestamp("2012-01-06")
@@ -361,14 +363,16 @@ def test_select_snaps_a_missing_day_on_daily_data(two_months):
 
 def test_select_still_refuses_an_empty_period(two_months):
     """'2013-01' is a period, not an instant: its nearest neighbour would be
-    data from a month the caller did not name."""
+    data from a month the caller did not name.
+    """
     with pytest.raises(KeyError, match="no data within '2013-01'"):
         select(two_months, {"time": "2013-01"})
 
 
 def test_a_day_of_hourly_data_is_a_period_not_an_instant():
     """On hourly data a bare date names twenty-four steps; when the record skips
-    the day entirely, snapping to a neighbouring day would misrepresent."""
+    the day entirely, snapping to a neighbouring day would misrepresent.
+    """
     time = xr.date_range("2012-01-01", periods=48, freq="h")
     hourly = xr.DataArray(np.arange(48.0), dims="time", coords={"time": time})
     with pytest.raises(KeyError, match="no data within '2012-01-05'"):
@@ -376,9 +380,10 @@ def test_a_day_of_hourly_data_is_a_period_not_an_instant():
 
 
 def test_a_method_key_warns_instead_of_vanishing(two_months):
-    """xarray's own KeyError advises method='nearest'; a caller who follows that
+    """Xarray's own KeyError advises method='nearest'; a caller who follows that
     advice into the spec should hear why it is not a key here — and still get
-    the selection they meant, since nearest is automatic."""
+    the selection they meant, since nearest is automatic.
+    """
     with pytest.warns(UserWarning, match="Nearest matching is automatic"):
         got = select(
             two_months, {"time": "2012-01-30T02:00:00", "method": "nearest"}
@@ -761,19 +766,25 @@ def test_a_bbox_already_in_the_same_convention_is_untouched():
     assert float(out.longitude.max()) == 51.0
 
 
-def test_a_bbox_straddling_the_seam_says_so_rather_than_dropping_half():
+def test_a_bbox_straddling_the_seam_crops_the_contiguous_band():
     """Contiguous in the box's convention, split in the reference's.
 
-    Slicing either half would quietly compare against a fragment of the region.
+    Slicing either half would quietly compare against a fragment of the region, so
+    the reference is re-expressed in the box's convention and cropped whole — the
+    Pacific-domain case (a 0-360 model straddling the antimeridian against a ±180
+    climatology), which used to raise instead of cropping.
     """
     import numpy as np
-    import pytest
 
     from ocean_skill.align import subset_to_bbox
 
-    ref = _lonlat_grid(np.arange(-180, 181, 1.0), np.arange(-90, 91, 1.0))
-    with pytest.raises(ValueError, match="cannot be cropped to one slice"):
-        subset_to_bbox(ref, (170.0, -5.0, 190.0, 5.0))
+    ref = _lonlat_grid(np.arange(-179.5, 180, 1.0), np.arange(-90, 91, 1.0))
+    out = subset_to_bbox(ref, (170.0, -5.0, 190.0, 5.0))
+    assert float(out.longitude.min()) == 169.5
+    assert float(out.longitude.max()) == 190.5
+    # both sides of the seam survive, in one contiguous slice
+    assert out.sizes["longitude"] == 22
+    assert bool(np.all(np.diff(out.longitude) > 0))
 
 
 # -- cropping the reference to the test's time window -------------------------

@@ -26,6 +26,7 @@ __all__ = [
     "harmonize_longitude",
     "is_composite",
     "match_axis",
+    "natural_convention",
     "point_of",
     "resolve_match_method",
     "sample_at",
@@ -85,6 +86,29 @@ def harmonize_longitude(obj, convention: Literal["0-360", "-180-180"] = "-180-18
     return out
 
 
+def natural_convention(obj) -> Literal["0-360", "-180-180"]:
+    """Return the longitude convention in which ``obj`` is one contiguous span.
+
+    A domain straddling the antimeridian (a Pacific model running 77°E to 316°E)
+    is contiguous in 0-360 and split in ±180 — forced into ±180 its bounding box
+    reads as the whole globe, so the reference it is compared against never gets
+    cropped, and cell corners derived across the fold average out to ~0°, painting
+    conservative regrids across half the planet. Measured rather than assumed:
+    whichever convention gives the smaller longitude span is the one the domain is
+    contiguous in. Ties (a truly global field) keep ±180, the maps' usual frame.
+    """
+    lon = _lon_name(obj)
+    if lon is None:
+        return "-180-180"
+    vals = np.asarray(obj[lon], dtype="float64").ravel()
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return "-180-180"
+    span_180 = np.ptp(((vals + 180.0) % 360.0) - 180.0)
+    span_360 = np.ptp(vals % 360.0)
+    return "0-360" if span_360 < span_180 else "-180-180"
+
+
 #: Degrees of margin kept around the test's own extent when the reference is cropped to
 #: it. Named rather than repeated because two places crop with it and they must agree: a
 #: lane pre-cropped with a *smaller* pad than :func:`align` uses would silently hand the
@@ -126,6 +150,11 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     band are the same question asked twice), and refuses to return an empty result: no
     overlap at all means the two sources do not cover the same region, which is worth
     saying plainly rather than failing later.
+
+    A box that straddles ``obj``'s longitude seam (a Pacific domain's 77°E-316°E
+    against a ±180 reference) comes back cropped in the *box's* convention — the
+    reference's longitudes are re-expressed and re-sorted so the band stays one
+    contiguous slice rather than being split at the seam or half-dropped.
     """
     from ocean_skill.operators import oriented_slice
 
@@ -133,17 +162,18 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     if lon is None or lat is None:
         return obj
     lon_min, lat_min, lon_max, lat_max = bbox
-    lon_min, lon_max = _bbox_lon_in_convention(obj[lon], lon_min, lon_max)
-    if lon_min > lon_max:
+    box_lo, box_hi = _bbox_lon_in_convention(obj[lon], lon_min, lon_max)
+    if box_lo > box_hi and lon in obj.dims:
         # Contiguous in the box's own convention, split in the reference's: the box
-        # straddles the seam (0/360, or the antimeridian). Slicing either half would
-        # silently drop the other, so say so rather than compare against a fragment.
-        raise ValueError(
-            f"the test's longitude range crosses {lon} = "
-            f"{'0/360' if float(np.nanmax(obj[lon])) > 180 else '+/-180'} in the "
-            "reference's convention, so it cannot be cropped to one slice. Convert "
-            "one source with ocean_skill.align.to_convention() before comparing."
+        # straddles the reference's seam (0/360, or the antimeridian — the Pacific
+        # case). Slicing either half would silently drop the other, so re-express the
+        # *reference* in the box's convention instead: a global axis stays global,
+        # re-sorted, and the slice below keeps the one contiguous band the box names.
+        obj = harmonize_longitude(
+            obj, "0-360" if max(lon_min, lon_max) > 180.0 else "-180-180"
         )
+        box_lo, box_hi = lon_min, lon_max
+    lon_min, lon_max = box_lo, box_hi
     sel = {}
     if lon in obj.dims:
         sel[lon] = oriented_slice(obj, lon, slice(lon_min - pad, lon_max + pad))
@@ -267,6 +297,11 @@ def grid_of(obj, bounds: bool = False) -> xr.Dataset:
             lon_b=("lon_b", _corners_1d(lon)), lat_b=("lat_b", _corners_1d(lat))
         )
     elif lon.ndim == 2 and lat.ndim == 2:
+        # A curvilinear grid straddling its convention's seam folds mid-array
+        # (…179.9, -179.9…), and corners averaged across the fold land near 0° —
+        # cells spanning half the globe. Unwrap to a continuous field first; ESMF
+        # reads degrees on the sphere, so values past ±180 are equivalent, not wrong.
+        lon = np.unwrap(np.unwrap(lon, axis=1, period=360.0), axis=0, period=360.0)
         grid = grid.assign_coords(
             lon_b=(("y_b", "x_b"), _corners_2d(lon)),
             lat_b=(("y_b", "x_b"), _corners_2d(lat)),
@@ -1065,7 +1100,7 @@ def align(
     reference,
     *,
     method: str = "bilinear",
-    convention: Literal["0-360", "-180-180"] = "-180-180",
+    convention: Literal["auto", "0-360", "-180-180"] = "auto",
     pad: float = DEFAULT_PAD,
     min_coverage: float = 0.5,
     test_name: str = "test",
@@ -1109,6 +1144,12 @@ def align(
     coastal or edge cell reads about half its true value — a large, purely artificial
     difference. ``"conservative_normed"`` renormalizes by the covered fraction, and the
     coverage mask then removes cells too sparsely covered to be meaningful.
+
+    ``convention="auto"`` (the default) expresses both lanes in whichever longitude
+    convention keeps the *test* contiguous (:func:`natural_convention`): ±180 for
+    most domains, 0-360 for one that straddles the antimeridian, as a Pacific model
+    does. The resolved choice is recorded as ``lon_convention`` in the result's
+    attrs; pass ``"0-360"`` or ``"-180-180"`` to force one instead.
     """
     import xesmf as xe
 
@@ -1135,6 +1176,14 @@ def align(
 
     test = _check_units(test, reference)
 
+    # "auto" follows the *test* lane: a domain straddling the antimeridian forced
+    # into ±180 has a bounding box the width of the globe, so the reference below
+    # never gets cropped — and its derived cell corners fold, so a conservative
+    # regrid paints the test across oceans it never covered (see
+    # :func:`natural_convention`). The reference follows the test so both lanes,
+    # the bbox and the crop all speak one convention.
+    if convention == "auto":
+        convention = natural_convention(test)
     test = harmonize_longitude(test, convention)
     reference = harmonize_longitude(reference, convention)
 
