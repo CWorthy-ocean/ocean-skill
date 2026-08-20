@@ -29,6 +29,10 @@ return value is exactly what :func:`build_catalog` takes, so the two compose::
 
     refs = build_kerchunk({"GOM_bgc": "output_bgc.*.nc", "GOM_his": "output_his.*.nc"},
                           root=run_dir, grid=GRID)
+    # restart files hold more than one time record per file; keep="latest-per-file"
+    # drops the earlier ones instead of letting them scramble the time axis
+    refs |= build_kerchunk({"GOM_rst": "output_rst.*.nc"}, root=run_dir, grid=GRID,
+                           keep="latest-per-file")
     build_catalog(refs, "catalogs/gom.yaml", title="GOM offline run")
 
 :func:`build_catalog` — many URLs sharing one set of options::
@@ -351,6 +355,39 @@ def _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, path
         )
 
 
+def _keep_latest_per_file(concat_dim: str, loadable_variables: tuple[str, ...]):
+    """Return a ``preprocess`` callable keeping only each file's latest record.
+
+    ROMS restart files typically hold more than one time record per file, and with
+    cycling restarts (``LcycleRST``) the newest record is not always written to the
+    last slot. Selecting by the time variable's *value* — via ``argmax``, not a
+    fixed position — is what makes cycled files come out right. A file with only
+    one record is a no-op.
+    """
+    import numpy as np
+
+    def preprocess(ds):
+        name = next(
+            (
+                n
+                for n in loadable_variables
+                if (var := ds.variables.get(n)) is not None
+                and var.dims == (concat_dim,)
+            ),
+            None,
+        )
+        if name is None:
+            raise ValueError(
+                "keep='latest-per-file' needs a time variable among "
+                f"loadable_variables={loadable_variables!r} with dims=({concat_dim!r},); "
+                "pass loadable_variables= explicitly if detection picked the wrong one."
+            )
+        i = int(np.argmax(np.asarray(ds[name].values)))
+        return ds.isel({concat_dim: slice(i, i + 1)})
+
+    return preprocess
+
+
 def make_kerchunk(
     files,
     out: str | Path,
@@ -358,6 +395,7 @@ def make_kerchunk(
     grid: str | Path | None = None,
     concat_dim: str | None = None,
     loadable_variables: tuple[str, ...] | None = None,
+    keep: str = "all",
     fmt: str | None = None,
     tolerant_attrs: bool = True,
 ) -> Path:
@@ -377,6 +415,16 @@ def make_kerchunk(
         Both **detected from the first file** by :func:`detect_concat` when left
         ``None`` — no per-model configuration. Pass them to override, e.g. for a
         model whose files should be joined along something other than time.
+    keep
+        Which records to keep from each file before concatenating. ``"all"``
+        (default) keeps every record. ``"latest-per-file"`` keeps only the record
+        with the latest time value in each file — the fix for ROMS restart files,
+        which write more than one time record per file and, under cycling restarts,
+        do not always write the newest one last. Selection happens per file, before
+        concatenation, so :func:`_warn_if_concat_axis_is_disordered` still runs
+        afterward and will warn about any overlap *between* files (e.g. a restart
+        stream re-covering time an earlier run already wrote) — this only removes
+        the within-file duplication, not that.
 
     Notes
     -----
@@ -388,6 +436,11 @@ def make_kerchunk(
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr import open_virtual_dataset, open_virtual_mfdataset
 
+    if keep not in ("all", "latest-per-file"):
+        raise ValueError(
+            f"make_kerchunk: keep={keep!r} not recognized; use 'all' or "
+            "'latest-per-file'"
+        )
     # Deliberately not Path() for remote sources: Path collapses the "//" in a URL
     # to "/", so http://host/f.nc becomes http:/host/f.nc and every downstream check
     # then treats it as a local relative path.
@@ -403,6 +456,11 @@ def make_kerchunk(
     parser = _parser_for(paths[0])
     if grid is not None and not _is_remote(grid):
         grid = Path(grid).expanduser()
+    preprocess = (
+        _keep_latest_per_file(concat_dim, loadable_variables)
+        if keep == "latest-per-file"
+        else None
+    )
 
     ctx = tolerant_hdf_attrs() if tolerant_attrs else contextlib.nullcontext()
     with ctx:
@@ -414,6 +472,7 @@ def make_kerchunk(
             combine="nested",
             concat_dim=concat_dim,
             loadable_variables=list(loadable_variables),
+            preprocess=preprocess,
         )
         _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
 
@@ -1552,8 +1611,11 @@ def build_kerchunk(
         (which is why they do not live in :mod:`ocean_skill.cache`).
     **kerchunk_kwargs
         Forwarded to :func:`make_kerchunk` (``concat_dim``, ``loadable_variables``,
-        ``fmt``, ``tolerant_attrs``). Model differences belong here, as arguments —
-        the defaults are detected per file, so nothing needs to know a model by name.
+        ``keep``, ``fmt``, ``tolerant_attrs``). Model differences belong here, as
+        arguments — the defaults are detected per file, so nothing needs to know a
+        model by name. Applied to every stream in this call, so a restart stream
+        needing ``keep="latest-per-file"`` goes in its own call, merged with
+        ``|`` — see the module docstring.
     """
     out_dir = Path(out_dir).expanduser()
     resolved = {name: _resolve_files(spec, root) for name, spec in streams.items()}

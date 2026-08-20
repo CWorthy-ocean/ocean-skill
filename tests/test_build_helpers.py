@@ -781,6 +781,123 @@ def test_the_warning_names_a_date_not_a_raw_roms_time(tmp_path):
     assert "2000-01-01T00:00:00" in str(caught[0].message)
 
 
+# --------------------------------------------------------- keep="latest-per-file"
+
+# A ROMS restart file writes more than one time record (typically two), and under
+# cycling restarts (LcycleRST) the newest record is not always written to the last
+# slot. Records carry distinct *values* here, not just distinct times, so a test that
+# reads back the wrong record is caught, not just one that reads back the wrong count.
+
+
+def _roms_restart_like(path, fmt, records):
+    """A restart file with ``records`` as ``[(time, value), ...]``, one per record."""
+    times, values = zip(*records)
+    data = np.stack([np.full((4, 5), v) for v in values])
+    xr.Dataset(
+        {"NO3": (("ocean_time", "eta_rho", "xi_rho"), data)},
+        coords={"ocean_time": ("ocean_time", list(times), {"units": "second"})},
+    ).to_netcdf(path, format=fmt)
+    return path
+
+
+def test_keep_latest_per_file_drops_the_earlier_record(tmp_path):
+    """Two two-record restart files -> one kept record each, from the latest time."""
+    from ocean_skill.build import make_kerchunk
+
+    day = 86400.0
+    files = [
+        _roms_restart_like(
+            tmp_path / f"rst.{i}.nc",
+            "NETCDF4",
+            [(i * day, 10 * i + 1), (i * day + 43200.0, 10 * i + 2)],
+        )
+        for i in range(2)
+    ]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = make_kerchunk(files, out=tmp_path / "r.json", keep="latest-per-file")
+
+    assert not [w for w in caught if "not strictly increasing" in str(w.message)]
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 2
+    assert list(ds.ocean_time.values) == [43200.0, 129600.0]
+    assert list(ds.NO3.isel(eta_rho=0, xi_rho=0).values) == [2.0, 12.0]
+
+
+def test_keep_latest_per_file_uses_the_time_value_not_the_last_slot(tmp_path):
+    """Cycling restarts can write the newest record to any slot, not just the last."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        # the newer record (later time, value 2) sits in slot 0 here, not slot 1
+        _roms_restart_like(tmp_path / "rst.0.nc", "NETCDF4", [(43200.0, 2), (0.0, 1)]),
+        _roms_restart_like(
+            tmp_path / "rst.1.nc", "NETCDF4", [(86400.0, 3), (129600.0, 4)]
+        ),
+    ]
+
+    out = make_kerchunk(files, out=tmp_path / "r.json", keep="latest-per-file")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert list(ds.ocean_time.values) == [43200.0, 129600.0]
+    assert list(ds.NO3.isel(eta_rho=0, xi_rho=0).values) == [2.0, 4.0]
+
+
+def test_keep_latest_per_file_works_on_netcdf3(tmp_path):
+    """The classic ROMS restart format, not just netCDF-4."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_restart_like(
+            tmp_path / f"rst.{i}.nc",
+            "NETCDF3_64BIT",
+            [(i * 86400.0, 10 * i + 1), (i * 86400.0 + 43200.0, 10 * i + 2)],
+        )
+        for i in range(2)
+    ]
+
+    out = make_kerchunk(files, out=tmp_path / "r.json", keep="latest-per-file")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 2
+    assert list(ds.NO3.isel(eta_rho=0, xi_rho=0).values) == [2.0, 12.0]
+
+
+def test_keep_latest_per_file_via_build_kerchunk(tmp_path):
+    """The stream-dict wrapper forwards keep= like any other kerchunk kwarg."""
+    from ocean_skill.build import build_kerchunk
+
+    for i in range(2):
+        _roms_restart_like(
+            tmp_path / f"rst.{i}.nc",
+            "NETCDF4",
+            [(i * 86400.0, 10 * i + 1), (i * 86400.0 + 43200.0, 10 * i + 2)],
+        )
+
+    refs = build_kerchunk(
+        {"GOM_rst": "rst.*.nc"},
+        root=tmp_path,
+        out_dir=tmp_path / "refs",
+        keep="latest-per-file",
+    )
+
+    ds = xr.open_dataset(
+        str(refs["GOM_rst"]), engine="kerchunk", chunks={}, decode_times=False
+    )
+    assert ds.sizes["ocean_time"] == 2
+
+
+def test_an_unrecognized_keep_value_is_rejected(tmp_path):
+    from ocean_skill.build import make_kerchunk
+
+    files = [_roms_like(tmp_path / "o.nc", "NETCDF4")]
+
+    with pytest.raises(ValueError, match="keep"):
+        make_kerchunk(files, out=tmp_path / "r.json", keep="every-other")
+
+
 # ------------------------------------------------------------- tilde expansion
 
 # Path("~/x") keeps the tilde literally. obstore then reports "Unable to canonicalize
