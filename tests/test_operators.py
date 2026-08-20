@@ -14,6 +14,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -340,6 +341,49 @@ def test_select_accepts_a_yaml_friendly_min_max_dict(two_months):
 def test_select_falls_back_to_nearest_for_an_inexact_scalar(two_months):
     """A float coordinate almost never matches exactly; failing on that is unhelpful."""
     assert float(select(two_months, {"lat": 1.4}).lat) == 1.0
+
+
+def test_select_snaps_a_full_timestamp_to_the_nearest_step(two_months):
+    """An instant behaves like a scalar: output is stamped at offsets the caller
+    cannot be expected to know, so 02:00 on midnight-stamped data means the
+    nearest step, not a KeyError."""
+    got = select(two_months, {"time": "2012-01-30T02:00:00"})
+    assert pd.Timestamp(got.time.values) == pd.Timestamp("2012-01-30")
+
+
+def test_select_snaps_a_missing_day_on_daily_data(two_months):
+    """A date at the axis's own resolution is one step's worth of time — an
+    instant — even without the clock part; five-daily output between steps."""
+    gappy = two_months.isel(time=slice(None, None, 5))  # Jan 1, 6, 11, ...
+    got = select(gappy, {"time": "2012-01-04"})
+    assert pd.Timestamp(got.time.values) == pd.Timestamp("2012-01-06")
+
+
+def test_select_still_refuses_an_empty_period(two_months):
+    """'2013-01' is a period, not an instant: its nearest neighbour would be
+    data from a month the caller did not name."""
+    with pytest.raises(KeyError, match="no data within '2013-01'"):
+        select(two_months, {"time": "2013-01"})
+
+
+def test_a_day_of_hourly_data_is_a_period_not_an_instant():
+    """On hourly data a bare date names twenty-four steps; when the record skips
+    the day entirely, snapping to a neighbouring day would misrepresent."""
+    time = xr.date_range("2012-01-01", periods=48, freq="h")
+    hourly = xr.DataArray(np.arange(48.0), dims="time", coords={"time": time})
+    with pytest.raises(KeyError, match="no data within '2012-01-05'"):
+        select(hourly, {"time": "2012-01-05"})
+
+
+def test_a_method_key_warns_instead_of_vanishing(two_months):
+    """xarray's own KeyError advises method='nearest'; a caller who follows that
+    advice into the spec should hear why it is not a key here — and still get
+    the selection they meant, since nearest is automatic."""
+    with pytest.warns(UserWarning, match="Nearest matching is automatic"):
+        got = select(
+            two_months, {"time": "2012-01-30T02:00:00", "method": "nearest"}
+        )
+    assert pd.Timestamp(got.time.values) == pd.Timestamp("2012-01-30")
 
 
 def test_select_skips_dimensions_the_field_does_not_have(two_months):
