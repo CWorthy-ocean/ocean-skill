@@ -426,9 +426,9 @@ def _field_facet(
     facet_labels`, so a consecutive-month figure says ``Jan 2012`` here too and cannot
     be mistaken for the climatology that says ``Jan`` — and three days of one January
     say ``2013-01-16`` here too rather than repeating a month three times. The layout's
-    own title defaults to the variable's short name, from the shared
-    :func:`~ocean_skill.plot.matplotlib_renderer.field_title`, so the two renderers name
-    the same field the same way; ``title=""`` drops it.
+    own title defaults to the variable, depth and (if collapsed to one instant) time,
+    from the shared :func:`~ocean_skill.plot.matplotlib_renderer.field_suptitle`, so the
+    two renderers name the same field the same way; ``title=""`` drops it.
 
     The column count also comes from the shared
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
@@ -447,7 +447,7 @@ def _field_facet(
         _aspect_of,
         _limits,
         facet_labels,
-        field_title,
+        field_suptitle,
     )
     from ocean_skill.plot.typography import facet_layout
 
@@ -465,7 +465,18 @@ def _field_facet(
     nrows = int(field.sizes[row_dim]) if row_dim else 1
     units = item.get("units") or ""
     standard_name = item.get("standard_name")
-    title = field_title(standard_name) if title is None else title
+    title = (
+        field_suptitle(
+            field,
+            standard_name=standard_name,
+            depth=item.get("depth"),
+            label=item.get("label"),
+            facet_dim=facet_dim,
+            row_dim=row_dim,
+        )
+        if title is None
+        else title
+    )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
 
@@ -525,6 +536,16 @@ def _field_facet(
         for row in range(nrows)
         for col in range(ncols if row_dim is not None else n)
     ]
+    if len(panels) == 1:
+        # A lone panel is an Overlay, which has no .cols() -- and stays a plain
+        # pannable overlay rather than gaining a one-element Layout's chrome, the
+        # same choice a single frame of _facet_movie/_field_movie makes.
+        single = panels[0]
+        if title:
+            panel_label = labels[0] if (facet_dim and labels and labels[0]) else ""
+            text = f"{title} — {panel_label}" if panel_label else str(title)
+            single = single.opts(title=text)
+        return single
     layout = panels[0]
     for extra in panels[1:]:
         layout = layout + extra

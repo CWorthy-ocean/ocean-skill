@@ -1842,6 +1842,59 @@ def field_title(standard_name) -> str:
     return pretty_level("variable", standard_name) if standard_name else ""
 
 
+def _scalar_time_label(value) -> str:
+    """``"2013-01-30"``, or ``"2013-01-30 14:00"`` when the time is not midnight."""
+    import pandas as pd
+
+    try:
+        t = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        t = value  # cftime: carries .hour/.minute/.second/.strftime itself
+    fmt = "%Y-%m-%d" if not (t.hour or t.minute or t.second) else "%Y-%m-%d %H:%M"
+    return t.strftime(fmt)
+
+
+def field_suptitle(
+    field,
+    *,
+    standard_name=None,
+    depth: str | None = None,
+    label: str | None = None,
+    facet_dim: str | None = None,
+    row_dim: str | None = None,
+) -> str:
+    """The suptitle a one-field figure carries: what a ``select=`` has taken off the page.
+
+    :func:`field_title` alone says only the variable. A ``select={"depth": "surface",
+    "time": ...}`` that collapses both axes to one map leaves nothing on the figure
+    saying which level or which instant — the panels can no longer say *when* because
+    there is only one panel, and no row says *how deep* because there is no row. This
+    builds the fuller identity a collapsed field needs: source, variable, depth, time,
+    joined with " · " and each part dropped when it is not this figure's to say.
+
+    Depth is left out when it is still a facet or row axis — those panels already say
+    it, down the rotated row label or across the columns. Time is included only when it
+    survives as a *scalar* coordinate; a standing time dimension is the facet axis
+    itself, and the panels already say when.
+    """
+    from ocean_skill.align import _time_name
+    from ocean_skill.operators import resolve_dim
+
+    parts = [field_title(standard_name)]
+
+    vertical = resolve_dim(field, "Z")
+    faceted_vertically = vertical is not None and vertical in (facet_dim, row_dim)
+    if depth and not faceted_vertically:
+        parts.append(depth)
+
+    tname = _time_name(field)
+    if tname is not None and tname in field.coords and field.coords[tname].ndim == 0:
+        parts.append(_scalar_time_label(field.coords[tname].values.item()))
+
+    subject = " · ".join(p for p in parts if p)
+    return f"{label}: {subject}" if label and subject else subject
+
+
 def field_facet(
     field,
     *,
@@ -1850,6 +1903,8 @@ def field_facet(
     title: str | None = None,
     units: str | None = None,
     standard_name: str | None = None,
+    depth: str | None = None,
+    label: str | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
     domain: tuple[float, float, float, float] | None = None,
@@ -1902,9 +1957,9 @@ def field_facet(
     (``2013-01-16``), since a title that names every panel names none. With a ``row_dim``
     the titles appear on the top row only — every row below shows the same months — and
     each row is named down the left edge instead (``50 m``), the same rotated label
-    :func:`field_grid` uses. The panels having said *when*, the suptitle says *what*: it
-    defaults to the variable's short name (see :func:`field_title`), and ``title=""``
-    drops it.
+    :func:`field_grid` uses. The panels having said *when*, the suptitle says *what* the
+    panels no longer do: it defaults to the variable, depth and (if collapsed to one
+    instant) time (see :func:`field_suptitle`), and ``title=""`` drops it.
 
     The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
@@ -1916,7 +1971,18 @@ def field_facet(
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
     canvas = resolve_canvas(size, zoom)
-    title = field_title(standard_name) if title is None else title
+    title = (
+        field_suptitle(
+            field,
+            standard_name=standard_name,
+            depth=depth,
+            label=label,
+            facet_dim=facet_dim,
+            row_dim=row_dim,
+        )
+        if title is None
+        else title
+    )
     for name, value in (("facet_dim", facet_dim), ("row_dim", row_dim)):
         if value is not None and value not in field.dims:
             raise ValueError(
@@ -1951,7 +2017,16 @@ def field_facet(
     # on the short edge it would be a stub beside a tall column, or a rule under a
     # wide one. Per-row bars are always vertical, beside their row.
     per_row_bars = row_dim is not None and not shared_limits
-    horizontal = False if per_row_bars else ncols > nrows
+    if row_dim is None and n == 1:
+        # A single map has no grid to compare rows and columns of -- the long edge is
+        # the map's own aspect, the same rule facet_movie's lone frame follows.
+        horizontal = colorbar_is_horizontal(
+            aspect,
+            default_horizontal=True,
+            requested=(colorbar_kwargs or {}).get("orientation"),
+        )
+    else:
+        horizontal = False if per_row_bars else ncols > nrows
 
     figsize = figsize or facet_figsize(
         aspect,
@@ -3259,6 +3334,8 @@ def render(spec, **kwargs: Any):
             row_dim=item.get("row_dim"),
             units=item.get("units"),
             standard_name=item.get("standard_name"),
+            depth=item.get("depth"),
+            label=item.get("label"),
             **opts,
         )
     if family == "facet_movie":
