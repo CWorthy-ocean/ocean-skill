@@ -399,12 +399,18 @@ physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)")                    # mat
 physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)", renderer="holoviews")  # same text, interactive
 ```
 
-The one-source families — `Field.plot()` and `Field.movie()` — **default** it to the
-variable's short name (`alkalinity`), the panels having said *when* but nothing having
-said *what*. Pass `title=""` to drop it, or any string to replace it. On an interactive
-movie the name joins each frame's label (`alkalinity — 2013-01-16`) instead, bokeh's
-only title there being the panel's own. Comparison families still draw no title unless
-given one: their rows are already named down the left edge.
+The one-source families default it, the panels having said *when* but nothing having
+said *what*. `Field.plot()` composes what a `select=` has taken off the page — the
+variable's short name, the depth (unless a row or facet axis already names it), and the
+instant (when time has collapsed to a single scalar rather than staying the panels'
+own axis) — as `source: variable · depth · time`, each part dropped when it does not
+apply (`alkalinity · 50 m · 2013-01-16`, or just `alkalinity` when the panels already
+say when and there is no single depth to add). Pass `title=""` to drop it, or any
+string to replace it. `Field.movie()` defaults to the plainer `field_title` (variable
+only); on an interactive movie the name joins each frame's label (`alkalinity —
+2013-01-16`) instead, bokeh's only title there being the panel's own. Comparison
+families still draw no title unless given one: their rows are already named down the
+left edge.
 
 ### `font_scale`
 

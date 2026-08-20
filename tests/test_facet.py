@@ -369,6 +369,43 @@ def test_the_title_sits_over_the_panels_not_over_the_canvas(daily):
     assert fig._suptitle.get_position()[0] == pytest.approx(middle, abs=0.01)
 
 
+def test_a_single_wide_map_keeps_its_title_close_to_the_map(daily):
+    """A single map's colorbar goes under it, not beside it.
+
+    A vertical bar beside a lone wide map leaves the figure sized for a panel title
+    that is never drawn, and the fixed-aspect map centres in the surplus height —
+    dropping it well below the suptitle. A bar on the map's own long edge sizes the
+    figure honestly instead.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    field = daily.sel(time="2012-01-16")  # a scalar time coord: one wide map, no facet
+    item = {
+        "field": field,
+        "facet_dim": None,
+        "row_dim": None,
+        "units": "mmol m-3",
+        "standard_name": NITRATE,
+    }
+    fig = render(PlotSpec(family="field_facet", items=[item]))
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    cbar_axes = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    assert len(cbar_axes) == 1
+    assert cbar_axes[0]._osk_cbar_horizontal is True
+
+    panels = [
+        ax
+        for ax in fig.axes
+        if ax.get_visible() and not getattr(ax, "_osk_cbar_parents", None)
+    ]
+    panel_top = max(ax.get_window_extent(renderer).y1 for ax in panels) / fig.dpi
+    sup_bottom = fig._suptitle.get_window_extent(renderer).y0 / fig.dpi
+    assert sup_bottom - panel_top < 0.2
+
+
 def test_a_field_with_no_cf_name_gets_no_title_rather_than_a_guess(daily):
     """A derived expression has no standard_name to shorten; silence beats invention."""
     import matplotlib
@@ -377,6 +414,132 @@ def test_a_field_with_no_cf_name_gets_no_title_rather_than_a_guess(daily):
     field = aggregate(daily, MONTHLY)
     item = {**_item(field, "time"), "standard_name": None}
     assert render(PlotSpec(family="field_facet", items=[item]))._suptitle is None
+
+
+def test_the_suptitle_carries_the_source_and_depth_in_both_renderers(daily):
+    """What a ``select=`` takes off the page belongs on the title instead.
+
+    A monthly facet's panels already say *when*, so only the source and depth are
+    missing from a plain "nitrate" — and both renderers compose them the same way.
+    """
+    import matplotlib
+    import holoviews as hv
+    from bokeh.models import Div
+
+    matplotlib.use("Agg")
+    field = aggregate(daily, MONTHLY)
+    item = {**_item(field, "time"), "depth": "surface", "label": "ccs"}
+    fig = render(PlotSpec(family="field_facet", items=[item]))
+    assert fig._suptitle.get_text() == "ccs: nitrate · surface"
+
+    doc = hv.render(render(PlotSpec(family="field_facet", items=[item]), renderer="holoviews"), backend="bokeh")
+    assert any("ccs: nitrate · surface" in d.text for d in doc.select({"type": Div}))
+
+
+def test_a_collapsed_single_map_also_carries_when_in_both_renderers(daily):
+    """No panel and no row is left to say the depth or the instant; the title must.
+
+    The case in hand: ``select={"depth": ..., "time": <one timestamp>}`` collapses
+    both axes, so a lone map's only identifying text is its suptitle. This also pins
+    the interactive single-panel fix — a lone panel used to crash instead of drawing.
+    """
+    import matplotlib
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    matplotlib.use("Agg")
+    field = daily.sel(time="2012-01-16")  # a scalar time coord, not a facet dim
+    item = {
+        "field": field,
+        "facet_dim": None,
+        "row_dim": None,
+        "units": "mmol m-3",
+        "standard_name": NITRATE,
+        "depth": "surface",
+        "label": "ccs",
+    }
+    expected = "ccs: nitrate · surface · 2012-01-16"
+    fig = render(PlotSpec(family="field_facet", items=[item]))
+    assert fig._suptitle.get_text() == expected
+
+    obj = render(PlotSpec(family="field_facet", items=[item]), renderer="holoviews")
+    figs = list(hv.render(obj, backend="bokeh").select({"type": figure}))
+    assert [f.title.text for f in figs] == [expected]
+
+
+def test_a_faceted_vertical_suppresses_the_depth_part(daily):
+    """A ``row_dim`` of levels already names the depth down the left edge."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    item = {
+        **_item(_by_depth(daily), "time", "depth"),
+        "depth": "surface, 50 m, 100 m",
+    }
+    fig = render(PlotSpec(family="field_facet", items=[item]))
+    assert fig._suptitle.get_text() == "nitrate"
+
+
+# --- field_suptitle, in isolation from a drawn figure --------------------------------
+
+
+def _no_dims(**coords):
+    return xr.DataArray(
+        np.zeros((3, 4)),
+        dims=("lat", "lon"),
+        coords={"lat": [1, 2, 3], "lon": [1, 2, 3, 4], **coords},
+    )
+
+
+def test_field_suptitle_drops_the_time_of_day_when_it_is_midnight():
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims(time=np.datetime64("2013-01-30T00:00:00"))
+    assert field_suptitle(field, standard_name=NITRATE) == "nitrate · 2013-01-30"
+
+
+def test_field_suptitle_keeps_the_time_of_day_when_it_is_not_midnight():
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims(time=np.datetime64("2013-01-30T14:00:00"))
+    assert field_suptitle(field, standard_name=NITRATE) == "nitrate · 2013-01-30 14:00"
+
+
+def test_field_suptitle_formats_a_cftime_scalar_without_raising():
+    import cftime
+
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims(time=cftime.DatetimeNoLeap(2013, 1, 30, 14, 30, 0))
+    assert field_suptitle(field, standard_name=NITRATE) == "nitrate · 2013-01-30 14:30"
+
+
+def test_field_suptitle_has_no_stray_separator_with_no_variable_name():
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims()
+    assert field_suptitle(field, standard_name=None, depth="surface") == "surface"
+    assert field_suptitle(field, standard_name=None, depth=None) == ""
+
+
+def test_field_suptitle_says_nothing_of_time_with_no_time_coord():
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims()
+    assert field_suptitle(field, standard_name=NITRATE, depth="surface") == (
+        "nitrate · surface"
+    )
+
+
+def test_field_suptitle_prefixes_the_source_label():
+    from ocean_skill.plot.matplotlib_renderer import field_suptitle
+
+    field = _no_dims()
+    assert field_suptitle(
+        field, standard_name=NITRATE, depth="surface", label="ccs"
+    ) == "ccs: nitrate · surface"
+    # no label, no colon
+    assert ":" not in field_suptitle(field, standard_name=NITRATE, depth="surface")
 
 
 def test_every_panel_shares_one_colour_scale(daily):
