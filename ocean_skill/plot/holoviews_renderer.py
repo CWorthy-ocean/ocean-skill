@@ -163,6 +163,8 @@ def _quadmesh(
     hover: bool = True,
     rasterize: bool = False,
     tiles: str | bool | None = None,
+    coastline: bool = True,
+    project: bool = False,
 ):
     """One interactive map panel with hover readout.
 
@@ -204,7 +206,19 @@ def _quadmesh(
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
-        opts |= {"geo": True, "coastline": "50m", "projection": None}
+        opts |= {"geo": True, "projection": None}
+        if coastline:
+            # hvplot's coastline is a geoviews Feature, which the plot re-projects
+            # from scratch every time it renders a frame. Fine for the single draw
+            # every other family does; ruinous for an embedded movie, which renders
+            # every frame — movies pass coastline=False and overlay a static,
+            # once-projected path instead (see _movie_coastline).
+            opts["coastline"] = "50m"
+        if project:
+            # project the data to the output projection now, once, instead of
+            # letting the plot re-project it per rendered frame. Only worth setting
+            # for movies: a single map pays the projection exactly once either way.
+            opts["project"] = True
         if tiles:
             # a basemap gives the eye real coastline and terrain where the field is
             # masked, which the 50m outline cannot. On by default for a movie, since a
@@ -225,6 +239,7 @@ def _quadmesh(
         opts.pop("geo", None)
         opts.pop("coastline", None)
         opts.pop("projection", None)
+        opts.pop("project", None)
         # tiles-without-geo is a different hvplot code path (it swaps x/y into
         # dimensions to project them), which breaks on 2-D curvilinear lon/lat
         # coordinates -- there is no basemap to fall back to without geo anyway.
@@ -697,6 +712,120 @@ def _should_rasterize(da, rasterize) -> bool:
     return True
 
 
+#: Frames bigger than this stay dask-backed rather than being loaded up front.
+#: Below it, one parallel read replaces a read per frame (see _preload_frames); above
+#: it, holding every raw frame in memory at once is the greater risk, so the movie
+#: draws from the store frame by frame instead.
+PRELOAD_FRAMES_BELOW_BYTES = 4 * 1024**3
+
+
+def _preload_frames(da):
+    """Load the movie's frames into memory once, when they fit.
+
+    A dask-backed field goes back to its store for every frame drawn — after the colour
+    limits already read the whole thing once — so a movie of N frames pays N+1 reads,
+    one at a time. One ``.load()`` up front turns that into a single parallel read that
+    every frame then slices in memory. Fields past
+    :data:`PRELOAD_FRAMES_BELOW_BYTES` keep the lazy per-frame reads and say so, since
+    an ``every=`` or a coarser ``aggregate=`` is the real fix at that size.
+    """
+    if getattr(da, "chunks", None) is None:
+        return da
+    if da.nbytes > PRELOAD_FRAMES_BELOW_BYTES:
+        warnings.warn(
+            f"the movie's frames are {da.nbytes / 1024**3:.1f} GB, too much to hold in "
+            "memory at once, so each frame reads from the store as it is drawn — "
+            "expect the movie to take a while to build. Thin it with every= or a "
+            "coarser aggregate= for a quicker one.",
+            stacklevel=2,
+        )
+        return da
+    return da.load()
+
+
+def _lon_pieces(lon0: float, lon1: float) -> list[tuple[float, float]]:
+    """Split a longitude span into ``(west, east)`` clip pieces in the ±180 frame.
+
+    Natural Earth geometry lives in −180…180 and so does the plot: the mesh is
+    projected into that frame whatever convention the grid uses, so the coastline is
+    clipped — and left — in it. A 0…360-style span becomes the equivalent pieces, two
+    of them when it crosses the antimeridian, exactly where the projected mesh lands.
+    """
+    if -180 <= lon0 and lon1 <= 180:
+        return [(lon0, lon1)]
+    if lon0 < 180 < lon1:
+        return [(lon0, 180.0), (-180.0, lon1 - 360.0)]
+    if lon0 >= 180:
+        return [(lon0 - 360.0, lon1 - 360.0)]
+    return [(max(lon0, -180.0), min(lon1, 180.0))]
+
+
+def _movie_coastline(*fields):
+    """The 50m coastline as one static ``hv.Path``, clipped to the fields' extent.
+
+    hvplot's own ``coastline`` overlay is a geoviews ``Feature``, and a Feature is
+    lazy: rendering it projects the whole world's coastline geometry from scratch —
+    which an embedded movie does once per frame, measured at 0.6–1.2 s and ~1.5 MB of
+    page *per frame*, dominating everything else the movie does. The coastline never
+    changes between frames, so it is built here exactly once: clipped to the fields'
+    own extent (plus margin to pan into) and returned as a plain holoviews Path, in
+    the plot's own lon/lat frame, that no geoviews machinery touches again. Movies
+    with tiles don't need it at all — the basemap draws the coast — so this only ever
+    joins the untiled (offline) movie, whose axes are plain PlateCarree degrees.
+    ``apply_ranges=False`` keeps the clip margin from widening the view.
+
+    Returns ``None`` when the coastline cannot be built (no cartopy, or Natural Earth
+    data unavailable offline) — a movie without an outline still plays.
+    """
+    import holoviews as hv
+
+    try:
+        import cartopy.feature as cfeature
+        from shapely.geometry import box
+
+        lons = np.concatenate([np.asarray(f["lon"]).ravel() for f in fields])
+        lats = np.concatenate([np.asarray(f["lat"]).ravel() for f in fields])
+        lon0, lon1 = float(np.nanmin(lons)), float(np.nanmax(lons))
+        lat0, lat1 = float(np.nanmin(lats)), float(np.nanmax(lats))
+        pad_x, pad_y = 0.5 * max(lon1 - lon0, 1e-3), 0.5 * max(lat1 - lat0, 1e-3)
+        lat0, lat1 = max(lat0 - pad_y, -90.0), min(lat1 + pad_y, 90.0)
+        geoms = list(
+            cfeature.NaturalEarthFeature("physical", "coastline", "50m").geometries()
+        )
+        segments = []
+        for west, east in _lon_pieces(lon0 - pad_x, lon1 + pad_x):
+            clip = box(west, lat0, east, lat1)
+            for geom in geoms:
+                gx0, gy0, gx1, gy1 = geom.bounds
+                if gx1 < west or gx0 > east or gy1 < lat0 or gy0 > lat1:
+                    continue
+                piece = geom.intersection(clip)
+                if piece.is_empty:
+                    continue
+                for line in getattr(piece, "geoms", [piece]):
+                    coords = np.asarray(line.coords)
+                    if len(coords) >= 2:
+                        segments.append(coords[:, :2])
+    except Exception as err:  # pragma: no cover - depends on local NE cache/network
+        warnings.warn(
+            f"could not build the movie's coastline overlay ({err}); the frames play "
+            "without one. Natural Earth data downloads on first use, so a machine "
+            "that has never drawn a coastline needs to be online once.",
+            stacklevel=2,
+        )
+        return None
+    # one NaN-separated array rather than one array per segment: bokeh breaks the line
+    # at NaN either way, and holoviews walks every segment of a Path on every frame it
+    # renders — a few hundred of them (islands, mostly) cost ~0.2s per embedded frame
+    nan_row = np.full((1, 2), np.nan)
+    merged = np.concatenate(
+        [arr for seg in segments for arr in (seg, nan_row)][:-1] or [np.empty((0, 2))]
+    )
+    return hv.Path([merged]).opts(
+        color="black", line_width=1, apply_ranges=False, show_legend=False
+    )
+
+
 def _frame_map(keys: list[str], draw, *, frame_dim: str | None = None):
     """Return a ``HoloMap`` holding every frame, drawn up front.
 
@@ -824,7 +953,8 @@ def _facet_movie(
       default since a notebook watching a movie is on the web already. Pass a
       :mod:`geoviews.tile_sources` name (e.g. ``tiles="EsriTerrain"`` or
       ``"CartoLight"``) for a different one, or ``tiles=False`` for a notebook that has
-      to work offline.
+      to work offline — which swaps the basemap for a static 50m coastline outline
+      (see :func:`_movie_coastline` for why a movie never uses hvplot's own).
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
@@ -864,17 +994,27 @@ def _facet_movie(
     standard_name = item.get("standard_name")
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    scope = field if shared_limits else field.isel({facet_dim: indices[0]})
+    frames_da = _preload_frames(field.isel({facet_dim: indices}))
+    if shared_limits:
+        # the selected frames *are* the whole field unless every= thinned them, so the
+        # loaded copy can feed the colour limits too, instead of a second full read of
+        # a lazy store
+        scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
+    else:
+        scope = frames_da.isel({facet_dim: 0})
     vmin, vmax = _limits(scope)
     if log:
         vmin = max(vmin, 1e-6)
-    raster = _should_rasterize(field.isel({facet_dim: indices[0]}), rasterize)
+    raster = _should_rasterize(frames_da.isel({facet_dim: 0}), rasterize)
     tiles = _check_tiles(tiles)
+    # with tiles the basemap draws the coast; without them a static, once-built
+    # outline stands in for the per-frame Feature that hvplot would overlay
+    coast = _movie_coastline(frames_da) if geo and not tiles else None
     subject = _subject(item) if title is None else title
 
     def draw(position: int):
-        frame = field.isel({facet_dim: indices[position]})
-        return _quadmesh(
+        frame = frames_da.isel({facet_dim: position})
+        mesh = _quadmesh(
             frame,
             # what is being shown, then which frame of it — the subject stays put while
             # the timestamp changes, so the eye is not re-reading the whole title every
@@ -892,7 +1032,10 @@ def _facet_movie(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
+            coastline=False,
+            project=True,
         )
+        return mesh if coast is None else mesh * coast
 
     movie = _frame_map(keys, draw)
     movie = _with_widget(movie, widget=widget, fps=fps, frame_dim=FRAME_DIM)
@@ -935,7 +1078,8 @@ def _field_movie(
     difference — the field there is largely empty near the coast, which a basemap fills
     in the same way it does for :func:`_facet_movie`. Pass a :mod:`geoviews.tile_sources`
     name for a different map, or ``tiles=False`` for a notebook that has to work
-    offline.
+    offline, which swaps the basemap for one static coastline outline shared by all
+    three panels (see :func:`_movie_coastline`).
 
     The colour scale is fixed across frames exactly as it is statically (see
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
@@ -968,6 +1112,13 @@ def _field_movie(
     # would otherwise re-derive a different scale for each.
     raster = _should_rasterize(items[0]["aligned"]["reference"], rasterize)
     tiles = _check_tiles(tiles)
+    # one static coastline for all three panels and every frame (the frames share the
+    # aligned grid); with tiles the basemap draws the coast instead
+    coast = (
+        _movie_coastline(first["aligned"]["test"], first["aligned"]["reference"])
+        if geo and not tiles
+        else None
+    )
     scope = items if shared_limits else items[:1]
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
@@ -990,6 +1141,10 @@ def _field_movie(
     )
 
     def draw(position: int, panel: int):
+        mesh = _panel_mesh(position, panel)
+        return mesh if coast is None else mesh * coast
+
+    def _panel_mesh(position: int, panel: int):
         item = items[position]
         aligned = item["aligned"]
         tl, rl = item.get("labels") or labels
@@ -1010,6 +1165,8 @@ def _field_movie(
                 hover=hover,
                 rasterize=raster,
                 tiles=tiles,
+                coastline=False,
+                project=True,
             )
         if panel == 1:
             return _quadmesh(
@@ -1025,6 +1182,8 @@ def _field_movie(
                 hover=hover,
                 rasterize=raster,
                 tiles=tiles,
+                coastline=False,
+                project=True,
             )
         summary = _metrics_summary(item.get("metrics"), metric_keys)
         return _quadmesh(
@@ -1039,6 +1198,8 @@ def _field_movie(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
+            coastline=False,
+            project=True,
         )
 
     # three maps over one shared frame dimension, so a single widget steps all three

@@ -814,6 +814,78 @@ def test_the_comparison_movie_gets_a_basemap_too(frames):
         assert "WMTS" in kinds, kinds
 
 
+def test_a_movie_frame_never_carries_a_geoviews_feature():
+    """Regression: the per-frame cost that made movies take minutes to appear.
+
+    hvplot's ``coastline`` overlay is a geoviews ``Feature``, which the renderer
+    re-projects — the whole world's coastline — for every frame the page embeds,
+    measured at 0.6–1.2s and ~1.5MB of page *per frame*. Movies must never hold one:
+    the basemap draws the coast when tiles are on, and a static pre-clipped path
+    stands in when they are off.
+    """
+    for options in ({}, {"tiles": False}):
+        movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None, **options))
+        kinds = [type(n).__name__ for n in _frames(movie)[0].traverse()]
+        assert "Feature" not in kinds, (options, kinds)
+
+
+def test_an_offline_movie_gets_one_static_coastline_shared_by_every_frame():
+    """tiles=False still shows a coastline — built once, not once per frame."""
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None, tiles=False))
+    paths = [
+        next(n for n in frame.traverse() if type(n).__name__ == "Path")
+        for frame in _frames(movie)
+    ]
+    assert len(paths[0].dimension_values(0)) > 2, "the clipped coastline came back empty"
+    assert all(p is paths[0] for p in paths), "frames rebuilt the coastline"
+
+
+def test_the_comparison_movie_shares_one_offline_coastline_too(frames):
+    layout = _interactive(frames, tiles=False)
+    paths = []
+    for holomap in _holomaps(layout):
+        for frame in _frames(holomap):
+            kinds = [type(n).__name__ for n in frame.traverse()]
+            assert "Feature" not in kinds, kinds
+            paths.append(next(n for n in frame.traverse() if type(n).__name__ == "Path"))
+    assert all(p is paths[0] for p in paths), "panels or frames rebuilt the coastline"
+
+
+def test_the_field_is_projected_once_at_build_not_once_per_frame():
+    """``project=True``: frames land in the output projection before embedding.
+
+    Without it the renderer re-projects the mesh for every embedded frame, which is
+    the second-largest share of the minutes-long display the coastline fix addresses.
+    """
+    import cartopy.crs as ccrs
+
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
+    frame = _frames(movie)[0]
+    mesh = next(
+        n for n in frame.traverse() if type(n).__name__ in ("QuadMesh", "Image")
+    )
+    assert mesh.crs == ccrs.GOOGLE_MERCATOR, mesh.crs
+
+
+def test_a_dask_backed_field_is_loaded_up_front_and_plays_whole():
+    """A lazy field's frames are read once, together — and the movie is complete."""
+    from ocean_skill.plot.holoviews_renderer import _preload_frames
+
+    lazy = _run(3).chunk({"time": 1})
+    assert _preload_frames(lazy).chunks is None, "the frames were not loaded"
+    movie = _hv(_facet_film(lazy, renderer="holoviews", domain=None))
+    assert len(movie.data) == 3
+
+
+def test_frames_too_big_for_memory_stay_lazy_and_say_so(monkeypatch):
+    import ocean_skill.plot.holoviews_renderer as hr
+
+    monkeypatch.setattr(hr, "PRELOAD_FRAMES_BELOW_BYTES", 10)
+    with pytest.warns(UserWarning, match="every="):
+        out = hr._preload_frames(_run(3).chunk({"time": 1}))
+    assert out.chunks is not None, "an oversized field should have stayed lazy"
+
+
 def test_a_mistyped_tile_source_says_which_ones_exist():
     """Hvplot's own failure for this is "cannot swap from dimension 'lon'"."""
     with pytest.raises(ValueError, match="unknown tile source"):

@@ -227,6 +227,19 @@ nothing downstream can evaluate a lazy aggregation once a frame is embedded), so
 magnifies the image rather than re-aggregating — pass `rasterize=False` for a field
 small enough to explore that way, or `True` to force it.
 
+**Nothing static is redrawn per frame.** The expensive lesson here: hvplot's `coastline`
+overlay is a geoviews `Feature`, which re-projects the whole world's coastline geometry
+for *every frame* the page embeds — measured at 0.6–1.2 s and ~1.5 MB of page per frame,
+several times the cost of the frame's own data. So a movie never carries a `Feature`:
+with tiles (the default) the basemap draws the coast, and without them a static outline —
+clipped to the domain, built once, shared by every frame — stands in. The field itself is
+projected once up front (`project=True`) rather than per frame, and a dask-backed field's
+frames are loaded in one parallel read instead of one read per frame (fields past ~4 GB
+stay lazy and warn, since `every=` or a coarser `aggregate=` is the real fix at that
+size). Together: a 40-frame 400×500 movie that took ~46 s to appear now takes ~3 s, on a
+~34 MB page instead of ~99 MB (`tiles=False` pays a little more, ~13 s, for the offline
+coastline).
+
 What remains is honest: display time and page size both scale with frame count, since
 every frame is drawn either way. `every=` thins a long movie, and the mp4 is the artifact
 for one long enough that thinning isn't enough.
@@ -239,7 +252,8 @@ Pass a source name — `tiles="EsriTerrain"`, `"CartoLight"`, or any [geoviews t
 source](https://geoviews.org/user_guide/Working_with_Bokeh.html) — for a different map,
 or `tiles=False` for a notebook that genuinely has to work offline. The view opens framed
 on the field's own domain, with the basemap filling in around it and under anywhere the
-field is masked.
+field is masked. With tiles on there is no separate coastline outline — the basemap *is*
+the coastline; `tiles=False` brings back a 50 m outline, clipped to the domain.
 
 The panel title says **what** as well as **when** — `GOM_bgc: alkalinity, surface —
 2010-01-29`. The variable comes from the CF standard name via `vars.short_name`, the
