@@ -8,7 +8,6 @@ import pytest
 
 from ocean_skill.plot.locations import (
     HOVER_FIELDS,
-    _default_extent,
     _normalized_geometry,
     build_items,
     map_datasets,
@@ -172,6 +171,50 @@ def test_default_extent_min_span_for_a_lone_mooring(index):
     assert lat1 - lat0 == pytest.approx(10.0)
     # centred on the mooring
     assert (lon0 + lon1) / 2 == pytest.approx(items[0]["lon"])
+
+
+def test_build_items_resolves_names_against_one_snapshot(index, monkeypatch):
+    from ocean_skill import catalog
+
+    real_discover = catalog.discover
+    calls = []
+
+    def counting():
+        calls.append(1)
+        return real_discover()
+
+    monkeypatch.setattr(catalog, "discover", counting)
+
+    items, _ = build_items(["papa", "roms_gulf", "pacific"])
+    assert len(calls) == 1  # one discover() for the whole name list, not one per name
+    assert sorted(item["name"] for item in items) == ["pacific", "papa", "roms_gulf"]
+
+
+def test_build_items_qualified_and_unknown_names(index):
+    items, _ = build_items(["OOI Station Papa:papa"])
+    assert [item["name"] for item in items] == ["papa"]
+
+    with pytest.raises(KeyError):
+        build_items(["does_not_exist"])
+
+
+def test_build_items_surfaces_the_shadow_warning(monkeypatch):
+    from pathlib import Path
+
+    from ocean_skill import catalog
+
+    shadowed = catalog.SourceRef(
+        name="dupe",
+        catalog="B",
+        path=Path("B.yaml"),
+        metadata=MOORING,
+        shadowed_path=Path("A.yaml"),
+    )
+    monkeypatch.setattr(catalog, "discover", lambda: {"dupe": shadowed})
+
+    with pytest.warns(UserWarning, match="shadows"):
+        items, _ = build_items(["dupe"])
+    assert [item["name"] for item in items] == ["dupe"]
 
 
 # -- spec ----------------------------------------------------------------------------
