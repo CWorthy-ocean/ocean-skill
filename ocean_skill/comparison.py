@@ -22,9 +22,11 @@ __all__ = [
     "ComparisonSet",
     "as_select",
     "compare",
+    "is_pair_spec",
     "is_surface_request",
     "prepare_source",
     "summary",
+    "variable_for",
 ]
 
 
@@ -145,12 +147,23 @@ def is_surface_request(depth: Any) -> bool:
     return depth is None or (isinstance(depth, str) and depth.lower() == SURFACE)
 
 
+#: Reported (in labels, repr, and the metrics table) for a comparison whose variable
+#: has no vertical axis at all -- a calculated diagnostic like mixed layer depth.
+#: Distinct from :data:`SURFACE`, which means "the model's own top level": a real
+#: vertical position a calculated field does not have, and reporting one anyway
+#: (the previous default) claimed something specific and wrong about where in the
+#: column the number came from.
+NO_VERTICAL_AXIS = "n/a"
+
+
 def _depth_label(depth: Any) -> str:
     """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``.
 
     A list — several levels kept as facet rows — spells each element by the same
     rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``.
     """
+    if depth == NO_VERTICAL_AXIS:
+        return NO_VERTICAL_AXIS
     if is_surface_request(depth):
         return SURFACE
     if is_depth_band(depth):
@@ -160,14 +173,134 @@ def _depth_label(depth: Any) -> str:
     return f"{float(depth):g} m"
 
 
-def _variable_label(spec: Any) -> str:
-    """Short display name for a variable spec, whether a name or a combination."""
+def is_pair_spec(spec: Any) -> bool:
+    """Report whether ``spec`` names a *different* variable per lane.
+
+    ``{"test": <spec>, "reference": <spec>, "standard_name": ...}`` — for the case a
+    plain or combination spec cannot cover: the two lanes carry the same physical
+    quantity under genuinely different recipes (a model computes mixed layer depth
+    from temperature and salinity; an observational climatology already ships it as
+    a plain field). Requiring *both* keys, not just one, is what tells a one-sided
+    typo (``{"test": ...}`` alone) apart from an ordinary combination spec, whose keys
+    are combiner names (``sum``/``product``/``difference``/``ratio``) or ``calculate``
+    — never ``test``/``reference`` — so there is no ambiguity between the two shapes.
+    """
+    return isinstance(spec, dict) and {"test", "reference"} <= spec.keys()
+
+
+def _require_pair_spec(spec: dict[str, Any]) -> None:
+    """Raise if ``spec`` has exactly one of ``test``/``reference`` — a likely typo.
+
+    A dict with neither key is an ordinary combination spec and never reaches this;
+    one with both is a valid pair. One alone is almost certainly a slip (typing
+    ``"tests"``, or meaning to write a plain combination) and is worth naming rather
+    than silently treating as a combiner key that will fail some other way downstream.
+    """
+    have = {"test", "reference"} & spec.keys()
+    if have and have != {"test", "reference"}:
+        missing = ({"test", "reference"} - have).pop()
+        raise ValueError(
+            f"a variable pair-spec needs both 'test' and 'reference'; got {sorted(have)} "
+            f"but not {missing!r}. {spec!r}"
+        )
+
+
+def variable_for(spec: Any, role: str) -> Any:
+    """Return the spec one lane (``"test"``/``"reference"``) should resolve.
+
+    A pair-spec's own side; any other spec, unchanged -- so every caller can go
+    through this once rather than repeating the ``is_pair_spec`` check.
+    """
+    return spec[role] if is_pair_spec(spec) else spec
+
+
+def _expand_derived(spec: Any) -> Any:
+    """Follow a :data:`ocean_skill.operators.DERIVED` string to what it names.
+
+    Mirrors :func:`ocean_skill.operators.resolve_variable`'s own expansion, so a
+    check against the raw spec (e.g. whether it is a calculate-spec) sees what
+    ``resolve_variable`` will actually use rather than the alias pointing at it --
+    ``register_derived("mld_dt", {"calculate": "mld", ...})`` makes ``"mld_dt"`` a
+    calculate-spec in every way that matters, even though it is spelled as a string.
+    The ``seen`` guard is only for a pathological cyclic registration; real chains
+    are at most one hop.
+    """
+    from ocean_skill.operators import DERIVED
+
+    seen: set[str] = set()
+    while isinstance(spec, str) and spec in DERIVED and spec not in seen:
+        seen.add(spec)
+        spec = DERIVED[spec]
+    return spec
+
+
+def _is_calculated(spec: Any) -> bool:
+    """Report whether ``spec`` (or either side of a pair-spec) is a ``calculate`` spec.
+
+    A calculated diagnostic collapses the vertical axis itself -- see the ``ValueError``
+    in :func:`_prepare` -- so :func:`compare`'s depth fan-out, which otherwise defaults
+    every variable to ``depths=("surface",)``, has nothing to fan over for it.
+    """
+    spec = _expand_derived(spec)
+    if isinstance(spec, dict) and "calculate" in spec:
+        return True
+    if is_pair_spec(spec):
+        return _is_calculated(spec["test"]) or _is_calculated(spec["reference"])
+    return False
+
+
+def _calculate_method(spec: Any) -> str | None:
+    """The ``method`` a calculate-spec (or a pair-spec's test side) declares, if any.
+
+    Two calculate-spec methods computing the same quantity (density-threshold vs
+    temperature-threshold MLD) are different recipes, not the same one -- and since
+    they legitimately share one explicit ``standard_name``, that alone is not enough
+    to tell their labels apart (two pair-specs both named ``standard_name="ocean_
+    mixed_layer_thickness"`` used to draw as two identically-labelled, unreadable
+    rows in the same figure). Folded into every label exactly once, in
+    :func:`_variable_label`/:func:`_short_variable_label`, regardless of whether the
+    spec carries its own standard_name or falls back to the calculator's plain name.
+    """
+    target = spec["test"] if is_pair_spec(spec) else spec
+    return target.get("method") if isinstance(target, dict) and "calculate" in target else None
+
+
+def _variable_label_base(spec: Any) -> str:
+    """The name half of :func:`_variable_label`, before any calculate-method suffix."""
     if isinstance(spec, str):
         return spec.split("_of_")[-1]
+    if is_pair_spec(spec):
+        if name := spec.get("standard_name"):
+            return str(name).split("_of_")[-1]
+        return _variable_label_base(spec["test"])  # the test side names the figure
     if name := spec.get("standard_name"):
         return str(name).split("_of_")[-1]
+    if "calculate" in spec:
+        # The calculator's own name, not a components list to join -- {"calculate":
+        # "mld", "method": ...} has no name-list to iterate the way a combination's
+        # ("sum": [...]) does, and treating the calculator name as one silently
+        # joined its characters ("mld" -> "m+l+d") until this was noticed here.
+        return str(spec["calculate"])
     how, names = next(iter((k, v) for k, v in spec.items() if k != "standard_name"))
     return f"{how}({'+'.join(map(str, names))})"
+
+
+def _variable_label(spec: Any) -> str:
+    """Short display name for a variable spec, whether a name or a combination."""
+    base = _variable_label_base(spec)
+    method = _calculate_method(spec)
+    return f"{base} ({method})" if method else base
+
+
+def _short_variable_label_base(spec: Any) -> str:
+    """The name half of :func:`_short_variable_label`, before any method suffix."""
+    from ocean_skill.vars import short_name
+
+    if is_pair_spec(spec):
+        if name := spec.get("standard_name"):
+            return short_name(name)
+        return _short_variable_label_base(spec["test"])  # it may be a plain name
+    return short_name(spec) if isinstance(spec, str) else _variable_label_base(spec)
 
 
 def _short_variable_label(spec: Any) -> str:
@@ -179,9 +312,9 @@ def _short_variable_label(spec: Any) -> str:
     Shared by :func:`compare` and :func:`_pooled_labels` so a set's own labels and a
     pooled set's relabelling cannot drift apart.
     """
-    from ocean_skill.vars import short_name
-
-    return short_name(spec) if isinstance(spec, str) else _variable_label(spec)
+    base = _short_variable_label_base(spec)
+    method = _calculate_method(spec)
+    return f"{base} ({method})" if method else base
 
 
 #: Keys naming the vertical axis in a `select`, in any accepted spelling.
@@ -210,6 +343,19 @@ def _selected_depth(select: dict[str, Any]) -> Any:
         if key in select:
             return select[key]
     return SURFACE
+
+
+def _display_depth(variable: Any, select: dict[str, Any]) -> Any:
+    """The depth a comparison should report in labels/repr/metrics.
+
+    A calculated diagnostic (mixed layer depth, ...) has no vertical axis at all --
+    see :data:`NO_VERTICAL_AXIS` -- so :func:`_selected_depth`'s own default
+    (:data:`SURFACE`, meant for an ordinary field nothing narrowed vertically) would
+    misreport where in the column the number actually came from.
+    """
+    if _is_calculated(variable):
+        return NO_VERTICAL_AXIS
+    return _selected_depth(select)
 
 
 def _surface_and_levels(sub, meta, name: str, depths) -> Any:
@@ -352,8 +498,11 @@ def _prepare(
     # itself and returns a field with no vertical axis at all -- there is nothing
     # left for the surface/to_depth/depth_band machinery below to do, and a depth
     # selection alongside one is a contradiction worth saying so about rather than
-    # silently ignoring (see the ValueError below).
-    calculated = isinstance(variable, dict) and "calculate" in variable
+    # silently ignoring (see the ValueError below). Expanded through DERIVED first:
+    # a registered name pointing at a calculate-spec is one in every way that
+    # matters here, even spelled as a plain string (see _expand_derived).
+    expanded_variable = _expand_derived(variable)
+    calculated = isinstance(expanded_variable, dict) and "calculate" in expanded_variable
 
     da = operators.resolve_variable(obj, variable)
     if da is None:
@@ -678,13 +827,33 @@ class Comparison:
         self.test_name = test
         # A plain name resolves through the vocabulary (short name, canonical
         # standard_name, or any alias, in any case) so everything downstream sees
-        # one consistent name. A dict is a combination spec for
+        # one consistent name. A dict is a combination spec (or a {"test",
+        # "reference"} pair-spec, resolved side by side below) for
         # ocean_skill.operators and is carried through as given.
-        self.variable = (
-            resolve_and_report(variable, context="Comparison variable=")
-            if isinstance(variable, str)
-            else variable
-        )
+        if isinstance(variable, dict):
+            _require_pair_spec(variable)
+        if is_pair_spec(variable):
+            self.variable = {
+                **variable,
+                "test": (
+                    resolve_and_report(variable["test"], context="Comparison variable=")
+                    if isinstance(variable["test"], str)
+                    else variable["test"]
+                ),
+                "reference": (
+                    resolve_and_report(
+                        variable["reference"], context="Comparison variable="
+                    )
+                    if isinstance(variable["reference"], str)
+                    else variable["reference"]
+                ),
+            }
+        else:
+            self.variable = (
+                resolve_and_report(variable, context="Comparison variable=")
+                if isinstance(variable, str)
+                else variable
+            )
         self.select = as_select(select)
         self.aggregate = aggregate
         self.method = method
@@ -716,10 +885,19 @@ class Comparison:
 
         A combination carries it explicitly (``{"sum": [...], "standard_name": ...}``);
         without one there is no single CF name, and downstream falls back to defaults.
+
+        A pair-spec's explicit ``standard_name`` wins the same way; absent that, the
+        **test** side names the figure -- an arbitrary but necessary choice, since the
+        two sides may resolve to different CF names (that mismatch itself is reported
+        once, in :meth:`align`, rather than silently picked between here).
         """
         from ocean_skill.operators import DERIVED
 
         spec = self.variable
+        if is_pair_spec(spec):
+            if name := spec.get("standard_name"):
+                return name
+            spec = spec["test"]
         if isinstance(spec, str):
             # A DERIVED key is a name for a spec, not a CF name -- expand it, or
             # colormaps, plot labels and the metrics table all see the key.
@@ -781,7 +959,7 @@ class Comparison:
         """
         return prepare_source(
             source,
-            self.variable,
+            variable_for(self.variable, role),
             self.select,
             self.aggregate,
             use_cache=use_cache,
@@ -790,6 +968,63 @@ class Comparison:
             bbox=bbox,
             time_window=time_window,
         )
+
+    def _warn_on_pair_spec_mismatch(
+        self, test_da, reference_da, *, trust_name_fallback: bool = True
+    ) -> None:
+        """Warn once when a pair-spec's two sides resolve to different standard_names.
+
+        An explicit ``standard_name`` on the pair-spec settles the question, so this
+        never fires (the caller has already said the two recipes describe the same
+        quantity). Without one, a mismatch means the comparison may not be scoring
+        one quantity against itself -- the metrics have no way to say that on their
+        own (see the standing "warn, don't annotate" rule), so this is the one place
+        it gets said, once, before anything downstream treats the pair as settled --
+        including on a *cached* result, or every process after the one that first
+        computed the pair would silently miss the one safety net an unlabelled
+        pair-spec has.
+
+        Checked against the *resolved* fields rather than the specs themselves: a
+        ``{"calculate": ...}`` spec's output name is not statically knowable (only its
+        *inputs* are, via :data:`ocean_skill.operators.CALCULATOR_INPUTS`), so this has
+        to wait until both lanes have actually been read. ``attrs["standard_name"] or
+        .name`` is the same fallback :func:`ocean_skill.units.find_variable` itself
+        uses -- a properly standardized field is keyed *by* its standard_name even
+        when nothing stamped the attribute explicitly.
+
+        ``trust_name_fallback=False`` for the two arrays :meth:`align` pulls out of a
+        *cached, aligned* result: :func:`ocean_skill.align.align` names its output
+        variables literally ``"test"``/``"reference"`` (see its ``test_name``/
+        ``reference_name`` parameters), so ``.name`` there is always ``"test"`` and
+        always ``"reference"`` -- always unequal, regardless of what the original
+        fields were -- and falling back to it would warn on *every* cache hit rather
+        than only a genuine mismatch. Only ``attrs["standard_name"]`` (which the
+        regrid step preserves, ``keep_attrs=True``) is trustworthy there; if it is
+        missing on either side, there is nothing left to check and this stays silent
+        rather than manufacture a comparison against a name that was never real.
+        """
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        spec = self.variable
+        if not is_pair_spec(spec) or spec.get("standard_name"):
+            return
+        test_name = test_da.attrs.get("standard_name")
+        reference_name = reference_da.attrs.get("standard_name")
+        if trust_name_fallback:
+            test_name = test_name or test_da.name
+            reference_name = reference_name or reference_da.name
+        if test_name and reference_name and test_name != reference_name:
+            warnings.warn(
+                f"this comparison's test side resolves to {test_name!r} but its "
+                f"reference side resolves to {reference_name!r} -- a pair-spec with "
+                "no explicit 'standard_name' assumes the two recipes describe the "
+                "same quantity, and here they may not. The metrics will not say so "
+                "on their own; pass standard_name= on the pair-spec if this is "
+                "intentional, or check the two method/variable choices if it is not.",
+                stacklevel=_stacklevel.find(),
+            )
 
     # -- pipeline ---------------------------------------------------------------
     def align(self, *, refresh: bool = False):
@@ -815,8 +1050,14 @@ class Comparison:
             if hit is not None:
                 self._aligned = hit
                 # actual_depth rides along in attrs precisely so a cached result
-                # restores the same state a freshly computed one would have.
+                # restores the same state a freshly computed one would have -- the
+                # pair-spec mismatch check is the same restoration, off the cached
+                # fields' own attrs rather than the (always "test"/"reference",
+                # unusable here) array names.
                 self._actual_depth = hit.attrs.get("actual_depth")
+                self._warn_on_pair_spec_mismatch(
+                    hit["test"], hit["reference"], trust_name_fallback=False
+                )
                 return self._aligned
 
         # The test lane goes first when an axis is being kept, so the reference can be
@@ -844,8 +1085,13 @@ class Comparison:
             time_window=window,
         )
         if r is None or t is None:
+            missing_role = "reference" if r is None else "test"
             missing = self.reference_name if r is None else self.test_name
-            raise KeyError(f"{self.variable!r} not available in {missing!r}")
+            raise KeyError(
+                f"{variable_for(self.variable, missing_role)!r} not available in "
+                f"{missing!r}"
+            )
+        self._warn_on_pair_spec_mismatch(t, r)
         self._actual_depth = r_depth
         # .load() so a computed result is a computed result: a cache hit hands back
         # eager arrays (open_zarr(...).load()), and a miss must leave the comparison
@@ -1064,7 +1310,7 @@ class Comparison:
                 variable=self.standard_name or str(self.variable),
                 test=self.test_name,
                 reference=self.reference_name,
-                depth=self.select.get("depth", SURFACE),
+                depth=_display_depth(self.variable, self.select),
                 obs_depth=self._actual_depth,
                 regrid=self.method,
                 **(
@@ -1163,8 +1409,30 @@ class Comparison:
         return (
             f"<Comparison {_variable_label(self.variable)[:24]} "
             f"{self.test_name} vs {self.reference_name} "
-            f"@ {_depth_label(_selected_depth(self.select))}{scored}>"
+            f"@ {_depth_label(_display_depth(self.variable, self.select))}{scored}>"
         )
+
+
+def _canonical(obj: Any) -> str:
+    """A dict-key-order-insensitive representation of ``obj``.
+
+    Plain ``repr()`` treats ``{"test": "a", "reference": "b"}`` and ``{"reference":
+    "b", "test": "a"}`` as different strings even though they are the same spec --
+    which would let two logically-identical pair-spec comparisons escape
+    :func:`_flatten`'s dedup (drawn twice, one atop the other) while
+    :func:`ocean_skill.cache.key_for`'s own ``json.dumps(..., sort_keys=True)``
+    treats them as the same cache entry. Matching that canonicalization here keeps
+    pooling's notion of "the same comparison" from disagreeing with the disk
+    cache's. ``default=str`` is the same fallback ``key_for`` uses, for values
+    ``json`` cannot serialize on its own (a ``slice`` in a ``select``, a numpy
+    scalar); anything neither can handle falls back to plain ``repr``.
+    """
+    import json
+
+    try:
+        return json.dumps(obj, sort_keys=True, default=str)
+    except TypeError:
+        return repr(obj)
 
 
 def _identity(c) -> tuple:
@@ -1177,9 +1445,9 @@ def _identity(c) -> tuple:
     return (
         getattr(c, "test_name", None),
         getattr(c, "reference_name", None),
-        repr(getattr(c, "variable", None)),
-        repr(getattr(c, "select", None)),
-        repr(getattr(c, "aggregate", None)),
+        _canonical(getattr(c, "variable", None)),
+        _canonical(getattr(c, "select", None)),
+        _canonical(getattr(c, "aggregate", None)),
         getattr(c, "method", None),
         getattr(c, "over", None),
         getattr(c, "time_method", None),
@@ -1242,7 +1510,7 @@ def _flatten(objs: Any) -> list[Comparison]:
 #: so ``color_by``/``marker_by`` can group by anything a label can name.
 _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("variable", lambda c: _short_variable_label(c.variable)),
-    ("depth", lambda c: _depth_label(_selected_depth(c.select))),
+    ("depth", lambda c: _depth_label(_display_depth(c.variable, c.select))),
     ("test", lambda c: c.test_name),
     ("reference", lambda c: c.reference_name),
 )
@@ -1673,6 +1941,15 @@ def compare(
 
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
+
+    A variable may also be a **pair-spec** — ``{"test": <spec>, "reference": <spec>}``
+    — when the two sides need genuinely different recipes for the same quantity, e.g.
+    a model computing mixed layer depth (``{"calculate": "mld", "method":
+    "density_threshold"}``) against an observational climatology that already ships it
+    as a plain field (``"mld_dt_mean"``). Add ``"standard_name"`` when you know it, both
+    to name the figure precisely and to settle whether the two sides describe the same
+    quantity; without one, a mismatch between what the two sides actually resolve to is
+    reported once as a warning rather than assumed away.
     ``aggregate`` names how dimensions collapse, and **there is no default**: a
     comparison has to be a single map, so if the sources carry a time axis you have to
     say what happens to it — ``{"time": "mean"}`` for the whole selection's mean,
@@ -1715,15 +1992,23 @@ def compare(
     — what to use after rerunning a model, since entries are keyed on source and
     selection rather than on file contents.
     """
+    import warnings
+
+    from ocean_skill import _stacklevel
     from ocean_skill.catalog import resolve
     from ocean_skill.vocabulary import equivalent_names, resolve_and_report
 
     # depths defaults to the vertical entry already in `select`, if any, so the two
-    # spellings agree instead of one clobbering the other.
+    # spellings agree instead of one clobbering the other. Recorded *before*
+    # defaulting -- see the calculated-variable check below, which needs to tell a
+    # caller who explicitly asked for a real depth apart from one who never asked
+    # at all and is only seeing the ("surface",) sentinel.
+    depths_was_explicit = depths is not None
+    explicit_vertical_select = {
+        k: select[k] for k in _VERTICAL_KEYS if select and k in select
+    }
     if depths is None:
-        vertical = next(
-            (select[k] for k in _VERTICAL_KEYS if select and k in select), SURFACE
-        )
+        vertical = next(iter(explicit_vertical_select.values()), SURFACE)
         depths = (vertical,)
 
     refs = [reference] if isinstance(reference, str) else list(reference)
@@ -1732,11 +2017,34 @@ def compare(
     # -- both so _offers() below matches against catalog metadata correctly (which
     # declares the canonical name), and so the one "name resolved to..." warning
     # fires once per variable rather than once per (ref, test, depth) combination
-    # this fans out to.
-    variables = [
-        resolve_and_report(v, context="compare variables=") if isinstance(v, str) else v
-        for v in variables
-    ]
+    # this fans out to. A pair-spec resolves each side the same way -- see
+    # Comparison.__init__, which does the identical per-side resolution when the
+    # spec reaches it directly rather than through this fan-out.
+    def _resolve_one(v):
+        if isinstance(v, dict):
+            # Validated for every dict up front, not only ones that already pass
+            # is_pair_spec (which requires *both* keys and so can never itself
+            # observe a one-sided pair) -- otherwise a one-sided {"test": ...} in a
+            # multi-variable variables=[...] surfaces only later, mid-fan-out, in
+            # Comparison.__init__, after earlier variables have already aligned.
+            _require_pair_spec(v)
+        if is_pair_spec(v):
+            return {
+                **v,
+                "test": (
+                    resolve_and_report(v["test"], context="compare variables=")
+                    if isinstance(v["test"], str)
+                    else v["test"]
+                ),
+                "reference": (
+                    resolve_and_report(v["reference"], context="compare variables=")
+                    if isinstance(v["reference"], str)
+                    else v["reference"]
+                ),
+            }
+        return resolve_and_report(v, context="compare variables=") if isinstance(v, str) else v
+
+    variables = [_resolve_one(v) for v in variables]
 
     def _offers(source: str, variable: Any) -> bool:
         """Report whether the source advertises this variable (or an equivalent).
@@ -1757,6 +2065,16 @@ def compare(
             return True  # no metadata to filter on; let the read decide
         declared = set(declared)
         options = spec_names(variable)
+        if not options:
+            # A calculator that registered no `inputs=` (ocean_skill.operators
+            # .CALCULATOR_INPUTS) reports nothing to check -- there is no more
+            # metadata to filter on here than there is for a source declaring no
+            # `variables` at all (the branch above), and the same "let the read
+            # decide" rule has to apply, or every calculator without a registered
+            # `inputs=` is invisible not just to catalog *search* but to compare()
+            # itself, which would silently skip the documented no-`inputs=` example
+            # in register_calculator's own docstring.
+            return True
         if any(all(equivalent_names(n) & declared for n in opt) for opt in options):
             return True  # positively offered
 
@@ -1776,17 +2094,53 @@ def compare(
         # on different time axes, so they cannot be one source. Filtering both
         # sides lets you pass every stream as `test=` and have each variable find
         # the one that has it, instead of failing half the cross-product.
-        matching = [r for r in refs if _offers(r, var)]
-        matching_tests = [t for t in tests if _offers(t, var)]
+        # A pair-spec asks a different question of each side -- e.g. mixed layer
+        # depth computed on the model but already a plain field on the reference --
+        # so each side is filtered against its *own* spec, not the pair as a whole.
+        matching = [r for r in refs if _offers(r, variable_for(var, "reference"))]
+        matching_tests = [t for t in tests if _offers(t, variable_for(var, "test"))]
         if not matching:
             print(f"  no reference offers {var!r}; skipped")
             continue
         if not matching_tests:
             print(f"  no test offers {var!r}; skipped")
             continue
+        # A calculated diagnostic (mixed layer depth, ...) already collapses the
+        # vertical axis, so there is nothing for the depth fan-out to iterate --
+        # one comparison, no depth key at all, rather than repeating the same
+        # collapsed field once per requested depth (or worse, injecting the
+        # "surface" default into a select={"depth": ...} that _prepare refuses).
+        calculated = _is_calculated(var)
+        if calculated:
+            # The bare default -- neither depths= nor a vertical select= key was
+            # actually asked for, only the ("surface",) sentinel this function
+            # invents when nothing else says otherwise -- is silently skipped: it
+            # carries no real request to discard. Anything the caller *did* ask
+            # for explicitly is a genuine contradiction with this variable and is
+            # worth saying so about, rather than vanishing without a trace the way
+            # it used to.
+            asked = []
+            if depths_was_explicit and any(not is_surface_request(d) for d in depths):
+                asked.append(f"depths={depths!r}")
+            asked += [
+                f"select={{{k!r}: {v!r}}}"
+                for k, v in explicit_vertical_select.items()
+                if not is_surface_request(v)
+            ]
+            if asked:
+                warnings.warn(
+                    f"{var!r} is a calculated diagnostic, which already reduces the "
+                    f"vertical axis itself, so {' and '.join(asked)} does not apply "
+                    "to it and is being dropped for this variable rather than "
+                    "honoured. Compare it on its own without a depth request, or "
+                    "leave depths=/select= to the variables that do carry a "
+                    "vertical axis.",
+                    stacklevel=_stacklevel.find(),
+                )
+        these_depths = (None,) if calculated else depths
         for ref in matching:
             for tst in matching_tests:
-                for d in depths:
+                for d in these_depths:
                     # `depths` is sugar for fanning select's vertical entry over a
                     # list -- one comparison per value. Writing it into the same key
                     # the caller may have used means a select={"Z": ...} is honoured
@@ -1794,11 +2148,13 @@ def compare(
                     sel = {**(select or {})}
                     for key in _VERTICAL_KEYS:
                         sel.pop(key, None)
-                    sel["depth"] = d
+                    if not calculated:
+                        sel["depth"] = d
                     # Label only what varies across the set: repeating the variable
                     # name on every point of a single-variable fan-out just collides.
                     short = _short_variable_label(var)
-                    many_vars, many_depths = len(variables) > 1, len(depths) > 1
+                    many_vars = len(variables) > 1
+                    many_depths = not calculated and len(depths) > 1
                     if many_vars and many_depths:
                         label = f"{short} {_depth_label(d)}"
                     elif many_depths:

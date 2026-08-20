@@ -176,6 +176,69 @@ Each depth row keeps its own colour scale, since nitrate at 100 m and at the sur
 span unrelated ranges and one scale across both would flatten the shallow rows — pass
 `shared_limits=True` if the levels you picked really do share a range.
 
+## Variable specs
+
+A plain name is the common case, but `variable=`/`variables=` accepts three other
+shapes for the cases a name alone can't cover:
+
+**A combination** sums (or differences, multiplies, divides) several variables into
+one field — MARBL splits chlorophyll into three phytoplankton components, MODIS ships
+the total under one CF name:
+
+```python
+osk.compare(
+    reference="modis_chl", test="GOM_bgc",
+    variables=[{"sum": ["spChl", "diatChl", "diazChl"],
+                "standard_name": "mass_concentration_of_chlorophyll_a_in_sea_water"}],
+)
+```
+
+**A registered calculator** is for a genuine formula rather than arithmetic — mixed
+layer depth, computed from temperature and salinity by a chosen criterion:
+
+```python
+osk.field("GOM_bgc", {"calculate": "mld", "method": "density_threshold"})
+```
+
+Any function can be plugged in this way, from a notebook, with no codebase change —
+`register_calculator` is public API, not an internal detail:
+
+```python
+from ocean_skill.operators import register_calculator
+
+@register_calculator("eke")
+def eddy_kinetic_energy(ds, **kwargs):
+    ...          # read whatever ds carries, return a DataArray
+    return da
+
+osk.field("GOM_bgc", {"calculate": "eke"})
+```
+
+**A pair-spec** — `{"test": <spec>, "reference": <spec>}` — is for the case a
+`Comparison` cannot otherwise express: the two sides need genuinely different recipes
+for the same quantity. A model computes mixed layer depth from temperature and
+salinity; an observational climatology (e.g. the Holte & Talley Argo product) already
+ships it as a plain field:
+
+```python
+osk.compare(
+    reference="holte_talley_mld_clim", test="GOM_bgc",
+    variables=[{
+        "test": {"calculate": "mld", "method": "density_threshold"},
+        "reference": "mld_dt_mean",
+        "standard_name": "ocean_mixed_layer_thickness",
+    }],
+    aggregate={"time": "mean"},
+)
+```
+
+`standard_name` is optional but worth setting whenever you know it: it names the
+figure precisely, and — since the two sides of a pair-spec can resolve to genuinely
+different CF names with nothing else checking that they don't — its absence is also
+what turns a mismatch between the two recipes into a warning rather than a number that
+looks right and isn't. `Comparison`/`compare()` accept a pair-spec; `Field` does not
+(there is no second lane to give the other half of the pair to).
+
 ## Catalogs
 
 Sources are described by [intake](https://intake.readthedocs.io) v2 catalogs, found
