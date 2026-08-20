@@ -177,16 +177,14 @@ class Field:
 
     def as_item(self) -> dict[str, Any]:
         """Return this field as a spec item."""
-        from ocean_skill.comparison import _VERTICAL_KEYS, SURFACE, _depth_label
+        from ocean_skill.comparison import _depth_label, _selected_depth
 
         row_dim, facet_dim = self.facet_dims
-        # the vertical selection, spelled for a label ("surface", "50 m"). A renderer
-        # cannot recover it from the field once the transform has collapsed the axis,
-        # and a plot of one level that does not say which level is a plot of nothing in
-        # particular -- see the interactive movie's title.
-        requested = next(
-            (self.select[k] for k in _VERTICAL_KEYS if k in self.select), SURFACE
-        )
+        # the vertical selection, spelled for a label ("surface", "50 m", "σ₀ = 26.5
+        # kg/m³"). A renderer cannot recover it from the field once the transform has
+        # collapsed the axis, and a plot of one level that does not say which level is
+        # a plot of nothing in particular -- see the interactive movie's title.
+        requested = _selected_depth(self.select)
         return {
             "field": self.data,
             "facet_dim": facet_dim,
@@ -304,6 +302,10 @@ def field(
     ``{"groupby": "month"}`` and the same call gives a twelve-panel climatology
     instead; the panels label themselves differently, so the two are told apart in the
     figure and not just in the code.
+
+    ``select={"depth": ...}`` is a surface of constant depth; ``select={"sigma0":
+    ...}`` asks for an isopycnal instead (ROMS sources only) — see
+    :func:`ocean_skill.roms.to_sigma0`.
     """
     return Field(
         source,

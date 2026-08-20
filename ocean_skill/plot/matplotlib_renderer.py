@@ -1764,6 +1764,16 @@ def facet_labels(coord) -> list[str]:
             return [calendar.month_abbr[int(v)] for v in values]
         except (ValueError, TypeError, IndexError):  # pragma: no cover - odd coord
             pass
+    if name == "sigma0":
+        # An isopycnal axis (:func:`ocean_skill.roms.to_sigma0`) — a density, not a
+        # depth, so it is spelled through the same label the rest of the package
+        # uses for one rather than folded into _DEPTH_COORDS, which would append "m".
+        from ocean_skill.comparison import _sigma_label
+
+        try:
+            return [_sigma_label(float(v)) for v in values]
+        except (ValueError, TypeError):  # pragma: no cover - odd coord
+            pass
     if name in _DEPTH_COORDS:
         try:
             return [f"{abs(float(v)):g} m" for v in values]

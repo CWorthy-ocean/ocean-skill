@@ -27,12 +27,14 @@ def tag_feature_type(obj, feature_type: str):
 #: Name fallbacks used when cf-xarray can't identify an axis. ROMS is the motivating
 #: case: it writes ``units="degrees East"`` (CF wants ``degrees_east``) and
 #: ``ocean_time`` with ``units="second"``, so cf-xarray detects nothing. Order matters —
-#: rho-points before the staggered/coarse variants.
+#: rho-points before the staggered/coarse variants. ``sigma0`` is the isopycnal axis
+#: :func:`ocean_skill.roms.to_sigma0` produces -- a vertical axis in every way that
+#: matters here (a facet row, what ``{"Z": "mean"}`` collapses), just not a depth.
 _COORD_FALLBACKS: dict[str, tuple[str, ...]] = {
     "longitude": ("lon_rho", "lon", "longitude", "nav_lon", "x_rho", "lon_u", "lon_v"),
     "latitude": ("lat_rho", "lat", "latitude", "nav_lat", "y_rho", "lat_u", "lat_v"),
     "time": ("time", "ocean_time", "t", "T"),
-    "vertical": ("depth", "z", "lev", "s_rho", "z_rho", "depth_surface"),
+    "vertical": ("depth", "z", "lev", "s_rho", "z_rho", "depth_surface", "sigma0"),
 }
 
 

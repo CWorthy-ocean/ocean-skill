@@ -156,14 +156,31 @@ def is_surface_request(depth: Any) -> bool:
 NO_VERTICAL_AXIS = "n/a"
 
 
+def _sigma_label(value: Any) -> str:
+    """Format a sigma0 request for labels/repr: ``"σ₀ = 26.5 kg/m³"``.
+
+    A list — several isopycnals kept as facet rows — spells each element the same
+    way, comma-joined, matching how :func:`_depth_label` spells a list of depths.
+    """
+    if isinstance(value, list | tuple):
+        return ", ".join(_sigma_label(v) for v in value)
+    return f"σ₀ = {float(value):g} kg/m³"
+
+
 def _depth_label(depth: Any) -> str:
     """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``.
 
     A list — several levels kept as facet rows — spells each element by the same
     rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``.
+
+    ``{"sigma0": ...}`` is the marker :func:`_selected_depth` returns for an
+    isopycnal request — distinct from a depth band's ``{"min", "max"}`` — and is
+    spelled through :func:`_sigma_label` instead of as a depth.
     """
     if depth == NO_VERTICAL_AXIS:
         return NO_VERTICAL_AXIS
+    if isinstance(depth, dict) and "sigma0" in depth:
+        return _sigma_label(depth["sigma0"])
     if is_surface_request(depth):
         return SURFACE
     if is_depth_band(depth):
@@ -320,15 +337,26 @@ def _short_variable_label(spec: Any) -> str:
 #: Keys naming the vertical axis in a `select`, in any accepted spelling.
 _VERTICAL_KEYS = frozenset({"depth", "Z", "vertical", "z"})
 
+#: The key naming an isopycnal (constant potential density) request. Kept separate
+#: from :data:`_VERTICAL_KEYS` rather than folded into it: the two spellings name the
+#: *same axis* but ask for different operations (:func:`ocean_skill.roms.to_depth`
+#: vs. :func:`ocean_skill.roms.to_sigma0`), and a `select` naming both is a
+#: contradiction :func:`_prepare` refuses rather than picking one silently.
+_ISOPYCNAL_KEYS = frozenset({"sigma0"})
+
+
+#: Every key naming a vertical request, depth or density alike.
+_ANY_VERTICAL_KEYS = _VERTICAL_KEYS | _ISOPYCNAL_KEYS
+
 
 def _vertical_only(agg: dict[str, Any] | None) -> dict[str, Any]:
     """Return the part of an aggregation spec addressing the vertical axis."""
-    return {k: v for k, v in (agg or {}).items() if k in _VERTICAL_KEYS}
+    return {k: v for k, v in (agg or {}).items() if k in _ANY_VERTICAL_KEYS}
 
 
 def _without_vertical(agg: dict[str, Any] | None) -> dict[str, Any]:
     """Return the part of an aggregation spec for every axis but the vertical."""
-    return {k: v for k, v in (agg or {}).items() if k not in _VERTICAL_KEYS}
+    return {k: v for k, v in (agg or {}).items() if k not in _ANY_VERTICAL_KEYS}
 
 
 def _selected_depth(select: dict[str, Any]) -> Any:
@@ -338,10 +366,17 @@ def _selected_depth(select: dict[str, Any]) -> Any:
     ``select`` it was given, and ``{"Z": 100}`` is as valid there as anywhere else. For
     labels the difference is not cosmetic: reading only ``"depth"`` reports a comparison
     at 100 m as ``surface``, and two comparisons at different depths as the same point.
+
+    An isopycnal request (``{"sigma0": ...}``) comes back wrapped in a one-key dict
+    rather than as the bare value, so :func:`_depth_label` can tell "26.5" the depth
+    apart from "26.5" the density anomaly — the two mean wildly different things and
+    a caller reading only the number back would not be able to tell which this was.
     """
     for key in ("depth", "Z", "z", "vertical"):
         if key in select:
             return select[key]
+    if "sigma0" in select:
+        return {"sigma0": select["sigma0"]}
     return SURFACE
 
 
@@ -491,6 +526,12 @@ def _prepare(
         obj = tabular.to_dataset(obj, meta)
 
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
+    sigma = select.get("sigma0")
+    if depth is not None and sigma is not None:
+        raise ValueError(
+            f"select cannot ask for both a depth ({depth!r}) and a density surface "
+            f"(sigma0={sigma!r}) -- pick one vertical request."
+        )
     surface = is_surface_request(depth)
     band = is_depth_band(depth)
     agg = NO_AGGREGATION if aggregate is None else aggregate
@@ -515,19 +556,28 @@ def _prepare(
     # no reduction is the default, which is the cost of asking for every step. The
     # vertical part of the aggregation then collapses whatever the vertical selection
     # left standing.
-    horizontal = {k: v for k, v in select.items() if k not in _VERTICAL_KEYS}
+    horizontal = {k: v for k, v in select.items() if k not in _ANY_VERTICAL_KEYS}
     da = operators.select(da, horizontal)
     da = operators.aggregate(da, _without_vertical(agg))
 
     if calculated:
-        if depth is not None:
+        bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
+        if bad is not None:
             raise ValueError(
                 f"{variable!r} is a registered calculator, which already reduces "
                 "the vertical axis itself (mixed layer depth is a single number per "
-                "water column, not a level of one) -- select={'depth': ...} does not "
-                "apply to it. Drop the depth key, or select on one of the plain "
-                "variables it is computed from instead."
+                "water column, not a level of one) -- "
+                f"select={{{bad!r}: ...}} does not apply to it. Drop the {bad} key, "
+                "or select on one of the plain variables it is computed from instead."
             )
+    elif sigma is not None and meta.get("model") != "roms":
+        raise ValueError(
+            f"select={{'sigma0': {sigma!r}}} needs a ROMS source: an isopycnal is "
+            "read off the model's own temperature/salinity field, and there is no "
+            "way to compute one for an observational or already-gridded product "
+            "here. Use select={'depth': ...} instead, or apply this to the model "
+            "source directly."
+        )
     elif meta.get("model") == "roms":
         # The vertical transform needs a Dataset carrying the grid; a DataArray
         # brings its coordinates (h, mask, Cs_r, ...) along, so this round trip
@@ -546,7 +596,36 @@ def _prepare(
         for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
             if grid_var in obj.variables and grid_var not in sub.variables:
                 sub = sub.assign({grid_var: obj[grid_var]})
-        if surface:
+        if sigma is not None:
+            # An isopycnal slice needs the full water column of temperature and
+            # salinity, not just the one variable this lane resolved -- reduced by
+            # the *same* horizontal select and non-vertical aggregate the sliced
+            # variable already went through (not the raw column), or the target
+            # density would still vary along an axis (e.g. time) the field being
+            # sliced no longer has, which xgcm's transform cannot reconcile.
+            for standard_name in (
+                "sea_water_potential_temperature",
+                "sea_water_practical_salinity",
+            ):
+                column = units.find_variable(obj, standard_name)
+                if column is None:
+                    raise ValueError(
+                        f"an isopycnal slice needs {standard_name!r}, which is not "
+                        "in this dataset (or not standardized to that name -- "
+                        "check the catalog entry's standard_names map, or that the "
+                        "source actually carries it)."
+                    )
+                column = operators.aggregate(
+                    operators.select(column, horizontal), _without_vertical(agg)
+                )
+                sub = sub.assign({standard_name: column})
+            targets = (
+                [float(v) for v in sigma]
+                if isinstance(sigma, list | tuple)
+                else float(sigma)
+            )
+            sub = roms.to_sigma0(sub, meta, targets)
+        elif surface:
             sub = roms.surface(sub, meta)
         elif band:
             # A band is averaged over native cells with thickness weights, not
@@ -585,6 +664,8 @@ def _prepare(
         # unconditionally used to discard every level but the first, silently.
         if "z" in da.dims and da.sizes["z"] == 1:
             da = da.isel(z=0)
+        if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
+            da = da.isel(sigma0=0)
     else:
         # observational depth axes vary: real metres, or an index with depths alongside
         zname = next(
@@ -1986,6 +2067,12 @@ def compare(
     sits a few metres down legitimately comes back all-NaN (with a warning) rather than
     silently reusing the surface field.
 
+    A surface of constant depth is not always the most meaningful slice through a
+    stratified column — ``select={"sigma0": 26.5}`` (or a list, faceted the same way
+    ``depths`` is) asks for an isopycnal instead, via
+    :func:`ocean_skill.roms.to_sigma0`; ROMS sources only, and not alongside
+    ``depths=`` or another vertical ``select`` key.
+
     Each pair's aligned result is cached to disk and reused on a later run with the
     same arguments (see :mod:`ocean_skill.cache`, which prints where once per
     process). ``cache=False`` bypasses it; ``refresh=True`` recomputes and overwrites
@@ -2007,9 +2094,31 @@ def compare(
     explicit_vertical_select = {
         k: select[k] for k in _VERTICAL_KEYS if select and k in select
     }
-    if depths is None:
-        vertical = next(iter(explicit_vertical_select.values()), SURFACE)
-        depths = (vertical,)
+    sigma_request = select.get("sigma0") if select else None
+    if depths_was_explicit and sigma_request is not None:
+        raise ValueError(
+            "compare() got both depths= and select={'sigma0': ...} -- pick one "
+            "vertical request: a set of fixed depths, or a set of density "
+            "surfaces, not both."
+        )
+    # `fan_key`/`fan_values` generalize `depths` to whichever vertical axis is
+    # actually being asked for -- a set of depths (the default) or, when `select`
+    # carries `sigma0`, a set of isopycnals instead. Kept as one pair of names
+    # through the rest of this function rather than branching every step on which
+    # one was asked for.
+    if sigma_request is not None:
+        fan_key = "sigma0"
+        fan_values = (
+            tuple(sigma_request)
+            if isinstance(sigma_request, list | tuple)
+            else (sigma_request,)
+        )
+    else:
+        fan_key = "depth"
+        if depths is None:
+            vertical = next(iter(explicit_vertical_select.values()), SURFACE)
+            depths = (vertical,)
+        fan_values = depths
 
     refs = [reference] if isinstance(reference, str) else list(reference)
     tests = [test] if isinstance(test, str) else list(test)
@@ -2120,13 +2229,18 @@ def compare(
             # worth saying so about, rather than vanishing without a trace the way
             # it used to.
             asked = []
-            if depths_was_explicit and any(not is_surface_request(d) for d in depths):
-                asked.append(f"depths={depths!r}")
-            asked += [
-                f"select={{{k!r}: {v!r}}}"
-                for k, v in explicit_vertical_select.items()
-                if not is_surface_request(v)
-            ]
+            if fan_key == "sigma0":
+                asked.append(f"select={{'sigma0': {sigma_request!r}}}")
+            else:
+                if depths_was_explicit and any(
+                    not is_surface_request(d) for d in depths
+                ):
+                    asked.append(f"depths={depths!r}")
+                asked += [
+                    f"select={{{k!r}: {v!r}}}"
+                    for k, v in explicit_vertical_select.items()
+                    if not is_surface_request(v)
+                ]
             if asked:
                 warnings.warn(
                     f"{var!r} is a calculated diagnostic, which already reduces the "
@@ -2137,28 +2251,29 @@ def compare(
                     "vertical axis.",
                     stacklevel=_stacklevel.find(),
                 )
-        these_depths = (None,) if calculated else depths
+        these_values = (None,) if calculated else fan_values
+        label_fn = _sigma_label if fan_key == "sigma0" else _depth_label
         for ref in matching:
             for tst in matching_tests:
-                for d in these_depths:
-                    # `depths` is sugar for fanning select's vertical entry over a
-                    # list -- one comparison per value. Writing it into the same key
-                    # the caller may have used means a select={"Z": ...} is honoured
-                    # rather than silently overridden by the default of "surface".
+                for d in these_values:
+                    # `depths`/`sigma0` is sugar for fanning select's vertical entry
+                    # over a list -- one comparison per value. Writing it into the
+                    # same key the caller may have used means a select={"Z": ...} is
+                    # honoured rather than silently overridden by the default.
                     sel = {**(select or {})}
-                    for key in _VERTICAL_KEYS:
+                    for key in _ANY_VERTICAL_KEYS:
                         sel.pop(key, None)
                     if not calculated:
-                        sel["depth"] = d
+                        sel[fan_key] = d
                     # Label only what varies across the set: repeating the variable
                     # name on every point of a single-variable fan-out just collides.
                     short = _short_variable_label(var)
                     many_vars = len(variables) > 1
-                    many_depths = not calculated and len(depths) > 1
-                    if many_vars and many_depths:
-                        label = f"{short} {_depth_label(d)}"
-                    elif many_depths:
-                        label = _depth_label(d)
+                    many_values = not calculated and len(fan_values) > 1
+                    if many_vars and many_values:
+                        label = f"{short} {label_fn(d)}"
+                    elif many_values:
+                        label = label_fn(d)
                     else:
                         label = short
                     c = Comparison(
