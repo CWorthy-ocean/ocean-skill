@@ -463,6 +463,27 @@ def _basemap(
     return gl
 
 
+def _map_projection(*fields):
+    """Return a PlateCarree centred so every field's longitudes stay contiguous.
+
+    A lane whose longitudes run past 180 (a 0-360 domain straddling the
+    antimeridian, as a Pacific model does) splits at the edges of the default
+    ``central_longitude=0`` frame; centring the frame on 180 puts the seam back
+    outside the data. Only the *axes* projection moves — the ``transform=`` handed
+    to pcolormesh stays plain :class:`~cartopy.crs.PlateCarree`, because the
+    coordinates are geographic degrees wherever the frame is centred.
+    """
+    import cartopy.crs as ccrs
+
+    for field in fields:
+        if field is None or "lon" not in getattr(field, "coords", ()):
+            continue
+        lon = np.asarray(field["lon"], dtype="float64")
+        if np.isfinite(lon).any() and float(np.nanmax(lon)) > 180.0:
+            return ccrs.PlateCarree(central_longitude=180.0)
+    return ccrs.PlateCarree()
+
+
 def _draw_map(
     ax,
     da,
@@ -1066,7 +1087,6 @@ def field_row(
     means a fraction of that extent. Set ``False`` to leave placement entirely to
     ``constrained_layout``.
     """
-    import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
     # Horizontal bars sit below the maps and so come out of the row's height; vertical
@@ -1091,7 +1111,7 @@ def field_row(
         1,
         3,
         figsize=figsize,
-        subplot_kw={"projection": ccrs.PlateCarree()},
+        subplot_kw={"projection": _map_projection(aligned)},
         constrained_layout=True,
     )
     ims, lab = _draw_row(
@@ -1599,11 +1619,10 @@ def field_grid(
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
     list; the same names mean the same thing here, applied per row.
     """
-    import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
     n = len(comparisons)
-    proj = ccrs.PlateCarree()
+    proj = _map_projection(*(c["aligned"] for c in comparisons))
     canvas = resolve_canvas(size, zoom)
     # One decision, used for both the layout allowance and the bars themselves.
     # Splitting them is how overriding the orientation used to cost 37% of the panel:
@@ -1975,7 +1994,6 @@ def field_facet(
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
     metrics, and ``row_label_kwargs`` applies only when there is a ``row_dim``.
     """
-    import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
@@ -2099,7 +2117,7 @@ def field_facet(
         nrows,
         ncols,
         figsize=figsize,
-        subplot_kw={"projection": ccrs.PlateCarree()},
+        subplot_kw={"projection": _map_projection(field)},
         constrained_layout=True,
         squeeze=False,
     )
@@ -2303,7 +2321,6 @@ def skill_map(
     """
     import warnings
 
-    import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
     from ocean_skill.colormaps import metric_colors
@@ -2400,7 +2417,7 @@ def skill_map(
         nrows,
         ncols,
         figsize=figsize,
-        subplot_kw={"projection": ccrs.PlateCarree()},
+        subplot_kw={"projection": _map_projection(*(item["skill"] for item in items))},
         constrained_layout=True,
         squeeze=False,
     )
@@ -2779,6 +2796,7 @@ def field_movie(
     )
     scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
     defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    # the axes' frame follows the data; the transform below stays geographic degrees
     proj = ccrs.PlateCarree()
 
     seq_norm = div_norm = None
@@ -2789,7 +2807,7 @@ def field_movie(
         1,
         3,
         figsize=figsize,
-        subplot_kw={"projection": proj},
+        subplot_kw={"projection": _map_projection(first["aligned"])},
         constrained_layout=True,
     )
     ims, lab = _draw_row(
@@ -2999,7 +3017,7 @@ def facet_movie(
 
     fig, ax = plt.subplots(
         figsize=figsize,
-        subplot_kw={"projection": ccrs.PlateCarree()},
+        subplot_kw={"projection": _map_projection(field)},
         constrained_layout=True,
     )
     im = _draw_map(

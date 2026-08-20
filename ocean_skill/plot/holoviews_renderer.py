@@ -147,6 +147,24 @@ def _panel_geometry(
     return px[0], px[1], bokeh_fontsize(px, font_scale=font_scale)
 
 
+def _output_projection(da):
+    """Return the map frame for ``da``: centred on 180 when longitudes pass 180.
+
+    A 0-360 lane straddling the antimeridian (a Pacific model, whose aligned pair
+    ``ocean_skill.align.align`` keeps in 0-360 — see ``natural_convention``) splits
+    at the edges of the default centre-0 frame; centring on 180 keeps it one piece.
+    ``None`` (hvplot's own default frame) everywhere else, exactly as before.
+    """
+    if "lon" not in getattr(da, "coords", ()):
+        return None
+    lon = np.asarray(da["lon"], dtype="float64")
+    if np.isfinite(lon).any() and float(np.nanmax(lon)) > 180.0:
+        import cartopy.crs as ccrs
+
+        return ccrs.PlateCarree(central_longitude=180.0)
+    return None
+
+
 def _quadmesh(
     da,
     *,
@@ -206,7 +224,7 @@ def _quadmesh(
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
-        opts |= {"geo": True, "projection": None}
+        opts |= {"geo": True, "projection": _output_projection(da)}
         if coastline:
             # hvplot's coastline is a geoviews Feature, which the plot re-projects
             # from scratch every time it renders a frame. Fine for the single draw

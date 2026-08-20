@@ -98,9 +98,16 @@ def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     lon_min, lat_min, lon_max, lat_max = (meta.get(k) for k in keys)
     if None in (lon_min, lat_min, lon_max, lat_max):
         return None
-    # Catalogs may declare 0-360 (ROMS' native convention); maps are drawn in ±180, so
-    # normalize. This assumes the domain doesn't itself straddle the anti-meridian.
-    lon_min, lon_max = (((lo + 180) % 360) - 180 for lo in (lon_min, lon_max))
+    # Catalogs may declare 0-360 (ROMS' native convention); maps are usually drawn in
+    # ±180, so normalize — unless the domain straddles the antimeridian, where ±180
+    # endpoints read backwards (lon_min > lon_max) and would draw as two stray
+    # verticals. Such a box stays in 0-360, matching the convention align() resolves
+    # for the same domain's data (see ocean_skill.align.natural_convention).
+    wrapped = tuple(((lo + 180) % 360) - 180 for lo in (lon_min, lon_max))
+    if wrapped[0] <= wrapped[1]:
+        lon_min, lon_max = wrapped
+    else:
+        lon_min, lon_max = (lo % 360 for lo in (lon_min, lon_max))
     return lon_min, lat_min, lon_max, lat_max
 
 
