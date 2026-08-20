@@ -25,6 +25,7 @@ __all__ = [
     "standardize",
     "surface",
     "to_depth",
+    "to_sigma0",
 ]
 
 
@@ -269,6 +270,25 @@ def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
     return da.chunk({s_dim: -1})
 
 
+def _z_grid(ds: xr.Dataset, s_dim: str):
+    """Build the xgcm ``Grid`` :func:`to_depth` and :func:`to_sigma0` both transform on.
+
+    Split out because the two share every step of the vertical transform except the
+    target coordinate itself — one is against ``z_rho``, the other against sigma0.
+    """
+    import xgcm
+
+    try:
+        return xgcm.Grid(
+            ds,
+            coords={"Z": {"center": s_dim}},
+            periodic=False,
+            autoparse_metadata=False,
+        )
+    except TypeError:  # older xgcm without autoparse_metadata kwarg
+        return xgcm.Grid(ds, coords={"Z": {"center": s_dim}}, periodic=False)
+
+
 def to_depth(
     ds: xr.Dataset, meta: dict[str, Any], d: float | list[float]
 ) -> xr.Dataset:
@@ -276,26 +296,17 @@ def to_depth(
 
     Uses xgcm's vertical transform against ``z_rho`` (linear; NaN outside the water
     column — no extrapolation). Keeps the result lazy. ``d`` may be a scalar or a list.
-    For a true surface field use :func:`surface` instead. Non-``s_rho`` variables drop.
+    For a true surface field use :func:`surface` instead; for a surface of constant
+    potential density rather than constant depth, see :func:`to_sigma0`.
+    Non-``s_rho`` variables drop.
     """
-    import xgcm
-
     if "z_rho" not in ds.coords:
         ds = add_depth_coord(ds, meta)
     s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
     depths = np.atleast_1d(np.asarray(d, dtype=float))
     targets = xr.DataArray(-depths, dims="z", coords={"z": -depths})
 
-    try:
-        grid = xgcm.Grid(
-            ds,
-            coords={"Z": {"center": s_dim}},
-            periodic=False,
-            autoparse_metadata=False,
-        )
-    except TypeError:  # older xgcm without autoparse_metadata kwarg
-        grid = xgcm.Grid(ds, coords={"Z": {"center": s_dim}}, periodic=False)
-
+    grid = _z_grid(ds, s_dim)
     z_rho = _contiguous_column(ds["z_rho"], s_dim)
     out = {}
     for var in ds.data_vars:
@@ -323,6 +334,136 @@ def to_depth(
                 warnings.warn(
                     f"{var!r} at {d:g} m is entirely NaN: the target lies outside the "
                     f"model's cell-centre range, so nothing can be interpolated;{hint}",
+                    stacklevel=2,
+                )
+    return result
+
+
+def to_sigma0(
+    ds: xr.Dataset, meta: dict[str, Any], s: float | list[float]
+) -> xr.Dataset:
+    """Interpolate s-coordinate fields onto surface(s) of constant potential density.
+
+    An isopycnal slice: the same xgcm vertical transform :func:`to_depth` uses, but
+    against potential density anomaly (sigma0, TEOS-10 via
+    :func:`ocean_skill.mld.potential_density`) instead of ``z_rho``. Water masses
+    move along density surfaces, not depth surfaces, so this is often the more
+    physically meaningful slice through a stratified column. ``s`` may be a scalar
+    or a list, exactly as ``d`` is for :func:`to_depth`.
+
+    ``s`` is read as sigma0 in kg/m3 -- *anomaly* form (roughly 20-28 through most of
+    the ocean), not full in-situ density (roughly 1020-1028): a value at or above
+    1000 almost certainly means a full density was quoted by mistake, and is refused
+    rather than silently naming a surface far from the one meant.
+
+    There is deliberately no ``"rho"``/``"density"`` alias for this request. ROMS's
+    own ``rho`` output is *in-situ* density -- pressure/compressibility included --
+    which at depth names a materially different surface from sigma0 (density
+    referenced to the sea surface); reading a value off one and asking for the
+    other under the same name would be a silent, and depth-growing, mismatch. sigma0
+    carries its own reference pressure in its name, leaving room for ``sigma2``/
+    ``sigma4`` (referenced to 2000/4000 dbar, the usual choice below where a
+    surface-referenced potential density becomes thermobarically unreliable) as
+    later siblings rather than a redefinition of what "density" means here.
+
+    sigma0 is computed from whatever ``ds`` carries for
+    ``sea_water_potential_temperature``/``sea_water_practical_salinity`` *at the
+    time this is called* -- if those have already been reduced (a time mean, say),
+    the slice is onto the density surface of that mean, not the mean of
+    instantaneously sliced surfaces. Two water masses of different
+    temperature/salinity can share a sigma0 value (density compensation), and a
+    column where sigma0 is not monotonic with depth (a density inversion) gives
+    xgcm's linear transform more than one crossing to choose from; this does not
+    detect or resolve that, it interpolates whatever profile it is given.
+
+    NaN outside the column's own sigma0 range (no extrapolation), with a warning
+    naming the target -- the same shape :func:`to_depth` uses for a target beyond
+    the water column.
+    """
+    from ocean_skill.mld import potential_density
+    from ocean_skill.units import find_variable
+
+    if "z_rho" not in ds.coords:
+        ds = add_depth_coord(ds, meta)
+    s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
+
+    values = np.atleast_1d(np.asarray(s, dtype=float))
+    over_1000 = values[values >= 1000]
+    if over_1000.size:
+        raise ValueError(
+            f"sigma0={s!r} looks like a full density (roughly 1020-1028 kg/m3), not "
+            "a potential density *anomaly* -- sigma0 is density minus 1000 kg/m3, "
+            f"typically 20-28 for seawater. Did you mean {list(over_1000 - 1000)!r}?"
+        )
+
+    temp = find_variable(ds, "sea_water_potential_temperature")
+    salt = find_variable(ds, "sea_water_practical_salinity")
+    if temp is None or salt is None:
+        missing = (
+            "sea_water_potential_temperature" if temp is None else
+            "sea_water_practical_salinity"
+        )
+        raise ValueError(
+            f"an isopycnal slice needs {missing!r}, which is not in this dataset "
+            "(or not standardized to that name -- check the catalog entry's "
+            "standard_names map, or that the source actually carries it)."
+        )
+    try:
+        sigma0 = potential_density(temp, salt, ds["z_rho"], ds["lon"], ds["lat"])
+    except ImportError as exc:
+        raise ImportError(
+            "isopycnal slicing needs gsw (TEOS-10); it is listed in "
+            "environment.yml but not installed -- `conda install -c conda-forge "
+            "gsw` or `pip install gsw`."
+        ) from exc
+
+    grid = _z_grid(ds, s_dim)
+    sigma0 = _contiguous_column(sigma0, s_dim)
+    targets = xr.DataArray(values, dims="sigma0", coords={"sigma0": values})
+
+    out = {}
+    for var in ds.data_vars:
+        da = ds[var]
+        # only rho-point 3-D fields share sigma0's grid; staggered u/v need
+        # interpolation to rho first (deferred, as in to_depth), so skip them here.
+        if s_dim in da.dims and {"eta_rho", "xi_rho"} <= set(da.dims):
+            transformed = grid.transform(
+                _contiguous_column(da, s_dim),
+                "Z",
+                targets,
+                target_data=sigma0,
+                method="linear",
+            )
+            # the transform sheds attrs; carry the source variable's forward, plus a
+            # note of how this level came to be, since "sliced onto a density
+            # surface" is not otherwise recoverable from the result alone.
+            transformed.attrs = {
+                **da.attrs,
+                "isopycnal_slice": (
+                    "linear interpolation onto sigma0 (potential density anomaly, "
+                    "TEOS-10 via gsw) surfaces"
+                ),
+            }
+            out[var] = transformed
+    result = xr.Dataset(
+        out, coords={"lon": ds["lon"], "lat": ds["lat"], "sigma0": values}
+    )
+    result.attrs.update(ds.attrs)
+    result["sigma0"].attrs = {
+        "units": "kg m-3",
+        "long_name": "potential density anomaly (sigma0, TEOS-10)",
+        "standard_name": "sea_water_sigma_theta",
+    }
+
+    # A target denser or lighter than the column holds anywhere interpolates to
+    # nothing and silently yields an all-NaN level. Say so, per level.
+    for var in result.data_vars:
+        for i, target in enumerate(values):
+            if not bool(np.isfinite(result[var].isel(sigma0=i)).any()):
+                warnings.warn(
+                    f"{var!r} at sigma0={target:g} kg/m3 is entirely NaN: the "
+                    "target density lies outside this water column's sigma0 range "
+                    "everywhere, so nothing can be interpolated.",
                     stacklevel=2,
                 )
     return result

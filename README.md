@@ -176,6 +176,27 @@ Each depth row keeps its own colour scale, since nitrate at 100 m and at the sur
 span unrelated ranges and one scale across both would flatten the shallow rows — pass
 `shared_limits=True` if the levels you picked really do share a range.
 
+A surface of constant depth is not always the most meaningful slice through a
+stratified column — water masses move along surfaces of constant density, not
+constant depth. `select={"sigma0": ...}` asks for an isopycnal instead, faceted the
+same way a list of depths is:
+
+```python
+osk.field(
+    "GOM_bgc",
+    NITRATE,
+    select={"time": slice("2012-01", "2012-06"), "sigma0": [24.5, 25.5, 26.5]},
+    aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+).plot()                       # 3 isopycnals x 6 months, rows labelled "σ₀ = 24.5 kg/m³"
+```
+
+ROMS sources only (an isopycnal is read off the model's own temperature and
+salinity), and not alongside a `"depth"`/`"Z"` select key or `compare()`'s `depths=` —
+pick one vertical request. `sigma0` is potential density *anomaly* (density minus
+1000 kg/m3, typically 20-28 for seawater); there is no `"rho"`/`"density"` alias, since
+ROMS's own `rho` output is in-situ density and would silently name a different surface
+at any real depth.
+
 ## Variable specs
 
 A plain name is the common case, but `variable=`/`variables=` accepts three other

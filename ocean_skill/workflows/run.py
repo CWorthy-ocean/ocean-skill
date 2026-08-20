@@ -17,8 +17,6 @@ from typing import Any
 
 import yaml
 
-from ocean_skill.comparison import SURFACE
-
 __all__ = ["main", "run_suite"]
 
 
@@ -93,7 +91,11 @@ def run_suite(suite_path: str | Path):
         reference=suite["reference"],
         test=suite["test"],
         variables=suite["variables"],
-        depths=tuple(suite.get("depths", (SURFACE,))),
+        # `None` (not a (SURFACE,) default) when the suite names no `depths:` --
+        # compare() then falls back to its own default, which honours a sigma0 (or
+        # any other vertical) key already sitting in `select:` instead of a bare
+        # `depths=("surface",)` colliding with it.
+        depths=tuple(suite["depths"]) if "depths" in suite else None,
         method=suite.get("regrid", "conservative_normed"),
         # A suite has to be able to say this, and until now could not: `aggregate` was
         # simply not forwarded, so every suite silently got the old implicit time mean.
