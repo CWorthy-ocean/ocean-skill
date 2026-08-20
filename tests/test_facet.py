@@ -626,6 +626,22 @@ def test_holoviews_draws_the_same_panels(daily):
     }
 
 
+def test_holoviews_draws_a_single_map_with_no_facet_axis(daily):
+    """A selection that collapses to one map is still a valid holoviews figure.
+
+    No ``facet_dim``/``row_dim`` left means ``_field_facet`` builds exactly one
+    panel, which stays a bare Overlay rather than becoming a Layout -- ``.cols()``
+    and ``hv.opts.Layout`` only apply to the latter, so this used to raise
+    ``AttributeError: 'Overlay' object has no attribute cols``.
+    """
+    field = daily.mean("time")
+    obj = render(
+        PlotSpec(family="field_facet", items=[_item(field, None)]),
+        renderer="holoviews",
+    )
+    assert len(_hv_titles(obj)) == 1
+
+
 # --- the model-only lane -------------------------------------------------------------
 
 

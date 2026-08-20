@@ -533,6 +533,22 @@ def test_skill_map_draws_the_same_panels_in_both_renderers(skill_item):
     assert {title.split(" (")[0] for title in interactive} == set(_SKILL_METRICS)
 
 
+def test_skill_map_draws_a_single_metric_panel(skill_item):
+    """One item, one requested metric collapses ``_skill_map`` to a single panel.
+
+    Same underlying bug as the single-map facet case: with exactly one panel,
+    ``layout`` stays a bare Overlay rather than becoming a Layout, and ``.cols()``
+    / ``hv.opts.Layout`` only apply to the latter.
+    """
+    interactive = _holoviews_panel_titles(
+        render(
+            _skill_spec(skill_item, metric_names=("bias",)),
+            renderer="holoviews",
+        )
+    )
+    assert len(interactive) == 1
+
+
 def test_the_overall_value_reaches_the_static_corner_box(skill_item):
     """The map and the single number are one statistic at two resolutions."""
     fig = render(_skill_spec(skill_item))

@@ -549,7 +549,8 @@ def _field_facet(
     layout = panels[0]
     for extra in panels[1:]:
         layout = layout + extra
-    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if len(panels) > 1:
+        layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
     return layout
@@ -649,7 +650,8 @@ def _skill_map(
     layout = panels[0]
     for extra in panels[1:]:
         layout = layout + extra
-    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if len(panels) > 1:
+        layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
     return layout
