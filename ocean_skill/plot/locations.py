@@ -299,14 +299,15 @@ def build_items(
     remains, rather than drawing an empty map.
     """
     from ocean_skill.build import _GRIDDED_FEATURE_TYPES
-    from ocean_skill.catalog import _matches_name, discover, resolve
+    from ocean_skill.catalog import _matches_name, _resolve_in, discover
 
+    index = discover()
     if names is None:
-        refs = list(discover().values())
+        refs = list(index.values())
     else:
         if isinstance(names, str):
             names = [names]
-        refs = [resolve(str(n)) for n in names]
+        refs = [_resolve_in(index, str(n)) for n in names]
     if catalog:
         refs = [ref for ref in refs if _matches_name(ref.catalog, catalog)]
 

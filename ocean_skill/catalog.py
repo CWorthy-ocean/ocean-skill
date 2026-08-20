@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ocean_skill import _stacklevel
 from ocean_skill._display import Text
 
 __all__ = [
@@ -57,8 +58,8 @@ class SourceRef:
     #: Set by :func:`discover` when another, lower-precedence catalog declares the
     #: same bare name — carried on the ref rather than warned about immediately, so
     #: only an actual *bare* lookup of this specific name ever surfaces it (see
-    #: :func:`resolve`). Building the merged index touches every entry on every
-    #: call; almost none of them are what the caller is actually asking about.
+    #: :func:`resolve`). Merging the index touches every entry; almost none of
+    #: them are what the caller is actually asking about.
     shadowed_path: Path | None = None
 
     @property
@@ -107,18 +108,41 @@ def _iter_catalog_files() -> list[Path]:
 
 
 def _entry_metadata(cat, name: str) -> dict[str, Any]:
-    """Best-effort per-entry metadata (reader instance, else the description)."""
-    try:
-        md = getattr(cat[name], "metadata", None)
-        if md:
-            return dict(md)
-    except Exception:  # pragma: no cover - defensive
-        pass
+    """Per-entry metadata straight off the catalog description.
+
+    Read from ``cat.entries`` rather than ``cat[name]``: indexing a v2 catalog
+    imports and instantiates the entry's reader class (network-capable for
+    ERDDAP entries), and the description already carries the full metadata
+    contract our builders write.
+    """
     try:
         key = cat.aliases.get(name, name)
         return dict(cat.entries[key].metadata or {})
     except Exception:  # pragma: no cover - defensive
         return {}
+
+
+def _catalog_fingerprint() -> tuple[tuple[str, int, int], ...]:
+    """Cache key for :func:`discover`: each catalog file with (mtime_ns, size).
+
+    Rebuilding a catalog, adding or removing one, or changing the search path
+    (cwd, ``$OCEAN_SKILL_CATALOGS``, user dir) all change this, so the cache
+    can never serve a stale index.
+    """
+    out: list[tuple[str, int, int]] = []
+    for path in _iter_catalog_files():
+        try:
+            st = path.stat()
+            out.append((str(path), st.st_mtime_ns, st.st_size))
+        except OSError:  # deleted between glob and stat
+            out.append((str(path), -1, -1))
+    return tuple(out)
+
+
+#: (fingerprint, index) of the last discovery; None until the first call.
+_discover_cache: (
+    tuple[tuple[tuple[str, int, int], ...], dict[str, SourceRef]] | None
+) = None
 
 
 def discover() -> dict[str, SourceRef]:
@@ -127,11 +151,20 @@ def discover() -> dict[str, SourceRef]:
     Returns a mapping ``entry_name -> SourceRef``. Catalogs that don't load as intake
     v2 are skipped with a warning. On a name collision the higher-precedence (later)
     catalog wins, recorded on the ref's ``shadowed_path`` rather than warned about
-    here: this runs on every catalog-touching call (``find``, ``catalogs.names()``,
-    every ``resolve``, ...), almost all of which have nothing to do with whichever
-    two entries happen to collide. :func:`resolve` decides whether a collision is
-    actually relevant to what was asked for.
+    here, since almost every caller (``find``, ``catalogs.names()``, every
+    ``resolve``, ...) has nothing to do with whichever two entries happen to
+    collide. :func:`resolve` decides whether a collision is actually relevant to
+    what was asked for.
+
+    The parsed index is cached against the catalog files' ``(path, mtime_ns, size)``,
+    so repeated calls cost a stat of each file rather than a re-parse; any change to
+    a file or to the search path invalidates it automatically.
     """
+    global _discover_cache
+    fingerprint = _catalog_fingerprint()
+    if _discover_cache is not None and _discover_cache[0] == fingerprint:
+        return dict(_discover_cache[1])
+
     import intake
 
     index: dict[str, SourceRef] = {}
@@ -158,7 +191,33 @@ def discover() -> dict[str, SourceRef]:
                 metadata=_entry_metadata(cat, name),
                 shadowed_path=shadowed,
             )
-    return index
+    _discover_cache = (fingerprint, index)
+    return dict(index)
+
+
+def _resolve_in(index: dict[str, SourceRef], name: str) -> SourceRef:
+    """Resolve one reference string against an already-built index.
+
+    Same semantics as :func:`resolve`, which is just this over a fresh
+    :func:`discover`; callers resolving many names build the index once and
+    call this directly instead of re-discovering per name.
+    """
+    if ":" in name:
+        cat, _, src = name.partition(":")
+        for ref in index.values():
+            if ref.name == src and ref.catalog == cat:
+                return ref
+        raise KeyError(f"No source {src!r} in catalog {cat!r}.")
+    if name in index:
+        ref = index[name]
+        if ref.shadowed_path is not None:
+            warnings.warn(
+                f"Entry name {name!r} in {ref.path} shadows {ref.shadowed_path}; "
+                f"use {ref.qualified!r} to disambiguate.",
+                stacklevel=_stacklevel.find(),
+            )
+        return ref
+    raise KeyError(f"Unknown source {name!r}. Known: {sorted(index)}")
 
 
 def resolve(name: str) -> SourceRef:
@@ -170,23 +229,7 @@ def resolve(name: str) -> SourceRef:
     name is the one that collided — an unrelated bare lookup elsewhere in the same
     call never triggers it. Raises :class:`KeyError` if unknown / ambiguous.
     """
-    if ":" in name:
-        cat, _, src = name.partition(":")
-        for ref in discover().values():
-            if ref.name == src and ref.catalog == cat:
-                return ref
-        raise KeyError(f"No source {src!r} in catalog {cat!r}.")
-    index = discover()
-    if name in index:
-        ref = index[name]
-        if ref.shadowed_path is not None:
-            warnings.warn(
-                f"Entry name {name!r} in {ref.path} shadows {ref.shadowed_path}; "
-                f"use {ref.qualified!r} to disambiguate.",
-                stacklevel=2,
-            )
-        return ref
-    raise KeyError(f"Unknown source {name!r}. Known: {sorted(index)}")
+    return _resolve_in(discover(), name)
 
 
 def _matches_name(source: str, pattern: str) -> bool:
@@ -518,9 +561,15 @@ def find(
     offers ``.map()``, drawing where the matches are on a map from their catalog
     metadata alone.
     """
-    from ocean_skill.vocabulary import equivalent_names
-
     terms = _as_terms(text) if text is not None else None
+    # Only pull in vocabulary (imports cf_xarray, runs its criteria refresh) and
+    # compute the equivalent-spellings set once, when a variable filter is
+    # actually in play -- not on every entry of every query.
+    wanted = None
+    if variable:
+        from ocean_skill.vocabulary import equivalent_names
+
+        wanted = equivalent_names(variable)
 
     out = SourceNames()
     for source, ref in discover().items():
@@ -540,9 +589,7 @@ def find(
                     continue
             elif is_clim is not climatology:
                 continue
-        if variable and not (
-            equivalent_names(variable) & set(meta.get("variables") or [])
-        ):
+        if wanted is not None and not (wanted & set(meta.get("variables") or [])):
             continue
         if featureType and meta.get("featureType") != featureType:
             continue

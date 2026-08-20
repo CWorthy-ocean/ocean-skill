@@ -38,6 +38,96 @@ def test_catalogs_registry_membership(isolated_catalogs):
     assert "foo" in catalogs.names()
 
 
+# -- discover() caching --------------------------------------------------------
+
+
+def test_discover_caches_until_files_change(isolated_catalogs, monkeypatch):
+    import intake
+
+    calls = []
+    orig = intake.from_yaml_file
+
+    def counting(*a, **kw):
+        calls.append(1)
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(intake, "from_yaml_file", counting)
+
+    catalog.discover()
+    catalog.discover()
+    assert len(calls) == 1  # second call served from cache, no re-parse
+
+
+def test_discover_invalidates_on_catalog_rewrite(isolated_catalogs, tmp_path):
+    import intake
+    from intake.readers import datatypes, readers
+
+    idx = catalog.discover()
+    assert idx["foo"].metadata["featureType"] == "grid"
+
+    data = datatypes.HDF5(url=str(tmp_path / "foo.nc"))
+    reader = readers.XArrayDatasetReader(data)
+    reader.metadata.update({"featureType": "timeSeries"})
+    cat = intake.entry.Catalog(metadata={"title": "example catalog"})
+    cat["foo"] = reader
+    cat.aliases["foo"] = "foo"
+    cat.to_yaml_file(str(isolated_catalogs / "example.catalog.yaml"))
+
+    idx2 = catalog.discover()
+    assert idx2["foo"].metadata["featureType"] == "timeSeries"
+
+
+def test_discover_invalidates_on_search_path_change(
+    isolated_catalogs, tmp_path, monkeypatch
+):
+    import intake
+    from intake.readers import datatypes, readers
+
+    idx = catalog.discover()
+    assert "foo" in idx
+
+    other = tmp_path / "other_cats"
+    other.mkdir()
+    data = datatypes.HDF5(url=str(tmp_path / "bar.nc"))
+    reader = readers.XArrayDatasetReader(data)
+    reader.metadata.update({"featureType": "timeSeries"})
+    other_cat = intake.entry.Catalog(metadata={"title": "other catalog"})
+    other_cat["bar"] = reader
+    other_cat.aliases["bar"] = "bar"
+    other_cat.to_yaml_file(str(other / "other.catalog.yaml"))
+
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(other))
+    idx2 = catalog.discover()
+    assert "bar" in idx2
+    assert "foo" not in idx2
+
+
+def test_discover_returns_a_copy_each_time(isolated_catalogs):
+    idx = catalog.discover()
+    del idx["foo"]
+    idx2 = catalog.discover()
+    assert "foo" in idx2
+
+
+def test_discover_does_not_instantiate_readers(isolated_catalogs):
+    """A catalog entry naming an unimportable reader class still yields its metadata.
+
+    ``cat[name]`` would import and instantiate the reader class (network-capable
+    for ERDDAP entries); reading straight off ``cat.entries`` never does.
+    """
+    path = isolated_catalogs / "example.catalog.yaml"
+    text = path.read_text()
+    assert "reader: intake.readers.readers:XArrayDatasetReader" in text
+    text = text.replace(
+        "reader: intake.readers.readers:XArrayDatasetReader",
+        "reader: not_a_module:Nope",
+    )
+    path.write_text(text)
+
+    idx = catalog.discover()
+    assert idx["foo"].metadata["featureType"] == "grid"
+
+
 # -- find() filters -----------------------------------------------------------
 
 
