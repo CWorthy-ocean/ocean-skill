@@ -343,7 +343,7 @@ def _keys(frame_map) -> list[str]:
 
 
 def _frames(frame_map) -> list:
-    """Return every frame, materialized — a DynamicMap draws none until asked."""
+    """Return every frame; a ``HoloMap`` already holds them all."""
     return [frame_map[key] for key in _keys(frame_map)]
 
 
@@ -409,7 +409,21 @@ def test_the_interactive_movie_writes_a_standalone_page(frames, tmp_path):
     out = tmp_path / "movie.html"
     _interactive(frames, save=out)
     assert out.exists()
-    assert "html" in out.read_text(errors="ignore")[:2000].lower()
+    html = out.read_text(errors="ignore")
+    assert "html" in html[:2000].lower()
+    for frame in frames:
+        assert frame["frame_label"] in html, "not every frame made it into the page"
+
+
+def test_a_dropdown_movie_saves_every_frame(frames, tmp_path):
+    """Regression: ``hv.HoloMap(dynamicmap)`` used to copy an empty cache, not the
+    frames, so this used to write a page with none of the movie in it.
+    """
+    out = tmp_path / "movie.html"
+    _interactive(frames, widget="dropdown", save=out)
+    html = out.read_text(errors="ignore")
+    for frame in frames:
+        assert frame["frame_label"] in html
 
 
 def test_the_interactive_movie_refuses_a_video_extension(frames, tmp_path):
@@ -443,6 +457,28 @@ def test_the_holoviews_default_control_is_still_reachable(frames):
     import holoviews as hv
 
     assert isinstance(_interactive(frames, widget="dropdown"), hv.Layout)
+
+
+def test_the_notebook_repr_embeds_every_frame(frames):
+    """The point of the fix: no live kernel should be needed to see every frame.
+
+    A stock ``pn.pane.HoloViews`` repr draws only the frame on screen and leaves the
+    rest to be requested over a live comm channel — which is exactly the channel that
+    was breaking the slider (see ``_frame_map``).
+    """
+    pane = _interactive(frames)
+    html = pane._repr_mimebundle_()[0]["text/html"]
+    for frame in frames:
+        assert frame["frame_label"] in html, "not every frame is in the cell's own output"
+
+
+def test_the_player_repr_embeds_the_last_frame_too(frames):
+    """Regression: panel's own ``Player._get_embed_state`` lists an end-exclusive
+    range, which drops the movie's last frame from the embedded page.
+    """
+    pane = _interactive(frames, widget="player")
+    html = pane._repr_mimebundle_()[0]["text/html"]
+    assert frames[-1]["frame_label"] in html
 
 
 def test_an_unknown_widget_is_refused(frames):
@@ -627,7 +663,7 @@ def test_a_field_movie_names_its_variable_in_both_renderers():
     movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
     titles = [
         f.title.text
-        for el in _frames(movie)  # lazy: a DynamicMap has drawn none until asked
+        for el in _frames(movie)  # a HoloMap already has every frame drawn
         for f in hv.render(el, backend="bokeh").select({"type": figure})
     ]
     # the variable is spelled by the same field_title the static suptitle uses; the
@@ -661,18 +697,20 @@ def test_every_thins_a_field_movie_too():
     assert _facet_film(_run(10), every=3, domain=None)._save_count == 4
 
 
-def test_frames_are_drawn_on_demand_not_up_front():
-    """The fix for a movie that opened slowly and then would not step.
+def test_every_frame_is_in_the_page_so_the_slider_needs_no_kernel():
+    """The fix for a movie whose slider moved but the plot never did.
 
-    A HoloMap materializes every frame before showing one and embeds them all in the
-    page; for a real model field that is millions of quads in the browser. Opening must
-    cost one frame however many there are.
+    A lazy ``DynamicMap`` drew only the frame on screen, over a live Panel↔kernel comm
+    channel that has to be perfectly bound to work at all — and in a real notebook often
+    wasn't. A ``HoloMap`` has every frame drawn and ready to embed instead, so stepping
+    through them needs no channel and no kernel (see ``_with_widget``).
     """
-    movie = _hv(_facet_film(_run(40), renderer="holoviews", domain=None))
-    assert len(_keys(movie)) == 40
-    assert len(movie.data) == 0, "frames were drawn before anything asked for them"
-    _ = movie[_keys(movie)[7]]
-    assert len(movie.data) == 1, "asking for one frame drew more than one"
+    import holoviews as hv
+
+    movie = _hv(_facet_film(_run(6), renderer="holoviews", domain=None))
+    assert not isinstance(movie, hv.DynamicMap)
+    assert len(_keys(movie)) == 6
+    assert len(movie.data) == 6, "not every frame was drawn up front"
 
 
 def test_hover_is_off_by_default_and_available_on_request():
@@ -711,11 +749,13 @@ def test_a_big_mesh_is_rasterized_and_a_small_one_is_not():
 
 
 def test_rasterizing_does_not_nest_two_dynamic_maps():
-    """Regression: hvplot returns rasterize=True lazily, and holoviews cannot nest it.
+    """Regression: hvplot returns rasterize=True lazily, which a movie cannot hold.
 
-    The frames are already a DynamicMap, so the datashader operation has to be applied
-    eagerly (``dynamic=False``) — without that, rendering raises "Nesting a DynamicMap
-    inside a DynamicMap is not supported" only once something tries to draw it.
+    The frames sit in a ``HoloMap``, which has to hold concrete elements — there is
+    nothing downstream to evaluate a lazy aggregation once a frame is embedded in a
+    page — so the datashader operation is applied eagerly instead (``dynamic=False``).
+    Without that, rendering raises "Nesting a DynamicMap inside a DynamicMap is not
+    supported" only once something tries to draw it.
     """
     import holoviews as hv
 
@@ -725,13 +765,53 @@ def test_rasterizing_does_not_nest_two_dynamic_maps():
     hv.render(_frames(movie)[0], backend="bokeh")  # must not raise
 
 
-def test_tiles_put_a_basemap_under_the_field():
-    """Opt-in, because the browser fetches them — but they have to actually arrive."""
+def test_a_basemap_arrives_under_the_field_by_default():
+    """On by default: a notebook watching a movie is already on the web."""
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
+    kinds = [type(n).__name__ for n in _frames(movie)[0].traverse()]
+    assert "WMTS" in kinds, kinds
+
+
+def test_a_named_tile_source_replaces_the_default_basemap():
     movie = _hv(
         _facet_film(_run(3), renderer="holoviews", domain=None, tiles="EsriTerrain")
     )
+    tile = next(n for n in _frames(movie)[0].traverse() if type(n).__name__ == "WMTS")
+    assert "arcgisonline" in tile.data, tile.data
+
+
+def test_tiles_can_be_turned_off_for_offline_notebooks():
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None, tiles=False))
     kinds = [type(n).__name__ for n in _frames(movie)[0].traverse()]
-    assert "WMTS" in kinds, kinds
+    assert "WMTS" not in kinds, kinds
+
+
+def test_a_tiled_movie_opens_framed_on_its_domain():
+    """Regression: a tile layer's world extent must not win over the field's own.
+
+    Verified against the current geoviews/hvplot that the view auto-frames the domain
+    even with a basemap; this pins that so a future dependency bump that regresses it
+    is caught rather than silently reopening the world-extent bug _quadmesh documents.
+    """
+    import cartopy.crs as ccrs
+    import holoviews as hv
+
+    movie = _hv(_facet_film(_run(3), renderer="holoviews", domain=None))
+    fig = hv.render(_frames(movie)[0], backend="bokeh")
+    x0, y0 = ccrs.GOOGLE_MERCATOR.transform_point(-98, 18, ccrs.PlateCarree())
+    x1, y1 = ccrs.GOOGLE_MERCATOR.transform_point(-80, 31, ccrs.PlateCarree())
+    domain_width = abs(x1 - x0)
+    assert (fig.x_range.end - fig.x_range.start) < 3 * domain_width, (
+        "the view opened far wider than the domain -- looks like world extent"
+    )
+    assert fig.x_range.start < (x0 + x1) / 2 < fig.x_range.end
+
+
+def test_the_comparison_movie_gets_a_basemap_too(frames):
+    """``field_movie`` (test/reference/difference) gets tiles by default as well."""
+    for holomap in _holomaps(_interactive(frames)):
+        kinds = [type(n).__name__ for n in _frames(holomap)[0].traverse()]
+        assert "WMTS" in kinds, kinds
 
 
 def test_a_mistyped_tile_source_says_which_ones_exist():

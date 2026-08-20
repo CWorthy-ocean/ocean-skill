@@ -520,8 +520,10 @@ than merely inconsistent — see
 ### Movie-only parameters
 
 `field_movie` and `facet_movie` add `save`, `fps`, `dpi`, `every`, `frame_label`,
-`frame_label_kwargs`, `player` (interactive) and `progress`. They are documented together
-in [Movies](movies.md), since they only mean anything once there is more than one frame.
+`frame_label_kwargs`, `widget`/`player` (interactive), `progress`, and — interactively
+only — `hover`, `rasterize` and `tiles` (on by default; see [Movies](movies.md)). They
+are documented together in [Movies](movies.md), since they only mean anything once
+there is more than one frame.
 
 ### `metric_names` (`skill_map` only)
 

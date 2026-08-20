@@ -193,24 +193,26 @@ The default is a slider rather than holoviews' own choice because holoviews pick
 ordered sequence: the next frame is two clicks and a search, and you cannot drag through
 the movie at all.
 
-### Why the interactive movie is quick
+### Why the interactive movie works anywhere
 
-Three things, all of which the obvious implementation gets wrong on a real model grid:
-
-**Frames are drawn on demand.** The obvious construction — a `HoloMap` holding every
-frame — materializes the whole movie before showing one, and embeds all of it in the
-page. A 60-frame surface field on a 150×200 grid is 1.8M quads in the browser, which
-opens slowly and then answers the slider slowly or not at all. A `DynamicMap` draws the
-frame you are looking at and no others, so opening costs one frame however many there
-are. The trade is that it needs the kernel alive, which is why `save=` has to render
-every frame on the way out.
+**Every frame is drawn and embedded up front.** This used to be lazy: a `DynamicMap`
+drew only the frame on screen, and asked a live Python kernel to draw the next one the
+moment the slider moved. That channel has to be bound perfectly to work at all, and in
+practice often isn't — `pn.extension()` running mid-cell, a notebook exported or
+reopened with no kernel behind it, an editor with its own comm handling. When the
+channel wasn't there, the slider moved and the plot didn't, with no error to say why.
+Drawing every frame into a `HoloMap` and baking it into the notebook cell's own output
+(the same machinery `save=` has always used) turns stepping through them into plain
+client-side JavaScript: no comm, no kernel, nothing to lose. It works in a running
+notebook exactly as it does in one you've exported or reopened cold.
 
 **`hover=False` by default.** A hover readout makes bokeh hit-test every quad. That is
 worth paying on one map you are reading values off, and pure cost on a movie you are
 watching. `hover=True` brings it back.
 
 **`rasterize="auto"`.** Past ~100k cells a frame, datashader renders the mesh to an image
-instead of shipping every quad. On a 400×550 grid that is **210 MB → 4.4 MB** and
+instead of shipping every quad — which is also what makes embedding every frame
+affordable rather than a hang. On a 400×550 grid that is **210 MB → 4.4 MB** and
 **31s → 1s** to save:
 
 | | raw mesh | rasterized |
@@ -220,16 +222,24 @@ instead of shipping every quad. On a 400×550 grid that is **210 MB → 4.4 MB**
 | time to save | 31.5s | 1.0s |
 
 Below the threshold the raw mesh is kept, because it stays sharp when you zoom in.
-Rasterizing is applied eagerly (holoviews cannot nest one lazy operation inside
-another), so zooming magnifies the image rather than re-aggregating — pass
-`rasterize=False` for a field small enough to explore that way, or `True` to force it.
+Rasterizing is applied eagerly (a `HoloMap`'s frames have to be concrete elements —
+nothing downstream can evaluate a lazy aggregation once a frame is embedded), so zooming
+magnifies the image rather than re-aggregating — pass `rasterize=False` for a field
+small enough to explore that way, or `True` to force it.
+
+What remains is honest: display time and page size both scale with frame count, since
+every frame is drawn either way. `every=` thins a long movie, and the mp4 is the artifact
+for one long enough that thinning isn't enough.
 
 ### Looks
 
-`tiles=` puts a basemap under the field — `tiles="EsriTerrain"`, `"CartoLight"`, or any
-[geoviews tile source](https://geoviews.org/user_guide/Working_with_Bokeh.html). Off by
-default: the browser fetches them, so a notebook that has to work offline cannot rely on
-them.
+`tiles=True` (the default) puts a basemap under the field — a notebook watching a movie
+is already on the web, so there's nothing offline about fetching a few map tiles too.
+Pass a source name — `tiles="EsriTerrain"`, `"CartoLight"`, or any [geoviews tile
+source](https://geoviews.org/user_guide/Working_with_Bokeh.html) — for a different map,
+or `tiles=False` for a notebook that genuinely has to work offline. The view opens framed
+on the field's own domain, with the basemap filling in around it and under anywhere the
+field is masked.
 
 The panel title says **what** as well as **when** — `GOM_bgc: alkalinity, surface —
 2010-01-29`. The variable comes from the CF standard name via `vars.short_name`, the
@@ -256,9 +266,10 @@ runs.movie(renderer="holoviews", save="depths.html")      # a page to send someo
 **A saved `.html` embeds every frame's data**, so its size grows with the frame count —
 four frames of a modest domain is already tens of megabytes, on top of bokeh's own
 bundle. That is the price of a page that pans, zooms and hovers with no server behind it.
-Displaying the movie in a notebook doesn't pay it (frames render on demand), and for
-anything long the mp4 is the artifact to send: same frames, orders of magnitude smaller,
-at the cost of interactivity.
+Displaying the movie in a notebook pays the same cost, for the same reason (see [Why the
+interactive movie works anywhere](#why-the-interactive-movie-works-anywhere)); for
+anything long the mp4 is the artifact to send instead: same frames, orders of magnitude
+smaller, at the cost of interactivity.
 
 The seven matplotlib-only `*_kwargs` dicts — `frame_label_kwargs` among them — mean
 nothing interactively and warn once if passed, exactly as they do for any other family.

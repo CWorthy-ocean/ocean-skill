@@ -162,7 +162,7 @@ def _quadmesh(
     axis_labels: tuple[str, str] | None = None,
     hover: bool = True,
     rasterize: bool = False,
-    tiles: str | None = None,
+    tiles: str | bool | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -194,11 +194,12 @@ def _quadmesh(
     }
     if rasterize:
         # hvplot returns rasterize=True as a *lazy* DynamicMap so that zooming
-        # re-aggregates at the new extent. Holoviews cannot nest one DynamicMap inside
-        # another, and a movie's frames are already one (see _frame_map), so the
-        # aggregation is applied eagerly here instead. The cost is that zooming
-        # magnifies the rasterized image rather than re-aggregating the mesh underneath
-        # it — pass rasterize=False for a field small enough to zoom into properly.
+        # re-aggregates at the new extent. A movie's HoloMap has to hold concrete
+        # elements — nothing downstream of it can evaluate a lazy aggregation once it is
+        # embedded in a page (see _frame_map) — so the aggregation is applied eagerly
+        # here instead. The cost is that zooming magnifies the rasterized image rather
+        # than re-aggregating the mesh underneath it — pass rasterize=False for a field
+        # small enough to zoom into properly.
         opts["dynamic"] = False
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
@@ -206,23 +207,28 @@ def _quadmesh(
         opts |= {"geo": True, "coastline": "50m", "projection": None}
         if tiles:
             # a basemap gives the eye real coastline and terrain where the field is
-            # masked, which the 50m outline cannot. Web tiles are fetched by the
-            # browser, hence opt-in: a notebook that has to work offline cannot have
-            # them on by default.
+            # masked, which the 50m outline cannot. On by default for a movie, since a
+            # notebook watching one is on the web already; tiles=False opts back out
+            # for a notebook that has to work offline.
             opts["tiles"] = tiles
             opts.pop("projection", None)
-            # Known limitation: a tile layer carries the whole world's extent, so the
-            # view opens wider than the domain and the field sits in the middle of it.
-            # Constraining it with xlim/ylim in degrees does *not* work — with tiles the
-            # plot is in Web Mercator, and lon/lat limits silently drop the field
-            # altogether rather than framing it. Zooming re-frames it fine; a real fix
-            # means projecting the bounds, which is not worth the risk of a blank map.
+            # A tile layer's own extent is the whole world, so it might seem the view
+            # would open zoomed out to match. It does not: geoviews/hvplot frame the
+            # view on the field's own extent regardless (verified against geoviews
+            # 1.15.1 / hvplot 0.12.2). Do not add xlim/ylim here to "fix" this — an
+            # xlim/ylim pair in degrees silently empties a *rasterized* field instead
+            # (the image comes back with zero finite values), and one in Web Mercator
+            # metres is just ignored, since hvplot's geo xlim/ylim are read as lon/lat.
     try:
         return da.hvplot.quadmesh(**opts)
     except Exception:  # pragma: no cover - geoviews/cartopy unavailable
         opts.pop("geo", None)
         opts.pop("coastline", None)
         opts.pop("projection", None)
+        # tiles-without-geo is a different hvplot code path (it swaps x/y into
+        # dimensions to project them), which breaks on 2-D curvilinear lon/lat
+        # coordinates -- there is no basemap to fall back to without geo anyway.
+        opts.pop("tiles", None)
         return da.hvplot.quadmesh(**opts)
 
 
@@ -642,11 +648,13 @@ FRAME_DIM = "frame"
 RASTERIZE_ABOVE_CELLS = 100_000
 
 
-def _check_tiles(tiles: str | None) -> str | None:
+def _check_tiles(tiles: str | bool | None) -> str | bool | None:
     """Return ``tiles`` once confirmed to name a real tile source.
 
-    A typo is otherwise reported as ``"cannot swap from dimension 'lon'"`` from deep
-    inside hvplot's projection handling, which names neither the argument at fault nor
+    ``True`` means hvplot's own default basemap (OpenStreetMap) and needs no lookup;
+    any other string is checked against :mod:`geoviews.tile_sources` because a typo is
+    otherwise reported as ``"cannot swap from dimension 'lon'"`` from deep inside
+    hvplot's projection handling, which names neither the argument at fault nor
     anything a reader could act on.
     """
     if not tiles or tiles is True:
@@ -690,24 +698,29 @@ def _should_rasterize(da, rasterize) -> bool:
 
 
 def _frame_map(keys: list[str], draw, *, frame_dim: str | None = None):
-    """Return a ``DynamicMap`` over ``keys`` that draws frames on demand.
+    """Return a ``HoloMap`` holding every frame, drawn up front.
 
-    The obvious construction — a ``HoloMap`` holding every frame — materializes the
-    whole movie before the first one appears, and then ships all of it to the browser.
-    For a real model field that is the difference between a plot and a hang: a 60-frame
-    surface field on a 150x200 grid is 1.8M quads embedded in the page, which opens
-    slowly and then answers the slider slowly or not at all.
+    A lazy ``DynamicMap`` was tried here instead: it draws only the frame you're looking
+    at, so opening costs one frame however many there are. But it draws that frame by
+    sending the slider's new value back through a live Panel↔kernel comm channel — a
+    channel that has to be bound perfectly to work at all, and in practice often isn't
+    (``pn.extension()`` running mid-cell, VS Code's own comm mode, a notebook that has
+    been exported or reopened with no kernel behind it). When it isn't bound the slider
+    moves and the plot doesn't, with no error to say why. Eager frames have no channel to
+    lose: every frame is embedded in the display itself (see :func:`_with_widget`), so
+    stepping through them is plain client-side JavaScript.
 
-    A ``DynamicMap`` renders the frame you are looking at and no others, so opening
-    costs one frame however many there are. The trade is that it needs the kernel
-    alive — which a notebook has and a saved HTML page does not, so
-    :func:`_save_interactive` materializes it again on the way out.
+    What makes this affordable again is ``rasterize`` — past
+    :data:`RASTERIZE_ABOVE_CELLS` each frame is a small fixed-size image rather than a
+    full quadmesh, so building and embedding all of them costs a fraction of what it
+    would for the raw mesh. The cost that remains is display time and page size, both
+    proportional to frame count; ``every=`` and the static renderer's mp4 are the levers
+    for a movie long enough for that to matter (see docs/movies.md).
     """
     import holoviews as hv
 
     dim = hv.Dimension(frame_dim or FRAME_DIM, values=keys)
-    index = {key: i for i, key in enumerate(keys)}
-    return hv.DynamicMap(lambda frame: draw(index[frame]), kdims=[dim])
+    return hv.HoloMap({key: draw(i) for i, key in enumerate(keys)}, kdims=[dim])
 
 
 def _subject(item: dict[str, Any]) -> str:
@@ -778,7 +791,7 @@ def _facet_movie(
     zoom: float = 1.0,
     hover: bool = False,
     rasterize: bool | str = "auto",
-    tiles: str | None = None,
+    tiles: str | bool | None = True,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -788,8 +801,9 @@ def _facet_movie(
     is the more useful of the two: forty panels on a page are each too small to read,
     while forty frames are full size and a drag apart.
 
-    Frames are drawn on demand (see :func:`_frame_map`), so opening the movie costs one
-    frame however many there are.
+    Every frame is drawn and embedded up front (see :func:`_frame_map`), so the slider
+    works with no live kernel behind it — in an exported notebook exactly as in a
+    running one.
 
     Being the only panel on the page, it gets the page: the frame is
     :data:`SOLO_PANEL_WIDTH_PX` rather than the third-of-a-row every other family draws
@@ -806,9 +820,11 @@ def _facet_movie(
       ``True`` to get it back.
     * ``rasterize="auto"`` — render the mesh to an image with datashader once it is
       bigger than :data:`RASTERIZE_ABOVE_CELLS`. See :func:`_should_rasterize`.
-    * ``tiles`` — a basemap under the field, e.g. ``tiles="EsriTerrain"`` or
-      ``"CartoLight"`` (any :mod:`geoviews.tile_sources` name). Off by default because
-      the browser fetches them, which a notebook working offline cannot rely on.
+    * ``tiles=True`` — a basemap under the field (OpenStreetMap by default), on by
+      default since a notebook watching a movie is on the web already. Pass a
+      :mod:`geoviews.tile_sources` name (e.g. ``tiles="EsriTerrain"`` or
+      ``"CartoLight"``) for a different one, or ``tiles=False`` for a notebook that has
+      to work offline.
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
@@ -902,6 +918,7 @@ def _field_movie(
     zoom: float = 1.0,
     hover: bool = False,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -913,6 +930,12 @@ def _field_movie(
     of which an mp4 can do. ``widget="player"`` swaps the slider for a play/pause
     scrubber, at ``fps``, for when it should just run; ``"dropdown"`` gives holoviews'
     own default control.
+
+    ``tiles=True`` (the default) puts a basemap under all three panels, including the
+    difference — the field there is largely empty near the coast, which a basemap fills
+    in the same way it does for :func:`_facet_movie`. Pass a :mod:`geoviews.tile_sources`
+    name for a different map, or ``tiles=False`` for a notebook that has to work
+    offline.
 
     The colour scale is fixed across frames exactly as it is statically (see
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
@@ -944,6 +967,7 @@ def _field_movie(
     # rather than per panel because _quadmesh is called once per frame per panel and
     # would otherwise re-derive a different scale for each.
     raster = _should_rasterize(items[0]["aligned"]["reference"], rasterize)
+    tiles = _check_tiles(tiles)
     scope = items if shared_limits else items[:1]
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
@@ -985,6 +1009,7 @@ def _field_movie(
                 canvas_factor=factor,
                 hover=hover,
                 rasterize=raster,
+                tiles=tiles,
             )
         if panel == 1:
             return _quadmesh(
@@ -999,6 +1024,7 @@ def _field_movie(
                 canvas_factor=factor,
                 hover=hover,
                 rasterize=raster,
+                tiles=tiles,
             )
         summary = _metrics_summary(item.get("metrics"), metric_keys)
         return _quadmesh(
@@ -1012,6 +1038,7 @@ def _field_movie(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
         )
 
     # three maps over one shared frame dimension, so a single widget steps all three
@@ -1025,6 +1052,56 @@ def _field_movie(
     return layout
 
 
+#: Cached on first use — (pane class, player class) whose notebook repr embeds every
+#: frame instead of asking a live kernel to draw the next one. Built lazily because
+#: panel, like the rest of this module, is imported only once bokeh is actually needed.
+_EMBED_TYPES: tuple[type, type] | None = None
+
+
+def _embed_types() -> tuple[type, type]:
+    """Return (pane, player) classes whose repr bakes in every frame.
+
+    A stock ``pn.pane.HoloViews`` repr draws only the current frame and leaves the rest
+    to be requested over a live comm channel — see :func:`_frame_map` for why that
+    channel is the thing actually breaking the slider. Forcing ``embed=True`` for the
+    repr runs the same machinery ``pane.save(embed=True)`` already uses, which bakes
+    every frame's data into the page up front: no comm, no kernel, nothing to lose.
+
+    ``comms="default"`` has to be forced alongside it: panel checks for a VS Code or
+    ipywidgets comm *before* it checks ``config.embed``, and takes that live-kernel path
+    instead if one is available (VS Code is, whenever ``jupyter_bokeh`` is installed) —
+    which would put the very channel this is working around back in the loop.
+
+    A stock ``pn.widgets.Player``'s embedded states are also one short: it lists
+    ``range(start, end, step)``, which is end-exclusive, so the last frame of the movie
+    never makes it into the page. The subclass below lists ``end + step`` instead.
+    """
+    global _EMBED_TYPES
+    if _EMBED_TYPES is None:
+        import panel as pn
+
+        class _EmbeddedHoloViews(pn.pane.HoloViews):
+            def _repr_mimebundle_(self, include=None, exclude=None):
+                with pn.config.set(embed=True, comms="default"):
+                    return super()._repr_mimebundle_(include, exclude)
+
+        class _EmbedPlayer(pn.widgets.Player):
+            def _get_embed_state(self, root, values=None, max_opts=3):
+                if values is None:
+                    values = list(range(self.start, self.end + self.step, self.step))
+                return (
+                    self,
+                    self._models[root.ref["id"]][0],
+                    values,
+                    lambda x: x.value,
+                    "value",
+                    "cb_obj.value",
+                )
+
+        _EMBED_TYPES = (_EmbeddedHoloViews, _EmbedPlayer)
+    return _EMBED_TYPES
+
+
 def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
     """Wrap ``obj`` so its frame dimension gets the widget the caller asked for.
 
@@ -1036,7 +1113,15 @@ def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
     ``"slider"`` (the default) is a ``DiscreteSlider``: drag it, or arrow-key through
     the frames, with the label still reading "2010-01-29" rather than an index.
     ``"player"`` is a ``Player`` — play, pause, step — running at ``fps``.
-    ``"dropdown"`` returns the holoviews object untouched, as every other family does.
+    ``"dropdown"`` returns the holoviews object untouched; holoviews' own display
+    embeds a bare ``HoloMap`` the same way :func:`_embed_types` does explicitly here,
+    so it needs no special handling.
+
+    Both the slider and player panes use the embedding classes from
+    :func:`_embed_types`: every frame is baked into the notebook cell's own output, so
+    stepping through them is client-side JavaScript with no kernel behind it — it
+    survives a shut-down kernel or an exported notebook exactly as a saved HTML page
+    does (see :func:`_save_interactive`).
     """
     if widget == "dropdown":
         return obj
@@ -1046,11 +1131,17 @@ def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
         )
     import panel as pn
 
+    pane_cls, player_cls = _embed_types()
     pn.extension()
     if widget == "player":
-        pane = pn.pane.HoloViews(obj, widget_type="scrubber", widget_location="bottom")
+        pane = pane_cls(
+            obj,
+            widget_type="scrubber",
+            widget_location="bottom",
+            default_widgets={"scrubber": player_cls},
+        )
     else:
-        pane = pn.pane.HoloViews(
+        pane = pane_cls(
             obj,
             widget_location="bottom",
             widgets={frame_dim: pn.widgets.DiscreteSlider} if frame_dim else {},
@@ -1066,10 +1157,11 @@ def _with_widget(obj, *, widget: str, fps: int, frame_dim: str | None = None):
 def _save_interactive(obj, save) -> None:
     """Write ``obj`` to a standalone HTML page, refusing formats bokeh cannot write.
 
-    A page has no kernel behind it, so the laziness that makes a movie open quickly in a
-    notebook (see :func:`_frame_map`) has to be paid back here: every frame is rendered
-    and embedded. That is the whole movie in one file, and it grows with the frame count
-    — which is exactly why the static renderer's mp4 exists.
+    A page has no kernel behind it, so every frame has to be rendered and embedded in
+    it — the same thing a notebook display now does (see :func:`_frame_map` and
+    :func:`_with_widget`), just written to disk instead of a cell. That is the whole
+    movie in one file, and it grows with the frame count — which is exactly why the
+    static renderer's mp4 exists.
     """
     from pathlib import Path
 
@@ -1085,10 +1177,8 @@ def _save_interactive(obj, save) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if hasattr(obj, "save"):  # a panel pane; embed=True evaluates every frame
         obj.save(str(path), embed=True)
-    else:
-        # a bare DynamicMap cannot be serialized lazily either -- materialize it into
-        # the HoloMap it would have been, which is what hv.save can write
-        hv.save(hv.HoloMap(obj) if isinstance(obj, hv.DynamicMap) else obj, str(path))
+    else:  # widget="dropdown": a bare HoloMap, which hv.save embeds directly
+        hv.save(obj, str(path))
     print(f"ocean-skill: interactive movie written to {path}")
 
 
