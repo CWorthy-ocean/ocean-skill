@@ -402,6 +402,20 @@ def select(obj, spec: dict[str, Any] | None):
     - a scalar — exact if present, otherwise the nearest value, because a float
       coordinate almost never matches exactly and failing on that is unhelpful.
 
+    A date string that names a single **instant** — ``"2013-01-30T02:00:00"``, or
+    any date no coarser than the axis's own resolution — behaves like a scalar:
+    exact if present, otherwise the nearest step, because model output is stamped
+    at whatever offsets the run chose and the caller cannot be expected to know
+    them. A **period** (``"2012-01"``) is never snapped: it either contains data
+    or it is an error, because the nearest neighbour of an empty January is data
+    from a month the caller did not name. See :func:`_string_instant` for where
+    the line sits.
+
+    There is no ``method`` key — nearest is automatic, and every key here is an
+    axis name. Since xarray's own ``KeyError`` suggests exactly that keyword, a
+    ``method``/``tolerance`` key that matches no axis draws a warning instead of
+    the silent skip other absent names get.
+
     A range — either spelling — is honoured on a **descending** axis as well as an
     ascending one; see :func:`oriented_slice` for why that needs saying, and why a
     satellite product is where it bites.
@@ -414,6 +428,14 @@ def select(obj, spec: dict[str, Any] | None):
     for name, value in (spec or {}).items():
         dim = resolve_dim(obj, name)
         if dim is None or dim not in obj.dims:
+            if name in ("method", "tolerance"):
+                warnings.warn(
+                    f"select ignores {name!r}: spec keys are axis names, not "
+                    "xarray .sel() keywords. Nearest matching is automatic — "
+                    "an inexact scalar or a full timestamp snaps to the "
+                    "nearest step on its own.",
+                    stacklevel=2,
+                )
             continue
         if isinstance(value, dict):
             value = slice(value.get("min"), value.get("max"))
@@ -425,14 +447,88 @@ def select(obj, spec: dict[str, Any] | None):
             continue
         try:
             obj = obj.sel({dim: value})
-        except (KeyError, IndexError):
-            # A scalar that is not an exact coordinate value: nearest is what the
-            # caller meant. Strings (partial dates) are exempt — xarray resolves
-            # those itself, and "nearest" is undefined for them.
+        except (KeyError, IndexError) as err:
+            # A value that is not an exact coordinate match: nearest is what the
+            # caller meant. A string gets that treatment only when it names a
+            # single instant; a period ("2013-01") failing means the period is
+            # *empty*, and its nearest neighbour would be data from a time the
+            # caller did not name — that stays an error, restated in select's
+            # own terms because xarray's hint to try method='nearest' points at
+            # a keyword this spec deliberately does not have.
             if isinstance(value, str):
-                raise
+                instant = _string_instant(obj, dim, value)
+                if instant is None:
+                    _explain_empty_period(obj, dim, name, value, err)
+                    raise
+                value = instant
             obj = obj.sel({dim: value}, method="nearest")
     return obj
+
+
+def _string_instant(obj, dim: str, value: str):
+    """The moment ``value`` names, as a ``Timestamp`` — ``None`` if it names a span.
+
+    ``"2013-01-30T02:00:00"`` is an instant; ``"2013-01"`` is a span (all of
+    January); ``"2013-01-30"`` is either, depending on the axis — one step of
+    daily output, twenty-four of hourly. The dividing line is the axis's own
+    resolution: a string no coarser than the axis pins down a single step's worth
+    of time, so *the nearest step* means something, exactly as it does for a
+    scalar. Anything coarser is a period, whose emptiness is the caller's to hear
+    about (see :func:`select`).
+
+    ``None`` also covers everything this cannot judge: a string that is not a
+    date, and an axis that is not a ``DatetimeIndex`` — station labels, or a
+    cftime axis, where xarray's own string handling is the only safe reading.
+    """
+    import pandas as pd
+
+    index = obj.indexes.get(dim)
+    if not isinstance(index, pd.DatetimeIndex):
+        return None
+    try:
+        period = pd.Period(value)
+    except (TypeError, ValueError):
+        return None
+    # pandas spells the axis resolution as a word; the matching span is how much
+    # time a string at that resolution covers. Coarser entries are unreachable —
+    # midnight-stamped monthly data already resolves as "day".
+    step = {
+        "day": pd.Timedelta(days=1),
+        "hour": pd.Timedelta(hours=1),
+        "minute": pd.Timedelta(minutes=1),
+        "second": pd.Timedelta(seconds=1),
+        "millisecond": pd.Timedelta(milliseconds=1),
+        "microsecond": pd.Timedelta(microseconds=1),
+        "nanosecond": pd.Timedelta(nanoseconds=1),
+    }.get(index.resolution)
+    if step is None or period.end_time - period.start_time > step:
+        return None
+    return pd.Timestamp(period.start_time)
+
+
+def _explain_empty_period(obj, dim: str, name: str, value: str, err) -> None:
+    """Raise the empty-period ``KeyError`` in select's vocabulary, when it can.
+
+    Only a date string against a datetime axis earns the restatement — there the
+    axis extent says at a glance whether the period missed the record entirely or
+    fell in a gap. Anything else that failed (a station name against a label
+    index, a typo that is no date at all) keeps xarray's error: returning without
+    raising lets :func:`select` re-raise it.
+    """
+    import pandas as pd
+
+    index = obj.indexes.get(dim)
+    if not isinstance(index, pd.DatetimeIndex) or not len(index):
+        return
+    try:
+        pd.Period(value)
+    except (TypeError, ValueError):
+        return
+    raise KeyError(
+        f"{name!r} has no data within {value!r}; the axis runs {index[0]} to "
+        f"{index[-1]}. A period must contain data — name a single instant "
+        "(a full timestamp) to snap to the nearest step instead."
+    ) from err
 
 
 def spec_names(spec: Any) -> list[list[str]]:
