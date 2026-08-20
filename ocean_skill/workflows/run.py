@@ -30,6 +30,11 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     restarted and has temporarily produced no files — must not wipe out every other
     entry the catalog already had. A source whose glob matches nothing simply keeps
     whatever entry it already had; only sources that actually rebuilt get touched.
+
+    An entry's ``keep`` key (default ``"all"``) is forwarded to
+    :func:`ocean_skill.build.make_kerchunk` — a restart stream that is still being
+    refreshed against a live run declares ``keep: latest-per-file`` to drop each
+    file's earlier, superseded record.
     """
     import glob as _glob
 
@@ -57,7 +62,12 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         if not files:
             skipped.append(entry["name"])
             continue
-        ref = make_kerchunk(files, entry["ref"], grid=entry.get("grid"))
+        ref = make_kerchunk(
+            files,
+            entry["ref"],
+            grid=entry.get("grid"),
+            keep=entry.get("keep", "all"),
+        )
         add_source(cat, entry["name"], ref)
         rebuilt.append(entry["name"])
         print(f"  refresh: {entry['name']} <- {len(files)} files")
