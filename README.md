@@ -260,6 +260,29 @@ what turns a mismatch between the two recipes into a warning rather than a numbe
 looks right and isn't. `Comparison`/`compare()` accept a pair-spec; `Field` does not
 (there is no second lane to give the other half of the pair to).
 
+`select` and `aggregate` accept the same `{"test": ..., "reference": ...}` spelling,
+for when the two lanes' *axes* don't match, not just their variable recipe — a model
+spanning several years against a WOA monthly climatology (its `time` read with
+`decode_times=False`, since a climatology has no calendar year to decode):
+
+```python
+osk.compare(
+    reference="woa23_nitrate_month01", test="GOM_bgc", variables=["nitrate"],
+    aggregate={"test": {"time": {"groupby": "month", "reduce": "mean"}},
+               "reference": {"time": "mean"}},
+    select={"test": {"month": 1}, "reference": {}},
+)
+```
+
+The model needs a monthly climatology of its own, then one month picked out of it;
+the reference just needs its one time step meaned away — a shared `aggregate` would
+try to `groupby` the reference's undecoded numeric time (no calendar to group by),
+and a shared `select={"time": "2010-01"}` fails the same way trying to match a date
+string against it. `select={"month": 1}` is deferred and retried once the aggregate
+above has created that axis, since it doesn't exist before then. `depths=`/
+`select={"depth": ...}` sugar still applies to both sides of a pair-spec select at
+once.
+
 ## Catalogs
 
 Sources are described by [intake](https://intake.readthedocs.io) v2 catalogs, found

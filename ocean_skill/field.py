@@ -100,6 +100,19 @@ class Field:
                 "source and nothing to give the other side to. Pass the one spec this "
                 "source actually needs, or use osk.compare() for a pair-spec."
             )
+        # select/aggregate carry the same pair-spec spelling in a Comparison, one
+        # lane's own select/aggregate -- a Field is one source, so a pair here is the
+        # same mistake as a pair-spec variable, and gets the same clear error.
+        for name, arg in (("select", select), ("aggregate", aggregate)):
+            if isinstance(arg, dict):
+                _require_pair_spec(arg, kind=name)
+            if is_pair_spec(arg):
+                raise TypeError(
+                    f"{arg!r} is a {{'test', 'reference'}} pair-spec {name}, for "
+                    "giving two lanes different selections/aggregations -- Field "
+                    f"has only one source and no other lane to give the other side "
+                    f"to. Pass the one {name} this source actually needs."
+                )
         self.source = source
         self.variable = (
             resolve_and_report(variable, context="Field variable=")

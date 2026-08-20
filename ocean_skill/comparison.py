@@ -20,11 +20,13 @@ __all__ = [
     "SURFACE",
     "Comparison",
     "ComparisonSet",
+    "aggregate_for",
     "as_select",
     "compare",
     "is_pair_spec",
     "is_surface_request",
     "prepare_source",
+    "select_for",
     "summary",
     "variable_for",
 ]
@@ -205,20 +207,24 @@ def is_pair_spec(spec: Any) -> bool:
     return isinstance(spec, dict) and {"test", "reference"} <= spec.keys()
 
 
-def _require_pair_spec(spec: dict[str, Any]) -> None:
+def _require_pair_spec(spec: dict[str, Any], kind: str = "variable") -> None:
     """Raise if ``spec`` has exactly one of ``test``/``reference`` — a likely typo.
 
     A dict with neither key is an ordinary combination spec and never reaches this;
     one with both is a valid pair. One alone is almost certainly a slip (typing
     ``"tests"``, or meaning to write a plain combination) and is worth naming rather
     than silently treating as a combiner key that will fail some other way downstream.
+
+    ``kind`` names what's being validated (``"variable"``, ``"select"``,
+    ``"aggregate"``) so the same check reads correctly for all three pair-specs.
     """
     have = {"test", "reference"} & spec.keys()
     if have and have != {"test", "reference"}:
         missing = ({"test", "reference"} - have).pop()
+        article = "an" if kind[0] in "aeiou" else "a"
         raise ValueError(
-            f"a variable pair-spec needs both 'test' and 'reference'; got {sorted(have)} "
-            f"but not {missing!r}. {spec!r}"
+            f"{article} {kind} pair-spec needs both 'test' and 'reference'; got "
+            f"{sorted(have)} but not {missing!r}. {spec!r}"
         )
 
 
@@ -229,6 +235,59 @@ def variable_for(spec: Any, role: str) -> Any:
     through this once rather than repeating the ``is_pair_spec`` check.
     """
     return spec[role] if is_pair_spec(spec) else spec
+
+
+def select_for(spec: Any, role: str) -> dict[str, Any]:
+    """Return the select dict one lane (``"test"``/``"reference"``) should use.
+
+    A pair-spec's own side; any other select, unchanged. Mirrors :func:`variable_for`
+    exactly, and is meant to be called on an already-normalized select (see
+    :func:`_normalize_pair`, used by :class:`Comparison` and :func:`compare`) — by the
+    time this runs, either side of a pair is already a plain dict, not something that
+    still needs :func:`as_select`.
+
+    The pair spelling exists for a reference whose axis cannot take the same value the
+    test lane needs — a WOA climatology's undecoded, numeric ``time`` cannot be asked
+    for ``"2010-01"`` the way the model's calendar time can — so ``select={"test":
+    {"time": "2010-01"}, "reference": {}}`` gives each lane its own selection instead
+    of the one shared dict every other axis still uses.
+    """
+    return spec[role] if is_pair_spec(spec) else spec
+
+
+def aggregate_for(spec: Any, role: str) -> dict[str, Any] | None:
+    """Return the aggregate spec one lane should use. Mirrors :func:`select_for`."""
+    return spec[role] if is_pair_spec(spec) else spec
+
+
+def _normalize_pair(
+    spec: Any, kind: str, *, normalize_side=lambda x: x
+) -> Any:
+    """Validate ``spec`` as a possible select/aggregate pair-spec, and normalize it.
+
+    Any top-level ``test``/``reference`` key signals pair intent: both are then
+    required (:func:`_require_pair_spec`) and, unlike a variable pair-spec, no other
+    key is allowed alongside them -- a select/aggregate pair has nothing else to
+    carry (no ``standard_name``), and there is no precedence rule in this package for
+    a key floating outside the two sides, so one is refused rather than silently
+    applied to one side, the other, or neither. Anything without pair intent passes
+    through ``normalize_side`` as a whole, unchanged in shape.
+    """
+    if isinstance(spec, dict):
+        _require_pair_spec(spec, kind=kind)
+    if is_pair_spec(spec):
+        extra = spec.keys() - {"test", "reference"}
+        if extra:
+            raise ValueError(
+                f"a {kind} pair-spec takes only 'test' and 'reference', got extra "
+                f"key(s) {sorted(extra)} -- put any axis shared by both lanes inside "
+                "both sides instead."
+            )
+        return {
+            "test": normalize_side(spec["test"]),
+            "reference": normalize_side(spec["reference"]),
+        }
+    return normalize_side(spec)
 
 
 def _expand_derived(spec: Any) -> Any:
@@ -387,10 +446,14 @@ def _display_depth(variable: Any, select: dict[str, Any]) -> Any:
     see :data:`NO_VERTICAL_AXIS` -- so :func:`_selected_depth`'s own default
     (:data:`SURFACE`, meant for an ordinary field nothing narrowed vertically) would
     misreport where in the column the number actually came from.
+
+    A pair-spec select reports the **test** side's depth -- an arbitrary but
+    necessary choice, matching :attr:`Comparison.standard_name`'s own precedent of
+    letting the test side name the figure when the two lanes could disagree.
     """
     if _is_calculated(variable):
         return NO_VERTICAL_AXIS
-    return _selected_depth(select)
+    return _selected_depth(select_for(select, "test"))
 
 
 def _surface_and_levels(sub, meta, name: str, depths) -> Any:
@@ -496,12 +559,73 @@ def _require_reduced(da, role: str, source: str) -> None:
     )
 
 
+def _select_horizontal_then_aggregate(
+    da, horizontal: dict[str, Any], agg: dict[str, Any] | None, source: str
+):
+    """Apply the horizontal ``select`` and non-vertical ``aggregate``, in that order.
+
+    A ``select`` key ordinarily has to name an axis already standing on ``da``
+    (selection precedes reduction — see the ordering note in :func:`_prepare`), but
+    it can also name an axis the aggregation itself *creates*:
+    ``{"time": {"groupby": "month", "reduce": "mean"}}`` renames ``time`` to
+    ``month`` (:func:`ocean_skill.operators.aggregate`), so a caller who wants one
+    month of that climatology writes ``select={"month": 1}`` — a key that matches
+    nothing until *after* the aggregate has run. Such a key is given a second try
+    once the aggregate has run, rather than being silently skipped the way an axis
+    a variable genuinely lacks is (:func:`ocean_skill.operators.select`'s own
+    contract, needed so one shared spec can cover several variables that don't all
+    carry the same axes).
+
+    Only a key still unmatched after *both* tries is the ordinary "not this
+    source's axis" case — and stays silent, or this would warn on essentially every
+    multi-variable :func:`compare` call. A key deferred to the second try and still
+    unmatched then is closer to a typo or a misunderstanding of what the aggregate
+    produced, so it draws a warning rather than vanishing without a trace.
+    """
+    import warnings
+
+    from ocean_skill import _stacklevel, operators
+
+    applied = {
+        name
+        for name in horizontal
+        if (dim := operators.resolve_dim(da, name)) is not None and dim in da.dims
+    }
+    da = operators.select(da, {k: v for k, v in horizontal.items() if k in applied})
+    da = operators.aggregate(da, agg)
+    deferred = {k: v for k, v in horizontal.items() if k not in applied}
+    if not deferred:
+        return da
+    still_unmatched = {
+        k
+        for k in deferred
+        if (dim := operators.resolve_dim(da, k)) is None or dim not in da.dims
+    }
+    if to_apply := {k: v for k, v in deferred.items() if k not in still_unmatched}:
+        da = operators.select(da, to_apply)
+    if still_unmatched:
+        warnings.warn(
+            f"{source!r}: select key(s) {sorted(still_unmatched)} matched no axis "
+            f"before or after aggregate={agg!r} ran; the standing axes are "
+            f"{sorted(da.dims)}. If one of these names an axis the aggregate "
+            "creates -- a groupby renames its dim to the grouping key, e.g. time -> "
+            "month -- check the spelling against what the aggregate actually "
+            "produced. Otherwise this is the ordinary case of a select shared "
+            "across variables that don't all carry the same axis, and can be "
+            "ignored.",
+            stacklevel=_stacklevel.find(),
+        )
+    return da
+
+
 def _prepare(
     obj,
     meta: dict[str, Any],
     variable: Any,
     select: dict[str, Any],
     aggregate: dict[str, Any] | None = None,
+    *,
+    source: str = "<unnamed>",
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -568,10 +692,14 @@ def _prepare(
     # fields as the reduction leaves it -- one, for a time mean; every step, now that
     # no reduction is the default, which is the cost of asking for every step. The
     # vertical part of the aggregation then collapses whatever the vertical selection
-    # left standing.
+    # left standing. A select key can also name an axis the aggregation *creates*
+    # (groupby renames its dim to the grouping key) rather than one already
+    # standing -- see :func:`_select_horizontal_then_aggregate`, which gives such a
+    # key a second try once the aggregate has run.
     horizontal = {k: v for k, v in select.items() if k not in _ANY_VERTICAL_KEYS}
-    da = operators.select(da, horizontal)
-    da = operators.aggregate(da, _without_vertical(agg))
+    da = _select_horizontal_then_aggregate(
+        da, horizontal, _without_vertical(agg), source
+    )
 
     if calculated:
         bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
@@ -628,8 +756,8 @@ def _prepare(
                         "check the catalog entry's standard_names map, or that the "
                         "source actually carries it)."
                     )
-                column = operators.aggregate(
-                    operators.select(column, horizontal), _without_vertical(agg)
+                column = _select_horizontal_then_aggregate(
+                    column, horizontal, _without_vertical(agg), source
                 )
                 sub = sub.assign({standard_name: column})
             targets = (
@@ -896,7 +1024,9 @@ def prepare_source(
     constraints = erddap_constraints(meta, select, time_window)
     obj = osk.read(source, constraints=constraints) if constraints else osk.read(source)
     _warn_if_chunk_is_large(obj, source)
-    da, depth = _prepare(obj, meta, variable, dict(select or {}), aggregate)
+    da, depth = _prepare(
+        obj, meta, variable, dict(select or {}), aggregate, source=source
+    )
     if da is not None and require_reduced:
         # before .load(), while it is still free -- see the docstring
         _require_reduced(da, require_reduced, source)
@@ -1005,8 +1135,21 @@ class Comparison:
                 if isinstance(variable, str)
                 else variable
             )
-        self.select = as_select(select)
-        self.aggregate = aggregate
+        # Either may also be a {"test": ..., "reference": ...} pair-spec, for a
+        # reference whose axis cannot take the same value the test lane needs (a WOA
+        # climatology's undecoded, numeric time cannot be asked for "2010-01" the way
+        # the model's calendar time can) -- see select_for/aggregate_for, which each
+        # lane's own prepare() call resolves this through, mirroring variable_for.
+        self.select = _normalize_pair(select, "select", normalize_side=as_select)
+        self.aggregate = _normalize_pair(aggregate, "aggregate")
+        if is_pair_spec(self.aggregate):
+            for role, side in self.aggregate.items():
+                if side is not None and not isinstance(side, dict):
+                    raise TypeError(
+                        f"aggregate={{'test': ..., 'reference': ...}}'s {role!r} "
+                        f"side must be a dict or None, matching aggregate= itself; "
+                        f"got {side!r}."
+                    )
         self.method = method
         # An explicit over= always wins; otherwise the reference's featureType decides,
         # since a station reference has a time axis and no map to draw. The reason is
@@ -1111,8 +1254,8 @@ class Comparison:
         return prepare_source(
             source,
             variable_for(self.variable, role),
-            self.select,
-            self.aggregate,
+            select_for(self.select, role),
+            aggregate_for(self.aggregate, role),
             use_cache=use_cache,
             refresh=refresh,
             require_reduced=None if self.over else role,
@@ -2061,6 +2204,73 @@ def summary(
     return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **kwargs)
 
 
+def _fan_vertical_entries(
+    select: dict[str, Any], keys: frozenset[str]
+) -> dict[str, Any]:
+    """Return the vertical entries (of ``keys``) compare()'s depths=/sigma0 sugar sees.
+
+    ``select`` here is always a dict (never ``None``) by the time :func:`compare`
+    calls this -- normalized up front through :func:`_normalize_pair`. For a plain
+    select, the entries it carries under ``keys`` are returned as-is. For a
+    pair-spec select, both sides must *agree* on any key of ``keys`` present in
+    both -- the sugar fans one set of values over both lanes, which only makes
+    sense if both lanes are being asked the same vertical question. A genuine
+    conflict raises, naming both sides, rather than silently preferring one: there
+    is no depths=/sigma0 spelling for a different vertical value per lane --
+    construct :class:`Comparison` directly (with its own per-role select) for that.
+    """
+    if not is_pair_spec(select):
+        return {k: select[k] for k in keys if k in select}
+    merged: dict[str, Any] = {}
+    for role in ("test", "reference"):
+        side = select[role] or {}
+        for k in keys:
+            if k not in side:
+                continue
+            if k in merged and merged[k] != side[k]:
+                raise ValueError(
+                    "compare()'s depths=/select vertical sugar fans one value over "
+                    f"both lanes, but this pair-spec select disagrees on {k!r}: "
+                    f"test={select['test'].get(k)!r}, "
+                    f"reference={select['reference'].get(k)!r}. Leave vertical keys "
+                    "out of a pair-spec select and pass depths=/select={'sigma0': "
+                    "...} normally (it is applied to both sides), or construct "
+                    "Comparison(...) directly for genuinely different per-lane "
+                    "vertical requests."
+                )
+            merged[k] = side[k]
+    return merged
+
+
+def _fanned_select(
+    select: dict[str, Any], fan_key: str, value: Any, calculated: bool
+) -> dict[str, Any]:
+    """Build the per-comparison select compare()'s depths=/sigma0 fan-out uses.
+
+    Strips any existing vertical key first -- ``depths=``/``select={'sigma0': ...}``
+    is sugar that *replaces* whatever vertical entry ``select`` already carried,
+    honouring the key the caller used rather than silently overriding it with a
+    different spelling -- then writes the fanned value back under ``fan_key``. For a
+    pair-spec select this happens on **both** sides, since the sugar asks the same
+    vertical question of both lanes (:func:`_fan_vertical_entries` already refused a
+    pair select that disagreed with itself on that axis).
+    """
+
+    def _strip(side: dict[str, Any] | None) -> dict[str, Any]:
+        return {k: v for k, v in (side or {}).items() if k not in _ANY_VERTICAL_KEYS}
+
+    if is_pair_spec(select):
+        sel = {"test": _strip(select["test"]), "reference": _strip(select["reference"])}
+        if not calculated:
+            sel["test"][fan_key] = value
+            sel["reference"][fan_key] = value
+        return sel
+    sel = _strip(select)
+    if not calculated:
+        sel[fan_key] = value
+    return sel
+
+
 def compare(
     *,
     reference,
@@ -2114,6 +2324,33 @@ def compare(
     — see :func:`ocean_skill.field.field` for the model-only path that plots those as
     panels.
 
+    ``select`` and ``aggregate`` may also each be a **pair-spec** — ``{"test": ...,
+    "reference": ...}`` — for when the two lanes' axes are not asking the same
+    question, not just carrying different values. A model spanning several years
+    compared against a WOA monthly climatology (read with ``decode_times=False``,
+    since a climatology has no calendar year) is the motivating case: the model needs
+    ``{"time": {"groupby": "month", "reduce": "mean"}}`` then a single month picked
+    out of the result, while the climatology just needs its lone time step meaned
+    away — a shared groupby would crash on it (no calendar to group by), and a shared
+    ``select={"time": "2010-01"}`` fails the same way trying to match a date string
+    against its undecoded, numeric time coordinate::
+
+        osk.compare(
+            ..., variables=["nitrate"], reference="woa23_nitrate_month01",
+            aggregate={"test": {"time": {"groupby": "month", "reduce": "mean"}},
+                       "reference": {"time": "mean"}},
+            select={"test": {"month": 1}, "reference": {}},
+        )
+
+    Note the ``select={"month": 1}`` above: it names an axis the *aggregation itself
+    creates* (a groupby renames its dim to the grouping key), which is why it can't
+    run before the aggregate the way ``select`` ordinarily does — it is deferred and
+    applied a second time once the aggregate has run, and only warns (rather than
+    silently doing nothing) if it still matches no axis afterward. ``depths=``/
+    ``select={"depth": ...}`` sugar still applies to both lanes of a pair-spec select
+    at once — write the vertical key into only one side, or into both agreeing on the
+    same value, and let the sugar fan it out.
+
     ``over`` is the third answer to "what happens to the time axis", and the one for a
     reference that varies in time as well as space. ``over="time"`` keeps the axis,
     matches the two lanes along it (:func:`ocean_skill.align.match_axis` — a finer test
@@ -2155,16 +2392,24 @@ def compare(
     from ocean_skill.catalog import resolve
     from ocean_skill.vocabulary import equivalent_names, resolve_and_report
 
+    # Validated (and, for a pair, normalized to plain per-side dicts) once up front,
+    # like `variables` below -- otherwise a one-sided {"test": ...} select/aggregate
+    # would surface only later, mid-fan-out, in the first Comparison() this builds.
+    # From here on `select` is always a dict (never None) and, if a pair, exactly
+    # {"test": ..., "reference": ...}.
+    select = _normalize_pair(select, "select", normalize_side=as_select)
+    aggregate = _normalize_pair(aggregate, "aggregate")
+
     # depths defaults to the vertical entry already in `select`, if any, so the two
     # spellings agree instead of one clobbering the other. Recorded *before*
     # defaulting -- see the calculated-variable check below, which needs to tell a
     # caller who explicitly asked for a real depth apart from one who never asked
-    # at all and is only seeing the ("surface",) sentinel.
+    # at all and is only seeing the ("surface",) sentinel. For a pair-spec select,
+    # both sides must agree on any vertical key present in both -- see
+    # :func:`_fan_vertical_entries`.
     depths_was_explicit = depths is not None
-    explicit_vertical_select = {
-        k: select[k] for k in _VERTICAL_KEYS if select and k in select
-    }
-    sigma_request = select.get("sigma0") if select else None
+    explicit_vertical_select = _fan_vertical_entries(select, _VERTICAL_KEYS)
+    sigma_request = _fan_vertical_entries(select, _ISOPYCNAL_KEYS).get("sigma0")
     if depths_was_explicit and sigma_request is not None:
         raise ValueError(
             "compare() got both depths= and select={'sigma0': ...} -- pick one "
@@ -2329,12 +2574,9 @@ def compare(
                     # `depths`/`sigma0` is sugar for fanning select's vertical entry
                     # over a list -- one comparison per value. Writing it into the
                     # same key the caller may have used means a select={"Z": ...} is
-                    # honoured rather than silently overridden by the default.
-                    sel = {**(select or {})}
-                    for key in _ANY_VERTICAL_KEYS:
-                        sel.pop(key, None)
-                    if not calculated:
-                        sel[fan_key] = d
+                    # honoured rather than silently overridden by the default. Into
+                    # both sides of a pair-spec select -- see :func:`_fanned_select`.
+                    sel = _fanned_select(select, fan_key, d, calculated)
                     # Label only what varies across the set: repeating the variable
                     # name on every point of a single-variable fan-out just collides.
                     short = _short_variable_label(var)
