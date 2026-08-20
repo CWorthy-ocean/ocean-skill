@@ -85,9 +85,21 @@ class Field:
         label: str | None = None,
         cache: bool | None = None,
     ):
-        from ocean_skill.comparison import as_select
+        from ocean_skill.comparison import _require_pair_spec, as_select, is_pair_spec
         from ocean_skill.vocabulary import resolve_and_report
 
+        if isinstance(variable, dict):
+            # A one-sided {"test": ...} names the same mistake a full pair-spec
+            # does, and deserves the same clear error rather than surfacing later,
+            # confusingly, as "unknown combiner 'test'" out of resolve_variable.
+            _require_pair_spec(variable)
+        if is_pair_spec(variable):
+            raise TypeError(
+                f"{variable!r} is a {{'test', 'reference'}} pair-spec, which names two "
+                "different recipes for two different lanes -- Field has only one "
+                "source and nothing to give the other side to. Pass the one spec this "
+                "source actually needs, or use osk.compare() for a pair-spec."
+            )
         self.source = source
         self.variable = (
             resolve_and_report(variable, context="Field variable=")

@@ -203,7 +203,7 @@ def key_for(
     *,
     test: str,
     reference: str,
-    variable: str,
+    variable: Any,
     select: dict[str, Any],
     method: str,
 ) -> str:
@@ -228,7 +228,7 @@ def key_for(
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def key_for_prepared(*, source: str, variable: str, select: dict[str, Any]) -> str:
+def key_for_prepared(*, source: str, variable: Any, select: dict[str, Any]) -> str:
     """Return the cache key for one *lane*: a single source reduced to a 2-D field.
 
     Deliberately excludes the other source and the regrid method — that is the whole

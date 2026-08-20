@@ -124,6 +124,19 @@ def register_calculator(name: str, *, inputs: Any = None):
     criterion) and needs coordinates :func:`resolve_variable` does not have (the
     depth axis). Use as a decorator; pass ``inputs=`` to register into
     :data:`CALCULATOR_INPUTS` at the same time.
+
+    This is public runtime API, not an internal detail: any function can be plugged
+    in this way from a notebook, with no codebase change --
+
+    >>> @register_calculator("eke")
+    ... def eddy_kinetic_energy(ds, **kwargs):
+    ...     ...
+    ...     return da
+    >>> osk.field("GOM_bgc", {"calculate": "eke"})
+
+    A spec stays data even so (a name plus keyword arguments, not the function
+    itself), which is what lets it serialize into a cache key and survive a round
+    trip through YAML -- see :mod:`ocean_skill.mld` for a complete example.
     """
 
     def decorate(fn):
