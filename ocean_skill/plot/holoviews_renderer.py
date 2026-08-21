@@ -300,6 +300,7 @@ def _field_row(
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
+    domain=None,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -378,6 +379,9 @@ def _field_row(
             canvas_factor=factor,
         ),
     ]
+    outline = _domain_overlay(domain, t, geo=geo)
+    if outline is not None:
+        panels = [p * outline for p in panels]
     row = panels[0] + panels[1] + panels[2]
     row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
@@ -395,6 +399,7 @@ def _field_grid(
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
+    domain=None,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -431,6 +436,7 @@ def _field_grid(
             font_scale=font_scale,
             size=size,
             zoom=zoom,
+            domain=domain,
         )
         for it in items
     ]
@@ -453,6 +459,7 @@ def _field_facet(
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
+    domain=None,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -518,6 +525,7 @@ def _field_facet(
     )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
+    outline = _domain_overlay(domain, field, geo=geo)
 
     def _clim(sub):
         lo, hi = _limits(sub)
@@ -558,7 +566,7 @@ def _field_facet(
         else:
             sub = field.isel({facet_dim: col}) if facet_dim else field
             title = str(labels[col])
-        return _quadmesh(
+        mesh = _quadmesh(
             sub,
             title=title,
             cmap=seq,
@@ -569,6 +577,7 @@ def _field_facet(
             font_scale=font_scale,
             canvas_factor=factor,
         )
+        return mesh if outline is None else mesh * outline
 
     panels = [
         _panel(row, col)
@@ -605,6 +614,7 @@ def _skill_map(
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
+    domain=None,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -659,6 +669,7 @@ def _skill_map(
     ncols = max(int(ncols), 1)
     factor = _canvas_factor(size, zoom)
     arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+    outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo)
 
     panels = []
     for row, item in enumerate(items):
@@ -672,19 +683,18 @@ def _skill_map(
             if stacked and item.get("row_label"):
                 base = f"{item['row_label']} — {base}"
             value = metric_value_text(item.get("metrics"), name)
-            panels.append(
-                _quadmesh(
-                    item["skill"][name],
-                    title=f"{base} ({value})" if value else base,
-                    cmap=colors.cmap,
-                    clim=colors.clim(),
-                    units=str(item["skill"][name].attrs.get("units", "") or ""),
-                    geo=geo,
-                    log=colors.log,
-                    font_scale=font_scale,
-                    canvas_factor=factor,
-                )
+            mesh = _quadmesh(
+                item["skill"][name],
+                title=f"{base} ({value})" if value else base,
+                cmap=colors.cmap,
+                clim=colors.clim(),
+                units=str(item["skill"][name].attrs.get("units", "") or ""),
+                geo=geo,
+                log=colors.log,
+                font_scale=font_scale,
+                canvas_factor=factor,
             )
+            panels.append(mesh if outline is None else mesh * outline)
 
     layout = panels[0]
     for extra in panels[1:]:
@@ -921,6 +931,62 @@ def _movie_coastline(*fields):
     )
 
 
+def _to_mercator(lons, lats):
+    """Project geographic ``lons``/``lats`` to Web Mercator (metres).
+
+    Shared by :func:`_locations` (its extent rectangles) and :func:`_domain_overlay`
+    (a domain outline) — both draw plain holoviews elements under web tiles, which
+    take no part in geoviews's automatic projection and so need this done by hand.
+    """
+    import cartopy.crs as ccrs
+
+    pts = ccrs.GOOGLE_MERCATOR.transform_points(
+        ccrs.PlateCarree(),
+        np.asarray(lons, dtype=float),
+        # Web Mercator diverges at the poles; clamp to its own limit
+        np.clip(np.asarray(lats, dtype=float), -85.06, 85.06),
+    )
+    return pts[:, 0], pts[:, 1]
+
+
+def _domain_overlay(domain, da, *, geo: bool = True, tiles=None):
+    """Return the model-domain outline as one dashed ``hv.Path`` in the panel's frame.
+
+    Plain holoviews rather than a geoviews element — the same choice
+    :func:`_movie_coastline` and :func:`_locations` make, and for the same reason: a
+    geoviews element re-projects its geometry from scratch on every render, fine once
+    but ruinous embedded in a movie. Under tiles the ring is projected to Web
+    Mercator (:func:`_to_mercator`); for an untiled geo panel it is shifted into
+    :func:`_output_projection`'s frame with the same formula :func:`_movie_coastline`
+    uses for its coastline — a plain ``PlateCarree(central_longitude=180)`` frame is
+    ``x = (lon % 360) - 180``, an identity shift for every other domain (one already
+    in ``_output_projection``'s own default frame needs no correction). ``domain``
+    accepts either spelling :func:`~ocean_skill.plot.matplotlib_renderer.domain_ring`
+    does — the bbox this option has always taken, or the true-perimeter ring a
+    curvilinear source's catalog entry supplies. Returns ``None`` when there is
+    nothing to draw.
+    """
+    from ocean_skill.plot.matplotlib_renderer import domain_ring
+
+    ring = domain_ring(domain)
+    if ring is None:
+        return None
+    import holoviews as hv
+
+    xs, ys = ring[:, 0].astype(float), ring[:, 1].astype(float)
+    if geo and tiles:
+        xs, ys = _to_mercator(xs, ys)
+    elif geo and _output_projection(da) is not None:
+        xs = (xs % 360.0) - 180.0
+    return hv.Path([np.column_stack([xs, ys])]).opts(
+        color="black",
+        line_dash="dashed",
+        line_width=1,
+        apply_ranges=False,
+        show_legend=False,
+    )
+
+
 def _frame_map(keys: list[str], draw, *, frame_dim: str | None = None):
     """Return a ``HoloMap`` holding every frame, drawn up front.
 
@@ -1016,6 +1082,7 @@ def _facet_movie(
     hover: bool = False,
     rasterize: bool | str = "auto",
     tiles: str | bool | None = True,
+    domain=None,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -1105,6 +1172,7 @@ def _facet_movie(
     # with tiles the basemap draws the coast; without them a static, once-built
     # outline stands in for the per-frame Feature that hvplot would overlay
     coast = _movie_coastline(frames_da) if geo and not tiles else None
+    outline = _domain_overlay(domain, frames_da, geo=geo, tiles=tiles)
     subject = _subject(item) if title is None else title
 
     def draw(position: int):
@@ -1130,7 +1198,10 @@ def _facet_movie(
             coastline=False,
             project=True,
         )
-        return mesh if coast is None else mesh * coast
+        for overlay in (coast, outline):
+            if overlay is not None:
+                mesh = mesh * overlay
+        return mesh
 
     movie = _frame_map(keys, draw)
     movie = _with_widget(movie, widget=widget, fps=fps, frame_dim=FRAME_DIM)
@@ -1157,6 +1228,7 @@ def _field_movie(
     hover: bool = False,
     rasterize: bool | str = "auto",
     tiles: str | bool | None = True,
+    domain=None,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -1216,6 +1288,7 @@ def _field_movie(
         if geo and not tiles
         else None
     )
+    outline = _domain_overlay(domain, first["aligned"]["test"], geo=geo, tiles=tiles)
     scope = items if shared_limits else items[:1]
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
@@ -1239,7 +1312,10 @@ def _field_movie(
 
     def draw(position: int, panel: int):
         mesh = _panel_mesh(position, panel)
-        return mesh if coast is None else mesh * coast
+        for overlay in (coast, outline):
+            if overlay is not None:
+                mesh = mesh * overlay
+        return mesh
 
     def _panel_mesh(position: int, panel: int):
         item = items[position]
@@ -1866,16 +1942,7 @@ def _locations(
         # kdims: raw Web Mercator metres for a rectangle corner under tiles.
         return HoverTool(tooltips=[(f, f"@{{{f}}}") for f in HOVER_FIELDS])
 
-    def to_mercator(lons, lats):
-        import cartopy.crs as ccrs
-
-        pts = ccrs.GOOGLE_MERCATOR.transform_points(
-            ccrs.PlateCarree(),
-            np.asarray(lons, dtype=float),
-            # Web Mercator diverges at the poles; clamp to its own limit
-            np.clip(np.asarray(lats, dtype=float), -85.06, 85.06),
-        )
-        return pts[:, 0], pts[:, 1]
+    to_mercator = _to_mercator
 
     if extent is None:
         from ocean_skill.plot.locations import _default_extent
@@ -2019,7 +2086,6 @@ def render(spec, **kwargs: Any):
         # matplotlib axes does, so the shrink-to-fit pass has nothing to do here.
         "fit_text",
         "row_height",
-        "domain",
         "mark",
         "metrics",
         # bokeh labels every panel's own axes and has no notion of borrowing a

@@ -827,3 +827,118 @@ def test_a_named_canvas_reaches_the_interactive_frame_too(family):
         )
     )
     assert all(c < p for c, p in zip(column, page, strict=True)), family
+
+
+# --- domain= draws the model-domain outline in both renderers ------------------------
+#
+# ``domain`` has always taken a ``(lon_min, lat_min, lon_max, lat_max)`` bbox; it now
+# also takes an (N, 2) vertex ring — a curvilinear source's true, possibly rotated,
+# perimeter (see ``ocean_skill.align.perimeter_of``) — and the interactive renderer
+# used to drop the option outright (it sat in holoviews_renderer.render's ``drops``).
+
+_DOMAIN_RING = [[261.0, 19.0], [269.0, 20.0], [268.0, 25.0], [262.0, 24.0]]
+_DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
+
+
+def _hv_paths(obj) -> list:
+    """Every ``hv.Path`` element in ``obj``, unwrapping a movie's widget pane."""
+    import holoviews as hv
+
+    return getattr(obj, "object", obj).traverse(lambda x: x, [hv.Path])
+
+
+def test_domain_draws_the_shape_it_was_given(two_rows):
+    """One deep check, on ``field_grid``: ring, bbox, and ``None`` each draw right.
+
+    Every family funnels a ``domain`` through the same ``_domain_overlay``/``mesh *
+    outline`` composition, so the shape itself only needs proving once; the
+    parametrized smoke test below is what catches a family that forgot to wire the
+    option through at all.
+    """
+    ring_out = render(
+        PlotSpec(family="field_grid", items=two_rows, options={"domain": _DOMAIN_RING}),
+        renderer="holoviews",
+    )
+    assert len(_hv_paths(ring_out)) == 6  # 2 rows x 3 panels
+
+    bbox_out = render(
+        PlotSpec(family="field_grid", items=two_rows, options={"domain": _DOMAIN_BBOX}),
+        renderer="holoviews",
+    )
+    assert len(_hv_paths(bbox_out)) == 6
+
+    none_out = render(
+        PlotSpec(family="field_grid", items=two_rows, options={"domain": None}),
+        renderer="holoviews",
+    )
+    assert not _hv_paths(none_out)
+
+
+@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+def test_domain_reaches_every_interactive_family(family):
+    """Every family takes ``**_``, so one that forgot to name ``domain`` absorbs it.
+
+    Same failure mode as the zoom=/size= checks above.
+    """
+    items = _INTERACTIVE_FAMILIES[family]()
+    out = render(
+        PlotSpec(family=family, items=items, options={"domain": _DOMAIN_RING}),
+        renderer="holoviews",
+    )
+    assert _hv_paths(out), f"{family}: domain= was accepted and dropped"
+
+
+def _matplotlib_dashed_lines(fig):
+    return [
+        line
+        for ax in fig.axes
+        for line in ax.get_lines()
+        if line.get_linestyle() == "--"
+    ]
+
+
+def test_matplotlib_draws_the_domain_ring_on_every_panel(two_rows):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = render(
+        PlotSpec(
+            family="field_grid", items=two_rows, options={"domain": _DOMAIN_RING}
+        ),
+        renderer="matplotlib",
+    )
+    dashed = _matplotlib_dashed_lines(fig)
+    # 2 rows x 3 panels (test | reference | difference) = 6 outlines
+    assert len(dashed) == 6
+    expected = np.asarray([*_DOMAIN_RING, _DOMAIN_RING[0]])
+    for line in dashed:
+        assert np.allclose(line.get_xydata(), expected)
+
+
+def test_matplotlib_domain_bbox_still_draws_a_rectangle(two_rows):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = render(
+        PlotSpec(
+            family="field_grid", items=two_rows, options={"domain": _DOMAIN_BBOX}
+        ),
+        renderer="matplotlib",
+    )
+    dashed = _matplotlib_dashed_lines(fig)
+    assert len(dashed) == 6
+    lo0, la0, lo1, la1 = _DOMAIN_BBOX
+    expected = np.asarray([[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]])
+    for line in dashed:
+        assert np.allclose(line.get_xydata(), expected)
+
+
+def test_matplotlib_domain_none_draws_nothing(two_rows):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = render(
+        PlotSpec(family="field_grid", items=two_rows, options={"domain": None}),
+        renderer="matplotlib",
+    )
+    assert _matplotlib_dashed_lines(fig) == []

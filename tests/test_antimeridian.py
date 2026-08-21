@@ -110,6 +110,246 @@ def test_domain_box_still_normalizes_a_non_straddling_domain(monkeypatch):
     assert (lon_min, lon_max) == (-100.0, -80.0)
 
 
+# -- perimeter_of: the true grid-edge ring, not a bounding box -----------------------
+
+
+def _rotated_grid(ny=20, nx=30, lon0=150.0, lat0=10.0, degrees=30.0):
+    """Build a regular grid rotated ``degrees`` about its own origin.
+
+    A stand-in for a ROMS domain whose rows/columns are not lines of constant
+    lon/lat.
+    """
+    i, j = np.meshgrid(np.arange(nx), np.arange(ny))
+    theta = np.radians(degrees)
+    x = i * np.cos(theta) - j * np.sin(theta)
+    y = i * np.sin(theta) + j * np.cos(theta)
+    return lon0 + x, lat0 + y
+
+
+def test_perimeter_traces_the_rotated_grid_edge_not_its_bbox():
+    lon, lat = _rotated_grid()
+    ring = A.perimeter_of(lon, lat, max_points=40)
+    assert np.allclose(ring[0], ring[-1]), "ring must close"
+    # every vertex is an actual grid-edge point, not a rectangle interpolated from
+    # the corners -- so lat varies along the "top" edge instead of staying constant
+    edge = {
+        tuple(np.round(pt, 6))
+        for edge_lon, edge_lat in (
+            (lon[0, :], lat[0, :]),
+            (lon[:, -1], lat[:, -1]),
+            (lon[-1, :], lat[-1, :]),
+            (lon[:, 0], lat[:, 0]),
+        )
+        for pt in np.stack([edge_lon, edge_lat], axis=1)
+    }
+    assert all(tuple(np.round(pt, 6)) in edge for pt in ring)
+    assert np.ptp(lat[0, :]) > 1.0, "a rotated top edge is not flat"
+    for corner in (
+        (lon[0, 0], lat[0, 0]),
+        (lon[0, -1], lat[0, -1]),
+        (lon[-1, -1], lat[-1, -1]),
+        (lon[-1, 0], lat[-1, 0]),
+    ):
+        assert any(np.allclose(corner, pt) for pt in ring), corner
+
+
+def test_perimeter_stays_contiguous_across_the_antimeridian():
+    field = _pacific_test()
+    ring = A.perimeter_of(np.asarray(field["lon"]), np.asarray(field["lat"]))
+    assert np.max(np.abs(np.diff(ring[:, 0]))) < 30.0, "no 360-degree jump"
+
+
+def test_perimeter_of_a_rectilinear_grid_is_its_bbox():
+    lon1d = np.linspace(0.0, 10.0, 5)
+    lat1d = np.linspace(0.0, 5.0, 4)
+    ring = A.perimeter_of(lon1d, lat1d)
+    lo0, la0, lo1, la1 = A.bbox_of(
+        xr.DataArray(
+            np.zeros((4, 5)), dims=("lat", "lon"), coords={"lon": lon1d, "lat": lat1d}
+        )
+    )
+    assert np.allclose(
+        ring, [[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]]
+    )
+
+
+def test_perimeter_thinning_still_keeps_every_corner():
+    lon, lat = _rotated_grid()
+    ring = A.perimeter_of(lon, lat, max_points=16)
+    for corner in (
+        (lon[0, 0], lat[0, 0]),
+        (lon[0, -1], lat[0, -1]),
+        (lon[-1, -1], lat[-1, -1]),
+        (lon[-1, 0], lat[-1, 0]),
+    ):
+        assert any(np.allclose(corner, pt) for pt in ring), corner
+
+
+def test_perimeter_of_returns_none_without_horizontal_coords():
+    assert A.perimeter_of(np.array([]), np.array([])) is None
+    assert A.perimeter_of(np.zeros((3, 3, 3)), np.zeros((3, 3, 3))) is None
+
+
+# -- _outline_of: the stored ring re-grounded in the requested convention -----------
+
+
+def _fake_outline_entry(monkeypatch, name, outline):
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(metadata={"domain_outline": outline})
+    resolved = {name: entry}
+
+    def fake_resolve(source):
+        if source not in resolved:
+            raise KeyError(source)
+        return resolved[source]
+
+    monkeypatch.setattr("ocean_skill.catalog.resolve", fake_resolve, raising=True)
+
+
+def test_outline_of_a_straddling_domain_stays_in_0_360(monkeypatch):
+    from ocean_skill import comparison
+
+    ring = [
+        [77.4 + t * (316.2 - 77.4), -10.0 + 20.0 * t] for t in np.linspace(0, 1, 12)
+    ]
+    _fake_outline_entry(monkeypatch, "pac", ring)
+
+    auto = comparison._outline_of("pac")
+    assert auto[:, 0].min() >= 0.0 and auto[:, 0].max() <= 360.0
+
+    explicit = comparison._outline_of("pac", "0-360")
+    assert np.allclose(auto, explicit)
+
+    # -180/180 would split this ring at its own seam, so it falls back to 0-360
+    # rather than fold it
+    fallback = comparison._outline_of("pac", "-180-180")
+    assert np.allclose(fallback, explicit)
+
+
+def test_outline_of_a_non_straddling_domain_normalizes_both_ways(monkeypatch):
+    from ocean_skill import comparison
+
+    ring = [[260.0 + 20.0 * t, 18.0 + 13.0 * t] for t in np.linspace(0, 1, 8)]
+    _fake_outline_entry(monkeypatch, "gom", ring)
+
+    pm180 = comparison._outline_of("gom", "-180-180")
+    assert pm180[:, 0].min() >= -180.0 and pm180[:, 0].max() <= 180.0
+    assert np.isclose(pm180[:, 0].min(), -100.0)
+    assert np.isclose(pm180[:, 0].max(), -80.0)
+
+    zero360 = comparison._outline_of("gom", "0-360")
+    assert np.isclose(zero360[:, 0].min(), 260.0)
+    assert np.isclose(zero360[:, 0].max(), 280.0)
+
+    # auto picks -180/180 here, since that does not split it
+    auto = comparison._outline_of("gom")
+    assert np.allclose(auto, pm180)
+
+
+def test_outline_of_is_none_without_a_declared_outline(monkeypatch):
+    from ocean_skill import comparison
+
+    _fake_outline_entry(monkeypatch, "has_none", None)
+    assert comparison._outline_of("has_none") is None
+    assert comparison._outline_of("unresolvable") is None
+
+
+# -- Comparison.plot()/ComparisonSet.plot() prefer the outline, fall back to the bbox
+
+
+def _stub_comparison(monkeypatch, *, test_name="test_src", domain_outline=None):
+    """Build a ``Comparison`` with ``.aligned`` set by hand, skipping align()/I/O.
+
+    ``_implied_over`` (from ``Comparison.__init__``) resolves ``reference`` through
+    the catalog too; leaving it unresolvable is fine -- ``over`` just stays ``None``,
+    which is what a gridded pair wants anyway.
+    """
+    from types import SimpleNamespace
+
+    from ocean_skill.comparison import Comparison
+
+    comp = Comparison(reference="unresolvable_ref", test=test_name, variable="nitrate")
+    field = _pacific_test()
+    comp._aligned = xr.Dataset(
+        {"test": field, "reference": field, "difference": field * 0},
+        attrs={"lon_convention": "0-360"},
+    )
+
+    entry_meta = {"geospatial_lon_min": 77.4, "geospatial_lat_min": -20.0}
+    entry_meta.update(
+        {"geospatial_lon_max": 316.2, "geospatial_lat_max": 20.0}
+    )
+    if domain_outline is not None:
+        entry_meta["domain_outline"] = domain_outline
+    entry = SimpleNamespace(metadata=entry_meta)
+
+    def fake_resolve(source):
+        if source == test_name:
+            return entry
+        raise KeyError(source)
+
+    monkeypatch.setattr("ocean_skill.catalog.resolve", fake_resolve, raising=True)
+    return comp
+
+
+def _capture_rendered_domain(monkeypatch):
+    """Patch the registry's ``render`` to capture the spec's ``domain`` option.
+
+    Renders nothing -- the plumbing under test is which value reaches the spec's
+    options, not what a figure of it looks like.
+    """
+    captured = {}
+
+    def fake_render(spec, **kwargs):
+        captured["domain"] = spec.options.get("domain")
+        return captured
+
+    monkeypatch.setattr("ocean_skill.plot.registry.render", fake_render, raising=True)
+    return captured
+
+
+def test_comparison_plot_prefers_the_stored_outline_over_the_bbox(monkeypatch):
+    ring = [[80.0, -15.0], [310.0, -10.0], [305.0, 15.0], [85.0, 12.0]]
+    comp = _stub_comparison(monkeypatch, domain_outline=ring)
+    captured = _capture_rendered_domain(monkeypatch)
+
+    comp.plot()
+
+    domain = captured["domain"]
+    assert domain is not None and not isinstance(domain, tuple)
+    assert np.asarray(domain).shape[1] == 2
+
+
+def test_comparison_plot_falls_back_to_the_bbox_without_an_outline(monkeypatch):
+    comp = _stub_comparison(monkeypatch, domain_outline=None)
+    captured = _capture_rendered_domain(monkeypatch)
+
+    comp.plot()
+
+    assert captured["domain"] == (77.4, -20.0, 316.2, 20.0)
+
+
+def test_comparison_plot_domain_none_still_suppresses_it(monkeypatch):
+    comp = _stub_comparison(monkeypatch, domain_outline=[[1.0, 1.0], [2, 1], [2, 2]])
+    captured = _capture_rendered_domain(monkeypatch)
+
+    comp.plot(domain=None)
+
+    assert captured["domain"] is None
+
+
+def test_comparison_plot_a_user_bbox_overrides_the_outline(monkeypatch):
+    comp = _stub_comparison(
+        monkeypatch, domain_outline=[[1.0, 1.0], [2, 1], [2, 2]]
+    )
+    captured = _capture_rendered_domain(monkeypatch)
+
+    comp.plot(domain=(0.0, 0.0, 5.0, 5.0))
+
+    assert captured["domain"] == (0.0, 0.0, 5.0, 5.0)
+
+
 def test_static_maps_centre_on_180_for_a_straddling_field():
     ccrs = pytest.importorskip("cartopy.crs")
     from ocean_skill.plot.matplotlib_renderer import _map_projection

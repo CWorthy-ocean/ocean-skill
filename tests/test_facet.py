@@ -422,8 +422,8 @@ def test_the_suptitle_carries_the_source_and_depth_in_both_renderers(daily):
     A monthly facet's panels already say *when*, so only the source and depth are
     missing from a plain "nitrate" — and both renderers compose them the same way.
     """
-    import matplotlib
     import holoviews as hv
+    import matplotlib
     from bokeh.models import Div
 
     matplotlib.use("Agg")
@@ -443,8 +443,8 @@ def test_a_collapsed_single_map_also_carries_when_in_both_renderers(daily):
     both axes, so a lone map's only identifying text is its suptitle. This also pins
     the interactive single-panel fix — a lone panel used to crash instead of drawing.
     """
-    import matplotlib
     import holoviews as hv
+    import matplotlib
     from bokeh.plotting import figure
 
     matplotlib.use("Agg")
@@ -736,6 +736,71 @@ def test_field_plot_draws_the_facet_family(prepared, monkeypatch):
     # no catalog entry for the stub source, so there is no domain box to draw
     fig = make_field("stub", "nitrate", label="run A").plot(domain=None)
     assert len(_mpl_titles(fig)) == 6
+
+
+def _resolve_only(monkeypatch, name, metadata):
+    """Monkeypatch ``catalog.resolve`` to know exactly one entry, ``name``."""
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(metadata=metadata)
+
+    def fake_resolve(source):
+        if source != name:
+            raise KeyError(source)
+        return entry
+
+    monkeypatch.setattr("ocean_skill.catalog.resolve", fake_resolve, raising=True)
+
+
+def test_field_domain_prefers_the_stored_outline_over_the_bbox(monkeypatch):
+    from ocean_skill.field import field as make_field
+
+    lon = np.linspace(0.0, 10.0, 6)[None, :] * np.ones((5, 1))
+    lat = np.linspace(0.0, 5.0, 5)[:, None] * np.ones((1, 6))
+    ring = [[1.0, 1.0], [9.0, 1.0], [9.0, 4.0], [1.0, 4.0]]
+    _resolve_only(
+        monkeypatch,
+        "curvi",
+        {
+            "domain_outline": ring,
+            "geospatial_lon_min": 0.0,
+            "geospatial_lat_min": 0.0,
+            "geospatial_lon_max": 10.0,
+            "geospatial_lat_max": 5.0,
+        },
+    )
+
+    f = make_field("curvi", "nitrate")
+    f._data = xr.DataArray(
+        np.ones((5, 6)),
+        dims=("y", "x"),
+        coords={"lon": (("y", "x"), lon), "lat": (("y", "x"), lat)},
+    )
+    domain = f._domain()
+    assert domain is not None and np.asarray(domain).shape[1] == 2
+
+
+def test_field_domain_falls_back_to_the_bbox_without_an_outline(monkeypatch):
+    from ocean_skill.field import field as make_field
+
+    _resolve_only(
+        monkeypatch,
+        "rectilinear",
+        {
+            "geospatial_lon_min": -98.0,
+            "geospatial_lat_min": 18.0,
+            "geospatial_lon_max": -80.0,
+            "geospatial_lat_max": 31.0,
+        },
+    )
+
+    f = make_field("rectilinear", "nitrate")
+    f._data = xr.DataArray(
+        np.ones((12, 20)),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(18, 31, 12), "lon": np.linspace(-98, -80, 20)},
+    )
+    assert f._domain() == (-98.0, 18.0, -80.0, 31.0)
 
 
 # --- two facet axes: depth by month --------------------------------------------------

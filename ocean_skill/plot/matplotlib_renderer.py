@@ -484,6 +484,32 @@ def _map_projection(*fields):
     return ccrs.PlateCarree()
 
 
+def domain_ring(domain) -> np.ndarray | None:
+    """Normalize a ``domain`` plot option to a closed ``(N, 2)`` ``[lon, lat]`` ring.
+
+    Accepts either spelling the option is documented to take: the ``(lon_min,
+    lat_min, lon_max, lat_max)`` bbox every family has always drawn, or the ``(N, 2)``
+    vertex ring :func:`ocean_skill.comparison._outline_of` hands back for a
+    curvilinear source's true (possibly rotated) grid shape. ``None`` stays ``None``
+    (no outline drawn). Shared with :mod:`ocean_skill.plot.holoviews_renderer` so the
+    two renderers agree on what the option means.
+    """
+    if domain is None:
+        return None
+    arr = np.asarray(domain, dtype="float64")
+    if arr.shape == (4,):
+        lo0, la0, lo1, la1 = arr
+        return np.array([[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]])
+    if arr.ndim == 2 and arr.shape[1] == 2 and arr.shape[0] >= 3:
+        if not np.allclose(arr[0], arr[-1]):
+            arr = np.vstack([arr, arr[:1]])
+        return arr
+    raise ValueError(
+        "domain must be a (lon_min, lat_min, lon_max, lat_max) bbox or an (N, 2) "
+        f"[lon, lat] ring, got an array of shape {arr.shape}."
+    )
+
+
 def _draw_map(
     ax,
     da,
@@ -492,7 +518,7 @@ def _draw_map(
     cmap,
     norm,
     mark: str,
-    domain: tuple[float, float, float, float] | None,
+    domain: tuple[float, float, float, float] | np.ndarray | None,
     gridline_kwargs: dict[str, Any],
     tick_label_kwargs: dict[str, Any],
     title_kwargs: dict[str, Any],
@@ -524,11 +550,11 @@ def _draw_map(
         left_labels=left_labels,
         bottom_labels=bottom_labels,
     )
-    if domain:
-        lo0, la0, lo1, la1 = domain
+    ring = domain_ring(domain)
+    if ring is not None:
         ax.plot(
-            [lo0, lo1, lo1, lo0, lo0],
-            [la0, la0, la1, la1, la0],
+            ring[:, 0],
+            ring[:, 1],
             transform=proj,
             color="k",
             lw=0.6,
@@ -557,7 +583,7 @@ def _draw_row(
     standard_name: str | None,
     metrics: dict[str, Any] | None,
     mark: str,
-    domain: tuple[float, float, float, float] | None,
+    domain: tuple[float, float, float, float] | np.ndarray | None,
     row_label: str | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     title_kwargs: dict[str, Any] | None = None,
@@ -1022,7 +1048,7 @@ def field_row(
     metrics: dict[str, Any] | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -1550,7 +1576,7 @@ def field_grid(
     title: str | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     row_height: float | None = None,
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
@@ -1936,7 +1962,7 @@ def field_facet(
     label: str | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     ncols: int | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -2269,7 +2295,7 @@ def skill_map(
     title: str | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     ncols: int | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -2705,7 +2731,7 @@ def field_movie(
     labels: tuple[str, str] | None = None,
     title: str | None = None,
     mark: str = "pcolormesh",
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -2933,7 +2959,7 @@ def facet_movie(
     units: str | None = None,
     standard_name: str | None = None,
     mark: str = "pcolormesh",
-    domain: tuple[float, float, float, float] | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
     title_kwargs: dict[str, Any] | None = None,

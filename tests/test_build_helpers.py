@@ -447,6 +447,124 @@ def test_a_real_time_axis_still_wins_over_global_attributes(tmp_path):
     assert md["time_coverage_start"] == "2015-06-01"
 
 
+# ----------------------------------------------------------- domain_outline (perimeter)
+
+
+def test_probe_writes_a_domain_outline_for_a_curvilinear_grid():
+    """A 2-D lon/lat grid gets its true grid-edge ring recorded, JSON-plain."""
+    from ocean_skill.build import _probe
+
+    ny, nx = 8, 10
+    lon = np.linspace(150.0, 200.0, nx)[None, :] * np.ones((ny, 1))
+    lat = np.linspace(-10.0, 10.0, ny)[:, None] * np.ones((1, nx))
+    ds = xr.Dataset(
+        {"temp": (("eta_rho", "xi_rho"), np.random.rand(ny, nx))},
+        coords={
+            "lon_rho": (("eta_rho", "xi_rho"), lon),
+            "lat_rho": (("eta_rho", "xi_rho"), lat),
+        },
+    )
+    md = _probe(ds, None)
+    outline = md["domain_outline"]
+    assert isinstance(outline, list)
+    assert all(
+        isinstance(pt, list) and all(isinstance(v, float) for v in pt)
+        for pt in outline
+    )
+    # plain floats/lists round-trip through YAML without a custom representer
+    import yaml
+
+    assert yaml.safe_load(yaml.safe_dump({"domain_outline": outline})) == {
+        "domain_outline": outline
+    }
+
+
+def test_probe_writes_no_domain_outline_for_a_rectilinear_grid():
+    """A 1-D lon/lat grid's bbox already is its perimeter -- no separate key needed."""
+    from ocean_skill.build import _probe
+
+    ds = xr.Dataset(
+        {"temp": (("lat", "lon"), np.ones((4, 5)))},
+        coords={"lon": np.linspace(0.0, 10.0, 5), "lat": np.linspace(0.0, 5.0, 4)},
+    )
+    md = _probe(ds, None)
+    assert "domain_outline" not in md
+
+
+def test_add_source_extracts_a_domain_outline_from_a_separate_roms_grid(tmp_path):
+    """A ROMS entry whose grid never merges into the store still gets an outline.
+
+    ``self_contained_grid`` is false whenever the grid stays a separate file (not
+    merged in by ``make_kerchunk``'s ``grid=``) -- the raw probed output then has no
+    ``lon_rho``/``lat_rho`` at all, so :func:`_probe` alone cannot derive one. This is
+    exactly the ``pac_dt_ramp``-shaped case: the grid file is read again, once, for
+    its shape.
+    """
+    from ocean_skill import build
+
+    ny, nx = 8, 10
+    lon = np.linspace(150.0, 200.0, nx)[None, :] * np.ones((ny, 1))
+    lat = np.linspace(-10.0, 10.0, ny)[:, None] * np.ones((1, nx))
+    grid_path = tmp_path / "grid.nc"
+    xr.Dataset(
+        coords={
+            "lon_rho": (("eta_rho", "xi_rho"), lon),
+            "lat_rho": (("eta_rho", "xi_rho"), lat),
+        }
+    ).to_netcdf(grid_path)
+
+    out_path = tmp_path / "out.nc"
+    out = xr.Dataset(
+        {
+            "temp": (
+                ("ocean_time", "s_rho", "eta_rho", "xi_rho"),
+                np.zeros((1, 2, ny, nx)),
+            )
+        },
+        coords={
+            "Cs_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+            "sigma_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+        },
+    )
+    out.attrs.update(theta_s=5.0, theta_b=1.0, hc=20.0)
+    out.to_netcdf(out_path)
+
+    cat = build.new_catalog(title="t")
+    build.add_source(cat, "roms_separate_grid", out_path, grid=str(grid_path))
+    md = cat["roms_separate_grid"].metadata
+    assert md["self_contained_grid"] is False
+    assert "domain_outline" in md
+    assert len(md["domain_outline"]) >= 4
+
+
+def test_a_missing_roms_grid_warns_but_keeps_the_entry(tmp_path):
+    """No outline without a real grid file -- but the entry still lands, per pattern."""
+    from ocean_skill import build
+
+    ny, nx = 8, 10
+    out_path = tmp_path / "out.nc"
+    out = xr.Dataset(
+        {
+            "temp": (
+                ("ocean_time", "s_rho", "eta_rho", "xi_rho"),
+                np.zeros((1, 2, ny, nx)),
+            )
+        },
+        coords={
+            "Cs_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+            "sigma_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+        },
+    )
+    out.attrs.update(theta_s=5.0, theta_b=1.0, hc=20.0)
+    out.to_netcdf(out_path)
+
+    cat = build.new_catalog(title="t")
+    with pytest.warns(UserWarning, match="domain outline"):
+        build.add_source(cat, "no_grid", out_path, grid=str(tmp_path / "missing.nc"))
+    assert "no_grid" in list(cat)
+    assert "domain_outline" not in cat["no_grid"].metadata
+
+
 # --------------------------------------------------------------- kerchunk targets
 
 
