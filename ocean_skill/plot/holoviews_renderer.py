@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for
 from ocean_skill.plot.locations import TAB10 as _TAB10
 from ocean_skill.plot.matplotlib_renderer import (
@@ -237,6 +238,10 @@ def _quadmesh(
             # letting the plot re-project it per rendered frame. Only worth setting
             # for movies: a single map pays the projection exactly once either way.
             opts["project"] = True
+        # movie callers already downgrade via _tiles_for before reaching here (so this
+        # is a no-op for them); a caller that hands tiles straight to _quadmesh still
+        # gets the same seam protection rather than a silently broken map.
+        tiles = _tiles_for(tiles, da)
         if tiles:
             # a basemap gives the eye real coastline and terrain where the field is
             # masked, which the 50m outline cannot. On by default for a movie, since a
@@ -727,6 +732,38 @@ def _check_tiles(tiles: str | bool | None) -> str | bool | None:
     return tiles
 
 
+def _tiles_for(tiles, *fields):
+    """Return ``tiles``, downgraded to ``None`` when a field genuinely straddles.
+
+    Web tiles are Web Mercator, whose frame is fixed at ±180 -- a domain that
+    actually straddles the antimeridian (a Pacific model crossing the dateline)
+    projects there as two disjoint pieces meeting at ±2e7 metres, so the tiled
+    quadmesh renders split across the map rather than as one contiguous field.
+    There is no tiled frame that keeps such a domain whole, so the basemap is
+    dropped in favour of the offline coastline (:func:`_movie_coastline`) rather
+    than shipping a broken map; pass ``tiles=False`` to silence the warning.
+
+    Tested with :func:`~ocean_skill.align.natural_convention` rather than
+    :func:`_output_projection`'s broader "any longitude past 180" check: a model
+    stored 0-360 natively but sitting entirely east of it (a Gulf of Mexico grid at
+    260-270°, say, reaching the renderer straight off a model-only
+    :class:`~ocean_skill.field.Field` with no reference to harmonize it) also has
+    ``lon.max() > 180`` without straddling anything -- Web Mercator wraps 260-270
+    into one contiguous -100…-90 slice, no seam involved. Downgrading tiles for a
+    domain like that would drop a feature that works fine; the natural-convention
+    test only answers yes for a domain that would actually split.
+    """
+    if not tiles or not any(natural_convention(f) == "0-360" for f in fields):
+        return tiles
+    warnings.warn(
+        "a web tile basemap is fixed in Web Mercator's ±180 frame, which splits "
+        "this dateline-straddling domain at the seam -- falling back to the "
+        "offline coastline outline instead. Pass tiles=False to silence this.",
+        stacklevel=2,
+    )
+    return None
+
+
 def _should_rasterize(da, rasterize) -> bool:
     """Resolve ``rasterize=True/False/"auto"`` for one frame.
 
@@ -810,15 +847,26 @@ def _movie_coastline(*fields):
     page *per frame*, dominating everything else the movie does. The coastline never
     changes between frames, so it is built here exactly once: clipped to the fields'
     own extent (plus margin to pan into) and returned as a plain holoviews Path, in
-    the plot's own lon/lat frame, that no geoviews machinery touches again. Movies
+    the movie's own output frame, that no geoviews machinery touches again. Movies
     with tiles don't need it at all — the basemap draws the coast — so this only ever
-    joins the untiled (offline) movie, whose axes are plain PlateCarree degrees.
+    joins the untiled (offline) movie.
+
+    That output frame is plain PlateCarree degrees for most domains, but one
+    straddling the antimeridian is drawn in :func:`_output_projection`'s 180-centred
+    frame instead (the same test :func:`_tiles_for` uses to decide tiles cannot show
+    such a domain at all) — so the coastline's x is shifted into that frame too, or
+    it would land 180° away from the mesh it is meant to outline.
     ``apply_ranges=False`` keeps the clip margin from widening the view.
 
     Returns ``None`` when the coastline cannot be built (no cartopy, or Natural Earth
     data unavailable offline) — a movie without an outline still plays.
     """
     import holoviews as hv
+
+    # 180 for a domain _output_projection would centre the mesh on (straddling the
+    # antimeridian); 0 -- an identity shift below -- for every other domain, leaving
+    # today's coordinates untouched.
+    central = 180.0 if any(_output_projection(f) is not None for f in fields) else 0.0
 
     try:
         import cartopy.feature as cfeature
@@ -862,6 +910,11 @@ def _movie_coastline(*fields):
     merged = np.concatenate(
         [arr for seg in segments for arr in (seg, nan_row)][:-1] or [np.empty((0, 2))]
     )
+    if central:
+        # NaN separator rows pass through unchanged: arithmetic and mod on NaN stay
+        # NaN. Each clip piece already lies inside one contiguous span of the output
+        # frame (see _lon_pieces), so this never introduces a new seam of its own.
+        merged[:, 0] = ((merged[:, 0] - central + 180.0) % 360.0) - 180.0
     return hv.Path([merged]).opts(
         color="black", line_width=1, apply_ranges=False, show_legend=False
     )
@@ -1047,7 +1100,7 @@ def _facet_movie(
     if log:
         vmin = max(vmin, 1e-6)
     raster = _should_rasterize(frames_da.isel({facet_dim: 0}), rasterize)
-    tiles = _check_tiles(tiles)
+    tiles = _tiles_for(_check_tiles(tiles), frames_da)
     # with tiles the basemap draws the coast; without them a static, once-built
     # outline stands in for the per-frame Feature that hvplot would overlay
     coast = _movie_coastline(frames_da) if geo and not tiles else None
@@ -1152,7 +1205,9 @@ def _field_movie(
     # rather than per panel because _quadmesh is called once per frame per panel and
     # would otherwise re-derive a different scale for each.
     raster = _should_rasterize(items[0]["aligned"]["reference"], rasterize)
-    tiles = _check_tiles(tiles)
+    tiles = _tiles_for(
+        _check_tiles(tiles), first["aligned"]["test"], first["aligned"]["reference"]
+    )
     # one static coastline for all three panels and every frame (the frames share the
     # aligned grid); with tiles the basemap draws the coast instead
     coast = (
