@@ -138,10 +138,11 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
     (``variable``, ``depth``, ``test``, ``reference``, ...). Colour defaults to one per
     point when no field is given, which is right for a small fan-out.
     """
-    import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    cmap = plt.get_cmap("tab10")
+    from ocean_skill.plot.style import COLOR_CYCLE
+
+    cycle = COLOR_CYCLE
     _pretty = pretty_level
 
     def _levels(field):
@@ -162,21 +163,21 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
 
     if color_by:
         levels = _levels(color_by)
-        cols = [cmap(levels.index(r.get(color_by)) % 10) for r in recs]
+        cols = [cycle[levels.index(r.get(color_by)) % len(cycle)] for r in recs]
     elif colors:
         cols = colors
     elif marker_by:
         # Colour follows the marker groups so the legend's swatches match the points.
         # Colouring per point here instead would vary colour with nothing explaining it,
         # against a legend whose entries are one per *marker* level.
-        cols = [cmap(mlevels.index(r.get(marker_by)) % 10) for r in recs]
+        cols = [cycle[mlevels.index(r.get(marker_by)) % len(cycle)] for r in recs]
     else:
-        cols = [cmap(i % 10) for i in range(len(recs))]
+        cols = [cycle[i % len(cycle)] for i in range(len(recs))]
 
     handles = []
     if color_by:
         for lev in _levels(color_by):
-            c = cmap(_levels(color_by).index(lev) % 10)
+            c = cycle[_levels(color_by).index(lev) % len(cycle)]
             handles.append(
                 Line2D(
                     [],
@@ -194,7 +195,7 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
             m = _MARKERS[i % len(_MARKERS)]
             # Grey only when colour already carries its own dimension; otherwise the
             # swatch takes the group's actual colour so it matches the points.
-            c = "0.35" if color_by else cmap(i % 10)
+            c = "0.35" if color_by else cycle[i % len(cycle)]
             handles.append(
                 Line2D(
                     [],
