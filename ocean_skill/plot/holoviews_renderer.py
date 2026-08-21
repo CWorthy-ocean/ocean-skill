@@ -34,6 +34,7 @@ from ocean_skill.plot.matplotlib_renderer import (
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
+from ocean_skill.plot.style import COLOR_CYCLE
 from ocean_skill.plot.typography import (
     PAGE_W,
     bokeh_fontsize,
@@ -1439,9 +1440,12 @@ def _save_interactive(obj, save) -> None:
     print(f"ocean-skill: interactive movie written to {path}")
 
 
-# _TAB10 — tab10 in matplotlib's own order, the palette ``summary._group_styles``
-# assigns by level index — is imported at the top from ocean_skill.plot.locations,
-# which now pins the hexes for both renderers so colours stay identical across them.
+# _TAB10 (from ocean_skill.plot.locations) colours the *locations map*'s fixed,
+# small featureType set — a separate concern from the diagrams below. The Target
+# diagram's group colours come from ``ocean_skill.plot.style.COLOR_CYCLE`` instead, the
+# same 20-colour tab20-derived cycle ``summary._group_styles`` assigns by level index,
+# so a Taylor/Target diagram and a series panel of the same comparisons agree and don't
+# repeat until the 21st group.
 
 #: matplotlib marker → bokeh marker, in the same order as ``summary._MARKERS``, so a
 #: diagram keeps its shapes when the same call is rendered interactively.
@@ -1718,7 +1722,7 @@ def _target(
     # One element per group with a *fixed* colour, rather than one element coloured by a
     # field. Bokeh cannot build a legend from a colour field and overlay labels at once
     # (E-1006: non-matching data sources), which is exactly what color_by + marker_by
-    # asks for. Explicit groups also pin the colours to tab10 by level index, so a
+    # asks for. Explicit groups also pin the colours to COLOR_CYCLE by level index, so a
     # diagram keeps its colours when the same call is rendered statically.
     color_levels = list(dict.fromkeys(df[color_dim]))
     grouped_by_marker = marker_by in df.columns
@@ -1752,7 +1756,7 @@ def _target(
                     label=_label(color_level, marker_level),
                 ).opts(
                     size=11,
-                    color=_TAB10[ci % len(_TAB10)],
+                    color=COLOR_CYCLE[ci % len(COLOR_CYCLE)],
                     marker=_BOKEH_MARKERS[mi % len(_BOKEH_MARKERS)],
                     tools=["hover"],
                     # Below, matching the static diagrams: target points scatter around

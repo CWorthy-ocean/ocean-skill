@@ -213,7 +213,7 @@ def test_both_renderers_agree_on_legend_entries(comparisons, items, grouping):
 
 
 def test_both_renderers_use_the_same_colours(comparisons, items):
-    """tab10 by level index in both, so a diagram keeps its colours across renderers."""
+    """COLOR_CYCLE by level index in both, so a diagram keeps its colours across renderers."""
     import matplotlib.colors as mcolors
 
     from ocean_skill.plot.summary import _group_styles
@@ -226,3 +226,17 @@ def test_both_renderers_use_the_same_colours(comparisons, items):
     interactive = [e.opts.get("style").kwargs["color"] for e in _points(obj)]
 
     assert static == interactive
+
+
+def test_more_than_ten_comparisons_still_get_distinct_colours():
+    """Regression: a tab10-only cycle silently repeats colour 1 on comparison 11.
+
+    12 comparisons, one point each (no ``color_by``/``marker_by``), must produce 12
+    distinct colours now that the cycle has 20 entries.
+    """
+    from ocean_skill.plot.summary import _group_styles
+
+    recs = [{"label": f"c{i}"} for i in range(12)]
+    cols, _, _ = _group_styles(recs)
+
+    assert len(set(cols)) == 12

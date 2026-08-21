@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "numpy",
     "pandas",
+    "matplotlib",  # ocean_skill.plot's static renderer, and its tab10/tab20 palettes
     "pyyaml>=6.0",
     "pydantic>=2",
     "platformdirs",

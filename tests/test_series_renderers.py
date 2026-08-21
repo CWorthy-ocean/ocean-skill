@@ -231,17 +231,26 @@ def test_encode_can_move_a_channel_but_not_the_role():
         _style.resolve(specs, encode={"dash": "source"})
 
 
-def test_the_colour_cycle_matches_matplotlibs_tab10():
-    """Keep a series panel's colours identical to a Taylor diagram's for one comparison.
+def test_the_colour_cycle_is_tab20_darks_then_lights():
+    """20 colours, not 10, so a Taylor/Target diagram with >10 series stops repeating.
 
-    ``summary._group_styles`` asks matplotlib for tab10 by level index; this module pins
-    the hexes so the interactive renderer can have them without importing matplotlib.
-    The invariant held before this family existed and was untested.
+    ``summary._group_styles`` and the interactive Target both index this same cycle by
+    level, so a series panel's colours stay identical to a Taylor diagram's for one
+    comparison. The first 10 must stay exactly tab10 so existing plots with <=10 series
+    are unaffected; matplotlib is now a core dependency (pyproject.toml), so the cycle is
+    derived from the colormap rather than hand-transcribed.
     """
+    from matplotlib import colormaps
     from matplotlib.colors import to_hex
-    from matplotlib.pyplot import get_cmap
 
-    assert _style.COLOR_CYCLE == tuple(to_hex(get_cmap("tab10")(i)) for i in range(10))
+    assert len(_style.COLOR_CYCLE) == 20
+    assert len(set(_style.COLOR_CYCLE)) == 20
+    assert _style.COLOR_CYCLE[:10] == tuple(
+        to_hex(colormaps["tab10"](i)) for i in range(10)
+    )
+    assert _style.COLOR_CYCLE == tuple(
+        to_hex(colormaps["tab20"](i)) for i in (*range(0, 20, 2), *range(1, 20, 2))
+    )
 
 
 def test_markers_are_subsampled_the_same_way_for_both_renderers():

@@ -27,6 +27,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
+from matplotlib import colormaps
+from matplotlib.colors import to_hex
+
 __all__ = [
     "BOKEH_DASHES",
     "CHANNELS",
@@ -41,21 +44,14 @@ __all__ = [
     "varying_fields",
 ]
 
-#: tab10 in matplotlib's own order, which is also what ``summary._group_styles`` assigns
-#: by level index — so a Taylor diagram and a series panel of the same comparisons come
-#: out the same colours. The hexes are pinned rather than read from matplotlib because
-#: the interactive renderer needs them without importing it.
-COLOR_CYCLE = (
-    "#1f77b4",
-    "#ff7f0e",
-    "#2ca02c",
-    "#d62728",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#7f7f7f",
-    "#bcbd22",
-    "#17becf",
+#: tab20 reordered darks-then-lights: indices 0-9 are exactly tab10 (matplotlib's own
+#: order), 10-19 are tab20's lighter companions. This is also what ``summary._group_styles``
+#: assigns by level index — so a Taylor/Target diagram and a series panel of the same
+#: comparisons come out the same colours, and don't repeat until the 21st series/level.
+#: Derived from the colormap (matplotlib is a core dependency) rather than pinned, so the
+#: two renderers can't drift from it independently.
+COLOR_CYCLE = tuple(
+    to_hex(colormaps["tab20"](i)) for i in (*range(0, 20, 2), *range(1, 20, 2))
 )
 
 #: matplotlib line styles. Index 0 is the reference's; the rest are the test cycle.
