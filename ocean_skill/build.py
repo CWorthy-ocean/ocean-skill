@@ -1333,6 +1333,33 @@ def _roms_metadata(ds) -> dict[str, Any]:
     return md
 
 
+def _domain_outline(lon, lat) -> list[list[float]] | None:
+    """Return a YAML-plain ``domain_outline`` for 2-D ``lon``/``lat``, else ``None``.
+
+    A 1-D (rectilinear) source gets nothing here — its ``geospatial_lon/lat_min/max``
+    bbox already *is* its perimeter, so :func:`~ocean_skill.comparison._domain_of`
+    covers it without this key. Only a curvilinear grid's true, possibly rotated,
+    boundary needs recording. Values are plain Python floats rounded to 3 decimals
+    (~100 m — far finer than the boundary needs to be, and small in the catalog
+    YAML), never a numpy scalar, since ``ruamel``/``pyyaml`` don't know how to dump
+    one and intake's ``to_yaml_file`` would otherwise fail on exactly the metadata
+    this adds.
+    """
+    import numpy as np
+
+    from ocean_skill.align import perimeter_of
+
+    if lon is None or lat is None:
+        return None
+    lon, lat = np.asarray(lon), np.asarray(lat)
+    if lon.ndim != 2 or lat.ndim != 2:
+        return None
+    ring = perimeter_of(lon, lat)
+    if ring is None:
+        return None
+    return [[round(float(lo), 3), round(float(la), 3)] for lo, la in ring]
+
+
 def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
     """Derive extents, axis mapping, variable mapping and featureType from a dataset.
 
@@ -1379,6 +1406,9 @@ def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
         md["lon_convention"] = "0-360" if lon[1] > 180 else "-180-180"
     if (lat := _extent("latitude")) is not None:
         md["geospatial_lat_min"], md["geospatial_lat_max"] = lat
+    lon_coord, lat_coord = coords["longitude"], coords["latitude"]
+    if (outline := _domain_outline(lon_coord, lat_coord)) is not None:
+        md["domain_outline"] = outline
     if (dep := _extent("vertical")) is not None:
         md["geospatial_vertical_min"], md["geospatial_vertical_max"] = dep
 
@@ -1627,6 +1657,35 @@ def _attach(cat, name, reader, *, probe, name_map, metadata):
                 stacklevel=3,
             )
     reader.metadata.update(metadata)
+    # A ROMS entry with its grid still a separate file (not merged into the store by
+    # make_kerchunk's grid= at build time) never sees lon_rho/lat_rho in the probed
+    # `data` above — self_contained_grid was already False by then, so :func:`_probe`
+    # could derive neither the geospatial extent nor an outline. Now that the caller's
+    # `grid=` path has landed in metadata, the grid file itself can supply the shape
+    # the model output alone could not — the same file
+    # :func:`ocean_skill.roms.standardize` opens at read time, just read here for its
+    # lon_rho/lat_rho rather than its data.
+    if (
+        reader.metadata.get("model") == "roms"
+        and not reader.metadata.get("self_contained_grid")
+        and reader.metadata.get("grid")
+        and "domain_outline" not in reader.metadata
+    ):
+        try:
+            from ocean_skill.roms import _open_grid
+
+            grid = _open_grid(reader.metadata)
+            outline = _domain_outline(grid["lon_rho"], grid["lat_rho"])
+        except Exception as exc:
+            warnings.warn(
+                f"{name!r} declares a separate ROMS grid file but it could not be "
+                f"read for a domain outline ({exc}); comparisons will fall back to "
+                "the bounding box.",
+                stacklevel=3,
+            )
+        else:
+            if outline is not None:
+                reader.metadata["domain_outline"] = outline
     cat[name] = reader
     cat.aliases[name] = name  # otherwise list(cat) is empty
     return reader

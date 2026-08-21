@@ -214,13 +214,21 @@ class Field:
         Goes through the renderer registry, so ``renderer="holoviews"`` gives the
         interactive version of the same plot with no other change.
         """
-        from ocean_skill.comparison import _domain_of
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        kwargs.setdefault("domain", _domain_of(self.source))
+        if "domain" not in kwargs:
+            kwargs["domain"] = self._domain()
         spec = PlotSpec(family="field_facet", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
+
+    def _domain(self):
+        """Return the source's true grid outline, its bbox lacking one, or ``None``."""
+        from ocean_skill.align import natural_convention
+        from ocean_skill.comparison import _domain_of, _outline_of
+
+        outline = _outline_of(self.source, natural_convention(self.data))
+        return outline if outline is not None else _domain_of(self.source)
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Play :attr:`facet_dim` instead of laying it out: this field as a movie.
@@ -252,11 +260,11 @@ class Field:
         A field the reduction left as a *single map* has no axis to play, and says so
         rather than writing a one-frame movie.
         """
-        from ocean_skill.comparison import _domain_of
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        kwargs.setdefault("domain", _domain_of(self.source))
+        if "domain" not in kwargs:
+            kwargs["domain"] = self._domain()
         spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 

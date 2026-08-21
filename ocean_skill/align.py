@@ -27,6 +27,7 @@ __all__ = [
     "is_composite",
     "match_axis",
     "natural_convention",
+    "perimeter_of",
     "point_of",
     "resolve_match_method",
     "sample_at",
@@ -242,6 +243,77 @@ def bbox_of(obj) -> tuple[float, float, float, float]:
         float(np.nanmax(lo)),
         float(np.nanmax(la)),
     )
+
+
+def _thin_ring(n: int, max_points: int) -> np.ndarray:
+    """Return indices thinning a length-``n`` open edge to at most ``max_points``.
+
+    Always keeps index 0 and ``n - 1`` (the edge's own endpoints, i.e. the
+    quadrilateral's corners), so thinning can shrink a long edge without ever
+    rounding a corner off the traced shape.
+    """
+    if n <= max_points:
+        return np.arange(n)
+    step = int(np.ceil((n - 1) / (max_points - 1)))
+    return np.r_[np.arange(0, n - 1, step), n - 1]
+
+
+def perimeter_of(lon, lat, *, max_points: int = 400) -> np.ndarray | None:
+    """Return the closed grid-edge ring of ``lon``/``lat`` as an ``(N, 2)`` array.
+
+    For a 2-D (curvilinear) grid this traces the true boundary — the four edge rows/
+    columns of the array, walked corner to corner — which is exact for a rotated grid
+    like a ROMS domain, not an approximation fit to a point cloud. For a 1-D
+    (rectilinear) grid the perimeter *is* the bounding-box rectangle, so that is what
+    comes back. Returns ``None`` for anything else (0-D, mismatched ndim, empty).
+
+    Each edge is thinned independently with :func:`_thin_ring` before assembly, so no
+    corner of a rotated quadrilateral is ever rounded off by thinning a long edge.
+    Longitude is unwrapped first (period 360) so a ring crossing the antimeridian
+    stays contiguous — the same idiom :func:`grid_of` uses for the same reason; the
+    unwrapped values are equivalent degrees on the sphere, not out-of-range ones.
+    """
+    lon, lat = np.asarray(lon, dtype="float64"), np.asarray(lat, dtype="float64")
+    if lon.ndim != lat.ndim or lon.ndim not in (1, 2) or lon.size == 0 or lat.size == 0:
+        return None
+    if lon.ndim == 1:
+        # 1-D axes are independent (lon has nx values, lat has ny) — unlike the 2-D
+        # case they need not share a shape.
+        lo0, la0, lo1, la1 = (
+            float(np.nanmin(lon)),
+            float(np.nanmin(lat)),
+            float(np.nanmax(lon)),
+            float(np.nanmax(lat)),
+        )
+        return np.array(
+            [[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]]
+        )
+    if lon.shape != lat.shape:
+        return None
+
+    lon = np.unwrap(np.unwrap(lon, axis=1, period=360.0), axis=0, period=360.0)
+    ny, nx = lon.shape
+    if ny < 2 or nx < 2:
+        return None
+
+    # Walk the four edges corner to corner — top left→right, right top→bottom,
+    # bottom right→left, left bottom→top — each edge dropping the point it shares
+    # with the edge before it, so the ring has no repeated vertex except the closing
+    # one. Per-edge thinning budget so a long, thin domain (nx >> ny, say) doesn't
+    # starve its short edges to bare corners while the long ones stay dense.
+    budget = max(2, max_points // 4)
+    top_i = _thin_ring(nx, budget)
+    side_i = _thin_ring(ny, budget)
+    bottom_i = _thin_ring(nx, budget)
+
+    def _ring(arr: np.ndarray) -> np.ndarray:
+        top = arr[0, :][top_i]
+        right = arr[:, -1][side_i][1:]
+        bottom = arr[-1, ::-1][bottom_i][1:]
+        left = arr[::-1, 0][side_i][1:-1]  # both ends already the top/bottom corners
+        return np.concatenate([top, right, bottom, left, top[:1]])
+
+    return np.column_stack([_ring(lon), _ring(lat)])
 
 
 def _as_xesmf(obj):

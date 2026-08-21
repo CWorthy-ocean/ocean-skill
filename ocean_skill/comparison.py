@@ -75,13 +75,66 @@ def _implied_over(reference: str) -> tuple[str | None, str]:
     return None, "the reference is gridded"
 
 
+def _outline_of(source: str, convention: str | None = None) -> np.ndarray | None:
+    """Return the source's true grid-edge outline as an ``(N, 2)`` ``[lon, lat]`` ring.
+
+    Reads the ``domain_outline`` a curvilinear source's catalog entry carries (written
+    by :mod:`ocean_skill.build` from the actual grid, native lon values — see
+    ``ocean_skill.align.perimeter_of``), and re-expresses it in ``convention``
+    (``"0-360"``/``"-180-180"``) so it lands on the same longitude axis the comparison
+    is plotted on. ``None`` (the default) picks whichever convention keeps the ring
+    contiguous, the same rule :func:`_domain_of` uses for a bbox. Returns ``None`` when
+    the source is unresolvable, declares no outline (a rectilinear grid, or a catalog
+    built before this key existed — :func:`_domain_of`'s bbox is the fallback then), or
+    the value is malformed.
+    """
+    from ocean_skill.catalog import resolve
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        return None
+    raw = meta.get("domain_outline")
+    if not raw:
+        return None
+    try:
+        ring = np.asarray(raw, dtype="float64")
+    except (TypeError, ValueError):
+        return None
+    if ring.ndim != 2 or ring.shape[1] != 2 or ring.shape[0] < 3:
+        return None
+    ring = ring.copy()
+    # Re-unwrap defensively (the stored ring was already unwrapped when built, but a
+    # round trip through YAML/user-editing offers no guarantee) before re-grounding it
+    # in the requested convention.
+    ring[:, 0] = np.unwrap(ring[:, 0], period=360.0)
+    lon_min, lon_max = float(ring[:, 0].min()), float(ring[:, 0].max())
+    wrapped_min = ((lon_min + 180) % 360) - 180
+    wrapped_max = ((lon_max + 180) % 360) - 180
+    # ±180 wraps each end independently; if that keeps them ordered, both ends fell in
+    # the same 360-cycle and one shift re-grounds the whole (already contiguous) ring.
+    # If it doesn't, ±180 would split the ring at its own seam — the case _domain_of
+    # keeps in 0-360 for the same reason (see its docstring) — so ground there instead.
+    splits_at_180 = wrapped_min > wrapped_max
+    if convention is None:
+        convention = "0-360" if splits_at_180 else "-180-180"
+    if convention == "-180-180" and not splits_at_180:
+        shift = wrapped_min - lon_min
+    else:
+        shift = -360.0 * np.floor(lon_min / 360.0)
+    ring[:, 0] += shift
+    return ring
+
+
 def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     """Return ``(lon_min, lat_min, lon_max, lat_max)`` for a source's catalog extent.
 
     Used to draw the model-domain outline on a map (as in Abigale Wyatt's
     ``Obs_comparisons.ipynb``) without the caller having to know or repeat the model's
-    bounding box. Returns ``None`` if the source is unresolvable or the catalog entry
-    doesn't declare a geospatial extent, in which case no box is drawn.
+    bounding box — the fallback when the source has no :func:`_outline_of` ring (a
+    rectilinear grid, whose bbox already *is* its perimeter, or an entry built before
+    ``domain_outline`` existed). Returns ``None`` if the source is unresolvable or the
+    catalog entry doesn't declare a geospatial extent, in which case no box is drawn.
     """
     from ocean_skill.catalog import resolve
 
@@ -1671,11 +1724,19 @@ class Comparison:
         family = self.family
         if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
-        if family != "series":
-            # Outline the test (model) source's own declared extent, matching Abigale
-            # Wyatt's side-by-side plots — pass domain=None to suppress it. A line plot
-            # has no map to outline, and series() would refuse the option outright.
-            kwargs.setdefault("domain", _domain_of(self.test_name))
+        if family != "series" and "domain" not in kwargs:
+            # Outline the test (model) source's own true grid shape when the catalog
+            # declares one, falling back to its bbox otherwise — matching Abigale
+            # Wyatt's side-by-side plots. Pass domain=None to suppress it, or your own
+            # bbox/ring to override; checking "not in kwargs" (rather than
+            # kwargs.setdefault) keeps that override working once the default value
+            # is an ndarray, whose truthiness setdefault can't rely on. A line plot has
+            # no map to outline, and series() would refuse the option outright.
+            convention = self.aligned.attrs.get("lon_convention")
+            outline = _outline_of(self.test_name, convention)
+            kwargs["domain"] = (
+                outline if outline is not None else _domain_of(self.test_name)
+            )
         spec = PlotSpec(family=family, items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
@@ -2066,11 +2127,16 @@ class ComparisonSet:
         family = families.pop()
         if family == "field_grid" or family == "series":
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
-        if family != "series":
-            # Outlines the first row's test (model) extent; rows sharing one test source
-            # (the common case) all get the same box. Pass domain=None to suppress, or
-            # your own bbox if rows mix test sources with different domains.
-            kwargs.setdefault("domain", _domain_of(first.test_name))
+        if family != "series" and "domain" not in kwargs:
+            # Outlines the first row's test (model) true grid shape (or its bbox,
+            # lacking one); rows sharing one test source (the common case) all get the
+            # same outline. Pass domain=None to suppress, or your own bbox/ring if rows
+            # mix test sources with different domains.
+            convention = first.aligned.attrs.get("lon_convention")
+            outline = _outline_of(first.test_name, convention)
+            kwargs["domain"] = (
+                outline if outline is not None else _domain_of(first.test_name)
+            )
         # field_row is one comparison's family; a set of them stacks as a grid.
         family = "field_grid" if family == "field_row" else family
         return render(
@@ -2118,7 +2184,12 @@ class ComparisonSet:
             {**item, "frame_label": item.get("row_label")} for item in self._items()
         ]
         kwargs.setdefault("labels", (first.test_name, first.reference_name))
-        kwargs.setdefault("domain", _domain_of(first.test_name))
+        if "domain" not in kwargs:
+            convention = first.aligned.attrs.get("lon_convention")
+            outline = _outline_of(first.test_name, convention)
+            kwargs["domain"] = (
+                outline if outline is not None else _domain_of(first.test_name)
+            )
         return render(
             PlotSpec(family="field_movie", items=frames, options=kwargs),
             renderer=renderer,
