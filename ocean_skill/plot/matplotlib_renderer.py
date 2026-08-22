@@ -717,7 +717,7 @@ def _date_axis(ax, scale: dict[str, float], tick_label_kwargs) -> None:
     locator = mdates.AutoDateLocator()
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-    ax.tick_params(axis="both", **{**{"labelsize": scale["tick_label"]}, **{}})
+    ax.tick_params(axis="both", labelsize=scale["tick_label"])
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         if tick_label_kwargs:
             label.set(**tick_label_kwargs)
@@ -2344,9 +2344,18 @@ def skill_map(
     ``metric_names`` picks and orders the panels from what the item carries; a name it
     does not carry raises (see :func:`metric_panels`). Every other parameter means
     what it means in :func:`field_facet`.
+
+    An item carrying ``stations`` (see :func:`ocean_skill.plot.map_metrics.build_items`
+    — an interpolated surface fit through scattered per-station values, rather than a
+    scored comparison's own cell-by-cell map) additionally draws each station's true
+    value as a dot, in the same colour scale as the surface underneath it. That is the
+    one thing distinguishing an interpolated metric map from a scored one here: where
+    the surface has actual support, and where it is only filling a gap between
+    stations.
     """
     import warnings
 
+    import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
 
     from ocean_skill.colormaps import metric_colors
@@ -2478,6 +2487,24 @@ def skill_map(
             # question is "is there a panel below me?", not "am I in the last row?"
             bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
         )
+        stations = item.get("stations")
+        if stations is not None and name in stations["values"]:
+            # Same cmap/norm as the surface beneath: a dot and the patch of surface
+            # under it are the same statistic, so they read as one colour scale, not
+            # two. zorder above the domain outline (4) and below nothing else drawn
+            # in this panel.
+            ax.scatter(
+                stations["lon"],
+                stations["lat"],
+                c=stations["values"][name],
+                cmap=colors.cmap,
+                norm=colors.norm(),
+                s=26,
+                transform=ccrs.PlateCarree(),
+                edgecolor="white",
+                linewidth=0.6,
+                zorder=5,
+            )
         if label is not None:
             ax.title._osk_size_pinned = title_pinned
         if col == 0 and stacked and item.get("row_label"):

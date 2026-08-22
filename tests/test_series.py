@@ -291,7 +291,7 @@ def station_lanes(monkeypatch):
     Mirrors ``tests/test_skill_maps.py``'s ``stub``: a comparison is built and aligned
     without a catalog or a network, so the featureType is stated rather than read.
     """
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
 
     lanes = {
         "papa": monthly_station(),
@@ -371,6 +371,34 @@ def test_the_overall_metrics_of_a_station_are_not_area_weighted(station_lanes):
     record = _comparison().metrics()
     assert record["weighted"] is False
     assert record["n"] == 7
+
+
+def test_a_stations_metrics_record_carries_its_own_position(station_lanes):
+    """osk.map_metrics needs a position on every station's record to plot it.
+
+    The position lives on ``aligned.attrs`` (written by ``align._align_at_point``)
+    and would otherwise never reach the metrics record — see
+    ``ocean_skill.plot.map_metrics``.
+    """
+    record = _comparison().metrics()
+    assert record["station_lon"] == pytest.approx(STATION[0])
+    assert record["station_lat"] == pytest.approx(STATION[1])
+
+
+def test_a_gridded_comparisons_record_carries_no_station_position(
+    station_lanes, monkeypatch
+):
+    """A grid-vs-grid comparison has no single place to report."""
+    import ocean_skill.comparison as comparison_module
+
+    lanes = {"papa": monthly_grid(start="2014-06-01"), "product": monthly_grid()}
+    monkeypatch.setattr(
+        comparison_module,
+        "prepare_source",
+        lambda source, *a, **k: (lanes[source], None),
+    )
+    record = _comparison().metrics()
+    assert "station_lon" not in record
 
 
 def test_a_station_comparison_has_no_maps_to_draw(station_lanes):

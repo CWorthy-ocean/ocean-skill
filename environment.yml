@@ -32,6 +32,10 @@ dependencies:
                       # criteria -- imported inside the calculator body, not core
   # --- metrics ---
   - xskillscore
+  # --- scattered-point interpolation (ocean_skill.plot.map_metrics) ---
+  - verde            # cross-validated spline fit through scattered station metrics
+  - pyproj           # local projection the spline is fit in; also cartopy's own dep,
+                      # named explicitly since map_metrics imports it directly
   # --- plotting (static + interactive) ---
   - matplotlib-base
   - cartopy

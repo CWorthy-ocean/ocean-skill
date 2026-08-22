@@ -604,6 +604,43 @@ def _field_facet(
     return layout
 
 
+def _station_overlay(stations, name: str, colors, da, *, geo: bool):
+    """Return one metric's station values as hoverable dots, or ``None``.
+
+    Plain ``hv.Points`` rather than a geoviews element — the same choice
+    :func:`_domain_overlay` makes and for the same reason: a static figure has no
+    per-frame reprojection cost to worry about, but staying in one coordinate
+    family with the outline it is drawn alongside is simpler than mixing two. The
+    antimeridian shift matches :func:`_domain_overlay`'s: identity for every panel
+    except one in :func:`_output_projection`'s shifted frame.
+    """
+    if stations is None or name not in stations.get("values", {}):
+        return None
+    import holoviews as hv
+    import pandas as pd
+
+    lon = np.asarray(stations["lon"], dtype="float64")
+    lat = np.asarray(stations["lat"], dtype="float64")
+    if geo and _output_projection(da) is not None:
+        lon = (lon % 360.0) - 180.0
+    frame = {"lon": lon, "lat": lat, "value": np.asarray(stations["values"][name])}
+    names = stations.get("names")
+    vdims = ["value"]
+    if names is not None:
+        frame["station"] = list(names)
+        vdims.append("station")
+    return hv.Points(pd.DataFrame(frame), kdims=["lon", "lat"], vdims=vdims).opts(
+        color="value",
+        cmap=colors.cmap,
+        clim=colors.clim(),
+        size=8,
+        line_color="white",
+        line_width=1,
+        tools=["hover"],
+        apply_ranges=False,
+    )
+
+
 def _skill_map(
     items,
     geo=True,
@@ -626,7 +663,9 @@ def _skill_map(
     panel is symmetric about zero and a correlation panel spans (−1, 1) in either
     backend. The column count comes from the shared
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
-    same panels the same way.
+    same panels the same way. An item carrying ``stations`` (see
+    :func:`ocean_skill.plot.map_metrics.build_items`) overlays each station's true value
+    as a hoverable dot in the same colour scale (:func:`_station_overlay`).
 
     Each metric's **overall** value — reduced over space and the scored axis together —
     joins its panel's title, which is the same substitution :func:`_field_row` makes
@@ -694,7 +733,13 @@ def _skill_map(
                 font_scale=font_scale,
                 canvas_factor=factor,
             )
-            panels.append(mesh if outline is None else mesh * outline)
+            points = _station_overlay(
+                item.get("stations"), name, colors, item["skill"][name], geo=geo
+            )
+            for extra in (outline, points):
+                if extra is not None:
+                    mesh = mesh * extra
+            panels.append(mesh)
 
     layout = panels[0]
     for extra in panels[1:]:
@@ -1744,6 +1789,7 @@ def _target(
     labels="annotate",
     color_by=None,
     marker_by=None,
+    groups=None,
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
@@ -1751,8 +1797,8 @@ def _target(
 ):
     """Interactive Target diagram: hover a point for its full metric record.
 
-    ``labels``, ``color_by`` and ``marker_by`` mean exactly what they do in
-    :mod:`ocean_skill.plot.summary`, so one call renders the same way in either
+    ``labels``, ``color_by``, ``marker_by`` and ``groups`` mean exactly what they do
+    in :mod:`ocean_skill.plot.summary`, so one call renders the same way in either
     renderer — including the default (``"annotate"``), which matches the static target.
     ``font_scale`` likewise: text is sized from the frame by the shared type scale, so
     the point labels here and on the static target are the same size relative to the
@@ -1775,6 +1821,15 @@ def _target(
     labels_mode = _resolve_labels(labels)
     recs = [dict(i.get("metrics", {}), label=i.get("label") or "") for i in items]
     df = pd.DataFrame(recs)
+    if groups:
+        # Mirrors summary._records: keyed by each record's own reference (its
+        # catalog source name), falling back to the label for a hand-built table.
+        df["group"] = [
+            groups.get(rec.get("reference"), groups.get(rec["label"], "other"))
+            for rec in recs
+        ]
+        if not color_by and not marker_by:
+            color_by = "group"
     sref = df["std_reference"].to_numpy()
     df["x"] = df["crmsd"].to_numpy() / sref * np.sign(df["std_test"].to_numpy() - sref)
     df["y"] = df["bias"].to_numpy() / sref

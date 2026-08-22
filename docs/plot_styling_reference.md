@@ -571,6 +571,18 @@ each cell to the map rather than the wider allowance a shared bar leaves. Passin
 `colorbar_kwargs={"orientation": "horizontal"}` is honored but warns: the grid's *height*
 is not re-charged for a bar under every panel, so pass `figsize=`/`zoom=` with it.
 
+### Station dots (`skill_map` items built by `map_metrics`)
+
+`osk.map_metrics(mooring_set)` interpolates many stations' per-station metrics onto a
+smooth surface and draws it with this same `skill_map` family — see
+[`docs/skill_maps.md`](skill_maps.md#interpolated-maps-for-scattered-stations) for what
+it does and does not do. Its items carry one thing an ordinary scored comparison's
+never do: a `stations` entry, drawn as a dot per station in **the same colour scale as
+the surface underneath it**, so a reader can tell where the surface has actual support
+and where it is only filling a gap between stations. There is no parameter for this —
+it rides on the item, not on `skill_map`'s own signature — so it is not something you
+pass, only something a `map_metrics` figure always shows.
+
 ### `ncols` (`field_facet` and `skill_map`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
@@ -693,6 +705,29 @@ dimension, split it across figures.
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
 a colour block and a marker block. Same groups, one legend instead of two.
+
+### `groups` (summary diagrams)
+
+`color_by`/`marker_by` split on a field the metric record already carries. `groups`
+is for splitting on something that isn't a column at all — which region a mooring
+sits in, which cruise a cast came from — supplied at plot time as a
+`{reference_name: label}` mapping, without injecting it into every comparison's own
+metrics first:
+
+```python
+regions = {"ciofs3-mooring-kbay01": "Kachemak Bay", "ciofs3-mooring-uci04": "Upper Inlet"}
+suite.taylor(groups=regions)                       # colours by group
+suite.taylor(groups=regions, marker_by="variable")  # ... shape still free for something else
+```
+
+Keyed by each comparison's `reference` (its catalog source name — what every metric
+record already carries), falling back to the `label` for a hand-built record with no
+`reference` column. When neither `color_by` nor `marker_by` is given, `groups` defaults
+`color_by="group"`; an explicit `color_by`/`marker_by` is never overridden, so `groups`
+can still supply the *other* channel.
+
+Honored by **both renderers** for `target` (`taylor`/`paired` delegate to matplotlib
+interactively, as `labels` does above).
 
 ---
 
