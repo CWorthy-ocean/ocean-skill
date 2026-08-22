@@ -1656,8 +1656,17 @@ class Comparison:
                 # A station has one latitude, so cos(lat) is a constant: the arithmetic
                 # is identical either way, but the row would claim an area weighting
                 # that never happened. What `n` counts is steps here, not cells.
+                # The position itself rides along too — it lives on `aligned.attrs`
+                # (written by align._align_at_point) and would otherwise never reach
+                # the metrics record, which is the one thing a spatial map of many
+                # stations' metrics (osk.map_metrics) needs from each of them.
                 **(
-                    {"weighted": False, "sample_noun": "time steps"}
+                    {
+                        "weighted": False,
+                        "sample_noun": "time steps",
+                        "station_lon": self.aligned.attrs.get("station_lon"),
+                        "station_lat": self.aligned.attrs.get("station_lat"),
+                    }
                     if self.is_series
                     else {}
                 ),
@@ -2236,6 +2245,19 @@ class ComparisonSet:
             PlotSpec(family="paired", items=self._metric_items(), options=kwargs),
             renderer=renderer,
         )
+
+    def map_metrics(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Interpolate this set's per-station metrics onto a map, one panel each.
+
+        Every comparison in the set should be a station (a place through time) —
+        anything else is skipped with a warning, since it has no single position to
+        plot. See :func:`ocean_skill.plot.map_metrics.map_metrics`, which this
+        delegates to, for what gets interpolated and how, and what it cannot do
+        (route an interpolated surface around land).
+        """
+        from ocean_skill.plot.map_metrics import map_metrics as _map_metrics
+
+        return _map_metrics(self, renderer=renderer, **kwargs)
 
     def __repr__(self) -> str:
         return f"<ComparisonSet: {len(self)} comparisons>"

@@ -22,6 +22,8 @@ The public API is intentionally small:
     osk.field(source, variable, select=...)          # one source, no reference
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
                                                      # pooled onto Taylor + target
+    osk.map_metrics(mooring_set)                     # per-station metrics, interpolated
+                                                     # onto a map, one panel per metric
 
     osk.cache.info()             # processed intermediates are cached; where, how big
     osk.outputs.info()           # where figures + metrics get written
@@ -33,6 +35,7 @@ from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.field import Field, field
 from ocean_skill.plot.locations import map_datasets
+from ocean_skill.plot.map_metrics import map_metrics
 from ocean_skill.sources import read
 
 __version__ = "0.0.1"
@@ -49,6 +52,7 @@ __all__ = [
     "field",
     "find",
     "map_datasets",
+    "map_metrics",
     "outputs",
     "read",
     "summary",

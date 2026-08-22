@@ -77,12 +77,26 @@ def _diagram_figsize(default, *, size=None, zoom: float = 1.0):
     return (default[0] * factor, default[1] * factor)
 
 
-def _records(comparisons) -> list[dict[str, Any]]:
-    """Metric records plus a short label for each comparison."""
+def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Metric records plus a short label for each comparison.
+
+    ``groups`` maps a comparison's ``reference`` (its catalog source name — what
+    every metric record already carries) to a group label of the caller's choosing:
+    a region, a cruise, whatever ``color_by``/``marker_by`` should split on but
+    nothing in the record itself names. Applied here, at plot time, rather than
+    stored on the comparison — grouping a set someone already built never means
+    recomputing it, and the same set groups differently for different figures.
+    Falls back to trying the *label* as the key, for a record with no ``reference``
+    (a plain metrics table someone assembled by hand).
+    """
     out = []
     for c in comparisons:
         rec = dict(c.metrics())
         rec["label"] = getattr(c, "label", None) or rec.get("variable", "")
+        if groups:
+            rec["group"] = groups.get(
+                rec.get("reference"), groups.get(rec["label"], "other")
+            )
         out.append(rec)
     return out
 
@@ -349,6 +363,7 @@ def taylor(
     colors=None,
     color_by: str | None = None,
     marker_by: str | None = None,
+    groups: dict[str, Any] | None = None,
     fig=None,
     rect: int = 111,
     labels: str | None = "legend",
@@ -368,6 +383,11 @@ def taylor(
     ``color_by``/``marker_by`` name a field of the metric records (``variable``,
     ``depth``, ``test``, ...) so several groups can share one diagram — colour for one
     dimension, marker shape for another (three models across six regions, say).
+    ``groups`` names a grouping that is not already in the record — a
+    ``{reference_name: label}`` mapping (see :func:`_records`) — for splitting on
+    something like region without having to compute it into every comparison's
+    metrics first; it defaults ``color_by`` to ``"group"`` when neither ``color_by``
+    nor ``marker_by`` is otherwise given.
 
     ``labels`` chooses how points are identified: ``"legend"`` (a key below the axes)
     or ``"annotate"`` (each label written beside its marker); ``None`` for neither.
@@ -385,9 +405,11 @@ def taylor(
     from ocean_skill.plot._taylor import TaylorDiagram
 
     labels = _resolve_labels(labels)
-    recs = _records(comparisons)
+    recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    if groups and not color_by and not marker_by:
+        color_by = "group"
 
     refstd = 1.0 if normalize else recs[0]["std_reference"]
     figsize = figsize or _diagram_figsize(TAYLOR_FIGSIZE, size=size, zoom=zoom)
@@ -459,6 +481,7 @@ def target(
     colors=None,
     color_by: str | None = None,
     marker_by: str | None = None,
+    groups: dict[str, Any] | None = None,
     circles=(0.5, 1.0),
     ax=None,
     labels: str | None = "annotate",
@@ -475,6 +498,8 @@ def target(
     reference standard deviation. Distance from the origin is the normalized total RMSD,
     so points inside the unit circle out-perform the observed mean as a predictor.
 
+    ``color_by``/``marker_by``/``groups`` mean exactly what they do in :func:`taylor`.
+
     ``labels`` chooses how points are identified — ``"legend"`` below the axes or
     ``"annotate"`` beside each marker — exactly as for :func:`taylor`, so the two can be
     made to match. It defaults to ``"annotate"`` here because target points cluster near
@@ -485,9 +510,11 @@ def target(
     import matplotlib.pyplot as plt
 
     labels_mode = _resolve_labels(labels)
-    recs = _records(comparisons)
+    recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    if groups and not color_by and not marker_by:
+        color_by = "group"
 
     sref = np.array([r["std_reference"] for r in recs])
     x = np.array([r["crmsd"] for r in recs]) / sref
@@ -589,9 +616,9 @@ def paired(
     """Taylor and Target side by side — the pairing they are usually read as.
 
     Pure composition: :func:`taylor` draws into the left half of the figure and
-    :func:`target` into the right, both accepting the same ``color_by``/``marker_by``
-    style arguments, so the two panels stay visually consistent. Neither function knows
-    about the other.
+    :func:`target` into the right, both accepting the same
+    ``color_by``/``marker_by``/``groups`` style arguments, so the two panels stay
+    visually consistent. Neither function knows about the other.
 
     ``labels`` applies to **both** panels, since the diagrams show the same points and
     identifying them two different ways in one figure reads as two unrelated plots. With
@@ -640,10 +667,12 @@ def paired(
     fig.subplots_adjust(wspace=0.35)
     if labels == "legend":
         # One shared key beneath both panels, so it cannot collide with either title
-        recs = _records(comparisons)
-        _, _, handles = _group_styles(
-            recs, kwargs.get("color_by"), kwargs.get("marker_by")
-        )
+        recs = _records(comparisons, kwargs.get("groups"))
+        color_by = kwargs.get("color_by")
+        marker_by = kwargs.get("marker_by")
+        if kwargs.get("groups") and not color_by and not marker_by:
+            color_by = "group"
+        _, _, handles = _group_styles(recs, color_by, marker_by)
         _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
     _fit_text(fig)
     if save:

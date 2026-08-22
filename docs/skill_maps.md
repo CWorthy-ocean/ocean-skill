@@ -142,6 +142,66 @@ is up to you:
 - and `select={"time": ...}` is still yours to narrow. A lane above ~2 GB says so before
   it is read.
 
+## Interpolated maps for scattered stations
+
+Everything above is one comparison, scored against a reference that itself varies in
+space and time — a satellite record, a climatology. A mooring network is a different
+shape entirely: dozens of *separate* comparisons, each at one place, each reduced to a
+single number per metric (`Comparison.metrics()`, not `.maps()` — a station has one
+cell, so there is nothing to score pointwise). Plotting those as discrete markers on a
+map answers one metric at a time and reads poorly once two stations sit close together.
+
+`osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
+surface through the scattered values** — a cross-validated spline
+([verde](https://www.fatiando.org/verde/)) in a local projection centred on the
+stations — and draws it with this same `skill_map` family: one panel per metric, the
+same `metric_colors` policy (a bias panel symmetric about zero, a correlation panel on
+(−1, 1)), the true station values overlaid as dots in that same colour scale:
+
+```python
+mooring_set = osk.compare(reference=osk.find(featureType="timeSeries", bbox=...),
+                           test="ciofs3", variables=["temperature"])
+mooring_set.map_metrics()                              # bias, crmsd, corr, sigma_ratio
+mooring_set.map_metrics(metrics=("corr", "n"))
+mooring_set.map_metrics(grid="regular")                # skip the model's own grid/mask
+osk.map_metrics(a_ciofs_report_metrics_table, test="ciofs3")   # a plain table works too
+```
+
+**Every metric here is a full-record statistic** — deliberately *not* split by year.
+Splitting first and mapping a median (or a per-year facet) sounds appealing but is the
+wrong default: a full-record correlation tests whether the model gets the whole signal
+right, inter-annual variability included, which a median-of-per-year-correlations
+cannot; and it means every station contributes exactly one clean value instead of a
+pile of per-year rows to reconcile. The consequence worth knowing: two stations with
+very different record lengths (one moored for two years, one for twenty) are
+interpolated as equals — `map_metrics` warns when the spread is wide (see `n`'s own
+column), but does not resolve it for you.
+
+**When a time slice matters more than the whole record**, pool it yourself and pass
+one entry per slice with `rows=`, which draws as `skill_map`'s ordinary stacked rows —
+metrics across, rows down:
+
+```python
+mooring_set.map_metrics(rows={"DJF": winter_set, "MAM": spring_set,
+                               "JJA": summer_set, "SON": fall_set})
+```
+
+**This does not route around land.** The interpolation only knows Euclidean distance
+in the map's own plane, so two moorings on opposite shores of a peninsula (Cook Inlet,
+most obviously) are blended as if the water between them were open. A model grid's
+ocean mask — used automatically when `grid="model"` (the default) can read one — keeps
+the surface from being *drawn* on land, but nothing stops a station on the far side of
+a barrier from *influencing* it. Read the coastline, not just the colour. Barrier-aware
+interpolation ([DIVAnd](https://github.com/gher-uliege/DIVAnd.jl)) is Julia-only and
+out of scope here; a distance mask (`maxdist=`) at least keeps the surface from
+extrapolating confidently across a large open gap between survey lines.
+
+See [`ocean_skill/plot/map_metrics.py`](../ocean_skill/plot/map_metrics.py) for the
+full mechanics (duplicate-position pooling, the antimeridian-safe projection, the
+model-grid vs. regular-grid fallback), and
+[`docs/plot_styling_reference.md`](plot_styling_reference.md#station-dots-skill_map-items-built-by-map_metrics)
+for the station-dot overlay and the `groups=` grouping option on `taylor`/`target`.
+
 ## See also
 
 - [`docs/plot_styling_reference.md`](plot_styling_reference.md) — the `skill_map` family's

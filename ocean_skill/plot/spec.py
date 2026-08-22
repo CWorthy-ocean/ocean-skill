@@ -76,6 +76,13 @@ class PlotSpec:
         record of scalars here. See
         :meth:`ocean_skill.comparison.ComparisonSet._metric_items`.
 
+        ``skill_map`` items carry one further *optional* key, ``stations``: a dict of
+        ``lon``, ``lat``, ``names`` and ``values`` (one array per metric), drawn as
+        dots in each panel's own colour scale on top of the interpolated surface. Only
+        :func:`ocean_skill.plot.map_metrics.build_items` sets it — a scored comparison's
+        own maps have no scattered stations to mark, and an item without the key draws
+        exactly as before.
+
         ``series`` carries ``field_grid``'s list too, with each ``aligned`` 1-D on
         ``time`` rather than 2-D on a grid (position and depth riding as scalar
         coordinates). Its items are *not* one per row, unlike ``field_grid``'s: the
