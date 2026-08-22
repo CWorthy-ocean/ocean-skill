@@ -73,10 +73,27 @@ runs.movie(save="depths.mp4")        # the same three, played
 runs.movie(renderer="holoviews")     # the same three, on a slider
 ```
 
-There is currently no way to fan a comparison out over *time* — `compare()` fans over
-variables and depths only — so a comparison movie's frames are whatever varies across the
-set you built. A model-vs-data movie through time needs `compare(times=...)`, which is
-designed but not built.
+`compare()` also fans over *time* — `times=` is the comparison analogue of `select=`/
+`aggregate=` on a model field above, but as one comparison per bin rather than one
+reduction kept standing (a comparison always has to be a single map; see
+[caching.md](caching.md) and the `compare()` docstring for why). A dict derives the bins
+from the **test** source's own time axis, in the same `{"resample": ..., "reduce": ...}`
+vocabulary:
+
+```python
+months = osk.compare(reference="run_baseline", test="run_new", variables=[NITRATE],
+                     times={"resample": "1MS", "reduce": "mean"})
+
+months.plot()                          # one row per month actually present
+months.movie(save="months.mp4")        # the same months, played
+months.movie(renderer="holoviews")     # the same months, on a slider
+```
+
+A list instead names an explicit set of values — `times=["2012-01", "2012-02"]` — one
+comparison per entry, paired with your own `aggregate={"time": "mean"}` the way you would
+without `times=` at all. Either form gives a `ComparisonSet` that also scores as skill
+through time (`.taylor()`/`.target()`), and whose `.metrics()` table carries a `time`
+column.
 
 A comparison movie keeps the ~260px panels of the row it animates, since it draws three
 of them side by side; only the single-field movie takes the whole width.

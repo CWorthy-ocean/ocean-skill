@@ -17,6 +17,8 @@ The public API is intentionally small:
     osk.compare(reference=..., test=..., variables=[...],
                 aggregate={"time": "mean"}).plot()   # no default reduction: say so
     osk.compare(..., over="time").plot()             # score against time, cell by cell
+    osk.compare(..., times={"resample": "1MS", "reduce": "mean"})  # one comparison
+                                                     # per month, plots or plays as one
     osk.field(source, variable, select=...)          # one source, no reference
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
                                                      # pooled onto Taylor + target

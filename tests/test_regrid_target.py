@@ -203,3 +203,51 @@ def test_a_fine_global_reference_lands_on_the_straddling_test_grid(method):
     xr.testing.assert_allclose(
         out["difference"], (out["test"] - out["reference"]).rename("difference")
     )
+
+
+# -- the same-grid bypass --------------------------------------------------------------
+
+
+def test_identical_grids_skip_the_regridder_entirely(monkeypatch):
+    """Two runs of the same model share a grid; nothing should be built or moved."""
+    import xesmf
+
+    def _no_regridder(*a, **k):
+        raise AssertionError("xesmf.Regridder should not be called for identical grids")
+
+    monkeypatch.setattr(xesmf, "Regridder", _no_regridder)
+    test, reference = _fine_test(value=10.0), _fine_test(value=4.0)
+    out = A.align(test, reference, method="conservative_normed")
+    assert out.attrs["regrid_target"] == "none"
+    assert "share one grid" in out.attrs["regrid_reason"]
+    assert "coverage" not in out
+    np.testing.assert_array_equal(out.lon, test.lon)
+    np.testing.assert_array_equal(out.lat, test.lat)
+    assert float(out["difference"].mean()) == pytest.approx(6.0, abs=1e-9)
+
+
+def test_identical_grids_bypass_survives_a_longitude_convention_difference(monkeypatch):
+    """The same grid, spelled in a different longitude convention, still bypasses."""
+    import xesmf
+
+    def _no_regridder(*a, **k):
+        raise AssertionError("xesmf.Regridder should not be called for identical grids")
+
+    monkeypatch.setattr(xesmf, "Regridder", _no_regridder)
+    test = _fine_test(value=10.0)
+    # the same cells, re-expressed in 0-360 -- align()'s own convention harmonizing
+    # brings this back onto test's -160..-140 axis before the grid check runs
+    reference = test.copy(data=np.full_like(test.values, 4.0))
+    reference = reference.assign_coords(lon=("lon", np.asarray(test.lon) + 360.0))
+    out = A.align(test, reference, method="conservative_normed")
+    assert out.attrs["regrid_target"] == "none"
+    assert float(out["difference"].mean()) == pytest.approx(6.0, abs=1e-9)
+
+
+def test_near_equal_but_different_grids_do_not_bypass():
+    """Off-by-one-cell grids are a genuinely different grid, not a shared one."""
+    test = _grid(-160.0, -140.0, 8, 10.0, 30.0, 8, value=10.0)
+    reference = _grid(-160.0, -140.0, 9, 10.0, 30.0, 9, value=4.0)
+    out = A.align(test, reference, method="bilinear")
+    assert out.attrs["regrid_target"] == "reference"
+    assert "share one grid" not in out.attrs["regrid_reason"]

@@ -1665,6 +1665,7 @@ class Comparison:
                 test=self.test_name,
                 reference=self.reference_name,
                 depth=_display_depth(self.variable, self.select),
+                time=_display_time(self.select),
                 obs_depth=self._actual_depth,
                 regrid=self.method,
                 **(
@@ -1768,10 +1769,13 @@ class Comparison:
 
     def __repr__(self) -> str:
         scored = f" over {self.over}" if self.over else ""
+        time = _display_time(self.select)
+        at_time = f" @ {_time_label(time)}" if time is not None else ""
         return (
             f"<Comparison {_variable_label(self.variable)[:24]} "
             f"{self.test_name} vs {self.reference_name} "
-            f"@ {_depth_label(_display_depth(self.variable, self.select))}{scored}>"
+            f"@ {_depth_label(_display_depth(self.variable, self.select))}"
+            f"{at_time}{scored}>"
         )
 
 
@@ -1868,11 +1872,19 @@ def _flatten(objs: Any) -> list[Comparison]:
 
 
 #: Dimensions a pooled label can be built from, in the order they are spelled, paired
-#: with how to read each one off a comparison. The same four a metrics record carries,
-#: so ``color_by``/``marker_by`` can group by anything a label can name.
+#: with how to read each one off a comparison. The same five a metrics record
+#: carries, so ``color_by``/``marker_by`` can group by anything a label can name.
 _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("variable", lambda c: _short_variable_label(c.variable)),
     ("depth", lambda c: _depth_label(_display_depth(c.variable, c.select))),
+    (
+        "time",
+        lambda c: (
+            _time_label(t)
+            if (t := _display_time(c.select)) is not None
+            else "full record"
+        ),
+    ),
     ("test", lambda c: c.test_name),
     ("reference", lambda c: c.reference_name),
 )
@@ -2283,19 +2295,30 @@ def summary(
 
 
 def _fan_vertical_entries(
-    select: dict[str, Any], keys: frozenset[str]
+    select: dict[str, Any],
+    keys: frozenset[str],
+    *,
+    sugar_label: str = "compare()'s depths=/select vertical",
+    example: str = "depths=/select={'sigma0': ...}",
+    axis_noun: str = "vertical",
 ) -> dict[str, Any]:
-    """Return the vertical entries (of ``keys``) compare()'s depths=/sigma0 sugar sees.
+    """Return the entries (of ``keys``) a compare() fan-out sugar sees.
 
     ``select`` here is always a dict (never ``None``) by the time :func:`compare`
     calls this -- normalized up front through :func:`_normalize_pair`. For a plain
     select, the entries it carries under ``keys`` are returned as-is. For a
     pair-spec select, both sides must *agree* on any key of ``keys`` present in
     both -- the sugar fans one set of values over both lanes, which only makes
-    sense if both lanes are being asked the same vertical question. A genuine
-    conflict raises, naming both sides, rather than silently preferring one: there
-    is no depths=/sigma0 spelling for a different vertical value per lane --
-    construct :class:`Comparison` directly (with its own per-role select) for that.
+    sense if both lanes are being asked the same question along that axis. A
+    genuine conflict raises, naming both sides, rather than silently preferring
+    one: there is no depths=/sigma0/times= spelling for a different value per
+    lane -- construct :class:`Comparison` directly (with its own per-role select)
+    for that.
+
+    Shared between the vertical fan (``depths=``/``select={'sigma0': ...}``) and
+    the time fan (``times=``); ``sugar_label``/``example``/``axis_noun`` only
+    change the error's wording so each reads as its own sugar rather than the
+    other's.
     """
     if not is_pair_spec(select):
         return {k: select[k] for k in keys if k in select}
@@ -2307,14 +2330,14 @@ def _fan_vertical_entries(
                 continue
             if k in merged and merged[k] != side[k]:
                 raise ValueError(
-                    "compare()'s depths=/select vertical sugar fans one value over "
-                    f"both lanes, but this pair-spec select disagrees on {k!r}: "
+                    f"{sugar_label} sugar fans one value over both lanes, but this "
+                    f"pair-spec select disagrees on {k!r}: "
                     f"test={select['test'].get(k)!r}, "
-                    f"reference={select['reference'].get(k)!r}. Leave vertical keys "
-                    "out of a pair-spec select and pass depths=/select={'sigma0': "
-                    "...} normally (it is applied to both sides), or construct "
-                    "Comparison(...) directly for genuinely different per-lane "
-                    "vertical requests."
+                    f"reference={select['reference'].get(k)!r}. Leave {axis_noun} "
+                    f"keys out of a pair-spec select and pass {example} normally "
+                    "(it is applied to both sides), or construct Comparison(...) "
+                    f"directly for genuinely different per-lane {axis_noun} "
+                    "requests."
                 )
             merged[k] = side[k]
     return merged
@@ -2349,12 +2372,264 @@ def _fanned_select(
     return sel
 
 
+def _selected_time(select: dict[str, Any]) -> Any:
+    """Return what a ``select`` asks for along time, or ``None`` if it names none.
+
+    Mirrors :func:`_selected_depth`: ``compare()`` writes plain ``"time"``, but a
+    ``Comparison`` built directly (or a pair-spec's own side) may use any spelling
+    in :data:`ocean_skill.sources._TIME_KEYS`, and reading only one back would
+    silently under-report a caller's own request.
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    for key in _TIME_KEYS:
+        if key in select:
+            return select[key]
+    return None
+
+
+def _display_time(select: dict[str, Any]) -> Any:
+    """The time value a comparison should report in labels/repr/metrics.
+
+    A pair-spec select reports the **test** side, matching :func:`_display_depth`'s
+    own precedent: the test side names the figure when the two lanes could
+    disagree, which is exactly why a pair-spec select exists.
+    """
+    return _selected_time(select_for(select, "test"))
+
+
+def _time_label(value: Any) -> str:
+    """Format one fanned time value for labels/repr.
+
+    A ``{"min", "max"}`` window (:func:`_time_select_value`'s fallback for a
+    frequency with no single partial-date spelling) reads as ``"start–stop"``,
+    each end sliced to ten characters; anything else — the common case, a
+    partial-date string like ``"2010-01"`` — is already its own label.
+    """
+    if isinstance(value, dict) and {"min", "max"} <= set(value):
+        return f"{str(value['min'])[:10]}–{str(value['max'])[:10]}"
+    return str(value)
+
+
+def _normalize_time_value(value: Any) -> Any:
+    """Return one ``times=`` list entry in its canonical, cache-stable spelling.
+
+    A :class:`~pandas.Timestamp`/``datetime`` and the string naming the same
+    instant must hash to the same cache key
+    (:func:`ocean_skill.cache.key_for`'s ``default=str`` covers either alone, but
+    not consistently against each other), so anything that is not already a
+    string or the YAML-friendly ``{"min", "max"}`` window is turned into one here,
+    once, rather than trusting every downstream reader to agree.
+    """
+    if isinstance(value, dict) and {"min", "max"} <= set(value):
+        return {"min": str(value["min"]), "max": str(value["max"])}
+    return value if isinstance(value, str) else str(value)
+
+
+def _normalize_times(times: Any) -> tuple[str, Any] | None:
+    """Return ``("bins", spec)``, ``("list", tuple)``, or ``None`` for ``times=None``.
+
+    A dict names how to *derive* bins from the test source's own time axis
+    (:func:`_time_bins`) — it must carry ``"resample"`` and ``"reduce"``, the same
+    vocabulary ``aggregate={"time": ...}`` already uses. Anything else names an
+    explicit set of time values, one comparison per entry, mirroring how a bare
+    ``depths=50`` is sugar for ``depths=(50,)``.
+    """
+    if times is None:
+        return None
+    if isinstance(times, dict):
+        if is_pair_spec(times):
+            raise ValueError(
+                "times= fans one question over both lanes, like depths=; it "
+                "takes no {'test': ..., 'reference': ...} pair-spec. Use select= "
+                "for a per-lane time entry instead."
+            )
+        if "groupby" in times:
+            raise ValueError(
+                f"times={times!r} names a climatology (every January of the "
+                "record folded into one field), which is not a set of time "
+                "steps to fan into separate comparisons. Build the climatology "
+                "with aggregate={'time': {'groupby': ...}} instead, then "
+                "osk.field() to plot its months as panels, or select= to pick "
+                "one month out of it."
+            )
+        if "resample" not in times or "reduce" not in times:
+            raise ValueError(
+                f"times={times!r} needs both 'resample' (a bin width, e.g. "
+                "'1MS') and 'reduce' (how each bin collapses, e.g. 'mean') -- "
+                "the same vocabulary as aggregate={'time': ...}. Or pass an "
+                "explicit list of time values instead, one comparison per entry."
+            )
+        return "bins", dict(times)
+    values = (
+        (times,)
+        if isinstance(times, str) or not hasattr(times, "__iter__")
+        else tuple(times)
+    )
+    return "list", tuple(_normalize_time_value(v) for v in values)
+
+
+def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
+    """Return ``(bin_start, bin_last_value)`` for every resample bin with data.
+
+    Coordinate-only — like :func:`ocean_skill.operators._bin_counts`, which finds
+    the bin edges here, reads: "a time coordinate is a small in-memory index and
+    already carries everything the count needs" — so resolving ``times=``'s dict
+    form against a lazily-opened, multi-file model run costs nothing like opening
+    the data itself would. ``window`` narrows which part of the axis counts,
+    mirroring how ``depths=`` can default from a select entry already present.
+
+    ``bin_last_value`` is each bin's own *realized* last timestamp, found by
+    comparison (``searchsorted``) against the real coordinate values — never by
+    adding an offset to a bin's start, which means something different for a
+    360-day ROMS calendar than for real dates and has to work identically for
+    both (see :func:`_time_select_value`, the only reader of this).
+    """
+    import pandas as pd
+    import xarray as xr
+
+    from ocean_skill import operators
+    from ocean_skill.sources import read
+
+    obj = read(source)
+    dim = operators.resolve_dim(obj, "time")
+    if dim is None:
+        raise ValueError(
+            f"{source!r} has no time axis, so times= has nothing to fan over."
+        )
+    index = obj.indexes.get(dim)
+    if not isinstance(index, pd.DatetimeIndex | xr.CFTimeIndex):
+        raise ValueError(
+            f"{source!r}'s time axis is not a decoded calendar axis"
+            f"{f' ({type(index).__name__})' if index is not None else ''}, so "
+            "times= cannot bin it into calendar periods. This is usually a "
+            "climatology read with decode_times=False -- give it a fixed "
+            "select= instead of times=, or aggregate={'time': 'mean'}."
+        )
+    if window is not None:
+        # A slice-shaped window that matches nothing comes back empty, size 0,
+        # below; a bare period string ("2099-01") that matches nothing raises its
+        # own KeyError instead (operators.select's empty-period restatement).
+        # Both mean the same thing here -- normalize to one ValueError so a
+        # caller (and compare()'s skip_missing) has one exception type to catch.
+        try:
+            obj = operators.select(obj, {dim: window})
+        except KeyError as err:
+            raise ValueError(
+                f"times=...'s window {window!r} matched no data in {source!r} "
+                f"along its time axis: {err}"
+            ) from err
+        if obj.sizes.get(dim, 0) == 0:
+            raise ValueError(
+                f"times=...'s window {window!r} matched no data in {source!r} "
+                "along its time axis."
+            )
+    if obj.sizes.get(dim, 0) == 0:
+        # Not a windowing outcome (that case is caught above with a message
+        # naming the window) -- the source's time axis is empty outright, which
+        # xarray's own .resample() refuses with a much less legible error.
+        raise ValueError(f"{source!r} has no data along its time axis.")
+    counts = operators._bin_counts(obj[dim], freq)
+    edges = counts[dim].values
+    values = np.sort(np.asarray(obj[dim].values))
+    bin_of = np.searchsorted(edges, values, side="right") - 1
+    bins = []
+    for i, (edge, n) in enumerate(zip(edges, counts.values, strict=True)):
+        if n <= 0:
+            continue
+        bins.append((edge, values[bin_of == i].max()))
+    if not bins:
+        window_note = f" within {window!r}" if window is not None else ""
+        raise ValueError(
+            f"times={{'resample': {freq!r}, ...}} found no bins with any data "
+            f"in {source!r}{window_note}."
+        )
+    return bins
+
+
+def _time_select_value(bin_start: Any, bin_last: Any, freq: str) -> Any:
+    """The per-bin select value for one resample bin.
+
+    A whole calendar unit (year/month/day, unit multiplier 1) already names the
+    whole bin as a partial-date string, sliced to that resolution — ``"2010-01"``
+    is all of January, xarray's own indexing, and the same idiom
+    :func:`ocean_skill.operators._bin_label` uses (numpy or cftime alike, since
+    both spell their first few characters the same way). Anything coarser or
+    irregular (``"3MS"``, ``"10D"``, hourly) has no single partial-date spelling,
+    so the bin's own realized span is written out as the ``{"min", "max"}``
+    window :func:`ocean_skill.operators.select` already reads.
+    """
+    import pandas as pd
+
+    try:
+        offset = pd.tseries.frequencies.to_offset(freq)
+        unit = offset.rule_code.split("-")[0]
+        n = offset.n
+    except ValueError:
+        unit, n = None, None
+    width = {"YS": 4, "YE": 4, "MS": 7, "ME": 7, "D": 10}.get(unit) if n == 1 else None
+    if width is not None:
+        return str(bin_start)[:width]
+    return {"min": str(bin_start), "max": str(bin_last)}
+
+
+def _fanned_time_select(sel: dict[str, Any], value: Any) -> dict[str, Any]:
+    """Write ``value`` into ``sel``'s time entry on both sides, replacing any there.
+
+    The time analog of :func:`_fanned_select`'s strip-then-write-back: ``times=``
+    is sugar that *replaces* whatever time entry ``select`` already carried (its
+    only role there was narrowing which bins to fan over — see ``compare()``'s
+    window handling), and writes the fanned value back under plain ``"time"``,
+    the spelling every one of ``compare()``'s own selections uses.
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    def _strip(side: dict[str, Any] | None) -> dict[str, Any]:
+        return {k: v for k, v in (side or {}).items() if k not in _TIME_KEYS}
+
+    if is_pair_spec(sel):
+        return {
+            "test": {**_strip(sel["test"]), "time": value},
+            "reference": {**_strip(sel["reference"]), "time": value},
+        }
+    return {**_strip(sel), "time": value}
+
+
+def _merged_time_aggregate(aggregate: Any, time_entry: dict[str, Any]) -> Any:
+    """Fold ``{"time": time_entry}`` into ``aggregate``, on both sides of a pair-spec.
+
+    Only for ``times=``'s dict form: the bin it derived is already exactly one
+    resample period, and this is what guarantees it reduces to the single map a
+    ``Comparison`` requires (:func:`_require_reduced`) even for a one-step bin,
+    where a period select still leaves a size-1 time dimension standing.
+    """
+    if is_pair_spec(aggregate):
+        return {
+            "test": {**(aggregate.get("test") or {}), "time": time_entry},
+            "reference": {**(aggregate.get("reference") or {}), "time": time_entry},
+        }
+    return {**(aggregate or {}), "time": time_entry}
+
+
+def _has_time_entry(spec: Any) -> bool:
+    """Whether a normalized select/aggregate names a time entry, either side."""
+    from ocean_skill.sources import _TIME_KEYS
+
+    sides = (
+        (spec.get("test") or {}, spec.get("reference") or {})
+        if is_pair_spec(spec)
+        else (spec or {},)
+    )
+    return any(k in side for side in sides for k in _TIME_KEYS)
+
+
 def compare(
     *,
     reference,
     test,
     variables: list[Any],
     depths=None,
+    times: dict[str, Any] | list | tuple | str | None = None,
     select: dict[str, Any] | None = None,
     aggregate: dict[str, Any] | None = None,
     method: str = "conservative_normed",
@@ -2368,7 +2643,7 @@ def compare(
     cache: bool | None = None,
     refresh: bool = False,
 ) -> ComparisonSet:
-    """Fan over reference × test × variable × depth and return a :class:`ComparisonSet`.
+    """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
     ``reference`` and ``test`` each take a source name or a list; ``variables`` is a
     list of anything :mod:`ocean_skill.vocabulary` recognizes — a short vocabulary key
@@ -2398,9 +2673,10 @@ def compare(
 
     ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology and
     ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep an
-    axis standing, which a comparison cannot use unless it is told to *score against* it
-    — see :func:`ocean_skill.field.field` for the model-only path that plots those as
-    panels.
+    axis standing, which a comparison cannot use directly: score against it cell by
+    cell with ``over="time"``, fan it into one comparison per month with ``times=``
+    (below) rather than ``aggregate``, or see :func:`ocean_skill.field.field` for the
+    model-only path that plots those as panels.
 
     ``select`` and ``aggregate`` may also each be a **pair-spec** — ``{"test": ...,
     "reference": ...}`` — for when the two lanes' axes are not asking the same
@@ -2458,6 +2734,33 @@ def compare(
     :func:`ocean_skill.roms.to_sigma0`; ROMS sources only, and not alongside
     ``depths=`` or another vertical ``select`` key.
 
+    ``times=`` is the month-by-month analogue of ``depths=``: instead of one map,
+    fan out one comparison per time bin, each reduced on its own. A dict names how
+    to *derive* the bins from the **test** source's own time axis, in the same
+    vocabulary ``aggregate={"time": ...}`` uses —
+    ``times={"resample": "1MS", "reduce": "mean"}`` gives one comparison per month
+    actually present in the record, monthly-meaned, without reading the data
+    yourself first to find out which months those are (this is the one case where
+    ``compare()`` itself opens a source, cheaply — the time coordinate alone, not
+    the data). A list instead names an explicit set of values —
+    ``times=["2010-01", "2010-02"]`` — one comparison per entry, with no bin
+    derivation and no aggregate merged in for you: pair it with your own
+    ``aggregate={"time": "mean"}`` the way you would without ``times=`` at all.
+
+    A ``select`` time entry alongside the dict form narrows *which* bins are
+    enumerated — the window, not a conflict, mirroring how ``depths=`` can default
+    from a select entry already present; alongside the list form it is dropped
+    with a warning, since the list already says exactly which comparisons to
+    build. ``times=`` and ``over="time"`` answer the same question two ways — fan
+    into separate comparisons, or keep the axis and score against it — and
+    ``compare()`` refuses both at once. The resulting :class:`ComparisonSet` plots
+    as monthly rows (``.plot()``), animates as monthly frames (``.movie()``), or
+    scores as skill through time (``.taylor()``/``.target()``); its ``.metrics()``
+    table carries a ``time`` column. Against a reference whose time axis is not a
+    decoded calendar (a climatology read with ``decode_times=False``) ``times=``
+    has no axis to fan against — use the pair-spec ``select``/``aggregate``
+    pattern above instead.
+
     Each pair's aligned result is cached to disk and reused on a later run with the
     same arguments (see :mod:`ocean_skill.cache`, which prints where once per
     process). ``cache=False`` bypasses it; ``refresh=True`` recomputes and overwrites
@@ -2512,6 +2815,63 @@ def compare(
             vertical = next(iter(explicit_vertical_select.values()), SURFACE)
             depths = (vertical,)
         fan_values = depths
+
+    # times= is the same kind of fan-out along the time axis instead of the
+    # vertical one -- see the compare() docstring's own `times=` paragraph. Only a
+    # dict form opens anything (the test source's time coordinate, to derive its
+    # bins); a list form is pure sugar over an explicit set of values, like
+    # `reference=` accepting a list. The pair-spec agreement check below only runs
+    # when times= is actually asked for -- unlike the vertical fan, a pair-spec
+    # select is *allowed* to carry genuinely different time values per lane
+    # without times= in the picture at all (the WOA-climatology pattern this
+    # module's own docstring documents), and times=None must leave that untouched.
+    from ocean_skill.sources import _TIME_KEYS
+
+    times_fan = _normalize_times(times)
+    time_freq: str | None = None
+    time_window: Any = None
+    if times_fan is not None:
+        if over is not None and over in _TIME_KEYS:
+            raise ValueError(
+                f"compare() got both times= and over={over!r}: times= fans the "
+                "time axis into one comparison per bin, over='time' keeps it "
+                "standing and scores against it, cell by cell. Pick one."
+            )
+        if times_fan[0] == "bins":
+            if _has_time_entry(aggregate):
+                raise ValueError(
+                    "compare() got both times={'resample': ..., 'reduce': ...} "
+                    "and an aggregate= time entry: times= already says how each "
+                    "bin reduces (its own 'reduce'), so a separate "
+                    "aggregate={'time': ...} would conflict with it. Drop the "
+                    "aggregate time entry, or drop times= and use "
+                    "aggregate={'time': {'resample': ..., 'reduce': ...}} "
+                    "yourself with osk.field() to keep the axis standing as "
+                    "panels instead."
+                )
+            # The window is actually *used* as one value here (unlike the list
+            # form below, which only checks whether a select time entry exists at
+            # all before dropping it), so a pair-spec select disagreeing on time
+            # is refused up front, exactly like depths=/select={'sigma0': ...}.
+            explicit_time_select = _fan_vertical_entries(
+                select,
+                _TIME_KEYS,
+                sugar_label="compare()'s times=",
+                example="times=",
+                axis_noun="time",
+            )
+            time_window = next(iter(explicit_time_select.values()), None)
+            time_entry = dict(times_fan[1])
+            time_freq = time_entry["resample"]
+            aggregate = _merged_time_aggregate(aggregate, time_entry)
+        elif _has_time_entry(select):
+            warnings.warn(
+                f"compare() got both times={times!r} and a select= time entry; "
+                "times= already says exactly which comparisons to build, so the "
+                "select= entry is dropped rather than narrowing each of them "
+                "further.",
+                stacklevel=_stacklevel.find(),
+            )
 
     refs = [reference] if isinstance(reference, str) else list(reference)
     tests = [test] if isinstance(test, str) else list(test)
@@ -2587,6 +2947,25 @@ def compare(
         # exclude when every name involved is one the catalog could have listed.
         return not all(is_known(n) for opt in options for n in opt)
 
+    # Resolved once per test source (dict form of times= only) and shared across
+    # every variable/reference/depth that source appears under -- the whole point
+    # of memoizing here rather than inside a single (var, ref, tst) iteration, the
+    # way `depths=`'s own fan_values needs no such cache (it costs nothing to
+    # repeat, being pure sugar over a value the caller already gave).
+    _time_bins_cache: dict[str, tuple[Any, ...]] = {}
+
+    def _times_for(tst: str) -> tuple[Any, ...]:
+        if times_fan is None:
+            return (None,)
+        if times_fan[0] == "list":
+            return times_fan[1]
+        if tst not in _time_bins_cache:
+            bins = _time_bins(tst, time_freq, time_window)
+            _time_bins_cache[tst] = tuple(
+                _time_select_value(start, last, time_freq) for start, last in bins
+            )
+        return _time_bins_cache[tst]
+
     out: list[Comparison] = []
     for var in variables:
         # Pair each variable with the sources that actually carry it, rather than
@@ -2646,8 +3025,18 @@ def compare(
                 )
         these_values = (None,) if calculated else fan_values
         label_fn = _sigma_label if fan_key == "sigma0" else _depth_label
+        many_vars = len(variables) > 1
+        many_values = not calculated and len(fan_values) > 1
         for ref in matching:
             for tst in matching_tests:
+                try:
+                    these_times = _times_for(tst)
+                except ValueError as exc:
+                    if not skip_missing:
+                        raise
+                    print(f"  skipped {tst!r}: {exc}")
+                    continue
+                many_times = times_fan is not None and len(these_times) > 1
                 for d in these_values:
                     # `depths`/`sigma0` is sugar for fanning select's vertical entry
                     # over a list -- one comparison per value. Writing it into the
@@ -2655,39 +3044,49 @@ def compare(
                     # honoured rather than silently overridden by the default. Into
                     # both sides of a pair-spec select -- see :func:`_fanned_select`.
                     sel = _fanned_select(select, fan_key, d, calculated)
-                    # Label only what varies across the set: repeating the variable
-                    # name on every point of a single-variable fan-out just collides.
-                    short = _short_variable_label(var)
-                    many_vars = len(variables) > 1
-                    many_values = not calculated and len(fan_values) > 1
-                    if many_vars and many_values:
-                        label = f"{short} {label_fn(d)}"
-                    elif many_values:
-                        label = label_fn(d)
-                    else:
-                        label = short
-                    c = Comparison(
-                        reference=ref,
-                        test=tst,
-                        variable=var,
-                        select=sel,
-                        aggregate=aggregate,
-                        method=method,
-                        over=over,
-                        time_method=time_method,
-                        tolerance=tolerance,
-                        bin_anchor=bin_anchor,
-                        min_pairs=min_pairs,
-                        metrics=metrics,
-                        label=label,
-                        cache=cache,
-                    )
-                    try:
-                        c.align(refresh=refresh)
-                    except KeyError as exc:
-                        if not skip_missing:
-                            raise
-                        print(f"  skipped: {exc}")
-                        continue
-                    out.append(c)
+                    for t in these_times:
+                        # `times=` is the same sugar along time, nested inside the
+                        # depth fan -- see :func:`_fanned_time_select`. Skipped
+                        # entirely when times= was never asked for, so `sel` (and
+                        # every label below) is untouched and this loop iterates
+                        # exactly once, matching today's behaviour byte for byte.
+                        sel_t = (
+                            sel if times_fan is None else _fanned_time_select(sel, t)
+                        )
+                        # Label only what varies across the set: repeating the
+                        # variable name on every point of a single-variable
+                        # fan-out just collides.
+                        short = _short_variable_label(var)
+                        parts = []
+                        if many_vars:
+                            parts.append(short)
+                        if many_values:
+                            parts.append(label_fn(d))
+                        if many_times:
+                            parts.append(_time_label(t))
+                        label = " ".join(parts) if parts else short
+                        c = Comparison(
+                            reference=ref,
+                            test=tst,
+                            variable=var,
+                            select=sel_t,
+                            aggregate=aggregate,
+                            method=method,
+                            over=over,
+                            time_method=time_method,
+                            tolerance=tolerance,
+                            bin_anchor=bin_anchor,
+                            min_pairs=min_pairs,
+                            metrics=metrics,
+                            label=label,
+                            cache=cache,
+                        )
+                        try:
+                            c.align(refresh=refresh)
+                        except KeyError as exc:
+                            if not skip_missing:
+                                raise
+                            print(f"  skipped {label}: {exc}")
+                            continue
+                        out.append(c)
     return ComparisonSet(out)

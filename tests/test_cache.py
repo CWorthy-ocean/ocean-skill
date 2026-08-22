@@ -276,6 +276,42 @@ def test_a_different_selection_is_a_different_entry(counted_pipeline):
     assert len(cache.entries("aligned")) == 2
 
 
+def test_two_fanned_months_are_two_cache_entries(counted_pipeline):
+    """Exactly the shape a `times=` fan produces: same pair, one select per month."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Comparison(
+            reference="woa",
+            test="model",
+            variable="nitrate",
+            select={"depth": 100, "time": "2010-01"},
+        ).align()
+    before = counted_pipeline["n"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Comparison(
+            reference="woa",
+            test="model",
+            variable="nitrate",
+            select={"depth": 100, "time": "2010-02"},
+        ).align()
+    assert counted_pipeline["n"] > before
+    assert len(cache.entries("aligned")) == 2
+
+    # and re-running the first month again is a pure cache hit, not a third build
+    after_second_month = counted_pipeline["n"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        Comparison(
+            reference="woa",
+            test="model",
+            variable="nitrate",
+            select={"depth": 100, "time": "2010-01"},
+        ).align()
+    assert counted_pipeline["n"] == after_second_month
+    assert len(cache.entries("aligned")) == 2
+
+
 def test_one_test_against_several_references_prepares_its_lane_once(counted_pipeline):
     """The lane layer's whole purpose: a model's own work must not repeat per pair.
 

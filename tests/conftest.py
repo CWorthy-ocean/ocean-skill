@@ -35,6 +35,24 @@ def isolated_cache(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def fresh_regridder_memo():
+    """Give every test its own empty regridder memo.
+
+    :func:`ocean_skill.align._regridder_for` keys on grid *content*, so two tests
+    that happen to build numerically identical grids would otherwise see each
+    other's cached weights — a correct but confusing cross-test coupling, and one
+    that would make a test asserting "the regridder was built" fail depending on
+    what ran before it. Unlike ``isolated_cache`` above, this module-level dict
+    is never reset on its own.
+    """
+    from ocean_skill import align
+
+    align.clear_regridder_memo()
+    yield
+    align.clear_regridder_memo()
+
+
+@pytest.fixture(autouse=True)
 def fast_probe_retries(monkeypatch):
     """Take the sleep out of probe retries so failure-path tests stay instant.
 
