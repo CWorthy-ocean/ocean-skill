@@ -733,74 +733,50 @@ def test_field_plot_draws_the_facet_family(prepared, monkeypatch):
     matplotlib.use("Agg")
     from ocean_skill.field import field as make_field
 
-    # no catalog entry for the stub source, so there is no domain box to draw
-    fig = make_field("stub", "nitrate", label="run A").plot(domain=None)
+    fig = make_field("stub", "nitrate", label="run A").plot()
     assert len(_mpl_titles(fig)) == 6
 
 
-def _resolve_only(monkeypatch, name, metadata):
-    """Monkeypatch ``catalog.resolve`` to know exactly one entry, ``name``."""
+def test_field_plot_draws_no_domain_box_even_with_one_declared(monkeypatch):
+    """A standalone field has nothing to compare against, so no dashed outline.
+
+    ``domain`` used to default from the catalog's bbox/outline here too, but a lone
+    field's own plotted extent *is* its data - the box only earns its place once
+    there is a reference panel to place it against (see ``Comparison.plot``).
+    """
     from types import SimpleNamespace
 
-    entry = SimpleNamespace(metadata=metadata)
+    import matplotlib
 
-    def fake_resolve(source):
-        if source != name:
-            raise KeyError(source)
-        return entry
-
-    monkeypatch.setattr("ocean_skill.catalog.resolve", fake_resolve, raising=True)
-
-
-def test_field_domain_prefers_the_stored_outline_over_the_bbox(monkeypatch):
+    matplotlib.use("Agg")
     from ocean_skill.field import field as make_field
 
-    lon = np.linspace(0.0, 10.0, 6)[None, :] * np.ones((5, 1))
-    lat = np.linspace(0.0, 5.0, 5)[:, None] * np.ones((1, 6))
-    ring = [[1.0, 1.0], [9.0, 1.0], [9.0, 4.0], [1.0, 4.0]]
-    _resolve_only(
-        monkeypatch,
-        "curvi",
-        {
-            "domain_outline": ring,
-            "geospatial_lon_min": 0.0,
-            "geospatial_lat_min": 0.0,
-            "geospatial_lon_max": 10.0,
-            "geospatial_lat_max": 5.0,
-        },
+    entry = SimpleNamespace(metadata={"domain_outline": [[1.0, 1.0], [9.0, 1.0]]})
+    monkeypatch.setattr(
+        "ocean_skill.catalog.resolve",
+        lambda source: entry if source == "curvi" else (_ for _ in ()).throw(
+            KeyError(source)
+        ),
+        raising=True,
     )
 
     f = make_field("curvi", "nitrate")
     f._data = xr.DataArray(
         np.ones((5, 6)),
         dims=("y", "x"),
-        coords={"lon": (("y", "x"), lon), "lat": (("y", "x"), lat)},
-    )
-    domain = f._domain()
-    assert domain is not None and np.asarray(domain).shape[1] == 2
-
-
-def test_field_domain_falls_back_to_the_bbox_without_an_outline(monkeypatch):
-    from ocean_skill.field import field as make_field
-
-    _resolve_only(
-        monkeypatch,
-        "rectilinear",
-        {
-            "geospatial_lon_min": -98.0,
-            "geospatial_lat_min": 18.0,
-            "geospatial_lon_max": -80.0,
-            "geospatial_lat_max": 31.0,
+        coords={
+            "lon": (("y", "x"), np.linspace(0.0, 10.0, 6)[None, :] * np.ones((5, 1))),
+            "lat": (("y", "x"), np.linspace(0.0, 5.0, 5)[:, None] * np.ones((1, 6))),
         },
     )
-
-    f = make_field("rectilinear", "nitrate")
-    f._data = xr.DataArray(
-        np.ones((12, 20)),
-        dims=("lat", "lon"),
-        coords={"lat": np.linspace(18, 31, 12), "lon": np.linspace(-98, -80, 20)},
-    )
-    assert f._domain() == (-98.0, 18.0, -80.0, 31.0)
+    fig = f.plot()
+    dashed = [
+        line
+        for ax in fig.axes
+        for line in ax.get_lines()
+        if line.get_linestyle() == "--"
+    ]
+    assert not dashed
 
 
 # --- two facet axes: depth by month --------------------------------------------------
