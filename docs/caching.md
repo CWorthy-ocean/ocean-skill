@@ -2,7 +2,7 @@
 
 Every comparison's expensive step is `Comparison.align()`: it opens both sources
 (often remote OPeNDAP), reduces each to one 2-D field (time mean, and for ROMS an
-xgcm s-coord → z transform), then regrids test onto reference with xesmf. The result
+xgcm s-coord → z transform), then regrids onto the coarser lane's grid with xesmf. The result
 is one small Dataset — `test`, `reference`, `difference`, `coverage`.
 
 That result is **cached to disk by default** and reused on a later run with the same

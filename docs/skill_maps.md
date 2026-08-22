@@ -65,16 +65,20 @@ value in each panel's title instead of its corner.
 
 This is the part you cannot infer from the signature, and the part most likely to matter.
 
-**Alignment in time mirrors alignment in space.** The test is brought onto the
-reference's time axis exactly as it is brought onto the reference's grid: the reference is
-the frame, and nothing is done to it. How the test moves depends on which side is coarser.
+**Alignment in time echoes alignment in space, with one difference.** Both pick
+direction by resolution rather than by role — how the finer side moves depends on how
+much finer it is — but only space is allowed to move the reference: a fine satellite
+reference scored against a coarse model lands *on* the model's grid (see
+[`align()`](../ocean_skill/align.py)'s `_regrid_target`), while in time the reference's
+axis is always the frame and a reference finer than the test is refused rather than
+coarsened.
 
 | Situation | What happens | Spatial analogue |
 |---|---|---|
 | Test much finer (hourly model, daily product) | test steps are **averaged into** the reference's bins | `conservative_normed` |
 | Comparable cadences, offset stamps (a daily mean at 12:00 vs a composite at 00:00) | steps are **paired** by nearest match within half a bin | `bilinear` |
 | Reference is instantaneous rather than a composite | test is **sampled** at those instants | `bilinear` |
-| Reference finer than the test | **refused**, naming both cadences | — (no counterpart: this package never coarsens the reference on its own) |
+| Reference finer than the test | **refused**, naming both cadences | no counterpart: space regrids the finer lane down instead of refusing |
 
 Averaging the finer lane is a default rather than something to request for the same
 reason area-averaging is: nobody has to ask for `conservative_normed` either. And the

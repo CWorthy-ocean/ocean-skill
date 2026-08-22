@@ -1382,7 +1382,7 @@ class Comparison:
 
     # -- pipeline ---------------------------------------------------------------
     def align(self, *, refresh: bool = False):
-        """Read both sources, reduce them, and regrid test onto reference.
+        """Read both sources, reduce them, and regrid onto the coarser lane's grid.
 
         The result is always computed, never lazy — see the ``.load()`` note below —
         so repeat consumers (metrics, a redrawn figure) read values rather than
@@ -1677,7 +1677,7 @@ class Comparison:
         return self._metrics
 
     def difference(self):
-        """Return the ``test − reference`` field on the reference grid."""
+        """Return the ``test − reference`` field on the aligned (coarser) grid."""
         return self.aligned["difference"]
 
     def as_item(self) -> dict[str, Any]:
