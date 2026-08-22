@@ -1,11 +1,14 @@
-"""Alignment: bring the ``test`` entity onto the ``reference`` grid/coordinates.
+"""Alignment: bring the two lanes onto one grid/coordinate frame.
 
-Direction is set by role (not argument order): test → reference (⇒ model→data by
-default), with an ``onto`` override. Longitude conventions are harmonized first —
-a 0-360 model vs a ±180 observational grid otherwise produces silently empty overlap.
-The reference is subset to the test's bounding box so we regrid onto the overlap
-rather than a whole globe. The result is **always xarray**, so one metrics engine
-serves both gridded and point comparisons.
+Roles are set by name (not argument order): ``test`` vs ``reference``. In time the
+reference's axis is the frame and the test moves onto it; in space the pair lands on
+the **coarser** of the two grids — the reference's when they are comparable, the
+test's when a fine satellite product is scored against a coarse model — so the finer
+lane is always the one area-averaged down (see :func:`_regrid_target`). Longitude
+conventions are harmonized first — a 0-360 model vs a ±180 observational grid
+otherwise produces silently empty overlap. The reference is subset to the test's
+bounding box so we regrid over the overlap rather than a whole globe. The result is
+**always xarray**, so one metrics engine serves both gridded and point comparisons.
 """
 
 from __future__ import annotations
@@ -1154,15 +1157,20 @@ def _match_exactly(test, reference, tdim, rdim):
     return test, reference, {}
 
 
-def _coverage(regridder, src, over: str | None):
-    """Regrid a field of ones over the test's valid cells: the fraction covered.
+def _coverage(regridder, src, over: str | None, role: str = "test"):
+    """Regrid a field of ones over the source's valid cells: the fraction covered.
+
+    ``src`` is whichever lane the regrid reads from — the finer one — so the mask
+    always describes how much valid *source* data landed in each coarser target cell;
+    ``role`` names that lane for the warning below.
 
     With a surviving axis this is one extra regrid *per step*, which is worth avoiding
     when it buys nothing. A model's missing cells are its land mask, which does not
     move, so the mask is checked for invariance along ``over`` — exactly, with
     ``any == all``, not assumed — and collapsed to one step when it holds. The 2-D
     result broadcasts back over every step, which is what a static mask means. A mask
-    that genuinely does move pays for the per-step version and says so.
+    that genuinely does move — a satellite reference's clouds — pays for the per-step
+    version and says so.
     """
     finite = np.isfinite(src)
     if over is not None and over in finite.dims:
@@ -1170,12 +1178,69 @@ def _coverage(regridder, src, over: str | None):
             one = finite.isel({over: 0}, drop=True)
             return regridder(xr.ones_like(src.isel({over: 0}, drop=True)).where(one))
         warnings.warn(
-            f"the test's valid cells change along {over!r}, so coverage is computed "
+            f"the {role}'s valid cells change along {over!r}, so coverage is computed "
             f"for every one of its {src.sizes[over]} steps rather than once. Expected "
             "of a field with a moving mask; surprising for a model land mask.",
             stacklevel=_stacklevel.find(),
         )
     return regridder(xr.ones_like(src).where(finite))
+
+
+def _regrid_target(
+    test,
+    reference,
+    target: Literal["auto", "test", "reference"] = "auto",
+) -> tuple[str, str]:
+    """Decide which lane's grid the pair lands on: the **coarser** of the two.
+
+    The spatial counterpart of :func:`resolve_match_method`, settled by the same
+    measurement: cell size read off the coordinates themselves (:func:`_cell_km`,
+    which handles regular and curvilinear grids alike), with :data:`COARSER_BY` as
+    the same hysteresis, so two grids of essentially one resolution never flip-flop
+    between directions. Regridding always moves the finer lane onto the coarser
+    because that is what ``conservative_normed`` *means* — area-averaging source
+    cells into bigger target cells; aimed the other way it would invent subgrid
+    structure the coarse lane never had. A 4 km satellite reference against a
+    coarser model is therefore regridded onto the model's grid, while the ordinary
+    fine-model-vs-coarse-climatology case keeps the reference as the frame, exactly
+    as before. Near-equal grids also keep the reference, the frame nothing has to
+    justify.
+
+    Returns ``(target, reason)``; both are recorded in the result's attrs so the
+    choice is on paper rather than in someone's memory.
+    """
+    if target != "auto":
+        if target not in ("test", "reference"):
+            raise ValueError(
+                f"unknown target {target!r}; expected 'auto', 'test' or 'reference'"
+            )
+        return target, f"target={target!r} as asked"
+    test_km = _cell_km(test, _lon_name(test), _lat_name(test))
+    reference_km = _cell_km(reference, _lon_name(reference), _lat_name(reference))
+    if (
+        not np.isfinite(test_km)
+        or not np.isfinite(reference_km)
+        or test_km <= 0
+        or reference_km <= 0
+    ):
+        return (
+            "reference",
+            "a lane's cell size could not be measured, so the reference stays the "
+            "frame",
+        )
+    if test_km >= COARSER_BY * reference_km:
+        return (
+            "test",
+            f"the reference's cells (~{reference_km:.3g} km) are materially finer "
+            f"than the test's (~{test_km:.3g} km), so the reference is regridded "
+            "onto the test's coarser grid",
+        )
+    return (
+        "reference",
+        f"the reference's cells (~{reference_km:.3g} km) are not materially finer "
+        f"than the test's (~{test_km:.3g} km), so the test is regridded onto the "
+        "reference's grid",
+    )
 
 
 def align(
@@ -1184,6 +1249,7 @@ def align(
     *,
     method: str = "bilinear",
     convention: Literal["auto", "0-360", "-180-180"] = "auto",
+    target: Literal["auto", "test", "reference"] = "auto",
     pad: float = DEFAULT_PAD,
     min_coverage: float = 0.5,
     test_name: str = "test",
@@ -1195,11 +1261,17 @@ def align(
     metadata: dict | None = None,
     bin_anchor: str = "auto",
 ) -> xr.Dataset:
-    """Regrid ``test`` onto ``reference``'s grid; return both plus their difference.
+    """Regrid the pair onto one grid — the coarser one — plus their difference.
 
     Both inputs should be 2-D (lat/lon) DataArrays — select time/depth beforehand.
-    Returns a Dataset with ``test``, ``reference`` and ``difference`` (test − reference)
-    on the reference grid.
+    Returns a Dataset with ``test``, ``reference`` and ``difference`` (test −
+    reference, whichever lane moved) on the **coarser** lane's grid: the reference's
+    when the grids are comparable or the reference is coarser (the historical
+    behavior), the test's when the reference is materially finer — a 4 km satellite
+    product against a coarse model (see :func:`_regrid_target`; the choice and its
+    reason are recorded as ``regrid_target``/``regrid_reason`` in the result's
+    attrs). ``target="test"`` or ``"reference"`` forces a direction instead, the way
+    ``convention=`` forces a longitude convention.
 
     ``over`` names one axis that is *allowed to survive* — the axis a caller is going to
     score the pair over, cell by cell (see
@@ -1288,10 +1360,19 @@ def align(
             report=report,
         )
 
-    # regrid onto the overlap, not the reference's full (often global) grid
+    # regrid over the overlap, not the reference's full (often global) grid — the
+    # reference is the possibly-global lane whichever direction the regrid runs
     reference = subset_to_bbox(reference, bbox_of(test), pad=pad)
 
-    src, tgt = _as_xesmf(test), _as_xesmf(reference)
+    # the pair lands on the coarser grid, so the finer lane is always the source the
+    # regrid area-averages down — see _regrid_target
+    target, target_reason = _regrid_target(test, reference, target)
+    if target == "test":
+        src, tgt = _as_xesmf(reference), _as_xesmf(test)
+        src_role, tgt_role = "reference", "test"
+    else:
+        src, tgt = _as_xesmf(test), _as_xesmf(reference)
+        src_role, tgt_role = "test", "reference"
     need_bounds = method.startswith("conservative")
     regridder = xe.Regridder(
         grid_of(src, need_bounds),
@@ -1301,29 +1382,40 @@ def align(
     )
     regridded = regridder(src, keep_attrs=True)
 
-    # Coverage = the same regrid applied to a field of ones over the valid test cells.
+    # Coverage = the same regrid applied to a field of ones over the valid source
+    # cells: however the direction resolved, it is the finer lane's coverage of the
+    # coarser target cells.
     coverage = None
     if min_coverage:
-        coverage = _coverage(regridder, src, over)
+        coverage = _coverage(regridder, src, over, role=src_role)
         regridded = regridded.where(coverage >= min_coverage)
 
+    # the lanes keep their identities whichever one moved: difference stays
+    # test − reference, never target − source
+    test_out, reference_out = (
+        (tgt, regridded) if target == "test" else (regridded, tgt)
+    )
     out = xr.Dataset(
         {
-            test_name: regridded,
-            reference_name: tgt,
-            "difference": regridded - tgt,
+            test_name: test_out,
+            reference_name: reference_out,
+            "difference": test_out - reference_out,
         }
     )
     out["difference"].attrs = {
         "long_name": f"{test_name} − {reference_name}",
-        "units": tgt.attrs.get("units", ""),
+        "units": reference_out.attrs.get("units", ""),
     }
     if coverage is not None:
         out["coverage"] = coverage
         out["coverage"].attrs = {
-            "long_name": "fraction of the reference cell covered by valid test data"
+            "long_name": (
+                f"fraction of the {tgt_role} cell covered by valid {src_role} data"
+            )
         }
     out.attrs["regrid_method"] = method
+    out.attrs["regrid_target"] = target
+    out.attrs["regrid_reason"] = target_reason
     out.attrs["lon_convention"] = convention
     out.attrs["min_coverage"] = min_coverage
     if over is not None:

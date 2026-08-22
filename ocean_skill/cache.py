@@ -57,7 +57,13 @@ __all__ = [
 #: and the one it is easiest to miss — the stored layout is untouched and nothing fails
 #: loudly; a stale hit simply returns a single map where the caller now expects an axis,
 #: and the error surfaces somewhere else entirely (a movie with nothing to animate).
-_FORMAT_VERSION = 2
+#:
+#: **3** — spatial alignment now regrids onto the *coarser* of the two grids instead
+#: of the reference's unconditionally (see :func:`ocean_skill.align._regrid_target`).
+#: A pre-change entry for a coarse-test/fine-reference pair sits on the reference's
+#: fine grid; the same key today would resolve onto the test's coarse one instead, so
+#: reusing it silently hands a caller the wrong grid rather than recomputing.
+_FORMAT_VERSION = 3
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline
