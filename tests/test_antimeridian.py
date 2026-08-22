@@ -51,6 +51,43 @@ def test_natural_convention_follows_contiguity():
     assert A.natural_convention(atlantic) == "-180-180"
 
 
+def test_natural_convention_is_not_flipped_by_float_noise_on_a_tied_span():
+    """A domain nowhere near the dateline (e.g. -160..-125) is an exact tie: both
+    conventions give the same span. The two wrap computations round differently at
+    the ~1e-14 level, so a bare ``<`` used to flip roughly a quarter of realistic
+    (irregular, curvilinear-style) grids to "0-360" -- dropping their tiles for no
+    reason. Seed 7 is pinned because it reproduced the flip before the fix.
+    """
+    rng = np.random.default_rng(7)
+    lon = np.linspace(-160.0, -125.0, 24) + rng.normal(0, 1e-9, 24)
+    field = xr.DataArray(
+        np.full((10, 24), 5.0),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(-15.0, 15.0, 10), "lon": lon},
+    )
+    assert A.natural_convention(field) == "-180-180"
+
+
+def test_natural_convention_treats_180_as_a_seam_not_a_wrap():
+    """A domain that reaches, but does not cross, the dateline (e.g. 120..180E)
+    does not straddle anything -- but wrapping +180 to -180 for the ±180 span
+    inflates it to the whole globe, so the domain used to lose its tiles anyway.
+    """
+    edge = xr.DataArray(
+        np.full((5, 41), 5.0),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(-10.0, 10.0, 5), "lon": np.linspace(120.0, 180.0, 41)},
+    )
+    assert A.natural_convention(edge) == "-180-180"
+
+    overshoot = edge.assign_coords(lon=np.linspace(120.0, 180.0000001, 41))
+    assert A.natural_convention(overshoot) == "-180-180"
+
+    # a genuine straddler running through 180 must still read as 0-360
+    straddler = edge.assign_coords(lon=np.linspace(170.0, 190.0, 41))
+    assert A.natural_convention(straddler) == "0-360"
+
+
 @pytest.mark.parametrize("method", ["bilinear", "conservative_normed"])
 def test_a_dateline_straddling_test_stays_inside_its_own_longitudes(method):
     """The bug in one line: a Pacific-only model must not fill a global map."""
@@ -412,6 +449,19 @@ def test_tiles_for_downgrades_only_a_straddling_field():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         assert _tiles_for(False, _straddling_field()) is False
+    assert not any("Web Mercator" in str(w.message) for w in caught)
+
+
+def test_tiles_for_keeps_tiles_for_a_domain_nowhere_near_the_dateline():
+    """A -160..-125 domain (e.g. a Pacific coast model) is a tied span, not a
+    straddle -- it must keep its basemap, not get downgraded on float noise.
+    """
+    from ocean_skill.plot.holoviews_renderer import _tiles_for
+
+    field = _rectilinear_field(-160.0, -125.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _tiles_for(True, field) is True
     assert not any("Web Mercator" in str(w.message) for w in caught)
 
 
