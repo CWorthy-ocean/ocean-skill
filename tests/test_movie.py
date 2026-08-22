@@ -971,3 +971,72 @@ def test_a_field_with_no_axis_left_says_so_from_movie(monkeypatch):
         warnings.simplefilter("ignore")
         with pytest.raises(ValueError, match="needs an axis to play"):
             make_field("stub", NITRATE).movie(domain=None)
+
+
+# --- ComparisonSet.movie(): a compare() fan animated, not stacked -------------------
+#
+# Only the seam through the real entry point is tested here -- the frame contract
+# itself (colour scale, ordering, labels) is already pinned above via hand-built
+# frames. What's new is that ComparisonSet.movie() actually reaches that contract
+# unchanged, and that it still refuses a series set.
+
+
+@pytest.fixture
+def times_stub(monkeypatch):
+    """Serve one fixed field for any source, and skip the domain outline lookup."""
+    from unittest import mock
+
+    from ocean_skill import comparison
+
+    monkeypatch.setattr(
+        comparison, "prepare_source", lambda source, *a, **k: (_field(0.0), None)
+    )
+    monkeypatch.setattr(comparison, "_domain_of", lambda name: None)
+    declared = {"model": {"variables": []}, "obs": {"variables": []}}
+    with mock.patch(
+        "ocean_skill.catalog.resolve", lambda n: mock.Mock(metadata=declared[n])
+    ):
+        yield comparison
+
+
+def test_comparisonset_movie_plays_one_frame_per_fanned_time(times_stub):
+    out = times_stub.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=[NITRATE],
+        times=["2010-01", "2010-02", "2010-03"],
+    )
+    assert len(out) == 3
+    ani = out.movie()
+    assert ani._save_count == 3
+
+
+def test_comparisonset_movie_keeps_the_fans_own_order_on_the_slider(times_stub):
+    out = times_stub.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=[NITRATE],
+        times=["2010-03", "2010-01", "2010-02"],  # deliberately not sorted
+    )
+    holomap = _holomaps(out.movie(renderer="holoviews"))[0]
+    assert _keys(holomap) == ["2010-03", "2010-01", "2010-02"]
+
+
+class _FakeSeriesComparison:
+    """Just enough to reach ComparisonSet.movie()'s own refusal, nothing further."""
+
+    is_series = True
+
+    def metrics(self):
+        return {}
+
+    def as_item(self):
+        return {}
+
+
+def test_comparisonset_movie_still_refuses_a_series_set():
+    from ocean_skill.comparison import ComparisonSet
+
+    bad = ComparisonSet([_FakeSeriesComparison()])
+    with pytest.raises(ValueError, match="time series"):
+        bad.movie()

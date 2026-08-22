@@ -96,6 +96,9 @@ def run_suite(suite_path: str | Path):
         # any other vertical) key already sitting in `select:` instead of a bare
         # `depths=("surface",)` colliding with it.
         depths=tuple(suite["depths"]) if "depths" in suite else None,
+        # `times:` is a dict (the bin-derivation form) or a list, same shapes YAML
+        # already gives either way -- passed straight through with no reshaping.
+        times=suite.get("times"),
         method=suite.get("regrid", "conservative_normed"),
         # A suite has to be able to say this, and until now could not: `aggregate` was
         # simply not forwarded, so every suite silently got the old implicit time mean.

@@ -13,7 +13,9 @@ bounding box so we regrid over the overlap rather than a whole globe. The result
 
 from __future__ import annotations
 
+import hashlib
 import warnings
+from collections import OrderedDict
 from typing import Any, Literal
 
 import numpy as np
@@ -25,6 +27,7 @@ from ocean_skill.cf import find_coord
 __all__ = [
     "align",
     "axis_edges",
+    "clear_regridder_memo",
     "grid_of",
     "harmonize_longitude",
     "is_composite",
@@ -1186,6 +1189,106 @@ def _coverage(regridder, src, over: str | None, role: str = "test"):
     return regridder(xr.ones_like(src).where(finite))
 
 
+#: How many distinct (method, source grid, target grid) weight sets to keep alive at
+#: once. Weight matrices are large, so this is small on purpose -- big enough that a
+#: fan over one pair of grids (a monthly `times=` fan against a fixed reference, most
+#: obviously) reuses one entry every step rather than evicting itself, too small to
+#: let an unrelated run's weights linger once that fan is done.
+_REGRIDDER_MEMO_SIZE = 4
+
+#: ``{(method, src_token, tgt_token): regridder}``, most-recently-used last. Keyed on
+#: grid *content*, not object identity, since every fanned comparison builds its own
+#: fresh (but numerically identical) lane objects -- see :func:`_grid_token`.
+_REGRIDDER_MEMO: OrderedDict[tuple, Any] = OrderedDict()
+
+
+def _grid_token(grid: xr.Dataset) -> tuple:
+    """Return a hashable fingerprint of a :func:`grid_of` result: its shape and values.
+
+    Built from the centre coordinates (``lon``/``lat``) only, not the corner arrays
+    (``lon_b``/``lat_b``) a conservative method also carries: corners are a pure
+    function of the centres (:func:`_corners_1d`/:func:`_corners_2d`), so two grids
+    with equal centres always have equal corners too, and hashing the smaller array
+    is cheaper for no loss of precision. ``need_bounds`` itself is a pure function of
+    ``method``, which the memo key already carries alongside this token.
+    """
+    lon, lat = np.asarray(grid["lon"]), np.asarray(grid["lat"])
+    return (
+        lon.shape,
+        lat.shape,
+        hashlib.sha256(np.ascontiguousarray(lon).tobytes()).hexdigest(),
+        hashlib.sha256(np.ascontiguousarray(lat).tobytes()).hexdigest(),
+    )
+
+
+def _regridder_for(src_grid: xr.Dataset, tgt_grid: xr.Dataset, method: str):
+    """Return a weight-built ``xe.Regridder`` for this (grid, grid, method), memoized.
+
+    A :func:`compare` fan over time builds one :class:`Comparison` per bin, each
+    reading its own fresh lane objects -- but against one fixed reference (or two
+    runs of one model, before :func:`_shared_grid` even gets here) every bin regrids
+    the *same two grids*, and the weights xesmf computes for them do not depend on
+    the data, only the geometry. Recomputing that per bin would pay the pipeline's
+    most expensive step N times for a result that is identical N times over; this
+    keys on the grids' own content (:func:`_grid_token`) so fresh-but-equal lane
+    objects hit, evicting least-recently-used past :data:`_REGRIDDER_MEMO_SIZE`.
+
+    Direction is already resolved by the time this is called (the caller passes
+    ``src``/``tgt`` in the order :func:`_regrid_target` decided), so it is part of
+    the key only in the sense that swapping the two arguments changes the token
+    order -- there is no separate "direction" component to track.
+    """
+    import xesmf as xe
+
+    key = (method, _grid_token(src_grid), _grid_token(tgt_grid))
+    cached = _REGRIDDER_MEMO.get(key)
+    if cached is not None:
+        _REGRIDDER_MEMO.move_to_end(key)
+        return cached
+    regridder = xe.Regridder(src_grid, tgt_grid, method, unmapped_to_nan=True)
+    _REGRIDDER_MEMO[key] = regridder
+    if len(_REGRIDDER_MEMO) > _REGRIDDER_MEMO_SIZE:
+        _REGRIDDER_MEMO.popitem(last=False)
+    return regridder
+
+
+def clear_regridder_memo() -> None:
+    """Drop every memoized regridder, freeing the weights it held.
+
+    Exposed for tests (each gets a clean memo, see ``tests/conftest.py``) and for a
+    long-lived process that has moved on to different grids and wants the memory
+    back sooner than LRU eviction would give it up.
+    """
+    _REGRIDDER_MEMO.clear()
+
+
+def _shared_grid(test, reference) -> bool:
+    """Report whether ``test``/``reference`` sit on exactly the same horizontal grid.
+
+    Checked on the coordinate *values* (not names or attrs) after
+    :func:`harmonize_longitude` has already reconciled conventions, so two lanes of
+    the same model run — a physics run and a biogeochemistry rerun sharing one
+    ROMS domain, most obviously — are recognized however each renamed its own
+    lon/lat. Exact equality on purpose: a near-equal grid is a genuinely different
+    grid, and :func:`_regrid_target`'s hysteresis already covers "close enough to
+    not flip-flop" — this is only for "there is nothing to regrid at all".
+    """
+    tlon, tlat = _lon_name(test), _lat_name(test)
+    rlon, rlat = _lon_name(reference), _lat_name(reference)
+    if tlon is None or tlat is None or rlon is None or rlat is None:
+        return False
+    tlon_da, tlat_da = test[tlon], test[tlat]
+    rlon_da, rlat_da = reference[rlon], reference[rlat]
+    if tlon_da.dims != rlon_da.dims or tlat_da.dims != rlat_da.dims:
+        # Same physical grid but different dimension names would still make
+        # xarray's own name-based alignment misbehave on `test - reference` below,
+        # so it is treated as not shared rather than risking a silent broadcast.
+        return False
+    return bool(
+        np.array_equal(np.asarray(tlon_da), np.asarray(rlon_da))
+    ) and bool(np.array_equal(np.asarray(tlat_da), np.asarray(rlat_da)))
+
+
 def _regrid_target(
     test,
     reference,
@@ -1271,7 +1374,10 @@ def align(
     product against a coarse model (see :func:`_regrid_target`; the choice and its
     reason are recorded as ``regrid_target``/``regrid_reason`` in the result's
     attrs). ``target="test"`` or ``"reference"`` forces a direction instead, the way
-    ``convention=`` forces a longitude convention.
+    ``convention=`` forces a longitude convention. When the two lanes already sit on
+    exactly the same grid — two runs of the same model, most commonly — nothing is
+    regridded at all: no weights are built, ``regrid_target`` reads ``"none"``, and
+    the difference is taken directly (see :func:`_shared_grid`).
 
     ``over`` names one axis that is *allowed to survive* — the axis a caller is going to
     score the pair over, cell by cell (see
@@ -1306,8 +1412,6 @@ def align(
     does. The resolved choice is recorded as ``lon_convention`` in the result's
     attrs; pass ``"0-360"`` or ``"-180-180"`` to force one instead.
     """
-    import xesmf as xe
-
     # Matched *before* the regrid: the binning is what decides how many fields there are
     # to regrid, so doing it after would pay for every step of the finer lane and then
     # throw most of them away.
@@ -1364,37 +1468,53 @@ def align(
     # reference is the possibly-global lane whichever direction the regrid runs
     reference = subset_to_bbox(reference, bbox_of(test), pad=pad)
 
-    # the pair lands on the coarser grid, so the finer lane is always the source the
-    # regrid area-averages down — see _regrid_target
-    target, target_reason = _regrid_target(test, reference, target)
-    if target == "test":
-        src, tgt = _as_xesmf(reference), _as_xesmf(test)
-        src_role, tgt_role = "reference", "test"
+    if _shared_grid(test, reference):
+        # Two lanes already on one grid -- two runs of the same model, most
+        # commonly -- so there is nothing to regrid: building weights to map a
+        # field onto the grid it is already on would only interpolate it onto
+        # itself, at the cost of the whole regridder machinery. Difference the
+        # two fields directly instead -- still renamed to lon/lat like a regridded
+        # result, since every downstream reader (the renderers, most visibly)
+        # expects those canonical names on the aligned output.
+        test_out, reference_out = _as_xesmf(test), _as_xesmf(reference)
+        coverage = None
+        target, target_reason = (
+            "none",
+            "the two lanes share one grid (identical lon/lat coordinates), so "
+            "nothing was regridded",
+        )
     else:
-        src, tgt = _as_xesmf(test), _as_xesmf(reference)
-        src_role, tgt_role = "test", "reference"
-    need_bounds = method.startswith("conservative")
-    regridder = xe.Regridder(
-        grid_of(src, need_bounds),
-        grid_of(tgt, need_bounds),
-        method,
-        unmapped_to_nan=True,
-    )
-    regridded = regridder(src, keep_attrs=True)
+        # the pair lands on the coarser grid, so the finer lane is always the
+        # source the regrid area-averages down — see _regrid_target
+        target, target_reason = _regrid_target(test, reference, target)
+        if target == "test":
+            src, tgt = _as_xesmf(reference), _as_xesmf(test)
+            src_role, tgt_role = "reference", "test"
+        else:
+            src, tgt = _as_xesmf(test), _as_xesmf(reference)
+            src_role, tgt_role = "test", "reference"
+        need_bounds = method.startswith("conservative")
+        # memoized on the two grids' own content -- see _regridder_for -- so a fan
+        # of comparisons against one fixed reference (compare()'s times= fan, most
+        # concretely) builds these weights once rather than once per fanned step
+        regridder = _regridder_for(
+            grid_of(src, need_bounds), grid_of(tgt, need_bounds), method
+        )
+        regridded = regridder(src, keep_attrs=True)
 
-    # Coverage = the same regrid applied to a field of ones over the valid source
-    # cells: however the direction resolved, it is the finer lane's coverage of the
-    # coarser target cells.
-    coverage = None
-    if min_coverage:
-        coverage = _coverage(regridder, src, over, role=src_role)
-        regridded = regridded.where(coverage >= min_coverage)
+        # Coverage = the same regrid applied to a field of ones over the valid
+        # source cells: however the direction resolved, it is the finer lane's
+        # coverage of the coarser target cells.
+        coverage = None
+        if min_coverage:
+            coverage = _coverage(regridder, src, over, role=src_role)
+            regridded = regridded.where(coverage >= min_coverage)
 
-    # the lanes keep their identities whichever one moved: difference stays
-    # test − reference, never target − source
-    test_out, reference_out = (
-        (tgt, regridded) if target == "test" else (regridded, tgt)
-    )
+        # the lanes keep their identities whichever one moved: difference stays
+        # test − reference, never target − source
+        test_out, reference_out = (
+            (tgt, regridded) if target == "test" else (regridded, tgt)
+        )
     out = xr.Dataset(
         {
             test_name: test_out,

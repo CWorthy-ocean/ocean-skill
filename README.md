@@ -55,6 +55,18 @@ depths.movie(save="depths.mp4")       # the same three, played  (.gif also works
 depths.movie(renderer="holoviews")    # the same three, on a slider
 ```
 
+`compare()` fans over **time** too — `times=` gives one comparison per bin instead of
+one reduction kept standing, so the set above plots and plays month by month:
+
+```python
+months = osk.compare(reference="GOM_bgc_hindcast", test="GOM_bgc_forecast",
+                     variables=[NITRATE],
+                     times={"resample": "1MS", "reduce": "mean"})
+
+months.plot()                         # one row per month actually present
+months.movie(save="months.mp4")       # the same months, played
+```
+
 When the reference varies in **time** as well as space — a satellite record rather than a
 climatology — averaging it away answers a different question. Name the axis instead and
 every metric is computed cell by cell along it, giving a map per metric with its overall
@@ -282,6 +294,12 @@ string against it. `select={"month": 1}` is deferred and retried once the aggreg
 above has created that axis, since it doesn't exist before then. `depths=`/
 `select={"depth": ...}` sugar still applies to both sides of a pair-spec select at
 once.
+
+`times=` is not what this pattern wants — it fans one calendar time axis, read off the
+**test** source, so a reference like this one with no decoded calendar (`decode_times=
+False`) has nothing for it to fan against. Reach for `times=` when both sides genuinely
+share a calendar (two model runs, a model against a satellite record), and the
+`aggregate`/`select` pair-spec above when they don't.
 
 ## Catalogs
 
