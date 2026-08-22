@@ -41,6 +41,11 @@ __all__ = [
 NEAREST = "nearest"
 _INTERPOLATING = ("bilinear", "linear")
 
+#: Tolerance (degrees) for :func:`natural_convention`'s span comparison and its
+#: +180 seam handling. Comfortably above float64 rounding noise on longitude
+#: values up to ~720° (~1e-13), comfortably below any real grid spacing.
+_CONVENTION_TOL = 1e-6
+
 
 def _lon_name(obj) -> str | None:
     """Name of the longitude coordinate, preferring canonical then ROMS names."""
@@ -96,7 +101,11 @@ def natural_convention(obj) -> Literal["0-360", "-180-180"]:
     cropped, and cell corners derived across the fold average out to ~0°, painting
     conservative regrids across half the planet. Measured rather than assumed:
     whichever convention gives the smaller longitude span is the one the domain is
-    contiguous in. Ties (a truly global field) keep ±180, the maps' usual frame.
+    contiguous in. Ties (a truly global field, or two spans equal within float
+    tolerance) keep ±180, the maps' usual frame. A value that lands on +180 itself
+    (a domain that reaches, but does not cross, the dateline) is treated as the
+    seam's own coordinate rather than wrapped to -180, which would otherwise
+    inflate the ±180 span to the whole globe for a domain that never left it.
     """
     lon = _lon_name(obj)
     if lon is None:
@@ -105,9 +114,11 @@ def natural_convention(obj) -> Literal["0-360", "-180-180"]:
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return "-180-180"
-    span_180 = np.ptp(((vals + 180.0) % 360.0) - 180.0)
+    wrapped_180 = ((vals + 180.0) % 360.0) - 180.0
+    wrapped_180 = np.where(np.abs(vals - 180.0) <= _CONVENTION_TOL, 180.0, wrapped_180)
+    span_180 = np.ptp(wrapped_180)
     span_360 = np.ptp(vals % 360.0)
-    return "0-360" if span_360 < span_180 else "-180-180"
+    return "0-360" if span_360 < span_180 - _CONVENTION_TOL else "-180-180"
 
 
 #: Degrees of margin kept around the test's own extent when the reference is cropped to
