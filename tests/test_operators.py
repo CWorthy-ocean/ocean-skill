@@ -380,6 +380,46 @@ def test_a_day_of_hourly_data_is_a_period_not_an_instant():
         select(hourly, {"time": "2012-01-05"})
 
 
+@pytest.fixture
+def climatology():
+    """Twelve months, undecoded — WOA's own shape: a numeric ``time``, not a calendar.
+
+    ``build._decode_times`` deliberately leaves a "months since ..." axis this way,
+    since the unit describes no fixed-length span; the raw values are just positions
+    1..12, kept as the axis's own coordinate.
+    """
+    da = xr.DataArray(
+        np.arange(12.0)[:, None, None] * np.ones((1, 2, 2)),
+        dims=("time", "lat", "lon"),
+        coords={"time": np.arange(1.0, 13.0), "lat": [1.0, 2.0], "lon": [1.0, 2.0]},
+        attrs={"units": "m"},
+    )
+    da["time"].attrs["units"] = "months since 1955-01-01"
+    return da
+
+
+def test_a_date_string_cannot_address_an_undecoded_axis(climatology):
+    """The WOA case: a date string against a numeric axis is refused, not misread.
+
+    Refused in select's own vocabulary — the axis, the subject, and the pair-spec cure
+    — rather than pandas' bare "could not convert string to float", which names none
+    of those.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        select(climatology, {"time": "2010-01"}, subject="woa23_nitrate_month01")
+    message = str(excinfo.value)
+    assert "woa23_nitrate_month01" in message, "the failing lane has to be named"
+    assert "months since 1955-01-01" in message, "the undecoded units are the tell"
+    assert '"reference": {}' in message, "the pair-spec cure"
+    assert isinstance(excinfo.value.__cause__, ValueError), "chains pandas' own error"
+
+
+def test_a_non_date_string_keeps_the_raw_error(climatology):
+    """A typo, not a date, against the same axis: nothing here can be sure it's ours."""
+    with pytest.raises(ValueError, match="could not convert string to float"):
+        select(climatology, {"time": "banana"})
+
+
 def test_a_method_key_warns_instead_of_vanishing(two_months):
     """Xarray's own KeyError advises method='nearest'; a caller who follows that
     advice into the spec should hear why it is not a key here — and still get

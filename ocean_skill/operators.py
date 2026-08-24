@@ -514,6 +514,16 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     from a month the caller did not name. See :func:`_string_instant` for where
     the line sits.
 
+    A date string only ever addresses a *datetime* axis. Some sources carry a
+    ``time`` that was deliberately left undecoded — a climatology's "months since
+    ..." units describe no fixed-length calendar, so :func:`ocean_skill.build`
+    leaves the axis as its raw numeric position rather than guessing a date range
+    for it. Asking such an axis for ``"2010-01"`` is refused, with a pointer at
+    selecting the axis's own numeric values instead, or giving each side of a
+    comparison its own ``select`` (see :func:`_explain_undecoded_axis`) — not at
+    the nearest-step fallback above, which presumes a calendar exists to be
+    nearest along.
+
     There is no ``method`` key — nearest is automatic, and every key here is an
     axis name. Since xarray's own ``KeyError`` suggests exactly that keyword, a
     ``method``/``tolerance`` key that matches no axis draws a warning instead of
@@ -587,6 +597,14 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
                     raise
                 value = instant
             obj = obj.sel({dim: value}, method="nearest")
+        except ValueError as err:
+            # A numeric axis fed a date string: pandas raises "could not convert
+            # string to float", naming neither the axis nor the cure. Restated
+            # only when this can be sure that is what happened -- see
+            # _explain_undecoded_axis, whose guards keep a typo or a genuinely
+            # non-numeric axis's own error intact.
+            _explain_undecoded_axis(obj, dim, name, value, err, subject)
+            raise
     return obj
 
 
@@ -653,6 +671,41 @@ def _explain_empty_period(obj, dim: str, name: str, value: str, err) -> None:
         f"{name!r} has no data within {value!r}; the axis runs {index[0]} to "
         f"{index[-1]}. A period must contain data — name a single instant "
         "(a full timestamp) to snap to the nearest step instead."
+    ) from err
+
+
+def _explain_undecoded_axis(
+    obj, dim: str, name: str, value: str, err, subject: str
+) -> None:
+    """Raise the numeric-axis ``ValueError`` in select's vocabulary, when it can.
+
+    Only a *string* value against a numeric, non-datetime index earns the
+    restatement — a climatology's undecoded "months since ..." time is exactly
+    such an axis (see :func:`ocean_skill.build._decode_times`), and pandas'
+    ``could not convert string to float`` names neither the axis nor the cure.
+    A non-string value, a datetime/cftime axis (whatever else went wrong there),
+    or a string that is not even date-shaped keeps xarray's own error: returning
+    without raising lets :func:`select` re-raise it.
+    """
+    import pandas as pd
+
+    index = obj.indexes.get(dim)
+    if index is None or not pd.api.types.is_numeric_dtype(index):
+        return
+    try:
+        pd.Period(value)
+    except (TypeError, ValueError):
+        return
+    units = obj[dim].attrs.get("units")
+    tell = f" ({units})" if units else ""
+    first, last = float(index[0]), float(index[-1])
+    raise ValueError(
+        f"{name!r} on {subject} is a numeric axis{tell}, not a calendar — a date "
+        f"string like {value!r} cannot address it. Its own values run {first!r} to "
+        f"{last!r}; select one of those directly (e.g. {{{name!r}: {first!r}}}), "
+        "or, in a comparison, give this side its own select instead of sharing the "
+        f'date string across both: select={{"test": {{{name!r}: {value!r}}}, '
+        '"reference": {}}.'
     ) from err
 
 

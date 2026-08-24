@@ -609,11 +609,18 @@ def _surface_and_levels(sub, meta, name: str, depths) -> Any:
 #: below); a ``Field`` can draw one leftover axis as panels or frames and two as a grid,
 #: refusing three (:func:`ocean_skill.field._facet_dims`). So you are asked to choose
 #: exactly when the data forces a choice, and never averaged behind your back.
+#:
+#: A surviving axis of length 1 is the one exception, and not really an exception at
+#: all: squeezing it changes no number (the one value already *is* the mean, the max,
+#: the member), so there is no choice being made on the caller's behalf for
+#: :func:`_require_reduced` to ask about. A WOA climatology's ``time=1`` therefore
+#: needs no ``aggregate={"time": "mean"}`` boilerplate; a real, multi-step axis still
+#: does.
 NO_AGGREGATION: dict[str, Any] = {}
 
 
-def _require_reduced(da, role: str, source: str) -> None:
-    """Raise unless ``da`` is a single map, naming what is left and how to collapse it.
+def _require_reduced(da, role: str, source: str):
+    """Squeeze away singleton axes, then raise unless what's left is a single map.
 
     A comparison regrids one field onto another and differences them, so it has to be
     2-D; :func:`ocean_skill.align._require_2d` enforces the same thing one step later,
@@ -621,6 +628,22 @@ def _require_reduced(da, role: str, source: str) -> None:
     *source* whose lane is at fault, which align cannot (it sees two anonymous arrays),
     and it runs before :func:`prepare_source` computes anything, so being told to choose
     costs nothing rather than costing the whole vertical transform first.
+
+    A non-spatial axis of size 1 is squeezed away first, with ``drop=True`` — its
+    coordinate is discarded, not kept as a scalar. Keeping it would seem the more
+    generous move (provenance for a title), but neither title nor depth actually reads
+    it: the displayed time comes from the caller's own ``select`` (:func:`_display_time`),
+    and depth travels as ``attrs["actual_depth"]``, captured before this ever runs. What
+    a kept scalar coord *would* do is collide: a test lane squeezed from a real date and
+    a WOA reference squeezed from its undecoded numeric time disagree on ``time``'s
+    dtype, and :func:`ocean_skill.align.align`'s ``xr.Dataset({test, reference,
+    difference})`` refuses to merge two conflicting scalar coordinates under one name.
+    Dropping it sidesteps that for free. Only genuinely ambiguous axes — size greater
+    than 1 — are named in the error below; a caller's ``aggregate={"time": "mean"}``
+    is worth asking for only where it would change a number.
+
+    Returns the (possibly squeezed) ``da`` so a caller can use the reduced result
+    rather than the one it checked.
     """
     from ocean_skill.align import _lat_name, _lon_name
 
@@ -628,9 +651,14 @@ def _require_reduced(da, role: str, source: str) -> None:
     for name in (_lon_name(da), _lat_name(da)):
         if name is not None:
             spatial |= {str(d) for d in da[name].dims}
+    singles = [
+        str(d) for d in da.dims if d not in spatial and da.sizes[d] == 1
+    ]
+    if singles:
+        da = da.squeeze(dim=singles, drop=True)
     extra = [str(d) for d in da.dims if d not in spatial]
     if not extra:
-        return
+        return da
     sizes = ", ".join(f"{d}={da.sizes[d]}" for d in extra)
     raise ValueError(
         f"the {role} lane ({source!r}) still has {sizes} beyond its horizontal axes, "
@@ -1075,6 +1103,12 @@ def prepare_source(
     entry written by a caller that tolerates a surviving axis would otherwise let a
     caller that does not sail straight past its own gate.
 
+    That check also squeezes away any singleton axis it finds (see
+    :func:`_require_reduced`), and the squeeze is applied only to what this function
+    *returns*, never to what it caches: the cache key has no role in it, so the stored
+    field must not have one baked into its shape either, or whichever caller happens to
+    fill the entry first decides what a later, differently-tolerant caller receives.
+
     ``bbox`` crops the lane to ``(lon_min, lat_min, lon_max, lat_max)`` plus
     :data:`ocean_skill.align.DEFAULT_PAD` *before* the load below, and joins the cache
     key. :func:`ocean_skill.align.align` does this crop anyway, but only once both lanes
@@ -1115,9 +1149,10 @@ def prepare_source(
     if use_cache and not refresh:
         hit = _cache.load_field(key)
         if hit is not None:
-            if hit[0] is not None and require_reduced:
-                _require_reduced(hit[0], require_reduced, source)
-            return hit
+            da_hit, depth_hit = hit
+            if da_hit is not None and require_reduced:
+                da_hit = _require_reduced(da_hit, require_reduced, source)
+            return da_hit, depth_hit
 
     # An ERDDAP table is fetched whole in one request, so the time narrowing below has
     # to travel with the request rather than follow it -- see erddap_constraints, which
@@ -1131,7 +1166,10 @@ def prepare_source(
         obj, meta, variable, dict(select or {}), aggregate, source=source
     )
     if da is not None and require_reduced:
-        # before .load(), while it is still free -- see the docstring
+        # A fail-fast check only -- before .load(), while it is still free -- see the
+        # docstring. Its return (squeezed or not) is deliberately dropped: what gets
+        # cached and crop-processed below must stay unsqueezed, and the squeeze that
+        # matters happens again, on the way out, right before this function returns.
         _require_reduced(da, require_reduced, source)
     if da is not None and bbox is not None:
         from ocean_skill.align import subset_to_bbox
@@ -1166,6 +1204,9 @@ def prepare_source(
     # that is cheap to rediscover and would otherwise persist past a fixed catalog.
     if use_cache and da is not None:
         _cache.save_field(key, da, depth)
+    # Squeezed on the way out, never into the cache -- see the docstring above.
+    if da is not None and require_reduced:
+        da = _require_reduced(da, require_reduced, source)
     return da, depth
 
 
@@ -2790,8 +2831,11 @@ def _merged_time_aggregate(aggregate: Any, time_entry: dict[str, Any]) -> Any:
     single map a ``Comparison`` requires (:func:`_require_reduced`). That is a
     plain reduction over the time axis — not another ``resample``: resample keeps
     the axis standing (one period start per bin), which for a single selected bin
-    leaves a size-1 ``time`` dimension that ``_require_reduced`` rejects. So drop
-    ``'resample'`` and keep only ``'reduce'`` and any reduction kwargs (e.g. ``q``).
+    would now merely be squeezed away by :func:`_require_reduced` rather than
+    reduced. ``'resample'`` is dropped anyway, keeping only ``'reduce'`` and any
+    reduction kwargs (e.g. ``q``): saying "reduce this one bin" is the honest
+    spelling of what's happening, truer than resampling a single bin and leaning
+    on the squeeze to clean up after it.
     """
     reduction = {k: v for k, v in time_entry.items() if k != "resample"}
     if is_pair_spec(aggregate):
