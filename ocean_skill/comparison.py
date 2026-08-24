@@ -1838,10 +1838,18 @@ class Comparison:
         the item carries the metric maps and the overall record that annotates them, and
         with it unset the aligned trio the ``test | reference | difference`` row draws.
         """
+        # The depth and time a select= has collapsed to one map, spelled for a title —
+        # what a single field_row has no row label to say. Uses the same test-side
+        # precedent as standard_name (a calculated diagnostic reports NO_VERTICAL_AXIS,
+        # which is not a depth to name, so it is dropped rather than shown as "n/a").
+        depth = _depth_label(_display_depth(self.variable, self.select))
+        selected_time = _display_time(self.select)
         common = {
             "metrics": self.metrics(),
             "units": self.aligned["reference"].attrs.get("units"),
             "standard_name": self.standard_name,
+            "depth": None if depth == NO_VERTICAL_AXIS else depth,
+            "time": None if selected_time is None else _time_label(selected_time),
             "label": self.label,
             # this comparison's own source names, for its row's column titles —
             # not necessarily the same pair as other rows in the same set (a

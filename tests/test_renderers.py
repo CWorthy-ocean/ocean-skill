@@ -361,6 +361,91 @@ def test_row_colorbars_span_their_panels_and_share_one_thickness():
     assert len(heights) == 1
 
 
+def _row_item(**over):
+    """A single-comparison field_row item, shaped as ``Comparison.as_item()`` builds it."""
+    test, ref = _field(1.0), _field(0.0)
+    return {
+        "aligned": {"test": test, "reference": ref, "difference": test - ref},
+        "units": "mmol m-3",
+        "standard_name": "chlorophyll",
+        "depth": "0-10 m",
+        "time": "2010-01-22",
+        "labels": ("second_2wks", "chl_gapfree"),
+        **over,
+    }
+
+
+def _mpl_row(**over):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    item = _row_item(**over)
+    return render(PlotSpec(family="field_row", items=[item], options={}))
+
+
+def _hv_row_title(**over):
+    import holoviews as hv
+    from bokeh.models import Div
+
+    item = _row_item(**over)
+    out = render(
+        PlotSpec(family="field_row", items=[item], options={}), renderer="holoviews"
+    )
+    divs = list(hv.render(out, backend="bokeh").select({"type": Div}))
+    return " ".join(d.text or "" for d in divs)
+
+
+def test_a_single_comparison_row_titles_itself_from_variable_depth_time():
+    """A lone row has no left-edge row label (that is field_grid's), so nothing said
+    *what* — only which two sources. The suptitle now names variable · depth · time,
+    the same spelling a one-field figure gets from field_suptitle, in both renderers."""
+    expected = "chlorophyll a · 0-10 m · 2010-01-22"
+    assert _mpl_row()._suptitle.get_text() == expected
+    assert expected in _hv_row_title()
+
+
+def test_an_explicit_row_title_wins_and_an_empty_one_drops_it():
+    """The default only fills in when the caller named none — a string still overrides,
+    and ``title=""`` suppresses the suptitle outright, in both renderers."""
+    import holoviews as hv
+    import matplotlib
+    from bokeh.models import Div
+
+    matplotlib.use("Agg")
+    item = _row_item()
+    spec = PlotSpec(family="field_row", items=[item], options={"title": "my run"})
+    assert render(spec)._suptitle.get_text() == "my run"
+
+    dropped = PlotSpec(family="field_row", items=[item], options={"title": ""})
+    assert render(dropped)._suptitle is None
+
+    out = render(spec, renderer="holoviews")
+    divs = list(hv.render(out, backend="bokeh").select({"type": Div}))
+    assert any("my run" in (d.text or "") for d in divs)
+
+
+def test_a_row_with_no_depth_or_time_titles_from_the_variable_alone():
+    """A pair nothing narrowed vertically or in time (or a diagnostic with no vertical
+    axis, whose depth as_item drops) still gets the variable, with no stray separator."""
+    assert _mpl_row(depth=None, time=None)._suptitle.get_text() == "chlorophyll a"
+
+
+def test_a_grid_does_not_borrow_the_single_rows_auto_title(two_rows):
+    """The auto suptitle is the *single* row's: a grid names its variable down each
+    row's left edge and carries one title up top, so per-row titling must not leak in.
+    Only the one overall title the caller passed should appear, once."""
+    import holoviews as hv
+    from bokeh.models import Div
+
+    out = render(
+        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
+        renderer="holoviews",
+    )
+    texts = [d.text or "" for d in hv.render(out, backend="bokeh").select({"type": Div})]
+    assert sum("GOM vs WOA" in t for t in texts) == 1
+    assert not any("·" in t for t in texts), "no row grew its own variable·depth title"
+
+
 def test_colorbars_sit_the_same_distance_from_their_panels(two_rows):
     """``pad`` is a fraction of the parent's own width, so it has to be levelled too.
 

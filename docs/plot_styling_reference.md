@@ -408,9 +408,12 @@ apply (`alkalinity · 50 m · 2013-01-16`, or just `alkalinity` when the panels 
 say when and there is no single depth to add). Pass `title=""` to drop it, or any
 string to replace it. `Field.movie()` defaults to the plainer `field_title` (variable
 only); on an interactive movie the name joins each frame's label (`alkalinity —
-2013-01-16`) instead, bokeh's only title there being the panel's own. Comparison
-families still draw no title unless given one: their rows are already named down the
-left edge.
+2013-01-16`) instead, bokeh's only title there being the panel's own. A single
+comparison (`Comparison.plot()`, a `test | reference | difference` row) defaults to the
+same `variable · depth · time` through the shared spelling, since a lone row has no
+left-edge label to name its variable (that is `field_grid`'s, and only when it stacks
+several rows). A `field_grid` of stacked comparisons still draws no per-row title: each
+row is named down its left edge, and one overall title sits up top if given.
 
 ### `font_scale`
 
