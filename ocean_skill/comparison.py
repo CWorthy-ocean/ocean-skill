@@ -2618,19 +2618,24 @@ def _fanned_time_select(sel: dict[str, Any], value: Any) -> dict[str, Any]:
 
 
 def _merged_time_aggregate(aggregate: Any, time_entry: dict[str, Any]) -> Any:
-    """Fold ``{"time": time_entry}`` into ``aggregate``, on both sides of a pair-spec.
+    """Fold ``times=``'s reduction into ``aggregate``, on both sides of a pair-spec.
 
-    Only for ``times=``'s dict form: the bin it derived is already exactly one
-    resample period, and this is what guarantees it reduces to the single map a
-    ``Comparison`` requires (:func:`_require_reduced`) even for a one-step bin,
-    where a period select still leaves a size-1 time dimension standing.
+    Only for ``times=``'s dict form. The bin has *already* been isolated by the
+    per-bin ``select`` (:func:`_fanned_time_select` writes the period value under
+    ``"time"``), so all the aggregate has to do is *collapse* that one bin to the
+    single map a ``Comparison`` requires (:func:`_require_reduced`). That is a
+    plain reduction over the time axis — not another ``resample``: resample keeps
+    the axis standing (one period start per bin), which for a single selected bin
+    leaves a size-1 ``time`` dimension that ``_require_reduced`` rejects. So drop
+    ``'resample'`` and keep only ``'reduce'`` and any reduction kwargs (e.g. ``q``).
     """
+    reduction = {k: v for k, v in time_entry.items() if k != "resample"}
     if is_pair_spec(aggregate):
         return {
-            "test": {**(aggregate.get("test") or {}), "time": time_entry},
-            "reference": {**(aggregate.get("reference") or {}), "time": time_entry},
+            "test": {**(aggregate.get("test") or {}), "time": reduction},
+            "reference": {**(aggregate.get("reference") or {}), "time": reduction},
         }
-    return {**(aggregate or {}), "time": time_entry}
+    return {**(aggregate or {}), "time": reduction}
 
 
 def _has_time_entry(spec: Any) -> bool:
