@@ -411,7 +411,9 @@ def _field_grid(
     rows share a variable. Set `False` if rows genuinely cover different regions.
     ``title`` sets one overall title above the whole grid, same kwarg as the static
     renderer's ``title=`` (its per-panel ``suptitle_kwargs`` styling has no bokeh
-    equivalent, so only the text carries over, not the font/size).
+    equivalent, so only the text carries over, not the font/size). Left unset it
+    defaults to the rows' shared identity, the same as the static grid — see
+    :func:`~ocean_skill.plot.matplotlib_renderer.grid_suptitle`; ``title=""`` drops it.
 
     Each row is titled from *its own* ``labels``, exactly as the static renderer
     does, falling back to the top-level ``labels`` only for a row that carries
@@ -425,6 +427,7 @@ def _field_grid(
     static scale is compensating for does not happen here. ``font_scale`` still applies.
     """
     hv = _extension()
+    title = _default_grid_title(items, title)
     rows = [
         _field_row(
             it,
@@ -447,6 +450,18 @@ def _field_grid(
     if title:
         layout = layout.opts(title=str(title))
     return layout
+
+
+def _default_grid_title(items, title):
+    """The grid's overall title, defaulted to the rows' shared identity when unset.
+
+    Kept identical to the static renderer's default (:func:`grid_suptitle`) so a stacked
+    comparison names the same shared variable · depth · time in both, and only when the
+    caller named none — ``title=""`` still suppresses it.
+    """
+    from ocean_skill.plot.matplotlib_renderer import grid_suptitle
+
+    return grid_suptitle(items) if title is None else title
 
 
 def _field_facet(

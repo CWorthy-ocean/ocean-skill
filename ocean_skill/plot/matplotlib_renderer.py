@@ -1661,11 +1661,20 @@ def field_grid(
     bottom, excluding the title above and the longitude labels below, which the grid
     cell the bar is otherwise sized to includes. See :func:`_align_colorbars`.
 
+    ``title`` defaults, when not given, to whatever identity every row shares — the
+    variable, the depth, the instant a ``select=`` fixed for all of them — through
+    :func:`grid_suptitle`; the part the rows *differ* in is already their left-edge row
+    label, so it is left off the top title rather than repeated. A grid whose rows share
+    nothing nameable draws no suptitle, as before. Pass ``title=""`` to drop it.
+
     The ``*_kwargs`` parameters each merge onto their current defaults and map onto
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
     list; the same names mean the same thing here, applied per row.
     """
     import matplotlib.pyplot as plt
+
+    if title is None:
+        title = grid_suptitle(comparisons)
 
     n = len(comparisons)
     proj = _map_projection(*(c["aligned"] for c in comparisons))
@@ -1985,6 +1994,26 @@ def suptitle_text(standard_name, extras, *, label: str | None = None) -> str:
     parts = [field_title(standard_name), *(e for e in extras if e)]
     subject = " · ".join(p for p in parts if p)
     return f"{label}: {subject}" if label and subject else subject
+
+
+def grid_suptitle(items) -> str:
+    """Overall title for a stacked grid: the identity every row already shares.
+
+    A grid names down each row's left edge whatever the set's fan varied — the variable,
+    the depth, the instant (:func:`ocean_skill.comparison.ComparisonSet._label_for`). The
+    parts that *don't* vary are common to every row, so one title up top can carry them;
+    the varying part is already the row label, so leaving it out is what keeps the two
+    from duplicating. The shared ``standard_name``/``depth``/``time`` compose through the
+    same :func:`suptitle_text` a single row uses, and a grid whose rows share nothing
+    nameable (different variables, no common depth or time) gets ``""`` — no suptitle,
+    exactly as before this default existed.
+    """
+
+    def shared(key):
+        values = {item.get(key) for item in items}
+        return next(iter(values)) if len(values) == 1 else None
+
+    return suptitle_text(shared("standard_name"), (shared("depth"), shared("time")))
 
 
 def field_facet(
