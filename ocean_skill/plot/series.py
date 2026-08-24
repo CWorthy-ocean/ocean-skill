@@ -29,7 +29,15 @@ import numpy as np
 from ocean_skill import _stacklevel
 from ocean_skill.plot import style as _style
 
-__all__ = ["Layout", "Panel", "compose", "line_specs", "panel_title", "time_values"]
+__all__ = [
+    "Layout",
+    "Panel",
+    "compose",
+    "item_roles",
+    "line_specs",
+    "panel_title",
+    "time_values",
+]
 
 #: Beyond this many panels a series figure is unreadable at page width, and beyond this
 #: many lines a panel is a thicket. Both warn and draw anyway — the caller may be
@@ -113,13 +121,40 @@ def _depth_of(aligned) -> float | None:
     return None if value is None else float(value)
 
 
+def item_roles(item: dict[str, Any]) -> tuple[str, ...]:
+    """The roles one item draws: ``("value",)`` alone, or ``("reference", "test")``.
+
+    A comparison's aligned pair always carries both of the latter; a single source
+    with nothing to compare against carries one variable named ``"value"`` instead
+    (see :meth:`ocean_skill.field.Field._series_items`) — no reference, no
+    residual, no statistics box, just the one line.
+    """
+    if "value" in item["aligned"].data_vars:
+        return ("value",)
+    return ("reference", "test")
+
+
 def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
-    """Return the two lines one comparison item draws: its reference and its test."""
+    """Return the line(s) one item draws: a lone value, or a reference/test pair."""
     aligned = item["aligned"]
-    test_source, reference_source = item.get("labels") or ("test", "reference")
     variable = item.get("standard_name") or item.get("label")
-    units = item.get("units") or aligned["reference"].attrs.get("units")
     depth = _depth_of(aligned)
+    if item_roles(item) == ("value",):
+        source = str((item.get("labels") or (item.get("label") or "value",))[0])
+        units = item.get("units") or aligned["value"].attrs.get("units")
+        return [
+            _style.LineSpec(
+                role="value",
+                source=source,
+                variable=variable,
+                depth=depth,
+                units=units,
+                values=aligned["value"],
+                item=index,
+            )
+        ]
+    test_source, reference_source = item.get("labels") or ("test", "reference")
+    units = item.get("units") or aligned["reference"].attrs.get("units")
     common = {
         "variable": variable,
         "depth": depth,
@@ -148,7 +183,14 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
     if by in ("source", "test"):
         return (item.get("labels") or ("test", "reference"))[0]
     if by == "reference":
-        return (item.get("labels") or ("test", "reference"))[1]
+        labels = item.get("labels") or ("test", "reference")
+        if len(labels) < 2:
+            raise ValueError(
+                "cannot facet a series by 'reference': this item has a single "
+                "source with nothing compared against it, so there is no "
+                "reference side to group by."
+            )
+        return labels[1]
     if by == "depth":
         return _depth_of(item["aligned"])
     if by == "comparison":
@@ -197,8 +239,19 @@ def panel_title(specs, *, varying) -> str:
 
 
 def _place_of(da) -> str:
-    """``"50.0°N 144.2°W"`` for a station, or ``""`` when there is no position."""
-    lon, lat = da.coords.get("lon"), da.coords.get("lat")
+    """``"50.0°N 144.2°W"`` for a station, or ``""`` when there is no position.
+
+    Looked up by :func:`ocean_skill.align._lon_name`/``_lat_name`` rather than the
+    literal ``"lon"``/``"lat"``, so a curvilinear (ROMS) point sampled by
+    :func:`ocean_skill.align.sample_at` — whose scalar coords keep their native
+    ``lon_rho``/``lat_rho`` names — still titles its place.
+    """
+    from ocean_skill.align import _lat_name, _lon_name
+
+    lon_name, lat_name = _lon_name(da), _lat_name(da)
+    if lon_name is None or lat_name is None:
+        return ""
+    lon, lat = da.coords.get(lon_name), da.coords.get(lat_name)
     if lon is None or lat is None or lon.dims or lat.dims:
         return ""
     lon_v, lat_v = float(lon), float(lat)
@@ -294,6 +347,13 @@ def compose(
             "both given. Overlaying the lanes of each comparison is already one axis; "
             "pick rows= or cols= for the other."
         )
+    if residual and any(item_roles(item) == ("value",) for item in items):
+        raise ValueError(
+            "residual=True needs a reference to difference against, but this "
+            "series has a source with nothing compared against it (drawn with "
+            "role 'value'). Compare it with osk.compare() for a residual strip, "
+            "or drop residual=True."
+        )
 
     all_specs = [s for i, item in enumerate(items) for s in line_specs(item, i)]
     styled = {
@@ -339,13 +399,13 @@ def compose(
             ]
         primary = tuple(
             styled[(n, role)]
-            for n, _ in primary_items
-            for role in ("reference", "test")
+            for n, it in primary_items
+            for role in item_roles(it)
         )
         second = tuple(
             styled[(n, role)]
-            for n, _ in secondary_items
-            for role in ("reference", "test")
+            for n, it in secondary_items
+            for role in item_roles(it)
         )
         # Title and corner ranking see the *whole* panel, secondary axis included: a
         # title naming one variable while a second is drawn beside it is wrong, and a

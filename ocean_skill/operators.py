@@ -39,6 +39,7 @@ function, because there a real formula is the irreducible content.
 from __future__ import annotations
 
 import functools
+import numbers
 import operator
 import warnings
 from typing import Any
@@ -52,6 +53,7 @@ __all__ = [
     "aggregate",
     "combine",
     "oriented_slice",
+    "point_in_spec",
     "register_calculator",
     "register_derived",
     "register_reducer",
@@ -321,6 +323,81 @@ def resolve_dim(obj, name: str) -> str | None:
     return None
 
 
+#: Spec key spellings that name the horizontal axes, for :func:`point_in_spec` --
+#: the union of :data:`_CF_AXES`'s "X"/"Y" and every name
+#: :func:`ocean_skill.cf.find_coord`'s fallback list resolves, so a point select is
+#: recognized under whichever spelling a source or a caller happens to use.
+_POINT_LON_KEYS = frozenset({"X", "lon", "longitude", "lon_rho", "nav_lon"})
+_POINT_LAT_KEYS = frozenset({"Y", "lat", "latitude", "lat_rho", "nav_lat"})
+
+
+def _point_scalar(value: Any) -> float | None:
+    """Return ``value`` as a float when it is a real scalar, else ``None``.
+
+    Bools are excluded even though ``bool`` is a subclass of ``int`` -- a
+    ``lat=True`` typo should not silently pass as a genuine coordinate value.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    return float(value)
+
+
+def point_in_spec(spec: dict[str, Any] | None) -> tuple[str, str, float, float] | None:
+    """Return ``(lon_key, lat_key, lon, lat)`` when ``spec`` pins one position.
+
+    Both horizontal axes have to be named *and* scalar for this to be a point: a
+    slice, a list, a range dict, or a string narrows an axis without collapsing it
+    to one place, and a lone ``lon`` with no ``lat`` (or vice versa) is a
+    meridional/zonal slice, not a point. Used both by :func:`select` to route a
+    point request through :func:`ocean_skill.align.sample_at`, and by
+    :func:`ocean_skill.comparison.Comparison` to infer ``over="time"`` when a
+    select already narrows the reference to a place.
+    """
+    if not spec:
+        return None
+    lon_key = next((k for k in _POINT_LON_KEYS if k in spec), None)
+    lat_key = next((k for k in _POINT_LAT_KEYS if k in spec), None)
+    if lon_key is None or lat_key is None:
+        return None
+    lon, lat = _point_scalar(spec[lon_key]), _point_scalar(spec[lat_key])
+    if lon is None or lat is None:
+        return None
+    return lon_key, lat_key, lon, lat
+
+
+def _point_selectable(
+    obj, spec: dict[str, Any] | None
+) -> tuple[str, str, float, float] | None:
+    """Return :func:`point_in_spec`'s hit when ``obj`` itself can be sampled at it.
+
+    Narrower than ``point_in_spec`` alone: a Dataset has no one array to sample
+    (:func:`ocean_skill.comparison._select_horizontal_then_aggregate` calls this
+    per-variable, after :func:`resolve_variable` has already picked one out), and a
+    spec's lon/lat keys mean nothing unless ``obj`` actually carries a
+    longitude/latitude coordinate that is either rectilinear (each 1-D and its own
+    dimension) or curvilinear (each 2-D, e.g. ROMS's ``lon_rho``/``lat_rho``). A
+    trajectory's ``lon(time)``/``lat(time)`` is neither, and is left to the
+    ordinary per-axis loop in :func:`select` -- :func:`ocean_skill.align.sample_at`'s
+    curvilinear branch searches a 2-D grid, not a 1-D path through one.
+    """
+    hit = point_in_spec(spec)
+    if hit is None or hasattr(obj, "data_vars"):
+        return None
+    from ocean_skill.cf import find_coord
+
+    lon_coord, lat_coord = find_coord(obj, "longitude"), find_coord(obj, "latitude")
+    if lon_coord is None or lat_coord is None:
+        return None
+    rectilinear = (
+        lon_coord.ndim == 1
+        and lat_coord.ndim == 1
+        and lon_coord.name in obj.dims
+        and lat_coord.name in obj.dims
+    )
+    curvilinear = lon_coord.ndim == 2 and lat_coord.ndim == 2
+    return hit if (rectilinear or curvilinear) else None
+
+
 def _descending(obj, dim: str) -> bool:
     """Whether ``dim``'s coordinate is stored high-to-low.
 
@@ -394,7 +471,7 @@ def _require_coordinate(obj, dim: str, asked: str) -> None:
     )
 
 
-def select(obj, spec: dict[str, Any] | None):
+def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     """Subset ``obj`` along each dimension in ``spec``. Returns it unchanged if empty.
 
     Selection is *not* aggregation, and keeping them apart is the point: this
@@ -414,6 +491,19 @@ def select(obj, spec: dict[str, Any] | None):
     - a list — an explicit set of values;
     - a scalar — exact if present, otherwise the nearest value, because a float
       coordinate almost never matches exactly and failing on that is unhelpful.
+
+    **Both horizontal axes as scalars is a point**, not two independent nearest
+    selections: ``{"lon": -144.25, "lat": 49.98}`` is routed through
+    :func:`ocean_skill.align.sample_at` (see :func:`point_in_spec`) rather than two
+    plain ``.sel(method="nearest")`` calls, which buys three things a per-axis
+    nearest search cannot: it works on a curvilinear grid, where ``lon``/``lat``
+    are 2-D and neither names a dimension a per-axis ``.sel`` could use; it wraps
+    the request into whatever longitude convention the grid is actually stored in
+    (``natural_convention``), so a −144° request against a 0-360 Pacific grid does
+    not silently snap to the wrong edge column; and it raises rather than returning
+    all-NaN when the nearest cell is masked. A lone ``lon`` or ``lat`` (a
+    meridional/zonal slice) is unaffected and keeps the per-axis behavior below.
+    ``subject`` names the source in the errors/warnings this can raise.
 
     A date string that names a single **instant** — ``"2013-01-30T02:00:00"``, or
     any date no coarser than the axis's own resolution — behaves like a scalar:
@@ -445,7 +535,22 @@ def select(obj, spec: dict[str, Any] | None):
     :func:`ocean_skill.comparison._select_horizontal_then_aggregate`; this function
     itself only ever sees one axis's-worth of dimensions at a time.
     """
-    for name, value in (spec or {}).items():
+    spec = dict(spec or {})
+    hit = _point_selectable(obj, spec)
+    if hit is not None:
+        lon_key, lat_key, lon, lat = hit
+        from ocean_skill.align import NEAREST, natural_convention, sample_at
+
+        del spec[lon_key], spec[lat_key]
+        obj = sample_at(
+            obj,
+            lon,
+            lat,
+            method=NEAREST,
+            convention=natural_convention(obj),
+            subject=subject,
+        )
+    for name, value in spec.items():
         dim = resolve_dim(obj, name)
         if dim is None or dim not in obj.dims:
             if name in ("method", "tolerance"):

@@ -410,3 +410,234 @@ def test_the_depth_caveat_survives_the_reference_being_resampled():
     assert "depth" not in monthly.coords
     with pytest.warns(UserWarning, match=r"24.9 m \(varying 16-39.5 m\)"):
         align.align(monthly_grid(), monthly, over="time")
+
+
+# -- model-vs-model point series: over= inference and sample_at routing ---------------
+
+#: Canonical name throughout this section so vocabulary resolution has nothing to
+#: warn about -- these tests are about the routing, not the aliasing.
+MODEL_VAR = "sea_water_potential_temperature"
+
+#: A point request neither grid is centred on, so each lane's own nearest cell is a
+#: distinct, non-trivial answer worth checking.
+POINT_SELECT = {"lon": -144.3, "lat": 50.0, "time": slice("2014-06", "2014-08")}
+
+
+def _offset_grid(*, lat_off=0.0, lon_off=0.0, seed=0):
+    """A monthly rectilinear grid, offset and independently valued.
+
+    Two calls with different offsets stand in for two models on their own native
+    grids -- close enough to share a point select, not so close that their nearest
+    cells to a shared request coincide (which would make "no km-apart warning" true
+    trivially, even without the routing this section exists to test).
+    """
+    time = pd.date_range("2014-06-01", "2014-09-01", freq="MS") + pd.Timedelta(days=14)
+    lat = np.arange(45.5, 55.5) + lat_off
+    lon = np.arange(-150.5, -139.5) + lon_off
+    values = 100 + np.random.RandomState(seed).rand(time.size, lat.size, lon.size)
+    da = xr.DataArray(
+        values,
+        coords={"time": time, "lat": lat, "lon": lon},
+        dims=("time", "lat", "lon"),
+        name=MODEL_VAR,
+    )
+    da.attrs["units"] = "degC"
+    return da.to_dataset()
+
+
+def _coarse_grid(lon_pts, lat_pts, seed=1):
+    """A widely-spaced rectilinear grid -- for the bbox-pad-misses-it case."""
+    time = pd.date_range("2014-06-01", "2014-09-01", freq="MS") + pd.Timedelta(days=14)
+    lon, lat = np.array(lon_pts, dtype=float), np.array(lat_pts, dtype=float)
+    values = 100 + np.random.RandomState(seed).rand(time.size, lat.size, lon.size)
+    da = xr.DataArray(
+        values,
+        coords={"time": time, "lat": lat, "lon": lon},
+        dims=("time", "lat", "lon"),
+        name=MODEL_VAR,
+    )
+    da.attrs["units"] = "degC"
+    return da.to_dataset()
+
+
+def _curvilinear_monthly(nx: int = 11, ny: int = 10, seed: int = 5):
+    """A ROMS-shaped reference: 2-D lon_rho/lat_rho, with a time axis alongside."""
+    time = pd.date_range("2014-06-01", "2014-09-01", freq="MS") + pd.Timedelta(days=14)
+    lon_1d = np.arange(-150.5, -150.5 + nx)
+    lat_1d = np.arange(45.5, 45.5 + ny)
+    lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    values = 200 + np.random.RandomState(seed).rand(time.size, ny, nx)
+    da = xr.DataArray(
+        values,
+        dims=("time", "eta_rho", "xi_rho"),
+        coords={
+            "time": time,
+            "lon_rho": (("eta_rho", "xi_rho"), lon_2d),
+            "lat_rho": (("eta_rho", "xi_rho"), lat_2d),
+        },
+        name=MODEL_VAR,
+        attrs={"units": "degC"},
+    )
+    return da.to_dataset()
+
+
+def _model_comparison(monkeypatch, *, test, reference, **kwargs):
+    """Build a ``Comparison`` between two gridded, featureType-less sources.
+
+    Patches ``osk.read``/``catalog.resolve`` rather than ``comparison.prepare_source``
+    (contrast ``station_lanes`` above) -- the point of this section is that a point
+    select's routing through ``operators.select``/``align.sample_at`` actually runs,
+    which a stubbed ``prepare_source`` would skip entirely.
+    """
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import Comparison
+
+    grids = {"run_new": test, "run_baseline": reference}
+    monkeypatch.setattr(osk, "read", lambda name, **kw: grids[name])
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata={}))
+    return Comparison(
+        reference="run_baseline",
+        test="run_new",
+        variable=MODEL_VAR,
+        cache=False,
+        **kwargs,
+    )
+
+
+def test_a_shared_point_select_implies_over_time(monkeypatch):
+    """Two gridded runs, a point select, no over= -- inferred rather than refused."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+    )
+    assert c.over == "time"
+    assert c.over_reason == "the select narrows the reference to one position"
+    assert c.family == "series"
+
+
+def test_the_routed_point_select_samples_co_located_with_no_distance_warning(
+    monkeypatch,
+):
+    """The primary case this session exists for: no spurious 'km apart' warning.
+
+    Narrowing both lanes independently (the pre-existing two-point branch) would
+    compare the test's nearest cell to *its own* request against the reference's
+    nearest cell to the same request -- two different, unrelated positions. Routing
+    instead samples the still-gridded test at the reference's own resolved cell, so
+    the pair is genuinely co-located.
+    """
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+    )
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        aligned = c.align()
+    assert not any("km apart" in str(w.message) for w in log)
+    assert aligned.attrs["point_method"] == "nearest"
+    assert "nearest_distance_km" in aligned.attrs
+    # the reference narrowed to its own snapped cell, not the raw request
+    assert (float(aligned["lon"]), float(aligned["lat"])) == (-144.5, 50.5)
+    # ...and the test was sampled there, on its own (different) grid
+    assert (float(aligned["test_lon"]), float(aligned["test_lat"])) == (-144.1, 50.9)
+
+
+def test_a_pair_spec_of_two_points_still_warns_about_the_distance(monkeypatch):
+    """The deliberate escape hatch -- two real positions -- keeps its own warning."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select={"test": POINT_SELECT, "reference": POINT_SELECT},
+    )
+    with pytest.warns(UserWarning, match="km apart"):
+        c.align()
+
+
+def test_explicit_over_time_routes_the_same_way_as_the_inference(monkeypatch):
+    inferred = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+    )
+    explicit = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+        over="time",
+    )
+    assert explicit.over_reason == "over= as asked"
+    assert explicit._cache_key == inferred._cache_key
+
+
+def test_a_point_select_with_a_time_collapsing_aggregate_does_not_imply_over(
+    monkeypatch,
+):
+    """Nothing would be left for a line to run along, so inference stays off."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+        aggregate={"time": "mean"},
+    )
+    assert c.over is None
+    assert c.over_reason == "the reference is gridded"
+
+
+def test_a_curvilinear_reference_point_select_is_a_series(monkeypatch):
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_curvilinear_monthly(),
+        select={
+            "lon_rho": -144.3,
+            "lat_rho": 50.0,
+            "time": slice("2014-06", "2014-08"),
+        },
+    )
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        c.align()
+    assert c.is_series
+    assert not any("matched no axis" in str(w.message) for w in log)
+
+
+def test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it(monkeypatch):
+    """The pad around one point can miss a coarse grid's nearest cell entirely.
+
+    Retrying without the bbox reads the whole (small) lane instead of failing the
+    comparison outright -- the point still gets sampled, just less cheaply.
+    """
+    c = _model_comparison(
+        monkeypatch,
+        test=_coarse_grid([-160.0, -150.0, -140.0, -130.0], [40.0, 50.0, 60.0]),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+    )
+    aligned = c.align()  # must not raise "no overlap"
+    assert float(aligned["test_lon"]) == -140.0
+
+
+def test_the_cache_key_is_stable_and_differs_from_a_pair_spec(monkeypatch):
+    def make(select):
+        return _model_comparison(
+            monkeypatch,
+            test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+            reference=_offset_grid(seed=2),
+            select=select,
+        )
+
+    routed_a, routed_b = make(POINT_SELECT), make(POINT_SELECT)
+    paired = make({"test": POINT_SELECT, "reference": POINT_SELECT})
+    assert routed_a._cache_key == routed_b._cache_key
+    assert routed_a._cache_key != paired._cache_key

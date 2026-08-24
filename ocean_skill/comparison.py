@@ -75,6 +75,38 @@ def _implied_over(reference: str) -> tuple[str | None, str]:
     return None, "the reference is gridded"
 
 
+#: Spec key spellings :func:`_collapses_time` recognizes as naming the time axis --
+#: matches how a ``select``/``aggregate`` spec is actually written (see
+#: :func:`ocean_skill.operators.resolve_dim`'s ``_CF_AXES``), not every fallback name
+#: :func:`ocean_skill.cf.find_coord` would also accept, since this check runs before
+#: any data is read and has no dataset to resolve a raw dim name like ``ocean_time``
+#: against.
+_TIME_KEYS = frozenset({"time", "T"})
+
+
+def _collapses_time(agg: dict[str, Any] | None) -> bool:
+    """Whether ``agg`` reduces time to a single value rather than keeping an axis.
+
+    A plain reducer (``"mean"``, or ``{"reduce": "mean"}`` with neither ``groupby``
+    nor ``resample``) collapses time to one number per position, leaving nothing
+    for a line to be drawn along -- a select that narrows the reference to a place
+    should not imply ``over="time"`` on top of that (see
+    :meth:`Comparison._point_select_implies_time`). ``groupby``/``resample`` both
+    *keep* an axis instead (a climatology, or consecutive periods -- see
+    :func:`ocean_skill.operators.aggregate`), so neither disables the inference the
+    mooring recipe already depends on.
+    """
+    agg = agg or {}
+    for key in _TIME_KEYS:
+        if key not in agg:
+            continue
+        spec = agg[key]
+        if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
+            return False
+        return True
+    return False
+
+
 def _outline_of(source: str, convention: str | None = None) -> np.ndarray | None:
     """Return the source's true grid-edge outline as an ``(N, 2)`` ``[lon, lat]`` ring.
 
@@ -636,11 +668,12 @@ def _select_horizontal_then_aggregate(
     contract, needed so one shared spec can cover several variables that don't all
     carry the same axes).
 
-    Only a key still unmatched after *both* tries is the ordinary "not this
-    source's axis" case — and stays silent, or this would warn on essentially every
-    multi-variable :func:`compare` call. A key deferred to the second try and still
-    unmatched then is closer to a typo or a misunderstanding of what the aggregate
-    produced, so it draws a warning rather than vanishing without a trace.
+    A key still unmatched after *both* tries draws a warning naming it, rather
+    than vanishing without a trace — it is usually a typo, or a misunderstanding
+    of what the aggregate produced (a groupby renames its dim to the grouping
+    key), but the warning's own wording also covers the ordinary case of a select
+    shared across variables that don't all carry the same axis, so it can be
+    ignored there.
     """
     import warnings
 
@@ -651,7 +684,17 @@ def _select_horizontal_then_aggregate(
         for name in horizontal
         if (dim := operators.resolve_dim(da, name)) is not None and dim in da.dims
     }
-    da = operators.select(da, {k: v for k, v in horizontal.items() if k in applied})
+    # A scalar lon+lat pair is a point request even when neither key names a
+    # dimension on its own -- ROMS's curvilinear lon_rho/lat_rho are 2-D, so
+    # resolve_dim above finds nothing for them, yet operators.select's point
+    # branch (operators.point_in_spec) can still sample the source there. Without
+    # this, a curvilinear point select would fall through to "matched no axis"
+    # (see the warning below) instead of narrowing to a place.
+    if hit := operators._point_selectable(da, horizontal):
+        applied |= {hit[0], hit[1]}
+    da = operators.select(
+        da, {k: v for k, v in horizontal.items() if k in applied}, subject=source
+    )
     da = operators.aggregate(da, agg)
     deferred = {k: v for k, v in horizontal.items() if k not in applied}
     if not deferred:
@@ -662,7 +705,7 @@ def _select_horizontal_then_aggregate(
         if (dim := operators.resolve_dim(da, k)) is None or dim not in da.dims
     }
     if to_apply := {k: v for k, v in deferred.items() if k not in still_unmatched}:
-        da = operators.select(da, to_apply)
+        da = operators.select(da, to_apply, subject=source)
     if still_unmatched:
         warnings.warn(
             f"{source!r}: select key(s) {sorted(still_unmatched)} matched no axis "
@@ -1212,10 +1255,17 @@ class Comparison:
                     )
         self.method = method
         # An explicit over= always wins; otherwise the reference's featureType decides,
-        # since a station reference has a time axis and no map to draw. The reason is
-        # kept so the family this ends up choosing can be traced to what chose it.
+        # since a station reference has a time axis and no map to draw -- and failing
+        # that, a select that already narrows the reference to one position implies the
+        # same thing, since there is no map left to draw either way (a gridded model
+        # asked for one lon/lat is exactly as reduced as a mooring is by nature). The
+        # reason is kept so the family this ends up choosing can be traced to what
+        # chose it.
         if over is None:
             over, self.over_reason = _implied_over(reference)
+            if over is None and self._point_select_implies_time():
+                over = "time"
+                self.over_reason = "the select narrows the reference to one position"
         else:
             self.over_reason = "over= as asked"
         self.over = over
@@ -1232,6 +1282,47 @@ class Comparison:
         self._metrics = None
         self._maps = None
         self._actual_depth = None
+
+    def _point_select_implies_time(self) -> bool:
+        """Whether the select alone narrows the reference to a place worth a line.
+
+        Called only when neither an explicit ``over=`` nor the reference's own
+        featureType (:func:`_implied_over`) already settled it. A select that pins
+        the reference's lon *and* lat to scalars (:func:`ocean_skill.operators
+        .point_in_spec`) leaves it exactly as reduced as a real mooring is by
+        nature -- there is no map left to draw either way -- unless the
+        reference's own ``aggregate`` has also collapsed time itself
+        (:func:`_collapses_time`), in which case there is no axis left for a line
+        to run along and inferring one would be wrong rather than merely unasked.
+        """
+        from ocean_skill import operators
+
+        ref_select = select_for(self.select, "reference")
+        if operators.point_in_spec(ref_select) is None:
+            return False
+        return not _collapses_time(aggregate_for(self.aggregate, "reference"))
+
+    def _point_route(self) -> tuple[str, str, float, float] | None:
+        """The point key/lon/lat a shared select narrows both lanes to, if routing.
+
+        ``None`` unless ``over`` is set (nothing to route otherwise -- a map has no
+        line to sample a point onto) and the select is shared rather than a
+        pair-spec: a deliberate ``select={"test": ..., "reference": ...}`` split
+        names two positions on purpose (two moorings, or a hand-narrowed test), and
+        :func:`ocean_skill.align.align`'s two-point branch -- which compares them
+        as given and warns if they are far apart -- has to see both lanes
+        unrouted, or a real mismatch would go unreported.
+
+        Used by :meth:`align` to keep the test lane gridded rather than also
+        narrowing it to the same place, and by :attr:`_cache_key` so a routed
+        comparison and a pair-spec one never share a cache entry despite an
+        otherwise-identical ``select``.
+        """
+        if self.over is None or is_pair_spec(self.select):
+            return None
+        from ocean_skill import operators
+
+        return operators.point_in_spec(self.select)
 
     @property
     def standard_name(self) -> str | None:
@@ -1277,6 +1368,13 @@ class Comparison:
                 "_bin_anchor": self.bin_anchor,
             }
         )
+        if self._point_route() is not None:
+            # Without this, a routed comparison (test kept gridded, sampled at the
+            # reference's snapped cell) and the same select= run before routing
+            # existed (both lanes independently narrowed to a point, compared as
+            # given) would be byte-identical keys for two different results -- a
+            # warm cache from the old behavior would silently serve it forever.
+            extra["_point_sample"] = True
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -1299,6 +1397,7 @@ class Comparison:
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
         time_window: tuple[Any, Any] | None = None,
+        drop_keys: tuple[str, ...] = (),
     ):
         """Reduce one source to its comparable field, via the lane cache.
 
@@ -1310,11 +1409,19 @@ class Comparison:
 
         ``bbox`` crops the lane before it is read into memory; see
         :func:`prepare_source`.
+
+        ``drop_keys`` removes keys from this lane's own select before it is prepared
+        — used by :meth:`align` to keep the test lane gridded when a shared point
+        select is routed through :func:`ocean_skill.align.sample_at` instead of also
+        narrowing the test independently (see :meth:`_point_route`).
         """
+        select = select_for(self.select, role)
+        if drop_keys:
+            select = {k: v for k, v in select.items() if k not in drop_keys}
         return prepare_source(
             source,
             variable_for(self.variable, role),
-            select_for(self.select, role),
+            select,
             aggregate_for(self.aggregate, role),
             use_cache=use_cache,
             refresh=refresh,
@@ -1419,7 +1526,41 @@ class Comparison:
         # align() crops it anyway, but only once both lanes are in memory, and a product
         # that kept a year of daily maps is the wrong thing to hold whole. Exact, not an
         # approximation: the bbox and the pad are the ones align() would have used.
-        t, _ = self._prepare_lane(self.test_name, use_cache, refresh, role="test")
+        #
+        # A select shared by both lanes that narrows to one position is routed
+        # differently: the point names where to *sample* the test, not a second place
+        # to also narrow it to on its own -- narrowing both independently would compare
+        # two different grids' nearest cells to each other, which is the "km apart"
+        # mismatch align()'s two-point branch exists to warn about, not the co-located
+        # sample this is meant to be. So the point is dropped from the test lane's own
+        # select and used as a small bbox instead, leaving the test gridded for align()
+        # to sample properly, at the reference's own (possibly curvilinear-snapped)
+        # position.
+        route = self._point_route()
+        drop_keys = route[:2] if route is not None else ()
+        point_bbox = (
+            (route[2], route[3], route[2], route[3]) if route is not None else None
+        )
+        try:
+            t, _ = self._prepare_lane(
+                self.test_name,
+                use_cache,
+                refresh,
+                role="test",
+                bbox=point_bbox,
+                drop_keys=drop_keys,
+            )
+        except ValueError as err:
+            # A coarse test grid, or a point near the edge of its extent: the pad
+            # subset_to_bbox adds around one location can still miss the nearest cell.
+            # Retrying without the bbox reads the whole lane instead of failing the
+            # comparison outright, and lets align()'s own sample_at report the
+            # (possibly large) offset the way it already does for a real station.
+            if point_bbox is None or "no overlap" not in str(err):
+                raise
+            t, _ = self._prepare_lane(
+                self.test_name, use_cache, refresh, role="test", drop_keys=drop_keys
+            )
         bbox = None
         window = None
         if self.over is not None and t is not None:
@@ -2438,6 +2579,22 @@ def compare(
     ``time_method``/``tolerance``/``bin_anchor`` tune the matching, ``min_pairs`` how
     many pairs a cell needs before it is reported, and ``metrics`` which maps are
     computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
+
+    ``over="time"`` is also implied, without being asked, whenever there is no map
+    left to draw: a reference whose catalog ``featureType`` is a mooring/station/point
+    (a place through time by nature), or — the two-*model* case — a ``select`` that
+    pins both horizontal axes to one lon/lat, since a gridded run asked for one
+    position is exactly as reduced as a mooring already is. Either way the comparison
+    draws as lines rather than maps (the ``series`` family; see
+    :attr:`Comparison.family_reason` for which of the two decided it), the reference's
+    own grid decides the exact position, and the *test* is sampled there too — so the
+    pair is genuinely co-located rather than each lane separately narrowing to its own
+    nearest cell of the raw request. A pair-spec ``select={"test": ..., "reference":
+    ...}`` naming two *different* positions on purpose (two moorings, or a
+    hand-narrowed test) opts out of that and is compared as given, with a warning past
+    1 km apart. The one thing this inference cannot see: a select that also pins time
+    to a single instant leaves no axis for a line either, and there ``over`` stays
+    unset rather than guessing.
 
     ``variables`` is required, deliberately not inferred from the sources' catalog
     metadata: a reference or test with several declared variables gives no way to
