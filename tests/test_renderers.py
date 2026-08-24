@@ -148,6 +148,124 @@ def test_holoviews_grid_renders_the_overall_title(two_rows):
     assert any("GOM vs WOA" in (d.text or "") for d in divs)
 
 
+def _grid_item(standard_name, depth, time, reference):
+    """A grid row carrying the depth/time an as_item() would, for title tests."""
+    it = _item(standard_name, reference, standard_name)
+    return {**it, "depth": depth, "time": time}
+
+
+def test_grid_suptitle_composes_only_what_every_row_shares():
+    """The variable/depth/time common to all rows makes the top title; whatever the fan
+    varied is already the row label, so it is left out — no duplication, no stray part."""
+    from ocean_skill.plot.matplotlib_renderer import grid_suptitle
+
+    n = "mole_concentration_of_nitrate_in_sea_water"
+    p = "mole_concentration_of_phosphate_in_sea_water"
+    # one row: everything shared
+    assert (
+        grid_suptitle([_grid_item("chlorophyll", "0-10 m", "2010-01-22", "chl")])
+        == "chlorophyll a · 0-10 m · 2010-01-22"
+    )
+    # variable fan-out: vars differ (they are the row labels), depth+time shared
+    assert (
+        grid_suptitle(
+            [_grid_item(n, "surface", "2010-01", "woa_n"),
+             _grid_item(p, "surface", "2010-01", "woa_p")]
+        )
+        == "surface · 2010-01"
+    )
+    # depth fan-out: one variable, depths differ (the row labels), time shared
+    assert (
+        grid_suptitle(
+            [_grid_item(n, "surface", "2010-01", "woa"),
+             _grid_item(n, "50 m", "2010-01", "woa")]
+        )
+        == "nitrate · 2010-01"
+    )
+    # nothing in common → no title at all
+    assert grid_suptitle(
+        [_grid_item(n, None, None, "a"), _grid_item(p, None, None, "b")]
+    ) == ""
+
+
+def test_a_stacked_grid_draws_the_shared_title_in_both_renderers():
+    """A shared depth/time reaches the drawn figure as a suptitle, both renderers."""
+    import holoviews as hv
+    import matplotlib
+    from bokeh.models import Div
+
+    matplotlib.use("Agg")
+    n = "mole_concentration_of_nitrate_in_sea_water"
+    p = "mole_concentration_of_phosphate_in_sea_water"
+    items = [_grid_item(n, "surface", "2010-01", "woa_n"),
+             _grid_item(p, "surface", "2010-01", "woa_p")]
+
+    fig = render(PlotSpec(family="field_grid", items=items, options={}))
+    assert fig._suptitle.get_text() == "surface · 2010-01"
+
+    out = render(PlotSpec(family="field_grid", items=items, options={}),
+                 renderer="holoviews")
+    divs = list(hv.render(out, backend="bokeh").select({"type": Div}))
+    assert any("surface · 2010-01" in (d.text or "") for d in divs)
+
+
+def test_a_grid_with_nothing_shared_still_draws_no_suptitle(two_rows):
+    """The default must not invent a title where the rows have no common identity —
+    two_rows are different variables with no depth/time, so the grid stays untitled."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = render(PlotSpec(family="field_grid", items=two_rows, options={}))
+    assert fig._suptitle is None
+
+
+def test_a_one_comparison_set_plots_as_a_single_row_not_a_grid(monkeypatch):
+    """``compare()`` always returns a set, even of one. A lone comparison should draw as
+    a single ``field_row`` — with its ``variable · depth · time`` suptitle — not a
+    one-row grid whose only identity is a rotated left-edge label; two or more still
+    stack as a grid."""
+    from ocean_skill.comparison import ComparisonSet
+
+    class _C:
+        family = "field_row"
+
+        def __init__(self, reference, label):
+            self.test_name, self.reference_name, self.label = (
+                "second_2wks",
+                reference,
+                label,
+            )
+
+        def metrics(self):  # _flatten keeps only objects with metrics + as_item
+            return {"bias": 0.1}
+
+        def as_item(self):
+            t, r = _field(1.0), _field(0.0)
+            return {
+                "aligned": {"test": t, "reference": r, "difference": t - r},
+                "standard_name": "chlorophyll",
+                "depth": "0-10 m",
+                "time": "2010-01-22",
+                "units": "milligram m-3",
+                "metrics": {"bias": 0.1},
+                "labels": (self.test_name, self.reference_name),
+            }
+
+    captured = {}
+
+    def fake_render(spec, **_):
+        captured["family"] = spec.family
+        return spec
+
+    monkeypatch.setattr("ocean_skill.plot.registry.render", fake_render, raising=True)
+
+    ComparisonSet([_C("chl_gapfree", "chlorophyll a")]).plot(domain=None)
+    assert captured["family"] == "field_row"
+
+    ComparisonSet([_C("woa_n", "nitrate"), _C("woa_p", "phosphate")]).plot(domain=None)
+    assert captured["family"] == "field_grid"
+
+
 def test_holoviews_grid_links_pan_and_zoom(two_rows):
     """Shared zoom means one shared bokeh Range object, not merely an option set."""
     import holoviews as hv

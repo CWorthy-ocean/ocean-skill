@@ -2310,7 +2310,12 @@ class ComparisonSet:
                 f"{detail}. Plot them separately."
             )
         family = families.pop()
-        if family == "field_grid" or family == "series":
+        # A set of exactly one comparison *is* that comparison: draw it as a single
+        # titled row (variable · depth · time up top), not a one-row grid whose only
+        # identity is a rotated left-edge row label. The grid is what more than one
+        # comparison needs; one does not.
+        single_row = family == "field_row" and len(self.comparisons) == 1
+        if family in ("field_row", "field_grid", "series"):
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
         if family != "series" and "domain" not in kwargs:
             # Outlines the first row's test (model) true grid shape (or its bbox,
@@ -2322,8 +2327,9 @@ class ComparisonSet:
             kwargs["domain"] = (
                 outline if outline is not None else _domain_of(first.test_name)
             )
-        # field_row is one comparison's family; a set of them stacks as a grid.
-        family = "field_grid" if family == "field_row" else family
+        # field_row is one comparison's family; a set of *more than one* stacks as a
+        # grid. A lone comparison keeps field_row and its single-row title.
+        family = "field_grid" if family == "field_row" and not single_row else family
         return render(
             PlotSpec(family=family, items=items, options=kwargs),
             renderer=renderer,
