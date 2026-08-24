@@ -65,6 +65,10 @@ class Panel:
     lines: tuple[_style.StyledLine, ...]
     secondary: tuple[_style.StyledLine, ...] = ()
     secondary_ylabel: str | None = None
+    #: Set only for a twin-axis panel, and only when every line on that axis shares one
+    #: colour — that is the one case where a label can honestly say "this is my axis".
+    ylabel_color: str | None = None
+    secondary_ylabel_color: str | None = None
     residual: tuple[_style.StyledLine, ...] = ()
     metrics_text: str = ""
     metrics_corner: str = "upper left"
@@ -213,6 +217,17 @@ def _ylabel(specs) -> str:
         else "value"
     )
     return f"{name} [{next(iter(units))}]" if len(units) == 1 else name
+
+
+def _label_color(lines) -> str | None:
+    """The one colour every line in ``lines`` shares, or ``None`` when they differ.
+
+    ``None`` leaves the label at the renderer's default: an axis carrying several
+    colours (``encode={"color": "source"}``, or several variables stacked on one axis)
+    has no single colour to speak for it.
+    """
+    colors = {line.color for line in lines}
+    return next(iter(colors)) if len(colors) == 1 else None
 
 
 def panel_title(specs, *, varying) -> str:
@@ -431,6 +446,9 @@ def compose(
                 _style.with_values(styled[(n, "test")], i["aligned"]["difference"])
                 for n, i in primary_items
             )
+        # Colour a y label like its lines only where a twin axis makes the label/axis
+        # pairing ambiguous; a lone axis already says what it is via its title.
+        colored = bool(second)
         panels.append(
             Panel(
                 title=panel_title(specs, varying=varying),
@@ -440,6 +458,8 @@ def compose(
                 secondary_ylabel=_ylabel([line.spec for line in second]) or None
                 if second
                 else None,
+                ylabel_color=_label_color(primary) if colored else None,
+                secondary_ylabel_color=_label_color(second) if colored else None,
                 residual=residual_lines,
                 metrics_text=box,
                 metrics_corner=free,
