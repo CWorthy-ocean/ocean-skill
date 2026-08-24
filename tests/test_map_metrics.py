@@ -262,6 +262,39 @@ def test_an_item_without_stations_draws_exactly_as_before():
         assert not _scatter_collections(ax)
 
 
+def test_a_big_skill_map_panel_is_rasterized_and_a_small_one_is_not():
+    """Check that a big skill_map panel rasterizes like a big field_row does.
+
+    A metric map is a curvilinear mesh too, and hits the same per-cell Python loop a
+    big field_row does without rasterize="auto".
+    """
+    from ocean_skill.plot.holoviews_renderer import RASTERIZE_ABOVE_CELLS
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    def skill_map(shape):
+        ny, nx = shape
+        field = xr.DataArray(
+            np.linspace(-1, 1, ny * nx).reshape(ny, nx),
+            dims=("lat", "lon"),
+            coords={"lat": np.linspace(58, 60, ny), "lon": np.linspace(-153, -151, nx)},
+            attrs={"units": "degC"},
+        )
+        item = {"skill": xr.Dataset({"bias": field}), "metric_names": ("bias",)}
+        return render(
+            PlotSpec(family="skill_map", items=[item], options={}),
+            renderer="holoviews",
+        )
+
+    def kinds(obj):
+        return [type(n).__name__ for n in obj.traverse()]
+
+    small, big = (8, 10), (400, 550)
+    assert small[0] * small[1] < RASTERIZE_ABOVE_CELLS < big[0] * big[1]
+    assert "QuadMesh" in kinds(skill_map(small))
+    assert "Image" in kinds(skill_map(big))
+
+
 # --- end to end: real Comparisons through ComparisonSet.map_metrics() ----------------
 
 

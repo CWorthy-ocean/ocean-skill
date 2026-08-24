@@ -216,12 +216,12 @@ def _quadmesh(
     }
     if rasterize:
         # hvplot returns rasterize=True as a *lazy* DynamicMap so that zooming
-        # re-aggregates at the new extent. A movie's HoloMap has to hold concrete
-        # elements — nothing downstream of it can evaluate a lazy aggregation once it is
-        # embedded in a page (see _frame_map) — so the aggregation is applied eagerly
-        # here instead. The cost is that zooming magnifies the rasterized image rather
-        # than re-aggregating the mesh underneath it — pass rasterize=False for a field
-        # small enough to zoom into properly.
+        # re-aggregates at the new extent. Nothing downstream can evaluate that lazily:
+        # a movie's HoloMap has to hold concrete frames (see _frame_map), and a still
+        # figure has to survive being saved and reopened with no kernel behind it — so
+        # the aggregation is applied eagerly here for both. The cost is that zooming
+        # magnifies the rasterized image rather than re-aggregating the mesh underneath
+        # it — pass rasterize=False for a field small enough to zoom into properly.
         opts["dynamic"] = False
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
@@ -301,6 +301,8 @@ def _field_row(
     size=None,
     zoom: float = 1.0,
     domain=None,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -321,6 +323,14 @@ def _field_row(
     :func:`~ocean_skill.plot.typography.bokeh_fontsize`). The seven ``*_kwargs`` dicts
     remain matplotlib-only, since each names a matplotlib call; ``font_scale`` names a
     size, which bokeh does have.
+
+    ``rasterize="auto"`` (the default, see :func:`_should_rasterize`) ships an image
+    instead of the raw mesh once a panel is past :data:`RASTERIZE_ABOVE_CELLS` — a
+    curvilinear model grid drawn without it sends bokeh a Python loop over every cell
+    (geoviews always projects to 2-D coordinates, which forces holoviews' irregular-mesh
+    path), taking minutes instead of seconds. Resolved once from the test panel so all
+    three panels rasterize together, same as :func:`_field_movie` decides once for every
+    frame. Pass ``rasterize=False`` for a field small enough to zoom into sharply.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits
@@ -338,6 +348,7 @@ def _field_row(
         vmin = max(vmin, 1e-6)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
     tl, rl = labels
+    raster = _should_rasterize(t, rasterize)
 
     diff_title = "difference"
     summary = _metrics_summary(item.get("metrics"), metric_keys)
@@ -356,6 +367,8 @@ def _field_row(
             log=log,
             font_scale=font_scale,
             canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         ),
         _quadmesh(
             r,
@@ -367,6 +380,8 @@ def _field_row(
             log=log,
             font_scale=font_scale,
             canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         ),
         _quadmesh(
             d,
@@ -377,6 +392,8 @@ def _field_row(
             geo=geo,
             font_scale=font_scale,
             canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         ),
     ]
     outline = _domain_overlay(domain, t, geo=geo)
@@ -400,6 +417,8 @@ def _field_grid(
     size=None,
     zoom: float = 1.0,
     domain=None,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -423,6 +442,10 @@ def _field_grid(
     a bokeh ``frame_width`` is fixed rather than a share of a page, so stacking more
     rows makes the page longer instead of making each panel smaller — the thing the
     static scale is compensating for does not happen here. ``font_scale`` still applies.
+
+    ``rasterize`` and ``hover`` pass straight through to every row (see
+    :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
+    can carry different-sized grids.
     """
     hv = _extension()
     rows = [
@@ -437,6 +460,8 @@ def _field_grid(
             size=size,
             zoom=zoom,
             domain=domain,
+            hover=hover,
+            rasterize=rasterize,
         )
         for it in items
     ]
@@ -460,6 +485,8 @@ def _field_facet(
     size=None,
     zoom: float = 1.0,
     domain=None,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -487,6 +514,11 @@ def _field_facet(
     joins each panel's title rather than sitting rotated at the row's left edge, bokeh
     having no equivalent of that floating text — the same substitution
     :func:`_field_row` makes for a field grid's ``row_label``.
+
+    ``rasterize="auto"`` (the default, see :func:`_should_rasterize`) decides once, from
+    one panel's worth of cells, whether every panel ships an image instead of the raw
+    mesh — the fix for the same per-cell Python loop :func:`_field_row` avoids, since a
+    facet grid draws just as many curvilinear panels as it has frames.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
@@ -526,6 +558,10 @@ def _field_facet(
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
     outline = _domain_overlay(domain, field, geo=geo)
+    # one panel's worth of cells, not the whole faceted field, which would overcount by
+    # the number of panels and rasterize a grid whose individual maps are small
+    one_panel = field.isel({d: 0 for d in (facet_dim, row_dim) if d})
+    raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
         lo, hi = _limits(sub)
@@ -576,6 +612,8 @@ def _field_facet(
             log=log,
             font_scale=font_scale,
             canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
         )
         return mesh if outline is None else mesh * outline
 
@@ -652,6 +690,8 @@ def _skill_map(
     size=None,
     zoom: float = 1.0,
     domain=None,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -672,6 +712,11 @@ def _skill_map(
     for a comparison's corner box: bokeh has no free-floating annotation that survives
     pan/zoom as cleanly as a title. Units stay on each panel's own colorbar, as they do
     statically.
+
+    ``rasterize="auto"`` (the default, see :func:`_should_rasterize`) resolves once from
+    the first metric's map, same fix as :func:`_field_row`'s: a metric map is a
+    curvilinear mesh too, and hits the same per-cell loop past
+    :data:`RASTERIZE_ABOVE_CELLS`.
     """
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot.matplotlib_renderer import (
@@ -709,6 +754,7 @@ def _skill_map(
     factor = _canvas_factor(size, zoom)
     arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
     outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo)
+    raster = _should_rasterize(items[0]["skill"][names[0]], rasterize)
 
     panels = []
     for row, item in enumerate(items):
@@ -732,6 +778,8 @@ def _skill_map(
                 log=colors.log,
                 font_scale=font_scale,
                 canvas_factor=factor,
+                hover=hover,
+                rasterize=raster,
             )
             points = _station_overlay(
                 item.get("stations"), name, colors, item["skill"][name], geo=geo

@@ -467,6 +467,42 @@ def test_a_collapsed_single_map_also_carries_when_in_both_renderers(daily):
     assert [f.title.text for f in figs] == [expected]
 
 
+def test_a_big_facet_panel_is_rasterized_and_a_small_one_is_not():
+    """Check that a big facet grid rasterizes like a big field_row does.
+
+    A facet grid draws as many curvilinear panels as it has frames, so it hits the
+    same per-cell Python loop a big field_row does without rasterize="auto" -- see
+    tests/test_movie.py's identical guard for the movie families that share this code.
+    """
+    from ocean_skill.plot.holoviews_renderer import RASTERIZE_ABOVE_CELLS
+
+    def facet(shape):
+        ny, nx = shape
+        rng = np.random.default_rng(0)
+        field = xr.DataArray(
+            rng.normal(5.0, 1.0, (2, ny, nx)),
+            dims=("time", "lat", "lon"),
+            coords={
+                "time": pd.date_range("2012-01-01", periods=2, freq="D"),
+                "lat": np.linspace(18, 31, ny),
+                "lon": np.linspace(-98, -80, nx),
+            },
+            attrs={"units": "mmol m-3"},
+        )
+        item = _item(field, "time")
+        return render(
+            PlotSpec(family="field_facet", items=[item]), renderer="holoviews"
+        )
+
+    def kinds(obj):
+        return [type(n).__name__ for n in obj.traverse()]
+
+    small, big = (12, 20), (400, 550)
+    assert small[0] * small[1] < RASTERIZE_ABOVE_CELLS < big[0] * big[1]
+    assert "QuadMesh" in kinds(facet(small))
+    assert "Image" in kinds(facet(big))
+
+
 def test_a_faceted_vertical_suppresses_the_depth_part(daily):
     """A ``row_dim`` of levels already names the depth down the left edge."""
     import matplotlib
@@ -648,7 +684,7 @@ def test_holoviews_draws_a_single_map_with_no_facet_axis(daily):
 @pytest.fixture
 def prepared(monkeypatch, daily):
     """Stub the source out, so these exercise the lane rather than the catalog."""
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
 
     field = aggregate(daily, MONTHLY)
     monkeypatch.setattr(comparison, "prepare_source", lambda *a, **k: (field, None))
@@ -663,7 +699,7 @@ def test_the_leftover_axis_becomes_the_panels(prepared):
 
 
 def test_a_fully_collapsed_field_has_no_facet_axis(monkeypatch, daily):
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
     from ocean_skill.field import field as make_field
 
     flat = aggregate(daily, {"time": "mean"})
@@ -677,7 +713,7 @@ def test_two_leftover_axes_become_a_grid_with_depth_down_the_rows(monkeypatch, d
     Depth reads top-to-bottom and time left-to-right; that is a convention, not
     something to be re-derived from whichever arrangement fits the page better.
     """
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
     from ocean_skill.field import field as make_field
 
     monkeypatch.setattr(
@@ -688,7 +724,7 @@ def test_two_leftover_axes_become_a_grid_with_depth_down_the_rows(monkeypatch, d
 
 def test_three_leftover_axes_are_refused(monkeypatch, daily):
     """A figure has rows and columns; a third axis would have to be dropped silently."""
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
     from ocean_skill.field import field as make_field
 
     extra = _by_depth(daily).expand_dims(member=[1, 2])
@@ -719,7 +755,7 @@ def test_a_bare_select_says_what_to_write_instead(factory):
 
 
 def test_a_missing_variable_is_reported_against_its_source(monkeypatch):
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
     from ocean_skill.field import field as make_field
 
     monkeypatch.setattr(comparison, "prepare_source", lambda *a, **k: (None, None))
