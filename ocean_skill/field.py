@@ -12,6 +12,12 @@ run to one map, which a comparison can use; ``{"time": {"resample": "1MS", "redu
 of this run in order" means. So the axis a comparison treats as an error is the one
 this class treats as the payload, and the panels come out of it.
 
+A ``select`` that narrows both horizontal axes to one position is the other shape a
+reduction can take: nothing left to lay out as columns, so it draws as a line over
+whatever axis survives instead of panels (:attr:`Field.family`) — one source, no
+reference, the model-only counterpart of a :class:`~ocean_skill.comparison.Comparison`
+whose reference is a station.
+
 The reduction, the caching and the vocabulary handling are all the comparison lane's,
 reached through :func:`ocean_skill.comparison.prepare_source` — a model field prepared
 for a comparison and the same field prepared on its own are the same field, and they
@@ -66,13 +72,14 @@ def _facet_dims(da, spatial_dims: set[str]) -> tuple[str | None, str | None]:
 
 
 class Field:
-    """One source reduced to a map, or to a series of maps over one axis.
+    """One source reduced to a map, a series of maps over one axis, or a line.
 
     Parameters mirror :class:`~ocean_skill.comparison.Comparison` where they mean the
     same thing, so moving between the two is a change of class rather than of grammar.
     ``aggregate`` is the one that matters here: a spec that fully collapses time gives
     a single panel, while ``groupby``/``resample`` leave the axis that becomes the
-    panels.
+    panels. A ``select`` that narrows both horizontal axes to one position instead
+    draws as a line over whatever axis survives — see :attr:`family`.
     """
 
     def __init__(
@@ -188,6 +195,85 @@ class Field:
         """The axis across the columns, or ``None`` for a single map."""
         return self.facet_dims[1]
 
+    @property
+    def is_series(self) -> bool:
+        """Whether this field's prepared data is a place through time, not a map.
+
+        Mirrors :attr:`ocean_skill.comparison.Comparison.is_series`: a select that
+        narrows both horizontal axes to one position
+        (:func:`ocean_skill.align.point_of`) leaves nothing for :attr:`facet_dims`
+        to lay out as columns, and a surviving time axis is exactly what a line
+        needs for its x. Read off the data's own shape, never an argument.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        return point_of(da) is not None and resolve_dim(da, "T") in da.dims
+
+    @property
+    def family(self) -> str:
+        """The plot family this field's own shape admits: ``series`` or ``field_facet``.
+
+        No argument selects it, the same as :attr:`ocean_skill.comparison
+        .Comparison.family` — the prepared data's shape decides.
+        """
+        return "series" if self.is_series else "field_facet"
+
+    @property
+    def family_reason(self) -> str:
+        """Why :attr:`family` came out the way it did, for tracing a surprise."""
+        if self.is_series:
+            return "drawn as a line: the selection leaves one place, so the surviving time axis is the x"
+        return "drawn as map panels: a horizontal extent survives"
+
+    def _series_items(self) -> list[dict[str, Any]]:
+        """Return this field's data as one or more single-source series items.
+
+        One item, unless a vertical axis also survives the reduction — then one
+        item per level, each carrying its own ``actual_depth`` so the depth-as-
+        marker channel (:mod:`ocean_skill.plot.style`) and the legend
+        (:func:`ocean_skill.plot.style.series_label`) tell the levels apart.
+        Anything else left standing beyond time and depth is refused, the same as
+        :func:`_facet_dims` refuses a third map axis — a line has only one axis to
+        give away.
+        """
+        import xarray as xr
+
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        tdim = resolve_dim(da, "T")
+        zdim = resolve_dim(da, "Z")
+        extra = [str(d) for d in da.dims if d not in (tdim, zdim)]
+        if extra:
+            raise ValueError(
+                f"this series still has {extra} beyond time, and a line has only "
+                f"one axis to give away. Collapse it with aggregate= (e.g. "
+                f'{{"{extra[0]}": "mean"}}) or narrow it with select=.'
+            )
+
+        base = {
+            "units": da.attrs.get("units"),
+            "standard_name": self.standard_name,
+            "label": self.label or self.source,
+            "labels": (self.label or self.source,),
+        }
+        if zdim is None or zdim not in da.dims:
+            return [{"aligned": xr.Dataset({"value": da}), "metrics": None, **base}]
+
+        items = []
+        for k in range(da.sizes[zdim]):
+            level = da.isel({zdim: k})
+            item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
+            # actual_depth lives on the *item's* Dataset, not the DataArray, since
+            # that is what _depth_of (plot/series.py) reads -- the same convention
+            # Comparison.align() uses for its own aligned pair.
+            if zdim in level.coords:
+                item["aligned"].attrs["actual_depth"] = float(level[zdim])
+            items.append(item)
+        return items
+
     def as_item(self) -> dict[str, Any]:
         """Return this field as a spec item."""
         from ocean_skill.comparison import _depth_label, _selected_depth
@@ -209,15 +295,39 @@ class Field:
         }
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw one panel per value of :attr:`facet_dim`.
+        """Draw this field: as map panels, or as a line over time at one place.
 
-        Goes through the renderer registry, so ``renderer="holoviews"`` gives the
-        interactive version of the same plot with no other change.
+        Which of the two is decided by the prepared data's own shape, never an
+        argument — see :attr:`family`. Goes through the renderer registry, so
+        ``renderer="holoviews"`` gives the interactive version of the same plot
+        with no other change.
         """
+        from ocean_skill.align import point_of
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        spec = PlotSpec(family="field_facet", items=[self.as_item()], options=kwargs)
+        if self.family == "series":
+            spec = PlotSpec(
+                family="series", items=self._series_items(), options=kwargs
+            )
+        else:
+            if point_of(self.data) is not None:
+                # A point with no surviving time: neither a map (no horizontal
+                # extent left) nor a line (nothing to run it along) can be drawn --
+                # field_facet would otherwise try to lay out panels of a field with
+                # no axes at all, which fails confusingly further in.
+                raise ValueError(
+                    f"{self.source!r} has been reduced to one place with no "
+                    f"surviving time axis ({sorted(self.data.dims)} standing), so "
+                    "there is no horizontal extent left for map panels and no time "
+                    "axis for a line either. Keep time standing for a series (drop "
+                    "a select={'time': ...} that pins it to an instant, or an "
+                    "aggregate that collapses it), or widen select= to keep a "
+                    "horizontal extent for a map."
+                )
+            spec = PlotSpec(
+                family="field_facet", items=[self.as_item()], options=kwargs
+            )
         return render(spec, renderer=renderer)
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -248,11 +358,19 @@ class Field:
         ``docs/movies.md`` for the whole picture.
 
         A field the reduction left as a *single map* has no axis to play, and says so
-        rather than writing a one-frame movie.
+        rather than writing a one-frame movie. A field reduced to a *point* (see
+        :attr:`family`) has no map at all, and says so too — it draws as a line,
+        which :meth:`plot` already shows in full; there is nothing left to play.
         """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
+        if self.is_series:
+            raise ValueError(
+                f"{self.source!r} has been reduced to a point and draws as a line "
+                "over time (see .family), not a map -- there is nothing to play as "
+                "a movie. Use .plot() instead; it already shows the whole series."
+            )
         spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
@@ -315,6 +433,19 @@ def field(
     ``select={"depth": ...}`` is a surface of constant depth; ``select={"sigma0":
     ...}`` asks for an isopycnal instead (ROMS sources only) — see
     :func:`ocean_skill.roms.to_sigma0`.
+
+    A ``select`` that narrows both horizontal axes to one position draws as a line
+    over whatever axis survives instead of map panels — never a separate call, the
+    same ``.plot()``::
+
+        osk.field(
+            "run_new", "temperature",
+            select={"lon": -144.25, "lat": 49.98, "time": slice("2012-01", "2012-12")},
+        ).plot()
+
+    One solid line, no reference to compare against (see
+    :attr:`Field.family`/``family_reason`` for why a given call drew what it drew).
+    ``renderer="holoviews"`` gives the interactive version with no other change.
     """
     return Field(
         source,

@@ -11,7 +11,9 @@ Two rules, in this order:
 * **Role wins.** ``reference`` is solid, ``test`` is dashed. That is the whole "obs
   solid, model dashed" convention, and because it keys off the *role* rather than the
   source it keeps working for model-versus-model (baseline solid, candidate dashed) and
-  reverses when the roles do.
+  reverses when the roles do. A lone, uncompared line has no role to win against --
+  it carries role ``"value"`` and draws solid, from the same cycle a second one would
+  step through.
 * **Then the channels.** ``colour <- variable``, ``linestyle <- source``,
   ``marker <- depth``, overridable per channel with ``encode=``. A channel is only
   *drawn* when its field actually varies within the figure, so a single-variable panel
@@ -143,9 +145,16 @@ def linestyle_for(role: str, level_index: int = 0) -> str:
     levels of whatever field feeds the linestyle channel, so two models get ``--`` and
     ``:`` while both references stay solid — and swapping which source is the reference
     swaps the styles, because the role decides and the name does not.
+
+    A lone, uncompared line carries role ``"value"`` rather than either of those --
+    calling it a "test" or "reference" would claim a comparison that was never made.
+    It has no role to *win against*, so it draws solid too, from the same full cycle
+    a second uncompared source would step through (``dash_levels`` in :func:`resolve`
+    already excludes only ``"reference"``, so several ``"value"`` lines in one figure
+    still dash apart from each other).
     """
-    if role == "reference":
-        return LINESTYLES[0]
+    if role in ("reference", "value"):
+        return LINESTYLES[level_index % len(LINESTYLES)]
     tail = LINESTYLES[1:]
     return tail[level_index % len(tail)]
 

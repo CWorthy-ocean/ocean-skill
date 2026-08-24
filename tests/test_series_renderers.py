@@ -77,6 +77,40 @@ def _item(
     }
 
 
+def _single_item(
+    *,
+    source: str = "run_new",
+    variable: str = TEMPERATURE,
+    units: str = "degC",
+    depth: float | None = None,
+    lon: float = -144.245,
+    lat: float = 49.978,
+    lon_name: str = "lon",
+    lat_name: str = "lat",
+    n: int = 12,
+) -> dict:
+    """One single-source series item, shaped as ``Field._series_items`` builds it.
+
+    No reference, no residual, no metrics -- one lone value, at a place, over time.
+    """
+    time = pd.date_range("2015-01-01", periods=n, freq="MS")
+    values = 8.0 + 4.0 * np.sin(np.arange(n) / 1.9)
+    da = xr.DataArray(
+        values, coords={"time": time}, dims="time", attrs={"units": units}
+    ).assign_coords(**{lon_name: lon, lat_name: lat})
+    aligned = xr.Dataset({"value": da})
+    if depth is not None:
+        aligned.attrs["actual_depth"] = depth
+    return {
+        "aligned": aligned,
+        "metrics": None,
+        "units": units,
+        "standard_name": variable,
+        "label": source,
+        "labels": (source,),
+    }
+
+
 def _spec(items, **options) -> PlotSpec:
     return PlotSpec(
         family="series",
@@ -372,6 +406,70 @@ def test_no_sample_counts_are_drawn_on_the_figure():
     fig = render(_spec([_item()]), renderer="matplotlib")
     drawn = [t.get_text() for ax in fig.axes for t in ax.texts]
     assert not [t for t in drawn if "n=" in t]
+
+
+# -- a single source, no comparison ------------------------------------------------
+
+
+def test_a_single_source_item_draws_one_solid_line_in_both_renderers():
+    item = _single_item()
+    static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_lines(render(_spec([item]), renderer="holoviews"))
+    assert [(a, b, c) for a, b, c, _ in static] == [
+        (a, b, c) for a, b, c, _ in interactive
+    ]
+    (label, _, dash, _), = static
+    assert label == "run_new"
+    assert dash == "-"
+
+
+def test_linestyle_for_the_value_role_is_solid():
+    assert _style.linestyle_for("value") == "-"
+
+
+def test_a_single_source_item_has_no_statistics_box_in_either_renderer():
+    import holoviews as hv
+
+    fig = render(_spec([_single_item()]), renderer="matplotlib")
+    static = [t.get_text() for ax in fig.axes for t in ax.texts]
+    assert not static
+
+    obj = render(_spec([_single_item()]), renderer="holoviews")
+    assert not obj.traverse(lambda x: x, [hv.Text])
+
+
+def test_residual_is_refused_for_a_single_source_item_in_both_renderers():
+    """There is no reference to difference against — the same refusal either way."""
+    with pytest.raises(ValueError, match="needs a reference"):
+        render(_spec([_single_item()], residual=True), renderer="matplotlib")
+    with pytest.raises(ValueError, match="needs a reference"):
+        render(_spec([_single_item()], residual=True), renderer="holoviews")
+
+
+def test_faceting_a_single_source_item_by_reference_is_refused():
+    items = [_single_item(), _single_item(source="run_other")]
+    with pytest.raises(ValueError, match="no reference side"):
+        render(_spec(items, rows="reference"), renderer="matplotlib")
+
+
+def test_panel_title_reads_a_curvilinear_scalar_position():
+    """A ROMS point (scalar lon_rho/lat_rho, not lon/lat) still titles its place."""
+    item = _single_item(lon_name="lon_rho", lat_name="lat_rho")
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_titles(render(_spec([item]), renderer="holoviews"))
+    assert static == interactive
+    assert any("144.2°W" in t and "50.0°N" in t for t in static)
+
+
+def test_depth_fanned_single_source_items_get_markers_and_depth_labels():
+    """One Field, several levels -- markers and legend labels tell them apart."""
+    items = [_single_item(depth=10.0), _single_item(depth=50.0)]
+    lines = _matplotlib_lines(render(_spec(items), renderer="matplotlib"))
+    labels = {label for label, _, _, _ in lines}
+    assert any("10" in label for label in labels)
+    assert any("50" in label for label in labels)
+    markers = {marker for _, _, _, marker in lines}
+    assert markers != {None}, "depth varies, so the marker channel should engage"
 
 
 # -- residual --------------------------------------------------------------------------

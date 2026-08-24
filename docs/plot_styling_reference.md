@@ -741,6 +741,19 @@ osk.compare(reference="ooi-gp03flma-rim01-02-ctdmog040", test="oceansoda_ethz",
             variables=["temperature"]).plot()
 ```
 
+Two *gridded* runs reach the same family the same way — a `select` that pins both
+lon and lat to one position leaves nothing to draw a map of, exactly like a mooring's
+`featureType` does, and `over="time"` is implied without being asked:
+
+```python
+osk.compare(reference="run_baseline", test="run_new", variables=["temperature"],
+            select={"lon": -144.25, "lat": 50.0}).plot()
+```
+
+The reference's own grid decides the exact position (nearest cell, or interpolated
+with `method="bilinear"`), and the test is sampled *there* — co-located, not each
+lane's own nearest cell to the raw request.
+
 ### Which channel carries what
 
 Deterministic, so a figure reads the same way every time and adding a source or a
@@ -755,6 +768,18 @@ variable does the expected thing:
 
 `role` beats everything: model-versus-model gives the baseline solid and the candidate
 dashed, and swapping which is the `reference` swaps the two.
+
+**One source, no comparison.** `osk.field(...).plot()` draws the same family when a
+`select` narrows both horizontal axes to one position — one line, role `"value"`
+since there is no reference to win against, drawn solid:
+
+```python
+osk.field("run_new", "temperature", select={"lon": -144.25, "lat": 50.0}).plot()
+```
+
+Colour still comes from `variable`; there is no statistics box (nothing to score
+against) and `residual=True` is refused with a clear error rather than silently
+drawing nothing, for the same reason.
 
 `encode=` moves a channel onto another field, or switches it off:
 

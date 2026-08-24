@@ -88,7 +88,14 @@ class PlotSpec:
         coordinates). Its items are *not* one per row, unlike ``field_grid``'s: the
         family bins them into panels by variable and overlays them by source (see
         :func:`ocean_skill.plot.series.compose`), so one item is a pair of lines rather
-        than a row.
+        than a row. ``aligned`` usually carries the ``test``/``reference``/
+        ``difference`` trio, but a single source with nothing compared against it
+        instead carries one variable named ``value`` — no ``difference``, ``metrics``
+        is ``None``, and ``labels`` is a 1-tuple of the one source's name. Such an
+        item draws one solid line (see
+        :func:`ocean_skill.plot.series.item_roles`/``line_specs``), with no
+        statistics box and no residual (``residual=True`` is refused if any item in
+        the figure is this shape).
 
         ``locations`` carries no field payload at all: one item per catalog *source*,
         with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``

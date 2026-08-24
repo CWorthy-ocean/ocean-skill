@@ -22,6 +22,7 @@ from ocean_skill.operators import (
     DERIVED,
     aggregate,
     combine,
+    point_in_spec,
     register_reducer,
     resolve_variable,
     select,
@@ -713,6 +714,129 @@ def test_a_scalar_against_a_bare_dimension_is_still_allowed():
 def test_a_single_valued_axis_has_no_direction_to_get_wrong():
     field = _gridded([25.0])
     assert select(field, {"lat": {"min": 20, "max": 30}}).sizes["lat"] == 1
+
+
+# -- a scalar lon+lat pair is a point, not two independent nearest selects -----
+
+
+def _curvilinear(nx: int = 11, ny: int = 10):
+    """A ROMS-shaped field: 2-D lon_rho/lat_rho riding on (eta_rho, xi_rho)."""
+    lon_1d = np.arange(-150.5, -150.5 + nx)
+    lat_1d = np.arange(45.5, 45.5 + ny)
+    lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    return xr.DataArray(
+        np.arange(ny * nx, dtype=float).reshape(ny, nx),
+        dims=("eta_rho", "xi_rho"),
+        coords={
+            "lon_rho": (("eta_rho", "xi_rho"), lon_2d),
+            "lat_rho": (("eta_rho", "xi_rho"), lat_2d),
+        },
+        attrs={"units": "degC"},
+    )
+
+
+def test_point_in_spec_needs_both_axes_as_real_scalars():
+    assert point_in_spec({"lon": -95.5, "lat": 21.0}) == ("lon", "lat", -95.5, 21.0)
+    assert point_in_spec({"lon": -95.5}) is None, "a lone lon is a slice, not a point"
+    assert point_in_spec({"lon": slice(1, 2), "lat": 3}) is None
+    assert point_in_spec({"lon": -95.5, "lat": True}) is None, "a bool is not a value"
+    assert point_in_spec({}) is None
+    assert point_in_spec(None) is None
+
+
+def test_a_scalar_lon_and_lat_together_route_through_sample_at():
+    """Both horizontal axes as scalars is a point, sampled rather than sliced twice."""
+    grid = _gridded([10.0, 20.0, 30.0])
+    direct = grid.sel(lat=20.0, lon=-96.0)
+    out = select(grid, {"lon": -95.5, "lat": 21.0})
+    assert out.dims == ()
+    assert float(out) == float(direct)
+    assert float(out["lon"]) == -96.0
+    assert float(out["lat"]) == 20.0
+    # sample_at's own bookkeeping rides along -- the point branch really is sample_at,
+    # not a second implementation of "nearest" that happens to agree with it.
+    assert out.attrs["point_method"] == "nearest"
+    assert "nearest_distance_km" in out.attrs and "cell_km" in out.attrs
+
+
+def test_a_lone_lon_keeps_its_meridional_slice_behavior():
+    """Without a lat alongside it, a lon key is an ordinary axis select, not a point."""
+    grid = _gridded([10.0, 20.0, 30.0])
+    out = select(grid, {"lon": -95.5})
+    assert "lon" not in out.dims  # narrowed to the nearest column...
+    assert "lat" in out.dims  # ...but lat is untouched, not also collapsed
+    assert out.sizes["lat"] == 3
+    assert "point_method" not in out.attrs
+
+
+def test_a_0_360_grid_no_longer_snaps_to_the_wrong_edge_column():
+    """The bug this exists to fix: a -95.5 request against a 0-360 grid.
+
+    Before routing through sample_at, ``.sel(lon=-95.5, method="nearest")`` against
+    an axis running 262-268 snapped to the westernmost column (262, i.e. true -98) --
+    ~2.5 degrees off in the wrong direction, silently.
+    """
+    grid = _gridded([10.0, 20.0, 30.0])
+    shifted = grid.assign_coords(lon=(grid.lon % 360)).sortby("lon")
+    out = select(shifted, {"lon": -95.5, "lat": 21.0})
+    assert float(out) == float(grid.sel(lat=20.0, lon=-96.0))
+
+
+def test_a_dateline_straddling_grid_wraps_the_request_to_match():
+    """A domain contiguous in 0-360 (the ``pac_dt_ramp``-style stress case)."""
+    lon = np.arange(170.0, 191.0, 2.0)  # 170..190, contiguous in 0-360, split in ±180
+    lat = np.array([10.0, 20.0, 30.0])
+    grid = xr.DataArray(
+        np.arange(lat.size * lon.size, dtype=float).reshape(lat.size, lon.size),
+        dims=("lat", "lon"),
+        coords={"lat": lat, "lon": lon},
+    )
+    out = select(grid, {"lon": -170.0, "lat": 21.0})  # -170 == 190 east of the seam
+    assert float(out["lon"]) % 360 == pytest.approx(190.0)
+
+
+def test_a_curvilinear_point_select_works_with_no_matched_no_axis_warning():
+    """resolve_dim alone can't see a 2-D lon_rho/lat_rho; the point branch can."""
+    grid = _curvilinear()
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        out = select(grid, {"lon_rho": -144.245, "lat_rho": 49.98})
+    assert out.dims == ()
+    assert float(out["lon_rho"]) == -144.5
+    assert float(out["lat_rho"]) == 49.5
+    assert not log
+
+
+def test_a_masked_point_raises_rather_than_returning_nan():
+    grid = _gridded([10.0, 20.0, 30.0])
+    masked = grid.where((grid.lon > -96) | (grid.lat > 25))
+    with pytest.raises(ValueError, match="no valid data"):
+        select(masked, {"lon": -97.0, "lat": 10.0})
+
+
+def test_a_dataset_is_left_to_the_ordinary_per_axis_loop():
+    """The point branch is DataArray-only; a Dataset still narrows, just not as one."""
+    grid = _gridded([10.0, 20.0, 30.0])
+    ds = xr.Dataset({"sst": grid})
+    out = select(ds, {"lon": -95.5, "lat": 21.0})
+    assert dict(out.sizes) == {}
+    assert float(out["sst"]) == float(grid.sel(lat=20.0, lon=-96.0))
+
+
+def test_a_trajectory_s_lon_lat_are_left_alone():
+    """lon(time)/lat(time) name no dimension of their own -- select skips both keys."""
+    time = np.arange(5)
+    traj = xr.DataArray(
+        np.arange(5.0),
+        dims="time",
+        coords={
+            "time": time,
+            "lon": ("time", np.array([-98.0, -97.0, -96.0, -95.0, -94.0])),
+            "lat": ("time", np.array([10.0, 11.0, 12.0, 13.0, 14.0])),
+        },
+    )
+    out = select(traj, {"lon": -96.0, "lat": 12.0})
+    xr.testing.assert_identical(out, traj)
 
 
 # -- bbox longitude conventions -----------------------------------------------

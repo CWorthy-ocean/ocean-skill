@@ -117,6 +117,26 @@ runs.summary()                        # Taylor + target diagrams side by side
 runs.write_metrics("metrics/")        # tidy CSV, one row per comparison
 ```
 
+A `select` that narrows both models to one **lon/lat** works the same way a station
+reference does — nothing left to draw a map of, so it draws as lines, `over="time"`
+implied the same way a mooring's `featureType` implies it:
+
+```python
+point = osk.compare(
+    reference="run_baseline", test="run_new", variables=[NITRATE],
+    select={"lon": -144.25, "lat": 50.0, "time": slice("2012-01", "2012-12")},
+)
+point.plot()                          # reference solid, test dashed, at one place
+point[0].family_reason                # "the select narrows the reference to one position"
+```
+
+The **reference's** grid decides the exact position — its nearest cell to the request,
+or its interpolated value with `method="bilinear"` — and the *test* is sampled there
+too, so the pair is genuinely co-located rather than each lane picking its own
+nearest cell to the raw request (which is what two independent `select={"test": ...,
+"reference": ...}` positions would do, and is still available when two real, possibly
+different, positions are the point — see `docs/plot_styling_reference.md`).
+
 Comparisons you already have go onto one diagram without being rebuilt — pool any mix
 of sets and single comparisons, which is often the only way to get them onto one figure
 at all, since a pool may span several references or aggregations:
@@ -150,6 +170,20 @@ run.plot()                            # six monthly means, one shared colour sca
 run.movie(save="nitrate.mp4")         # the same six, played instead of laid out
 run.movie(renderer="holoviews")       # the same six, stepped through on a slider
 ```
+
+A `select` that narrows both horizontal axes to one **lon/lat** instead draws as a
+line over whatever axis survives — never a separate call, still `.plot()`:
+
+```python
+osk.field(
+    "run_new", NITRATE,
+    select={"lon": -144.25, "lat": 50.0, "time": slice("2012-01", "2012-12")},
+).plot()                              # one solid line, no reference to compare against
+```
+
+Which of the two — map panels or a line — `.plot()` draws is read off the data's own
+shape (`Field.family`/`family_reason`), the same rule `compare()` follows between a
+score map and a line comparison; there is no argument that picks one over the other.
 
 **Nothing is reduced unless you ask.** There is no default aggregation anywhere: omit
 `aggregate` and every step of the selection survives as its own panel or frame. A
