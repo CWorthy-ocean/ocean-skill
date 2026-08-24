@@ -159,7 +159,35 @@ def test_a_comparison_refuses_an_unreduced_lane(gom_bgc):
 def test_a_reduced_lane_passes_the_check(gom_bgc):
     ds, meta = gom_bgc
     da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {}, {"time": "mean"})
-    _require_reduced(da, "test", "GOM_bgc")  # must not raise
+    out = _require_reduced(da, "test", "GOM_bgc")  # must not raise
+    xr.testing.assert_identical(out, da)  # an already-reduced lane comes back unchanged
+
+
+def test_a_singleton_axis_is_squeezed_not_refused(gom_bgc):
+    """A WOA climatology's ``time=1`` needs no ``aggregate`` boilerplate to pass.
+
+    Squeezing a size-1 axis changes no number — the one value already is the mean —
+    so :func:`_require_reduced` collapses it itself rather than asking the caller to
+    say how, the same way it would refuse a genuinely ambiguous axis.
+    """
+    ds, meta = gom_bgc
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    one = da.isel(time=slice(0, 1))
+    out = _require_reduced(one, "test", "GOM_bgc")  # must not raise
+    assert "time" not in out.dims
+    np.testing.assert_array_equal(out.values, one.isel(time=0).values)
+
+
+def test_a_singleton_does_not_excuse_a_real_axis(gom_bgc):
+    """A size-1 axis is squeezed away quietly; a genuinely ambiguous one still isn't."""
+    ds, meta = gom_bgc
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    one = da.isel(time=slice(0, 1)).expand_dims(depth=[0.0, 10.0])
+    with pytest.raises(ValueError) as excinfo:
+        _require_reduced(one, "test", "GOM_bgc")
+    message = str(excinfo.value)
+    assert "depth=2" in message, "the real axis has to be named"
+    assert "time=" not in message, "the singleton it squeezed away should not be"
 
 
 def test_a_cached_lane_is_still_checked_for_reduction(monkeypatch, gom_bgc):
@@ -186,6 +214,37 @@ def test_a_cached_lane_is_still_checked_for_reduction(monkeypatch, gom_bgc):
     with pytest.raises(ValueError, match="GOM_bgc") as excinfo:
         prepare_source("GOM_bgc", OXYGEN_PER_MASS, None, None, require_reduced="test")
     assert "time=" in str(excinfo.value)
+
+
+def test_a_cached_singleton_lane_is_squeezed_on_the_way_out(monkeypatch, gom_bgc):
+    """The squeeze applies to what a caller receives, never to what the cache holds.
+
+    A field cached with its singleton ``time`` standing (written by a tolerant caller)
+    must come back squeezed to a stricter caller on a cache *hit* — the same rule
+    :func:`_require_reduced` applies on a cache miss — while the entry itself, read
+    again by a tolerant caller, still shows the un-squeezed axis it was written with.
+    """
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import prepare_source
+
+    ds, meta = gom_bgc
+    one_step = ds.isel(time=slice(0, 1))
+    monkeypatch.setattr(osk, "read", lambda name: one_step)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
+
+    kept, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, None, None)
+    assert kept.sizes["time"] == 1, "the tolerant caller fills the cache unsqueezed"
+
+    hit, _ = prepare_source(
+        "GOM_bgc_1", OXYGEN_PER_MASS, None, None, require_reduced="test"
+    )
+    assert "time" not in hit.dims, "a stricter caller gets the cache hit squeezed"
+
+    again, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, None, None)
+    assert again.sizes["time"] == 1, "the stored entry itself was never squeezed"
 
 
 def test_depth_label():
