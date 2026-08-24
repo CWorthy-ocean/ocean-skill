@@ -410,6 +410,47 @@ def test_interactive_maps_centre_on_180_for_a_straddling_field():
     assert _output_projection(_global_reference()) is None
 
 
+def _straddling_stored_in_180():
+    """Build a dateline-straddling field whose coords are stored in ±180, not 0-360.
+
+    A pair aligned onto a ±180 reference grid keeps a straddling Pacific domain in ±180:
+    the data sits at 80..180 and -180..-44, with the Atlantic (−44..80) empty, and
+    ``lon.max()`` is only 180. This is what a real ``compare()`` hands the renderers
+    when the reference is the frame — and the case the old ``lon.max() > 180`` test
+    missed, since no coordinate exceeds 180 even though the domain plainly straddles.
+    """
+    lon = np.unique(
+        np.concatenate([np.linspace(80.0, 180.0, 20), np.linspace(-180.0, -44.0, 15)])
+    )
+    return xr.DataArray(
+        np.full((10, lon.size), 5.0),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(-40.0, 40.0, 10), "lon": lon},
+        attrs={"units": "mmol/m^3"},
+    )
+
+
+def test_both_renderers_centre_on_180_when_a_straddler_is_stored_in_180():
+    """The real-data regression: straddling but stored in ±180, no regrid (no xesmf).
+
+    ``lon.max() <= 180`` here, so the retired raw-value test read this as a plain ±180
+    field and drew it torn across a centre-0 frame with a blank Atlantic down the
+    middle. ``natural_convention`` measures the span instead and both renderers now
+    centre it on 180.
+    """
+    pytest.importorskip("cartopy.crs")
+    from ocean_skill.plot.holoviews_renderer import _output_projection
+    from ocean_skill.plot.matplotlib_renderer import _map_projection
+
+    field = _straddling_stored_in_180()
+    assert float(field.lon.max()) <= 180.0  # the exact condition the old test needed
+    assert A.natural_convention(field) == "0-360"
+
+    assert _map_projection(field).proj4_params["lon_0"] == 180.0
+    proj = _output_projection(field)
+    assert proj is not None and proj.proj4_params["lon_0"] == 180.0
+
+
 # -- interactive movies: web tiles cannot show a straddling domain whole -------------
 
 

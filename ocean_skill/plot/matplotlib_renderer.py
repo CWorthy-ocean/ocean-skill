@@ -466,20 +466,28 @@ def _basemap(
 def _map_projection(*fields):
     """Return a PlateCarree centred so every field's longitudes stay contiguous.
 
-    A lane whose longitudes run past 180 (a 0-360 domain straddling the
-    antimeridian, as a Pacific model does) splits at the edges of the default
-    ``central_longitude=0`` frame; centring the frame on 180 puts the seam back
-    outside the data. Only the *axes* projection moves — the ``transform=`` handed
-    to pcolormesh stays plain :class:`~cartopy.crs.PlateCarree`, because the
+    A lane straddling the antimeridian (a 0-360 domain, as a Pacific model has)
+    splits at the edges of the default ``central_longitude=0`` frame — the basin torn
+    across both edges with a blank Atlantic between — so centring the frame on 180 puts
+    the seam back outside the data. Only the *axes* projection moves; the ``transform=``
+    handed to pcolormesh stays plain :class:`~cartopy.crs.PlateCarree`, because the
     coordinates are geographic degrees wherever the frame is centred.
+
+    Straddling is decided by :func:`~ocean_skill.align.natural_convention`, the same
+    span-based test ``align`` uses — not by ``lon.max() > 180``, which only sees a
+    straddle when the coordinates happen to be *stored* in 0-360. A pair aligned onto a
+    ±180 reference grid keeps a straddling Pacific domain's longitudes in ±180
+    (``lon.max() <= 180``) while it still straddles, and the raw-value test missed
+    exactly that case.
     """
     import cartopy.crs as ccrs
+
+    from ocean_skill.align import natural_convention
 
     for field in fields:
         if field is None or "lon" not in getattr(field, "coords", ()):
             continue
-        lon = np.asarray(field["lon"], dtype="float64")
-        if np.isfinite(lon).any() and float(np.nanmax(lon)) > 180.0:
+        if natural_convention(field) == "0-360":
             return ccrs.PlateCarree(central_longitude=180.0)
     return ccrs.PlateCarree()
 
