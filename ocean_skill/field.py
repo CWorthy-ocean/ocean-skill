@@ -29,7 +29,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Field", "field"]
+__all__ = ["Field", "FieldSet", "field"]
 
 
 def _facet_dims(da, spatial_dims: set[str]) -> tuple[str | None, str | None]:
@@ -80,6 +80,9 @@ class Field:
     a single panel, while ``groupby``/``resample`` leave the axis that becomes the
     panels. A ``select`` that narrows both horizontal axes to one position instead
     draws as a line over whatever axis survives — see :attr:`family`.
+
+    Holds exactly one variable. A list of them belongs to :func:`field`, which fans it
+    into a :class:`FieldSet` instead of a single ``Field``.
     """
 
     def __init__(
@@ -95,6 +98,13 @@ class Field:
         from ocean_skill.comparison import _require_pair_spec, as_select, is_pair_spec
         from ocean_skill.vocabulary import resolve_and_report
 
+        if isinstance(variable, (list, tuple)):
+            raise TypeError(
+                f"{variable!r} is a list of variable specs, and a Field holds exactly "
+                "one -- pass the list to osk.field(), which fans it into a FieldSet "
+                "(one Field per variable, drawn on one figure), or pass the one spec "
+                "this Field is for."
+            )
         if isinstance(variable, dict):
             # A one-sided {"test": ...} names the same mistake a full pair-spec
             # does, and deserves the same clear error rather than surfacing later,
@@ -403,6 +413,107 @@ class Field:
         )
 
 
+class FieldSet:
+    """Several variables of one source, drawn together as one ``series`` figure.
+
+    ``osk.field(source, [v1, v2, ...])`` builds one :class:`Field` per variable,
+    sharing the same ``select``/``aggregate``/``label``/``cache`` (there is no
+    per-variable select yet — see :func:`field`), and pools them here. The layout is
+    whatever :mod:`ocean_skill.plot.series` already does with several variables: one
+    panel and a secondary y-axis for two, one row per variable for three or more, all
+    overlaid within a row by source. There is nothing to configure beyond what
+    :meth:`Field.plot` already exposes, because the composition rule *is* the feature.
+
+    Series only — a set with a member that reduces to a map rather than a point has
+    nothing in common to draw as one figure, and :meth:`plot` says so rather than
+    guessing which one it should be.
+    """
+
+    def __init__(self, fields: list[Field]):
+        for f in fields:
+            if not isinstance(f, Field):
+                raise TypeError(
+                    f"expected Fields, got {f!r}. A FieldSet is built by osk.field() "
+                    "from a list of variables -- construct it that way rather than "
+                    "by hand."
+                )
+        self.fields = list(fields)
+
+    def __len__(self) -> int:
+        return len(self.fields)
+
+    def __iter__(self):
+        return iter(self.fields)
+
+    def __getitem__(self, i):
+        return self.fields[i]
+
+    def __repr__(self) -> str:
+        return f"FieldSet({self.fields!r})"
+
+    def _items(self) -> list[dict[str, Any]]:
+        """Every member's series items, concatenated into one figure's worth."""
+        return [item for f in self.fields for item in f._series_items()]
+
+    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Draw every member's variable on one figure, laid out by :mod:`plot.series`.
+
+        Every member has to draw as a line (see :attr:`Field.family`) for that to mean
+        anything -- a set that mixes a point and a map has no single figure that is
+        both, so this refuses rather than picking one arbitrarily.
+        """
+        from ocean_skill.comparison import _short_variable_label
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        not_series = [f for f in self.fields if f.family != "series"]
+        if not_series:
+            detail = "; ".join(
+                f"{_short_variable_label(f.variable)}: {f.family_reason}"
+                for f in not_series
+            )
+            raise ValueError(
+                f"several variables on one figure draw as overlaid lines, but not "
+                f"every one of them reduced to a point -- {detail}. Narrow select= "
+                "to one lon/lat position so each variable is a series, or plot each "
+                "variable's maps separately with osk.field(source, variable)."
+            )
+        spec = PlotSpec(family="series", items=self._items(), options=kwargs)
+        return render(spec, renderer=renderer)
+
+    def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Refuse: a set of variables drawn as lines has nothing to play as frames."""
+        raise ValueError(
+            "this set holds several variables of one source drawn as lines over "
+            "time -- there is nothing to play as a movie. Use .plot(); it already "
+            "shows the whole series. For a movie of maps, give osk.field() one "
+            "variable."
+        )
+
+    def save(
+        self,
+        project: str | None = None,
+        *,
+        stem: str | None = None,
+        renderer: str = "matplotlib",
+        **plot_kwargs: Any,
+    ) -> dict[str, Path]:
+        """Write this set's figure under ``output/<project>/figures/``.
+
+        The same layout :meth:`Field.save` writes to, minus the metrics table -- there
+        is no reference for any member here either.
+        """
+        from ocean_skill import outputs
+        from ocean_skill.comparison import _short_variable_label
+
+        stem = stem or "_".join(
+            _short_variable_label(f.variable) for f in self.fields
+        )[:24]
+        path = outputs.figures_dir(project or self.fields[0].source) / f"{stem}.png"
+        self.plot(renderer=renderer, save=path, **plot_kwargs)
+        return {"figure": path}
+
+
 def field(
     source: str,
     variable: Any,
@@ -411,7 +522,7 @@ def field(
     aggregate: dict[str, Any] | None = None,
     label: str | None = None,
     cache: bool | None = None,
-) -> Field:
+) -> Field | FieldSet:
     """Build a :class:`Field`: one model source, no reference.
 
     The counterpart of :func:`ocean_skill.comparison.compare` for the case where there
@@ -446,7 +557,54 @@ def field(
     One solid line, no reference to compare against (see
     :attr:`Field.family`/``family_reason`` for why a given call drew what it drew).
     ``renderer="holoviews"`` gives the interactive version with no other change.
+
+    ``variable`` also accepts a list, fanning like :func:`ocean_skill.comparison
+    .compare`'s ``variables=`` — one :class:`Field` per entry, sharing this same
+    ``select``/``aggregate``/``label``/``cache`` (there is no per-variable select yet),
+    pooled into a :class:`FieldSet`::
+
+        run = osk.field(
+            "run_new", ["temperature", "salinity"],
+            select={"lon": -144.25, "lat": 49.98},
+        )
+        run.plot()                       # 2 variables: one panel, salinity on a
+                                          # secondary y-axis (docs/plot_styling_reference.md)
+        run.plot(secondary_y=False)      # ...or two stacked panels instead
+        run.plot(renderer="holoviews")   # same figure, interactive
+
+    The first entry takes the left (primary) axis when there are exactly two. A dict
+    entry (a combination or ``calculate`` spec) should carry its own ``standard_name``
+    — panel grouping, colour and the legend all key on it. Exact repeats (including
+    alias repeats, like ``"temp"`` and ``"temperature"``) are dropped with a note
+    rather than drawn twice. A single-element list still returns a ``FieldSet``, for
+    the same reason ``compare(variables=[v])`` still returns a set.
     """
+    if isinstance(variable, (list, tuple)):
+        if not variable:
+            raise ValueError(
+                "variable=[] names nothing to draw. Pass one spec (a name or a "
+                'dict), or a list of them -- osk.field(src, ["temperature", '
+                '"salinity"]).'
+            )
+        from ocean_skill.comparison import _canonical
+
+        members = [
+            Field(source, v, select=select, aggregate=aggregate, label=label, cache=cache)
+            for v in variable
+        ]
+        kept: list[Field] = []
+        seen: set[str] = set()
+        dropped = 0
+        for f in members:
+            key = _canonical(f.variable)
+            if key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            kept.append(f)
+        if dropped:
+            print(f"  dropped {dropped} duplicate variable(s)")
+        return FieldSet(kept)
     return Field(
         source,
         variable,

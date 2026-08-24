@@ -185,6 +185,27 @@ Which of the two — map panels or a line — `.plot()` draws is read off the da
 shape (`Field.family`/`family_reason`), the same rule `compare()` follows between a
 score map and a line comparison; there is no argument that picks one over the other.
 
+**More than one variable on the same line plot** — pass a list instead of a name, and
+`osk.field` fans it into a `FieldSet` (one `Field` per variable, sharing this same
+`select`/`aggregate`), drawn on one figure:
+
+```python
+run = osk.field(
+    "run_new", ["temperature", "salinity"],
+    select={"lon": -144.25, "lat": 50.0, "time": slice("2012-01", "2012-12")},
+)
+run.plot()                            # 2 variables: one panel, the second on a
+                                       # secondary y-axis
+run.plot(secondary_y=False)           # ...or two stacked panels instead
+run.plot(renderer="holoviews")        # same figure, interactive
+```
+
+The layout follows the series composition rule everywhere else in this package: one
+variable overlays every source on one panel, two share a panel with the second on a
+secondary axis by default, three or more each get their own row (see
+`docs/plot_styling_reference.md`). There is no separate multi-variable option to
+learn — the same `.plot()` keyword arguments (`rows=`, `cols=`, `secondary_y=`) apply.
+
 **Nothing is reduced unless you ask.** There is no default aggregation anywhere: omit
 `aggregate` and every step of the selection survives as its own panel or frame. A
 `compare()` needs a single map, so it will tell you to choose rather than average an axis
@@ -246,7 +267,11 @@ at any real depth.
 ## Variable specs
 
 A plain name is the common case, but `variable=`/`variables=` accepts three other
-shapes for the cases a name alone can't cover:
+shapes for the cases a name alone can't cover — each describing one quantity, however
+it has to be built. (A *list* of specs is a different thing: several quantities, one
+figure. `compare()`'s `variables=` fans a list into a `ComparisonSet`; `osk.field`'s
+`variable=` fans one the same way into a `FieldSet` — see "More than one variable on
+the same line plot" above. Any of the shapes below can be one entry in that list.)
 
 **A combination** sums (or differences, multiplies, divides) several variables into
 one field — MARBL splits chlorophyll into three phytoplankton components, MODIS ships

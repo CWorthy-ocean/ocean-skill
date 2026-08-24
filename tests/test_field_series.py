@@ -18,6 +18,7 @@ import xarray as xr
 matplotlib.use("Agg")
 
 NITRATE = "nitrate"
+SILICATE = "silicate"
 
 
 def _point_series(n: int = 12, *, lon_name: str = "lon", lat_name: str = "lat"):
@@ -80,6 +81,12 @@ def _make(**kwargs):
     from ocean_skill.field import field as make_field
 
     return make_field("stub", NITRATE, **kwargs)
+
+
+def _make_set(variables, **kwargs):
+    from ocean_skill.field import field as make_field
+
+    return make_field("stub", variables, **kwargs)
 
 
 # -- family inference: series vs field_facet -------------------------------------------
@@ -185,3 +192,125 @@ def test_save_writes_a_figure_for_a_point_series(tmp_path, stub):
         assert paths["figure"].exists()
     finally:
         outputs.set_base(None)
+
+
+# -- several variables from one source (FieldSet) ---------------------------------------
+
+
+def test_a_list_of_variables_returns_a_fieldset(stub):
+    from ocean_skill.field import Field, FieldSet
+
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    assert isinstance(fs, FieldSet)
+    assert len(fs) == 2
+    assert all(isinstance(f, Field) for f in fs)
+    assert fs[0].standard_name != fs[1].standard_name
+
+
+def test_a_one_element_list_is_still_a_set(stub):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    fs = _make_set([NITRATE])
+    assert isinstance(fs, FieldSet)
+    assert len(fs) == 1
+    fig = fs.plot()
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 1
+
+
+def test_two_variables_share_a_panel_with_a_secondary_axis(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    fig = fs.plot()
+    assert len(fig.axes) == 2  # one panel plus its twin
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 1
+
+    import holoviews as hv
+
+    obj = _make_set([NITRATE, SILICATE]).plot(renderer="holoviews")
+    assert len(obj.traverse(lambda x: x, [hv.Curve])) == 2
+
+
+def test_secondary_y_false_stacks_two_variables(stub):
+    stub(_point_series())
+    fig = _make_set([NITRATE, SILICATE]).plot(secondary_y=False)
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 2
+
+    obj = _make_set([NITRATE, SILICATE]).plot(
+        secondary_y=False, renderer="holoviews"
+    )
+    import holoviews as hv
+
+    assert len(obj.traverse(lambda x: x, [hv.Curve])) == 2
+
+
+def test_three_variables_become_three_rows(stub):
+    stub(_point_series())
+    fig = _make_set([NITRATE, SILICATE, "oxygen"]).plot()
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 3
+
+    obj = _make_set([NITRATE, SILICATE, "oxygen"]).plot(renderer="holoviews")
+    import holoviews as hv
+
+    titled = obj.traverse(lambda x: x.opts.get("plot").kwargs.get("title"), [hv.Overlay])
+    assert len([t for t in titled if t]) == 3
+
+
+def test_depth_fanout_multiplies_items_per_variable(stub):
+    stub(_point_with_depth(depths=(0.0, 50.0, 100.0)))
+    fs = _make_set([NITRATE, SILICATE])
+    assert len(fs._items()) == 6
+    fig = fs.plot()
+    assert sum(len(ax.get_lines()) for ax in fig.axes) == 6
+
+
+def test_a_list_passed_to_field_itself_is_refused():
+    from ocean_skill.field import Field
+
+    with pytest.raises(TypeError, match="list of variable specs"):
+        Field("some_source", [NITRATE, SILICATE])
+
+
+def test_an_empty_list_is_refused():
+    with pytest.raises(ValueError, match="names nothing"):
+        _make_set([])
+
+
+def test_duplicate_variables_are_dropped(stub, capsys):
+    stub(_point_series())
+    fs = _make_set([NITRATE, NITRATE])
+    assert len(fs) == 1
+    assert "duplicate" in capsys.readouterr().out
+
+
+def test_a_map_shaped_member_refuses_the_set_plot(stub):
+    stub(_gridded_map())
+    fs = _make_set([NITRATE, SILICATE])
+    with pytest.raises(ValueError, match="overlaid lines"):
+        fs.plot()
+
+
+def test_movie_refuses_a_fieldset(stub):
+    stub(_point_series())
+    with pytest.raises(ValueError, match="nothing to play"):
+        _make_set([NITRATE, SILICATE]).movie()
+
+
+def test_fieldset_save_writes_one_figure(tmp_path, stub):
+    from ocean_skill import outputs
+
+    outputs.set_base(tmp_path)
+    try:
+        stub(_point_series())
+        paths = _make_set([NITRATE, SILICATE]).save("proj")
+        assert paths["figure"].exists()
+    finally:
+        outputs.set_base(None)
+
+
+def test_rows_facet_overrides_the_secondary_axis(stub):
+    stub(_point_series())
+    fig = _make_set([NITRATE, SILICATE]).plot(rows="variable")
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 2

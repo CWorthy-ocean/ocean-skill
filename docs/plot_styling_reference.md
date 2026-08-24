@@ -781,6 +781,18 @@ Colour still comes from `variable`; there is no statistics box (nothing to score
 against) and `residual=True` is refused with a clear error rather than silently
 drawing nothing, for the same reason.
 
+Pass a list instead of one name and `osk.field` fans it into a `FieldSet` — one
+single-source item per variable, pooled into this same figure and following the
+Composition table below exactly as a multi-variable comparison set would:
+
+```python
+osk.field(
+    "run_new", ["temperature", "salinity"],
+    select={"lon": -144.25, "lat": 50.0},
+).plot()                              # 2 variables: one panel, salinity on the
+                                       # secondary axis
+```
+
 `encode=` moves a channel onto another field, or switches it off:
 
 ```python
