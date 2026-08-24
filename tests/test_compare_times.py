@@ -154,16 +154,24 @@ def test_fanned_time_select_writes_both_sides_of_a_pair_spec():
 
 def test_merged_time_aggregate_folds_into_a_flat_aggregate():
     entry = {"resample": "1MS", "reduce": "mean"}
-    assert _merged_time_aggregate(None, entry) == {"time": entry}
-    assert _merged_time_aggregate({"Z": "mean"}, entry) == {"Z": "mean", "time": entry}
+    # 'resample' is dropped: the per-bin select already isolates the period, so
+    # the aggregate only has to collapse it -- a plain reduction, not a resample
+    # (which would keep a size-1 time axis _require_reduced rejects).
+    reduction = {"reduce": "mean"}
+    assert _merged_time_aggregate(None, entry) == {"time": reduction}
+    assert _merged_time_aggregate({"Z": "mean"}, entry) == {
+        "Z": "mean",
+        "time": reduction,
+    }
 
 
 def test_merged_time_aggregate_folds_into_both_sides_of_a_pair_spec():
     entry = {"resample": "1MS", "reduce": "mean"}
+    reduction = {"reduce": "mean"}
     pair = {"test": {"Z": "mean"}, "reference": None}
     assert _merged_time_aggregate(pair, entry) == {
-        "test": {"Z": "mean", "time": entry},
-        "reference": {"time": entry},
+        "test": {"Z": "mean", "time": reduction},
+        "reference": {"time": reduction},
     }
 
 
@@ -420,15 +428,17 @@ def test_a_dict_fans_one_comparison_per_derived_bin(stubbed_bins):
         variables=["temperature"],
         times={"resample": "1MS", "reduce": "mean"},
     )
+    # The bin lives in the select; the aggregate is a plain reduction that
+    # collapses it (no 'resample' -- that would keep a size-1 time axis).
     assert stubbed_bins == [
         (
             {"depth": "surface", "time": "2010-01"},
-            {"time": {"resample": "1MS", "reduce": "mean"}},
+            {"time": {"reduce": "mean"}},
             "2010-01",
         ),
         (
             {"depth": "surface", "time": "2010-02"},
-            {"time": {"resample": "1MS", "reduce": "mean"}},
+            {"time": {"reduce": "mean"}},
             "2010-02",
         ),
     ]
@@ -442,9 +452,7 @@ def test_a_dict_merges_reduction_kwargs_into_the_aggregate(stubbed_bins):
         times={"resample": "1MS", "reduce": "quantile", "q": 0.9},
     )
     _, aggregate, _ = stubbed_bins[0]
-    assert aggregate == {
-        "time": {"resample": "1MS", "reduce": "quantile", "q": 0.9}
-    }
+    assert aggregate == {"time": {"reduce": "quantile", "q": 0.9}}
 
 
 def test_a_select_time_entry_becomes_the_window_not_a_conflict(monkeypatch):
