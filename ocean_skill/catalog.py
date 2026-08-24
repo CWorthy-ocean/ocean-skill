@@ -17,9 +17,11 @@ earlier, with a collision warning):
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import os
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -207,7 +209,11 @@ def _resolve_in(index: dict[str, SourceRef], name: str) -> SourceRef:
         for ref in index.values():
             if ref.name == src and ref.catalog == cat:
                 return ref
-        raise KeyError(f"No source {src!r} in catalog {cat!r}.")
+        in_cat = [ref.name for ref in index.values() if ref.catalog == cat]
+        raise KeyError(
+            f"No source {src!r} in catalog {cat!r}.{_did_you_mean(src, in_cat)} "
+            f"{_find_hint(len(index))}"
+        )
     if name in index:
         ref = index[name]
         if ref.shadowed_path is not None:
@@ -217,7 +223,9 @@ def _resolve_in(index: dict[str, SourceRef], name: str) -> SourceRef:
                 stacklevel=_stacklevel.find(),
             )
         return ref
-    raise KeyError(f"Unknown source {name!r}. Known: {sorted(index)}")
+    raise KeyError(
+        f"Unknown source {name!r}.{_did_you_mean(name, index)} {_find_hint(len(index))}"
+    )
 
 
 def resolve(name: str) -> SourceRef:
@@ -230,6 +238,34 @@ def resolve(name: str) -> SourceRef:
     call never triggers it. Raises :class:`KeyError` if unknown / ambiguous.
     """
     return _resolve_in(discover(), name)
+
+
+def _did_you_mean(name: str, options: Iterable[str], n: int = 5) -> str:
+    """A short " Did you mean: ...?" clause, or "" if nothing looks close.
+
+    Used instead of dumping every known name on a lookup miss (there can be
+    hundreds). Tries edit-distance matches first (typos), then falls back to
+    case-insensitive substring hits (a partial name like ``"nitrate"``), so a
+    guess is offered whenever one is plausible without ever listing everything.
+    """
+    options = list(options)
+    lower_to_original = {opt.lower(): opt for opt in options}
+    close = difflib.get_close_matches(name.lower(), lower_to_original, n=n)
+    matches = [lower_to_original[c] for c in close]
+    if not matches:
+        needle = name.lower()
+        matches = sorted(opt for opt in options if needle in opt.lower())[:n]
+    if not matches:
+        return ""
+    return f" Did you mean: {', '.join(matches)}?"
+
+
+def _find_hint(n_sources: int) -> str:
+    """A brief pointer to searching for a source yourself, for lookup-miss errors."""
+    return (
+        "Search with osk.find(name=...) (substring/glob) or osk.find(text=...); "
+        f"bare osk.find() lists all {n_sources} sources."
+    )
 
 
 def _matches_name(source: str, pattern: str) -> bool:
@@ -662,8 +698,9 @@ def describe(name: str) -> Text:
         lines.append(f"  sources ({len(srcs)}): {', '.join(srcs)}")
         return Text("\n".join(lines))
     raise KeyError(
-        f"{name!r} is neither a known source nor catalog. "
-        f"Known sources: {sorted(index)}. Known catalogs: {catalog_names()}"
+        f"{name!r} is neither a known source nor catalog."
+        f"{_did_you_mean(name, [*index, *catalog_names()])} "
+        f"Known catalogs: {catalog_names()}. {_find_hint(len(index))}"
     )
 
 

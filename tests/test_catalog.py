@@ -25,6 +25,20 @@ def test_resolve_unknown_raises(isolated_catalogs):
         catalog.resolve("does_not_exist")
 
 
+def test_resolve_qualified_miss_suggests_within_that_catalog(isolated_catalogs):
+    with pytest.raises(KeyError) as exc:
+        catalog.resolve("example catalog:fo")
+    message = exc.value.args[0]
+    assert "Did you mean: foo?" in message
+    assert "osk.find(" in message
+
+
+def test_resolve_qualified_miss_unknown_catalog_has_no_suggestion(isolated_catalogs):
+    with pytest.raises(KeyError) as exc:
+        catalog.resolve("no_such_catalog:foo")
+    assert "Did you mean" not in exc.value.args[0]
+
+
 def test_find_by_standard_name_and_feature_type(isolated_catalogs):
     assert "foo" in catalog.find(variable="sea_water_temperature")
     assert "foo" in catalog.find(featureType="grid")
@@ -235,6 +249,44 @@ def test_a_source_declaring_no_extent_is_kept(index):
     assert "ooi-gp02hypm-rim01-02-ctdmog039" in index.find(
         time=("1850-01-01", "1850-02-01")
     )
+
+
+# -- lookup-miss messages: suggestions instead of a full dump -----------------
+
+
+def test_resolve_unknown_suggests_close_match(index):
+    """A typo gets a "Did you mean" nudge, not all 4+ names dumped."""
+    with pytest.raises(KeyError) as exc:
+        index.resolve("GOM_bgd")
+    message = exc.value.args[0]
+    assert "Did you mean: GOM_bgc?" in message
+    assert "woa23_nitrate_month01" not in message  # no full dump
+
+
+def test_resolve_unknown_alien_name_has_no_suggestion(index):
+    """Nothing close enough -- no guess offered, but the self-search hint remains."""
+    with pytest.raises(KeyError) as exc:
+        index.resolve("zzzzqqqq")
+    message = exc.value.args[0]
+    assert "Did you mean" not in message
+    assert "osk.find(" in message
+
+
+def test_resolve_unknown_falls_back_to_substring_match(index):
+    """A partial name that isn't edit-close still finds a suggestion by substring."""
+    with pytest.raises(KeyError) as exc:
+        index.resolve("month01")
+    message = exc.value.args[0]
+    assert "woa23_nitrate_month01" in message
+    assert "woa23_nitrate_month02" not in message
+
+
+def test_describe_unknown_suggests_across_sources_and_catalogs(index):
+    with pytest.raises(KeyError) as exc:
+        index.describe("GOM_bgd")
+    message = exc.value.args[0]
+    assert "Did you mean: GOM_bgc?" in message
+    assert "Known catalogs:" in message
 
 
 # -- climatologies ------------------------------------------------------------
