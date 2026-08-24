@@ -1,10 +1,13 @@
 """Alignment: bring the two lanes onto one grid/coordinate frame.
 
-Roles are set by name (not argument order): ``test`` vs ``reference``. In time the
-reference's axis is the frame and the test moves onto it; in space the pair lands on
-the **coarser** of the two grids — the reference's when they are comparable, the
-test's when a fine satellite product is scored against a coarse model — so the finer
-lane is always the one area-averaged down (see :func:`_regrid_target`). Longitude
+Roles are set by name (not argument order): ``test`` vs ``reference``. In both time and
+space the pair lands on the **coarser** of the two — the reference's when it is
+comparable or coarser, the test's when it is materially finer (a 15-minute mooring
+reference against weekly output, a fine satellite product against a coarse model) —
+so the finer lane is always the one averaged down, in time (see
+:func:`resolve_match_method`) as in space (see :func:`_regrid_target`). The shared
+axis keeps the reference's *name* in both directions; which lane actually moved is
+recorded (``match_target``/``regrid_target``) rather than assumed. Longitude
 conventions are harmonized first — a 0-360 model vs a ±180 observational grid
 otherwise produces silently empty overlap. The reference is subset to the test's
 bounding box so we regrid over the overlap rather than a whole globe. The result is
@@ -819,46 +822,87 @@ def resolve_match_method(
     reference_values: np.ndarray,
     *,
     composite: bool | None,
+    test_composite: bool | None = None,
     tolerance: float | None = None,
     calendar: bool = True,
-) -> tuple[str, str, float | None]:
-    """Decide how the test's axis should be brought onto the reference's.
+) -> tuple[str, str, float | None, str]:
+    """Decide how the two axes should be brought onto one another.
 
-    The temporal counterpart of choosing a regrid method, and settled the same way: the
-    reference is the frame, the test is what moves, and how it moves depends on which is
-    coarser. A materially finer test is **averaged into** the reference's bins — the
-    analogue of ``conservative_normed``, and the reason it is a default rather than
-    something to ask for: nobody has to request area-averaging in space either. Against
-    an instantaneous reference the test is **sampled** at the nearest step instead, the
-    analogue of ``bilinear``.
+    The temporal counterpart of choosing a regrid method, and settled the same way:
+    the pair lands on whichever lane is **coarser**, and the finer lane moves. A
+    materially finer test is **averaged into** the reference's bins — the analogue of
+    ``conservative_normed``, and the reason it is a default rather than something to
+    ask for: nobody has to request area-averaging in space either. Against an
+    instantaneous reference the test is **sampled** at the nearest step instead, the
+    analogue of ``bilinear``. A materially finer *reference* is handled the same way,
+    mirrored — averaged into the test's bins, or sampled at the test's instants if the
+    test declares itself a series of snapshots — with a warning rather than silence,
+    since coarsening the reference does change the thing being scored against and
+    that is worth saying out loud even though it is not refused.
 
-    A reference finer than the test is refused rather than resolved. Coarsening the
-    reference would alter the thing being scored against, and this package never touches
-    the reference silently.
-
-    Returns ``(method, reason, tolerance)``; the reason is recorded in the aligned
-    result's attrs so the choice is on paper rather than in someone's memory.
+    Returns ``(method, reason, tolerance, target)``; ``target`` is ``"test"`` or
+    ``"reference"`` and names the lane whose axis is the frame — the temporal twin of
+    a regrid's destination grid. The reason is recorded in the aligned result's attrs
+    so the choice is on paper rather than in someone's memory.
     """
     ct, cr = _cadence(test_values), _cadence(reference_values)
     if ct is None or cr is None:
         # one lane is a single step: there is nothing to bin, only something to pair
         known = ct or cr
         if known is None:
-            return "exact", "neither lane has a measurable cadence", None
+            return "exact", "neither lane has a measurable cadence", None, "reference"
         return (
             "nearest",
             "one lane has a single step, so its counterpart is sampled at it",
             tolerance if tolerance is not None else NEAREST_TOLERANCE_FRACTION * known,
+            "reference",
         )
     if cr * COARSER_BY <= ct:
-        raise ValueError(
-            f"the reference steps every {_duration(cr, calendar)} and the test every "
-            f"{_duration(ct, calendar)}, so the reference is the finer of the two. "
-            "Averaging it down to the test's cadence would change what is being "
-            "scored against, which is not something this will do on its own. Coarsen "
-            'reference deliberately (aggregate={"time": {"resample": "'
-            f'{_pandas_freq(ct)}", "reduce": "mean"}}) or swap the roles so the finer '
+        disclosure = (
+            ", and nothing on the test says whether its steps are period averages or "
+            "instants, so they are taken to be averages"
+            if test_composite is None
+            else ""
+        )
+        hatch = (
+            "To coarsen the reference deliberately (or differently), spell it out — "
+            'aggregate={"reference": {"time": {"resample": "'
+            + _pandas_freq(ct)
+            + '", "reduce": "mean"}}, "test": {}} — or swap the roles so the finer '
             "product is the test."
+        )
+        if test_composite is False:
+            warnings.warn(
+                f"the reference steps every {_duration(cr, calendar)} and the test "
+                f"every {_duration(ct, calendar)}, so the reference is the finer of "
+                "the two and is sampled at the test's instants (the test declares "
+                "instantaneous steps). That subsets the thing being scored against. "
+                f"{hatch}",
+                stacklevel=_stacklevel.find(),
+            )
+            return (
+                "nearest",
+                f"the test is an instantaneous product every "
+                f"{_duration(ct, calendar)}; the reference steps every "
+                f"{_duration(cr, calendar)} and is sampled at those instants",
+                tolerance if tolerance is not None else NEAREST_TOLERANCE_FRACTION * ct,
+                "test",
+            )
+        warnings.warn(
+            f"the reference steps every {_duration(cr, calendar)} and the test every "
+            f"{_duration(ct, calendar)}, so the reference is the finer of the two and "
+            "is averaged into the test's bins — the finer lane lands on the coarser "
+            "one's axis, exactly as a regrid does in space. That coarsens the thing "
+            f"being scored against{disclosure}. {hatch}",
+            stacklevel=_stacklevel.find(),
+        )
+        return (
+            "mean",
+            f"the reference steps every {_duration(cr, calendar)} and the test every "
+            f"{_duration(ct, calendar)}, so the reference is averaged into the "
+            "test's bins",
+            tolerance,
+            "test",
         )
     if ct * COARSER_BY <= cr:
         if composite is False:
@@ -868,12 +912,14 @@ def resolve_match_method(
                 f"{_duration(cr, calendar)}; the test steps every "
                 f"{_duration(ct, calendar)} and is sampled at those instants",
                 tolerance if tolerance is not None else NEAREST_TOLERANCE_FRACTION * cr,
+                "reference",
             )
         return (
             "mean",
             f"the test steps every {_duration(ct, calendar)} and the reference every "
             f"{_duration(cr, calendar)}, so the test is averaged into its bins",
             tolerance,
+            "reference",
         )
     return (
         "nearest",
@@ -882,6 +928,7 @@ def resolve_match_method(
         tolerance
         if tolerance is not None
         else NEAREST_TOLERANCE_FRACTION * max(ct, cr),
+        "reference",
     )
 
 
@@ -905,6 +952,9 @@ def _duration(seconds: float | None, calendar: bool = True) -> str:
     hours = seconds / 3600.0
     if hours >= 1:
         return f"{hours:.3g} hour{'s' if round(hours, 3) != 1 else ''}"
+    minutes = seconds / 60.0
+    if minutes >= 1:
+        return f"{minutes:.3g} minute{'s' if round(minutes, 3) != 1 else ''}"
     return f"{seconds:.3g} s"
 
 
@@ -935,19 +985,22 @@ def match_axis(
     tolerance: float | None = None,
     min_overlap: int = MIN_OVERLAP,
     metadata: dict | None = None,
+    test_metadata: dict | None = None,
     bin_anchor: str = "auto",
 ):
-    """Bring the test's ``over`` axis onto the reference's, and report what it took.
+    """Bring the two lanes onto one ``over`` axis, and report what it took.
 
-    Direction is the same rule alignment follows everywhere here: **test → reference**.
-    The reference's axis is the frame and nothing is done to it, except that steps it
-    ends up with no test data for are dropped — an all-NaN step contributes nothing to a
-    metric and would make the difference field say something untrue about it.
+    Direction follows the same rule alignment uses everywhere here: the pair lands on
+    whichever lane is **coarser**, named as the reference names it either way. Nothing
+    is done to the frame lane except that steps it ends up with no counterpart data for
+    are dropped — an all-NaN step contributes nothing to a metric and would make the
+    difference field say something untrue about it.
 
     Returns ``(test, reference, report)`` with both lanes on one axis, named as the
-    reference names it. Everything measured for the report is measured on the
-    *coordinate*, never by walking the data: the counts are index arithmetic and stay
-    free even when the lanes are a year of daily maps.
+    reference names it; ``report["match_target"]`` says which lane's *stamps* the axis
+    actually carries (see :func:`resolve_match_method`). Everything measured for the
+    report is measured on the *coordinate*, never by walking the data: the counts are
+    index arithmetic and stay free even when the lanes are a year of daily maps.
     """
     from ocean_skill.operators import resolve_dim
 
@@ -967,14 +1020,18 @@ def match_axis(
     spans = (_span(test, tdim), _span(reference, rdim))
 
     reason = f"method={method!r} as asked"
+    target = "reference"
     if method == "auto":
-        method, reason, tolerance = resolve_match_method(
+        ref_composite = is_composite(reference, rdim, metadata)
+        test_composite = is_composite(test, tdim, test_metadata)
+        method, reason, tolerance, target = resolve_match_method(
             tf,
             rf,
-            composite=is_composite(reference, rdim, metadata),
+            composite=ref_composite,
+            test_composite=test_composite,
             tolerance=tolerance,
         )
-        if is_composite(reference, rdim, metadata) is None and method == "mean":
+        if target == "reference" and ref_composite is None and method == "mean":
             warnings.warn(
                 "nothing on the reference says whether its steps are period averages "
                 "or instantaneous — no CF cell_methods on the variable, no 'period' in "
@@ -985,18 +1042,22 @@ def match_axis(
                 stacklevel=_stacklevel.find(),
             )
 
-    report: dict[str, Any] = {"match_method": method, "match_reason": reason}
+    report: dict[str, Any] = {
+        "match_method": method,
+        "match_reason": reason,
+        "match_target": target,
+    }
     if tolerance is not None:
         report["match_tolerance"] = float(tolerance)
 
     if method == "mean":
         test, reference, extra = _match_by_mean(
-            test, reference, tdim, rdim, tf, rf, bin_anchor
+            test, reference, tdim, rdim, tf, rf, bin_anchor, target=target
         )
         report.update(extra)
     elif method == "nearest":
         test, reference, extra = _match_by_nearest(
-            test, reference, tdim, rdim, tf, rf, tolerance
+            test, reference, tdim, rdim, tf, rf, tolerance, target=target
         )
         report.update(extra)
     elif method == "exact":
@@ -1009,7 +1070,7 @@ def match_axis(
         )
 
     matched = int(reference.sizes[rdim])
-    # both lanes now name the axis as the reference names it -- test -> reference again
+    # both lanes now name the axis as the reference names it, whichever lane moved
     report["axis"] = rdim
     report["n_matched"] = matched
     if matched == 0:
@@ -1038,35 +1099,52 @@ def _span(da, dim: str) -> str:
     return f"{values[0]} to {values[-1]}"
 
 
-def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor):
-    """Average the test's steps into the reference's bins."""
-    if bin_anchor == "auto":
-        bin_anchor = infer_bin_anchor(reference[rdim].values)
-    edges = axis_edges(rf, anchor=bin_anchor)
+def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="reference"):
+    """Average the finer lane's steps into the coarser lane's (the frame's) bins.
 
-    which = np.searchsorted(edges, tf, side="right") - 1
-    inside = (which >= 0) & (which < rf.size)
-    stamps = np.asarray(reference[rdim].values)
+    ``target`` names the frame — ``"reference"`` for the historical direction (the
+    test is binned into the reference's bins), ``"test"`` for the mirror (a finer
+    reference is binned into the test's). Either way the *shared* axis keeps the
+    reference's dimension name (``rdim``); only which lane's stamps survive differs.
+    """
+    if target == "reference":
+        frame, fdim, fvals, frame_role = reference, rdim, rf, "reference"
+        binned, bdim, bvals, binned_role = test, tdim, tf, "test"
+    else:
+        frame, fdim, fvals, frame_role = test, tdim, tf, "test"
+        binned, bdim, bvals, binned_role = reference, rdim, rf, "reference"
+
+    if bin_anchor == "auto":
+        bin_anchor = infer_bin_anchor(frame[fdim].values)
+    edges = axis_edges(fvals, anchor=bin_anchor)
+
+    which = np.searchsorted(edges, bvals, side="right") - 1
+    inside = (which >= 0) & (which < fvals.size)
+    stamps = np.asarray(frame[fdim].values)
     if not inside.any():
         # nothing to group: hand back empty lanes, and match_axis raises with the spans
-        empty = test.isel({tdim: []})
-        if tdim != rdim:
-            empty = empty.rename({tdim: rdim})
-        return (
-            empty,
-            reference.isel({rdim: []}),
-            {"bin_anchor": bin_anchor, "steps_outside_bins": int(tf.size)},
-        )
-    label = xr.DataArray(stamps[which[inside]], dims=(tdim,), name="_osk_bin")
-    attrs = dict(test.attrs)
-    grouped = test.isel({tdim: inside}).groupby(label).mean(tdim)
+        empty_binned = binned.isel({bdim: []})
+        if bdim != rdim:
+            empty_binned = empty_binned.rename({bdim: rdim})
+        empty_frame = frame.isel({fdim: []})
+        if fdim != rdim:
+            empty_frame = empty_frame.rename({fdim: rdim})
+        extra = {"bin_anchor": bin_anchor, "steps_outside_bins": int(bvals.size)}
+        if target == "reference":
+            return empty_binned, empty_frame, extra
+        return empty_frame, empty_binned, extra
+    label = xr.DataArray(stamps[which[inside]], dims=(bdim,), name="_osk_bin")
+    attrs = dict(binned.attrs)
+    grouped = binned.isel({bdim: inside}).groupby(label).mean(bdim)
     # a reduction drops attrs, and `units` has to survive: align() checks it next
     grouped.attrs = attrs
     grouped = grouped.rename({"_osk_bin": rdim})
     filled = np.asarray(grouped[rdim].values)
-    reference = reference.sel({rdim: filled})
+    frame_out = frame.sel({fdim: filled})
+    if fdim != rdim:
+        frame_out = frame_out.rename({fdim: rdim})
 
-    counts = np.bincount(which[inside], minlength=rf.size)
+    counts = np.bincount(which[inside], minlength=fvals.size)
     typical = float(np.median(counts[counts > 0])) if (counts > 0).any() else 0.0
     from ocean_skill.operators import SHORT_BIN_FRACTION
 
@@ -1074,51 +1152,80 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor):
     empty = int((counts == 0).sum())
     if empty:
         warnings.warn(
-            f"{empty} of the reference's {rf.size} steps had no test data in their bin "
-            "and were dropped. An all-NaN step scores nothing and would make the "
-            "difference field claim otherwise.",
+            f"{empty} of the {frame_role}'s {fvals.size} steps had no {binned_role} "
+            "data in their bin and were dropped. An all-NaN step scores nothing and "
+            "would make the difference field claim otherwise.",
             stacklevel=_stacklevel.find(),
         )
     if short:
         warnings.warn(
-            f"{short} of the reference's bins caught fewer than "
-            f"{SHORT_BIN_FRACTION:.0%} of the usual {typical:g} test steps, so those "
-            "steps are averages over part of a period labelled like a whole one — "
-            "usually the first and last bin of the selection. Narrow select= to whole "
-            "periods to drop them.",
+            f"{short} of the {frame_role}'s bins caught fewer than "
+            f"{SHORT_BIN_FRACTION:.0%} of the usual {typical:g} {binned_role} steps, "
+            "so those steps are averages over part of a period labelled like a whole "
+            "one — usually the first and last bin of the selection. Narrow select= to "
+            "whole periods to drop them.",
             stacklevel=_stacklevel.find(),
         )
-    return (
-        grouped,
-        reference,
-        {
-            "bin_anchor": bin_anchor,
-            "steps_outside_bins": int((~inside).sum()),
-            "bins_empty": empty,
-            "bins_short": short,
-            "steps_per_bin": typical,
-        },
-    )
+    extra = {
+        "bin_anchor": bin_anchor,
+        "steps_outside_bins": int((~inside).sum()),
+        "bins_empty": empty,
+        "bins_short": short,
+        "steps_per_bin": typical,
+    }
+    if target == "reference":
+        return grouped, frame_out, extra
+    return frame_out, grouped, extra
 
 
-def _match_by_nearest(test, reference, tdim, rdim, tf, rf, tolerance, calendar=True):
-    """Pair each reference step with the nearest test step within ``tolerance``."""
+def _match_by_nearest(
+    test, reference, tdim, rdim, tf, rf, tolerance, calendar=True, target="reference"
+):
+    """Pair each frame step with the nearest step in the lane that moves onto it.
+
+    ``target`` names the frame, as in :func:`_match_by_mean`: ``"reference"`` for the
+    historical direction (the test is sampled at the reference's instants), ``"test"``
+    for the mirror (a finer reference is sampled at the test's).
+    """
     import pandas as pd
 
-    index = pd.Index(tf)
+    if target == "reference":
+        frame_dim, frame_vals = rdim, rf
+        mover_dim, mover_vals = tdim, tf
+        frame_role, mover_role = "reference", "test"
+    else:
+        frame_dim, frame_vals = tdim, tf
+        mover_dim, mover_vals = rdim, rf
+        frame_role, mover_role = "test", "reference"
+
+    index = pd.Index(mover_vals)
     pos = index.get_indexer(
-        rf, method="nearest", **({"tolerance": tolerance} if tolerance else {})
+        frame_vals, method="nearest", **({"tolerance": tolerance} if tolerance else {})
     )
     keep = pos >= 0
-    test = test.isel({tdim: pos[keep]})
-    reference = reference.isel({rdim: keep})
-    offsets = np.abs(tf[pos[keep]] - rf[keep]) if keep.any() else np.empty(0)
-    # the reference's own stamps become the shared axis: test -> reference, here too
-    attrs = dict(test.attrs)
-    test = test.assign_coords({tdim: np.asarray(reference[rdim].values)})
-    if tdim != rdim:
-        test = test.rename({tdim: rdim})
-    test.attrs = attrs
+
+    frame_da = reference if target == "reference" else test
+    mover_da = test if target == "reference" else reference
+    frame_da = frame_da.isel({frame_dim: keep})
+    mover_da = mover_da.isel({mover_dim: pos[keep]})
+    offsets = (
+        np.abs(mover_vals[pos[keep]] - frame_vals[keep]) if keep.any() else np.empty(0)
+    )
+
+    # the frame's own stamps become the shared axis, whichever lane is the frame
+    attrs = dict(mover_da.attrs)
+    frame_stamps = np.asarray(frame_da[frame_dim].values)
+    mover_da = mover_da.assign_coords({mover_dim: frame_stamps})
+    if mover_dim != rdim:
+        mover_da = mover_da.rename({mover_dim: rdim})
+    mover_da.attrs = attrs
+    if frame_dim != rdim:
+        frame_da = frame_da.rename({frame_dim: rdim})
+
+    test, reference = (
+        (mover_da, frame_da) if target == "reference" else (frame_da, mover_da)
+    )
+
     if offsets.size and float(offsets.max()) > 0:
         warnings.warn(
             f"paired {int(keep.sum())} steps by nearest match, shifting each by up to "
@@ -1130,7 +1237,7 @@ def _match_by_nearest(test, reference, tdim, rdim, tf, rf, tolerance, calendar=T
     unmatched = int((~keep).sum())
     if unmatched:
         warnings.warn(
-            f"{unmatched} reference steps had no test step within "
+            f"{unmatched} {frame_role} steps had no {mover_role} step within "
             f"{_duration(tolerance, calendar)} and were dropped.",
             stacklevel=_stacklevel.find(),
         )
@@ -1362,6 +1469,7 @@ def align(
     tolerance: float | None = None,
     min_overlap: int = MIN_OVERLAP,
     metadata: dict | None = None,
+    test_metadata: dict | None = None,
     bin_anchor: str = "auto",
 ) -> xr.Dataset:
     """Regrid the pair onto one grid — the coarser one — plus their difference.
@@ -1384,14 +1492,18 @@ def align(
     :func:`ocean_skill.metrics.evaluate`). The two lanes are then matched along it first
     (:func:`match_axis`) and regridded after, which is both the correct order and much
     the cheaper one: averaging hourly output into daily bins before the regrid turns
-    8760 regridded fields into 365. ``time_method``/``tolerance``/``bin_anchor``/
-    ``metadata`` are its arguments; what it decided is recorded in the result's attrs.
+    8760 regridded fields into 365. The match itself lands on whichever lane is
+    coarser — the reference's cadence when it is comparable or coarser (the historical
+    behavior), the test's when the reference is materially finer, with a warning (see
+    :func:`resolve_match_method`). ``time_method``/``tolerance``/``bin_anchor``/
+    ``metadata``/``test_metadata`` are its arguments; what it decided, including which
+    lane's stamps survived (``match_target``), is recorded in the result's attrs.
 
     A **station reference** — one position rather than a grid, as a mooring is — has no
     cells to regrid onto, so the test lane is *sampled* at its position instead
     (:func:`_align_at_point`, via :func:`sample_at`). Everything before that point is
     the same for both: the axis matching, the dimensionality check, the units. The
-    result has the same three variables on the reference's own axis, 1-D not 2-D.
+    result has the same three variables on the matched axis, 1-D not 2-D.
 
     ``method="conservative_normed"`` (or ``"conservative"``) **area-averages** the test
     onto the reference cells, which is the right operator when the test is much finer
@@ -1425,6 +1537,7 @@ def align(
             tolerance=tolerance,
             min_overlap=min_overlap,
             metadata=metadata,
+            test_metadata=test_metadata,
             bin_anchor=bin_anchor,
         )
         over = str(report.pop("axis", over))
@@ -1559,7 +1672,7 @@ def _align_at_point(
     over: str | None,
     report: dict[str, Any],
 ) -> xr.Dataset:
-    """Pair a gridded test lane with a station reference, on the reference's own axis.
+    """Pair a gridded test lane with a station reference, on the already-matched axis.
 
     The point counterpart of the regrid in :func:`align`, and the only step that
     differs: a station has no cells to remap onto, so the test lane is **sampled** at it

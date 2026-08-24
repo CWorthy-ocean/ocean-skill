@@ -5,10 +5,12 @@ and every failure mode here is one that produces a *plausible number* rather tha
 error: model hours averaged into the wrong day, two products paired off by position, an
 overlap that silently comes out empty.
 
-The rule under test is the one alignment already follows in space — test → reference,
-the reference is the frame — with the method chosen by which lane is coarser: a finer
-test is averaged into the reference's bins, a comparable one paired step for step.
-None of these need xesmf: matching happens before the regrid, deliberately.
+The rule under test is the one alignment already follows in space: the pair lands on
+whichever lane is coarser, named as the reference names it either way, with the method
+chosen by which lane is coarser — a finer lane is averaged into the coarser one's bins,
+a comparable one paired step for step. A finer *reference* is coarsened the same way,
+mirrored, with a warning rather than silence. None of these need xesmf: matching happens
+before the regrid, deliberately.
 """
 
 from __future__ import annotations
@@ -189,14 +191,67 @@ def test_an_undeclared_reference_assumes_a_composite_and_says_so():
     assert "period" in message and "cell_methods" in message, "and the permanent fix"
 
 
-def test_a_reference_finer_than_the_test_is_refused():
-    """Coarsening the reference would change the thing being scored against."""
-    with pytest.raises(ValueError) as excinfo:
+def test_a_finer_reference_is_averaged_into_the_test_bins():
+    """The mirror of the classic case: now the *reference* is the one sampled fine."""
+    daily, hourly = _daily(3), _hourly(72)
+    with pytest.warns(UserWarning, match="finer of the two"):
+        test, reference, report = A.match_axis(daily, hourly, over="time")
+
+    assert report["match_method"] == "mean"
+    assert report["match_target"] == "test"
+    assert test.sizes["time"] == reference.sizes["time"] == 3
+    assert report["steps_per_bin"] == 24
+    # the test's own stamps become the shared axis, mirroring the classic direction
+    assert (test.time.values == daily.time.values).all()
+    for i, day in enumerate(("2012-01-01", "2012-01-02", "2012-01-03")):
+        assert np.allclose(reference.isel(time=i), hourly.sel(time=day).mean("time")), day
+
+
+def test_the_coarsening_warning_names_the_cadences_and_both_ways_out():
+    with pytest.warns(UserWarning, match="finer of the two") as record:
         A.match_axis(_daily(3), _hourly(72), over="time")
-    message = str(excinfo.value)
+    message = str(record[0].message)
     assert "1 hour" in message and "1 day" in message, "both cadences"
-    assert "resample" in message, "the deliberate way to coarsen it"
+    assert '"reference"' in message and "resample" in message, "the pair-spec hatch"
     assert "swap the roles" in message, "or the other way out"
+    assert "taken to be averages" in message, "undeclared test compositeness, disclosed"
+
+
+def test_a_snapshot_test_samples_the_reference_at_its_instants():
+    """An instantaneous test names a nearest-match, not an average, for the mirror too."""
+    snapshot_daily = _daily(
+        3, attrs={"units": "mmol m-3", "cell_methods": "time: point"}
+    )
+    hourly = _hourly(72)
+    with pytest.warns(UserWarning, match="finer of the two"):
+        test, reference, report = A.match_axis(snapshot_daily, hourly, over="time")
+    assert report["match_method"] == "nearest"
+    assert report["match_target"] == "test"
+    assert (test.time.values == snapshot_daily.time.values).all()
+    assert report["n_matched"] == 3
+
+
+def test_units_survive_the_mirrored_binning():
+    """The reference is the one reduced this time, so its attrs are what must survive."""
+    with pytest.warns(UserWarning, match="finer of the two"):
+        _, reference, _ = A.match_axis(_daily(3), _hourly(72), over="time")
+    assert reference.attrs["units"] == "mmol m-3"
+
+
+def test_an_explicit_method_keeps_the_reference_frame():
+    """Naming a method outright bypasses the coarser-lane rule entirely.
+
+    A fine (hourly) reference forced into the classic direction bins the coarse
+    (daily) test into the reference's own bins — leaving most of them empty, which
+    warns on its own, but never raises and never says "finer of the two": that
+    check lives in :func:`resolve_match_method`, which an explicit method skips.
+    """
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        _, _, report = A.match_axis(_daily(3), _hourly(72), over="time", method="mean")
+    assert report["match_target"] == "reference"
+    assert "as asked" in report["match_reason"]
+    assert not any("finer of the two" in str(w.message) for w in record)
 
 
 def test_an_explicit_method_is_not_second_guessed():
