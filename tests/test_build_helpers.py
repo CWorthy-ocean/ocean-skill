@@ -21,6 +21,7 @@ from ocean_skill.build import (
     _reader_for,
     _resolve_files,
     add_catalog,
+    add_copernicus_source,
     add_source,
     add_sources,
     build_catalog,
@@ -257,6 +258,76 @@ def test_reader_and_url_sources_mix_in_one_catalog(netcdfs, tmp_path):
         tmp_path / "mixed.yaml",
     )
     assert sorted(intake.from_yaml_file(str(out))) == ["custom", "plain"]
+
+
+# -- add_copernicus_source ----------------------------------------------------
+
+
+def test_copernicus_source_adds_one_entry_per_chunking(tmp_path):
+    """Each ARCO layout becomes its own suffixed, service-tagged entry."""
+    cat = new_catalog()
+    add_copernicus_source(
+        cat,
+        "chl_gapfree_my_daily",
+        "cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D",
+        probe=False,  # would need copernicusmarine + a login: assert the entries only
+    )
+    out = tmp_path / "cmems.yaml"
+    from ocean_skill.build import save
+
+    reloaded = intake.from_yaml_file(str(save(cat, out)))
+    assert sorted(reloaded) == [
+        "chl_gapfree_my_daily_geo",
+        "chl_gapfree_my_daily_timeseries",
+    ]
+
+    ts = reloaded["chl_gapfree_my_daily_timeseries"]
+    assert "CopernicusMarineReader" in str(ts.reader)
+    # the chunking approach is recorded in metadata, and matched by the reader's service
+    assert ts.metadata["chunking"] == "time-series"
+    assert ts.metadata["service"] == "arco-time-series"
+    assert ts.kwargs["service"] == "arco-time-series"
+    assert (
+        ts.metadata["dataset_id"]
+        == "cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D"
+    )
+
+    geo = reloaded["chl_gapfree_my_daily_geo"]
+    assert geo.metadata["chunking"] == "geo"
+    assert geo.kwargs["service"] == "arco-geo-series"
+
+
+def test_copernicus_source_can_add_a_single_service(tmp_path):
+    cat = new_catalog()
+    added = add_copernicus_source(
+        cat, "glorys_my_daily", "cmems_mod_glo_phy_my_0.083deg_P1D-m",
+        services=("arco-geo-series",), probe=False,
+    )
+    assert list(added) == ["glorys_my_daily_geo"]
+
+
+def test_copernicus_source_rejects_an_unknown_service(tmp_path):
+    with pytest.raises(ValueError, match="unknown Copernicus service"):
+        add_copernicus_source(
+            new_catalog(), "x", "some_id", services=("arco-bogus",), probe=False
+        )
+
+
+def test_copernicus_reader_without_the_toolbox_is_a_clear_error():
+    """With copernicusmarine absent, reading says exactly what to install/do."""
+    from importlib.util import find_spec
+
+    if find_spec("copernicusmarine") is not None:
+        pytest.skip("copernicusmarine is installed; cannot test the missing-dep path")
+
+    from ocean_skill.readers import CopernicusMarineReader
+
+    reader = CopernicusMarineReader(
+        dataset_id="cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D",
+        service="arco-time-series",
+    )
+    with pytest.raises(RuntimeError, match="copernicusmarine"):
+        reader.read()
 
 
 def test_a_source_with_neither_url_nor_reader_is_rejected(tmp_path):
