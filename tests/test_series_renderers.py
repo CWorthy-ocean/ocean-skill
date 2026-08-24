@@ -472,6 +472,22 @@ def test_depth_fanned_single_source_items_get_markers_and_depth_labels():
     assert markers != {None}, "depth varies, so the marker channel should engage"
 
 
+def test_two_single_source_variables_agree_across_renderers():
+    """The same composition rule single-source items get, not just comparisons'."""
+    items = [_single_item(), _single_item(variable=SALINITY, units="1e-3")]
+    static = _matplotlib_lines(render(_spec(items), renderer="matplotlib"))
+    interactive = _holoviews_lines(render(_spec(items), renderer="holoviews"))
+    assert [(a, b, c) for a, b, c, _ in static] == [
+        (a, b, c) for a, b, c, _ in interactive
+    ]
+    fig = render(_spec(items), renderer="matplotlib")
+    assert len(fig.axes) == 2  # one panel plus its twin
+    assert len(_matplotlib_titles(fig)) == 1
+
+    stacked = render(_spec(items, secondary_y=False), renderer="matplotlib")
+    assert len(_matplotlib_titles(stacked)) == 2
+
+
 # -- residual --------------------------------------------------------------------------
 
 

@@ -33,7 +33,7 @@ from ocean_skill import cache, outputs
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
-from ocean_skill.field import Field, field
+from ocean_skill.field import Field, FieldSet, field
 from ocean_skill.plot.locations import map_datasets
 from ocean_skill.plot.map_metrics import map_metrics
 from ocean_skill.sources import read
@@ -44,6 +44,7 @@ __all__ = [
     "Comparison",
     "ComparisonSet",
     "Field",
+    "FieldSet",
     "__version__",
     "cache",
     "catalogs",
