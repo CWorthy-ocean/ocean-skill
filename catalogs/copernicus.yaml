@@ -1,0 +1,2243 @@
+aliases:
+  chl_climatology_doy_geo: chl_climatology_doy_geo
+  chl_climatology_doy_timeseries: chl_climatology_doy_timeseries
+  chl_gapfree_my_daily_geo: chl_gapfree_my_daily_geo
+  chl_gapfree_my_daily_timeseries: chl_gapfree_my_daily_timeseries
+  chl_gapfree_nrt_daily_geo: chl_gapfree_nrt_daily_geo
+  chl_gapfree_nrt_daily_timeseries: chl_gapfree_nrt_daily_timeseries
+  cur_multiobs_my_daily_geo: cur_multiobs_my_daily_geo
+  cur_multiobs_my_daily_timeseries: cur_multiobs_my_daily_timeseries
+  cur_multiobs_nrt_daily_geo: cur_multiobs_nrt_daily_geo
+  cur_multiobs_nrt_daily_timeseries: cur_multiobs_nrt_daily_timeseries
+  glo_anfc_daily_geo: glo_anfc_daily_geo
+  glo_anfc_daily_timeseries: glo_anfc_daily_timeseries
+  glorys_climatology_geo: glorys_climatology_geo
+  glorys_climatology_timeseries: glorys_climatology_timeseries
+  glorys_my_daily_geo: glorys_my_daily_geo
+  glorys_my_daily_timeseries: glorys_my_daily_timeseries
+  optics_my_monthly_geo: optics_my_monthly_geo
+  optics_my_monthly_timeseries: optics_my_monthly_timeseries
+  pp_my_monthly_geo: pp_my_monthly_geo
+  pp_my_monthly_timeseries: pp_my_monthly_timeseries
+  ssh_duacs_my_daily_geo: ssh_duacs_my_daily_geo
+  ssh_duacs_my_daily_timeseries: ssh_duacs_my_daily_timeseries
+  ssh_duacs_my_monthly_geo: ssh_duacs_my_monthly_geo
+  ssh_duacs_my_monthly_timeseries: ssh_duacs_my_monthly_timeseries
+  ssh_duacs_nrt_daily_geo: ssh_duacs_nrt_daily_geo
+  ssh_duacs_nrt_daily_timeseries: ssh_duacs_nrt_daily_timeseries
+  ssh_duacs_twosat_daily_geo: ssh_duacs_twosat_daily_geo
+  ssh_duacs_twosat_daily_timeseries: ssh_duacs_twosat_daily_timeseries
+  sst_c3s_rep_daily_geo: sst_c3s_rep_daily_geo
+  sst_c3s_rep_daily_timeseries: sst_c3s_rep_daily_timeseries
+  sst_esacci_rep_daily_geo: sst_esacci_rep_daily_geo
+  sst_esacci_rep_daily_timeseries: sst_esacci_rep_daily_timeseries
+  sst_ostia_nrt_daily_geo: sst_ostia_nrt_daily_geo
+  sst_ostia_nrt_daily_timeseries: sst_ostia_nrt_daily_timeseries
+  swh_my_daily_geo: swh_my_daily_geo
+  swh_my_daily_timeseries: swh_my_daily_timeseries
+  transp_gapfree_my_daily_geo: transp_gapfree_my_daily_geo
+  transp_gapfree_my_daily_timeseries: transp_gapfree_my_daily_timeseries
+  wind_my_hourly_geo: wind_my_hourly_geo
+  wind_my_hourly_timeseries: wind_my_hourly_timeseries
+  wind_nrt_hourly_geo: wind_nrt_hourly_geo
+  wind_nrt_hourly_timeseries: wind_nrt_hourly_timeseries
+data: {}
+entries:
+  chl_climatology_doy_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-multi-climatology-4km_P1D
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-multi-climatology-4km_P1D
+      duplicate_standard_names:
+        CHL_mean: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_median: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_minimum: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_3: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_97: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_standard_deviation: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_standard_deviation: mass_concentration_of_chlorophyll_a_in_sea_water
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        CHL_count: number_of_observations
+        CHL_maximum: mass_concentration_of_chlorophyll_a_in_sea_water
+        climatology_bounds: time
+        flags: status_flag
+      time_coverage_end: '2008-12-31'
+      time_coverage_start: '2008-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - number_of_observations
+      - status_flag
+      - time
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  chl_climatology_doy_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-multi-climatology-4km_P1D
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-multi-climatology-4km_P1D
+      duplicate_standard_names:
+        CHL_mean: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_median: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_minimum: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_3: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_97: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_percentile_standard_deviation: mass_concentration_of_chlorophyll_a_in_sea_water
+        CHL_standard_deviation: mass_concentration_of_chlorophyll_a_in_sea_water
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        CHL_count: number_of_observations
+        CHL_maximum: mass_concentration_of_chlorophyll_a_in_sea_water
+        climatology_bounds: time
+        flags: status_flag
+      time_coverage_end: '2008-12-31'
+      time_coverage_start: '2008-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - number_of_observations
+      - status_flag
+      - time
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  chl_gapfree_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        CHL: mass_concentration_of_chlorophyll_a_in_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-16'
+      time_coverage_start: '1997-09-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  chl_gapfree_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        CHL: mass_concentration_of_chlorophyll_a_in_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-16'
+      time_coverage_start: '1997-09-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  chl_gapfree_nrt_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        CHL: mass_concentration_of_chlorophyll_a_in_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2026-08-06'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  chl_gapfree_nrt_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-plankton_nrt_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        CHL: mass_concentration_of_chlorophyll_a_in_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2026-08-06'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - mass_concentration_of_chlorophyll_a_in_sea_water
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  cur_multiobs_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-mob_glo_phy-cur_my_0.25deg_P1D-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: geo
+      dataset_id: cmems_obs-mob_glo_phy-cur_my_0.25deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      geospatial_vertical_max: 15.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        err_ue: eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_ugos: surface_geostophic_eastward_sea_water_velocity_standard_error
+        err_uo: eastward_sea_water_velocity_standard_error
+        err_utide: sea_water_x_velocity_due_to_tide_standard_error
+        err_ve: northward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_vgos: surface_geostophic_northward_sea_water_velocity_standard_error
+        err_vo: northward_sea_water_velocity_standard_error
+        err_vtide: sea_water_y_velocity_due_to_tide_velocity_standard_error
+        ue: eastward_sea_water_velocity_due_to_ekman_drift
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        uo: eastward_sea_water_velocity
+        utide: sea_water_x_velocity_due_to_tide
+        ve: northward_sea_water_velocity_due_to_ekman_drift
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vo: northward_sea_water_velocity
+        vtide: sea_water_y_velocity_due_to_tide
+      time_coverage_end: '2026-03-31'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_water_velocity
+      - eastward_sea_water_velocity_due_to_ekman_drift
+      - eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - eastward_sea_water_velocity_standard_error
+      - northward_sea_water_velocity
+      - northward_sea_water_velocity_due_to_ekman_drift
+      - northward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - northward_sea_water_velocity_standard_error
+      - sea_water_x_velocity_due_to_tide
+      - sea_water_x_velocity_due_to_tide_standard_error
+      - sea_water_y_velocity_due_to_tide
+      - sea_water_y_velocity_due_to_tide_velocity_standard_error
+      - surface_geostophic_eastward_sea_water_velocity_standard_error
+      - surface_geostophic_northward_sea_water_velocity_standard_error
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity
+      vertical_levels: 2
+      vertical_resolution_max: 15.0
+      vertical_resolution_min: 15.0
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  cur_multiobs_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-mob_glo_phy-cur_my_0.25deg_P1D-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: time-series
+      dataset_id: cmems_obs-mob_glo_phy-cur_my_0.25deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      geospatial_vertical_max: 15.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        err_ue: eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_ugos: surface_geostophic_eastward_sea_water_velocity_standard_error
+        err_uo: eastward_sea_water_velocity_standard_error
+        err_utide: sea_water_x_velocity_due_to_tide_standard_error
+        err_ve: northward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_vgos: surface_geostophic_northward_sea_water_velocity_standard_error
+        err_vo: northward_sea_water_velocity_standard_error
+        err_vtide: sea_water_y_velocity_due_to_tide_velocity_standard_error
+        ue: eastward_sea_water_velocity_due_to_ekman_drift
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        uo: eastward_sea_water_velocity
+        utide: sea_water_x_velocity_due_to_tide
+        ve: northward_sea_water_velocity_due_to_ekman_drift
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vo: northward_sea_water_velocity
+        vtide: sea_water_y_velocity_due_to_tide
+      time_coverage_end: '2026-03-31'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_water_velocity
+      - eastward_sea_water_velocity_due_to_ekman_drift
+      - eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - eastward_sea_water_velocity_standard_error
+      - northward_sea_water_velocity
+      - northward_sea_water_velocity_due_to_ekman_drift
+      - northward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - northward_sea_water_velocity_standard_error
+      - sea_water_x_velocity_due_to_tide
+      - sea_water_x_velocity_due_to_tide_standard_error
+      - sea_water_y_velocity_due_to_tide
+      - sea_water_y_velocity_due_to_tide_velocity_standard_error
+      - surface_geostophic_eastward_sea_water_velocity_standard_error
+      - surface_geostophic_northward_sea_water_velocity_standard_error
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity
+      vertical_levels: 2
+      vertical_resolution_max: 15.0
+      vertical_resolution_min: 15.0
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  cur_multiobs_nrt_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-mob_glo_phy-cur_nrt_0.25deg_P1D-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: geo
+      dataset_id: cmems_obs-mob_glo_phy-cur_nrt_0.25deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      geospatial_vertical_max: 15.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        err_ue: eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_ugos: surface_geostophic_eastward_sea_water_velocity_standard_error
+        err_uo: eastward_sea_water_velocity_standard_error
+        err_utide: sea_water_x_velocity_due_to_tide_standard_error
+        err_ve: northward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_vgos: surface_geostophic_northward_sea_water_velocity_standard_error
+        err_vo: northward_sea_water_velocity_standard_error
+        err_vtide: sea_water_y_velocity_due_to_tide_velocity_standard_error
+        ue: eastward_sea_water_velocity_due_to_ekman_drift
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        uo: eastward_sea_water_velocity
+        utide: sea_water_x_velocity_due_to_tide
+        ve: northward_sea_water_velocity_due_to_ekman_drift
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vo: northward_sea_water_velocity
+        vtide: sea_water_y_velocity_due_to_tide
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2022-05-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_water_velocity
+      - eastward_sea_water_velocity_due_to_ekman_drift
+      - eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - eastward_sea_water_velocity_standard_error
+      - northward_sea_water_velocity
+      - northward_sea_water_velocity_due_to_ekman_drift
+      - northward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - northward_sea_water_velocity_standard_error
+      - sea_water_x_velocity_due_to_tide
+      - sea_water_x_velocity_due_to_tide_standard_error
+      - sea_water_y_velocity_due_to_tide
+      - sea_water_y_velocity_due_to_tide_velocity_standard_error
+      - surface_geostophic_eastward_sea_water_velocity_standard_error
+      - surface_geostophic_northward_sea_water_velocity_standard_error
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity
+      vertical_levels: 2
+      vertical_resolution_max: 15.0
+      vertical_resolution_min: 15.0
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  cur_multiobs_nrt_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-mob_glo_phy-cur_nrt_0.25deg_P1D-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: time-series
+      dataset_id: cmems_obs-mob_glo_phy-cur_nrt_0.25deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      geospatial_vertical_max: 15.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        err_ue: eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_ugos: surface_geostophic_eastward_sea_water_velocity_standard_error
+        err_uo: eastward_sea_water_velocity_standard_error
+        err_utide: sea_water_x_velocity_due_to_tide_standard_error
+        err_ve: northward_sea_water_velocity_due_to_ekman_drift_standard_error
+        err_vgos: surface_geostophic_northward_sea_water_velocity_standard_error
+        err_vo: northward_sea_water_velocity_standard_error
+        err_vtide: sea_water_y_velocity_due_to_tide_velocity_standard_error
+        ue: eastward_sea_water_velocity_due_to_ekman_drift
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        uo: eastward_sea_water_velocity
+        utide: sea_water_x_velocity_due_to_tide
+        ve: northward_sea_water_velocity_due_to_ekman_drift
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vo: northward_sea_water_velocity
+        vtide: sea_water_y_velocity_due_to_tide
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2022-05-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_water_velocity
+      - eastward_sea_water_velocity_due_to_ekman_drift
+      - eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - eastward_sea_water_velocity_standard_error
+      - northward_sea_water_velocity
+      - northward_sea_water_velocity_due_to_ekman_drift
+      - northward_sea_water_velocity_due_to_ekman_drift_standard_error
+      - northward_sea_water_velocity_standard_error
+      - sea_water_x_velocity_due_to_tide
+      - sea_water_x_velocity_due_to_tide_standard_error
+      - sea_water_y_velocity_due_to_tide
+      - sea_water_y_velocity_due_to_tide_velocity_standard_error
+      - surface_geostophic_eastward_sea_water_velocity_standard_error
+      - surface_geostophic_northward_sea_water_velocity_standard_error
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity
+      vertical_levels: 2
+      vertical_resolution_max: 15.0
+      vertical_resolution_min: 15.0
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glo_anfc_daily_geo:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_anfc_0.083deg_P1D-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_mod_glo_phy_anfc_0.083deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.91668701171875
+      geospatial_lon_min: -180.0
+      grid_regular: true
+      grid_resolution_deg: 0.083332
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        ist: sea_ice_surface_temperature
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        pbo: sea_water_pressure_at_sea_floor
+        siage: age_of_sea_ice
+        sialb: sea_ice_albedo
+        siconc: sea_ice_area_fraction
+        sisnthick: surface_snow_thickness
+        sithick: sea_ice_thickness
+        sivelo: sea_ice_speed
+        sob: sea_water_salinity_at_sea_floor
+        tob: sea_water_potential_temperature_at_sea_floor
+        usi: eastward_sea_ice_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2026-09-02'
+      time_coverage_start: '2022-06-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - age_of_sea_ice
+      - eastward_sea_ice_velocity
+      - northward_sea_ice_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_albedo
+      - sea_ice_area_fraction
+      - sea_ice_speed
+      - sea_ice_surface_temperature
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_pressure_at_sea_floor
+      - sea_water_salinity_at_sea_floor
+      - surface_snow_thickness
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glo_anfc_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_anfc_0.083deg_P1D-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_mod_glo_phy_anfc_0.083deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.91668701171875
+      geospatial_lon_min: -180.0
+      grid_regular: true
+      grid_resolution_deg: 0.083332
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        ist: sea_ice_surface_temperature
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        pbo: sea_water_pressure_at_sea_floor
+        siage: age_of_sea_ice
+        sialb: sea_ice_albedo
+        siconc: sea_ice_area_fraction
+        sisnthick: surface_snow_thickness
+        sithick: sea_ice_thickness
+        sivelo: sea_ice_speed
+        sob: sea_water_salinity_at_sea_floor
+        tob: sea_water_potential_temperature_at_sea_floor
+        usi: eastward_sea_ice_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2026-09-02'
+      time_coverage_start: '2022-06-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - age_of_sea_ice
+      - eastward_sea_ice_velocity
+      - northward_sea_ice_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_albedo
+      - sea_ice_area_fraction
+      - sea_ice_speed
+      - sea_ice_surface_temperature
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_pressure_at_sea_floor
+      - sea_water_salinity_at_sea_floor
+      - surface_snow_thickness
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glorys_climatology_geo:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_my_0.083deg-climatology_P1M-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: geo
+      dataset_id: cmems_mod_glo_phy_my_0.083deg-climatology_P1M-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.9166717529297
+      geospatial_lon_min: -180.0
+      geospatial_vertical_max: 5727.9169921875
+      geospatial_vertical_min: 0.49402499198913574
+      grid_regular: true
+      grid_resolution_deg: 0.083333
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        bottomT: sea_water_potential_temperature_at_sea_floor
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        siconc: sea_ice_area_fraction
+        sithick: sea_ice_thickness
+        so: sea_water_salinity
+        thetao: sea_water_potential_temperature
+        uo: eastward_sea_water_velocity
+        usi: eastward_sea_ice_velocity
+        vo: northward_sea_water_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2004-12-01'
+      time_coverage_start: '2004-01-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - eastward_sea_ice_velocity
+      - eastward_sea_water_velocity
+      - northward_sea_ice_velocity
+      - northward_sea_water_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_area_fraction
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_salinity
+      vertical_levels: 50
+      vertical_resolution_max: 453.133
+      vertical_resolution_min: 1.047
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glorys_climatology_timeseries:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_my_0.083deg-climatology_P1M-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: time-series
+      dataset_id: cmems_mod_glo_phy_my_0.083deg-climatology_P1M-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.9166717529297
+      geospatial_lon_min: -180.0
+      geospatial_vertical_max: 5727.9169921875
+      geospatial_vertical_min: 0.49402499198913574
+      grid_regular: true
+      grid_resolution_deg: 0.083333
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        bottomT: sea_water_potential_temperature_at_sea_floor
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        siconc: sea_ice_area_fraction
+        sithick: sea_ice_thickness
+        so: sea_water_salinity
+        thetao: sea_water_potential_temperature
+        uo: eastward_sea_water_velocity
+        usi: eastward_sea_ice_velocity
+        vo: northward_sea_water_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2004-12-01'
+      time_coverage_start: '2004-01-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - eastward_sea_ice_velocity
+      - eastward_sea_water_velocity
+      - northward_sea_ice_velocity
+      - northward_sea_water_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_area_fraction
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_salinity
+      vertical_levels: 50
+      vertical_resolution_max: 453.133
+      vertical_resolution_min: 1.047
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glorys_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_my_0.083deg_P1D-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: geo
+      dataset_id: cmems_mod_glo_phy_my_0.083deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.9166717529297
+      geospatial_lon_min: -180.0
+      geospatial_vertical_max: 5727.9169921875
+      geospatial_vertical_min: 0.49402499198913574
+      grid_regular: true
+      grid_resolution_deg: 0.083333
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        bottomT: sea_water_potential_temperature_at_sea_floor
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        siconc: sea_ice_area_fraction
+        sithick: sea_ice_thickness
+        so: sea_water_salinity
+        thetao: sea_water_potential_temperature
+        uo: eastward_sea_water_velocity
+        usi: eastward_sea_ice_velocity
+        vo: northward_sea_water_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2026-06-23'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_ice_velocity
+      - eastward_sea_water_velocity
+      - northward_sea_ice_velocity
+      - northward_sea_water_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_area_fraction
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_salinity
+      vertical_levels: 50
+      vertical_resolution_max: 453.133
+      vertical_resolution_min: 1.047
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  glorys_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_mod_glo_phy_my_0.083deg_P1D-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+        Z: depth
+      chunking: time-series
+      dataset_id: cmems_mod_glo_phy_my_0.083deg_P1D-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -80.0
+      geospatial_lon_max: 179.9166717529297
+      geospatial_lon_min: -180.0
+      geospatial_vertical_max: 5727.9169921875
+      geospatial_vertical_min: 0.49402499198913574
+      grid_regular: true
+      grid_resolution_deg: 0.083333
+      grid_resolution_km: 9.266
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        bottomT: sea_water_potential_temperature_at_sea_floor
+        mlotst: ocean_mixed_layer_thickness_defined_by_sigma_theta
+        siconc: sea_ice_area_fraction
+        sithick: sea_ice_thickness
+        so: sea_water_salinity
+        thetao: sea_water_potential_temperature
+        uo: eastward_sea_water_velocity
+        usi: eastward_sea_ice_velocity
+        vo: northward_sea_water_velocity
+        vsi: northward_sea_ice_velocity
+        zos: sea_surface_height_above_geoid
+      time_coverage_end: '2026-06-23'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - eastward_sea_ice_velocity
+      - eastward_sea_water_velocity
+      - northward_sea_ice_velocity
+      - northward_sea_water_velocity
+      - ocean_mixed_layer_thickness_defined_by_sigma_theta
+      - sea_ice_area_fraction
+      - sea_ice_thickness
+      - sea_surface_height_above_geoid
+      - sea_water_potential_temperature
+      - sea_water_potential_temperature_at_sea_floor
+      - sea_water_salinity
+      vertical_levels: 50
+      vertical_resolution_max: 453.133
+      vertical_resolution_min: 1.047
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  optics_my_monthly_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-optics_my_l4-multi-4km_P1M
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-optics_my_l4-multi-4km_P1M
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        BBP: volume_backwards_scattering_coefficient_of_radiative_flux_in_sea_water_due_to_particles
+        CDM: volume_absorption_coefficient_of_radiative_flux_in_sea_water_due_to_dissolved_organic_matter_and_non_algal_particles
+        flags: status_flag
+      time_coverage_end: '2026-07-01'
+      time_coverage_start: '1997-09-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - status_flag
+      - volume_absorption_coefficient_of_radiative_flux_in_sea_water_due_to_dissolved_organic_matter_and_non_algal_particles
+      - volume_backwards_scattering_coefficient_of_radiative_flux_in_sea_water_due_to_particles
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  optics_my_monthly_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-optics_my_l4-multi-4km_P1M
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-optics_my_l4-multi-4km_P1M
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        BBP: volume_backwards_scattering_coefficient_of_radiative_flux_in_sea_water_due_to_particles
+        CDM: volume_absorption_coefficient_of_radiative_flux_in_sea_water_due_to_dissolved_organic_matter_and_non_algal_particles
+        flags: status_flag
+      time_coverage_end: '2026-07-01'
+      time_coverage_start: '1997-09-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - status_flag
+      - volume_absorption_coefficient_of_radiative_flux_in_sea_water_due_to_dissolved_organic_matter_and_non_algal_particles
+      - volume_backwards_scattering_coefficient_of_radiative_flux_in_sea_water_due_to_particles
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  pp_my_monthly_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        PP: primary_productivity_of_biomass_expressed_as_carbon
+        flags: status_flag
+      time_coverage_end: '2026-07-01'
+      time_coverage_start: '1997-09-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - primary_productivity_of_biomass_expressed_as_carbon
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  pp_my_monthly_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-pp_my_l4-multi-4km_P1M
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        PP: primary_productivity_of_biomass_expressed_as_carbon
+        flags: status_flag
+      time_coverage_end: '2026-07-01'
+      time_coverage_start: '1997-09-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - primary_productivity_of_biomass_expressed_as_carbon
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+      service: arco-geo-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+      duplicate_standard_names:
+        tpa_correction: sea_surface_height_above_sea_level
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-01-16'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+      service: arco-time-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1D
+      duplicate_standard_names:
+        tpa_correction: sea_surface_height_above_sea_level
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-01-16'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_my_monthly_geo:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1M-m
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1M-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        sla: sea_surface_height_above_sea_level
+      time_coverage_end: '2025-12-01'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - sea_surface_height_above_sea_level
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_my_monthly_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1M-m
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-sl_glo_phy-ssh_my_allsat-l4-duacs-0.125deg_P1M-m
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        sla: sea_surface_height_above_sea_level
+      time_coverage_end: '2025-12-01'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
+      variables:
+      - sea_surface_height_above_sea_level
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_nrt_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0.125deg_P1D
+      service: arco-geo-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0.125deg_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-08-24'
+      time_coverage_start: '2024-07-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_nrt_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0.125deg_P1D
+      service: arco-time-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-sl_glo_phy-ssh_nrt_allsat-l4-duacs-0.125deg_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-08-24'
+      time_coverage_start: '2024-07-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_twosat_daily_geo:
+    kwargs:
+      dataset_id: c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D
+      service: arco-geo-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D
+      duplicate_standard_names:
+        tpa_correction: sea_surface_height_above_sea_level
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-01-16'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  ssh_duacs_twosat_daily_timeseries:
+    kwargs:
+      dataset_id: c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D
+      service: arco-time-series
+    metadata:
+      auxiliary_variables:
+        err_sla: sea_surface_height_above_sea_level standard_error
+        err_ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+        err_vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+          standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: c3s_obs-sl_glo_phy-ssh_my_twosat-l4-duacs-0.25deg_P1D
+      duplicate_standard_names:
+        tpa_correction: sea_surface_height_above_sea_level
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.875
+      geospatial_lat_min: -89.875
+      geospatial_lon_max: 179.875
+      geospatial_lon_min: -179.875
+      grid_regular: true
+      grid_resolution_deg: 0.25
+      grid_resolution_km: 27.799
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        adt: sea_surface_height_above_geoid
+        flag_ice: status_flag
+        sla: sea_surface_height_above_sea_level
+        ugos: surface_geostrophic_eastward_sea_water_velocity
+        ugosa: surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+        vgos: surface_geostrophic_northward_sea_water_velocity
+        vgosa: surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+      time_coverage_end: '2026-01-16'
+      time_coverage_start: '1993-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_height_above_geoid
+      - sea_surface_height_above_sea_level
+      - status_flag
+      - surface_geostrophic_eastward_sea_water_velocity
+      - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+      - surface_geostrophic_northward_sea_water_velocity
+      - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_c3s_rep_daily_geo:
+    kwargs:
+      dataset_id: C3S-GLO-SST-L4-REP-OBS-SST
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: C3S-GLO-SST-L4-REP-OBS-SST
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97500610351562
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        analysed_sst: sea_surface_temperature
+        analysed_st: surface_temperature
+        analysis_error_sst: estimated error standard deviation of analysed_sst
+        sea_ice_fraction: sea_ice_area_fraction
+        sea_ice_fraction_flag: sea_ice_area_fraction_flag
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '1982-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - estimated error standard deviation of analysed_sst
+      - sea_ice_area_fraction
+      - sea_ice_area_fraction_flag
+      - sea_surface_temperature
+      - surface_temperature
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_c3s_rep_daily_timeseries:
+    kwargs:
+      dataset_id: C3S-GLO-SST-L4-REP-OBS-SST
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: C3S-GLO-SST-L4-REP-OBS-SST
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97500610351562
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        analysed_sst: sea_surface_temperature
+        analysed_st: surface_temperature
+        analysis_error_sst: estimated error standard deviation of analysed_sst
+        sea_ice_fraction: sea_ice_area_fraction
+        sea_ice_fraction_flag: sea_ice_area_fraction_flag
+      time_coverage_end: '2024-12-31'
+      time_coverage_start: '1982-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - estimated error standard deviation of analysed_sst
+      - sea_ice_area_fraction
+      - sea_ice_area_fraction_flag
+      - sea_surface_temperature
+      - surface_temperature
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_esacci_rep_daily_geo:
+    kwargs:
+      dataset_id: ESACCI-GLO-SST-L4-REP-OBS-SST
+      service: arco-geo-series
+    metadata:
+      auxiliary_variables:
+        analysed_sst_uncertainty: sea_water_temperature standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: ESACCI-GLO-SST-L4-REP-OBS-SST
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9749984741211
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        analysed_sst: sea_water_temperature
+        mask: status_flag
+        sea_ice_fraction: sea_ice_area_fraction
+      time_coverage_end: '2021-12-31'
+      time_coverage_start: '1980-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_water_temperature
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_esacci_rep_daily_timeseries:
+    kwargs:
+      dataset_id: ESACCI-GLO-SST-L4-REP-OBS-SST
+      service: arco-time-series
+    metadata:
+      auxiliary_variables:
+        analysed_sst_uncertainty: sea_water_temperature standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: ESACCI-GLO-SST-L4-REP-OBS-SST
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9749984741211
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        analysed_sst: sea_water_temperature
+        mask: status_flag
+        sea_ice_fraction: sea_ice_area_fraction
+      time_coverage_end: '2021-12-31'
+      time_coverage_start: '1980-01-01'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_water_temperature
+      - status_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_ostia_nrt_daily_geo:
+    kwargs:
+      dataset_id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+      service: arco-geo-series
+    metadata:
+      auxiliary_variables:
+        analysis_error: sea_surface_foundation_temperature standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9749984741211
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        analysed_sst: sea_surface_foundation_temperature
+        sea_ice_fraction: sea_ice_area_fraction
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2024-01-17'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_surface_foundation_temperature
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  sst_ostia_nrt_daily_timeseries:
+    kwargs:
+      dataset_id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+      service: arco-time-series
+    metadata:
+      auxiliary_variables:
+        analysis_error: sea_surface_foundation_temperature standard_error
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: METOFFICE-GLO-SST-L4-NRT-OBS-SST-V2
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9749984741211
+      geospatial_lat_min: -89.9749984741211
+      geospatial_lon_max: 179.97500610351562
+      geospatial_lon_min: -179.97500610351562
+      grid_regular: true
+      grid_resolution_deg: 0.049999
+      grid_resolution_km: 5.56
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        analysed_sst: sea_surface_foundation_temperature
+        sea_ice_fraction: sea_ice_area_fraction
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2024-01-17'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_ice_area_fraction
+      - sea_surface_foundation_temperature
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  swh_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-wave_glo_phy-swh_my_multi-l4-0.5deg_P1D-i
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-wave_glo_phy-swh_my_multi-l4-0.5deg_P1D-i
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -90.0
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -180.0
+      grid_regular: true
+      grid_resolution_deg: 0.5
+      grid_resolution_km: 55.597
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        VAVH_INST: sea_surface_wave_significant_height
+        VAVH_INST_FLAG: sea_surface_wave_significant_height_flag
+      time_coverage_end: '2020-12-31'
+      time_coverage_start: '2002-01-15'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_wave_significant_height
+      - sea_surface_wave_significant_height_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  swh_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-wave_glo_phy-swh_my_multi-l4-0.5deg_P1D-i
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-wave_glo_phy-swh_my_multi-l4-0.5deg_P1D-i
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 90.0
+      geospatial_lat_min: -90.0
+      geospatial_lon_max: 179.5
+      geospatial_lon_min: -180.0
+      grid_regular: true
+      grid_resolution_deg: 0.5
+      grid_resolution_km: 55.597
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        VAVH_INST: sea_surface_wave_significant_height
+        VAVH_INST_FLAG: sea_surface_wave_significant_height_flag
+      time_coverage_end: '2020-12-31'
+      time_coverage_start: '2002-01-15'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - sea_surface_wave_significant_height
+      - sea_surface_wave_significant_height_flag
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  transp_gapfree_my_daily_geo:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-transp_my_l4-gapfree-multi-4km_P1D
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-oc_glo_bgc-transp_my_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        KD490: volume_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+        ZSD: secchi_depth_of_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-16'
+      time_coverage_start: '1997-09-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - secchi_depth_of_sea_water
+      - status_flag
+      - volume_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  transp_gapfree_my_daily_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-oc_glo_bgc-transp_my_l4-gapfree-multi-4km_P1D
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-oc_glo_bgc-transp_my_l4-gapfree-multi-4km_P1D
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.97916412353516
+      geospatial_lat_min: -89.97917175292969
+      geospatial_lon_max: 179.9791717529297
+      geospatial_lon_min: -179.9791717529297
+      grid_regular: true
+      grid_resolution_deg: 0.041667
+      grid_resolution_km: 4.633
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        KD490: volume_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+        ZSD: secchi_depth_of_sea_water
+        flags: status_flag
+      time_coverage_end: '2026-08-16'
+      time_coverage_start: '1997-09-04'
+      time_resolution: P1D
+      time_resolution_s: 86400.0
+      variables:
+      - secchi_depth_of_sea_water
+      - status_flag
+      - volume_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  wind_my_hourly_geo:
+    kwargs:
+      dataset_id: cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H
+      duplicate_standard_names:
+        number_of_observations_divcurl: number_of_observations
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        air_density: air_density
+        eastward_stress: surface_downward_eastward_stress
+        eastward_stress_bias: surface_downward_eastward_stress_bias
+        eastward_stress_sdd: surface_downward_eastward_stress_standard_deviation_of_differences
+        eastward_wind: eastward_wind
+        eastward_wind_bias: eastward_wind_bias
+        eastward_wind_sdd: eastward_wind_standard_deviation_of_differences
+        northward_stress: surface_downward_northward_stress
+        northward_stress_bias: surface_downward_northward_stress_bias
+        northward_stress_sdd: surface_downward_northward_stress_standard_deviation_of_differences
+        northward_wind: northward_wind
+        northward_wind_bias: northward_wind_bias
+        northward_wind_sdd: northward_wind_standard_deviation_of_differences
+        number_of_observations: number_of_observations
+        stress_curl: vertical_component_of_surface_downward_stress_curl
+        stress_curl_bias: vertical_component_of_surface_downward_stress_curl_bias
+        stress_curl_dv: vertical_component_of_surface_downward_stress_curl_difference_of_variances
+        stress_divergence: divergence_of_surface_downward_stress
+        stress_divergence_bias: divergence_of_surface_downward_stress_bias
+        stress_divergence_dv: divergence_of_surface_downward_stress_difference_of_variances
+        wind_curl: atmosphere_relative_vorticity
+        wind_curl_bias: atmosphere_relative_vorticity_bias
+        wind_curl_dv: atmosphere_relative_vorticity_difference_of_variances
+        wind_divergence: divergence_of_wind
+        wind_divergence_bias: divergence_of_wind_bias
+        wind_divergence_dv: divergence_of_wind_difference_of_variances
+      time_coverage_end: '2026-04-20'
+      time_coverage_start: '2007-01-11'
+      time_resolution: PT1H
+      time_resolution_s: 3600.0
+      variables:
+      - air_density
+      - atmosphere_relative_vorticity
+      - atmosphere_relative_vorticity_bias
+      - atmosphere_relative_vorticity_difference_of_variances
+      - divergence_of_surface_downward_stress
+      - divergence_of_surface_downward_stress_bias
+      - divergence_of_surface_downward_stress_difference_of_variances
+      - divergence_of_wind
+      - divergence_of_wind_bias
+      - divergence_of_wind_difference_of_variances
+      - eastward_wind
+      - eastward_wind_bias
+      - eastward_wind_standard_deviation_of_differences
+      - northward_wind
+      - northward_wind_bias
+      - northward_wind_standard_deviation_of_differences
+      - number_of_observations
+      - surface_downward_eastward_stress
+      - surface_downward_eastward_stress_bias
+      - surface_downward_eastward_stress_standard_deviation_of_differences
+      - surface_downward_northward_stress
+      - surface_downward_northward_stress_bias
+      - surface_downward_northward_stress_standard_deviation_of_differences
+      - vertical_component_of_surface_downward_stress_curl
+      - vertical_component_of_surface_downward_stress_curl_bias
+      - vertical_component_of_surface_downward_stress_curl_difference_of_variances
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  wind_my_hourly_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-wind_glo_phy_my_l4_0.125deg_PT1H
+      duplicate_standard_names:
+        number_of_observations_divcurl: number_of_observations
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        air_density: air_density
+        eastward_stress: surface_downward_eastward_stress
+        eastward_stress_bias: surface_downward_eastward_stress_bias
+        eastward_stress_sdd: surface_downward_eastward_stress_standard_deviation_of_differences
+        eastward_wind: eastward_wind
+        eastward_wind_bias: eastward_wind_bias
+        eastward_wind_sdd: eastward_wind_standard_deviation_of_differences
+        northward_stress: surface_downward_northward_stress
+        northward_stress_bias: surface_downward_northward_stress_bias
+        northward_stress_sdd: surface_downward_northward_stress_standard_deviation_of_differences
+        northward_wind: northward_wind
+        northward_wind_bias: northward_wind_bias
+        northward_wind_sdd: northward_wind_standard_deviation_of_differences
+        number_of_observations: number_of_observations
+        stress_curl: vertical_component_of_surface_downward_stress_curl
+        stress_curl_bias: vertical_component_of_surface_downward_stress_curl_bias
+        stress_curl_dv: vertical_component_of_surface_downward_stress_curl_difference_of_variances
+        stress_divergence: divergence_of_surface_downward_stress
+        stress_divergence_bias: divergence_of_surface_downward_stress_bias
+        stress_divergence_dv: divergence_of_surface_downward_stress_difference_of_variances
+        wind_curl: atmosphere_relative_vorticity
+        wind_curl_bias: atmosphere_relative_vorticity_bias
+        wind_curl_dv: atmosphere_relative_vorticity_difference_of_variances
+        wind_divergence: divergence_of_wind
+        wind_divergence_bias: divergence_of_wind_bias
+        wind_divergence_dv: divergence_of_wind_difference_of_variances
+      time_coverage_end: '2026-04-20'
+      time_coverage_start: '2007-01-11'
+      time_resolution: PT1H
+      time_resolution_s: 3600.0
+      variables:
+      - air_density
+      - atmosphere_relative_vorticity
+      - atmosphere_relative_vorticity_bias
+      - atmosphere_relative_vorticity_difference_of_variances
+      - divergence_of_surface_downward_stress
+      - divergence_of_surface_downward_stress_bias
+      - divergence_of_surface_downward_stress_difference_of_variances
+      - divergence_of_wind
+      - divergence_of_wind_bias
+      - divergence_of_wind_difference_of_variances
+      - eastward_wind
+      - eastward_wind_bias
+      - eastward_wind_standard_deviation_of_differences
+      - northward_wind
+      - northward_wind_bias
+      - northward_wind_standard_deviation_of_differences
+      - number_of_observations
+      - surface_downward_eastward_stress
+      - surface_downward_eastward_stress_bias
+      - surface_downward_eastward_stress_standard_deviation_of_differences
+      - surface_downward_northward_stress
+      - surface_downward_northward_stress_bias
+      - surface_downward_northward_stress_standard_deviation_of_differences
+      - vertical_component_of_surface_downward_stress_curl
+      - vertical_component_of_surface_downward_stress_curl_bias
+      - vertical_component_of_surface_downward_stress_curl_difference_of_variances
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  wind_nrt_hourly_geo:
+    kwargs:
+      dataset_id: cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H
+      service: arco-geo-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: geo
+      dataset_id: cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H
+      duplicate_standard_names:
+        number_of_observations_divcurl: number_of_observations
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-geo-series
+      standard_names:
+        air_density: air_density
+        eastward_stress: surface_downward_eastward_stress
+        eastward_stress_bias: surface_downward_eastward_stress_bias
+        eastward_stress_sdd: surface_downward_eastward_stress_standard_deviation_of_differences
+        eastward_wind: eastward_wind
+        eastward_wind_bias: eastward_wind_bias
+        eastward_wind_sdd: eastward_wind_standard_deviation_of_differences
+        northward_stress: surface_downward_northward_stress
+        northward_stress_bias: surface_downward_northward_stress_bias
+        northward_stress_sdd: surface_downward_northward_stress_standard_deviation_of_differences
+        northward_wind: northward_wind
+        northward_wind_bias: northward_wind_bias
+        northward_wind_sdd: northward_wind_standard_deviation_of_differences
+        number_of_observations: number_of_observations
+        stress_curl: vertical_component_of_surface_downward_stress_curl
+        stress_curl_bias: vertical_component_of_surface_downward_stress_curl_bias
+        stress_curl_dv: vertical_component_of_surface_downward_stress_curl_difference_of_variances
+        stress_divergence: divergence_of_surface_downward_stress
+        stress_divergence_bias: divergence_of_surface_downward_stress_bias
+        stress_divergence_dv: divergence_of_surface_downward_stress_difference_of_variances
+        wind_curl: atmosphere_relative_vorticity
+        wind_curl_bias: atmosphere_relative_vorticity_bias
+        wind_curl_dv: atmosphere_relative_vorticity_difference_of_variances
+        wind_divergence: divergence_of_wind
+        wind_divergence_bias: divergence_of_wind_bias
+        wind_divergence_dv: divergence_of_wind_difference_of_variances
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2024-06-13'
+      time_resolution: PT1H
+      time_resolution_s: 3600.0
+      variables:
+      - air_density
+      - atmosphere_relative_vorticity
+      - atmosphere_relative_vorticity_bias
+      - atmosphere_relative_vorticity_difference_of_variances
+      - divergence_of_surface_downward_stress
+      - divergence_of_surface_downward_stress_bias
+      - divergence_of_surface_downward_stress_difference_of_variances
+      - divergence_of_wind
+      - divergence_of_wind_bias
+      - divergence_of_wind_difference_of_variances
+      - eastward_wind
+      - eastward_wind_bias
+      - eastward_wind_standard_deviation_of_differences
+      - northward_wind
+      - northward_wind_bias
+      - northward_wind_standard_deviation_of_differences
+      - number_of_observations
+      - surface_downward_eastward_stress
+      - surface_downward_eastward_stress_bias
+      - surface_downward_eastward_stress_standard_deviation_of_differences
+      - surface_downward_northward_stress
+      - surface_downward_northward_stress_bias
+      - surface_downward_northward_stress_standard_deviation_of_differences
+      - vertical_component_of_surface_downward_stress_curl
+      - vertical_component_of_surface_downward_stress_curl_bias
+      - vertical_component_of_surface_downward_stress_curl_difference_of_variances
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+  wind_nrt_hourly_timeseries:
+    kwargs:
+      dataset_id: cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H
+      service: arco-time-series
+    metadata:
+      axes:
+        T: time
+        X: longitude
+        Y: latitude
+      chunking: time-series
+      dataset_id: cmems_obs-wind_glo_phy_nrt_l4_0.125deg_PT1H
+      duplicate_standard_names:
+        number_of_observations_divcurl: number_of_observations
+      featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.9375
+      geospatial_lat_min: -89.9375
+      geospatial_lon_max: 179.9375
+      geospatial_lon_min: -179.9375
+      grid_regular: true
+      grid_resolution_deg: 0.125
+      grid_resolution_km: 13.899
+      lon_convention: -180-180
+      service: arco-time-series
+      standard_names:
+        air_density: air_density
+        eastward_stress: surface_downward_eastward_stress
+        eastward_stress_bias: surface_downward_eastward_stress_bias
+        eastward_stress_sdd: surface_downward_eastward_stress_standard_deviation_of_differences
+        eastward_wind: eastward_wind
+        eastward_wind_bias: eastward_wind_bias
+        eastward_wind_sdd: eastward_wind_standard_deviation_of_differences
+        northward_stress: surface_downward_northward_stress
+        northward_stress_bias: surface_downward_northward_stress_bias
+        northward_stress_sdd: surface_downward_northward_stress_standard_deviation_of_differences
+        northward_wind: northward_wind
+        northward_wind_bias: northward_wind_bias
+        northward_wind_sdd: northward_wind_standard_deviation_of_differences
+        number_of_observations: number_of_observations
+        stress_curl: vertical_component_of_surface_downward_stress_curl
+        stress_curl_bias: vertical_component_of_surface_downward_stress_curl_bias
+        stress_curl_dv: vertical_component_of_surface_downward_stress_curl_difference_of_variances
+        stress_divergence: divergence_of_surface_downward_stress
+        stress_divergence_bias: divergence_of_surface_downward_stress_bias
+        stress_divergence_dv: divergence_of_surface_downward_stress_difference_of_variances
+        wind_curl: atmosphere_relative_vorticity
+        wind_curl_bias: atmosphere_relative_vorticity_bias
+        wind_curl_dv: atmosphere_relative_vorticity_difference_of_variances
+        wind_divergence: divergence_of_wind
+        wind_divergence_bias: divergence_of_wind_bias
+        wind_divergence_dv: divergence_of_wind_difference_of_variances
+      time_coverage_end: '2026-08-23'
+      time_coverage_start: '2024-06-13'
+      time_resolution: PT1H
+      time_resolution_s: 3600.0
+      variables:
+      - air_density
+      - atmosphere_relative_vorticity
+      - atmosphere_relative_vorticity_bias
+      - atmosphere_relative_vorticity_difference_of_variances
+      - divergence_of_surface_downward_stress
+      - divergence_of_surface_downward_stress_bias
+      - divergence_of_surface_downward_stress_difference_of_variances
+      - divergence_of_wind
+      - divergence_of_wind_bias
+      - divergence_of_wind_difference_of_variances
+      - eastward_wind
+      - eastward_wind_bias
+      - eastward_wind_standard_deviation_of_differences
+      - northward_wind
+      - northward_wind_bias
+      - northward_wind_standard_deviation_of_differences
+      - number_of_observations
+      - surface_downward_eastward_stress
+      - surface_downward_eastward_stress_bias
+      - surface_downward_eastward_stress_standard_deviation_of_differences
+      - surface_downward_northward_stress
+      - surface_downward_northward_stress_bias
+      - surface_downward_northward_stress_standard_deviation_of_differences
+      - vertical_component_of_surface_downward_stress_curl
+      - vertical_component_of_surface_downward_stress_curl_bias
+      - vertical_component_of_surface_downward_stress_curl_difference_of_variances
+    output_instance: xarray:Dataset
+    reader: ocean_skill.readers:CopernicusMarineReader
+    user_parameters: {}
+metadata:
+  featureTypes:
+  - grid
+  geospatial_lat_max: 90.0
+  geospatial_lat_min: -90.0
+  geospatial_lon_max: 179.9791717529297
+  geospatial_lon_min: -180.0
+  geospatial_vertical_max: 5727.9169921875
+  geospatial_vertical_min: 0.0
+  standard_names:
+  - age_of_sea_ice
+  - air_density
+  - atmosphere_relative_vorticity
+  - atmosphere_relative_vorticity_bias
+  - atmosphere_relative_vorticity_difference_of_variances
+  - divergence_of_surface_downward_stress
+  - divergence_of_surface_downward_stress_bias
+  - divergence_of_surface_downward_stress_difference_of_variances
+  - divergence_of_wind
+  - divergence_of_wind_bias
+  - divergence_of_wind_difference_of_variances
+  - eastward_sea_ice_velocity
+  - eastward_sea_water_velocity
+  - eastward_sea_water_velocity_due_to_ekman_drift
+  - eastward_sea_water_velocity_due_to_ekman_drift_standard_error
+  - eastward_sea_water_velocity_standard_error
+  - eastward_wind
+  - eastward_wind_bias
+  - eastward_wind_standard_deviation_of_differences
+  - estimated error standard deviation of analysed_sst
+  - mass_concentration_of_chlorophyll_a_in_sea_water
+  - northward_sea_ice_velocity
+  - northward_sea_water_velocity
+  - northward_sea_water_velocity_due_to_ekman_drift
+  - northward_sea_water_velocity_due_to_ekman_drift_standard_error
+  - northward_sea_water_velocity_standard_error
+  - northward_wind
+  - northward_wind_bias
+  - northward_wind_standard_deviation_of_differences
+  - number_of_observations
+  - ocean_mixed_layer_thickness_defined_by_sigma_theta
+  - primary_productivity_of_biomass_expressed_as_carbon
+  - sea_ice_albedo
+  - sea_ice_area_fraction
+  - sea_ice_area_fraction_flag
+  - sea_ice_speed
+  - sea_ice_surface_temperature
+  - sea_ice_thickness
+  - sea_surface_foundation_temperature
+  - sea_surface_height_above_geoid
+  - sea_surface_height_above_sea_level
+  - sea_surface_temperature
+  - sea_surface_wave_significant_height
+  - sea_surface_wave_significant_height_flag
+  - sea_water_potential_temperature
+  - sea_water_potential_temperature_at_sea_floor
+  - sea_water_pressure_at_sea_floor
+  - sea_water_salinity
+  - sea_water_salinity_at_sea_floor
+  - sea_water_temperature
+  - sea_water_x_velocity_due_to_tide
+  - sea_water_x_velocity_due_to_tide_standard_error
+  - sea_water_y_velocity_due_to_tide
+  - sea_water_y_velocity_due_to_tide_velocity_standard_error
+  - secchi_depth_of_sea_water
+  - status_flag
+  - surface_downward_eastward_stress
+  - surface_downward_eastward_stress_bias
+  - surface_downward_eastward_stress_standard_deviation_of_differences
+  - surface_downward_northward_stress
+  - surface_downward_northward_stress_bias
+  - surface_downward_northward_stress_standard_deviation_of_differences
+  - surface_geostophic_eastward_sea_water_velocity_standard_error
+  - surface_geostophic_northward_sea_water_velocity_standard_error
+  - surface_geostrophic_eastward_sea_water_velocity
+  - surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid
+  - surface_geostrophic_northward_sea_water_velocity
+  - surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid
+  - surface_snow_thickness
+  - surface_temperature
+  - time
+  - vertical_component_of_surface_downward_stress_curl
+  - vertical_component_of_surface_downward_stress_curl_bias
+  - vertical_component_of_surface_downward_stress_curl_difference_of_variances
+  - volume_absorption_coefficient_of_radiative_flux_in_sea_water_due_to_dissolved_organic_matter_and_non_algal_particles
+  - volume_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water
+  - volume_backwards_scattering_coefficient_of_radiative_flux_in_sea_water_due_to_particles
+  time_coverage_end: '2026-09-02'
+  time_coverage_start: '1980-01-01'
+  title: Copernicus Marine
+user_parameters: {}
+version: 2

@@ -1,18 +1,19 @@
 aliases:
-  oceansoda_ethz: oceansoda_ethz
+  oceansoda: oceansoda
 data:
-  c0bccbbe069a04c6:
+  9d7e7b63250c60a7:
     datatype: intake.readers.datatypes:HDF5
     kwargs:
       path: ''
+      storage_options: null
       url: blockcache::https://www.ncei.noaa.gov/data/oceans/ncei/ocads/data/0220059/OceanSODA_ETHZ-v2025.OCADS.01-1982-2024.nc
     metadata: {}
     user_parameters: {}
 entries:
-  oceansoda_ethz:
+  oceansoda:
     kwargs:
       args:
-      - '{data(c0bccbbe069a04c6)}'
+      - '{data(9d7e7b63250c60a7)}'
       chunks: {}
       decode_times: false
       engine: h5netcdf
@@ -27,8 +28,12 @@ entries:
       geospatial_lat_min: -89.5
       geospatial_lon_max: 179.5
       geospatial_lon_min: -179.5
+      grid_lat_regular: true
+      grid_lon_regular: true
+      grid_resolution_km: 111.195
+      grid_resolution_lat_deg: 1.0
+      grid_resolution_lon_deg: 1.0
       lon_convention: -180-180
-      source: NCEI OCADS accession 0220059
       standard_names:
         dic: mole_concentration_of_dissolved_inorganic_carbon_in_sea_water
         omega_ar: aragonite saturation state
@@ -39,6 +44,9 @@ entries:
         temperature: sea_surface_temperature
       time_coverage_end: '2024-12-15'
       time_coverage_start: '1982-01-15'
+      time_regular: false
+      time_resolution: P1M
+      time_resolution_s: 2678400.0
       variables:
       - aragonite saturation state
       - calcite saturation state
@@ -51,8 +59,6 @@ entries:
     reader: intake.readers.readers:XArrayDatasetReader
     user_parameters: {}
 metadata:
-  description: OceanSODA-ETHZ v2025 surface carbonate system climatology (1982-2024),
-    NCEI OCADS 0220059.
   featureTypes:
   - grid
   geospatial_lat_max: 89.5
@@ -69,6 +75,6 @@ metadata:
   - total_alkalinity_in_sea_water
   time_coverage_end: '2024-12-15'
   time_coverage_start: '1982-01-15'
-  title: OceanSODA-ETHZ
+  title: OceanSODA
 user_parameters: {}
 version: 2
