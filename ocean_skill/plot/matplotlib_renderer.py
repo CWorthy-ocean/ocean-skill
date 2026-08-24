@@ -1051,6 +1051,8 @@ def field_row(
     title: str | None = None,
     units: str | None = None,
     standard_name: str | None = None,
+    depth: str | None = None,
+    time: str | None = None,
     metrics: dict[str, Any] | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
@@ -1118,8 +1120,20 @@ def field_row(
     holds their titles and axis labels (see :func:`_align_colorbars`). ``shrink`` then
     means a fraction of that extent. Set ``False`` to leave placement entirely to
     ``constrained_layout``.
+
+    ``title`` defaults, when not given, to the variable this comparison names followed
+    by the depth and time a ``select=`` has collapsed to one map — ``chlorophyll · 0–10
+    m · 2010-01-22`` — built through the same :func:`suptitle_text` a one-field figure
+    uses (:func:`field_suptitle`), so a comparison and a plain field name the same
+    quantity the same way. A single row has no left-edge row label to carry the variable
+    (that is :func:`field_grid`'s doing, and only when it stacks several), so without
+    this the figure said only *which sources*, never *what*. Pass ``title=""`` to drop
+    it, or any string to replace it.
     """
     import matplotlib.pyplot as plt
+
+    if title is None:
+        title = suptitle_text(standard_name, (depth, time))
 
     # Horizontal bars sit below the maps and so come out of the row's height; vertical
     # ones sit beside and come out of its width. Which it is has to be settled before
@@ -1941,17 +1955,34 @@ def field_suptitle(
     from ocean_skill.align import _time_name
     from ocean_skill.operators import resolve_dim
 
-    parts = [field_title(standard_name)]
+    extras = []
 
     vertical = resolve_dim(field, "Z")
     faceted_vertically = vertical is not None and vertical in (facet_dim, row_dim)
     if depth and not faceted_vertically:
-        parts.append(depth)
+        extras.append(depth)
 
     tname = _time_name(field)
     if tname is not None and tname in field.coords and field.coords[tname].ndim == 0:
-        parts.append(_scalar_time_label(field.coords[tname].values.item()))
+        extras.append(_scalar_time_label(field.coords[tname].values.item()))
 
+    return suptitle_text(standard_name, extras, label=label)
+
+
+def suptitle_text(standard_name, extras, *, label: str | None = None) -> str:
+    """Join a variable name with the context a collapsed figure has to spell out.
+
+    The package's one spelling of a default figure title: the variable's short name
+    (via :func:`field_title`) followed by whatever a ``select=`` has taken off the page
+    — a depth, an instant — each part dropped when it is empty, joined with `` · ``. A
+    ``label``, when given, prefixes the whole as ``label: subject``.
+
+    Shared by :func:`field_suptitle` (which derives ``extras`` from a single field's own
+    coords) and :func:`field_row` (which is handed the comparison's already-formatted
+    depth and time), so a one-field figure and a ``test | reference | difference`` row
+    name the same quantity the same way.
+    """
+    parts = [field_title(standard_name), *(e for e in extras if e)]
     subject = " · ".join(p for p in parts if p)
     return f"{label}: {subject}" if label and subject else subject
 
@@ -3443,6 +3474,8 @@ def render(spec, **kwargs: Any):
             item["aligned"],
             units=item.get("units"),
             standard_name=item.get("standard_name"),
+            depth=item.get("depth"),
+            time=item.get("time"),
             metrics=item.get("metrics"),
             **opts,
         )

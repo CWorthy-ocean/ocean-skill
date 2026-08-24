@@ -2186,7 +2186,21 @@ def render(spec, **kwargs: Any):
         opts.pop(drop, None)
 
     if family == "field_row":
-        return _field_row(spec.single, **opts)
+        # Default the row's overall title to variable · depth · time, exactly as the
+        # static field_row does (a single row has no left-edge row label to name the
+        # variable — that is field_grid's, and only when it stacks several). Kept in the
+        # dispatch, not _field_row, so _field_grid's per-row calls never pick it up and
+        # title every row where the grid means to carry one name up top.
+        from ocean_skill.plot.matplotlib_renderer import suptitle_text
+
+        item = spec.single
+        opts.setdefault(
+            "title",
+            suptitle_text(
+                item.get("standard_name"), (item.get("depth"), item.get("time"))
+            ),
+        )
+        return _field_row(item, **opts)
     if family == "field_grid":
         return _field_grid(spec.items, **opts)
     if family == "field_facet":
