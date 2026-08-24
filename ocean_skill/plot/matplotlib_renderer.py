@@ -933,6 +933,9 @@ def series(
             panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
         )
         ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
+        if panel.ylabel_color:
+            ax.yaxis.label.set_color(panel.ylabel_color)
+            ax.tick_params(axis="y", labelcolor=panel.ylabel_color)
         if ylim is not None:
             ax.set_ylim(*ylim)
         if panel.secondary:
@@ -941,6 +944,9 @@ def series(
             per_panel[-1] = (ax, handles)
             twin.set_ylabel(panel.secondary_ylabel or "", fontsize=scale["axes_label"])
             twin.tick_params(labelsize=scale["tick_label"])
+            if panel.secondary_ylabel_color:
+                twin.yaxis.label.set_color(panel.secondary_ylabel_color)
+                twin.tick_params(axis="y", labelcolor=panel.secondary_ylabel_color)
         _metrics_box(ax, panel, metrics_kwargs)
         _date_axis(ax, scale, tick_label_kwargs)
         if panel.residual:

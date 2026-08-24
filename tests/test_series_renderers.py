@@ -342,6 +342,80 @@ def test_secondary_y_false_stacks_them_instead():
     assert len(_matplotlib_titles(fig)) == 2
 
 
+# -- axis label colour ------------------------------------------------------------------
+
+
+def test_a_twin_panel_records_its_axis_label_colours():
+    """Each label's colour is read off its own axis's lines, not the other's."""
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    layout = _series.compose(items)
+    panel = layout.panels[0]
+    assert panel.ylabel_color == panel.lines[0].color
+    assert panel.secondary_ylabel_color == panel.secondary[0].color
+    assert panel.ylabel_color != panel.secondary_ylabel_color
+
+
+def test_an_axis_carrying_two_colours_leaves_its_label_uncoloured():
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    layout = _series.compose(items, encode={"color": "source"})
+    assert layout.panels[0].ylabel_color is None
+    assert layout.panels[0].secondary_ylabel_color is None
+
+
+def test_a_lone_panel_keeps_its_label_uncoloured():
+    """No twin axis means no ambiguity to resolve -- the label stays default."""
+    layout = _series.compose([_item()])
+    assert layout.panels[0].ylabel_color is None
+
+
+def test_twin_axis_label_colours_match_their_lines_in_both_renderers():
+    import holoviews as hv
+
+    items = [_item(), _item(SALINITY, units="1e-3", offset=-0.2)]
+    fig = render(_spec(items), renderer="matplotlib")
+    primary, twin = fig.axes  # per test_two_variables_go_to_a_secondary_axis_by_default
+    static = {
+        primary.get_ylabel(): primary.yaxis.label.get_color(),
+        twin.get_ylabel(): twin.yaxis.label.get_color(),
+    }
+
+    obj = render(_spec(items), renderer="holoviews")
+    overlay = obj.traverse(lambda x: x, [hv.Overlay])[0]
+    bokeh_fig = hv.render(overlay, backend="bokeh")  # runs the finalize hook
+    # The metrics box is an hv.Text with its own default "y" dimension, which under
+    # multi_y earns bokeh a third, unrelated axis (pre-existing, nothing to do with
+    # colour) -- restrict the comparison to the two real data axes.
+    interactive = {
+        axis.axis_label: axis.axis_label_text_color
+        for axis in bokeh_fig.yaxis
+        if axis.axis_label in static
+    }
+
+    assert static == interactive
+    assert set(static.values()) == {_style.COLOR_CYCLE[0], _style.COLOR_CYCLE[1]}
+
+    # the tick numbers take the same colour as their label, in both renderers
+    assert primary.yaxis.get_ticklabels()[0].get_color() == static[primary.get_ylabel()]
+    assert twin.yaxis.get_ticklabels()[0].get_color() == static[twin.get_ylabel()]
+    for axis in bokeh_fig.yaxis:
+        if axis.axis_label in interactive:
+            assert axis.major_label_text_color == interactive[axis.axis_label]
+
+
+def test_a_single_axis_label_is_not_coloured():
+    import holoviews as hv
+
+    fig = render(_spec([_item()]), renderer="matplotlib")
+    assert fig.axes[0].yaxis.label.get_color() not in _style.COLOR_CYCLE
+
+    obj = render(_spec([_item()]), renderer="holoviews")
+    overlay = obj.traverse(lambda x: x, [hv.Overlay])[0]
+    bokeh_fig = hv.render(overlay, backend="bokeh")
+    assert all(
+        axis.axis_label_text_color not in _style.COLOR_CYCLE for axis in bokeh_fig.yaxis
+    )
+
+
 def test_three_variables_become_three_rows():
     items = [
         _item(),

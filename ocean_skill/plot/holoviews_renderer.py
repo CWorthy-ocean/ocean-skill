@@ -1635,6 +1635,30 @@ def _series_curve(hv, line, dimensions, *, mark: str):
     return element
 
 
+def _axis_label_color_hook(panel):
+    """Bokeh finalize hook: colour each y axis's label like the lines it scales.
+
+    Bokeh's ``multi_y`` axes are not real twins the way matplotlib's are, so there is
+    no per-axis option for this -- only a hook reaching into the rendered figure after
+    the fact. Axes are matched to the panel by ``axis_label``, the one identity both
+    this hook and the static renderer's own labels share.
+    """
+    wanted = {
+        panel.ylabel: panel.ylabel_color,
+        (panel.secondary_ylabel or ""): panel.secondary_ylabel_color,
+    }
+
+    def hook(plot, element):
+        axes = getattr(getattr(plot, "state", None), "yaxis", None) or ()
+        for axis in axes:
+            color = wanted.get(axis.axis_label)
+            if color:
+                axis.axis_label_text_color = color
+                axis.major_label_text_color = color
+
+    return hook
+
+
 def _series(
     items,
     title=None,
@@ -1721,6 +1745,7 @@ def _series(
                 ),
                 multi_y=bool(panel.secondary),
                 fontsize=fontsize,
+                hooks=[_axis_label_color_hook(panel)],
             ),
         )
         if ylim is not None:

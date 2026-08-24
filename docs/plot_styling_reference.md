@@ -799,6 +799,11 @@ drawing nothing, for the same reason.
 `secondary_y=False` stacks the two-variable case instead. `rows=` or `cols=` (one, not
 both) facet on `variable`, `source`, `reference`, `depth` or `comparison`.
 
+On a two-variable panel, each y-axis label — and its tick numbers — take the colour of
+the lines drawn against that axis, so the left and right scales stay identifiable
+without reading the units. A single-axis panel keeps the default label colour; so does
+any axis whose lines don't share one colour (`encode={"color": "source"}`, for example).
+
 ### `series`-only parameters
 
 | Parameter | Default | Effect |
@@ -823,8 +828,8 @@ takes except `loc`, which the layout chooses so the key cannot land on the stati
 
 ### Static versus interactive
 
-Both renderers draw the same lines, colours, dash patterns, titles, axis labels and key
-*entries*. Two differences, both deliberate:
+Both renderers draw the same lines, colours, dash patterns, titles, axis labels, axis
+label colours and key *entries*. Two differences, both deliberate:
 
 * **Where the key goes.** When every panel shares one set of entries, the static renderer
   draws a single key below the figure; bokeh has no figure-level legend, so it always
