@@ -1042,6 +1042,29 @@ def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     )
 
 
+def _warn_if_interactive_only(rasterize, hover) -> None:
+    """Warn that ``rasterize``/``hover`` are the interactive renderer's, not this one.
+
+    Accepted here only so ``renderer="both"`` can pass one option set to each renderer
+    — the same accommodation :func:`locations` makes for ``tiles``. Bokeh needs
+    ``rasterize`` to avoid a per-cell Python loop on a large curvilinear mesh and
+    ``hover`` to draw a readout tool; matplotlib's ``pcolormesh`` is vectorized
+    regardless of mesh size and has no interactive readout to switch on, so neither
+    option has anything to do here. To shrink a static figure's draw time, thin the
+    data itself (``every=``, a coarser ``aggregate=``) rather than the mesh's rendering.
+    """
+    import warnings
+
+    given = (("rasterize", rasterize), ("hover", hover))
+    passed = [name for name, value in given if value is not None]
+    if passed:
+        warnings.warn(
+            f"{passed} only affect the interactive renderer and have no effect here "
+            "— pass renderer='holoviews' for them to apply.",
+            stacklevel=_stacklevel.find(),
+        )
+
+
 def field_row(
     aligned,
     *,
@@ -1071,6 +1094,8 @@ def field_row(
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
     fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -1129,9 +1154,14 @@ def field_row(
     (that is :func:`field_grid`'s doing, and only when it stacks several), so without
     this the figure said only *which sources*, never *what*. Pass ``title=""`` to drop
     it, or any string to replace it.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
+    interactive renderer's fix for a large mesh and do nothing here.
     """
     import matplotlib.pyplot as plt
 
+    _warn_if_interactive_only(rasterize, hover)
     if title is None:
         title = suptitle_text(standard_name, (depth, time))
 
@@ -1614,6 +1644,8 @@ def field_grid(
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
     fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -1664,9 +1696,14 @@ def field_grid(
     The ``*_kwargs`` parameters each merge onto their current defaults and map onto
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
     list; the same names mean the same thing here, applied per row.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
+    interactive renderer's fix for a large mesh and do nothing here.
     """
     import matplotlib.pyplot as plt
 
+    _warn_if_interactive_only(rasterize, hover)
     n = len(comparisons)
     proj = _map_projection(*(c["aligned"] for c in comparisons))
     canvas = resolve_canvas(size, zoom)
@@ -2014,6 +2051,8 @@ def field_facet(
     font_scale: float = 1.0,
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -2056,11 +2095,16 @@ def field_facet(
     The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
     metrics, and ``row_label_kwargs`` applies only when there is a ``row_dim``.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
+    interactive renderer's fix for a large mesh and do nothing here.
     """
     import matplotlib.pyplot as plt
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
+    _warn_if_interactive_only(rasterize, hover)
     canvas = resolve_canvas(size, zoom)
     title = (
         field_suptitle(
@@ -2348,6 +2392,8 @@ def skill_map(
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
     fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
 ):
     """Draw one map per skill metric: where the model agrees, metric by metric.
 
@@ -2389,6 +2435,10 @@ def skill_map(
     one thing distinguishing an interpolated metric map from a scored one here: where
     the surface has actual support, and where it is only filling a gap between
     stations.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
+    interactive renderer's fix for a large mesh and do nothing here.
     """
     import warnings
 
@@ -2398,6 +2448,7 @@ def skill_map(
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
+    _warn_if_interactive_only(rasterize, hover)
     if not items:
         raise ValueError("skill_map needs at least one comparison, got none")
     names = metric_panels(items[0]["skill"], metric_names)

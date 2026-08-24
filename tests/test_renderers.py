@@ -398,7 +398,8 @@ def _hv_row_title(**over):
 def test_a_single_comparison_row_titles_itself_from_variable_depth_time():
     """A lone row has no left-edge row label (that is field_grid's), so nothing said
     *what* — only which two sources. The suptitle now names variable · depth · time,
-    the same spelling a one-field figure gets from field_suptitle, in both renderers."""
+    the same spelling a one-field figure gets from field_suptitle, in both renderers.
+    """
     expected = "chlorophyll a · 0-10 m · 2010-01-22"
     assert _mpl_row()._suptitle.get_text() == expected
     assert expected in _hv_row_title()
@@ -406,7 +407,8 @@ def test_a_single_comparison_row_titles_itself_from_variable_depth_time():
 
 def test_an_explicit_row_title_wins_and_an_empty_one_drops_it():
     """The default only fills in when the caller named none — a string still overrides,
-    and ``title=""`` suppresses the suptitle outright, in both renderers."""
+    and ``title=""`` suppresses the suptitle outright, in both renderers.
+    """
     import holoviews as hv
     import matplotlib
     from bokeh.models import Div
@@ -426,14 +428,16 @@ def test_an_explicit_row_title_wins_and_an_empty_one_drops_it():
 
 def test_a_row_with_no_depth_or_time_titles_from_the_variable_alone():
     """A pair nothing narrowed vertically or in time (or a diagnostic with no vertical
-    axis, whose depth as_item drops) still gets the variable, with no stray separator."""
+    axis, whose depth as_item drops) still gets the variable, with no stray separator.
+    """
     assert _mpl_row(depth=None, time=None)._suptitle.get_text() == "chlorophyll a"
 
 
 def test_a_grid_does_not_borrow_the_single_rows_auto_title(two_rows):
     """The auto suptitle is the *single* row's: a grid names its variable down each
     row's left edge and carries one title up top, so per-row titling must not leak in.
-    Only the one overall title the caller passed should appear, once."""
+    Only the one overall title the caller passed should appear, once.
+    """
     import holoviews as hv
     from bokeh.models import Div
 
@@ -511,7 +515,7 @@ def test_colorbar_alignment_can_be_turned_off(two_rows):
 def test_row_labels_are_not_bold(two_rows):
     fig = render(PlotSpec(family="field_grid", items=two_rows, options={}))
     labels = [
-        getattr(ax, "_osk_row_label")
+        ax._osk_row_label
         for ax in fig.axes
         if getattr(ax, "_osk_row_label", None) is not None
     ]
@@ -528,7 +532,7 @@ def test_row_label_styling_is_still_overridable(two_rows):
         )
     )
     label = next(
-        getattr(ax, "_osk_row_label")
+        ax._osk_row_label
         for ax in fig.axes
         if getattr(ax, "_osk_row_label", None) is not None
     )
@@ -1027,3 +1031,100 @@ def test_matplotlib_domain_none_draws_nothing(two_rows):
         renderer="matplotlib",
     )
     assert _matplotlib_dashed_lines(fig) == []
+
+
+# --- rasterize/hover: the fix for a large interactive mesh hanging for minutes -------
+#
+# _field_row used to always draw the raw mesh with hover on. Once geoviews projects a
+# curvilinear grid to 2-D coordinates, that forces holoviews into a pure-Python loop
+# over every cell — fine at 80 cells, minutes at the size a real comparison's aligned
+# grid actually is. RASTERIZE_ABOVE_CELLS/_should_rasterize already existed for the
+# movie families (see tests/test_movie.py); these guard the still ones too.
+
+
+def _big_row_item(shape=(400, 550), **over) -> dict:
+    """Build a field_row item whose panels are past RASTERIZE_ABOVE_CELLS."""
+    ny, nx = shape
+    rng = np.random.default_rng(0)
+    coords = {"lat": np.linspace(18, 31, ny), "lon": np.linspace(260, 280, nx)}
+    test = xr.DataArray(
+        rng.normal(5.0, 1.0, shape), dims=("lat", "lon"), coords=coords
+    )
+    ref = xr.DataArray(rng.normal(5.0, 1.0, shape), dims=("lat", "lon"), coords=coords)
+    return {
+        "aligned": {"test": test, "reference": ref, "difference": test - ref},
+        "units": "mmol m-3",
+        "standard_name": "chlorophyll",
+        **over,
+    }
+
+
+def _hv_row(item, **options):
+    return render(
+        PlotSpec(family="field_row", items=[item], options=options),
+        renderer="holoviews",
+    )
+
+
+def _element_kinds(obj) -> list[str]:
+    return [type(n).__name__ for n in obj.traverse()]
+
+
+def test_a_big_field_row_mesh_is_rasterized_and_a_small_one_is_not():
+    from ocean_skill.plot.holoviews_renderer import RASTERIZE_ABOVE_CELLS
+
+    small, big = (8, 10), (400, 550)
+    assert small[0] * small[1] < RASTERIZE_ABOVE_CELLS < big[0] * big[1]
+
+    assert "QuadMesh" in _element_kinds(_hv_row(_big_row_item(small)))
+    big_kinds = _element_kinds(_hv_row(_big_row_item(big)))
+    assert "Image" in big_kinds, "a large mesh was not rasterized"
+    assert "QuadMesh" not in big_kinds
+
+
+def test_a_rasterized_field_row_renders_without_raising():
+    """Regression: hvplot's rasterize=True is lazy.
+
+    A still figure cannot hold that any better than a movie's HoloMap can (see
+    test_rasterizing_does_not_nest_two_dynamic_maps in test_movie.py) -- eager
+    aggregation has to survive for a still too.
+    """
+    import holoviews as hv
+
+    row = _hv_row(_big_row_item((400, 550)))
+    for panel in row:
+        hv.render(panel, backend="bokeh")  # must not raise
+
+
+def test_field_row_rasterize_false_opts_out():
+    """A field small enough to zoom into sharply can still ask for the raw mesh."""
+    row = _hv_row(_big_row_item((400, 550)), rasterize=False)
+    kinds = _element_kinds(row)
+    assert "QuadMesh" in kinds
+    assert "Image" not in kinds
+
+
+def test_field_row_hover_is_on_by_default_and_can_be_turned_off():
+    def tools(**options):
+        row = _hv_row(_row_item(), **options)
+        mesh = next(n for n in row.traverse() if getattr(n, "vdims", None))
+        return mesh.opts.get("plot").kwargs.get("tools", [])
+
+    assert "hover" in tools()
+    assert "hover" not in tools(hover=False)
+
+
+def test_static_field_row_accepts_rasterize_and_hover_with_a_warning():
+    """Check that renderer='both' can hand one option set to each renderer.
+
+    Same precedent as ``tiles=`` in ``matplotlib_renderer.locations`` -- the static
+    side must not raise on options that are only the interactive renderer's.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    spec = PlotSpec(
+        family="field_row", items=[_row_item()], options={"rasterize": False}
+    )
+    with pytest.warns(UserWarning, match="only affect the interactive renderer"):
+        render(spec, renderer="matplotlib")
