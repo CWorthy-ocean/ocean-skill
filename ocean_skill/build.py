@@ -63,6 +63,7 @@ from ocean_skill.cf import find_coord
 __all__ = [
     "ROMS_STANDARD_NAMES",
     "add_catalog",
+    "add_copernicus_source",
     "add_erddap_source",
     "add_source",
     "add_sources",
@@ -2046,6 +2047,104 @@ def add_erddap_source(
     cat[name] = reader
     cat.aliases[name] = name
     return reader
+
+
+#: The two ARCO chunking layouts Copernicus Marine publishes for each dataset, and how
+#: each is surfaced in a catalog: the ``copernicusmarine`` ``service`` value that opens
+#: it, the nickname ``suffix`` a user selects by, and the human-facing ``chunking``
+#: label recorded in metadata. timeChunked (``arco-time-series``) chunks the full time
+#: axis with a small spatial footprint -- fast for a time series at a point/small area;
+#: geoChunked (``arco-geo-series``) chunks broad space with few time steps -- fast for
+#: maps. See :class:`ocean_skill.readers.CopernicusMarineReader`.
+COPERNICUS_SERVICES: dict[str, dict[str, str]] = {
+    "arco-time-series": {"suffix": "timeseries", "chunking": "time-series"},
+    "arco-geo-series": {"suffix": "geo", "chunking": "geo"},
+}
+
+
+def add_copernicus_source(
+    cat,
+    name: str,
+    dataset_id: str,
+    *,
+    services: tuple[str, ...] = ("arco-time-series", "arco-geo-series"),
+    dataset_version: str | None = None,
+    probe: bool = True,
+    reader_kwargs: dict[str, Any] | None = None,
+    **metadata: Any,
+):
+    """Add a Copernicus Marine dataset to ``cat`` — one entry per ARCO chunking layout.
+
+    Copernicus Marine publishes each dataset in two chunkings, and which one you want
+    depends on the access pattern, so this adds a *separate, separately-named* entry for
+    each requested ``service`` rather than picking one for you. The nickname gains a
+    suffix the user selects by — ``"<name>_timeseries"`` (timeChunked; fast time series
+    at a point/small area) and ``"<name>_geo"`` (geoChunked; fast spatial maps) — and
+    each entry records its layout under the ``chunking`` metadata key (plus ``service``
+    and ``dataset_id``) so the choice is visible in ``osk.find()`` and the written YAML.
+
+    Each entry is a :class:`ocean_skill.readers.CopernicusMarineReader`, i.e. every read
+    is delegated to ``copernicusmarine.open_dataset`` (authenticated); the anonymous
+    store URL cannot be read for data (see that class). Only the stable ``dataset_id``
+    is stored — the toolbox resolves the current version at read time — so pass
+    ``dataset_version`` only to pin one.
+
+    Parameters
+    ----------
+    cat, name
+        Catalog and the *base* entry name; the service suffix is appended per entry.
+    dataset_id
+        The Copernicus Marine dataset ID, e.g.
+        ``"cmems_obs-oc_glo_bgc-plankton_my_l4-gapfree-multi-4km_P1D"``.
+    services
+        Which ARCO layouts to add, from :data:`COPERNICUS_SERVICES`. Defaults to both.
+        Pass a single-element tuple to add just one.
+    probe
+        Open each entry once at build time to derive variables/extents (the default).
+        This needs ``copernicusmarine`` installed and a valid ``copernicusmarine
+        login``, and costs one authenticated open per entry. Set ``False`` to record the
+        entry without opening it (no metadata beyond what you pass in).
+    reader_kwargs
+        Extra keyword arguments forwarded to ``copernicusmarine.open_dataset`` (e.g.
+        ``variables=``); ``dataset_id``/``service``/``dataset_version`` are supplied
+        here.
+    **metadata
+        Extra metadata applied to every entry; caller values override derived ones.
+
+    Returns
+    -------
+    dict[str, Any]
+        The readers added, keyed by their suffixed entry name.
+    """
+    added: dict[str, Any] = {}
+    for service in services:
+        try:
+            spec = COPERNICUS_SERVICES[service]
+        except KeyError:
+            raise ValueError(
+                f"unknown Copernicus service {service!r}; expected one of "
+                f"{sorted(COPERNICUS_SERVICES)}"
+            ) from None
+        entry_name = f"{name}_{spec['suffix']}"
+        rk: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "service": service,
+            **(reader_kwargs or {}),
+        }
+        if dataset_version is not None:
+            rk["dataset_version"] = dataset_version
+        added[entry_name] = add_source(
+            cat,
+            entry_name,
+            reader="ocean_skill.readers:CopernicusMarineReader",
+            reader_kwargs=rk,
+            probe=probe,
+            dataset_id=dataset_id,
+            service=service,
+            chunking=spec["chunking"],
+            **metadata,
+        )
+    return added
 
 
 # def add_erddap_catalog(

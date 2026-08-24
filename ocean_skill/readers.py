@@ -12,7 +12,7 @@ from typing import ClassVar
 
 from intake.readers.readers import BaseReader
 
-__all__ = ["PoochTarNetCDF"]
+__all__ = ["CopernicusMarineReader", "PoochTarNetCDF"]
 
 
 class PoochTarNetCDF(BaseReader):
@@ -85,3 +85,66 @@ class PoochTarNetCDF(BaseReader):
                 f"No filename-named variables found among {len(paths)} files"
             )
         return xr.merge(pieces, compat="override", join="override")
+
+
+class CopernicusMarineReader(BaseReader):
+    """Open a Copernicus Marine ARCO store by ``dataset_id`` via ``copernicusmarine``.
+
+    Copernicus Marine's ARCO Zarr stores on CloudFerro are not anonymously readable at
+    the *chunk* level -- only the Zarr metadata (``.zmetadata``/``.zarray``) is public.
+    A plain anonymous ``xarray.open_dataset`` of the store URL therefore *opens* (it
+    only reads metadata) but then 403s on the first data chunk: an empty land/ice tile
+    comes back as ``403 AccessDenied`` rather than ``404`` (the anonymous caller lacks
+    ``s3:ListBucket``), so zarr's missing-chunk-is-``fill_value`` path -- which triggers
+    on a 404 -- never runs and the read raises. The toolbox holds the login
+    (``copernicusmarine login`` -> ``~/.copernicusmarine``), mints the short-lived S3
+    auth, and resolves the current dataset version, so a catalog stores only the stable
+    ``dataset_id`` and delegates every read here (as roms-tools' GLORYS loader does).
+
+    ``service`` selects which chunking layout to open -- CMEMS publishes each dataset in
+    both:
+
+    * ``"arco-time-series"`` (timeChunked): the full time axis per chunk with a small
+      spatial footprint -- fast for a time series at a point/small area, slow for maps.
+    * ``"arco-geo-series"`` (geoChunked): broad space per chunk with few time steps --
+      fast for spatial maps at a few dates.
+
+    ``copernicusmarine`` is an *optional* dependency imported here rather than declared
+    in ``imports`` so that loading a catalog that merely *contains* Copernicus entries
+    never requires it -- only actually reading one does, and then with a clear message.
+    """
+
+    output_instance = "xarray:Dataset"
+
+    def _read(
+        self,
+        dataset_id,
+        service="arco-time-series",
+        dataset_version=None,
+        check_login=True,
+        **kwargs,
+    ):
+        from importlib.util import find_spec
+
+        if find_spec("copernicusmarine") is None:
+            raise RuntimeError(
+                f"Reading the Copernicus Marine source {dataset_id!r} needs the "
+                "'copernicusmarine' package. Install it (e.g. `pip install "
+                "copernicusmarine`) and authenticate once with "
+                "`copernicusmarine login`."
+            )
+        import copernicusmarine
+
+        # Fail early and legibly on a missing/expired login rather than letting the
+        # anonymous-style 403 resurface deeper in the stack (see the class docstring).
+        if check_login and not copernicusmarine.login(check_credentials_valid=True):
+            raise RuntimeError(
+                f"Not authenticated with Copernicus Marine, so {dataset_id!r} cannot "
+                "be read. Run `copernicusmarine login` (free CMEMS account) and retry."
+            )
+        opts = dict(kwargs)
+        if dataset_version is not None:
+            opts["dataset_version"] = dataset_version
+        return copernicusmarine.open_dataset(
+            dataset_id=dataset_id, service=service, **opts
+        )
