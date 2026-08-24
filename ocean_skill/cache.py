@@ -305,6 +305,27 @@ def load(key: str, kind: str = "aligned"):
     return ds
 
 
+#: Encoding keys that carry a codec object. Datasets read from a source zarr store
+#: inherit these (e.g. a ``numcodecs.blosc.Blosc`` compressor), and zarr v3's codec
+#: pipeline rejects the v2-style objects on write ("Expected a BytesBytesCodec"). We
+#: never want the source's codecs on our small cache stores anyway, so drop them and
+#: let zarr choose its own v3 defaults. dtype/chunks/fill_value are left intact.
+_CODEC_ENCODING_KEYS = ("compressor", "compressors", "filters", "serializer", "codecs")
+
+
+def _strip_codec_encoding(ds):
+    """Return ``ds`` with inherited codec encoding removed from every variable.
+
+    Works on a shallow copy so the caller's live dataset keeps its encoding: xarray's
+    shallow copy gives each variable an independent ``encoding`` dict over shared data.
+    """
+    out = ds.copy(deep=False)
+    for var in (*out.variables.values(),):
+        for k in _CODEC_ENCODING_KEYS:
+            var.encoding.pop(k, None)
+    return out
+
+
 def save(key: str, ds, kind: str = "aligned") -> None:
     """Write ``ds`` to the cache under ``key``, replacing any existing entry.
 
@@ -328,9 +349,8 @@ def save(key: str, ds, kind: str = "aligned") -> None:
         # still holding, and it should not sprout a private bookkeeping attr.
         # consolidated=False because zarr v3 warns that consolidated metadata is
         # outside its spec; these stores are small, so the read cost is noise.
-        ds.assign_attrs({_ORDER_ATTR: list(ds.data_vars)}).to_zarr(
-            tmp, mode="w", consolidated=False
-        )
+        out = _strip_codec_encoding(ds.assign_attrs({_ORDER_ATTR: list(ds.data_vars)}))
+        out.to_zarr(tmp, mode="w", consolidated=False)
         shutil.rmtree(store, ignore_errors=True)
         os.replace(tmp, store)
     except Exception as exc:
