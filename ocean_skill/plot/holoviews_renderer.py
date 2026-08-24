@@ -150,17 +150,23 @@ def _panel_geometry(
 
 
 def _output_projection(da):
-    """Return the map frame for ``da``: centred on 180 when longitudes pass 180.
+    """Return the map frame for ``da``: centred on 180 when it straddles the dateline.
 
-    A 0-360 lane straddling the antimeridian (a Pacific model, whose aligned pair
-    ``ocean_skill.align.align`` keeps in 0-360 — see ``natural_convention``) splits
-    at the edges of the default centre-0 frame; centring on 180 keeps it one piece.
-    ``None`` (hvplot's own default frame) everywhere else, exactly as before.
+    A lane straddling the antimeridian (a Pacific model) splits at the edges of the
+    default centre-0 frame, leaving the basin torn across both edges and a blank
+    Atlantic in the middle; centring on 180 keeps it one piece. ``None`` (hvplot's own
+    default frame) everywhere else.
+
+    Straddling is decided by :func:`~ocean_skill.align.natural_convention`, the same
+    span-based test ``align`` and ``_tiles_for`` use — not by ``lon.max() > 180``, which
+    only sees a straddle when the coordinates happen to be *stored* in 0-360. A pair
+    aligned onto a ±180 reference grid keeps a straddling Pacific domain's longitudes in
+    ±180 (``lon.max() <= 180``) while it still straddles, and the raw-value test missed
+    exactly that case — the one this frame exists for.
     """
     if "lon" not in getattr(da, "coords", ()):
         return None
-    lon = np.asarray(da["lon"], dtype="float64")
-    if np.isfinite(lon).any() and float(np.nanmax(lon)) > 180.0:
+    if natural_convention(da) == "0-360":
         import cartopy.crs as ccrs
 
         return ccrs.PlateCarree(central_longitude=180.0)
