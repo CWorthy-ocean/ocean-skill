@@ -8,8 +8,10 @@ Four caveats, all of them real and all of them reported by the pipeline rather t
 buried here:
 
 * **Cadence.** The mooring samples every 15 minutes and the product is monthly, so the
-  mooring is binned to monthly means. That is asked for explicitly — coarsening the
-  *reference* changes the thing being scored against, so it is never done silently.
+  mooring is binned to monthly means. Left alone, alignment would do exactly that on
+  its own and warn about it — coarsening the *reference* changes the thing being scored
+  against, worth saying even though it is not refused — but it is asked for explicitly
+  here, which puts the choice on the record and runs quietly.
 * **Depth.** This entry is titled "CTD (30 meters)" and its ``z`` column is a flat 0.0,
   but its pressure record says otherwise: the instrument sits near 9 m in one deployment
   and near 34 m in another. ``tabular.depth_of`` reads pressure and says so; the product

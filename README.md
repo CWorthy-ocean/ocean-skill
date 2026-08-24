@@ -12,8 +12,8 @@ transform, curvilinear regridding) live behind a thin adapter.
 ## Concepts
 
 - **reference / test** — roles assigned *at compare time* (not in the catalog). They set
-  the difference direction (`test − reference`), alignment direction (test → reference),
-  and styling (reference solid, test dashed).
+  the difference direction (`test − reference`), which lane moves during alignment (the
+  finer one, whichever that is), and styling (reference solid, test dashed).
 - **entities** — a thing-being-compared is a `(source, variable, selection)` over time /
   depth / location. Any two entities can be compared; one alone just plots.
 - **featureType drives the plot recipe** — `grid`/`timeSeries`/`profile`/`trajectory`/…
@@ -94,8 +94,9 @@ papa = osk.compare(
     reference="ooi-gp03flma-rim01-02-ctdmog040",   # a Station Papa CTD
     test="oceansoda_ethz",                          # a monthly gridded product
     variables=["temperature"],
-    # the mooring samples every 15 minutes and the product is monthly, so say how the
-    # mooring is binned — coarsening the *reference* is never done silently
+    # the mooring samples every 15 minutes and the product is monthly. Left alone,
+    # alignment coarsens the mooring into the product's own months itself and warns
+    # about it; saying so here puts the choice on the record and runs quietly
     aggregate={"time": {"resample": "MS", "reduce": "mean"}},
 )
 

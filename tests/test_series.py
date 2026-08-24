@@ -182,8 +182,10 @@ def test_a_conservative_method_cannot_sample_a_point():
 def monthly_station(**kwargs):
     """Return a mooring pre-aggregated to monthly means.
 
-    What a comparison against a monthly product requires: the alignment refuses to
-    coarsen a reference on its own.
+    Left alone, aligning a 15-minute mooring against a monthly product coarsens the
+    mooring itself (see :func:`test_a_finer_reference_is_averaged_with_a_warning`) and
+    warns about it. Doing it here, deliberately, puts the choice on the record instead
+    and runs quietly.
     """
     from ocean_skill import operators
 
@@ -208,21 +210,31 @@ def test_a_station_reference_is_sampled_rather_than_regridded():
     assert not bool(np.isnan(out["reference"]).any())
 
 
-def test_a_reference_finer_than_the_test_is_refused_with_the_fix():
-    """A 15-minute mooring against a monthly product, roles as they should be.
+def test_a_finer_reference_is_averaged_with_a_warning():
+    """A 15-minute mooring against a monthly product, with nothing pre-aggregated.
 
-    The refusal is deliberate and not this family's: coarsening the *reference* would
-    change the thing being scored against, so it has to be asked for. The message names
-    the aggregate spec that does it, which is what ``monthly_station`` above applies.
+    The old behavior refused outright; now the mooring is coarsened into the
+    product's own months automatically, the same way a fine satellite reference gets
+    regridded onto a coarse model grid in space — but it warns, since coarsening the
+    reference does change what is being scored against. ``monthly_station`` above is
+    the quiet, deliberate way to reach the same place.
     """
-    with pytest.raises(ValueError, match="reference is the finer of the two"):
-        align.align(monthly_grid(), station(), over="time")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        out = align.align(monthly_grid(), station(), over="time")
+    assert any("reference is the finer of the two" in str(w.message) for w in record)
+    assert out.attrs["match_method"] == "mean"
+    assert out.attrs["match_target"] == "test"
+    assert set(out.data_vars) == {"test", "reference", "difference"}
+    assert 6 <= out.sizes["time"] <= 7
+    assert not bool(np.isnan(out["reference"]).any())
 
 
 def test_the_matching_and_the_sampling_both_go_on_the_record():
     """Two decisions were made for the caller, so both are written down."""
     out = _quiet_align(monthly_grid(), monthly_station())
     assert out.attrs["match_method"] in ("nearest", "mean", "exact")
+    assert out.attrs["match_target"] in ("test", "reference")
     assert "match_reason" in out.attrs
     assert out.attrs["scored_over"] == "time"
     assert out.attrs["cell_km"] > 0

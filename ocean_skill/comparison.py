@@ -1,12 +1,12 @@
 """The compare layer: ``Comparison`` (one pair) and ``compare`` (fan-out).
 
 A :class:`Comparison` holds a reference and a test source for one variable plus a
-selection; it reads both, reduces them to a comparable 2-D field, aligns them
-(test → reference), and exposes the difference, metrics and a plot. Roles are assigned
-here, not in the catalog: ``diff = test − reference``, alignment brings test onto
-reference. :func:`compare` fans over the reference × test × variable × depth
-cross-product and collects the results into a :class:`ComparisonSet` that can write one
-tidy metrics table and one stacked figure.
+selection; it reads both, reduces them to a comparable 2-D field, aligns them onto
+whichever lane is coarser, and exposes the difference, metrics and a plot. Roles are
+assigned here, not in the catalog: ``diff = test − reference`` always, regardless of
+which lane's axis the alignment lands on. :func:`compare` fans over the reference ×
+test × variable × depth cross-product and collects the results into a
+:class:`ComparisonSet` that can write one tidy metrics table and one stacked figure.
 """
 
 from __future__ import annotations
@@ -1604,6 +1604,7 @@ class Comparison:
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
             metadata=self._reference_metadata(),
+            test_metadata=self._test_metadata(),
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
@@ -1636,6 +1637,20 @@ class Comparison:
             # unreadable catalog, a stub in a test. None is a reason a comparison
             # cannot run — the metadata only refines a default the matching can reach
             # on its own, and which it says out loud when it has to.
+            return None
+
+    def _test_metadata(self) -> dict[str, Any] | None:
+        """Return the test's catalog metadata, or ``None`` if it will not resolve.
+
+        The mirror of :meth:`_reference_metadata`: only wanted when a finer reference
+        forces the axis matching to ask the test lane whether *its* steps are
+        averages or instants (see :func:`ocean_skill.align.resolve_match_method`).
+        """
+        from ocean_skill.catalog import resolve
+
+        try:
+            return resolve(self.test_name).metadata
+        except Exception:
             return None
 
     @property
@@ -2875,10 +2890,11 @@ def compare(
 
     ``over`` is the third answer to "what happens to the time axis", and the one for a
     reference that varies in time as well as space. ``over="time"`` keeps the axis,
-    matches the two lanes along it (:func:`ocean_skill.align.match_axis` — a finer test
-    is averaged into the reference's bins) and computes every metric *cell by cell*
-    along it, so the figure becomes one map per metric with the overall value beside it.
-    ``over="Z"`` does the same down each water column.
+    matches the two lanes along it (:func:`ocean_skill.align.match_axis` — the finer
+    lane is averaged into the coarser one's bins, whichever lane that is; a finer
+    reference is coarsened this way too, with a warning) and computes every metric
+    *cell by cell* along it, so the figure becomes one map per metric with the overall
+    value beside it. ``over="Z"`` does the same down each water column.
     ``time_method``/``tolerance``/``bin_anchor`` tune the matching, ``min_pairs`` how
     many pairs a cell needs before it is reported, and ``metrics`` which maps are
     computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).

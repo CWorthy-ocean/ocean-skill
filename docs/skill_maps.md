@@ -65,43 +65,52 @@ value in each panel's title instead of its corner.
 
 This is the part you cannot infer from the signature, and the part most likely to matter.
 
-**Alignment in time echoes alignment in space, with one difference.** Both pick
-direction by resolution rather than by role — how the finer side moves depends on how
-much finer it is — but only space is allowed to move the reference: a fine satellite
-reference scored against a coarse model lands *on* the model's grid (see
-[`align()`](../ocean_skill/align.py)'s `_regrid_target`), while in time the reference's
-axis is always the frame and a reference finer than the test is refused rather than
-coarsened.
+**Alignment in time now matches alignment in space exactly.** Both pick direction by
+resolution rather than by role — how the finer side moves depends on how much finer it
+is, and either lane may be the one that moves. A fine satellite reference scored
+against a coarse model lands *on* the model's grid (see
+[`align()`](../ocean_skill/align.py)'s `_regrid_target`); a fine mooring reference
+scored against a coarse monthly product lands *on* the product's months the same way
+(`resolve_match_method`) — with a warning, since coarsening the reference does change
+what is being scored against, even though it is not refused.
 
 | Situation | What happens | Spatial analogue |
 |---|---|---|
 | Test much finer (hourly model, daily product) | test steps are **averaged into** the reference's bins | `conservative_normed` |
 | Comparable cadences, offset stamps (a daily mean at 12:00 vs a composite at 00:00) | steps are **paired** by nearest match within half a bin | `bilinear` |
 | Reference is instantaneous rather than a composite | test is **sampled** at those instants | `bilinear` |
-| Reference finer than the test | **refused**, naming both cadences | no counterpart: space regrids the finer lane down instead of refusing |
+| Reference finer than the test (a 15-minute mooring against a monthly product) | reference steps are **averaged into** the test's bins, with a warning | the same finer-onto-coarser regrid |
 
 Averaging the finer lane is a default rather than something to request for the same
 reason area-averaging is: nobody has to ask for `conservative_normed` either. And the
 binning happens *before* the regrid, which is not just tidier — it turns 8760 regridded
-fields into 365.
+fields into 365. Whichever lane is finer, coarsening it is the default; only when the
+*reference* is the one being coarsened does it also warn, naming both cadences and two
+ways out — an explicit `aggregate={"reference": {"time": {"resample": ..., "reduce":
+"mean"}}, "test": {}}` to spell out the same thing deliberately (and silence the
+warning), or swapping which lane is the test.
 
-**Bin edges come from the reference's own stamps**, as cell edges in longitude and
-latitude do. Whether a stamp marks the *start* of its bin or the *middle* is read off the
-stamps themselves: a product that labels a bin with its first instant lands on a period
-boundary (midnight for a daily or 8-day composite, the first of the month for a monthly
-one), while one that labels the middle deliberately does not — WOA and OceanSODA stamp the
-15th, a ROMS daily average noon. Both spellings therefore bin their own period correctly.
-Override with `bin_anchor="start"`/`"center"` if a product does something else.
+**Bin edges come from the coarser lane's own stamps** — the frame, whichever lane that
+turns out to be — as cell edges in longitude and latitude do. Whether a stamp marks the
+*start* of its bin or the *middle* is read off the stamps themselves: a product that
+labels a bin with its first instant lands on a period boundary (midnight for a daily or
+8-day composite, the first of the month for a monthly one), while one that labels the
+middle deliberately does not — WOA and OceanSODA stamp the 15th, a ROMS daily average
+noon. Both spellings therefore bin their own period correctly. Override with
+`bin_anchor="start"`/`"center"` if a product does something else.
 
 **Composite or snapshot** is read from CF `cell_methods` on the variable, then from
-`period` in the catalog entry. When neither says, the reference is taken to be a composite
+`period` in the catalog entry — asked of whichever lane is finer, since that is the one
+being averaged or sampled. When neither says, the finer lane is taken to be a composite
 and you get a warning naming the assumption, the override (`time_method="nearest"`) and
 the permanent fix. That is the same warn-and-proceed `align()` already does for units it
 cannot verify.
 
 Everything the matching decided lands in the aligned result's `attrs`, beside
-`regrid_method`: `match_method`, `match_reason`, `n_matched`, `bin_anchor`, how many bins
-came out empty or short. Both are choices a reader of the numbers is entitled to see.
+`regrid_method`: `match_method`, `match_target` (which lane's stamps the shared axis
+carries — `"reference"` for the historical direction, `"test"` for the mirror),
+`match_reason`, `n_matched`, `bin_anchor`, how many bins came out empty or short. Both
+are choices a reader of the numbers is entitled to see.
 
 ```python
 scored[0].aligned.attrs["match_reason"]
@@ -136,7 +145,8 @@ is up to you:
 
 - the reference lane is cropped to the model's own extent **before** it is read, not after
   (`align()` crops it either way; doing it early is what saves the memory);
-- the test is binned down to the reference's cadence before anything is regridded;
+- the finer lane is binned down to the coarser one's cadence before anything is
+  regridded;
 - coverage is computed once rather than per step when the model's valid cells do not move,
   which for a land mask is always;
 - and `select={"time": ...}` is still yours to narrow. A lane above ~2 GB says so before
