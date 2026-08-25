@@ -116,7 +116,7 @@ def test_equivalent_names_spans_the_whole_concept():
 def test_one_short_key_finds_every_registered_spelling(stored_as):
     """Datasets disagree on chlorophyll's CF name; "chlorophyll" must find them all.
 
-    The MODIS spelling here is a real mismatch found in ``catalogs/modis_aqua.yaml``
+    The MODIS spelling here is a real mismatch found in ``ocean_skill/catalogs/modis_aqua.yaml``
     (it drops the ``_a_``), not a hypothetical — before it was registered,
     ``find_variable(modis_ds, "chlorophyll")`` returned ``None``.
     """

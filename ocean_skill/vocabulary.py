@@ -117,7 +117,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # Kept for the "seawater" (no underscore) spelling seen in the wild --
             # it is NOT a CF name, so it matches only products that write it that way.
             "seawater_alkalinity_per_unit_mass_expressed_as_mole_equivalent",
-            # OceanSODA-ETHZ's `talk` (catalogs/oceansoda.yaml). Also not CF: the
+            # OceanSODA-ETHZ's `talk` (ocean_skill/catalogs/oceansoda.yaml). Also not CF: the
             # table has no total_alkalinity_in_sea_water entry or alias. Without it,
             # find(variable="alkalinity") returned GLODAP and ROMS but silently
             # dropped OceanSODA, and compare() would not pair them.
@@ -140,7 +140,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # of asking. MUR alone declares sea_surface_foundation_temperature.
             "sea_surface_foundation_temperature",
             # The plain surface spelling, used by every gridded surface product we
-            # carry (OceanSODA-ETHZ's `temperature`, catalogs/oceansoda.yaml, as well
+            # carry (OceanSODA-ETHZ's `temperature`, ocean_skill/catalogs/oceansoda.yaml, as well
             # as the CoastWatch L3 and Geo-Polar SST fields). The sampling depth is a
             # property of where the measurement was taken, which a comparison reports
             # separately (the metrics row's `obs_depth`, and align_series' depth
@@ -216,7 +216,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "standard_name": "mass_concentration_of_chlorophyll_a_in_sea_water",
         "aliases": [
             "mass_concentration_of_chlorophyll_in_sea_water",
-            # OOI Papa's profiler-mounted fluorometer (catalogs/ooi_papa.yaml) --
+            # OOI Papa's profiler-mounted fluorometer (ocean_skill/catalogs/ooi_papa.yaml) --
             # same quantity, a different instrument's naming convention.
             "mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled",
             # NOAA CoastWatch's ERDDAP griddap MODIS datasets (erdMH1chla1day and

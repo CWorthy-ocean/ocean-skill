@@ -49,7 +49,7 @@ Homepage = "https://github.com/"   # TODO: set when a remote exists
 include = ["ocean_skill*"]
 
 [tool.setuptools.package-data]
-# Ship packaged example catalogs and any YAML assets inside the wheel.
+# Ship the packaged reference catalogs and any YAML assets inside the wheel.
 "*" = ["*.yaml", "*.yml"]
 
 # --- ruff: linter + formatter (mirrors cstar-forge / roms-tools house style) ---

@@ -2329,9 +2329,11 @@ class ComparisonSet:
 
         if not self.comparisons:
             raise ValueError(
-                "no comparisons to plot: every pair was skipped. Check that the "
-                "reference actually offers the requested variables (its catalog "
-                "metadata lists them under 'variables')."
+                "no comparisons to plot: every pair was skipped. See the "
+                "'skipped ...' lines compare() printed for why each one was "
+                "dropped -- typically the reference not actually offering the "
+                "requested variable (its catalog metadata lists them under "
+                "'variables') or a real-but-missing time/depth in that source."
             )
         items = self._items()
         first = self.comparisons[0]
@@ -2399,7 +2401,11 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         if not self.comparisons:
-            raise ValueError("no comparisons to animate: every pair was skipped")
+            raise ValueError(
+                "no comparisons to animate: every pair was skipped. See the "
+                "'skipped ...' lines compare() printed for why each one was "
+                "dropped."
+            )
         series = [c for c in self.comparisons if c.is_series]
         if series:
             raise ValueError(
@@ -3165,6 +3171,19 @@ def compare(
         return resolve_and_report(v, context="compare variables=") if isinstance(v, str) else v
 
     variables = [_resolve_one(v) for v in variables]
+
+    # A source name that resolves nowhere can never contribute a comparison, no
+    # matter how `variables`/`depths`/`times` fan out -- unlike a real source
+    # missing one variable or one time step, there is no `skip_missing=False`
+    # sense in which trying anyway could still succeed. Checking here, once
+    # `variables` itself is known well-formed, lets the resolver's own KeyError
+    # (name + "Did you mean...?" + a pointer to osk.find()) reach the caller
+    # directly, rather than this typo being silently absorbed by `_offers()`'s
+    # "unknown source, let the read decide" branch below and only surfacing many
+    # pairs later as an empty ComparisonSet with no indication *why* every pair
+    # was skipped.
+    for name in {*refs, *tests}:
+        resolve(name)
 
     def _offers(source: str, variable: Any) -> bool:
         """Report whether the source advertises this variable (or an equivalent).

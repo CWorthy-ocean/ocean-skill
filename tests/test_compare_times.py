@@ -627,6 +627,31 @@ def test_skip_missing_false_reraises_a_bin_resolution_failure():
             )
 
 
+def test_an_unresolvable_source_name_is_never_skippable():
+    """Unlike a missing variable or a bin-resolution failure, a source name that
+    resolves nowhere can never contribute a comparison no matter how the fan-out
+    proceeds -- so it is checked once, up front, and raised even under the
+    default ``skip_missing=True`` rather than silently dropping every pair and
+    surfacing later as an empty, unexplained ComparisonSet.
+    """
+    declared = {"model": mock.Mock(metadata={"variables": []})}
+
+    def resolve(name):
+        try:
+            return declared[name]
+        except KeyError:
+            raise KeyError(f"Unknown source {name!r}.") from None
+
+    with mock.patch("ocean_skill.catalog.resolve", resolve):
+        with pytest.raises(KeyError, match="woa23_nitrate_typo"):
+            comparison.compare(
+                reference=["woa23_nitrate_typo"],
+                test=["model"],
+                variables=["nitrate"],
+                aggregate={"time": "mean"},
+            )
+
+
 # -- metrics/__repr__/pooling: a fanned time entry survives past the fan ---------
 
 
