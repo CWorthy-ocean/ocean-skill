@@ -73,9 +73,20 @@ def isolated_catalogs(tmp_path, monkeypatch):
     Builds the catalog programmatically (the only correct way to make v2), sets
     ``$OCEAN_SKILL_CATALOGS`` to the temp dir, and chdirs away from the repo's own
     ``./catalogs``. The entry has metadata but is never read. Returns the temp dir.
+
+    Discovery's search path also always includes the packaged reference catalogs
+    (``ocean_skill/catalogs/``, unconditionally, so they resolve regardless of
+    cwd) -- not something env/cwd can steer away from, unlike the other three
+    tiers. A test asserting exact discovery contents or exact parse-call counts
+    would otherwise also see the real shipped catalogs, so ``search_paths`` is
+    wrapped to drop just that one packaged entry, leaving env/cwd behavior (and
+    the real user-config-dir tier, deliberately not isolated here either) as
+    ``search_paths`` would actually compute them.
     """
     import intake
     from intake.readers import datatypes, readers
+
+    from ocean_skill import catalog
 
     cats = tmp_path / "cats"
     cats.mkdir()
@@ -92,4 +103,12 @@ def isolated_catalogs(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(cats))
     monkeypatch.chdir(tmp_path)
+
+    packaged = catalog.Path(catalog.__file__).parent / "catalogs"
+    real_search_paths = catalog.search_paths
+    monkeypatch.setattr(
+        catalog,
+        "search_paths",
+        lambda: [p for p in real_search_paths() if p != packaged],
+    )
     return cats

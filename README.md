@@ -382,8 +382,8 @@ directory; set `$OCEAN_SKILL_DIR` to move it, or fsspec's own
 ## Layout
 
 ```
-ocean_skill/       package (flat layout)
-catalogs/          project-local intake catalogs (auto-discovered)
+ocean_skill/       package (flat layout); ocean_skill/catalogs/ ships the reference catalogs
+catalogs/          project-local catalogs you build (auto-discovered; gitignored)
 tests/             pytest suite
 docs/              MyST / Jupyter Book docs + notebooks
 examples/          short runnable scripts

@@ -225,7 +225,7 @@ def catalog_entry(url: str) -> dict:
 
         build_catalog(
             {nickname(u): catalog_entry(u) for u in urls if nickname(u)},
-            "catalogs/modis_aqua.yaml", title="MODIS Aqua",
+            "ocean_skill/catalogs/modis_aqua.yaml", title="MODIS Aqua",
         )
     """
     return {"url": url, **catalog_metadata(url)}

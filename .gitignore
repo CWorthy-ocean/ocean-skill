@@ -21,10 +21,10 @@ output/
 refs/
 docs/refs/
 
-# Machine-specific: absolute paths to local model output
-catalogs/gom_offline.yaml
-catalogs/ROMS.yaml
-catalogs/roms_example.catalog.yaml
+# Project-local scratch: catalogs a user builds against their own model output
+# (build_catalog(refs, "catalogs/<name>.yaml") writes here). The package's own
+# reference catalogs ship inside ocean_skill/catalogs/ instead — see its README.
+catalogs/
 
 # Notebook scratch: divergent copies of catalogs/, shadows them from docs/
 docs/catalogs/

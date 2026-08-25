@@ -38,13 +38,13 @@ print("=" * 70)
 print("1. One concept, several real-world spellings -- all resolve the same way")
 print("=" * 70)
 
-# catalogs/modis_aqua.yaml standardizes MODIS's chlor_a to this spelling -- missing
+# ocean_skill/catalogs/modis_aqua.yaml standardizes MODIS's chlor_a to this spelling -- missing
 # "_a_" -- which is NOT the canonical CF name ocean_skill uses everywhere else
 # (mass_concentration_of_chlorophyll_a_in_sea_water, in vars.py/colormaps.py). A real
 # find_variable(modis_ds, "chlorophyll") call found nothing until this alias was
 # added to VOCABULARY["chlorophyll"] -- this reproduces exactly that.
 modis_shaped = _tiny_dataset("mass_concentration_of_chlorophyll_in_sea_water")
-# catalogs/ooi_papa.yaml's profiler-mounted fluorometer -- a different instrument,
+# ocean_skill/catalogs/ooi_papa.yaml's profiler-mounted fluorometer -- a different instrument,
 # same physical quantity, its own naming convention.
 ooi_profiler_shaped = _tiny_dataset(
     "mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled"

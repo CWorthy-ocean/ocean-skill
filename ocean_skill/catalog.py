@@ -9,7 +9,7 @@ and merges into a single namespace. Discovery loads each catalog with
 
 Any ``*.yaml`` in a catalog *directory* is picked up. Search precedence (later shadows
 earlier, with a collision warning):
-    1. packaged example catalogs      (``ocean_skill/catalogs/``)
+    1. packaged reference catalogs    (``ocean_skill/catalogs/``)
     2. user dir                       (``platformdirs`` / ``~/.ocean-skill/catalogs``)
     3. ``$OCEAN_SKILL_CATALOGS``      (os.pathsep-separated dirs)
     4. project-local                  (``./catalogs``)
@@ -72,7 +72,7 @@ class SourceRef:
 
 def search_paths() -> list[Path]:
     """Return the ordered catalog search path (lowest to highest precedence)."""
-    paths: list[Path] = [Path(__file__).parent / "catalogs"]  # packaged examples
+    paths: list[Path] = [Path(__file__).parent / "catalogs"]  # packaged reference catalogs
 
     try:
         import platformdirs
@@ -264,7 +264,8 @@ def _find_hint(n_sources: int) -> str:
     """A brief pointer to searching for a source yourself, for lookup-miss errors."""
     return (
         "Search with osk.find(name=...) (substring/glob) or osk.find(text=...); "
-        f"bare osk.find() lists all {n_sources} sources."
+        f"bare osk.find() lists all {n_sources} sources. If a catalog you expected "
+        "isn't among them, check osk.catalog.search_paths()."
     )
 
 
