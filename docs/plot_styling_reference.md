@@ -700,10 +700,11 @@ suite.taylor(color_by="variable", marker_by="test")   # 3 models × 6 variables
 Naming only `marker_by` colours by the *same* groups, so the legend's swatches match
 the points rather than varying with nothing to explain them.
 
-A third channel (size, or filled vs hollow) is possible but deliberately absent: marker
-size already reads as magnitude on these diagrams, and three encodings on one point
-tend to be slower to decode than two diagrams side by side. If you need a third
-dimension, split it across figures.
+A third *grouping* channel (size, or filled vs hollow) is possible but deliberately
+absent: three encodings on one point tend to be slower to decode than two diagrams
+side by side. If you need a third dimension, split it across figures.
+[`marker_scale`](#marker_scale-summary-diagrams) below is not this — it resizes every
+point by the same factor, a style knob rather than a way to tell points apart.
 
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
@@ -731,6 +732,91 @@ can still supply the *other* channel.
 
 Honored by **both renderers** for `target` (`taylor`/`paired` delegate to matplotlib
 interactively, as `labels` does above).
+
+### `colors` (summary diagrams)
+
+An explicit colour list, one entry per comparison, for when the automatic cycle isn't
+wanted — matching a house palette, say, or keeping colours stable as comparisons are
+added and removed:
+
+```python
+suite.target(colors=["#1b9e77", "#d95f02", "#7570b3"])
+```
+
+`color_by` overrides it outright: naming a grouping field already decides colour, so
+an explicit list would either be ignored or fight the grouping, and `color_by` wins.
+Statically the list is taken one-per-point in comparison order (shorter than the
+number of points is an error); interactively it cycles the same way `COLOR_CYCLE`
+does, so a shorter list repeats rather than raising.
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
+above).
+
+### `marker_scale` (summary diagrams)
+
+**Default:** `1.0`
+
+Multiplies the size of every marker on the diagram together — sample points, the
+reference star, and the legend swatches — keeping their proportions, the way
+`font_scale` multiplies every text role together:
+
+```python
+suite.taylor(marker_scale=1.5)   # larger points, star, and key entries alike
+```
+
+This is a uniform style knob, not a third grouping channel — see the note at the end
+of [`color_by` / `marker_by`](#color_by--marker_by) above. It resizes every point by
+the same factor rather than encoding anything in the size itself.
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only).
+
+### `alpha` (summary diagrams)
+
+**Default:** `None` (opaque)
+
+Fades the data points — fill and edge together — for a set with heavy overlap:
+
+```python
+suite.target(alpha=0.5)
+```
+
+The reference star, point labels, and the static legend's swatches stay fully opaque,
+since fading the one point every other point is read against, or the text identifying
+them, defeats the point of drawing them at all. (Interactively the legend glyph is
+drawn from the point itself, so it inherits the point's alpha — a small, unavoidable
+divergence from the static legend.)
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only).
+
+### `circles` (target only)
+
+**Default:** `(0.5, 1.0)`
+
+Radii of the dashed/dotted guide rings. The ring at `1.0` marks where a model's total
+normalized RMSD equals the observed mean's own standard deviation — inside it, the
+model out-performs the observed mean as a predictor:
+
+```python
+suite.target(circles=(0.5, 1.0, 1.5))
+```
+
+Honored by **both renderers**.
+
+### `normalize` (Taylor only)
+
+**Default:** `True`
+
+Divides each standard deviation by its own reference, so comparisons of different
+variables or in different units can share one diagram, with every reference sitting at
+radius 1:
+
+```python
+suite.taylor(normalize=False)   # native units; only sound with a shared reference
+```
+
+Turn it off only when every comparison shares one reference and the native units
+matter more than a common scale. (`taylor` delegates to matplotlib interactively, so
+this applies to both renderers either way.)
 
 ---
 
