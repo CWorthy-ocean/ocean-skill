@@ -237,6 +237,37 @@ class Field:
             return "drawn as a line: the selection leaves one place, so the surviving time axis is the x"
         return "drawn as map panels: a horizontal extent survives"
 
+    def extremum(self, kind: str = "max") -> Any:
+        """Locate this field's min/max: value, lon/lat, grid indices, snapshot.
+
+        Runs over every dim the prepared field still has, not just the horizontal
+        ones -- a field faceted over time or depth reports the facet coordinate
+        the extremum fell on as part of the answer, the same way :attr:`family`
+        reads its shape off the data rather than an argument. Refused when
+        :attr:`is_series` (or this field has otherwise been reduced to one place):
+        a point has one value already, and there is no spatial extent left to
+        search over.
+
+        The result's ``.series()`` follows the located position through time --
+        a point selection at this extremum's lon/lat, over a window that
+        defaults to :data:`~ocean_skill.extrema.DEFAULT_PAD_STEPS` native steps
+        each side of the snapshot -- and ``.plot()`` draws that immediately::
+
+            run = osk.field("pac_dt_ramp", "temperature",
+                             select={"time": "2013-06-15", "depth": "surface"})
+            ext = run.extremum("max")
+            ext.series(variables=["salinity"]).plot()   # both, same place/window
+
+        A :class:`FieldSet` (several variables) has no ``extremum`` of its own --
+        each member is its own field with its own map; call it on one member,
+        e.g. ``fields[0].extremum()``.
+
+        See :class:`ocean_skill.extrema.Extremum`.
+        """
+        from ocean_skill.extrema import field_extremum
+
+        return field_extremum(self, kind)
+
     def _series_items(self) -> list[dict[str, Any]]:
         """Return this field's data as one or more single-source series items.
 

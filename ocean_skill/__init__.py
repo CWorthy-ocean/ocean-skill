@@ -20,6 +20,8 @@ The public API is intentionally small:
     osk.compare(..., times={"resample": "1MS", "reduce": "mean"})  # one comparison
                                                      # per month, plots or plays as one
     osk.field(source, variable, select=...)          # one source, no reference
+    osk.field(...).extremum("max").plot()            # where the max is, and how it
+                                                     # evolves around that snapshot
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
                                                      # pooled onto Taylor + target
     osk.map_metrics(mooring_set)                     # per-station metrics, interpolated
@@ -33,6 +35,7 @@ from ocean_skill import cache, outputs
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
+from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
 from ocean_skill.plot.locations import map_datasets
 from ocean_skill.plot.map_metrics import map_metrics
@@ -43,6 +46,7 @@ __version__ = "0.0.1"
 __all__ = [
     "Comparison",
     "ComparisonSet",
+    "Extremum",
     "Field",
     "FieldSet",
     "__version__",

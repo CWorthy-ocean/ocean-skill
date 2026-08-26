@@ -265,6 +265,45 @@ pick one vertical request. `sigma0` is potential density *anomaly* (density minu
 ROMS's own `rho` output is in-situ density and would silently name a different surface
 at any real depth.
 
+**Where is the hot spot, and how did it get there?** — a map naturally raises that
+question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid
+indices), and the snapshot it fell on.
+
+```python
+run = osk.field(
+    "pac_dt_ramp", NITRATE,
+    select={"time": "2013-06-15", "depth": "surface"},
+)
+ext = run.extremum("max")
+ext
+# max nitrate = 31.42 mmol m-3 at lon 214.3800, lat 5.1200 (0-360)
+#   grid indices {'eta_rho': 112, 'xi_rho': 387}, time 2013-06-15 00:00:00
+#   source='pac_dt_ramp', grid="the source's own grid"
+```
+
+`lon`/`lat` are reported in whatever convention the grid is actually stored in
+(`lon_convention`) — a domain straddling the dateline, like `pac_dt_ramp`, reports past
+180° rather than silently wrapping. `indices` is keyed by the field's own dimension
+names, so a curvilinear (ROMS) grid shows `eta_rho`/`xi_rho` and a rectilinear one shows
+`lat`/`lon` directly. Pass `"min"` for the opposite extreme; running over every
+standing dimension means a field faceted over time or depth reports the facet
+coordinate the extremum fell on too.
+
+`.series()` follows that position through time — a point selection at the extremum's
+lon/lat, defaulting to 10 native time steps either side of the snapshot (clamped to the
+record's own ends) — and `.plot()` draws it immediately, the same `series` figure
+`osk.field`'s own point selects already draw:
+
+```python
+ext.plot()                                        # ±10 steps, one line
+ext.series(variables=["salinity"]).plot()          # add a line, same place/window
+ext.series(time=slice("2013-05", "2013-07")).plot()  # a wider window instead
+```
+
+A field already reduced to one place (see `Field.family`) has nothing left to search
+spatially, and `.extremum()` says so rather than returning the one value `.plot()`
+already shows.
+
 ## Variable specs
 
 A plain name is the common case, but `variable=`/`variables=` accepts three other
