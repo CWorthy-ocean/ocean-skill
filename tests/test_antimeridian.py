@@ -542,6 +542,42 @@ def test_movie_coastline_is_unshifted_for_a_non_straddling_domain():
     assert finite.max() <= lon1 + pad + 1e-6
 
 
+def test_interactive_still_projects_a_straddling_mesh_onto_the_180_frame():
+    """A still (non-movie) map of a straddling field must project its mesh.
+
+    Choosing a 180-centred frame is not enough on its own: with ``project=False``
+    geoviews leaves the quadmesh at its raw 0-360 longitudes and only relabels the
+    axes, so every cell past 180 wraps back to the far side and the basin opens out
+    to the whole globe with a blank middle -- the very centre-0 layout the frame was
+    picked to avoid. The rendered x-range is the tell: torn, it spans the full world
+    (-180..180); projected, it hugs the field's own ~100 deg extent.
+    """
+    pytest.importorskip("geoviews")
+    pytest.importorskip("hvplot")
+    pytest.importorskip("cartopy")
+    from ocean_skill.plot.holoviews_renderer import _extension, _quadmesh
+
+    hv = _extension()
+    mesh = _quadmesh(
+        _straddling_field(),  # 150..250, crosses the dateline
+        title="t",
+        cmap="viridis",
+        clim=(0.0, 10.0),
+        units="u",
+        geo=True,
+        rasterize=True,
+        tiles=False,
+        coastline=False,  # avoid a Natural Earth download in the test
+        hover=False,
+    )
+    fig = hv.render(mesh)
+    start, end = float(fig.x_range.start), float(fig.x_range.end)
+    # torn (project=False) => the whole planet; projected => the ~100 deg domain plus pad
+    assert end - start < 200.0, f"mesh was not projected onto its frame: x_range=({start}, {end})"
+    # and it sits inside the 180-centred frame, not pinned to the global seam edges
+    assert start > -180.0 + 1.0 and end < 180.0 - 1.0
+
+
 def _facet_item(lon0: float, lon1: float, *, days=3):
     """One ``facet_movie`` item, shaped as ``Field.as_item()`` builds it."""
     import pandas as pd
