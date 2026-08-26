@@ -138,3 +138,78 @@ def test_a_depth_band_is_not_hoisted():
         _prepare(ds, meta, "temp", {"depth": {"min": 0, "max": 10}}, {"time": "mean"})
 
     assert "s_rho" in captured["dims"], "a band needs the whole column, not the top"
+
+
+# ---------------------------------------- the horizontal spatial mean runs dead last
+
+
+def _roms_column_with_lon_lat(nt=3, ns=6, ny=2, nx=2) -> tuple[xr.Dataset, dict]:
+    """``_roms_column_with_time`` plus 2-D lon/lat, for a box select/spatial mean."""
+    ds, meta = _roms_column_with_time(nt=nt, ns=ns, ny=ny, nx=nx)
+    lon, lat = np.meshgrid(
+        np.arange(nx, dtype=float) - 150.0, np.arange(ny, dtype=float) + 45.0
+    )
+    ds = ds.assign_coords(
+        lon=(("eta_rho", "xi_rho"), lon), lat=(("eta_rho", "xi_rho"), lat)
+    )
+    return ds, meta
+
+
+def test_the_spatial_mean_runs_after_the_vertical_ladder_not_with_the_early_aggregate():
+    """The early (non-vertical) aggregate call must never see the lat/lon mean keys,
+    and by the time a call *does* carry them, the vertical axis must already be gone
+    (see the ordering note in ``ocean_skill.comparison._prepare``: to_depth/to_sigma0
+    interpolate per column against horizontally-varying z_rho, and a depth-band mean
+    must collapse each column's own thickness weights before columns are
+    area-averaged together -- either breaks if the spatial mean runs first)."""
+    pytest.importorskip("dask")
+    ds, meta = _roms_column_with_lon_lat()
+    calls: list[tuple[dict, tuple[str, ...]]] = []
+    real_aggregate = operators.aggregate
+
+    def spy(da, spec):
+        calls.append((dict(spec or {}), da.dims))
+        return real_aggregate(da, spec)
+
+    with mock.patch("ocean_skill.operators.aggregate", side_effect=spy):
+        _prepare(
+            ds,
+            meta,
+            "temp",
+            {
+                "depth": {"min": 0, "max": 300},
+                "lon": {"min": -150.5, "max": 0.5},
+                "lat": {"min": 44.5, "max": 47.0},
+            },
+            {"time": "mean", "Z": "mean", "lat": "mean", "lon": "mean"},
+        )
+
+    spatial_calls = [c for c in calls if "lat" in c[0] and "lon" in c[0]]
+    assert len(spatial_calls) == 1, "the spatial mean must run in exactly one call"
+    spatial_spec, spatial_dims = spatial_calls[0]
+
+    # every call before the spatial one carries no lat/lon key at all
+    before = calls[: calls.index(spatial_calls[0])]
+    assert all("lat" not in spec and "lon" not in spec for spec, _ in before)
+    # and by the time the spatial call runs, the vertical axis is already gone --
+    # the band's own dz weights already collapsed it, one column at a time
+    assert "s_rho" not in spatial_dims
+    assert {"eta_rho", "xi_rho"} <= set(spatial_dims)
+
+
+def test_the_composition_matches_a_hand_computed_per_column_then_area_mean():
+    """depth-band + {"Z": "mean"} + a box mean == weight each column by its own dz,
+    collapse it, *then* area-average the four columns -- not the other order."""
+    pytest.importorskip("dask")
+    ds, meta = _roms_column_with_lon_lat()
+    ds = ds.assign(temp=xr.ones_like(ds["temp"]))  # uniform: any correct order gives 1
+    out, _ = _prepare(
+        ds,
+        meta,
+        "temp",
+        {"depth": {"min": 0, "max": 300}},
+        {"time": "mean", "Z": "mean", "lat": "mean", "lon": "mean"},
+    )
+    assert out.dims == ()
+    assert float(out) == pytest.approx(1.0)
+    assert out.attrs["spatial_mean"].startswith("area-weighted mean")

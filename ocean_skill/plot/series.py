@@ -260,7 +260,21 @@ def _place_of(da) -> str:
     literal ``"lon"``/``"lat"``, so a curvilinear (ROMS) point sampled by
     :func:`ocean_skill.align.sample_at` — whose scalar coords keep their native
     ``lon_rho``/``lat_rho`` names — still titles its place.
+
+    A box mean (``aggregate={"lat": "mean", "lon": "mean"}``) lands here with
+    exactly the same scalar coords a station has — that is the point of it (see
+    :func:`ocean_skill.operators._horizontal_mean`) — but titling it as a place
+    would claim a station this is not. ``attrs["region"]`` (set alongside those
+    coords) is checked first, so it reads ``"mean over 45–55°N, 165°E–155°W"``
+    instead. "mean over" is load-bearing, not decoration: without it the title
+    is indistinguishable from a real station's.
     """
+    region = da.attrs.get("region")
+    if region is not None:
+        from ocean_skill.comparison import _region_label
+
+        return f"mean over {_region_label(region)}"
+
     from ocean_skill.align import _lat_name, _lon_name
 
     lon_name, lat_name = _lon_name(da), _lat_name(da)

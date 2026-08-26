@@ -40,6 +40,7 @@ __all__ = [
     "point_of",
     "resolve_match_method",
     "sample_at",
+    "subset_to_box",
     "subset_to_bbox",
 ]
 
@@ -162,6 +163,118 @@ def _bbox_lon_in_convention(values, lon_min: float, lon_max: float):
     return ((lon_min + 180) % 360) - 180, ((lon_max + 180) % 360) - 180
 
 
+def _curvilinear_window(obj, lon_name: str, lat_name: str, bbox, pad: float):
+    """Return ``(obj windowed to bbox's index bounds, its inside-mask)`` for a 2-D grid.
+
+    The mask is built elementwise over the 2-D lon/lat, which sidesteps the
+    mid-array longitude fold a curvilinear grid can have crossing its own seam:
+    unlike a corners/perimeter derivation (:func:`perimeter_of`, :func:`grid_of`),
+    which differences *neighbouring* cells and so needs :func:`numpy.unwrap` first,
+    a per-cell predicate has no neighbour to compare against and needs none.
+
+    Returns the object windowed to the smallest index rectangle containing every
+    inside cell, plus the mask over that same window as an
+    :class:`xarray.DataArray` on the grid's own dimensions (so a caller's
+    ``.where(mask)`` broadcasts correctly over any extra axis — depth, time — the
+    object also carries). When no cell is inside, ``obj`` is returned unwindowed
+    and the mask is all ``False`` over its full extent; the caller decides what an
+    empty result means.
+    """
+    lon_min, lat_min, lon_max, lat_max = bbox
+    lon2d, lat2d = np.asarray(obj[lon_name]), np.asarray(obj[lat_name])
+    box_lo, box_hi = _bbox_lon_in_convention(lon2d, lon_min, lon_max)
+    if box_lo > box_hi:
+        # Box is contiguous only in its own convention: wrap the grid's lon
+        # *values* (not the coordinate itself — data stays in its native
+        # convention) into that convention, for the comparison below only.
+        conv = "0-360" if max(lon_min, lon_max) > 180.0 else "-180-180"
+        lon_vals = _wrap_lon(lon2d, conv)
+        box_lo, box_hi = lon_min, lon_max
+    else:
+        lon_vals = lon2d
+    inside = (
+        (lon_vals >= box_lo - pad)
+        & (lon_vals <= box_hi + pad)
+        & (lat2d >= lat_min - pad)
+        & (lat2d <= lat_max + pad)
+    )
+    dims = obj[lon_name].dims
+    if inside.any():
+        rows = np.where(inside.any(axis=1))[0]
+        cols = np.where(inside.any(axis=0))[0]
+        i0, i1 = int(rows.min()), int(rows.max())
+        j0, j1 = int(cols.min()), int(cols.max())
+        window = {dims[0]: slice(i0, i1 + 1), dims[1]: slice(j0, j1 + 1)}
+        obj = obj.isel(window)
+        inside = inside[i0 : i1 + 1, j0 : j1 + 1]
+    mask = xr.DataArray(inside, dims=dims)
+    return obj, mask
+
+
+def subset_to_box(obj, bbox, *, subject: str = "the source"):
+    """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max), exactly.
+
+    The ``select=`` counterpart of :func:`subset_to_bbox`: no padding, and an empty
+    result is refused outright rather than silently handed back unchanged, since a
+    caller who named a box wants that box, not a hint that something went missing.
+
+    Rectilinear lon/lat (each 1-D, each its own dimension) narrows exactly like an
+    ordinary :func:`ocean_skill.operators.oriented_slice` pair, with the same seam
+    handling :func:`subset_to_bbox` has: a box straddling the object's own
+    longitude convention (a 170-to-190 request against a ±180 grid) re-expresses
+    the *object* in the box's convention rather than silently returning nothing.
+
+    Curvilinear lon/lat (each 2-D, e.g. ROMS's ``lon_rho``/``lat_rho``) has no
+    dimension to slice along, so the crop is a boolean predicate over the whole
+    2-D grid instead (:func:`_curvilinear_window`): the object is windowed to the
+    smallest index rectangle containing every cell inside the box, and cells
+    inside that rectangle but outside the box itself (a rotated grid's corners)
+    are masked to NaN with ``.where`` — a map drawn from the result shows exactly
+    the requested box, not the enclosing parallelogram of grid indices.
+
+    The result carries ``attrs["region"] = [lon_min, lat_min, lon_max, lat_max]``,
+    the box as asked (not padded, not re-expressed), for renderers and labels to
+    read back.
+    """
+    from ocean_skill.operators import oriented_slice
+
+    lon, lat = _lon_name(obj), _lat_name(obj)
+    if lon is None or lat is None:
+        return obj
+    lon_min, lat_min, lon_max, lat_max = bbox
+    lon_values = np.asarray(obj[lon])
+    rectilinear = lon_values.ndim == 1 and lon in obj.dims and lat in obj.dims
+
+    if rectilinear:
+        box_lo, box_hi = _bbox_lon_in_convention(obj[lon], lon_min, lon_max)
+        target = obj
+        if box_lo > box_hi:
+            target = harmonize_longitude(
+                target, "0-360" if max(lon_min, lon_max) > 180.0 else "-180-180"
+            )
+            box_lo, box_hi = lon_min, lon_max
+        out = target.sel(
+            {
+                lon: oriented_slice(target, lon, slice(box_lo, box_hi)),
+                lat: oriented_slice(target, lat, slice(lat_min, lat_max)),
+            }
+        )
+        empty = out.sizes.get(lon, 1) == 0 or out.sizes.get(lat, 1) == 0
+    else:
+        out, inside = _curvilinear_window(obj, lon, lat, bbox, pad=0.0)
+        empty = not bool(inside.any())
+        if not empty:
+            out = out.where(inside)
+    if empty:
+        raise ValueError(
+            f"select lon/lat box ({lon_min:g}..{lon_max:g}, {lat_min:g}..{lat_max:g}) "
+            f"selects nothing from {subject}: check the box against the source's "
+            "extent and longitude convention (0-360 vs +/-180)."
+        )
+    out.attrs["region"] = [lon_min, lat_min, lon_max, lat_max]
+    return out
+
+
 def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max) plus ``pad``.
 
@@ -176,12 +289,31 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     against a ±180 reference) comes back cropped in the *box's* convention — the
     reference's longitudes are re-expressed and re-sorted so the band stays one
     contiguous slice rather than being split at the seam or half-dropped.
+
+    A curvilinear ``obj`` (2-D lon/lat, e.g. ROMS's ``lon_rho``/``lat_rho``) has no
+    dimension to slice along, so it is windowed to the smallest index rectangle
+    containing the padded box instead (:func:`_curvilinear_window`) — unlike
+    :func:`subset_to_box`, no ``.where`` mask is applied: this crop is a cost
+    optimization ahead of a regrid, not a selection, and windowing to a superset
+    of the box is exactly what the rectilinear branch below does too.
     """
     from ocean_skill.operators import oriented_slice
 
     lon, lat = _lon_name(obj), _lat_name(obj)
     if lon is None or lat is None:
         return obj
+    lon_values = np.asarray(obj[lon])
+    if lon not in obj.dims and lon_values.ndim == 2:
+        out, inside = _curvilinear_window(obj, lon, lat, bbox, pad=pad)
+        if not bool(inside.any()):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            raise ValueError(
+                f"no overlap: the reference does not cover the test's extent "
+                f"(lon {lon_min:g} to {lon_max:g}, lat {lat_min:g} to "
+                f"{lat_max:g}). Check the two sources really overlap in space."
+            )
+        return out
+
     lon_min, lat_min, lon_max, lat_max = bbox
     box_lo, box_hi = _bbox_lon_in_convention(obj[lon], lon_min, lon_max)
     if box_lo > box_hi and lon in obj.dims:

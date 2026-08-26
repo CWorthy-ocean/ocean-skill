@@ -560,14 +560,26 @@ def _draw_map(
     )
     ring = domain_ring(domain)
     if ring is not None:
-        ax.plot(
-            ring[:, 0],
-            ring[:, 1],
-            transform=proj,
-            color="k",
-            lw=0.6,
-            ls="--",
-            zorder=4,
+        from matplotlib.lines import Line2D
+
+        # add_artist rather than ax.plot: the ring is context, not data the view
+        # should frame itself around -- ax.plot folds it into dataLim, so a small
+        # spatial subset's axes would autoscale out to the whole model domain the
+        # moment its (much larger) outline is drawn. add_artist skips that update
+        # while still leaving the ring itself drawn and enumerable (ax.get_lines()
+        # still finds it) -- the matplotlib equivalent of holoviews'
+        # apply_ranges=False on the same overlay
+        # (ocean_skill.plot.holoviews_renderer._domain_overlay).
+        ax.add_artist(
+            Line2D(
+                ring[:, 0],
+                ring[:, 1],
+                transform=proj._as_mpl_transform(ax),
+                color="k",
+                lw=0.6,
+                ls="--",
+                zorder=4,
+            )
         )
     # Always set_title, even to "": the point is not the text but the explicit ``y`` in
     # title_kwargs, which clears matplotlib's ``_autotitlepos`` and so skips the
@@ -1084,6 +1096,7 @@ def field_row(
     standard_name: str | None = None,
     depth: str | None = None,
     time: str | None = None,
+    region: str | None = None,
     metrics: dict[str, Any] | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
@@ -1155,13 +1168,13 @@ def field_row(
     ``constrained_layout``.
 
     ``title`` defaults, when not given, to the variable this comparison names followed
-    by the depth and time a ``select=`` has collapsed to one map — ``chlorophyll · 0–10
-    m · 2010-01-22`` — built through the same :func:`suptitle_text` a one-field figure
-    uses (:func:`field_suptitle`), so a comparison and a plain field name the same
-    quantity the same way. A single row has no left-edge row label to carry the variable
-    (that is :func:`field_grid`'s doing, and only when it stacks several), so without
-    this the figure said only *which sources*, never *what*. Pass ``title=""`` to drop
-    it, or any string to replace it.
+    by the depth, time and region a ``select=`` has collapsed to one map —
+    ``chlorophyll · 0–10 m · 2010-01-22 · 45–55°N, 165°E–155°W`` — built through the
+    same :func:`suptitle_text` a one-field figure uses (:func:`field_suptitle`), so a
+    comparison and a plain field name the same quantity the same way. A single row has
+    no left-edge row label to carry the variable (that is :func:`field_grid`'s doing,
+    and only when it stacks several), so without this the figure said only *which
+    sources*, never *what*. Pass ``title=""`` to drop it, or any string to replace it.
 
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
@@ -1171,7 +1184,7 @@ def field_row(
 
     _warn_if_interactive_only(rasterize, hover)
     if title is None:
-        title = suptitle_text(standard_name, (depth, time))
+        title = suptitle_text(standard_name, (depth, time, region))
 
     # Horizontal bars sit below the maps and so come out of the row's height; vertical
     # ones sit beside and come out of its width. Which it is has to be settled before
@@ -2005,9 +2018,13 @@ def field_suptitle(
     Depth is left out when it is still a facet or row axis — those panels already say
     it, down the rotated row label or across the columns. Time is included only when it
     survives as a *scalar* coordinate; a standing time dimension is the facet axis
-    itself, and the panels already say when.
+    itself, and the panels already say when. A region is included when the field's own
+    ``select`` cropped it to a box (``attrs["region"]``, set by
+    :func:`ocean_skill.align.subset_to_box`) — the one-field counterpart of
+    :func:`ocean_skill.comparison.Comparison.as_item`'s ``"region"`` key.
     """
     from ocean_skill.align import _time_name
+    from ocean_skill.comparison import _region_label
     from ocean_skill.operators import resolve_dim
 
     extras = []
@@ -2020,6 +2037,10 @@ def field_suptitle(
     tname = _time_name(field)
     if tname is not None and tname in field.coords and field.coords[tname].ndim == 0:
         extras.append(_scalar_time_label(field.coords[tname].values.item()))
+
+    region = field.attrs.get("region")
+    if region is not None:
+        extras.append(_region_label(region))
 
     return suptitle_text(standard_name, extras, label=label)
 
@@ -2059,7 +2080,9 @@ def grid_suptitle(items) -> str:
         values = {item.get(key) for item in items}
         return next(iter(values)) if len(values) == 1 else None
 
-    return suptitle_text(shared("standard_name"), (shared("depth"), shared("time")))
+    return suptitle_text(
+        shared("standard_name"), (shared("depth"), shared("time"), shared("region"))
+    )
 
 
 def field_facet(
@@ -3565,6 +3588,7 @@ def render(spec, **kwargs: Any):
             standard_name=item.get("standard_name"),
             depth=item.get("depth"),
             time=item.get("time"),
+            region=item.get("region"),
             metrics=item.get("metrics"),
             **opts,
         )

@@ -186,6 +186,13 @@ def test_grid_suptitle_composes_only_what_every_row_shares():
     assert grid_suptitle(
         [_grid_item(n, None, None, "a"), _grid_item(p, None, None, "b")]
     ) == ""
+    # a shared region joins depth+time, exactly like them
+    region = "45–55°N, 165°E–155°W"
+    rows = [
+        {**_grid_item(n, "surface", "2010-01", "woa_n"), "region": region},
+        {**_grid_item(p, "surface", "2010-01", "woa_p"), "region": region},
+    ]
+    assert grid_suptitle(rows) == f"surface · 2010-01 · {region}"
 
 
 def test_a_stacked_grid_draws_the_shared_title_in_both_renderers():
@@ -521,6 +528,14 @@ def test_a_single_comparison_row_titles_itself_from_variable_depth_time():
     expected = "chlorophyll a · 0-10 m · 2010-01-22"
     assert _mpl_row()._suptitle.get_text() == expected
     assert expected in _hv_row_title()
+
+
+def test_a_box_select_names_the_region_in_the_title_in_both_renderers():
+    """A mapview box carries its own label into the suptitle, both renderers."""
+    region = "45–55°N, 165°E–155°W"
+    expected = f"chlorophyll a · 0-10 m · 2010-01-22 · {region}"
+    assert _mpl_row(region=region)._suptitle.get_text() == expected
+    assert expected in _hv_row_title(region=region)
 
 
 def test_an_explicit_row_title_wins_and_an_empty_one_drops_it():
@@ -1138,6 +1153,28 @@ def test_matplotlib_domain_bbox_still_draws_a_rectangle(two_rows):
     expected = np.asarray([[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]])
     for line in dashed:
         assert np.allclose(line.get_xydata(), expected)
+
+
+def test_matplotlib_axes_frame_the_field_not_a_much_larger_domain_ring():
+    """A field_row's axes must stay framed on the (small) field, not autoscale out
+    to a much larger domain outline drawn only for context -- the ring is drawn
+    via ax.add_artist rather than ax.plot for exactly this reason (see the
+    add_artist fix in ocean_skill.plot.matplotlib_renderer._draw_map)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    item = _row_item()  # a field spanning lon 260-270, lat 18-26
+    huge_domain = (0.0, -80.0, 360.0, 80.0)  # a near-global ring for contrast
+    fig = render(
+        PlotSpec(family="field_row", items=[item], options={"domain": huge_domain}),
+        renderer="matplotlib",
+    )
+    geo_axes = [ax for ax in fig.axes if hasattr(ax, "get_extent")]
+    assert geo_axes, "expected at least one GeoAxes panel"
+    for ax in geo_axes:
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        assert xlim[1] - xlim[0] < 50, f"lon span {xlim} framed on the domain, not the field"
+        assert ylim[1] - ylim[0] < 50, f"lat span {ylim} framed on the domain, not the field"
 
 
 def test_matplotlib_domain_none_draws_nothing(two_rows):

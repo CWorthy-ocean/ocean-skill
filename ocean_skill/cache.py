@@ -63,7 +63,17 @@ __all__ = [
 #: A pre-change entry for a coarse-test/fine-reference pair sits on the reference's
 #: fine grid; the same key today would resolve onto the test's coarse one instead, so
 #: reusing it silently hands a caller the wrong grid rather than recomputing.
-_FORMAT_VERSION = 3
+#:
+#: **4** — two more keys now answer a different question under the same spelling.
+#: A curvilinear (ROMS) lane's ``select`` naming a lon/lat *box* used to fall
+#: through untouched (see :func:`ocean_skill.operators.box_in_spec`); it now
+#: really crops. And an ``_aggregate`` reducing both horizontal axes by a plain
+#: ``"mean"`` used to be two sequential unweighted means (a silent no-op on a
+#: curvilinear grid); it is now one area-weighted joint reduction (see
+#: :func:`ocean_skill.operators.spatial_mean_in_spec`). Either key means the
+#: same thing it always did on a rectilinear select with no box and no spatial
+#: mean, but a stale entry filed under either new shape held the old answer.
+_FORMAT_VERSION = 4
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline

@@ -681,3 +681,86 @@ def test_the_cache_key_is_stable_and_differs_from_a_pair_spec(monkeypatch):
     paired = make({"test": POINT_SELECT, "reference": POINT_SELECT})
     assert routed_a._cache_key == routed_b._cache_key
     assert routed_a._cache_key != paired._cache_key
+
+
+# --------------------------------------------- a box mean implies over="time" too
+
+
+#: A box neither grid is centred on, so each lane's own area mean is a non-trivial
+#: reduction of a real subset, not the grid's own bounding box in disguise.
+BOX_SELECT = {
+    "lon": {"min": -149.0, "max": -142.0},
+    "lat": {"min": 47.0, "max": 53.0},
+    "time": slice("2014-06", "2014-08"),
+}
+BOX_MEAN = {"lat": "mean", "lon": "mean"}
+
+
+def test_a_shared_box_mean_implies_over_time(monkeypatch):
+    """An area-weighted spatial mean is exactly as reduced as a station -- there
+    is no map left to draw either way -- so over="time" is inferred the same way
+    a point select already implies it."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=BOX_SELECT,
+        aggregate=BOX_MEAN,
+    )
+    assert c.over == "time"
+    assert c.over_reason == "the aggregate collapses space to one box mean"
+    assert c.family == "series"
+
+
+def test_a_shared_box_mean_lands_both_lanes_on_the_same_position_with_no_distance_warning(
+    monkeypatch,
+):
+    """Both lanes reduce the *same requested box* to its own midpoint, independent
+    of their own grids -- unlike a point select's nearest-cell routing, there is no
+    grid-dependent offset for the two to disagree about."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=BOX_SELECT,
+        aggregate=BOX_MEAN,
+    )
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        aligned = c.align()
+    assert not any("km apart" in str(w.message) for w in log)
+    assert float(aligned["lon"]) == pytest.approx(-145.5)
+    assert float(aligned["lat"]) == pytest.approx(50.0)
+    assert aligned["reference"].attrs["region"] == [-149.0, 47.0, -142.0, 53.0]
+
+
+def test_a_time_collapsing_aggregate_alongside_a_box_mean_does_not_imply_over(
+    monkeypatch,
+):
+    """Collapsing time too leaves nothing for a line to run along."""
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=BOX_SELECT,
+        aggregate={**BOX_MEAN, "time": "mean"},
+    )
+    assert c.over is None
+    assert c.over_reason == "the reference is gridded"
+
+
+def test_a_pair_spec_of_two_different_boxes_still_warns_about_the_distance(
+    monkeypatch,
+):
+    """The escape hatch mirrors the point-select one: two real, different boxes
+    keep their own distance warning rather than being silently forced together."""
+    other_box = {**BOX_SELECT, "lon": {"min": -148.0, "max": -145.0}}
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select={"test": other_box, "reference": BOX_SELECT},
+        aggregate=BOX_MEAN,
+    )
+    with pytest.warns(UserWarning, match="km apart"):
+        c.align()
