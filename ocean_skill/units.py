@@ -154,7 +154,15 @@ def parse(unit_string):
     ``None`` rather than raising: an unrecognized unit should degrade to "cannot
     check this" and let the caller decide, not abort a comparison whose numbers may
     be perfectly fine.
+
+    A missing attribute (``None``) is deliberately not the same as an *empty* one
+    (``""``, which CF legitimately uses for a dimensionless quantity): normalizing
+    ``None`` to ``""`` would parse as "dimensionless" and make :func:`compatible`
+    report a real physical mismatch against a variable that simply never recorded
+    its units.
     """
+    if unit_string is None:
+        return None
     try:
         return registry().Unit(normalize(unit_string))
     except Exception:

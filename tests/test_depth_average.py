@@ -105,6 +105,18 @@ def test_units_and_provenance_survive(roms_column):
     assert "0.0-10.0 m" in out.attrs["depth_average"]
 
 
+def test_to_depth_also_keeps_units(roms_column):
+    """Regression: a units-less test lane made align()'s unit check raise instead
+    of warn, because to_depth (unlike depth_average/to_sigma0) copied only the
+    dataset's attrs, not each variable's -- see the near-identical note in
+    roms.to_sigma0. 100 m is inside the water column at the deep (eta_rho=1,
+    xi_rho=1) corner, where h=5000.
+    """
+    ds, meta = roms_column
+    out = roms.to_depth(ds, meta, 100.0)["chl"]
+    assert out.attrs["units"] == "mg/m^3"
+
+
 # -- through the compare layer ------------------------------------------------
 
 
