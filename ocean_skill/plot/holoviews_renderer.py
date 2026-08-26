@@ -1887,16 +1887,19 @@ def _target(
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
+    colors=None,
+    marker_scale: float = 1.0,
+    alpha: float | None = None,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
 
-    ``labels``, ``color_by``, ``marker_by`` and ``groups`` mean exactly what they do
-    in :mod:`ocean_skill.plot.summary`, so one call renders the same way in either
-    renderer — including the default (``"annotate"``), which matches the static target.
-    ``font_scale`` likewise: text is sized from the frame by the shared type scale, so
-    the point labels here and on the static target are the same size relative to the
-    diagram.
+    ``labels``, ``color_by``, ``marker_by``, ``groups``, ``colors``, ``marker_scale``
+    and ``alpha`` mean exactly what they do in :mod:`ocean_skill.plot.summary`, so one
+    call renders the same way in either renderer — including the default
+    (``"annotate"``), which matches the static target. ``font_scale`` likewise: text is
+    sized from the frame by the shared type scale, so the point labels here and on the
+    static target are the same size relative to the diagram.
     """
     import pandas as pd
 
@@ -1953,6 +1956,13 @@ def _target(
     grouped_by_marker = marker_by in df.columns
     marker_levels = list(dict.fromkeys(df[marker_by])) if grouped_by_marker else []
 
+    # Mirrors summary._group_styles' precedence: color_by (a field-driven grouping)
+    # wins outright; otherwise an explicit palette replaces COLOR_CYCLE, indexed by
+    # level the same way. With no grouping at all color_dim is "label", one level per
+    # point in record order, so this reproduces the static per-point colours exactly.
+    palette = list(colors) if colors and not color_by else COLOR_CYCLE
+    alpha_opts = {} if alpha is None else {"fill_alpha": alpha, "line_alpha": alpha}
+
     def _label(color_level, marker_level):
         # pretty_level, not str(): the static legend spells levels through it, and the
         # two renderers must not disagree about what the same group is called.
@@ -1980,8 +1990,8 @@ def _target(
                     vdims=cols,
                     label=_label(color_level, marker_level),
                 ).opts(
-                    size=11,
-                    color=COLOR_CYCLE[ci % len(COLOR_CYCLE)],
+                    size=11 * marker_scale,
+                    color=palette[ci % len(palette)],
                     marker=_BOKEH_MARKERS[mi % len(_BOKEH_MARKERS)],
                     tools=["hover"],
                     # Below, matching the static diagrams: target points scatter around
@@ -1990,6 +2000,7 @@ def _target(
                     show_legend=labels_mode == "legend",
                     line_color="white",
                     line_width=1,
+                    **alpha_opts,
                 )
             )
     points = hv.Overlay(elements)
@@ -2020,7 +2031,9 @@ def _target(
             hv.HLine(0).opts(color="lightgrey", line_width=1),
             hv.VLine(0).opts(color="lightgrey", line_width=1),
             # the reference sits at the origin, as in the static version
-            hv.Scatter([(0.0, 0.0)]).opts(marker="star", size=16, color="black"),
+            hv.Scatter([(0.0, 0.0)]).opts(
+                marker="star", size=16 * marker_scale, color="black"
+            ),
         ]
     )
     return (guides * points).opts(

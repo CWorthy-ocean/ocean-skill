@@ -145,12 +145,15 @@ def pretty_level(field, value) -> str:
     return str(value)
 
 
-def _group_styles(recs, color_by=None, marker_by=None, colors=None):
+def _group_styles(recs, color_by=None, marker_by=None, colors=None, marker_scale=1.0):
     """Assign a colour and marker to every record; return styles plus legend handles.
 
     ``color_by``/``marker_by`` name any field present in the metric records
     (``variable``, ``depth``, ``test``, ``reference``, ...). Colour defaults to one per
     point when no field is given, which is right for a small fan-out.
+
+    ``marker_scale`` sizes the legend swatches to match points drawn at the same
+    scale — see :func:`taylor`.
     """
     from matplotlib.lines import Line2D
 
@@ -200,7 +203,7 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
                     marker="o",
                     mfc=c,
                     mec=c,
-                    ms=7,
+                    ms=7 * marker_scale,
                     label=_pretty(color_by, lev),
                 )
             )
@@ -218,7 +221,7 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
                     marker=m,
                     mfc=c,
                     mec=c,
-                    ms=7,
+                    ms=7 * marker_scale,
                     label=_pretty(marker_by, lev),
                 )
             )
@@ -227,7 +230,16 @@ def _group_styles(recs, color_by=None, marker_by=None, colors=None):
         # own point. Without this a legend would only ever be possible when the caller
         # happened to pass color_by/marker_by, which is the common case for a small set.
         handles = [
-            Line2D([], [], ls="", marker=mk, mfc=c, mec=c, ms=7, label=r["label"])
+            Line2D(
+                [],
+                [],
+                ls="",
+                marker=mk,
+                mfc=c,
+                mec=c,
+                ms=7 * marker_scale,
+                label=r["label"],
+            )
             for r, c, mk in zip(recs, cols, marks, strict=True)
         ]
     return cols, marks, handles
@@ -251,11 +263,20 @@ def _resolve_labels(labels):
     return labels
 
 
-def _reference_handle():
+def _reference_handle(marker_scale=1.0):
     """Legend entry for the reference point, drawn as a black star on both diagrams."""
     from matplotlib.lines import Line2D
 
-    return Line2D([], [], ls="", marker="*", mfc="k", mec="k", ms=9, label="reference")
+    return Line2D(
+        [],
+        [],
+        ls="",
+        marker="*",
+        mfc="k",
+        mec="k",
+        ms=9 * marker_scale,
+        label="reference",
+    )
 
 
 #: Most columns a key beneath the axes is laid out in before it starts wrapping.
@@ -372,6 +393,8 @@ def taylor(
     size=None,
     zoom: float = 1.0,
     scale: dict[str, float] | None = None,
+    marker_scale: float = 1.0,
+    alpha: float | None = None,
 ):
     """Taylor diagram with one point per comparison.
 
@@ -399,6 +422,11 @@ def taylor(
     them all. ``scale`` takes a ready-made :func:`_scale` result, which is how
     :func:`paired` gives both of its panels the sizes of the figure they *share* rather
     than the sizes each would pick alone.
+
+    ``marker_scale`` multiplies every marker — sample points, the reference star, and
+    the legend swatches — together, keeping their proportions; it is the marker
+    analogue of ``font_scale``. ``alpha`` fades the sample points (fill and edge) for
+    overlapping sets, leaving the reference star and any labels opaque.
     """
     import matplotlib.pyplot as plt
 
@@ -427,17 +455,25 @@ def taylor(
         label="reference",
         srange=(0, max(1.6, 1.15 * max(stds))),
     )
-    cols, marks, handles = _group_styles(recs, color_by, marker_by, colors)
+    if marker_scale != 1.0:
+        # The vendored diagram draws its own reference star at a fixed size; scaling it
+        # afterwards (upstream's own idiom — see _taylor.py's use of set_color) keeps it
+        # proportionate to points drawn at marker_scale without touching that file.
+        dia.samplePoints[0].set_markersize(10 * marker_scale)
+    cols, marks, handles = _group_styles(
+        recs, color_by, marker_by, colors, marker_scale
+    )
 
     for rec, sd, col, mk in zip(recs, stds, cols, marks, strict=True):
         dia.add_sample(
             sd,
             rec["corr"],
             marker=mk,
-            ms=9,
+            ms=9 * marker_scale,
             ls="",
             mfc=col,
             mec=col,
+            alpha=alpha,
             label=rec["label"],
         )
     contours = dia.add_contours(levels=5, colors="0.6", linewidths=0.7)
@@ -452,7 +488,7 @@ def taylor(
         axis.label.set_fontsize(scale["axes_label"])
 
     if labels == "legend":
-        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
+        _legend_below(fig, [*handles, _reference_handle(marker_scale)], scale["legend"])
     elif labels == "annotate":
         # The aux axes are polar: a sample sits at (arccos(corr), stddev), which is
         # exactly where add_sample put it.
@@ -490,6 +526,8 @@ def target(
     size=None,
     zoom: float = 1.0,
     scale: dict[str, float] | None = None,
+    marker_scale: float = 1.0,
+    alpha: float | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
 
@@ -506,6 +544,7 @@ def target(
     the origin when a model is good, and a label beside the marker stays readable there.
 
     ``font_scale``/``scale`` size the text from the figure, as in :func:`taylor`.
+    ``marker_scale``/``alpha`` mean exactly what they do in :func:`taylor`.
     """
     import matplotlib.pyplot as plt
 
@@ -554,19 +593,24 @@ def target(
         )
     ax.axhline(0, color="0.7", lw=0.7, zorder=1)
     ax.axvline(0, color="0.7", lw=0.7, zorder=1)
-    ax.plot(0, 0, marker="*", ms=11, color="k", zorder=3, label="reference")
+    ax.plot(
+        0, 0, marker="*", ms=11 * marker_scale, color="k", zorder=3, label="reference"
+    )
 
-    cols, marks, handles = _group_styles(recs, color_by, marker_by, colors)
+    cols, marks, handles = _group_styles(
+        recs, color_by, marker_by, colors, marker_scale
+    )
     for xi, yi, ci, mi in zip(x, y, cols, marks, strict=True):
         ax.scatter(
             xi,
             yi,
-            s=70,
+            s=70 * marker_scale**2,
             color=ci,
             marker=mi,
             zorder=4,
             edgecolor="white",
             linewidth=0.6,
+            alpha=alpha,
         )
     # Axes labelling before the key: _legend_below places itself below the lowest label
     # already drawn, so the x label has to exist by then or the key lands on top of it.
@@ -586,7 +630,7 @@ def target(
     if labels_mode == "annotate":
         _offset_labels(ax, x, y, point_labels, scale["annotation"], colors=cols)
     elif labels_mode == "legend":
-        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
+        _legend_below(fig, [*handles, _reference_handle(marker_scale)], scale["legend"])
 
     if owns_figure:
         # That x label is longer than the axes it belongs to at any generous type level,
@@ -617,8 +661,9 @@ def paired(
 
     Pure composition: :func:`taylor` draws into the left half of the figure and
     :func:`target` into the right, both accepting the same
-    ``color_by``/``marker_by``/``groups`` style arguments, so the two panels stay
-    visually consistent. Neither function knows about the other.
+    ``color_by``/``marker_by``/``groups``/``colors``/``marker_scale``/``alpha`` style
+    arguments, so the two panels stay visually consistent. Neither function knows about
+    the other.
 
     ``labels`` applies to **both** panels, since the diagrams show the same points and
     identifying them two different ways in one figure reads as two unrelated plots. With
@@ -672,8 +717,15 @@ def paired(
         marker_by = kwargs.get("marker_by")
         if kwargs.get("groups") and not color_by and not marker_by:
             color_by = "group"
-        _, _, handles = _group_styles(recs, color_by, marker_by)
-        _legend_below(fig, [*handles, _reference_handle()], scale["legend"])
+        panel_marker_scale = kwargs.get("marker_scale", 1.0)
+        _, _, handles = _group_styles(
+            recs, color_by, marker_by, kwargs.get("colors"), panel_marker_scale
+        )
+        _legend_below(
+            fig,
+            [*handles, _reference_handle(panel_marker_scale)],
+            scale["legend"],
+        )
     _fit_text(fig)
     if save:
         save = Path(save).expanduser()
