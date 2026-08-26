@@ -95,6 +95,16 @@ def test_split_units_reads_both_spellings():
     )
 
 
+def test_split_units_reads_the_bracketed_spelling_too():
+    """A mooring CSV's own convention: no space before the unit, brackets not parens."""
+    assert tabular.split_units("Salinity_qc[PSU]") == ("Salinity_qc", "PSU")
+    assert tabular.split_units("Time[days_since_1950-01-01T00:00:00Z]") == (
+        "Time",
+        "days_since_1950-01-01T00:00:00Z",
+    )
+    assert tabular.split_units("Instrument_SN") == ("Instrument_SN", None)
+
+
 def test_build_and_tabular_share_one_parser():
     """The catalog description and the reader must agree about the convention.
 

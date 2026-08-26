@@ -250,6 +250,44 @@ def is_qc_name(name) -> bool:
     return bool(_QC_TOKENS & set(_TOKEN_SPLIT.split(str(name).lower())))
 
 
+#: Processing tiers of the *same* measurement, ranked lowest-preferred-first --
+#: distinct from ``_QC_TOKENS`` above, which assumes a bare "qc"/"flag" token means a
+#: dimensionless flag/code column with no unit of its own (ERDDAP's
+#: ``..._qc_agg``/``..._qc_tests``, WOA's auxiliary companions). Some mooring CSVs
+#: instead ship each measurement three ways -- ``Salinity_raw[PSU]``,
+#: ``Salinity_qc[PSU]``, ``Salinity_flag`` -- where ``_qc`` names the quality-
+#: controlled *value* (preferred), not a flag, even though it carries the same "qc"
+#: token _QC_TOKENS watches for. ``_TIER_SUFFIX`` below only treats a name this way
+#: when it also carries a real physical unit, which a flag/code column never does --
+#: that unit is the signal separating the two conventions.
+_QUALITY_TIERS = {"qc": 0, "raw": 1}
+
+#: Matches a trailing ``_qc``/``_raw`` tier suffix, case-insensitively.
+_TIER_SUFFIX = re.compile(
+    r"^(?P<base>.+)_(?P<tier>" + "|".join(_QUALITY_TIERS) + r")$", re.IGNORECASE
+)
+
+
+def _tiered_candidates(ds, standard_name: str) -> list[str]:
+    """Dataset variables that are ``standard_name`` under a quality-tier suffix.
+
+    Returns every ``<base>_qc``/``<base>_raw`` variable (bearing a real ``units``
+    attribute — the check that keeps this from also claiming a dimensionless flag
+    like ``..._qc_agg``) whose stripped ``base`` resolves to ``standard_name``,
+    ordered most-preferred first (``qc`` before ``raw``) per :data:`_QUALITY_TIERS`.
+    """
+    lowered = standard_name.lower()
+    candidates = []
+    for v in ds.variables:
+        match = _TIER_SUFFIX.match(str(v))
+        if match is None or not ds[v].attrs.get("units"):
+            continue
+        if resolve_name(match.group("base")).lower() != lowered:
+            continue
+        candidates.append((_QUALITY_TIERS[match.group("tier").lower()], str(v)))
+    return [name for _, name in sorted(candidates)]
+
+
 def _warn_if_only_a_flag_matched(ds, standard_name: str) -> None:
     """Say a QC flag was the sole match, rather than reporting a bare "not found".
 
@@ -282,6 +320,11 @@ def _match_name(ds, standard_name: str, *, allow_qc: bool = False) -> str | None
 
     Raises if two variables differ only by case: which one was meant is genuinely
     unknowable, and picking either would be a coin flip on the returned data.
+
+    Failing that, tries :func:`_tiered_candidates`: a mooring CSV carrying
+    ``Salinity_raw[PSU]``/``Salinity_qc[PSU]`` has no variable spelled anything like
+    ``sea_water_practical_salinity``, so the sweep above never fires for it — this
+    stage is what returns the quality-controlled one preferentially.
     """
     if standard_name in ds.variables:
         return standard_name
@@ -294,7 +337,10 @@ def _match_name(ds, standard_name: str, *, allow_qc: bool = False) -> str | None
             f"{standard_name!r} matches {sorted(hits)} in this dataset, which differ "
             "only by case; rename one so the request is unambiguous."
         )
-    return hits[0] if hits else None
+    if hits:
+        return hits[0]
+    tiered = _tiered_candidates(ds, standard_name)
+    return tiered[0] if tiered else None
 
 
 def find_variable(ds, name: str):
