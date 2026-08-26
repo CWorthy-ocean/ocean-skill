@@ -284,6 +284,27 @@ def _native_time_index(source: str):
     return index
 
 
+def _scalar_time(coord) -> Any:
+    """The scalar value of a 0-d time coordinate, as a type that round-trips.
+
+    ``numpy.datetime64`` scalars at nanosecond resolution collapse to a bare int
+    under ``.item()`` -- Python's ``datetime`` can't hold nanoseconds, so numpy
+    hands back the raw ns-since-epoch integer. That int then can't be nearest-
+    matched against the source's native time index in :func:`_window_select`
+    whenever the index isn't itself ``datetime64[ns]`` (a ``datetime64[s]`` index
+    raises "Cannot compare dtypes datetime64[s] and int64"). Route datetime64
+    through :class:`pandas.Timestamp` so the snapshot stays a datetime regardless
+    of the coordinate's resolution; leave everything else -- numeric time axes,
+    cftime objects -- to ``.item()``, which already yields the right Python type.
+    """
+    values = coord.values
+    if np.issubdtype(values.dtype, np.datetime64):
+        import pandas as pd
+
+        return pd.Timestamp(values)
+    return values.item()
+
+
 def _window_select(index, snapshot: Any, pad: int) -> dict[str, str]:
     """Return a ``{"min", "max"}`` range spanning ``pad`` native steps each side of
     ``snapshot``, clamped to ``index``'s own ends."""
@@ -329,7 +350,7 @@ def field_extremum(fld, kind: str = "max") -> Extremum:
 
     time_name = _time_name(point)
     time = (
-        point[time_name].values.item()
+        _scalar_time(point[time_name])
         if time_name is not None and time_name in point.coords
         else None
     )
