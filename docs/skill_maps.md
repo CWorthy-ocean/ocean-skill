@@ -47,11 +47,13 @@ and reading either alone is how a respectable average hides a bad region.
 
 ```python
 scored = osk.compare(..., over="time")
-scored.metrics()            # the tidy one-row-per-comparison table, as always
-scored[0].maps()            # the metric maps as an xr.Dataset
-scored[0].maps("rmse", "n") # or any other registered metric
-scored.taylor()             # still works: these are the same numbers
-scored.save("gom_vs_modis") # figure + CSV, same layout as any other comparison
+scored.metrics()                         # the tidy one-row-per-comparison table,
+                                          # as always
+scored[0].pointwise_metrics()            # the metric maps as an xr.Dataset
+scored[0].pointwise_metrics("rmse", "n") # or any other registered metric
+scored.taylor()                          # still works: these are the same numbers
+scored.save("gom_vs_modis")              # figure + CSV, same layout as any other
+                                          # comparison
 ```
 
 Because they are the same numbers, a scored set pools with an unscored one on a single
@@ -157,9 +159,10 @@ is up to you:
 Everything above is one comparison, scored against a reference that itself varies in
 space and time — a satellite record, a climatology. A mooring network is a different
 shape entirely: dozens of *separate* comparisons, each at one place, each reduced to a
-single number per metric (`Comparison.metrics()`, not `.maps()` — a station has one
-cell, so there is nothing to score pointwise). Plotting those as discrete markers on a
-map answers one metric at a time and reads poorly once two stations sit close together.
+single number per metric (`Comparison.metrics()`, not `.pointwise_metrics()` — a
+station has one cell, so there is nothing to score pointwise). Plotting those as
+discrete markers on a map answers one metric at a time and reads poorly once two
+stations sit close together.
 
 `osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
 surface through the scattered values** — a cross-validated spline

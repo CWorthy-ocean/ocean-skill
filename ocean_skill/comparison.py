@@ -1225,7 +1225,8 @@ class Comparison:
     are matched along it (:func:`ocean_skill.align.match_axis`), and every metric is
     then computed *cell by cell* along it, giving a map of bias, a map of correlation.
     So the axis a comparison normally refuses becomes the one it scores against, and the
-    figure stops being test-vs-reference and becomes a panel per metric (:meth:`maps`).
+    figure stops being test-vs-reference and becomes a panel per metric
+    (:meth:`pointwise_metrics`).
     """
 
     def __init__(
@@ -1321,7 +1322,7 @@ class Comparison:
         self.cache = cache
         self._aligned = None
         self._metrics = None
-        self._maps = None
+        self._pointwise_metrics = None
         self._actual_depth = None
 
     def _point_select_implies_time(self) -> bool:
@@ -1743,14 +1744,17 @@ class Comparison:
             return f"drawn as metric maps: {self.over_reason}"
         return "drawn as test | reference | difference: no axis is being scored"
 
-    def maps(self, *names: str):
-        """One 2-D map per metric, each computed cell by cell along ``over``.
+    def pointwise_metrics(self, *names: str):
+        """One 2-D field per metric, each computed cell by cell along ``over``.
 
         The pointwise counterpart of :meth:`metrics`: the same registry entries
         (:data:`ocean_skill.metrics.REGISTRY`), reduced over the scored axis alone
         instead of over everything, so ``bias`` becomes *where* the model is biased and
         ``corr`` becomes *where* it tracks the observations. Defaults to
         :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`; any registered name works.
+
+        Returns an :class:`xarray.Dataset` of the values, not a figure — for the map
+        drawing of them, see :meth:`ComparisonSet.map_metrics`.
 
         Not area-weighted, and that is not an omission: one cell's series sits at one
         latitude, so cos(lat) is a constant that cancels out of every metric here. The
@@ -1785,8 +1789,10 @@ class Comparison:
                 'them all. Build it with over= (e.g. compare(..., over="time")) to '
                 "keep the time axis and score against it cell by cell."
             )
-        if self._maps is not None and set(requested) <= set(self._maps.data_vars):
-            return self._maps[list(requested)]
+        if self._pointwise_metrics is not None and set(requested) <= set(
+            self._pointwise_metrics.data_vars
+        ):
+            return self._pointwise_metrics[list(requested)]
 
         axis = self._scored_axis
         wanted = tuple(dict.fromkeys((*requested, "n")))
@@ -1823,7 +1829,7 @@ class Comparison:
                 "metrics computed from very short series.",
                 stacklevel=_stacklevel.find(),
             )
-        self._maps = maps
+        self._pointwise_metrics = maps
         return maps[list(requested)]
 
     def metrics(self, **extra: Any) -> dict[str, Any]:
@@ -1831,10 +1837,10 @@ class Comparison:
 
         Every dimension is reduced, so this is one number per metric for the whole
         comparison — and when an axis is being scored ``over``, that means *space and
-        that axis together*: the overall value the maps in :meth:`maps` decompose. It is
-        computed on the same cells those maps show (the ``min_pairs`` mask applies here
-        too), or the number printed beside a figure would describe a different domain
-        from the figure.
+        that axis together*: the overall value the maps in :meth:`pointwise_metrics`
+        decompose. It is computed on the same cells those maps show (the ``min_pairs``
+        mask applies here too), or the number printed beside a figure would describe a
+        different domain from the figure.
         """
         from ocean_skill import metrics as _metrics
 
@@ -1844,7 +1850,7 @@ class Comparison:
             # the maps show. A station has one cell and no maps, so there is nothing to
             # mask and asking for them would raise.
             if self.over is not None and not self.is_series:
-                enough = self.maps("n")["n"] >= self.min_pairs
+                enough = self.pointwise_metrics("n")["n"] >= self.min_pairs
                 aligned = aligned.where(enough)
             self._metrics = _metrics.compute(
                 aligned,
@@ -1919,7 +1925,11 @@ class Comparison:
         from ocean_skill.metrics import DEFAULT_MAP_METRICS
 
         names = tuple(self.metric_names or DEFAULT_MAP_METRICS)
-        return {"skill": self.maps(*names), "metric_names": names, **common}
+        return {
+            "skill": self.pointwise_metrics(*names),
+            "metric_names": names,
+            **common,
+        }
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render as a ``test | reference | difference`` row, or as metric maps.
@@ -1954,6 +1964,20 @@ class Comparison:
             )
         spec = PlotSpec(family=family, items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
+
+    def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Map where this comparison's data sits: the selection over the model domain.
+
+        From the request (``select``) and catalog metadata alone — nothing is
+        opened, and this never aligns the comparison, so it costs the same
+        whether :meth:`plot` has already run or not. Not :meth:`pointwise_metrics`,
+        which computes per-cell metric maps of an already-scored comparison; this
+        answers a different question — *where* the comparison looked, not what it
+        found there. See :func:`ocean_skill.plot.map_locations.map_locations`.
+        """
+        from ocean_skill.plot.map_locations import map_locations as _map_locations
+
+        return _map_locations(self, renderer=renderer, **kwargs)
 
     def save(
         self,
@@ -2306,10 +2330,10 @@ class ComparisonSet:
 
         The summary families are the one place :meth:`_items` is more than is needed and
         the extra costs real work: for a set scored ``over`` an axis, ``as_item`` builds
-        a metric map per comparison (:meth:`Comparison.maps`) that a Taylor or target
-        point never looks at. Both renderers take exactly ``metrics`` and ``label`` off
-        these items — see ``matplotlib_renderer._Record`` and the interactive target —
-        so this is the whole contract, not a subset of it.
+        a metric map per comparison (:meth:`Comparison.pointwise_metrics`) that a Taylor
+        or target point never looks at. Both renderers take exactly ``metrics`` and
+        ``label`` off these items — see ``matplotlib_renderer._Record`` and the
+        interactive target — so this is the whole contract, not a subset of it.
         """
         return [
             {"metrics": c.metrics(), "label": self._label_for(i)}
@@ -2475,6 +2499,21 @@ class ComparisonSet:
         from ocean_skill.plot.map_metrics import map_metrics as _map_metrics
 
         return _map_metrics(self, renderer=renderer, **kwargs)
+
+    def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Map where this set's comparisons look: each one's selection, deduped.
+
+        From each comparison's request and catalog metadata alone — nothing is
+        opened or aligned. Not :meth:`map_metrics`, which interpolates *scored*
+        per-station metrics onto a map; this answers where the data comes from,
+        not how well the model matched it. Comparisons sharing one point/region
+        (a ``compare()`` fan across variables at one mooring, say) draw once, not
+        once per comparison — see
+        :func:`ocean_skill.plot.map_locations.build_map_items`.
+        """
+        from ocean_skill.plot.map_locations import map_locations as _map_locations
+
+        return _map_locations(self, renderer=renderer, **kwargs)
 
     def __repr__(self) -> str:
         return f"<ComparisonSet: {len(self)} comparisons>"

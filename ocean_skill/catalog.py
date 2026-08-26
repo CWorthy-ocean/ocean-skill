@@ -500,15 +500,18 @@ class SourceNames(list):
         osk.find(variable="nitrate").map()   # where are they?
 
     For the cases with no query to hang a method on ("map everything", "map this
-    catalog"), :func:`ocean_skill.plot.locations.map_datasets` is the same map as
-    a standalone call.
+    catalog"), :func:`ocean_skill.plot.map_locations.map_locations` is the same
+    map as a standalone call.
     """
 
     def map(self, **kwargs):
-        """Map where these sources are; see :func:`ocean_skill.plot.locations.map_datasets`."""
-        from ocean_skill.plot.locations import map_datasets
+        """Map where these sources are.
 
-        return map_datasets(self, **kwargs)
+        See :func:`ocean_skill.plot.map_locations.map_locations`.
+        """
+        from ocean_skill.plot.map_locations import map_locations
+
+        return map_locations(self, **kwargs)
 
 
 def find(

@@ -2096,11 +2096,7 @@ def _locations(
     import pandas as pd
     from bokeh.models import HoverTool
 
-    from ocean_skill.plot.locations import (
-        FEATURE_TYPE_ORDER,
-        HOVER_FIELDS,
-        _style_index,
-    )
+    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, HOVER_FIELDS, style_for
 
     hv = _extension()
     if tiles is True:
@@ -2131,14 +2127,23 @@ def _locations(
     else:
         overlay = gv.feature.coastline.opts(scale="50m")
 
-    rect_rows = [
-        {"lon0": lo, "lat0": la, "lon1": hi, "lat1": ha}
-        | {field: item[field] for field in HOVER_FIELDS}
-        for item in items
-        if item["kind"] == "extent"
-        for lo, la, hi, ha in item["bboxes"]
-    ]
-    if rect_rows:
+    def _ordered(groups: dict[str, list[dict[str, Any]]]) -> list[str]:
+        ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
+        ordered += [ft for ft in groups if ft not in FEATURE_TYPE_ORDER]
+        return ordered
+
+    extent_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] == "extent":
+            extent_groups.setdefault(item["featureType"], []).append(item)
+    for feature_type in _ordered(extent_groups):
+        style = style_for(feature_type)
+        rect_rows = [
+            {"lon0": lo, "lat0": la, "lon1": hi, "lat1": ha}
+            | {field: item[field] for field in HOVER_FIELDS}
+            for item in extent_groups[feature_type]
+            for lo, la, hi, ha in item["bboxes"]
+        ]
         rect_df = pd.DataFrame(rect_rows)
         if tiles:
             for lon_col, lat_col in (("lon0", "lat0"), ("lon1", "lat1")):
@@ -2149,11 +2154,11 @@ def _locations(
             rect_df,
             kdims=["lon0", "lat0", "lon1", "lat1"],
             vdims=list(HOVER_FIELDS),
-            label="grid",
+            label=feature_type,
         ).opts(
             fill_alpha=0,
-            line_dash="dashed",
-            line_color=_TAB10[_style_index("grid") % len(_TAB10)],
+            line_dash="solid" if style["linestyle"] == "-" else "dashed",
+            line_color=style["color"],
             line_width=1.5,
             tools=[hover_tool()],
             show_legend=legend,
@@ -2163,10 +2168,11 @@ def _locations(
     for item in items:
         if item["kind"] == "point":
             point_groups.setdefault(item["featureType"], []).append(item)
-    ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in point_groups]
-    ordered += [ft for ft in point_groups if ft not in FEATURE_TYPE_ORDER]
-    for feature_type in ordered:
-        index = _style_index(feature_type)
+    for feature_type in _ordered(point_groups):
+        style = style_for(feature_type)
+        marker = style["bokeh_marker"] or _BOKEH_MARKERS[
+            style["marker_index"] % len(_BOKEH_MARKERS)
+        ]
         frame = pd.DataFrame(point_groups[feature_type])[
             ["lon", "lat", *HOVER_FIELDS]
         ]
@@ -2178,12 +2184,40 @@ def _locations(
             vdims=list(HOVER_FIELDS),
             label=feature_type,
         ).opts(
-            color=_TAB10[index % len(_TAB10)],
-            marker=_BOKEH_MARKERS[index % len(_BOKEH_MARKERS)],
+            color=style["color"],
+            marker=marker,
             size=marker_size,
             tools=[hover_tool()],
             line_color="white",
             line_width=1,
+            show_legend=legend,
+        )
+
+    # "line" (a selection slice) and "ring" (a domain outline) are plain paths, not
+    # geoviews elements -- the same reason the extent rectangles above are plain
+    # hv.Rectangles: a geoviews element re-projects its geometry from scratch on
+    # every render, and gv + hover crashes for a shape with no point-per-glyph
+    # record to show. No hover on these in v1, matching _domain_overlay's own
+    # domain ring, for the same reason: there is nothing per-glyph to report.
+    path_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] in ("line", "ring"):
+            path_groups.setdefault(item["featureType"], []).append(item)
+    for feature_type in _ordered(path_groups):
+        style = style_for(feature_type)
+        group_items = path_groups[feature_type]
+        any_solid = any(item["kind"] == "line" for item in group_items)
+        segments = []
+        for item in group_items:
+            for seg in item["paths"]:
+                xs, ys = seg[:, 0].astype(float), seg[:, 1].astype(float)
+                if tiles:
+                    xs, ys = to_mercator(xs, ys)
+                segments.append(np.column_stack([xs, ys]))
+        overlay = overlay * hv.Path(segments, label=feature_type).opts(
+            color=style["color"],
+            line_dash="solid" if any_solid else "dashed",
+            line_width=1.8 if any_solid else 1.0,
             show_legend=legend,
         )
 

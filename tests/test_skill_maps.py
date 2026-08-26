@@ -157,7 +157,7 @@ def test_a_second_surviving_axis_is_still_refused(stub, lanes):
 
 
 def test_the_default_maps_are_the_taylor_and_target_quantities(stub):
-    maps = _scored().maps()
+    maps = _scored().pointwise_metrics()
     assert list(maps.data_vars) == ["bias", "crmsd", "corr", "sigma_ratio"]
     for name, da in maps.items():
         assert da.dims == ("lat", "lon"), name
@@ -169,7 +169,7 @@ def test_a_map_cell_is_that_cells_own_series_scored(stub):
     from ocean_skill import metrics as _metrics
 
     comparison = _scored()
-    maps = comparison.maps("bias", "corr")
+    maps = comparison.pointwise_metrics("bias", "corr")
     cell = comparison.aligned.isel(lat=2, lon=3)
     scalar = _metrics.compute(cell, weighted=False, min_samples=0)
     assert float(maps["bias"].isel(lat=2, lon=3)) == pytest.approx(scalar["bias"])
@@ -177,7 +177,7 @@ def test_a_map_cell_is_that_cells_own_series_scored(stub):
 
 
 def test_asking_for_other_metrics_gets_them(stub):
-    maps = _scored().maps("rmse", "mae", "n")
+    maps = _scored().pointwise_metrics("rmse", "mae", "n")
     assert list(maps.data_vars) == ["rmse", "mae", "n"]
     assert (maps["n"] > 0).any()
 
@@ -195,7 +195,7 @@ def test_the_overall_number_describes_the_cells_the_maps_show(stub):
     from ocean_skill import metrics as _metrics
 
     comparison = _scored(min_pairs=25)
-    enough = comparison.maps("n")["n"] >= 25
+    enough = comparison.pointwise_metrics("n")["n"] >= 25
     expected = _metrics.compute(comparison.aligned.where(enough), min_samples=0)
     assert comparison.metrics()["bias"] == pytest.approx(expected["bias"])
 
@@ -217,7 +217,7 @@ def test_thin_cells_are_masked_in_every_map_but_counted_in_n(monkeypatch, lanes)
     monkeypatch.setattr(comparison, "_domain_of", lambda name: None)
     scored = _scored(min_pairs=5)
     with pytest.warns(UserWarning, match="valid pairs along"):
-        maps = scored.maps("bias", "corr", "n")
+        maps = scored.pointwise_metrics("bias", "corr", "n")
     thin = maps["n"] < 5
     assert bool(thin.any()), "the fixture is meant to leave some cells thin"
     for name in ("bias", "corr"):
@@ -236,7 +236,7 @@ def test_maps_need_an_axis_to_score_along(stub):
         cache=False,
     )
     with pytest.raises(ValueError, match="over="):
-        plain.maps()
+        plain.pointwise_metrics()
 
 
 # --- what a plain comparison still does ----------------------------------------------

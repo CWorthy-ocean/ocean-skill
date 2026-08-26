@@ -4,9 +4,12 @@ The catalog probe records each entry's ``geospatial_*`` extent, ``featureType`` 
 descriptive metadata, so a map of *where the datasets are* is a pure metadata
 operation — nothing is opened, nothing is read. :func:`build_items` turns catalog
 entries (all of them, a ``find()`` result, or one catalog) into the flat item dicts
-the ``"locations"`` plot family draws, and :func:`map_datasets` is the public
-entry point: build items, wrap them in a :class:`~ocean_skill.plot.spec.PlotSpec`,
-route through the renderer registry like every other family.
+the ``"locations"`` plot family draws — the shared plumbing (styling, antimeridian
+splitting, extent framing) both this metadata-only path and
+:mod:`ocean_skill.plot.map_locations`'s request-based one build on.
+:func:`~ocean_skill.plot.map_locations.map_locations` is the public entry point for
+both: build items, wrap them in a :class:`~ocean_skill.plot.spec.PlotSpec`, route
+through the renderer registry like every other family.
 
 Non-gridded feature types (a mooring, a profile, a track) become scatter markers at
 their bounding box's midpoint; ``grid`` datasets become dashed extent rectangles.
@@ -25,14 +28,17 @@ import warnings
 from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
+
 from ocean_skill import _stacklevel
 
 __all__ = [
     "FEATURE_TYPE_ORDER",
+    "GROUP_STYLES",
     "HOVER_FIELDS",
     "TAB10",
     "build_items",
-    "map_datasets",
+    "style_for",
 ]
 
 #: tab10 in matplotlib's own order. This is the palette both renderers draw the
@@ -95,6 +101,31 @@ _NEAR_GLOBAL_LAT = 150.0
 #: a degenerate zero-area frame.
 _MIN_SPAN_DEG = 10.0
 
+#: Fixed accent styles for the two groups a selection map adds beyond catalog
+#: metadata (see :mod:`ocean_skill.plot.map_locations`): the requested geometry
+#: itself, and the model domain drawn as context behind it. Crimson is not in
+#: :data:`TAB10`, so a selection can never collide with a catalog featureType's
+#: colour; the domain ring's black-dashed matches the ``domain=`` option every
+#: other family already draws, so all this package's maps agree on what a model
+#: footprint looks like. ``marker``/``bokeh_marker`` are ``None`` where a group has
+#: no marker of its own (the domain ring never scatters points).
+GROUP_STYLES: dict[str, dict[str, Any]] = {
+    "selection": {
+        "color": "crimson",
+        "marker": "*",
+        "bokeh_marker": "star",
+        "linestyle": "-",
+        "marker_index": None,
+    },
+    "domain": {
+        "color": "black",
+        "marker": None,
+        "bokeh_marker": None,
+        "linestyle": "--",
+        "marker_index": None,
+    },
+}
+
 
 def _style_index(feature_type: str) -> int:
     """The colour/marker index for a featureType (unknown types style as ``unknown``)."""
@@ -104,9 +135,99 @@ def _style_index(feature_type: str) -> int:
         return FEATURE_TYPE_ORDER.index("unknown")
 
 
+def style_for(feature_type: str) -> dict[str, Any]:
+    """Colour/marker/linestyle for one ``locations`` group, by its ``featureType``.
+
+    Fixed (see :data:`GROUP_STYLES`) for the ``"selection"``/``"domain"`` groups a
+    selection map adds; index-based off :data:`TAB10` and :func:`_style_index` for
+    an ordinary catalog featureType, as this module has always coloured them.
+    ``marker``/``bokeh_marker`` of ``None`` with a ``marker_index`` set means "look
+    the index up in your renderer's own marker table" — the two renderers keep
+    separate marker tables (matplotlib's, bokeh's), so the index travels and the
+    lookup happens where it is drawn.
+    """
+    if feature_type in GROUP_STYLES:
+        return dict(GROUP_STYLES[feature_type])
+    index = _style_index(feature_type)
+    return {
+        "color": TAB10[index % len(TAB10)],
+        "marker": None,
+        "bokeh_marker": None,
+        "linestyle": "--",
+        "marker_index": index,
+    }
+
+
 def _wrap(lon: float) -> float:
     """One longitude brought into the −180..180 frame."""
     return ((lon + 180.0) % 360.0) - 180.0
+
+
+def _split_bbox(
+    lo: float, la: float, hi: float, ha: float
+) -> list[tuple[float, float, float, float]]:
+    """Split a declared ``(lon_min, lat_min, lon_max, lat_max)`` box at the seam.
+
+    ``hi > 180`` means the box was declared in 0-360 (ROMS' native convention) and
+    is wrapped into ±180; if that wrapping leaves ``lo > hi`` the box's true span
+    crosses the antimeridian the long way — exactly what a "declared 0-360" pair
+    whose bounds read backwards in ±180 means — and it is drawn as two rectangles
+    meeting at the seam rather than one box that reads backwards. Shared by
+    :func:`_normalized_geometry` (a catalog entry's declared extent) and
+    :mod:`ocean_skill.plot.map_locations` (a region select, a lone-lon/lat slice's
+    degenerate box, or a domain bbox fallback) so a straddling box splits the same
+    way wherever it comes from.
+    """
+    if hi > 180.0:
+        lo, hi = _wrap(lo), _wrap(hi)
+    if lo > hi:
+        return [(lo, la, 180.0, ha), (-180.0, la, hi, ha)]
+    return [(lo, la, hi, ha)]
+
+
+def _seam_split(lons: Any, lats: Any) -> list[np.ndarray]:
+    """Cut a (possibly unwrapped) polyline into pieces that each stay within ±180.
+
+    Wraps every vertex into the −180..180 frame, then cuts wherever two
+    consecutive *wrapped* vertices imply a jump greater than 180° — the sign a
+    seam crossing happened between them, not a bend in the path — interpolating
+    the crossing latitude at the exact ±180 boundary so each resulting piece
+    touches the seam instead of stopping short of it. A path that never crosses
+    the seam comes back as the one piece it already was.
+
+    For the closed rings :func:`ocean_skill.comparison._outline_of` traces (a
+    real, possibly rotated grid perimeter), this is the only correct way to split
+    one apart: its vertices do not walk a simple box, so the bounds-only test
+    :func:`_split_bbox` uses would cut the wrong pieces apart. Use that instead
+    for anything box-shaped (a region select, a domain bbox, a slice line's own
+    degenerate box) — it is only ambiguous here, where the true "long way" span
+    isn't declared anywhere, that walking the trace edge by edge is the only way
+    to tell where the path actually crosses.
+    """
+    lon_vals = [float(v) for v in lons]
+    lat_vals = [float(v) for v in lats]
+    wrapped = [_wrap(v) for v in lon_vals]
+    piece_lons: list[float] = [wrapped[0]]
+    piece_lats: list[float] = [lat_vals[0]]
+    pieces: list[tuple[list[float], list[float]]] = [(piece_lons, piece_lats)]
+    for i in range(1, len(wrapped)):
+        prev_lon, prev_lat = wrapped[i - 1], lat_vals[i - 1]
+        lon, lat = wrapped[i], lat_vals[i]
+        delta = lon - prev_lon
+        if abs(delta) > 180.0:
+            seam_prev, seam_curr = (180.0, -180.0) if delta < 0 else (-180.0, 180.0)
+            span = (180.0 - abs(prev_lon)) + (180.0 - abs(lon))
+            frac = (180.0 - abs(prev_lon)) / span if span else 0.5
+            cross_lat = prev_lat + frac * (lat - prev_lat)
+            pieces[-1][0].append(seam_prev)
+            pieces[-1][1].append(cross_lat)
+            piece_lons, piece_lats = [seam_curr], [cross_lat]
+            pieces.append((piece_lons, piece_lats))
+        piece_lons.append(lon)
+        piece_lats.append(lat)
+    return [
+        np.column_stack([np.asarray(lo), np.asarray(la)]) for lo, la in pieces
+    ]
 
 
 def _normalized_geometry(meta: dict[str, Any]) -> dict[str, Any] | None:
@@ -137,12 +258,7 @@ def _normalized_geometry(meta: dict[str, Any]) -> dict[str, Any] | None:
     # circular midpoint from the *raw* bounds: the naive (lo+hi)/2 of a wrapped
     # Pacific extent lands in the Atlantic
     mid_lon = _wrap(lo + ((hi - lo) % 360.0) / 2.0)
-    if hi > 180.0:  # declared 0-360 (ROMS' native convention); bring into +/-180
-        lo, hi = _wrap(lo), _wrap(hi)
-    if lo > hi:  # straddles the anti-meridian; draw both halves
-        bboxes = [(lo, la, 180.0, ha), (-180.0, la, hi, ha)]
-    else:
-        bboxes = [(lo, la, hi, ha)]
+    bboxes = _split_bbox(lo, la, hi, ha)
     return {"midpoint": (mid_lon, mid_lat), "bboxes": bboxes}
 
 
@@ -240,10 +356,10 @@ def _default_extent(
 ) -> tuple[float, float, float, float]:
     """``(lon_min, lat_min, lon_max, lat_max)`` framing every item, with margin.
 
-    The union of all point positions and extent corners, padded by 5% of the span
-    (at least 2°) per side, held to a minimum span so a lone mooring maps to a
-    region rather than a point, and snapped to the whole world once the union is
-    effectively global anyway.
+    The union of all point positions, extent corners and ring/line path vertices,
+    padded by 5% of the span (at least 2°) per side, held to a minimum span so a
+    lone mooring maps to a region rather than a point, and snapped to the whole
+    world once the union is effectively global anyway.
     """
     lons: list[float] = []
     lats: list[float] = []
@@ -252,6 +368,10 @@ def _default_extent(
             for lo, la, hi, ha in item["bboxes"]:
                 lons += [lo, hi]
                 lats += [la, ha]
+        elif item["kind"] in ("line", "ring"):
+            for seg in item["paths"]:
+                lons += [float(seg[:, 0].min()), float(seg[:, 0].max())]
+                lats += [float(seg[:, 1].min()), float(seg[:, 1].max())]
         else:
             lons.append(item["lon"])
             lats.append(item["lat"])
@@ -350,41 +470,3 @@ def build_items(
     if not items:
         raise ValueError("no datasets with a geospatial extent to map")
     return items, _default_extent(items)
-
-
-def map_datasets(
-    names: str | Iterable[str] | None = None,
-    *,
-    catalog: str | None = None,
-    renderer: str = "matplotlib",
-    **kwargs: Any,
-):
-    """Map where catalog datasets are, from metadata alone — nothing is read.
-
-    ::
-
-        osk.map_datasets()                                # everything discoverable
-        osk.map_datasets(osk.find(variable="nitrate"))    # a query result
-        osk.find(variable="nitrate").map()                # the same, as a method
-        osk.map_datasets(catalog="ooi_papa")              # one catalog
-        osk.map_datasets(renderer="holoviews")            # interactive, with hover
-
-    Moorings, profiles and tracks draw as markers at their declared position;
-    gridded datasets draw as dashed extent rectangles; both are coloured by
-    featureType with a legend. The interactive renderer shows each dataset's
-    metadata on hover (name, catalog, featureType, variables, time coverage,
-    cadence, resolution, depth, institution, title) over a web basemap — pass
-    ``tiles=None`` to work offline, or another ``geoviews.tile_sources`` name.
-
-    Everything beyond ``names``/``catalog``/``renderer`` is a plot option
-    (``extent=``, ``title=``, ``save=``, ``tiles=``, ``legend=``, ...), passed to
-    the renderer like any other family's. The default ``extent`` frames every
-    mapped dataset with a margin.
-    """
-    from ocean_skill.plot.registry import render
-    from ocean_skill.plot.spec import PlotSpec
-
-    items, default_extent = build_items(names, catalog=catalog)
-    kwargs.setdefault("extent", default_extent)
-    spec = PlotSpec(family="locations", items=items, options=kwargs)
-    return render(spec, renderer=renderer)

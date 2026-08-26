@@ -41,6 +41,8 @@ comparison = osk.compare(
 comparison.plot()                     # test | reference | difference maps
 comparison.plot(renderer="holoviews") # the same plot, interactive
 comparison.metrics()                  # bias, rmse, corr, sigma_ratio, n
+comparison.map_locations()            # where the comparison's data sits: the
+                                       # selection over the model domain
 ```
 
 A set of comparisons stacks as rows, or plays as frames — the same items either way
@@ -80,7 +82,7 @@ scored = osk.compare(
 )
 
 scored.plot()                         # bias | crmsd | corr | sigma_ratio, as maps
-scored[0].maps("rmse", "n")           # any registered metric, as an xr.Dataset
+scored[0].pointwise_metrics("rmse", "n")  # any registered metric, as an xr.Dataset
 scored.metrics()                      # the same numbers over space *and* time
 ```
 

@@ -2368,7 +2368,7 @@ def metric_panels(skill, requested=None) -> list[str]:
             f"no pointwise map for {missing} — this comparison computed "
             f"{available}. Which metrics are computed is decided when the maps are "
             'prepared, not when they are drawn: pass metrics=("bias", "corr", ...) to '
-            "compare() (or to Comparison.maps()) to add them."
+            "compare() (or to Comparison.pointwise_metrics()) to add them."
         )
     return names
 
@@ -3285,17 +3285,20 @@ def locations(
     tick_label_kwargs: dict[str, Any] | None = None,
     legend_kwargs: dict[str, Any] | None = None,
 ):
-    """Map where catalog datasets are: markers for stations, dashed boxes for grids.
+    """Map where things sit: markers for points, dashed boxes for extents and
+    domains, solid lines for selection slices.
 
-    Items come from :func:`ocean_skill.plot.locations.build_items` — pure catalog
-    metadata, so there is no field, no colormap and no colorbar here; colour keys
-    the featureType instead, off the shared constants in
+    Items come from :func:`ocean_skill.plot.locations.build_items` (pure catalog
+    metadata) and/or :func:`ocean_skill.plot.map_locations.build_map_items` (a
+    plotted selection) — no field, no colormap and no colorbar either way; colour
+    keys the item's ``featureType`` instead, off the shared constants and
+    :func:`~ocean_skill.plot.locations.style_for` in
     :mod:`ocean_skill.plot.locations`, and the legend is the key to it.
 
     ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
     ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
-    :func:`~ocean_skill.plot.locations.map_datasets`). ``tiles`` is accepted so
-    ``renderer="both"`` can pass one set of options, but web tiles are the
+    :func:`~ocean_skill.plot.map_locations.map_locations`). ``tiles`` is accepted
+    so ``renderer="both"`` can pass one set of options, but web tiles are the
     interactive renderer's; here it warns and draws the usual coastline basemap.
     """
     import warnings
@@ -3304,7 +3307,7 @@ def locations(
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
-    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, TAB10, _style_index
+    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, style_for
     from ocean_skill.plot.summary import _MARKERS
 
     if tiles:
@@ -3360,12 +3363,14 @@ def locations(
 
     handles = []
     for feature_type in ordered:
-        index = _style_index(feature_type)
-        color = TAB10[index % len(TAB10)]
-        marker = _MARKERS[index % len(_MARKERS)]
+        style = style_for(feature_type)
+        color = style["color"]
+        linestyle = style["linestyle"]
         points = [i for i in groups[feature_type] if i["kind"] == "point"]
         extents = [i for i in groups[feature_type] if i["kind"] == "extent"]
+        paths = [i for i in groups[feature_type] if i["kind"] in ("line", "ring")]
         if points:
+            marker = style["marker"] or _MARKERS[style["marker_index"] % len(_MARKERS)]
             ax.scatter(
                 [p["lon"] for p in points],
                 [p["lat"] for p in points],
@@ -3398,11 +3403,39 @@ def locations(
                         transform=proj,
                         color=color,
                         lw=1.0,
-                        ls="--",
+                        ls=linestyle,
                         zorder=4,
                     )
             handles.append(
-                Line2D([], [], linestyle="--", color=color, label=feature_type)
+                Line2D([], [], linestyle=linestyle, color=color, label=feature_type)
+            )
+        if paths:
+            # "line" (a selection slice) draws solid and on top; "ring" (a domain
+            # outline) draws dashed and beneath — the same convention the
+            # extent/point split above keeps, so a mixed group's legend entry
+            # still reads as one thing even though it drew two ways.
+            for item in paths:
+                solid = item["kind"] == "line"
+                for seg in item["paths"]:
+                    ax.plot(
+                        seg[:, 0],
+                        seg[:, 1],
+                        transform=proj,
+                        color=color,
+                        lw=1.8 if solid else 1.0,
+                        ls="-" if solid else linestyle,
+                        zorder=5 if solid else 4,
+                    )
+            any_solid = any(item["kind"] == "line" for item in paths)
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    linestyle="-" if any_solid else linestyle,
+                    lw=1.8 if any_solid else 1.0,
+                    color=color,
+                    label=feature_type,
+                )
             )
 
     if legend and handles:

@@ -179,8 +179,8 @@ opened or read:
 
 ```python
 osk.find(variable="nitrate").map()          # where every match is, on one map
-osk.map_datasets()                          # everything discoverable
-osk.map_datasets(catalog="OOI*")            # one catalog
+osk.map_locations()                         # everything discoverable
+osk.map_locations(catalog="OOI*")           # one catalog
 osk.find(name="papa").map(renderer="holoviews")  # interactive
 ```
 

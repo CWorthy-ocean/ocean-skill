@@ -11,7 +11,7 @@ The public API is intentionally small:
     osk.catalogs                 # discovered catalogs / sources
     osk.find(variable=...)       # search sources across catalogs
     osk.find(variable=...).map() # ... and map where the matches are
-    osk.map_datasets()           # map every discovered dataset (metadata only)
+    osk.map_locations()          # map every discovered dataset (metadata only)
     osk.describe("glodap")       # metadata for one source, or one whole catalog
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
     osk.compare(reference=..., test=..., variables=[...],
@@ -26,6 +26,7 @@ The public API is intentionally small:
                                                      # pooled onto Taylor + target
     osk.map_metrics(mooring_set)                     # per-station metrics, interpolated
                                                      # onto a map, one panel per metric
+    comparison.map_locations()                       # where a plotted selection sits
 
     osk.cache.info()             # processed intermediates are cached; where, how big
     osk.outputs.info()           # where figures + metrics get written
@@ -37,7 +38,7 @@ from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
-from ocean_skill.plot.locations import map_datasets
+from ocean_skill.plot.map_locations import map_locations
 from ocean_skill.plot.map_metrics import map_metrics
 from ocean_skill.sources import read
 
@@ -56,7 +57,7 @@ __all__ = [
     "describe",
     "field",
     "find",
-    "map_datasets",
+    "map_locations",
     "map_metrics",
     "outputs",
     "read",
