@@ -310,8 +310,8 @@ def interpolate_records(
     ``lon``/``lat``) and one column per name in ``metric_names`` (default
     :data:`~ocean_skill.metrics.DEFAULT_MAP_METRICS`). Returns an ``xr.Dataset``
     with one 2-D variable per metric, ``lon``/``lat`` as 2-D coordinates — the same
-    shape :meth:`~ocean_skill.comparison.Comparison.maps` returns for a single
-    scored comparison, so it draws through the ``skill_map`` family unchanged.
+    shape :meth:`~ocean_skill.comparison.Comparison.pointwise_metrics` returns for a
+    single scored comparison, so it draws through the ``skill_map`` family unchanged.
 
     Each metric is fit **independently** (a station good at correlation need not be
     good at bias) with a verde spline in a local Mercator projection centred on the

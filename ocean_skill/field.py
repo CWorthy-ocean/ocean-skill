@@ -384,6 +384,18 @@ class Field:
         spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
+    def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Map where this field's data sits: the selection over the source's domain.
+
+        From the request (``select``) and catalog metadata alone — nothing is
+        opened, so this costs the same whether :meth:`plot`/:meth:`movie` have
+        already run or not. See
+        :func:`ocean_skill.plot.map_locations.map_locations`.
+        """
+        from ocean_skill.plot.map_locations import map_locations as _map_locations
+
+        return _map_locations(self, renderer=renderer, **kwargs)
+
     def save(
         self,
         project: str | None = None,
@@ -489,6 +501,17 @@ class FieldSet:
             "shows the whole series. For a movie of maps, give osk.field() one "
             "variable."
         )
+
+    def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Map where this set's fields sit: each member's selection, deduped.
+
+        From each member's request and catalog metadata alone — nothing is
+        opened. Members sharing one point/region draw once, not once per
+        member. See :func:`ocean_skill.plot.map_locations.map_locations`.
+        """
+        from ocean_skill.plot.map_locations import map_locations as _map_locations
+
+        return _map_locations(self, renderer=renderer, **kwargs)
 
     def save(
         self,

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import pytest
 
 from ocean_skill.plot.locations import (
+    GROUP_STYLES,
     HOVER_FIELDS,
+    TAB10,
+    _default_extent,
     _normalized_geometry,
+    _seam_split,
+    _split_bbox,
     build_items,
-    map_datasets,
+    style_for,
 )
 
 # -- fake catalog index (same isolation pattern as tests/test_catalog.py) --------------
@@ -116,6 +122,86 @@ def test_global_extent_short_circuits_before_wrapping():
 
 def test_missing_extent_is_none():
     assert _normalized_geometry(NO_EXTENT) is None
+
+
+# -- shared box/path splitting (reused by ocean_skill.plot.map_locations) -----------
+
+
+def test_split_bbox_ordinary_box_passes_through():
+    assert _split_bbox(10.0, 0.0, 20.0, 5.0) == [(10.0, 0.0, 20.0, 5.0)]
+
+
+def test_split_bbox_declared_0_360_wraps_without_splitting():
+    # a box that stays contiguous once wrapped needs no second piece
+    assert _split_bbox(262.0, 18.0, 282.0, 31.0) == [(-98.0, 18.0, -78.0, 31.0)]
+
+
+def test_split_bbox_straddling_splits_at_the_seam():
+    assert _split_bbox(150.0, -10.0, 210.0, 10.0) == [
+        (150.0, -10.0, 180.0, 10.0),
+        (-180.0, -10.0, -150.0, 10.0),
+    ]
+
+
+def test_seam_split_non_straddling_path_is_one_piece():
+    lons, lats = [-140.0, -145.0, -150.0], [50.0, 51.0, 52.0]
+    pieces = _seam_split(lons, lats)
+    assert len(pieces) == 1
+    assert pieces[0][:, 0].tolist() == lons
+    assert pieces[0][:, 1].tolist() == lats
+
+
+def test_seam_split_straddling_ring_stays_within_pm180_and_touches_the_seam():
+    # a small closed rectangle whose east edge sits past 180 in an unwrapped,
+    # contiguous trace (170 -> 190), the shape align.perimeter_of would trace for
+    # a grid straddling the antimeridian
+    ring_lons = [170.0, 190.0, 190.0, 170.0, 170.0]
+    ring_lats = [-10.0, -10.0, 10.0, 10.0, -10.0]
+    pieces = _seam_split(ring_lons, ring_lats)
+    assert len(pieces) >= 2
+    all_lons = [lon for piece in pieces for lon in piece[:, 0]]
+    assert all(-180.0 <= lon <= 180.0 for lon in all_lons)
+    assert any(abs(lon - 180.0) < 1e-9 for lon in all_lons)
+    assert any(abs(lon + 180.0) < 1e-9 for lon in all_lons)
+    # no piece silently reintroduces a >180 jump between its own vertices
+    for piece in pieces:
+        deltas = np.diff(piece[:, 0])
+        assert all(abs(d) <= 180.0 for d in deltas)
+
+
+# -- selection/domain styling and extent framing (shared with map_locations) -------
+
+
+def test_style_for_selection_and_domain_are_fixed():
+    selection = style_for("selection")
+    assert selection["color"] == GROUP_STYLES["selection"]["color"] == "crimson"
+    assert selection["marker_index"] is None
+    domain = style_for("domain")
+    assert domain["color"] == GROUP_STYLES["domain"]["color"] == "black"
+    assert domain["linestyle"] == "--"
+
+
+def test_style_for_catalog_featuretype_is_index_based():
+    style = style_for("grid")
+    assert style["color"] == TAB10[0]
+    assert style["marker_index"] == 0
+    assert style["marker"] is None  # renderer looks its own marker table up
+
+
+def test_default_extent_includes_ring_and_line_paths():
+    items = [
+        {
+            "kind": "ring",
+            "paths": [
+                np.array([[170.0, -10.0], [180.0, -10.0]]),
+                np.array([[-180.0, -10.0], [-170.0, 10.0]]),
+            ],
+        },
+        {"kind": "line", "paths": [np.array([[-150.0, 40.0], [-150.0, 60.0]])]},
+    ]
+    lon0, lat0, lon1, lat1 = _default_extent(items)
+    assert lon0 <= -180.0 or lon0 < -170.0  # ring's western piece is included
+    assert lat1 >= 60.0 - 1e-9  # line's northern end is included
 
 
 # -- item building ------------------------------------------------------------------
@@ -238,6 +324,81 @@ def _items(index):
         return build_items()
 
 
+def _hover_stub(name: str) -> dict[str, str]:
+    """A minimal all-string hover record for a hand-built ``locations`` item."""
+    return {field: (name if field == "name" else "") for field in HOVER_FIELDS}
+
+
+def test_matplotlib_locations_draws_ring_and_line_kinds():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from ocean_skill.plot.matplotlib_renderer import locations
+
+    ring = np.array([[170.0, -10.0], [180.0, -10.0], [180.0, 10.0], [170.0, 10.0]])
+    line = np.array([[-150.0, 40.0], [-150.0, 60.0]])
+    items = [
+        {
+            **_hover_stub("model domain"),
+            "kind": "ring",
+            "paths": [ring],
+            "featureType": "domain",
+        },
+        {
+            **_hover_stub("meridional slice"),
+            "kind": "line",
+            "paths": [line],
+            "featureType": "selection",
+        },
+    ]
+    fig = locations(items, extent=(-180.0, -20.0, -120.0, 70.0))
+    ax = fig.axes[0]
+
+    labels = sorted(t.get_text() for t in ax.get_legend().get_texts())
+    assert labels == ["domain", "selection"]
+
+    solid = [ln for ln in ax.lines if ln.get_linestyle() == "-"]
+    dashed = [ln for ln in ax.lines if ln.get_linestyle() == "--"]
+    assert len(solid) == 1  # the selection slice line, drawn solid
+    assert len(dashed) == 1  # the domain ring, drawn dashed
+    assert solid[0].get_color() == GROUP_STYLES["selection"]["color"]
+    assert dashed[0].get_color() == GROUP_STYLES["domain"]["color"]
+
+
+def test_matplotlib_locations_mixes_catalog_and_selection_items(index):
+    """A selection map's items sit alongside catalog items without disturbing them."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from ocean_skill.plot.matplotlib_renderer import locations
+
+    catalog_items, extent = _items(index)
+    ring = np.array([[-100.0, 15.0], [-95.0, 15.0], [-95.0, 25.0], [-100.0, 25.0]])
+    selection_items = [
+        {
+            **_hover_stub("model domain"),
+            "kind": "ring",
+            "paths": [ring],
+            "featureType": "domain",
+        },
+        {
+            **_hover_stub("requested point"),
+            "kind": "point",
+            "lon": -98.0,
+            "lat": 20.0,
+            "featureType": "selection",
+        },
+    ]
+    fig = locations(catalog_items + selection_items, extent=extent)
+    ax = fig.axes[0]
+    labels = sorted(t.get_text() for t in ax.get_legend().get_texts())
+    assert labels == ["domain", "grid", "selection", "timeSeries"]
+    # catalog rings unaffected: still dashed, still one per bbox (roms 1 + pacific
+    # split 2 + climatology 1), plus the new domain ring makes 5
+    dashed = [ln for ln in ax.lines if ln.get_linestyle() == "--"]
+    assert len(dashed) == 5
+
+
 def test_matplotlib_locations_smoke(index):
     import matplotlib
 
@@ -316,16 +477,76 @@ def test_holoviews_locations_tiles(index):
     assert abs(fig.x_range.start) > 1000.0
 
 
+def _selection_map_items():
+    """A ring, a line, a point and a box — one of each new/reused kind."""
+    ring = np.array([[170.0, -10.0], [180.0, -10.0], [180.0, 10.0], [170.0, 10.0]])
+    line = np.array([[-150.0, 40.0], [-150.0, 60.0]])
+    return [
+        {
+            **_hover_stub("model domain"),
+            "kind": "ring",
+            "paths": [ring],
+            "featureType": "domain",
+        },
+        {
+            **_hover_stub("meridional slice"),
+            "kind": "line",
+            "paths": [line],
+            "featureType": "selection",
+        },
+        {
+            **_hover_stub("requested point"),
+            "kind": "point",
+            "lon": -144.8,
+            "lat": 50.07,
+            "featureType": "selection",
+        },
+        {
+            **_hover_stub("region"),
+            "kind": "extent",
+            "featureType": "selection",
+            "bboxes": [(-100.0, 15.0, -95.0, 25.0)],
+        },
+    ]
+
+
+def test_holoviews_locations_ring_and_line_kinds():
+    import holoviews as hv
+
+    from ocean_skill.plot.holoviews_renderer import _locations
+
+    items = _selection_map_items()
+    extent = (-180.0, -20.0, -80.0, 70.0)
+
+    # untiled: rendered as a legend-carrying element, in plain degrees
+    fig = hv.render(_locations(items, extent=extent, tiles=None), backend="bokeh")
+    legend_labels = {it.label["value"] for it in fig.legend[0].items}
+    assert {"domain", "selection"} <= legend_labels
+
+    # tiled: paths are hand-projected to Web Mercator, same as the extent boxes
+    fig = hv.render(_locations(items, extent=extent), backend="bokeh")
+    assert abs(fig.x_range.start) > 1000.0
+
+    # the point and the box hover with the full metadata record; the ring/line
+    # paths carry none — there is nothing per-glyph on a path to report
+    hovers = _bokeh_hover_tools(_locations(items, extent=extent, tiles=None))
+    assert len(hovers) == 2  # rectangles element + points element, not the paths
+    for hover in hovers:
+        assert [name for name, _ in hover.tooltips] == list(HOVER_FIELDS)
+
+
 # -- public API ---------------------------------------------------------------------
 
 
-def test_map_datasets_and_find_map(index):
+def test_map_locations_by_name_and_find_map(index):
     import matplotlib
 
     matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
-    fig = map_datasets(["papa", "roms_gulf"])
+    from ocean_skill.plot.map_locations import map_locations
+
+    fig = map_locations(["papa", "roms_gulf"])
     assert isinstance(fig, Figure)
 
     names = index.find(featureType="timeSeries")

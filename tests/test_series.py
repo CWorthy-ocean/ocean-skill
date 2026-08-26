@@ -415,7 +415,7 @@ def test_a_gridded_comparisons_record_carries_no_station_position(
 
 def test_a_station_comparison_has_no_maps_to_draw(station_lanes):
     with pytest.raises(ValueError, match="one place"):
-        _comparison().maps("bias")
+        _comparison().pointwise_metrics("bias")
 
 
 def test_a_set_that_mixes_families_says_which_went_which_way(station_lanes):

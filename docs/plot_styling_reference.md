@@ -941,12 +941,13 @@ label colours and key *entries*. Two differences, both deliberate:
 `line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
 static renderer, which warns rather than absorbing them silently.
 
-## The `locations` family (dataset map)
+## The `locations` family (dataset map, and selection map)
 
-`osk.map_datasets()` / `osk.find(...).map()` draw where catalog datasets *are*, from
+`osk.map_locations()` / `osk.find(...).map()` draw where catalog datasets *are*, from
 metadata alone — no field, so no colormap, no colorbar and no `mark`. Colour keys the
 `featureType` (markers for stations/profiles/tracks, dashed extent boxes for grids),
-and the legend is the key to it.
+and the legend is the key to it. The same family also draws where a plotted
+*selection* sits — see [Selection maps](#selection-maps) below.
 
 ### `locations`-only parameters
 
@@ -966,3 +967,46 @@ Interactively, hovering any marker or extent box reads that dataset's record —
 catalog, featureType, variables, time coverage, cadence, resolution, depth,
 institution, title — pre-formatted by `ocean_skill.plot.locations.build_items`, which
 is also where entries with no declared geospatial extent are skipped with a warning.
+
+### Selection maps
+
+`comparison.map_locations()`, `comparison_set.map_locations()`, `field.map_locations()`
+and `field_set.map_locations()` draw where *that object's own data* sits — the same
+`locations` family, fed by `ocean_skill.plot.map_locations` instead of catalog names:
+
+```python
+comparisons = osk.compare(reference="papa", test="ciofs3", variables="temperature",
+                           select={"lon": -144.3, "lat": 50.0})
+comparisons.map_locations()                     # a crimson star at the requested
+                                                 # point, over ciofs3's dashed
+                                                 # domain outline
+comparisons.map_locations(renderer="holoviews") # the same, interactive
+```
+
+Every lane draws once: its **requested** selection (a point, a region box, or a
+lone-lon/lat slice as a solid line) when `select` pins one, else its own **catalog
+footprint** — the same marker/box `osk.map_locations("that_source")` would draw —
+so a comparison with no horizontal select still places both the test and the
+reference. A `ComparisonSet`/`FieldSet` fan that shares one point or region (ten
+variables at one mooring, say) draws it once, not once per member.
+
+This never opens a dataset and never aligns a comparison — it reads only the
+*request* (`select`) and catalog metadata, so it costs the same whether `.plot()`
+has already run or not. It is therefore also never precise about a snapped-vs-
+requested offset (the few kilometres between where you asked and the nearest model
+cell): that offset is already a warning where alignment actually happens, and stays
+a warning there rather than becoming a second marker or an annotation here.
+
+Selection geometry always draws **crimson** (a colour outside the catalog
+featureType palette, so it can never collide with one); the domain outline always
+draws **black, dashed** — the same style the `domain=` option draws everywhere
+else, so every map in this package agrees on what a model's footprint looks like.
+The domain ring is on by default (one per distinct test source); pass `domain=None`
+to suppress it, or a `(lon_min, lat_min, lon_max, lat_max)` bbox / `(N, 2)` ring to
+override it — the same spelling `.plot()`'s own `domain=` takes. The ring/line paths
+carry no hover record in the interactive renderer (there is nothing per-glyph on a
+path to report); the selection point/box still hovers with the same fields a
+catalog item does, `title` holding a plain-language description ("point at (-144.30,
+50.07)", "meridional slice at -150.00°", ...).
+
+All the `locations`-only parameters above apply here too.
