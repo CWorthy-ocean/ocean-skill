@@ -232,7 +232,8 @@ def _quadmesh(
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
     if geo:
-        opts |= {"geo": True, "projection": _output_projection(da)}
+        projection = _output_projection(da)
+        opts |= {"geo": True, "projection": projection}
         if coastline:
             # hvplot's coastline is a geoviews Feature, which the plot re-projects
             # from scratch every time it renders a frame. Fine for the single draw
@@ -240,10 +241,18 @@ def _quadmesh(
             # every frame — movies pass coastline=False and overlay a static,
             # once-projected path instead (see _movie_coastline).
             opts["coastline"] = "50m"
-        if project:
+        if project or projection is not None:
             # project the data to the output projection now, once, instead of
-            # letting the plot re-project it per rendered frame. Only worth setting
-            # for movies: a single map pays the projection exactly once either way.
+            # letting the plot re-project it per rendered frame. Movies set
+            # ``project`` to pay that cost a single time rather than per frame.
+            #
+            # A straddling field (``projection`` is the 180-centred frame) *must*
+            # be projected regardless: with ``project=False`` geoviews leaves the
+            # quadmesh in its raw 0-360 longitudes and only relabels the axes, so
+            # every cell past 180 wraps back to the far side — the basin tears
+            # across both edges with a blank Atlantic in the middle, exactly the
+            # centre-0 layout the 180-centred frame was chosen to avoid. Projecting
+            # the mesh vertices once keeps it one contiguous piece.
             opts["project"] = True
         # movie callers already downgrade via _tiles_for before reaching here (so this
         # is a no-op for them); a caller that hands tiles straight to _quadmesh still
