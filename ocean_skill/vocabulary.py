@@ -62,15 +62,24 @@ __all__ = [
 VOCABULARY: dict[str, dict[str, object]] = {
     "nitrate": {
         "standard_name": "mole_concentration_of_nitrate_in_sea_water",
-        "aliases": ["moles_of_nitrate_per_unit_mass_in_sea_water"],
+        "aliases": [
+            "moles_of_nitrate_per_unit_mass_in_sea_water",
+            "NO3",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
     },
     "phosphate": {
         "standard_name": "mole_concentration_of_phosphate_in_sea_water",
-        "aliases": ["moles_of_phosphate_per_unit_mass_in_sea_water"],
+        "aliases": [
+            "moles_of_phosphate_per_unit_mass_in_sea_water",
+            "PO4",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
     },
     "silicate": {
         "standard_name": "mole_concentration_of_silicate_in_sea_water",
-        "aliases": ["moles_of_silicate_per_unit_mass_in_sea_water"],
+        "aliases": [
+            "moles_of_silicate_per_unit_mass_in_sea_water",
+            "SiO3",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
     },
     "ammonium": {
         "standard_name": "mole_concentration_of_ammonium_in_sea_water",
@@ -96,13 +105,19 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "standard_name": (
             "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
         ),
-        "aliases": ["moles_of_oxygen_per_unit_mass_in_sea_water"],
+        "aliases": [
+            "moles_of_oxygen_per_unit_mass_in_sea_water",
+            "O2",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
     },
     "dissolved_inorganic_carbon": {
         "standard_name": (
             "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water"
         ),
-        "aliases": ["moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water"],
+        "aliases": [
+            "moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water",
+            "DIC",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
     },
     "alkalinity": {
         # All of these are *total* alkalinity: CF defines the canonical name as "the
@@ -122,6 +137,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # find(variable="alkalinity") returned GLODAP and ROMS but silently
             # dropped OceanSODA, and compare() would not pair them.
             "total_alkalinity_in_sea_water",
+            "ALK",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
         ],
     },
     "temperature": {
@@ -129,6 +145,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # in-situ, not strictly the same quantity as potential temperature -- see
         # the module docstring on why that is an alias here and not its own tier
         "aliases": [
+            "temp",  # ROMS tracer name; see the `Fe` note below on matching
             "sea_water_temperature",
             # Satellite SST, in the three flavours GHRSST distinguishes. They are
             # *not* identical: skin is the radiometric top micron, subskin the top
@@ -202,6 +219,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
     "salinity": {
         "standard_name": "sea_water_practical_salinity",
         "aliases": [
+            "salt",  # ROMS tracer name; see the `Fe` note above on matching
             "sea_water_salinity",  # near-identical; see "temperature" above
             "sea_surface_salinity",  # the surface spelling, as for temperature
         ],
@@ -215,6 +233,11 @@ VOCABULARY: dict[str, dict[str, object]] = {
     "chlorophyll": {
         "standard_name": "mass_concentration_of_chlorophyll_a_in_sea_water",
         "aliases": [
+            # Common shorthand for the concept. Unlike NO3/O2/... above, `Chl` is NOT
+            # a single model tracer -- ROMS/MARBL carry per-PFT spChl/diatChl/diazChl
+            # summed via {"sum": [...]} (see ocean_skill.operators). Matched whole (the
+            # `Fe` note), so `Chl`/`chl`/`CHL` resolve but spChl/diatChl/diazChl do not.
+            "Chl",
             "mass_concentration_of_chlorophyll_in_sea_water",
             # OOI Papa's profiler-mounted fluorometer (ocean_skill/catalogs/ooi_papa.yaml) --
             # same quantity, a different instrument's naming convention.

@@ -172,6 +172,37 @@ def test_short_symbol_alias_resolves_whole_name_any_case(spelling):
     )
 
 
+# The ROMS/MARBL tracer short names that must resolve as a typed nickname, not just
+# be renamed at build time -- a caller types `NO3`/`O2`/`DIC`/... as readily as the
+# long CF name. Kept in sync with build.ROMS_STANDARD_NAMES below; the ones left out
+# (zeta/u/v/hbls/FG_CO2) reach the same concept through their friendly keys instead.
+_TYPEABLE_TRACERS = [
+    "temp", "salt", "w", "NO3", "PO4", "SiO3", "NH4", "Fe", "O2", "DIC", "ALK",
+]
+
+
+@pytest.mark.parametrize("tracer", _TYPEABLE_TRACERS)
+def test_model_tracer_name_resolves_as_a_typed_nickname(tracer):
+    """Typing the model's own tracer name reaches the same variable a build produces.
+
+    Regression guard for the asymmetry where `NH4`/`Fe` resolved but `NO3`/`O2`/...
+    silently passed through: a build-time rename is not enough, resolve_name (used
+    everywhere a caller supplies a name) must reach it too.
+    """
+    from ocean_skill.build import ROMS_STANDARD_NAMES
+
+    assert vocabulary.resolve_name(tracer) == ROMS_STANDARD_NAMES[tracer]
+
+
+def test_chl_shorthand_resolves_but_does_not_grab_per_pft_tracers():
+    """`Chl` is a shorthand for the concept, not a tracer -- spChl/... stay themselves."""
+    assert vocabulary.resolve_name("Chl") == (
+        "mass_concentration_of_chlorophyll_a_in_sea_water"
+    )
+    for per_pft in ("spChl", "diatChl", "diazChl"):
+        assert vocabulary.resolve_name(per_pft) == per_pft
+
+
 @pytest.mark.parametrize("not_iron", ["felix", "ferric", "Fe_flux"])
 def test_short_symbol_alias_is_not_a_prefix_match(not_iron):
     """A name merely starting with the symbol is a different variable, not iron."""
