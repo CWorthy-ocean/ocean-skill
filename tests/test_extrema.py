@@ -233,6 +233,36 @@ def test_time_facet_argmax_sets_snapshot_time(stub):
     assert ext.time_reason == "the time coordinate at the extremum"
 
 
+def _ns_resolution(da):
+    """Force ``da``'s time coordinate to datetime64[ns] -- the resolution whose
+    ``.item()`` collapses to a bare ns-since-epoch int, reproducing the reported
+    bug regardless of xarray's ambient default resolution."""
+    return da.assign_coords(time=da["time"].values.astype("datetime64[ns]"))
+
+
+def test_snapshot_time_is_a_datetime_not_a_raw_ns_int(stub):
+    # A datetime64[ns] coordinate must not collapse to a bare ns-since-epoch int
+    # via .item() -- that int cannot be nearest-matched against a native time
+    # index of a different resolution in _window_select.
+    stub(_ns_resolution(_rectilinear_map(nt=3)))
+    ext = _make().extremum("max")
+    assert not isinstance(ext.time, (int, np.integer))
+    assert pd.Timestamp(ext.time) == pd.Timestamp("2012-01-02")
+
+
+def test_default_window_survives_a_non_ns_native_index(stub, monkeypatch):
+    # Regression: snapshot from a datetime64[ns] coord, native index at second
+    # resolution -- previously raised "Cannot compare dtypes datetime64[s] and
+    # int64" (then "'<' not supported between datetime.datetime and int") from
+    # _window_select.
+    stub(_ns_resolution(_rectilinear_map(nt=5)))
+    ext = _make().extremum("max")  # planted max at time index 1
+    index = pd.date_range("2012-01-01", periods=5, freq="D").as_unit("s")
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda src: index)
+    fs = ext.series(pad=1)
+    assert fs[0].select["time"] == {"min": str(index[0]), "max": str(index[2])}
+
+
 def test_no_time_axis_leaves_time_none_with_a_reason(stub):
     stub(_rectilinear_map())
     ext = _make().extremum("max")
