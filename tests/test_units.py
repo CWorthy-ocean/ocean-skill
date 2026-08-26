@@ -56,6 +56,16 @@ def test_unparseable_units_return_none_rather_than_raising():
     assert u.parse("not a unit at all $$") is None
 
 
+def test_missing_units_are_not_dimensionless():
+    """A variable that never recorded ``units`` (``None``) is unknown, not "".
+
+    ``normalize(None)`` collapses to ``""`` -> "dimensionless", which used to make
+    a units-less field parse as a real, empty unit -- indistinguishable from a
+    variable that genuinely declared itself dimensionless.
+    """
+    assert u.parse(None) is None
+
+
 # -- compatibility ------------------------------------------------------------
 
 
@@ -72,6 +82,14 @@ def test_different_quantities_are_incompatible():
 def test_unknown_units_report_unknown_not_incompatible():
     """Three-valued on purpose: blocking on a spelling problem would be wrong."""
     assert u.compatible("$$", "mmol/m^3") is None
+
+
+def test_a_missing_units_attr_also_reports_unknown():
+    """Regression: a units-less to_depth() result made compatible(None, ...) return
+    a hard False (via normalize(None) -> "dimensionless"), which made align()
+    refuse a comparison it should have warned and proceeded with instead.
+    """
+    assert u.compatible(None, "mmol/m^3") is None
 
 
 @pytest.mark.parametrize(
@@ -170,6 +188,17 @@ def test_align_converts_before_differencing():
 
 def test_align_warns_but_proceeds_when_units_are_unknown():
     test, reference = _pair("$$unparseable", "mmol/m^3")
+    with pytest.warns(UserWarning, match="cannot verify units"):
+        _align.align(test, reference, method="bilinear")
+
+
+def test_align_warns_but_proceeds_when_units_are_missing_entirely():
+    """Same as above, but the test lane never had a ``units`` attr at all -- the
+    shape of the failure a units-dropping vertical transform (e.g. to_depth
+    before it copied per-variable attrs) actually produces.
+    """
+    test, reference = _pair("$$unparseable", "mmol/m^3")
+    del test.attrs["units"]
     with pytest.warns(UserWarning, match="cannot verify units"):
         _align.align(test, reference, method="bilinear")
 

@@ -279,13 +279,16 @@ def _z_grid(ds: xr.Dataset, s_dim: str):
     import xgcm
 
     try:
+        # >=1.0 dropped `periodic` in favour of `padding` (default None, i.e. not
+        # periodic) -- passing periodic=False here raises ValueError rather than
+        # the TypeError this except clause catches, so the modern branch omits it.
         return xgcm.Grid(
             ds,
             coords={"Z": {"center": s_dim}},
-            periodic=False,
             autoparse_metadata=False,
         )
-    except TypeError:  # older xgcm without autoparse_metadata kwarg
+    except TypeError:  # older xgcm: no autoparse_metadata, defaults to periodic=True,
+        # and transform() refuses a periodic axis -- must be explicit here.
         return xgcm.Grid(ds, coords={"Z": {"center": s_dim}}, periodic=False)
 
 
@@ -314,13 +317,18 @@ def to_depth(
         # only rho-point 3-D fields share z_rho's grid; staggered u/v (xi_u/eta_v) need
         # interpolation to rho first (deferred), so skip them here.
         if s_dim in da.dims and {"eta_rho", "xi_rho"} <= set(da.dims):
-            out[var] = grid.transform(
+            transformed = grid.transform(
                 _contiguous_column(da, s_dim),
                 "Z",
                 targets,
                 target_data=z_rho,
                 method="linear",
             )
+            # the transform sheds attrs on some xarray versions (see to_sigma0's
+            # identical note); carry the source variable's forward explicitly
+            # rather than depend on apply_ufunc's keep_attrs default.
+            transformed.attrs = {**da.attrs, **transformed.attrs}
+            out[var] = transformed
     result = xr.Dataset(out, coords={"lon": ds["lon"], "lat": ds["lat"], "z": -depths})
     result.attrs.update(ds.attrs)
 
