@@ -2322,7 +2322,8 @@ def render(spec, **kwargs: Any):
         opts.setdefault(
             "title",
             suptitle_text(
-                item.get("standard_name"), (item.get("depth"), item.get("time"))
+                item.get("standard_name"),
+                (item.get("depth"), item.get("time"), item.get("region")),
             ),
         )
         return _field_row(item, **opts)

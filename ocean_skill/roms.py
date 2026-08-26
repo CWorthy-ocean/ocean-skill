@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 
 __all__ = [
+    "AREA_COORD",
     "WEIGHT_COORD",
     "add_depth_coord",
     "add_interface_coord",
@@ -27,6 +28,15 @@ __all__ = [
     "to_depth",
     "to_sigma0",
 ]
+
+#: Coordinate name carrying per-cell horizontal area, so a spatial mean can honour
+#: it — mirrors :data:`WEIGHT_COORD`'s "weights ride on the data" pattern:
+#: :func:`ocean_skill.operators.aggregate` needs no special case for a box mean,
+#: ``{"lat": "mean", "lon": "mean"}`` finds it and uses it, exactly as ``{"Z":
+#: "mean"}`` needs nothing special for depth. Attached in :func:`standardize` when
+#: the grid carries ``pm``/``pn`` (ROMS's inverse grid spacings, 1/m); absent from
+#: a grid that does not, in which case a spatial mean falls back to cos(latitude).
+AREA_COORD = "cell_area"
 
 
 def _open_grid(meta: dict[str, Any]) -> xr.Dataset:
@@ -76,6 +86,18 @@ def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     for name in ("h", "Cs_r", "sigma_r", "mask_rho", "angle"):
         if name in grid.variables:
             ds = ds.assign_coords({name: grid[name]})
+
+    # true cell area, for an area-weighted spatial mean (ocean_skill.operators
+    # aggregate); absent from a grid that ships no pm/pn, in which case a spatial
+    # mean falls back to cos(latitude) -- see AREA_COORD.
+    if "pm" in grid.variables and "pn" in grid.variables:
+        ds = ds.assign_coords(
+            {
+                AREA_COORD: (
+                    1.0 / (grid["pm"] * grid["pn"])
+                ).assign_attrs(units="m2", long_name="grid cell area (1/(pm*pn))")
+            }
+        )
 
     # rename model variable names -> CF standard_names
     rename = {
@@ -229,7 +251,7 @@ def depth_average(
         averaged.attrs["depth_average"] = f"thickness-weighted mean over {low}-{high} m"
         out[name] = averaged
     result = xr.Dataset(out, attrs=dict(ds.attrs))
-    for coord in ("lon", "lat", "lon_rho", "lat_rho", "mask_rho", "h"):
+    for coord in ("lon", "lat", "lon_rho", "lat_rho", "mask_rho", "h", AREA_COORD):
         if coord in ds.coords and coord not in result.coords:
             result = result.assign_coords({coord: ds[coord]})
     return result
@@ -329,7 +351,10 @@ def to_depth(
             # rather than depend on apply_ufunc's keep_attrs default.
             transformed.attrs = {**da.attrs, **transformed.attrs}
             out[var] = transformed
-    result = xr.Dataset(out, coords={"lon": ds["lon"], "lat": ds["lat"], "z": -depths})
+    coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
+    if AREA_COORD in ds.coords:
+        coords[AREA_COORD] = ds[AREA_COORD]
+    result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
 
     # A target shallower than the topmost cell centre (or deeper than the bottom one)
@@ -453,9 +478,10 @@ def to_sigma0(
                 ),
             }
             out[var] = transformed
-    result = xr.Dataset(
-        out, coords={"lon": ds["lon"], "lat": ds["lat"], "sigma0": values}
-    )
+    coords = {"lon": ds["lon"], "lat": ds["lat"], "sigma0": values}
+    if AREA_COORD in ds.coords:
+        coords[AREA_COORD] = ds[AREA_COORD]
+    result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
     result["sigma0"].attrs = {
         "units": "kg m-3",

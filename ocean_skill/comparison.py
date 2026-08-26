@@ -284,6 +284,41 @@ def _depth_label(depth: Any) -> str:
     return f"{float(depth):g} m"
 
 
+def _hemisphere_range(lo: float, hi: float, pos: str, neg: str) -> str:
+    """Format a numeric range with hemisphere letters, sharing one when possible.
+
+    ``45, 55, "N", "S"`` reads ``"45–55°N"``: one shared letter, since the whole
+    range sits in one hemisphere. ``-5, 5, "N", "S"`` reads ``"5°S–5°N"`` instead
+    -- each end keeps its own letter once the range crosses zero, since one
+    shared letter would misname whichever side it is not.
+    """
+    if (lo >= 0) == (hi >= 0):
+        letter = pos if hi >= 0 else neg
+        return f"{abs(lo):g}–{abs(hi):g}°{letter}"
+    lo_letter = pos if lo >= 0 else neg
+    hi_letter = pos if hi >= 0 else neg
+    return f"{abs(lo):g}°{lo_letter}–{abs(hi):g}°{hi_letter}"
+
+
+def _region_label(bbox: Any) -> str:
+    """Format a lon/lat box for labels/repr: ``"45–55°N, 165°E–155°W"``.
+
+    Latitude first, matching :func:`ocean_skill.plot.series._place_of`'s point
+    spelling. Longitude is wrapped to ±180 for display, independently at each
+    end -- which is what turns a box that straddles the antimeridian (given as,
+    say, 165 to 205 in a contiguous 0-360 spelling) into the readable
+    ``"165°E–155°W"`` rather than a number past 180 nobody asked for.
+    ``bbox`` may be a list or a tuple: the aligned lane's cache round-trips a
+    tuple through zarr as a list, and this reads either.
+    """
+    lon_min, lat_min, lon_max, lat_max = bbox
+    lon_min = ((float(lon_min) + 180) % 360) - 180
+    lon_max = ((float(lon_max) + 180) % 360) - 180
+    lat_str = _hemisphere_range(float(lat_min), float(lat_max), "N", "S")
+    lon_str = _hemisphere_range(lon_min, lon_max, "E", "W")
+    return f"{lat_str}, {lon_str}"
+
+
 def is_pair_spec(spec: Any) -> bool:
     """Report whether ``spec`` names a *different* variable per lane.
 
@@ -510,6 +545,33 @@ def _without_vertical(agg: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (agg or {}).items() if k not in _ANY_VERTICAL_KEYS}
 
 
+def _horizontal_mean_part(agg: dict[str, Any] | None) -> dict[str, Any]:
+    """Return just the joint spatial-mean pair of an aggregation spec, if present.
+
+    ``{}`` when ``agg`` does not ask for one (see
+    :func:`ocean_skill.operators.spatial_mean_in_spec`) -- the ordinary case, where
+    this is a no-op reduction to hand :func:`ocean_skill.operators.aggregate`.
+    """
+    from ocean_skill import operators
+
+    pair = operators.spatial_mean_in_spec(agg)
+    return {} if pair is None else {k: agg[k] for k in pair}
+
+
+def _without_horizontal_mean(agg: dict[str, Any] | None) -> dict[str, Any]:
+    """Return an aggregation spec with its joint spatial-mean pair removed, if any.
+
+    The horizontal mean has to run *after* the vertical ladder (see the ordering
+    note in :func:`_prepare`: ``to_depth``/``to_sigma0`` interpolate per column
+    against horizontally-varying ``z_rho``, and a depth-band mean must collapse
+    each column's own thickness weights before columns are area-averaged
+    together), so it is held back out of the early non-vertical aggregate this
+    pairs with, and applied as its own final phase instead.
+    """
+    part = _horizontal_mean_part(agg)
+    return {k: v for k, v in (agg or {}).items() if k not in part}
+
+
 def _selected_depth(select: dict[str, Any]) -> Any:
     """Return what a ``select`` asks for vertically, whichever spelling it used.
 
@@ -717,8 +779,12 @@ def _select_horizontal_then_aggregate(
     # resolve_dim above finds nothing for them, yet operators.select's point
     # branch (operators.point_in_spec) can still sample the source there. Without
     # this, a curvilinear point select would fall through to "matched no axis"
-    # (see the warning below) instead of narrowing to a place.
+    # (see the warning below) instead of narrowing to a place. A lon/lat *range*
+    # pair (a box) has the identical problem and the identical fix -- see
+    # operators.box_in_spec/_box_selectable.
     if hit := operators._point_selectable(da, horizontal):
+        applied |= {hit[0], hit[1]}
+    if hit := operators._box_selectable(da, horizontal):
         applied |= {hit[0], hit[1]}
     da = operators.select(
         da, {k: v for k, v in horizontal.items() if k in applied}, subject=source
@@ -817,20 +883,26 @@ def _prepare(
         name = da.name or "field"
         da = roms.surface(da.to_dataset(name=name), meta)[name]
 
-    # Order matters twice over. Selection precedes reduction, or "the mean of
-    # January" would average the whole record. And the *non-vertical* reduction runs
+    # Order matters three ways now. Selection precedes reduction, or "the mean of
+    # January" would average the whole record. The *non-vertical* reduction runs
     # before the vertical step, so an expensive s-coordinate transform sees as few
     # fields as the reduction leaves it -- one, for a time mean; every step, now that
     # no reduction is the default, which is the cost of asking for every step. The
     # vertical part of the aggregation then collapses whatever the vertical selection
-    # left standing. A select key can also name an axis the aggregation *creates*
-    # (groupby renames its dim to the grouping key) rather than one already
+    # left standing. And a joint spatial mean over both horizontal axes (see
+    # ocean_skill.operators.spatial_mean_in_spec) runs *last*, after the vertical
+    # ladder rather than here with the rest of the non-vertical reduction: to_depth/
+    # to_sigma0 interpolate per column against horizontally-varying z_rho, and a
+    # depth-band mean must collapse each column's own thickness weights before
+    # columns are area-averaged together -- either would see no columns left if the
+    # spatial mean ran first. A select key can also name an axis the aggregation
+    # *creates* (groupby renames its dim to the grouping key) rather than one already
     # standing -- see :func:`_select_horizontal_then_aggregate`, which gives such a
     # key a second try once the aggregate has run.
     horizontal = {k: v for k, v in select.items() if k not in _ANY_VERTICAL_KEYS}
-    da = _select_horizontal_then_aggregate(
-        da, horizontal, _without_vertical(agg), source
-    )
+    early_agg = _without_horizontal_mean(_without_vertical(agg))
+    horizontal_mean = _horizontal_mean_part(_without_vertical(agg))
+    da = _select_horizontal_then_aggregate(da, horizontal, early_agg, source)
 
     if calculated:
         bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
@@ -888,7 +960,7 @@ def _prepare(
                         "source actually carries it)."
                     )
                 column = _select_horizontal_then_aggregate(
-                    column, horizontal, _without_vertical(agg), source
+                    column, horizontal, early_agg, source
                 )
                 sub = sub.assign({standard_name: column})
             targets = (
@@ -990,6 +1062,12 @@ def _prepare(
     # Now the vertical reduction, on whatever the vertical selection left: one level
     # (already collapsed), several interpolated levels, or a weighted band.
     da = operators.aggregate(da, _vertical_only(agg))
+    # Then, last of all, the joint horizontal mean -- see the ordering note above.
+    # By now `da` is one map (or one map per surviving non-horizontal axis, if the
+    # caller kept one standing), so the area-weighted reduction operates on exactly
+    # what select= narrowed it to, whatever vertical shape that field is in.
+    if horizontal_mean:
+        da = operators.aggregate(da, horizontal_mean)
     # A station carries its instrument depth as a scalar coordinate rather than an axis
     # to select from (see ocean_skill.tabular.depth_of), so the depth actually compared
     # is read off the lane itself. Reported the same way as an observational level's:
@@ -1308,6 +1386,9 @@ class Comparison:
             if over is None and self._point_select_implies_time():
                 over = "time"
                 self.over_reason = "the select narrows the reference to one position"
+            elif over is None and self._spatial_mean_implies_time():
+                over = "time"
+                self.over_reason = "the aggregate collapses space to one box mean"
         else:
             self.over_reason = "over= as asked"
         self.over = over
@@ -1341,6 +1422,26 @@ class Comparison:
 
         ref_select = select_for(self.select, "reference")
         if operators.point_in_spec(ref_select) is None:
+            return False
+        return not _collapses_time(aggregate_for(self.aggregate, "reference"))
+
+    def _spatial_mean_implies_time(self) -> bool:
+        """Whether the aggregate alone reduces the reference to one box mean.
+
+        Called only when neither an explicit ``over=`` nor the reference's
+        featureType nor a point select (:meth:`_point_select_implies_time`) has
+        already settled it. An aggregate reducing the reference's horizontal axes
+        to one joint area-weighted mean (:func:`ocean_skill.operators
+        .spatial_mean_in_spec`) leaves it exactly as reduced as a station is by
+        nature -- there is no map left to draw either way -- unless the same
+        aggregate has also collapsed time itself (:func:`_collapses_time`), in
+        which case there is no axis left for a line to run along and inferring
+        one would be wrong rather than merely unasked.
+        """
+        from ocean_skill import operators
+
+        ref_agg = _without_vertical(aggregate_for(self.aggregate, "reference"))
+        if operators.spatial_mean_in_spec(ref_agg) is None:
             return False
         return not _collapses_time(aggregate_for(self.aggregate, "reference"))
 
@@ -1906,12 +2007,14 @@ class Comparison:
         # which is not a depth to name, so it is dropped rather than shown as "n/a").
         depth = _depth_label(_display_depth(self.variable, self.select))
         selected_time = _display_time(self.select)
+        region = _display_region(self.select)
         common = {
             "metrics": self.metrics(),
             "units": self.aligned["reference"].attrs.get("units"),
             "standard_name": self.standard_name,
             "depth": None if depth == NO_VERTICAL_AXIS else depth,
             "time": None if selected_time is None else _time_label(selected_time),
+            "region": None if region is None else _region_label(region),
             "label": self.label,
             # this comparison's own source names, for its row's column titles —
             # not necessarily the same pair as other rows in the same set (a
@@ -2674,6 +2777,53 @@ def _display_time(select: dict[str, Any]) -> Any:
     disagree, which is exactly why a pair-spec select exists.
     """
     return _selected_time(select_for(select, "test"))
+
+
+def _is_range(value: Any) -> bool:
+    """Whether ``value`` is the YAML-friendly ``{"min", "max"}`` range spelling.
+
+    The same shape test :func:`is_depth_band` makes, under a neutral name -- kept
+    separate so a longitude/latitude range is not read through depth's name.
+    """
+    return isinstance(value, dict) and {"min", "max"} <= set(value)
+
+
+def _selected_region(
+    select: dict[str, Any],
+) -> tuple[float, float, float, float] | None:
+    """Return the lon/lat box a ``select`` asks for, or ``None`` if it names none.
+
+    Both a lon range and a lat range (see
+    :func:`ocean_skill.operators.box_in_spec`) -- a lone range on one axis is a
+    meridional/zonal band, not a box, and is not reported here. This reads only
+    the *select*, for a map-view title; a box-mean's own region (after the
+    horizontal axes are gone) is read back from the aligned data's own attrs
+    instead, by :func:`ocean_skill.plot.series._place_of`.
+    """
+    from ocean_skill import operators
+
+    lon_key = next((k for k in operators._POINT_LON_KEYS if k in select), None)
+    lat_key = next((k for k in operators._POINT_LAT_KEYS if k in select), None)
+    if lon_key is None or lat_key is None:
+        return None
+    lon_value, lat_value = select[lon_key], select[lat_key]
+    if not (_is_range(lon_value) and _is_range(lat_value)):
+        return None
+    return (
+        float(lon_value["min"]),
+        float(lat_value["min"]),
+        float(lon_value["max"]),
+        float(lat_value["max"]),
+    )
+
+
+def _display_region(select: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """The lon/lat box a comparison should report in labels/repr.
+
+    A pair-spec select reports the **test** side, matching :func:`_display_time`
+    and :func:`_display_depth`'s own precedent.
+    """
+    return _selected_region(select_for(select, "test"))
 
 
 def _time_label(value: Any) -> str:

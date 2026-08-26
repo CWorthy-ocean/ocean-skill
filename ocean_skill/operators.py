@@ -51,6 +51,7 @@ __all__ = [
     "DERIVED",
     "REDUCERS",
     "aggregate",
+    "box_in_spec",
     "combine",
     "oriented_slice",
     "point_in_spec",
@@ -60,6 +61,7 @@ __all__ = [
     "resolve_dim",
     "resolve_variable",
     "select",
+    "spatial_mean_in_spec",
     "spec_names",
 ]
 
@@ -323,10 +325,13 @@ def resolve_dim(obj, name: str) -> str | None:
     return None
 
 
-#: Spec key spellings that name the horizontal axes, for :func:`point_in_spec` --
-#: the union of :data:`_CF_AXES`'s "X"/"Y" and every name
-#: :func:`ocean_skill.cf.find_coord`'s fallback list resolves, so a point select is
-#: recognized under whichever spelling a source or a caller happens to use.
+#: Spec key spellings that name the horizontal axes -- the union of
+#: :data:`_CF_AXES`'s "X"/"Y" and every name :func:`ocean_skill.cf.find_coord`'s
+#: fallback list resolves, so a request is recognized under whichever spelling a
+#: source or a caller happens to use. Shared by :func:`point_in_spec` (both scalar
+#: -- a place), :func:`box_in_spec` (both a range -- a box), and
+#: :func:`spatial_mean_in_spec` (both a plain "mean" in an ``aggregate`` -- one
+#: area-weighted reduction over both axes together).
 _POINT_LON_KEYS = frozenset({"X", "lon", "longitude", "lon_rho", "nav_lon"})
 _POINT_LAT_KEYS = frozenset({"Y", "lat", "latitude", "lat_rho", "nav_lat"})
 
@@ -382,6 +387,102 @@ def _point_selectable(
     """
     hit = point_in_spec(spec)
     if hit is None or hasattr(obj, "data_vars"):
+        return None
+    from ocean_skill.cf import find_coord
+
+    lon_coord, lat_coord = find_coord(obj, "longitude"), find_coord(obj, "latitude")
+    if lon_coord is None or lat_coord is None:
+        return None
+    rectilinear = (
+        lon_coord.ndim == 1
+        and lat_coord.ndim == 1
+        and lon_coord.name in obj.dims
+        and lat_coord.name in obj.dims
+    )
+    curvilinear = lon_coord.ndim == 2 and lat_coord.ndim == 2
+    return hit if (rectilinear or curvilinear) else None
+
+
+def _range_bounds(value: Any) -> tuple[Any, Any] | None:
+    """Return ``(lo, hi)`` when ``value`` spells a range, else ``None``.
+
+    Mirrors the two range spellings :func:`select` accepts: a ``slice``, or the
+    YAML-friendly ``{"min": ..., "max": ...}`` dict. A scalar, list, or string is
+    not a range and returns ``None`` — the caller decides what that means (a
+    point, an explicit value set, a date).
+    """
+    if isinstance(value, slice):
+        return value.start, value.stop
+    if isinstance(value, dict) and ("min" in value or "max" in value):
+        return value.get("min"), value.get("max")
+    return None
+
+
+def box_in_spec(
+    spec: dict[str, Any] | None,
+) -> tuple[str, str, tuple[float, float], tuple[float, float]] | None:
+    """Return ``(lon_key, lat_key, (lon_min, lon_max), (lat_min, lat_max))`` for a box.
+
+    A lon/lat pair both spelled as *ranges* (a ``slice`` or a ``{"min", "max"}``
+    dict — see :func:`select`) is a box, the plural of :func:`point_in_spec`'s
+    scalar pair: the same key sets serve both, since one value is either a scalar
+    (a point) or a range (a box), never both at once. A scalar lon+lat stays a
+    point; a lone lon-range or lat-range (a meridional/zonal band) is neither and
+    is left to the ordinary per-axis loop in :func:`select`.
+
+    Latitude may be one-sided (open toward a pole, defaulting to ±90); longitude
+    may not — an open bound on a circle names no band, so a lone-sided longitude
+    falls through to ``None`` (not a box) rather than guessing a hemisphere.
+    Backwards bounds (``max`` < ``min``) are accepted on both axes: latitude is
+    simply swapped, and longitude is first tried as a seam-straddling box in
+    0-360 — ``{"min": 170, "max": -170}`` becomes ``170..190``, the
+    ``pac_dt_ramp``-style stress case — before falling back to a swap for a
+    plain backwards typo that does not resolve that way (e.g. ``30`` before
+    ``20``).
+    """
+    if not spec:
+        return None
+    lon_key = next((k for k in _POINT_LON_KEYS if k in spec), None)
+    lat_key = next((k for k in _POINT_LAT_KEYS if k in spec), None)
+    if lon_key is None or lat_key is None:
+        return None
+    lon_range, lat_range = _range_bounds(spec[lon_key]), _range_bounds(spec[lat_key])
+    if lon_range is None or lat_range is None:
+        return None
+    lon_lo, lon_hi = lon_range
+    if lon_lo is None or lon_hi is None:
+        return None  # an open longitude bound names no band on a circle
+    lat_lo, lat_hi = lat_range
+    lat_lo = -90.0 if lat_lo is None else float(lat_lo)
+    lat_hi = 90.0 if lat_hi is None else float(lat_hi)
+    if lat_lo > lat_hi:
+        lat_lo, lat_hi = lat_hi, lat_lo
+    lon_lo, lon_hi = float(lon_lo), float(lon_hi)
+    if lon_lo > lon_hi:
+        wrapped_lo, wrapped_hi = lon_lo % 360, lon_hi % 360
+        lon_lo, lon_hi = (
+            (wrapped_lo, wrapped_hi) if wrapped_lo <= wrapped_hi else (lon_hi, lon_lo)
+        )
+    return lon_key, lat_key, (lon_lo, lon_hi), (lat_lo, lat_hi)
+
+
+def _box_selectable(
+    obj, spec: dict[str, Any] | None
+) -> tuple[str, str, tuple[float, float], tuple[float, float]] | None:
+    """Return :func:`box_in_spec`'s hit when ``obj`` itself can be cropped to it.
+
+    Narrower than ``box_in_spec`` alone, the same way :func:`_point_selectable` is
+    narrower than :func:`point_in_spec`: a box's keys mean nothing unless ``obj``
+    actually carries a longitude/latitude coordinate that is either rectilinear
+    (each 1-D and its own dimension) or curvilinear (each 2-D, e.g. ROMS's
+    ``lon_rho``/``lat_rho``). Unlike the point gate, a **Dataset** is not excluded
+    here: :func:`ocean_skill.align.sample_at` needs one array to NaN-check for a
+    point, but a crop has no such constraint —
+    :func:`ocean_skill.align.subset_to_bbox` already crops whole Datasets, and
+    :func:`ocean_skill.align.subset_to_box` does the same.
+    """
+    hit = box_in_spec(spec)
+    if hit is None:
         return None
     from ocean_skill.cf import find_coord
 
@@ -505,6 +606,15 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     meridional/zonal slice) is unaffected and keeps the per-axis behavior below.
     ``subject`` names the source in the errors/warnings this can raise.
 
+    **A lon range and a lat range together are a box** (see :func:`box_in_spec`),
+    routed through :func:`ocean_skill.align.subset_to_box` rather than two
+    independent per-axis slices — the box counterpart of the point routing above,
+    with the same three benefits: it works on a curvilinear grid (a boolean
+    predicate over the 2-D lon/lat, rather than a slice along a dimension neither
+    coordinate names), it wraps the box into whichever longitude convention the
+    grid actually uses, and an empty result raises rather than silently returning
+    a size-zero array. A lone lon-range or lat-range is unaffected.
+
     A date string that names a single **instant** — ``"2013-01-30T02:00:00"``, or
     any date no coarser than the axis's own resolution — behaves like a scalar:
     exact if present, otherwise the nearest step, because model output is stamped
@@ -560,6 +670,13 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
             convention=natural_convention(obj),
             subject=subject,
         )
+    box = _box_selectable(obj, spec)
+    if box is not None:
+        lon_key, lat_key, (lon_lo, lon_hi), (lat_lo, lat_hi) = box
+        from ocean_skill.align import subset_to_box
+
+        del spec[lon_key], spec[lat_key]
+        obj = subset_to_box(obj, (lon_lo, lat_lo, lon_hi, lat_hi), subject=subject)
     for name, value in spec.items():
         dim = resolve_dim(obj, name)
         if dim is None or dim not in obj.dims:
@@ -757,6 +874,142 @@ def _leaf_names(names) -> list[str]:
     return out
 
 
+def spatial_mean_in_spec(agg: dict[str, Any] | None) -> tuple[str, str] | None:
+    """Return ``(lon_key, lat_key)`` when ``agg`` asks for one joint area-weighted mean.
+
+    Both horizontal axes reduced by a plain ``"mean"`` (or ``{"reduce": "mean"}``,
+    with no ``groupby``/``resample``/other kwargs) together — not sequentially, the
+    way two ordinary ``aggregate`` entries would be applied one after another (this
+    function's own per-key loop) — because with a ragged NaN mask the mean of the
+    row-means is not the mean: a joint reduction is the only one that weighs every
+    wet cell in the box equally, whichever row or column it sits in. See
+    :func:`_horizontal_mean`, the reduction this routes to.
+
+    Anything else — a lone ``{"lat": "mean"}`` zonal mean, ``{"lat": "mean", "lon":
+    "max"}``, a groupby/resample on either axis — is not this joint path and is
+    left to the ordinary per-axis loop, unweighted as it has always been.
+    """
+    if not agg:
+        return None
+    lon_key = next((k for k in _POINT_LON_KEYS if k in agg), None)
+    lat_key = next((k for k in _POINT_LAT_KEYS if k in agg), None)
+    if lon_key is None or lat_key is None:
+        return None
+
+    def _is_plain_mean(value: Any) -> bool:
+        if value == "mean":
+            return True
+        if isinstance(value, dict):
+            return value.get("reduce") == "mean" and set(value) <= {"reduce"}
+        return False
+
+    if _is_plain_mean(agg[lon_key]) and _is_plain_mean(agg[lat_key]):
+        return lon_key, lat_key
+    return None
+
+
+def _horizontal_reducible(da) -> bool:
+    """Whether ``da`` has a lon/lat coordinate :func:`_horizontal_mean` can reduce.
+
+    The same rectilinear-or-curvilinear gate :func:`_box_selectable` uses for a
+    crop: each 1-D and its own dimension, or each 2-D and sharing dimensions. A
+    Dataset (no single array's dims to check) or a trajectory's ``lon(time)``
+    fails this and is left to the ordinary per-axis loop below, unweighted.
+    """
+    from ocean_skill.cf import find_coord
+
+    if hasattr(da, "data_vars"):
+        return False
+    lon_coord, lat_coord = find_coord(da, "longitude"), find_coord(da, "latitude")
+    if lon_coord is None or lat_coord is None:
+        return False
+    rectilinear = (
+        lon_coord.ndim == 1
+        and lat_coord.ndim == 1
+        and lon_coord.name in da.dims
+        and lat_coord.name in da.dims
+    )
+    curvilinear = lon_coord.ndim == 2 and lat_coord.ndim == 2
+    return rectilinear or curvilinear
+
+
+def _area_weights_for(da) -> tuple[Any, str]:
+    """Return ``(weights, description)`` for an area-weighted spatial mean of ``da``.
+
+    True cell area (:data:`ocean_skill.roms.AREA_COORD`, ``1/(pm*pn)``) when a ROMS
+    grid carries it — the same "weights ride on the data" pattern
+    :func:`_weights_for` reads for a depth band — else ``cos(latitude)``, exact for
+    a rectilinear lat/lon grid and the same approximation
+    :func:`ocean_skill.metrics.area_weights` already uses for skill metrics. NaN
+    weights (dry cells, and cos(lat) wherever latitude itself is missing) are
+    filled to zero rather than left to poison the reduction —
+    :meth:`xarray.DataArray.weighted` refuses NaN weights outright.
+    """
+    import numpy as np
+
+    from ocean_skill.cf import find_coord
+    from ocean_skill.roms import AREA_COORD
+
+    area = da.coords.get(AREA_COORD)
+    if area is not None and set(area.dims) <= set(da.dims):
+        return area.fillna(0.0), "area-weighted mean (cell_area)"
+    lat_coord = find_coord(da, "latitude")
+    if lat_coord is None:
+        raise ValueError(
+            "cannot area-weight a spatial mean: no latitude coordinate found to "
+            "compute cos(latitude) from, and no cell_area coordinate is present."
+        )
+    weights = np.cos(np.deg2rad(lat_coord))
+    return weights.fillna(0.0), "area-weighted mean (cos latitude)"
+
+
+def _horizontal_mean(da):
+    """Return ``da`` reduced by one area-weighted mean over both horizontal axes.
+
+    The reduction :func:`spatial_mean_in_spec` routes to: a single
+    ``da.weighted(weights).mean(...)`` over the union of the lon and lat
+    coordinates' own dimensions (one dim each on a rectilinear grid, two shared
+    dims — ``eta_rho``/``xi_rho`` — on a curvilinear one), which is why it must be
+    one call rather than two sequential per-axis means (see
+    :func:`spatial_mean_in_spec`).
+
+    The result's lon/lat coordinates become the box's own midpoint, read from
+    ``da.attrs["region"]`` when a ``select`` box drove this call — set by
+    :func:`ocean_skill.align.subset_to_box`, and carried forward through
+    whatever vertical transform ran in between, the same way ``units`` already
+    is — or from the field's own extent (:func:`ocean_skill.align.bbox_of`) for a
+    whole-domain mean with no preceding box. Reading the *requested* box back
+    this way, rather than the reduced data's own (possibly ragged) extent, is
+    what lets two lanes of one comparison sharing one box land on exactly the
+    same position: this is what drops a box-mean into the same "one place, one
+    time axis" recipe a station reference already has
+    (:func:`ocean_skill.align.point_of`).
+    """
+    from ocean_skill.align import _wrap_lon, bbox_of
+    from ocean_skill.cf import find_coord
+
+    lon_coord, lat_coord = find_coord(da, "longitude"), find_coord(da, "latitude")
+    if lon_coord is None or lat_coord is None:
+        raise ValueError(
+            "cannot take a spatial mean: no longitude/latitude coordinate found "
+            "to reduce."
+        )
+    dims = sorted(set(lon_coord.dims) | set(lat_coord.dims))
+    weights, description = _area_weights_for(da)
+    attrs = dict(da.attrs)
+    region = da.attrs.get("region")
+    out = da.weighted(weights).mean(dim=dims)
+    out.attrs = {**attrs, **out.attrs}  # a reduction drops attrs; units must survive
+    lon_min, lat_min, lon_max, lat_max = region if region is not None else bbox_of(da)
+    mid_lon = _wrap_lon(0.5 * (float(lon_min) + float(lon_max)), "-180-180")
+    mid_lat = 0.5 * (float(lat_min) + float(lat_max))
+    out = out.assign_coords({lon_coord.name: mid_lon, lat_coord.name: mid_lat})
+    out.attrs["spatial_mean"] = description
+    if region is not None:
+        out.attrs["region"] = list(region)
+    return out
+
+
 def aggregate(da, spec: dict[str, Any] | None):
     """Reduce ``da`` over each dimension in ``spec``. Returns ``da`` unchanged if empty.
 
@@ -774,11 +1027,24 @@ def aggregate(da, spec: dict[str, Any] | None):
     rather than a precedence rule, since either alone is a complete answer and
     silently honouring one would give a plausible figure of the wrong thing.
 
+    **Both horizontal axes reduced by a plain "mean" together** is one joint
+    area-weighted spatial mean rather than two sequential unweighted ones — see
+    :func:`spatial_mean_in_spec` and :func:`_horizontal_mean`. This is the plural
+    of the point routing :func:`select` gives a scalar lon+lat pair: the same key
+    spellings, reduced together rather than sliced together, because a mean of
+    means is not a mean once the wet-cell mask is ragged.
+
     Dimensions absent from ``da`` are skipped rather than raising: a selection may
     already have collapsed one, and a spec shared across variables should not fail on
     the one that has no depth axis.
     """
-    for name, how in (spec or {}).items():
+    spec = dict(spec or {})
+    pair = spatial_mean_in_spec(spec)
+    if pair is not None and _horizontal_reducible(da):
+        lon_key, lat_key = pair
+        del spec[lon_key], spec[lat_key]
+        da = _horizontal_mean(da)
+    for name, how in spec.items():
         dim = resolve_dim(da, name)
         if dim is None or dim not in da.dims:
             continue

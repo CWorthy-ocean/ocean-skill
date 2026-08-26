@@ -535,6 +535,48 @@ def test_panel_title_reads_a_curvilinear_scalar_position():
     assert any("144.2°W" in t and "50.0°N" in t for t in static)
 
 
+def test_a_box_mean_comparison_reads_mean_over_the_region_not_a_place():
+    """A box-mean lands on the box midpoint -- the same scalar-coord machinery a
+    station's point sample uses (see ocean_skill.operators._horizontal_mean) -- but
+    the title must say what it actually is, not claim a station that isn't there."""
+    from ocean_skill.comparison import _region_label
+
+    item = _item()
+    region = [-149.0, 47.0, -142.0, 53.0]
+    for name in ("reference", "test", "difference"):
+        item["aligned"][name].attrs["region"] = region
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_titles(render(_spec([item]), renderer="holoviews"))
+    assert static == interactive
+    expected = f"mean over {_region_label(region)}"
+    assert any(expected in t for t in static)
+    assert not any("°N " in t and "mean over" not in t for t in static)
+
+
+def test_a_box_mean_single_source_item_reads_mean_over_the_region_too():
+    from ocean_skill.comparison import _region_label
+
+    item = _single_item()
+    region = [-149.0, 47.0, -142.0, 53.0]
+    item["aligned"]["value"].attrs["region"] = region
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_titles(render(_spec([item]), renderer="holoviews"))
+    assert static == interactive
+    expected = f"mean over {_region_label(region)}"
+    assert any(expected in t for t in static)
+
+
+def test_a_list_region_attr_formats_too():
+    """A zarr round trip turns the tuple region attr into a list -- must still format."""
+    from ocean_skill.comparison import _region_label
+
+    item = _item()
+    region = [-149.0, 47.0, -142.0, 53.0]  # list, as a lane cache round-trip gives it
+    item["aligned"]["reference"].attrs["region"] = region
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    assert any(f"mean over {_region_label(region)}" in t for t in static)
+
+
 def test_depth_fanned_single_source_items_get_markers_and_depth_labels():
     """One Field, several levels -- markers and legend labels tell them apart."""
     items = [_single_item(depth=10.0), _single_item(depth=50.0)]
