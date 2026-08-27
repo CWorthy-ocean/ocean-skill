@@ -30,6 +30,7 @@ from ocean_skill import _stacklevel
 from ocean_skill._display import Text
 
 __all__ = [
+    "Overlap",
     "SourceNames",
     "SourceRef",
     "catalog_metadata",
@@ -39,6 +40,7 @@ __all__ = [
     "discover",
     "find",
     "match_report",
+    "overlap",
     "resolve",
     "search_paths",
 ]
@@ -489,6 +491,93 @@ def _time_overlaps(meta: dict[str, Any], window) -> bool | None:
     except Exception:
         return None
     return _overlaps(have[0], have[1], want[0], want[1])
+
+
+def _circular_overlap(lon_min_a, lon_max_a, lon_min_b, lon_max_b) -> bool:
+    """Whether two longitude intervals intersect on the circle (mod 360).
+
+    :func:`ocean_skill.comparison._domain_of` deliberately returns a
+    dateline-straddling domain's bounds in whichever of 0-360/+/-180 keeps them
+    contiguous (its own docstring explains why) -- so the two intervals handed
+    here are not guaranteed to share a convention, and comparing them as plain
+    (non-wrapping) intervals would misjudge exactly the antimeridian domains
+    this exists to get right. Sliding one interval by every whole turn that
+    could bring it adjacent to the other sidesteps the question of which
+    convention either one started in.
+    """
+    lo_a, hi_a = lon_min_a % 360.0, lon_min_a % 360.0 + (lon_max_a - lon_min_a)
+    lo_b, hi_b = lon_min_b % 360.0, lon_min_b % 360.0 + (lon_max_b - lon_min_b)
+    return any(
+        _overlaps(lo_a, hi_a, lo_b + shift, hi_b + shift) for shift in (-360.0, 0.0, 360.0)
+    )
+
+
+def _boxes_overlap(box_a, box_b) -> bool:
+    """Whether two ``(lon_min, lat_min, lon_max, lat_max)`` boxes intersect."""
+    lon_min_a, lat_min_a, lon_max_a, lat_max_a = box_a
+    lon_min_b, lat_min_b, lon_max_b, lat_max_b = box_b
+    if not _overlaps(lat_min_a, lat_max_a, lat_min_b, lat_max_b):
+        return False
+    return _circular_overlap(lon_min_a, lon_max_a, lon_min_b, lon_max_b)
+
+
+@dataclass(frozen=True)
+class Overlap:
+    """Whether two sources' catalog-declared extents overlap in space and time.
+
+    Each axis is ``True`` (the two sources' declared extents overlap),
+    ``False`` (they provably do not), or ``None`` (one side has no declared
+    extent on that axis -- an ungridded/unprobed entry, or one whose
+    coordinate columns this package's build step didn't recognize -- so there
+    is nothing to check, not a "no"). ``bool(this)`` reads as "no *known*
+    reason to refuse this pair": ``True`` unless an axis is provably disjoint,
+    so a caller doesn't block on an axis it simply can't check yet.
+    """
+
+    space: bool | None
+    time: bool | None
+
+    def __bool__(self) -> bool:
+        return self.space is not False and self.time is not False
+
+    def __repr__(self) -> str:
+        def fmt(value: bool | None) -> str:
+            return "unknown" if value is None else ("yes" if value else "no")
+
+        return f"Overlap(space={fmt(self.space)}, time={fmt(self.time)})"
+
+
+def overlap(a: str, b: str) -> Overlap:
+    """Whether two catalog sources' declared extents overlap in space and time.
+
+    Read-free -- built entirely from each source's catalog metadata (the same
+    ``geospatial_*``/``time_coverage_*`` contract :func:`describe` and
+    :func:`find` already rely on), so it costs nothing to check *before*
+    comparing two sources: two whose catalog-declared time coverage never
+    meets will never produce a matched pair, and a multi-GB read is a bad way
+    to learn that. :meth:`ocean_skill.comparison.Comparison.align` calls this
+    itself and warns when it comes back false, for the same reason.
+
+    A day of padding is folded into the time check (the same pad
+    :func:`ocean_skill.comparison._time_coverage_of` applies before narrowing
+    a test lane to a reference's record), so this agrees with what narrowing
+    would actually find rather than being a stricter, unrelated question.
+    Longitude is compared on the circle, convention-agnostic (0-360 vs
+    +/-180, and a domain straddling the antimeridian) -- see
+    :func:`_circular_overlap`.
+    """
+    from ocean_skill.comparison import _domain_of, _time_coverage_of
+
+    box_a, box_b = _domain_of(a), _domain_of(b)
+    space = None if box_a is None or box_b is None else _boxes_overlap(box_a, box_b)
+
+    window_a, window_b = _time_coverage_of(a), _time_coverage_of(b)
+    time = (
+        None
+        if window_a is None or window_b is None
+        else _overlaps(*window_a, *window_b)
+    )
+    return Overlap(space=space, time=time)
 
 
 class SourceNames(list):

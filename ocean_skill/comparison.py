@@ -1944,6 +1944,44 @@ class Comparison:
             return None, None
         return _domain_of(self.reference_name), _time_coverage_of(self.reference_name)
 
+    def _warn_if_no_overlap(self) -> None:
+        """Warn, before either lane is read, when the two sources provably never meet.
+
+        A test and reference whose catalog-declared extents don't overlap on some
+        axis will never produce a matched pair on it either -- narrowing quietly
+        gives up rather than failing (:func:`ocean_skill.align.subset_to_time`
+        returns an empty window uncropped, on purpose, since a climatology
+        legitimately shares no span with anything), so without this a caller's
+        first sign of the mismatch is a multi-GB read that changes nothing,
+        followed by an empty or refused alignment once both lanes are finally in
+        memory. Checked with :func:`ocean_skill.catalog.overlap`, which a caller
+        can also run by hand *before* calling :func:`compare` at all.
+
+        Silent when either side has nothing declared to check (``None`` on an
+        axis, not ``False``) -- exactly :class:`ocean_skill.catalog.Overlap`'s own
+        "unknown, not a no" contract, so a source this package can't yet read
+        metadata for is never mistaken for a confirmed mismatch.
+        """
+        import warnings
+
+        from ocean_skill import _stacklevel
+        from ocean_skill.catalog import overlap
+
+        ov = overlap(self.test_name, self.reference_name)
+        bad = [axis for axis, ok in (("space", ov.space), ("time", ov.time)) if ok is False]
+        if not bad:
+            return
+        warnings.warn(
+            f"{self.test_name!r} and {self.reference_name!r} do not overlap in "
+            f"{' or '.join(bad)}, per their catalog-declared extents -- this "
+            "comparison is likely to end up with nothing matched once both "
+            "lanes are read. Check osk.catalog.overlap"
+            f"({self.test_name!r}, {self.reference_name!r}) for the declared "
+            "bounds, or point select=/aggregate= at a period or region the two "
+            "sources actually share.",
+            stacklevel=_stacklevel.find(),
+        )
+
     @property
     def standard_name(self) -> str | None:
         """The CF name this comparison represents, for colormaps/labels/metrics.
@@ -2208,6 +2246,7 @@ class Comparison:
         # cannot second-guess -- but the derived time window still applies either way,
         # since where and when are independent questions and a routed select says
         # nothing about the latter.
+        self._warn_if_no_overlap()
         route = self._point_route()
         drop_keys = route[:2] if route is not None else ()
         derived_bbox, derived_window = self._reference_narrowing()

@@ -603,3 +603,77 @@ def test_describe_catalog_includes_a_vocabulary_section(isolated_catalogs):
     assert "vocabulary:" in text
     assert "temperature" in text
     assert "sea_water_temperature" in text
+
+
+# -- overlap() ----------------------------------------------------------------------
+
+
+def test_overlap_true_on_both_axes(monkeypatch):
+    cat = _fake_index(monkeypatch, {"a": ("C", GULF), "b": ("C", GULF)})
+    ov = cat.overlap("a", "b")
+    assert (ov.space, ov.time) == (True, True)
+    assert bool(ov) is True
+
+
+def test_overlap_false_reports_the_offending_axis(monkeypatch):
+    """The Anvil case: a station's own record predates the model's declared run."""
+    far_future = {**GULF, "time_coverage_start": "2099-01-01", "time_coverage_end": "2099-02-01"}
+    cat = _fake_index(monkeypatch, {"a": ("C", GULF), "b": ("C", far_future)})
+    ov = cat.overlap("a", "b")
+    assert (ov.space, ov.time) == (True, False)
+    assert bool(ov) is False
+
+
+def test_overlap_false_on_space_alone(monkeypatch):
+    elsewhere = {**GULF, "geospatial_lon_min": 60.0, "geospatial_lon_max": 70.0}
+    cat = _fake_index(monkeypatch, {"a": ("C", GULF), "b": ("C", elsewhere)})
+    ov = cat.overlap("a", "b")
+    assert (ov.space, ov.time) == (False, True)
+    assert bool(ov) is False
+
+
+def test_overlap_is_unknown_not_false_when_metadata_is_missing(monkeypatch):
+    """An unprobed/undeclared source can't be checked -- that isn't a "no"."""
+    cat = _fake_index(monkeypatch, {"a": ("C", GULF), "b": ("C", {})})
+    ov = cat.overlap("a", "b")
+    assert (ov.space, ov.time) == (None, None)
+    assert bool(ov) is True
+
+
+def test_overlap_handles_an_antimeridian_straddling_domain(monkeypatch):
+    """The pac_dt_ramp stress case: a domain kept in 0-360 (see _domain_of) must
+    still compare correctly against a source declared in plain +/-180.
+    """
+    straddling = {
+        "geospatial_lon_min": 77.0,
+        "geospatial_lon_max": 316.0,
+        "geospatial_lat_min": 0.0,
+        "geospatial_lat_max": 60.0,
+    }
+    inside = {  # -170 in +/-180 is 190 in 0-360, which the 77..316 arc covers
+        "geospatial_lon_min": -171.0,
+        "geospatial_lon_max": -169.0,
+        "geospatial_lat_min": 10.0,
+        "geospatial_lat_max": 20.0,
+    }
+    outside = {  # 0 falls in the 316..77 gap the domain does *not* cover
+        "geospatial_lon_min": -1.0,
+        "geospatial_lon_max": 1.0,
+        "geospatial_lat_min": 10.0,
+        "geospatial_lat_max": 20.0,
+    }
+    cat = _fake_index(
+        monkeypatch,
+        {"straddling": ("C", straddling), "inside": ("C", inside), "outside": ("C", outside)},
+    )
+    assert cat.overlap("straddling", "inside").space is True
+    assert cat.overlap("straddling", "outside").space is False
+
+
+def test_overlap_repr_and_bool():
+    from ocean_skill.catalog import Overlap
+
+    assert bool(Overlap(space=True, time=True)) is True
+    assert bool(Overlap(space=False, time=True)) is False
+    assert bool(Overlap(space=None, time=None)) is True
+    assert repr(Overlap(space=True, time=False)) == "Overlap(space=yes, time=no)"
