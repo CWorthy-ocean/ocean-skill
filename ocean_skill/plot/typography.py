@@ -537,6 +537,13 @@ SERIES_OVERHEAD = (2.9, 0.19)
 #: for a wide panel) stays the family's own choice rather than an aspect override.
 SECTION_ASPECT = 2.2
 
+#: What a *profile* (value-by-depth) panel wants. Portrait, unlike every other line
+#: or map family here: a water column is read top-to-bottom, and a wide-format panel
+#: would waste most of its width on a physically narrow story. A design choice, like
+#: :data:`SERIES_ASPECT` and :data:`SECTION_ASPECT` -- there is no lon/lat span (or
+#: any other physical ratio) to measure a profile panel's shape from either.
+PROFILE_ASPECT = 0.62
+
 #: Height of a residual strip as a fraction of the panel it sits under. A difference
 #: *map* is a third panel of equal weight because it needs its own colour scale; a
 #: difference *series* is conventionally a thin strip below the data it belongs to.

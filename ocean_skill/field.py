@@ -222,6 +222,29 @@ class Field:
         return point_of(da) is not None and resolve_dim(da, "T") in da.dims
 
     @property
+    def is_profile(self) -> bool:
+        """Whether this field's prepared data is a place through depth, not a map.
+
+        Mirrors :attr:`is_series` one axis over: a select that narrows both
+        horizontal axes to one position leaves a surviving vertical axis standing
+        with no time axis to draw a line through instead (see :attr:`is_series`,
+        checked first in :attr:`family` -- a select that keeps *both* time and
+        depth standing still draws as a series, one line per level, exactly as
+        before). The water column a station is, at one instant.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        if point_of(da) is None:
+            return False
+        tdim = resolve_dim(da, "T")
+        zdim = resolve_dim(da, "Z")
+        return (tdim is None or tdim not in da.dims) and (
+            zdim is not None and zdim in da.dims
+        )
+
+    @property
     def is_section(self) -> bool:
         """Whether this field's prepared data is a cut through space: a vertical slice.
 
@@ -245,13 +268,16 @@ class Field:
     def family(self) -> str:
         """The plot family this field's own shape admits.
 
-        ``series`` (a line over time at one place), ``section`` (a cut through
-        depth and along-path distance), or ``field_facet`` (map panels) — no
-        argument selects it, the same as :attr:`ocean_skill.comparison
-        .Comparison.family` — the prepared data's shape decides.
+        ``series`` (a line over time at one place), ``profile`` (a line down
+        depth at one place, one instant), ``section`` (a cut through depth and
+        along-path distance), or ``field_facet`` (map panels) — no argument
+        selects it, the same as :attr:`ocean_skill.comparison.Comparison.family`
+        — the prepared data's shape decides.
         """
         if self.is_series:
             return "series"
+        if self.is_profile:
+            return "profile"
         if self.is_section:
             return "section"
         return "field_facet"
@@ -261,6 +287,8 @@ class Field:
         """Why :attr:`family` came out the way it did, for tracing a surprise."""
         if self.is_series:
             return "drawn as a line: the selection leaves one place, so the surviving time axis is the x"
+        if self.is_profile:
+            return "drawn as a profile: the selection leaves one place and one instant, so the surviving depth axis is the y"
         if self.is_section:
             return "drawn as a section: select={'transect': ...} leaves a cut through space, with depth on the other axis"
         return "drawn as map panels: a horizontal extent survives"
@@ -343,6 +371,39 @@ class Field:
             items.append(item)
         return items
 
+    def _profile_items(self) -> list[dict[str, Any]]:
+        """Return this field's data as one single-source profile item.
+
+        The vertical twin of :meth:`_series_items`, and simpler: a profile's
+        depth axis survives *whole*, one line down the water column, rather than
+        being fanned into one item per level -- depth is the axis a profile line
+        draws against, not a fact several series lines are told apart by (see
+        :mod:`ocean_skill.plot.profile`). Anything beyond it left standing is
+        refused, the same as :meth:`_series_items` refuses a third axis a line
+        has no room for.
+        """
+        import xarray as xr
+
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        zdim = resolve_dim(da, "Z")
+        extra = [str(d) for d in da.dims if d != zdim]
+        if extra:
+            raise ValueError(
+                f"this profile still has {extra} beyond depth, and a profile "
+                f"line has only one axis to give away. Collapse it with "
+                f'aggregate= (e.g. {{"{extra[0]}": "mean"}}) or narrow it with '
+                "select=."
+            )
+        base = {
+            "units": da.attrs.get("units"),
+            "standard_name": self.standard_name,
+            "label": self.label or self.source,
+            "labels": (self.label or self.source,),
+        }
+        return [{"aligned": xr.Dataset({"value": da}), "metrics": None, **base}]
+
     def as_item(self) -> dict[str, Any]:
         """Return this field as a spec item."""
         from ocean_skill.comparison import _depth_label, _selected_depth
@@ -402,9 +463,9 @@ class Field:
         )
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw this field: as map panels, as a vertical section, or as a line over time.
+        """Draw this field: as map panels, a vertical section, a profile, or a line.
 
-        Which of the three is decided by the prepared data's own shape, never an
+        Which of the four is decided by the prepared data's own shape, never an
         argument — see :attr:`family`. Goes through the renderer registry, so
         ``renderer="holoviews"`` gives the interactive version of the same plot
         with no other change.
@@ -417,23 +478,29 @@ class Field:
             spec = PlotSpec(
                 family="series", items=self._series_items(), options=kwargs
             )
+        elif self.family == "profile":
+            spec = PlotSpec(
+                family="profile", items=self._profile_items(), options=kwargs
+            )
         elif self.family == "section":
             self._require_section_shape()
             spec = PlotSpec(family="section", items=[self.as_item()], options=kwargs)
         else:
             if point_of(self.data) is not None:
-                # A point with no surviving time: neither a map (no horizontal
-                # extent left) nor a line (nothing to run it along) can be drawn --
-                # field_facet would otherwise try to lay out panels of a field with
-                # no axes at all, which fails confusingly further in.
+                # A point with neither a surviving time nor depth axis: no line
+                # (nothing to run it along, either way) and no map (no horizontal
+                # extent left) can be drawn -- field_facet would otherwise try to
+                # lay out panels of a field with no axes at all, which fails
+                # confusingly further in.
                 raise ValueError(
                     f"{self.source!r} has been reduced to one place with no "
-                    f"surviving time axis ({sorted(self.data.dims)} standing), so "
-                    "there is no horizontal extent left for map panels and no time "
-                    "axis for a line either. Keep time standing for a series (drop "
-                    "a select={'time': ...} that pins it to an instant, or an "
-                    "aggregate that collapses it), or widen select= to keep a "
-                    "horizontal extent for a map."
+                    f"surviving time or depth axis ({sorted(self.data.dims)} "
+                    "standing), so there is no horizontal extent left for map "
+                    "panels and nothing for a line to run along either. Keep time "
+                    "standing for a series, or depth for a profile (drop a "
+                    "select= that pins it to one value, or an aggregate that "
+                    "collapses it), or widen select= to keep a horizontal extent "
+                    "for a map."
                 )
             spec = PlotSpec(
                 family="field_facet", items=[self.as_item()], options=kwargs
@@ -480,6 +547,13 @@ class Field:
                 f"{self.source!r} has been reduced to a point and draws as a line "
                 "over time (see .family), not a map -- there is nothing to play as "
                 "a movie. Use .plot() instead; it already shows the whole series."
+            )
+        if self.is_profile:
+            raise ValueError(
+                f"{self.source!r} has been reduced to a point and draws as a "
+                "profile down depth (see .family), not a map -- there is no time "
+                "axis here to play as a movie. Use .plot() instead; it already "
+                "shows the whole profile."
             )
         if self.is_section:
             raise ValueError(
@@ -571,42 +645,51 @@ class FieldSet:
         return f"FieldSet({self.fields!r})"
 
     def _items(self) -> list[dict[str, Any]]:
-        """Every member's series items, concatenated into one figure's worth."""
+        """Every member's items (series or profile), concatenated into one figure."""
+        if self.fields and self.fields[0].family == "profile":
+            return [item for f in self.fields for item in f._profile_items()]
         return [item for f in self.fields for item in f._series_items()]
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw every member's variable on one figure, laid out by :mod:`plot.series`.
+        """Draw every member's variable on one figure, laid out by :mod:`plot.series`
+        or :mod:`plot.profile`.
 
-        Every member has to draw as a line (see :attr:`Field.family`) for that to mean
-        anything -- a set that mixes a point and a map has no single figure that is
-        both, so this refuses rather than picking one arbitrarily.
+        Every member has to draw the same way -- all a :attr:`Field.family` of
+        ``"series"`` (a point over time) or all ``"profile"`` (a point down
+        depth, at one instant) -- for that to mean anything. A set that mixes
+        either with a map, or a series with a profile, has no single figure
+        that is both, so this refuses rather than picking one arbitrarily.
         """
         from ocean_skill.comparison import _short_variable_label
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        not_series = [f for f in self.fields if f.family != "series"]
-        if not_series:
+        not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
+        mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1
+        if not_lines or mixed:
             detail = "; ".join(
                 f"{_short_variable_label(f.variable)}: {f.family_reason}"
-                for f in not_series
+                for f in self.fields
             )
             raise ValueError(
                 f"several variables on one figure draw as overlaid lines, but not "
-                f"every one of them reduced to a point -- {detail}. Narrow select= "
-                "to one lon/lat position so each variable is a series, or plot each "
-                "variable's maps separately with osk.field(source, variable)."
+                f"every one of them reduced the same way -- {detail}. Narrow "
+                "select= to one lon/lat position -- keeping time standing draws "
+                "a series, keeping depth standing with no time draws a profile "
+                "-- so every member draws the same way, or plot each variable's "
+                "maps separately with osk.field(source, variable)."
             )
-        spec = PlotSpec(family="series", items=self._items(), options=kwargs)
+        family = self.fields[0].family
+        spec = PlotSpec(family=family, items=self._items(), options=kwargs)
         return render(spec, renderer=renderer)
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Refuse: a set of variables drawn as lines has nothing to play as frames."""
         raise ValueError(
             "this set holds several variables of one source drawn as lines over "
-            "time -- there is nothing to play as a movie. Use .plot(); it already "
-            "shows the whole series. For a movie of maps, give osk.field() one "
-            "variable."
+            "time or down depth -- there is nothing to play as a movie. Use "
+            ".plot(); it already shows the whole figure. For a movie of maps, "
+            "give osk.field() one variable."
         )
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):

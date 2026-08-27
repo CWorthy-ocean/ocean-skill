@@ -40,6 +40,7 @@ FAMILIES = (
     "series",
     "section",
     "section_row",
+    "profile",
     "skill_map",
     "taylor",
     "target",
@@ -121,6 +122,23 @@ class PlotSpec:
         ``field_grid``-style stack of its own (``section_grid`` is a follow-up —
         see :class:`~ocean_skill.comparison.ComparisonSet`'s refusal on more than
         one ``section_row``).
+
+        ``profile`` carries ``field_grid``'s list, one item per station/cast, each
+        ``aligned`` 1-D on the vertical axis (``z``, ``depth``, or ``sigma0`` for an
+        isopycnal profile) rather than on ``time`` -- the vertical twin of
+        ``series``, drawn with depth on the y-axis (inverted, surface at top) and
+        the compared value on x. A profile item's ``aligned`` never carries
+        ``attrs["actual_depth"]``: depth is the axis every line already draws
+        against, not a single number to style a line by. A cast's own instant, if
+        it has one, rides as a scalar ``time`` coordinate instead (read by
+        :func:`ocean_skill.plot.profile.panel_title` for identity and by
+        :mod:`ocean_skill.plot.style` as the marker channel, in the same slot
+        ``series`` gives its own ``depth``) -- several casts at one place are
+        several items, not one item with a surviving time axis, exactly as
+        ``series`` fans a surviving depth axis into one item per level. Built by
+        :meth:`ocean_skill.field.Field.as_item` (a model column at one point) and
+        :meth:`ocean_skill.comparison.Comparison.as_item` (``over=`` a vertical
+        axis, at a station).
 
         ``locations`` carries no field payload at all: one item per catalog *source*,
         with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``

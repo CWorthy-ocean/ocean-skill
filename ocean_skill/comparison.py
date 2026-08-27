@@ -17,12 +17,14 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "COLUMN",
     "SURFACE",
     "Comparison",
     "ComparisonSet",
     "aggregate_for",
     "as_select",
     "compare",
+    "is_column_request",
     "is_pair_spec",
     "is_surface_request",
     "prepare_source",
@@ -36,17 +38,52 @@ __all__ = [
 #: for the field interpolated to literal 0 m — see :func:`_prepare`.
 SURFACE = "surface"
 
+#: Sentinel meaning "every native level" -- the whole water column, as distinct from
+#: an explicit depth list (which invents fixed levels via
+#: :func:`ocean_skill.roms.to_depth`) or a band (which needs its own ``min``/``max``).
+#: With no vertical select at all, ``select={"depth": ...}`` unset means
+#: :data:`SURFACE`, so a whole column is otherwise unreachable without first knowing
+#: the local water depth to hand :data:`is_depth_band` an upper bound — see
+#: :func:`_prepare`, which routes this to an unbounded
+#: :func:`~ocean_skill.roms.depth_band`, keeping every native s-level standing.
+COLUMN = "column"
+
 
 #: CF featureTypes whose data is a *place*, not a field: one position, a time axis, and
 #: nothing to draw a map of. A comparison against one of these keeps its time axis and
 #: draws as lines (the ``series`` family) — which is what "featureType drives the plot
 #: recipe" means in practice for the non-gridded half of the catalog.
 #:
-#: ``profile``, ``timeSeriesProfile`` and ``trajectory`` are deliberately absent: each
-#: needs its own recipe (a profile's axis is depth and its x is the value; a trajectory
-#: is a position that moves, so one sampling point is wrong for it), and inferring
-#: "series" for them would draw something plausible and wrong.
+#: ``profile``, ``timeSeriesProfile`` and ``trajectory`` are deliberately absent:
+#: ``trajectory`` needs its own recipe (a position that moves, so one sampling point is
+#: wrong for it) and inferring "series" for it would draw something plausible and
+#: wrong; the other two have their own recipe now (see :data:`PROFILE_FEATURE_TYPES`
+#: and :func:`_implied_over`).
 POINT_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
+
+#: CF featureTypes whose data is a *place through depth*: one position, a vertical
+#: axis, and (for ``timeSeriesProfile``) a time axis too. A comparison against
+#: ``profile`` unambiguously keeps depth -- the featureType's own definition
+#: (:func:`ocean_skill.build.infer_feature_type`) is "fixed point, Z, no T". A
+#: ``timeSeriesProfile`` reference carries *both* axes, so which one a comparison
+#: keeps is read off the caller's own select/aggregate instead (see
+#: :func:`_implied_over`) rather than guessed from the featureType alone.
+PROFILE_FEATURE_TYPES = frozenset({"profile", "timeSeriesProfile"})
+
+
+#: CF featureTypes whose catalog metadata already names a place worth cropping the
+#: *test* lane to before it is read -- see :meth:`Comparison._reference_narrowing`.
+#: A superset of :data:`POINT_FEATURE_TYPES`: unlike the plot-recipe question that set
+#: answers (does this reference leave an axis for a line?), this one only asks
+#: whether the reference's own position is knowable read-free from its catalog entry,
+#: which is also true of a profile (one lon/lat, a depth axis instead of a line) and a
+#: trajectory (a bounding box rather than a point, but still a real spatial extent
+#: worth handing to the test lane's own crop). Narrowing from this set never implies
+#: anything about ``over`` -- a profile keeps ``over=None`` exactly as it does today;
+#: this only changes how much of the test gets read.
+NARROWING_FEATURE_TYPES = frozenset(
+    {"timeSeries", "point", "station", "profile", "timeSeriesProfile", "trajectory"}
+)
 
 
 def _feature_type(source: str) -> str | None:
@@ -59,19 +96,98 @@ def _feature_type(source: str) -> str | None:
         return None
 
 
-def _implied_over(reference: str) -> tuple[str | None, str]:
+def _collapses_vertical(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
+    """Whether select/agg narrows depth to one value rather than keeping an axis.
+
+    Mirrors :func:`_collapses_time`, one axis over. An explicit scalar depth (a
+    number, or the unset default of :data:`SURFACE`) collapses on its own; a band,
+    a level list, or :data:`COLUMN` survive unless the vertical aggregate reduces
+    them (a ``groupby``/``resample`` keeps an axis, exactly as it does for time).
+    """
+    depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
+    if not (is_depth_band(depth) or isinstance(depth, list | tuple) or is_column_request(depth)):
+        return True
+    agg = agg or {}
+    for key in _ANY_VERTICAL_KEYS:
+        if key not in agg:
+            continue
+        spec = agg[key]
+        if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
+            return False
+        return True
+    return False
+
+
+def _time_collapsed(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
+    """Whether select/agg narrows time to one instant rather than keeping an axis.
+
+    :func:`_collapses_time` alone only reads ``agg`` -- right for
+    :meth:`Comparison._point_select_implies_time`, where a *point* select already
+    settled the horizontal question and only the aggregate could still undo the
+    time axis on top of it. Here neither axis is settled yet, so a bare scalar
+    ``select={"time": "2015-06-15"}`` -- the natural way to ask for a cast at one
+    instant -- has to count on its own; a range or a list keeps the axis, mirroring
+    :func:`_collapses_vertical`'s identical band/list-survives reading.
+    """
+    for key in _TIME_KEYS:
+        if key not in select:
+            continue
+        value = select[key]
+        if isinstance(value, dict) and {"min", "max"} <= set(value):
+            break
+        if isinstance(value, list | tuple):
+            break
+        return True
+    return _collapses_time(agg)
+
+
+def _implied_over(
+    reference: str, select: dict[str, Any], agg: dict[str, Any] | None
+) -> tuple[str | None, str]:
     """Return ``(over, why)`` — the axis a reference's featureType asks to keep.
 
     The featureType decides the recipe, as the README has promised since the beginning:
     a ``timeSeries`` reference has one position and a time axis, so time is the axis
-    that survives and the comparison is a line plot rather than a map. Returning the
-    *reason* alongside is the point — the choice is then recorded on the aligned result
-    (``family_reason``), so a family that surprises someone can be traced to what
-    decided it rather than guessed at.
+    that survives and the comparison is a line plot rather than a map. A ``profile``
+    reference is the vertical analogue -- by the featureType's own definition it has
+    no time axis at all, so depth is the one to keep, unambiguously.
+
+    A ``timeSeriesProfile`` reference carries both axes, so the featureType alone
+    cannot say which one a comparison should keep -- that is read off ``select``/
+    ``agg`` instead (:func:`_collapses_time`/:func:`_collapses_vertical`, the
+    reference's own side): narrowing depth to one value keeps time (the familiar
+    mooring-at-a-depth reading), narrowing time to one value keeps depth (a cast at
+    an instant). Neither, or both, collapsed is genuinely ambiguous and is left
+    unset -- :func:`_require_reduced`'s own error already names ``over=`` as the
+    way out, and guessing wrong here would draw something plausible and wrong.
+
+    Returning the *reason* alongside is the point — the choice is then recorded on
+    the aligned result (``family_reason``), so a family that surprises someone can
+    be traced to what decided it rather than guessed at.
     """
     feature = _feature_type(reference)
     if feature in POINT_FEATURE_TYPES:
         return "time", f"the reference's featureType is {feature!r}"
+    if feature == "profile":
+        return "Z", f"the reference's featureType is {feature!r}"
+    if feature == "timeSeriesProfile":
+        vertical_collapsed = _collapses_vertical(select, agg)
+        time_collapsed = _time_collapsed(select, agg)
+        if vertical_collapsed and not time_collapsed:
+            return "time", (
+                f"the reference's featureType is {feature!r} and its depth is "
+                "narrowed to one value, so the time axis is kept"
+            )
+        if time_collapsed and not vertical_collapsed:
+            return "Z", (
+                f"the reference's featureType is {feature!r} and its time is "
+                "narrowed to one value, so the depth axis is kept"
+            )
+        return None, (
+            f"the reference's featureType is {feature!r}, which carries both a "
+            "time and a depth axis -- neither select= nor aggregate= narrows just "
+            "one of them, so which to keep is ambiguous"
+        )
     return None, "the reference is gridded"
 
 
@@ -196,6 +312,60 @@ def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     return lon_min, lat_min, lon_max, lat_max
 
 
+#: Padding applied to each end of a catalog-derived time window, in days. Mirrors why
+#: :func:`ocean_skill.align.time_span_of` pads a prepared lane by one step: matching at
+#: the very edge of the record needs a candidate just past it, and the record's own
+#: cadence is not knowable without reading it -- one day comfortably covers every
+#: mooring/profile cadence this package has seen, from sub-hourly to monthly.
+_TIME_COVERAGE_PAD_DAYS = 1.0
+
+
+def _time_coverage_of(source: str) -> tuple[Any, Any] | None:
+    """Return ``(start, stop)`` for a source's catalog-declared time coverage.
+
+    Read-free, the same contract as :func:`_domain_of`: used to crop the *test* lane
+    to the reference's own record before it is read (see
+    :meth:`Comparison._reference_narrowing`), not to crop the reference itself -- the
+    reference already carries its record; this exists only to keep from reading a
+    test lane's whole time axis when a fixed-position reference only ever asks about
+    a few months of it.
+
+    Two keys carry this, and they disagree in one way worth preferring correctly:
+    an ERDDAP tabledap entry's own ``minTime``/``maxTime`` (from ``intake_erddap``'s
+    ``allDatasets`` metadata) are full timestamps, while every entry's
+    ``time_coverage_start``/``time_coverage_end`` (written by
+    :mod:`ocean_skill.build`) are truncated to a bare date. Preferring ``minTime``/
+    ``maxTime`` when present avoids padding away precision that was never lost;
+    falling back to the truncated pair when they are absent (non-ERDDAP sources)
+    still works, with the day-level uncertainty covered by
+    :data:`_TIME_COVERAGE_PAD_DAYS` on top of the truncation itself -- a record
+    ending at 18:00 on its last declared date must not be cropped off at midnight.
+
+    Returns ``None`` when the source is unresolvable, declares neither pair, or
+    either value fails to parse -- a hand-edited or stale catalog entry should leave
+    the test lane unnarrowed rather than fail the comparison outright.
+    """
+    import pandas as pd
+
+    from ocean_skill.catalog import resolve
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        return None
+    start, stop = meta.get("minTime"), meta.get("maxTime")
+    if start is None or stop is None:
+        start, stop = meta.get("time_coverage_start"), meta.get("time_coverage_end")
+    if start is None or stop is None:
+        return None
+    try:
+        start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    except (TypeError, ValueError):
+        return None
+    pad = pd.Timedelta(days=_TIME_COVERAGE_PAD_DAYS)
+    return start - pad, stop + pad
+
+
 def as_select(select: Any) -> dict[str, Any]:
     """Return ``select`` as a dict, refusing anything else with a usable message.
 
@@ -241,6 +411,18 @@ def is_surface_request(depth: Any) -> bool:
     return depth is None or (isinstance(depth, str) and depth.lower() == SURFACE)
 
 
+def is_column_request(depth: Any) -> bool:
+    """Report whether ``depth`` asks for the whole water column, native levels standing.
+
+    ``select={"depth": "column"}`` — the one way to reach every native s-level: no
+    vertical select at all defaults to :data:`SURFACE`, and a band needs its own
+    ``min``/``max`` (which asks the caller to already know the local water depth).
+    Model-only, like every native-level request — an observational product reports
+    at its own standard levels regardless, so this sentinel means nothing to it.
+    """
+    return isinstance(depth, str) and depth.lower() == COLUMN
+
+
 #: Reported (in labels, repr, and the metrics table) for a comparison whose variable
 #: has no vertical axis at all -- a calculated diagnostic like mixed layer depth.
 #: Distinct from :data:`SURFACE`, which means "the model's own top level": a real
@@ -277,6 +459,8 @@ def _depth_label(depth: Any) -> str:
         return _sigma_label(depth["sigma0"])
     if is_surface_request(depth):
         return SURFACE
+    if is_column_request(depth):
+        return "full water column"
     if is_depth_band(depth):
         return f"{float(depth['min']):g}-{float(depth['max']):g} m"
     if isinstance(depth, list | tuple):
@@ -889,6 +1073,7 @@ def _prepare(
         )
     surface = is_surface_request(depth)
     band = is_depth_band(depth)
+    column = is_column_request(depth)
     agg = NO_AGGREGATION if aggregate is None else aggregate
     # A registered calculator (mixed layer depth, ...) reads the whole water column
     # itself and returns a field with no vertical axis at all -- there is nothing
@@ -1036,6 +1221,14 @@ def _prepare(
             # A *selection*: keeps the cells and their thickness weights, so the
             # vertical aggregation below decides how to collapse them.
             sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
+        elif column:
+            # The whole water column, native levels standing: an unbounded band --
+            # every cell overlaps a 0..inf m range, so nothing is excluded, but the
+            # cells still come back with real depth_band()/depth_average() weights
+            # attached (unlike the plain add_depth_coord the is_section branch
+            # above uses), so {"Z": "mean"} on a column request is the same
+            # thickness-weighted mean a band gives, not an unweighted one.
+            sub = roms.depth_band(sub, meta, 0.0, float("inf"))
         elif isinstance(depth, list | tuple) and any(
             is_surface_request(d) for d in depth
         ):
@@ -1068,10 +1261,22 @@ def _prepare(
         if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
             da = da.isel(sigma0=0)
     else:
-        # observational depth axes vary: real metres, or an index with depths alongside
-        zname = next(
-            (n for n in ("depth", "depth_surface", "lev") if n in da.dims), None
-        )
+        # observational depth axes vary: real metres, or an index with depths alongside.
+        # The catalog's own declared axis name wins when there is one -- meta["axes"]
+        # is where a builder records "this raw variable is the Z axis" (WHOTS' `DEPTH`,
+        # say), the same map axes["T"] already reads for time, and it says so with
+        # certainty a heuristic (cf-xarray attrs, or a lowercase name guess) cannot.
+        # resolve_dim is the fallback for a source with no such declaration.
+        zname = (meta.get("axes") or {}).get("Z")
+        if zname is None or zname not in da.dims:
+            zname = operators.resolve_dim(da, "Z")
+        if column:
+            raise ValueError(
+                f"select={{'depth': {COLUMN!r}}} names the model's own native "
+                "levels, which an observational product has none of -- it "
+                f"already reports at its own standard levels{f' ({zname!r})' if zname else ''}. "
+                "Leave depth unset for those, or name one/several explicitly."
+            )
         if zname is not None:
             levels = (
                 np.asarray(obj["Depth"])
@@ -1091,7 +1296,13 @@ def _prepare(
                 attrs = dict(da.attrs)
                 da = da.isel({zname: list(inside)})
                 da.attrs = attrs
-                da.attrs["actual_depth"] = float(np.mean(levels[list(inside)]))
+                # A vertical aggregate later in this function collapses these levels
+                # to one value regardless -- the ordinary (non-profile) comparison --
+                # so the mean is still the honest summary to attach here. Only a
+                # *surviving* multi-level axis (no vertical aggregate coming) skips
+                # this: one number cannot label an axis a profile still needs whole.
+                if len(inside) == 1 or _vertical_only(agg):
+                    da.attrs["actual_depth"] = float(np.mean(levels[list(inside)]))
             elif isinstance(depth, list | tuple):
                 # "surface" in a list means what it means as a scalar here: the
                 # nearest standard level to 0 m (products report at real levels, so
@@ -1103,7 +1314,10 @@ def _prepare(
                 attrs = dict(da.attrs)
                 da = da.isel({zname: keep})
                 da.attrs = attrs
-                da.attrs["actual_depth"] = float(np.mean(levels[keep]))
+                # Same rule as the band above: skip only when these levels are
+                # genuinely going to survive (no vertical aggregate collapsing them).
+                if len(keep) == 1 or _vertical_only(agg):
+                    da.attrs["actual_depth"] = float(np.mean(levels[keep]))
             else:
                 target = 0.0 if surface else float(depth)
                 k = int(np.abs(levels - target).argmin())
@@ -1251,16 +1465,23 @@ def prepare_source(
     :data:`ocean_skill.align.DEFAULT_PAD` *before* the load below, and joins the cache
     key. :func:`ocean_skill.align.align` does this crop anyway, but only once both lanes
     are in memory — fine for a single global map, the dominant cost for a global product
-    that kept a long time axis. Passing the test lane's own extent here changes nothing
+    that kept a long time axis. Passing a lane's own extent here changes nothing
     about the result and a great deal about the peak memory. It does cost this
     lane its cross-model reuse (a reference cropped to one model's domain is not the one
     another model wants), which is why the caller passes it only when it is worth that.
+    This runs in both directions: a skill map derives a bbox from its *test* lane to
+    crop the *reference* (see :meth:`Comparison.align`), and a point-like reference
+    (a mooring, a profile) offers its own catalog-declared position to crop the
+    *test* lane the same way, before the reference itself has even been read (see
+    :meth:`Comparison._reference_narrowing`).
 
     ``time_window`` is the same idea along time: ``(start, stop)`` the lane is cropped
     to, and part of the cache key for the same reason ``bbox`` is. A skill map derives
-    it from its test lane (see :meth:`Comparison.align`), so the caller knows the window
-    before this reads anything — which is what lets it reach an ERDDAP table as a
-    server-side constraint rather than as a crop applied to a record already downloaded.
+    it from its test lane's actual data, or from a point-like reference's own catalog
+    metadata (again :meth:`Comparison._reference_narrowing`) — either way the caller
+    knows the window before this reads anything, which is what lets it reach an ERDDAP
+    table as a server-side constraint rather than as a crop applied to a record
+    already downloaded.
 
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
@@ -1444,7 +1665,11 @@ class Comparison:
         # reason is kept so the family this ends up choosing can be traced to what
         # chose it.
         if over is None:
-            over, self.over_reason = _implied_over(reference)
+            over, self.over_reason = _implied_over(
+                reference,
+                select_for(self.select, "reference"),
+                aggregate_for(self.aggregate, "reference"),
+            )
             if over is None and self._point_select_implies_time():
                 over = "time"
                 self.over_reason = "the select narrows the reference to one position"
@@ -1669,6 +1894,54 @@ class Comparison:
         )
         return extra_select, bbox
 
+    def _reference_narrowing(
+        self,
+    ) -> tuple[tuple[float, float, float, float] | None, tuple[Any, Any] | None]:
+        """The ``(bbox, time_window)`` the reference's own catalog metadata offers.
+
+        Read-free, and unlike :meth:`_point_route` not gated on ``over`` at all: this
+        answers a different question -- not "does the plot recipe reduce to a line",
+        but "does the reference's catalog entry already name a place worth cropping
+        the *test* lane to before it is read" -- so it applies just as well to a
+        profile (``over`` stays ``None`` for one today, and this leaves that alone)
+        as to a mooring.
+
+        ``None`` for a pair-spec select, for the same reason :meth:`_point_route`
+        stays unrouted then: a deliberate ``select={"test": ..., "reference": ...}``
+        names two positions on purpose, and narrowing the test to the reference's
+        *catalog* position on top of that would silently override a choice the
+        caller already made explicitly. A featureType outside
+        :data:`NARROWING_FEATURE_TYPES` (gridded, or unresolvable) also returns
+        ``(None, None)`` -- a gridded reference's extent already crops the *other*
+        direction, from the test lane onto the reference, once both are read (see
+        :meth:`align`).
+
+        Each half is independent and may come back ``None`` on its own -- a NetCDF
+        source with a position but no declared time coverage still narrows the
+        test's space; an entry missing ``geospatial_*`` but carrying
+        ``time_coverage_*`` still narrows its time. Used by :meth:`align` to crop
+        the test lane before it is read, and by :attr:`_cache_key` so a run before a
+        catalog rebuild widened the reference's declared record does not silently
+        keep serving the narrower one.
+
+        A crop built from a stale or approximate catalog position is not free of
+        risk the way a crop built from data would be: on a grid coarser than
+        :data:`ocean_skill.align.DEFAULT_PAD`, the true nearest cell can fall
+        outside the cropped window even though the crop itself is not empty, and
+        :func:`ocean_skill.align.sample_at` would then silently pick a different
+        (nearby, in-crop) cell than an unnarrowed run would have -- the same
+        exposure an explicit user point select already carries via
+        :meth:`_point_route`, and caught the same way: ``sample_at``'s own
+        past-one-cell-offset warning. A window or bbox that misses the test lane
+        entirely raises instead, and :meth:`align` retries unnarrowed rather than
+        failing the comparison outright.
+        """
+        if is_pair_spec(self.select):
+            return None, None
+        if _feature_type(self.reference_name) not in NARROWING_FEATURE_TYPES:
+            return None, None
+        return _domain_of(self.reference_name), _time_coverage_of(self.reference_name)
+
     @property
     def standard_name(self) -> str | None:
         """The CF name this comparison represents, for colormaps/labels/metrics.
@@ -1729,6 +2002,19 @@ class Comparison:
             # naming the identical points directly would share a key despite
             # not being guaranteed to mean the same thing forever.
             extra["_transect_sample"] = True
+        # Not gated on `over` the way the block above is -- _reference_narrowing()
+        # applies to a profile reference too, which keeps over=None. Carried as the
+        # actual values rather than a boolean flag (contrast `_point_sample`, which
+        # only needs to distinguish two *behaviors*): narrowing the test lane's time
+        # axis changes which of its steps ever reach the aligned pair, so a catalog
+        # rebuild that widens or narrows the reference's declared record has to
+        # invalidate the entry it changes, not just the ones from before this
+        # feature existed. Rounded the way prepare_source's own `_bbox` key is.
+        ref_bbox, ref_window = self._reference_narrowing()
+        if ref_bbox is not None:
+            extra["_ref_bbox"] = [round(float(b), 4) for b in ref_bbox]
+        if ref_window is not None:
+            extra["_ref_window"] = [str(w) for w in ref_window]
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -1908,10 +2194,25 @@ class Comparison:
         # select and used as a small bbox instead, leaving the test gridded for align()
         # to sample properly, at the reference's own (possibly curvilinear-snapped)
         # position.
+        #
+        # A reference the caller didn't hand-route this way can still narrow the test
+        # lane, from its own catalog metadata rather than from select= -- a mooring's
+        # (or profile's, or trajectory's) position and declared time coverage are
+        # already sitting in its catalog entry, read-free, and reading a whole model
+        # run to compare it against a few months at one point is the same waste the
+        # routed case exists to avoid (see :meth:`_reference_narrowing`). An explicit
+        # routed point wins spatially when both are in play -- it names the position
+        # the caller actually wants sampled, which the reference's own catalog entry
+        # cannot second-guess -- but the derived time window still applies either way,
+        # since where and when are independent questions and a routed select says
+        # nothing about the latter.
         route = self._point_route()
         drop_keys = route[:2] if route is not None else ()
-        point_bbox = (
-            (route[2], route[3], route[2], route[3]) if route is not None else None
+        derived_bbox, derived_window = self._reference_narrowing()
+        test_bbox = (
+            (route[2], route[3], route[2], route[3])
+            if route is not None
+            else derived_bbox
         )
         # A vertical section is the same "route around the ordinary select" idea as
         # a point, one level down: the reference is not narrowed independently, it is
@@ -1929,23 +2230,29 @@ class Comparison:
                 use_cache,
                 refresh,
                 role="test",
-                bbox=point_bbox,
+                bbox=test_bbox,
+                time_window=derived_window,
                 drop_keys=drop_keys,
                 keep=keep,
             )
         except ValueError as err:
-            # A coarse test grid, or a point near the edge of its extent: the pad
-            # subset_to_bbox adds around one location can still miss the nearest cell.
-            # Retrying without the bbox reads the whole lane instead of failing the
-            # comparison outright, and lets align()'s own sample_at report the
-            # (possibly large) offset the way it already does for a real station.
-            if point_bbox is None or "no overlap" not in str(err):
+            # A coarse test grid, a point near the edge of its extent, or a stale
+            # catalog position: the pad subset_to_bbox adds can still miss the
+            # nearest cell either way. Retrying without the bbox reads the whole
+            # lane instead of failing the comparison outright, and lets align()'s
+            # own sample_at report the (possibly large) offset the way it already
+            # does for a real station. The time window is kept on the retry --
+            # a stale bbox and a stale window are independent failures, and
+            # subset_to_time silently declines to crop an empty window rather than
+            # raising, so keeping it here costs nothing even if it too was stale.
+            if test_bbox is None or "no overlap" not in str(err):
                 raise
             t, _ = self._prepare_lane(
                 self.test_name,
                 use_cache,
                 refresh,
                 role="test",
+                time_window=derived_window,
                 drop_keys=drop_keys,
                 keep=keep,
             )
@@ -2077,9 +2384,42 @@ class Comparison:
         dimension to map, whatever the catalog said — and a catalog that said the wrong
         thing shows up here as a family that surprises someone, which is why
         :attr:`family_reason` records both halves.
+
+        ``over`` scoring the vertical axis (see :attr:`is_profile`) is excluded here
+        even though its aligned reference is also a point -- that point's surviving
+        axis is depth, not time, so it draws down a water column, not across a
+        calendar.
         """
         from ocean_skill.align import point_of
+        from ocean_skill.operators import _CF_AXES
 
+        if _CF_AXES.get(self.over) == "vertical":
+            return False
+        return point_of(self.aligned["reference"]) is not None
+
+    @property
+    def is_profile(self) -> bool:
+        """Whether this comparison is a place through depth rather than a field.
+
+        The vertical twin of :attr:`is_series`, one axis over: an ``over="Z"``
+        comparison whose aligned reference sits at one point is a station's water
+        column, brought onto the reference's own levels by interpolation
+        (:func:`ocean_skill.align.match_axis`) rather than reduced to a single
+        map -- the vertical analogue of a ``timeSeries`` reference keeping its
+        time axis instead.
+
+        Read off ``self.over`` itself, not the aligned axis's name:
+        ``over="depth"``/``over="z"`` are pre-existing, unrelated spellings for a
+        literal-named axis (see ``tests/test_axis_match.py``'s own numeric-axis
+        case) with their own nearest/mean matching, and are deliberately left to
+        that path rather than folded in here -- ``over="Z"`` (or ``"vertical"``)
+        is the one spelling this feature promises.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.operators import _CF_AXES
+
+        if _CF_AXES.get(self.over) != "vertical":
+            return False
         return point_of(self.aligned["reference"]) is not None
 
     @property
@@ -2103,14 +2443,17 @@ class Comparison:
     def family(self) -> str:
         """The plot family this comparison's own shape admits.
 
-        Four cases, in the order the data decides them: a place through time draws as
-        ``series``, a vertical slice through space draws as ``section_row``, a pair
-        scored over an axis draws as ``skill_map``, and a pair of single maps draws as
-        ``field_row``. No argument selects it — the same rule
-        :meth:`ocean_skill.field.Field.plot` follows between a map and a facet grid.
+        Five cases, in the order the data decides them: a place through time draws
+        as ``series``, a place through depth as ``profile``, a vertical slice
+        through space as ``section_row``, a pair scored over any other axis as
+        ``skill_map``, and a pair of single maps as ``field_row``. No argument
+        selects it — the same rule :meth:`ocean_skill.field.Field.plot` follows
+        between a map and a facet grid.
         """
         if self.is_series:
             return "series"
+        if self.is_profile:
+            return "profile"
         if self.is_section:
             return "section_row"
         return "field_row" if self.over is None else "skill_map"
@@ -2127,6 +2470,8 @@ class Comparison:
         """
         if self.is_series:
             return f"drawn as lines: {self.over_reason}, so the time axis is kept"
+        if self.is_profile:
+            return f"drawn as a profile: {self.over_reason}, so the depth axis is kept"
         if self.is_section:
             return (
                 "drawn as test | reference | difference sections: the select cuts "
@@ -2172,6 +2517,13 @@ class Comparison:
                 "this comparison is at one place, so there is no map to make: a "
                 "per-cell metric over one cell is the number metrics() already gives. "
                 "Use .metrics() for the numbers and .plot() for the series."
+            )
+        if self.is_profile:
+            raise ValueError(
+                "this comparison is a single water column, so there is no map to "
+                "make: a per-cell metric over one column is the number metrics() "
+                "already gives. Use .metrics() for the numbers and .plot() for "
+                "the profile."
             )
         if self.is_section:
             raise ValueError(
@@ -2247,9 +2599,9 @@ class Comparison:
         if self._metrics is None:
             aligned = self.aligned
             # The mask is per *cell*: it exists so the scalar describes the same domain
-            # the maps show. A station has one cell and no maps, so there is nothing to
-            # mask and asking for them would raise.
-            if self.over is not None and not self.is_series:
+            # the maps show. A station (through time or through depth) has one cell
+            # and no maps, so there is nothing to mask and asking for them would raise.
+            if self.over is not None and not self.is_series and not self.is_profile:
                 enough = self.pointwise_metrics("n")["n"] >= self.min_pairs
                 aligned = aligned.where(enough)
             self._metrics = _metrics.compute(
@@ -2258,11 +2610,12 @@ class Comparison:
                 reference_name="reference",
                 # A station has one latitude, so cos(lat) is a constant: the arithmetic
                 # is identical either way, but the row would claim an area weighting
-                # that never happened. What `n` counts is steps here, not cells.
-                # The position itself rides along too — it lives on `aligned.attrs`
-                # (written by align._align_at_point) and would otherwise never reach
-                # the metrics record, which is the one thing a spatial map of many
-                # stations' metrics (osk.map_metrics) needs from each of them.
+                # that never happened. What `n` counts is steps (or levels) here, not
+                # cells. The position itself rides along too — it lives on
+                # `aligned.attrs` (written by align._align_at_point) and would
+                # otherwise never reach the metrics record, which is the one thing a
+                # spatial map of many stations' metrics (osk.map_metrics) needs from
+                # each of them.
                 #
                 # A section is unweighted for a different reason: metrics.area_weights
                 # would find the lat coordinate riding on the along-path axis and
@@ -2272,11 +2625,11 @@ class Comparison:
                 **(
                     {
                         "weighted": False,
-                        "sample_noun": "time steps",
+                        "sample_noun": "depth levels" if self.is_profile else "time steps",
                         "station_lon": self.aligned.attrs.get("station_lon"),
                         "station_lat": self.aligned.attrs.get("station_lat"),
                     }
-                    if self.is_series
+                    if self.is_series or self.is_profile
                     else {"weighted": False, "sample_noun": "section cells"}
                     if self.is_section
                     else {}
@@ -2328,9 +2681,10 @@ class Comparison:
             # compare() fan-out commonly pairs one variable per reference source).
             "labels": (self.test_name, self.reference_name),
         }
-        # A scored comparison carries metric maps -- unless it is a place through time,
-        # where there is no map to carry and the series family draws the pair itself.
-        if self.over is None or self.is_series:
+        # A scored comparison carries metric maps -- unless it is a place through time
+        # or through depth, where there is no map to carry and the series/profile
+        # family draws the pair itself.
+        if self.over is None or self.is_series or self.is_profile:
             return {"aligned": self.aligned, **common}
         from ocean_skill.metrics import DEFAULT_MAP_METRICS
 
@@ -2359,14 +2713,14 @@ class Comparison:
         family = self.family
         if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
-        if family not in ("series", "section_row") and "domain" not in kwargs:
+        if family not in ("series", "section_row", "profile") and "domain" not in kwargs:
             # Outline the test (model) source's own true grid shape when the catalog
             # declares one, falling back to its bbox otherwise — matching Abigale
             # Wyatt's side-by-side plots. Pass domain=None to suppress it, or your own
             # bbox/ring to override; checking "not in kwargs" (rather than
             # kwargs.setdefault) keeps that override working once the default value
-            # is an ndarray, whose truthiness setdefault can't rely on. A line plot has
-            # no map to outline, and neither does a section -- series()/section_row()
+            # is an ndarray, whose truthiness setdefault can't rely on. A line, a
+            # profile or a section plot has no map to outline, and any of the three
             # would refuse the option outright.
             convention = self.aligned.attrs.get("lon_convention")
             outline = _outline_of(self.test_name, convention)
@@ -2793,9 +3147,12 @@ class ComparisonSet:
         # identity is a rotated left-edge row label. The grid is what more than one
         # comparison needs; one does not.
         single_row = family == "field_row" and len(self.comparisons) == 1
-        if family in ("field_row", "field_grid", "series", "section_row"):
+        if family in ("field_row", "field_grid", "series", "section_row", "profile"):
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
-        if family not in ("series", "section_row") and "domain" not in kwargs:
+        if (
+            family not in ("series", "section_row", "profile")
+            and "domain" not in kwargs
+        ):
             # Outlines the first row's test (model) true grid shape (or its bbox,
             # lacking one); rows sharing one test source (the common case) all get the
             # same outline. Pass domain=None to suppress, or your own bbox/ring if rows
@@ -2857,6 +3214,14 @@ class ComparisonSet:
                 "frames to play: their time axis is already the x axis of the figure. "
                 "Use .plot() — a movie of a line plot would be one line drawn over and "
                 "over."
+            )
+        profiles = [c for c in self.comparisons if c.is_profile]
+        if profiles:
+            raise ValueError(
+                f"{len(profiles)} of these comparisons are vertical profiles, which "
+                "have no frames to play yet: their depth axis is already the y axis "
+                "of the figure, and time-animated profiles are a follow-up. Use "
+                ".plot() instead."
             )
         sections = [c for c in self.comparisons if c.is_section]
         if sections:
@@ -3492,6 +3857,17 @@ def compare(
     1 km apart. The one thing this inference cannot see: a select that also pins time
     to a single instant leaves no axis for a line either, and there ``over`` stays
     unset rather than guessing.
+
+    A reference whose featureType names a place this way — mooring, profile, or
+    trajectory alike — also narrows the *test* lane automatically, in space and
+    time, from that same catalog entry's own declared position and time coverage,
+    before the test is ever read into memory (see
+    :meth:`Comparison._reference_narrowing`). This is what keeps a comparison
+    against one mooring from reading a model's whole multi-year, full-domain
+    history just to sample it at one point over a few months; a gridded reference
+    gets no such narrowing (its own extent already crops the *other* direction,
+    once both lanes are read) and still benefits from the ``select=``/
+    ``aggregate=`` narrowing the size warning below suggests.
 
     ``variables`` is required, deliberately not inferred from the sources' catalog
     metadata: a reference or test with several declared variables gives no way to
