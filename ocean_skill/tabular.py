@@ -36,10 +36,12 @@ __all__ = [
     "COORD_COLUMNS",
     "coord_axis_of",
     "coord_column",
+    "decode_time_column",
     "depth_of",
     "is_coordinate_column",
     "is_frame",
     "is_qc_column",
+    "numeric_in_range",
     "split_units",
     "to_dataset",
 ]
@@ -184,6 +186,100 @@ def split_units(column) -> tuple[str, str | None]:
     return (match.group(1), match.group(2)) if match else (str(column), None)
 
 
+#: Values a coordinate axis cannot physically take, keyed by axis. Real-world CSV
+#: exports (SEANOE's mooring tables among them) commonly flag "not reported" with a
+#: round-number sentinel like ``9999`` rather than leaving the cell blank -- it is not
+#: NaN, so :func:`pandas.to_numeric`'s ``errors="coerce"`` never catches it, and a
+#: plain ``.min()``/``.max()`` (or a "does this position vary" check) takes the fill
+#: value as if it were a real extreme. Longitude/latitude have hard physical bounds to
+#: check against; depth/pressure has no equally sharp one, so the ceiling here is a
+#: generous "past the deepest trench on Earth" rather than anything dataset-specific.
+_AXIS_BOUNDS: dict[str, tuple[float, float]] = {
+    "X": (-360.0, 360.0),  # longitude, either sign convention
+    "Y": (-90.0, 90.0),  # latitude
+    "Z": (-100.0, 11000.0),  # depth/pressure: a little above sea level to Challenger Deep
+}
+
+#: Round-number "not reported" markers seen in ocean CSV/NetCDF exports, and their
+#: negatives. Longitude/latitude fall outside :data:`_AXIS_BOUNDS` and are caught by the
+#: range check alone, but a depth/pressure fill of ``9999`` sits *inside* the Z range (a
+#: real reading could be 9999 dbar), so the sentinel set is what catches it there. Kept
+#: to the widely-used round values rather than guessing: a real datum equal to one of
+#: these is far rarer than the fill convention it denotes.
+_FILL_SENTINELS = frozenset(
+    {9999.0, 99999.0, 999999.0, -999.0, -9999.0, -99999.0, -999999.0}
+)
+
+#: NetCDF's default floating fill (``9.96920996839e+36``) and kin: any value this large
+#: in magnitude is a fill, never a coordinate. A single threshold catches the family
+#: (``1e20``, ``1e37``, ...) without enumerating each.
+_FILL_MAGNITUDE = 1e10
+
+
+def numeric_in_range(series, axis: str):
+    """Return ``series`` as numeric, with non-numeric, out-of-range, and fill values NaN.
+
+    Same job as ``pandas.to_numeric(series, errors="coerce")`` plus a fill filter: a
+    value outside :data:`_AXIS_BOUNDS` for ``axis``, equal to a :data:`_FILL_SENTINELS`
+    marker, or larger than :data:`_FILL_MAGNITUDE`, is a "not reported" placeholder
+    rather than a real reading and is dropped the same way NaN already is. Used
+    everywhere an axis's min/max/spread is computed, so a stray ``9999`` cannot
+    masquerade as this mooring's northernmost latitude or its deepest reading.
+    """
+    import pandas as pd
+
+    values = pd.to_numeric(series, errors="coerce")
+    lo, hi = _AXIS_BOUNDS[axis]
+    ok = (
+        values.between(lo, hi)
+        & (values.abs() < _FILL_MAGNITUDE)
+        & ~values.isin(_FILL_SENTINELS)
+    )
+    return values.where(ok)
+
+
+#: ``"<n> since <date>"`` with "since" joined to its neighbors by underscores instead
+#: of the CF-standard spaces -- the spelling seen on mooring CSVs whose column names
+#: pack units into brackets (``"Time[days_since_1950-01-01T00:00:00Z]"``, from
+#: :data:`_COLUMN_UNITS_BRACKET`). Normalized to the CF spelling before being handed to
+#: xarray's own decoder.
+_CF_SINCE = re.compile(r"[_\s]+since[_\s]+", re.IGNORECASE)
+
+
+def decode_time_column(series, column):
+    """Decode a time column to UTC ``datetime64``, honoring CF units in its own name.
+
+    A time column's name sometimes states its encoding explicitly, e.g.
+    ``"Time[days_since_1950-01-01T00:00:00Z]"``. :func:`pandas.to_datetime` does not
+    know that convention, and given the raw numbers it reads them as nanoseconds since
+    the Unix epoch instead -- every timestamp lands within a heartbeat of
+    1970-01-01, which is silent rather than an error. Detected here from
+    :func:`split_units` and decoded with xarray's calendar-aware CF decoder
+    (:func:`xarray.coding.times.decode_cf_datetime`) instead. A column with no such
+    units (already timestamps, or a plain date string) falls back to
+    :func:`pandas.to_datetime`, exactly as before.
+    """
+    import pandas as pd
+
+    index = getattr(series, "index", None)
+    _, units = split_units(str(column))
+    if units and _CF_SINCE.search(units):
+        try:
+            import xarray as xr
+
+            normalized = _CF_SINCE.sub(" since ", units)
+            vals = pd.to_numeric(series, errors="coerce").to_numpy()
+            decoded = xr.coding.times.decode_cf_datetime(vals, normalized)
+            # A Series (not the DatetimeIndex pd.to_datetime returns for an array),
+            # keyed on the original index -- callers do frame-aligned `.dt`/`.notna()`
+            # on the result, exactly as they would on the pd.to_datetime fallback.
+            return pd.to_datetime(pd.Series(decoded, index=index), utc=True)
+        except Exception:
+            pass  # not actually CF-decodable (e.g. "since" inside a longer word) --
+            # fall through to generic parsing below
+    return pd.to_datetime(series, errors="coerce", utc=True)
+
+
 def coord_column(df, axis: str) -> str | None:
     """Return the column naming ``axis`` (``T``/``X``/``Y``/``Z``) by its own spelling.
 
@@ -290,11 +386,17 @@ def _units_map(df, meta: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _scalar_position(df, column: str | None) -> float | None:
-    """Return a fixed lon/lat, or ``None`` when it varies (or there is no column)."""
+def _scalar_position(df, column: str | None, axis: str) -> float | None:
+    """Return a fixed lon/lat, or ``None`` when it varies (or there is no column).
+
+    ``axis`` (``"X"``/``"Y"``) filters out-of-range fill values (see
+    :func:`numeric_in_range`) before the spread check -- a handful of ``9999``
+    sentinel rows would otherwise blow the range check open and report a fixed
+    mooring as a drifting trajectory.
+    """
     if column is None:
         return None
-    values = np.asarray(df[column], dtype="float64")
+    values = numeric_in_range(df[column], axis).to_numpy()
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return None
@@ -337,7 +439,7 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
         )
         if column is None:
             continue
-        values = np.asarray(df[column], dtype="float64")
+        values = numeric_in_range(df[column], "Z").to_numpy()
         finite = values[np.isfinite(values)]
         if finite.size == 0:
             continue
@@ -447,7 +549,7 @@ def to_dataset(df, meta: dict[str, Any]):
     # tz-aware lane would re-read the whole remote record on every run. Resampling one
     # also yields datetime.datetime labels, which no later join matches. UTC is
     # recorded in attrs rather than thrown away.
-    time = pd.to_datetime(df[time_col], errors="coerce", utc=True)
+    time = decode_time_column(df[time_col], time_col)
     frame = df.loc[time.notna()].copy()
     frame[time_col] = time[time.notna()].dt.tz_convert("UTC").dt.tz_localize(None)
     frame = frame.sort_values(time_col)
@@ -465,8 +567,8 @@ def to_dataset(df, meta: dict[str, Any]):
         frame = frame.loc[~duplicated]
 
     units = _units_map(frame, meta)
-    lon = _scalar_position(frame, lon_col)
-    lat = _scalar_position(frame, lat_col)
+    lon = _scalar_position(frame, lon_col, "X")
+    lat = _scalar_position(frame, lat_col, "Y")
     if (lon is None) != (lat is None) or (
         lon is None and lon_col is not None and lat_col is not None
     ):
@@ -582,7 +684,7 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
             '`axes={"Z": "depth (m)"}`, or name the column "depth".'
         )
 
-    depth = pd.to_numeric(df[depth_col], errors="coerce")
+    depth = numeric_in_range(df[depth_col], "Z")
     frame = df.loc[depth.notna()].copy()
     frame[depth_col] = depth[depth.notna()]
     frame = frame.sort_values(depth_col)
@@ -605,12 +707,12 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
     lon_col = _axis_column(frame, meta, "X")
     lat_col = _axis_column(frame, meta, "Y")
     time_col = _axis_column(frame, meta, "T")
-    lon = _scalar_position(frame, lon_col)
-    lat = _scalar_position(frame, lat_col)
+    lon = _scalar_position(frame, lon_col, "X")
+    lat = _scalar_position(frame, lat_col, "Y")
 
     time = None
     if time_col is not None:
-        decoded = pd.to_datetime(frame[time_col], errors="coerce", utc=True)
+        decoded = decode_time_column(frame[time_col], time_col)
         decoded = decoded.dropna()
         if not decoded.empty:
             if decoded.nunique() > 1:
