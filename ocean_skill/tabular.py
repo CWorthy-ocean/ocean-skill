@@ -45,16 +45,20 @@ COORD_COLUMNS = frozenset({"time", "latitude", "longitude", "z", "depth", "altit
 #: Suffixes ``intake_erddap`` gives a variable's QARTOD companion columns.
 _QC_SUFFIXES = ("_qc_agg", "_qc_tests")
 
-#: ``"<name> (<units>)"`` — the spelling ``intake_erddap``'s readers produce.
-_COLUMN_UNITS = re.compile(r"^(.+) \((.+)\)$")
+#: ``"<name> (<units>)"`` — the spelling ``intake_erddap``'s readers produce. Any
+#: amount of whitespace (including none) between the name and the paren is accepted
+#: and discarded (``\s*``, non-greedy name so a stray extra space never leaks into
+#: the returned name) — real files are not consistent about the single space the
+#: convention nominally calls for.
+_COLUMN_UNITS = re.compile(r"^(.+?)\s*\((.+)\)$")
 
-#: ``"<name>[<units>]"`` — no space before the bracket, unlike the parenthesized form
-#: above. Seen on mooring CSVs that pack units into the column name this way (e.g.
+#: ``"<name>[<units>]"`` — brackets instead of parens, same whitespace tolerance.
+#: Seen on mooring CSVs that pack units into the column name this way (e.g.
 #: ``"Salinity_qc[PSU]"``, ``"Time[days_since_1950-01-01T00:00:00Z]"``). Tried as a
 #: fallback in :func:`split_units`, after the parenthesized form, so a name that
 #: happens to end in a literal ``[...]`` under the ERDDAP convention (unseen so far)
 #: would still prefer that reading.
-_COLUMN_UNITS_BRACKET = re.compile(r"^(.+)\[(.+)\]$")
+_COLUMN_UNITS_BRACKET = re.compile(r"^(.+?)\s*\[(.+)\]$")
 
 #: Depth-bearing columns, most direct first. Pressure is last because it is a
 #: *conversion*, not a reading — see :func:`depth_of`.

@@ -105,6 +105,26 @@ def test_split_units_reads_the_bracketed_spelling_too():
     assert tabular.split_units("Instrument_SN") == ("Instrument_SN", None)
 
 
+@pytest.mark.parametrize(
+    "column",
+    [
+        "temperature(degC)",  # no space -- the nominal "(units)" convention needs one
+        "temperature (degC)",  # the documented single space
+        "temperature  (degC)",  # extra space must not leak into the returned name
+        "temperature[degC]",
+        "temperature [degC]",
+        "temperature  [degC]",
+    ],
+)
+def test_split_units_tolerates_any_amount_of_whitespace_before_the_unit(column):
+    """Real files are not consistent about the single space either convention assumes.
+
+    A stray extra space used to survive into the returned name (``"temperature "``),
+    which then silently fails every downstream exact-match lookup.
+    """
+    assert tabular.split_units(column) == ("temperature", "degC")
+
+
 def test_build_and_tabular_share_one_parser():
     """The catalog description and the reader must agree about the convention.
 
