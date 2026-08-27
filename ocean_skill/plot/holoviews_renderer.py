@@ -124,6 +124,7 @@ def _panel_geometry(
     font_scale: float = 1.0,
     width_px: float = PANEL_WIDTH_PX,
     canvas_factor: float = 1.0,
+    aspect: float | None = None,
 ):
     """``(frame_width, frame_height, fontsize)`` for one interactive map of ``da``.
 
@@ -136,13 +137,18 @@ def _panel_geometry(
     ``width_px`` is the panel's share of the page — a third of it for a row of three,
     all of it for a lone panel (:data:`SOLO_PANEL_WIDTH_PX`). The type scale follows it,
     so a bigger frame gets proportionally bigger labels without being told.
+
+    ``aspect``, given, is used outright instead of measured off ``da["lon"]``/
+    ``da["lat"]`` — the escape hatch a non-geographic panel needs (see
+    :func:`_quadmesh`'s own note), since it has no lon/lat spans to measure at all.
     """
-    try:
-        aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
-            float(np.ptp(np.asarray(da["lat"]))), 1e-6
-        )
-    except Exception:  # pragma: no cover - unlabelled coords; fall back to square
-        aspect = 1.0
+    if aspect is None:
+        try:
+            aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
+                float(np.ptp(np.asarray(da["lat"]))), 1e-6
+            )
+        except Exception:  # pragma: no cover - unlabelled coords; fall back to square
+            aspect = 1.0
     # the two compose: width_px is this family's share of the page, canvas_factor is
     # how much bigger a canvas the caller asked for than the default one
     px = frame_px(aspect, width_px=width_px * canvas_factor)
@@ -191,6 +197,11 @@ def _quadmesh(
     tiles: str | bool | None = None,
     coastline: bool = True,
     project: bool = False,
+    x: str = "lon",
+    y: str = "lat",
+    aspect: float | None = None,
+    invert_y: bool = False,
+    bgcolor: str | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -199,15 +210,32 @@ def _quadmesh(
     East)": accurate, twice the width of the numbers it labels, and truncated by bokeh
     anyway — the static renderer never shows it because cartopy draws gridline labels
     instead.
+
+    ``x``/``y`` name the coordinates to draw against, ``"lon"``/``"lat"`` by default;
+    a non-geographic panel (a vertical section — see
+    :func:`ocean_skill.plot.section.prepare_section`) passes its own pair with
+    ``geo=False``, skipping every geographic option below. ``aspect``, given,
+    overrides :func:`_panel_geometry`'s lon/lat-span measurement outright — a
+    section's axes are kilometres and metres, spans with no ratio to *read*, so its
+    shape is a design constant instead (:data:`~ocean_skill.plot.typography.
+    SECTION_ASPECT`), the same reasoning that gives the static renderer's
+    ``SERIES_ASPECT`` no data to measure either. ``invert_y``/``bgcolor`` are the
+    other two a non-geographic panel needs and a geographic one never does: a
+    section's y-axis reads shallow-at-top, and its off-domain/below-bathymetry
+    cells want the same grey a map draws for land.
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
     frame_w, frame_h, fontsize = _panel_geometry(
-        da, font_scale=font_scale, width_px=width_px, canvas_factor=canvas_factor
+        da,
+        font_scale=font_scale,
+        width_px=width_px,
+        canvas_factor=canvas_factor,
+        aspect=aspect,
     )
     opts = {
-        "x": "lon",
-        "y": "lat",
+        "x": x,
+        "y": y,
         "cmap": cmap,
         "clim": clim,
         "title": title,
@@ -220,6 +248,10 @@ def _quadmesh(
         "rasterize": rasterize,
         "logz": log,
     }
+    if invert_y:
+        opts["invert_yaxis"] = True
+    if bgcolor is not None:
+        opts["bgcolor"] = bgcolor
     if rasterize:
         # hvplot returns rasterize=True as a *lazy* DynamicMap so that zooming
         # re-aggregates at the new extent. Nothing downstream can evaluate that lazily:
@@ -670,6 +702,71 @@ def _field_facet(
     if title:
         layout = layout.opts(title=str(title))
     return layout
+
+
+def _section(
+    item: dict[str, Any],
+    title: str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    **_,
+):
+    """One interactive vertical section: depth against along-path distance.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.section`. Draws through the same
+    :func:`~ocean_skill.plot.section.prepare_section` the static renderer calls, so
+    the two cannot disagree about which axis is depth, which sign it reads
+    positive, or what the along-path axis is labelled — and through the same
+    :func:`_quadmesh` every geographic family draws through, just with ``geo=False``
+    (no tiles, no coastline, no cartopy projection: a section is not a map) and its
+    non-geographic options (``aspect``, ``invert_y``, ``bgcolor``) instead.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.section import prepare_section
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _extension()
+    factor = _canvas_factor(size, zoom)
+    field, geometry = prepare_section(item["field"])
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    if title is None:
+        title = suptitle_text(
+            standard_name, (item.get("depth"), geometry.path_note),
+            label=item.get("label"),
+        )
+    seq, _div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+    vmin, vmax = _limits(field)
+    if log:
+        vmin = max(vmin, 1e-6)
+    raster = _should_rasterize(field, rasterize)
+
+    return _quadmesh(
+        field,
+        title=title,
+        cmap=seq,
+        clim=(vmin, vmax),
+        units=units,
+        geo=False,
+        log=log,
+        font_scale=font_scale,
+        canvas_factor=factor,
+        width_px=SOLO_PANEL_WIDTH_PX,
+        axis_labels=(geometry.x_label, geometry.y_label),
+        hover=hover,
+        rasterize=raster,
+        x=geometry.x_name,
+        y=geometry.y_name,
+        aspect=SECTION_ASPECT,
+        invert_y=True,
+        bgcolor="#d9d9d9",
+    )
 
 
 def _station_overlay(stations, name: str, colors, da, *, geo: bool):
@@ -2337,6 +2434,15 @@ def render(spec, **kwargs: Any):
         return _facet_movie(spec.single, **opts)
     if family == "series":
         return _series(spec.items, **opts)
+    if family == "section":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of section -- a section has no map to "
+                "outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _section(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
     if family == "locations":

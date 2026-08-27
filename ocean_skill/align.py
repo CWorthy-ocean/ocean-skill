@@ -28,6 +28,7 @@ from ocean_skill import _stacklevel
 from ocean_skill.cf import find_coord
 
 __all__ = [
+    "ALONG_DIM",
     "align",
     "axis_edges",
     "clear_regridder_memo",
@@ -36,6 +37,7 @@ __all__ = [
     "is_composite",
     "match_axis",
     "natural_convention",
+    "path_of",
     "perimeter_of",
     "point_of",
     "resolve_match_method",
@@ -558,6 +560,37 @@ def point_of(obj) -> tuple[float, float] | None:
         return None
     lon, lat = _single_value(obj, lon_name), _single_value(obj, lat_name)
     return None if lon is None or lat is None else (lon, lat)
+
+
+#: The along-path dimension a vertical section is carried on -- see :func:`path_of`
+#: and :func:`ocean_skill.transect.grid_slice`. One name shared by both modules so a
+#: section is recognized the same way everywhere, the way :data:`NEAREST` is one
+#: spelling shared by every caller of :func:`sample_at`.
+ALONG_DIM = "along"
+
+
+def path_of(obj) -> str | None:
+    """Return the along-path dimension name when ``obj`` is a vertical-section lane.
+
+    A :func:`~ocean_skill.transect.grid_slice` result carries 1-D ``lon``/``lat``
+    coordinates riding on one dedicated dimension (:data:`ALONG_DIM`) — distinct
+    from a rectilinear map, where longitude *is* its own dimension, and distinct
+    from a curvilinear one, where it is 2-D. Deliberately keyed on the dimension's
+    *name* rather than inferred from shape alone: a moving trajectory's
+    ``lon(time)``/``lat(time)`` has the same 1-D-coordinate-on-a-shared-dim shape
+    as a section, but is a position that moves in *time*, not a cut through
+    *space* — reading it as a section here would be wrong the same way
+    :func:`ocean_skill.operators._point_selectable` deliberately leaves a
+    trajectory to its own recipe rather than sampling it like a curvilinear grid.
+    """
+    lon_name, lat_name = _lon_name(obj), _lat_name(obj)
+    if lon_name is None or lat_name is None:
+        return None
+    if ALONG_DIM not in obj.dims:
+        return None
+    if obj[lon_name].dims != (ALONG_DIM,) or obj[lat_name].dims != (ALONG_DIM,):
+        return None
+    return ALONG_DIM
 
 
 def _wrap_lon(lon: float, convention: str) -> float:

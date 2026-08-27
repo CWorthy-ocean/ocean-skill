@@ -529,6 +529,14 @@ SERIES_ASPECT = 2.6
 SERIES_PANEL_W_FRACTION = 0.90
 SERIES_OVERHEAD = (2.9, 0.19)
 
+#: What a *section* (depth-by-distance) panel wants. Its x is kilometres and its y is
+#: metres -- no physical ratio between the two to read, so like :data:`SERIES_ASPECT`
+#: this is a design choice rather than a measurement. Wide, because along-path
+#: distance routinely dwarfs the water column it cuts through, and kept comfortably
+#: under :data:`COLORBAR_ASPECT_FORCES_HORIZONTAL` so a horizontal colorbar (natural
+#: for a wide panel) stays the family's own choice rather than an aspect override.
+SECTION_ASPECT = 2.2
+
 #: Height of a residual strip as a fraction of the panel it sits under. A difference
 #: *map* is a third panel of equal weight because it needs its own colour scale; a
 #: difference *series* is conventionally a thin strip below the data it belongs to.

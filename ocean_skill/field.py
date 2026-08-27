@@ -222,19 +222,47 @@ class Field:
         return point_of(da) is not None and resolve_dim(da, "T") in da.dims
 
     @property
-    def family(self) -> str:
-        """The plot family this field's own shape admits: ``series`` or ``field_facet``.
+    def is_section(self) -> bool:
+        """Whether this field's prepared data is a cut through space: a vertical slice.
 
-        No argument selects it, the same as :attr:`ocean_skill.comparison
+        Mirrors :attr:`is_series`, one level down: a select that names
+        ``{"transect": ...}`` leaves an along-path axis standing
+        (:func:`ocean_skill.align.path_of`) instead of collapsing to one place, so
+        the shape that answers "is this a section?" is a path, not a point. Read
+        off the data's own shape, never an argument -- see :attr:`family`.
+
+        True regardless of whether a vertical axis actually survives alongside the
+        path; :meth:`plot` is where a shape that cannot draw as one panel (no
+        vertical axis left, or more than one extra axis) is refused, with the
+        specifics of what is wrong. This property only answers "is this the kind
+        of field a section recipe applies to at all".
+        """
+        from ocean_skill.align import path_of
+
+        return path_of(self.data) is not None
+
+    @property
+    def family(self) -> str:
+        """The plot family this field's own shape admits.
+
+        ``series`` (a line over time at one place), ``section`` (a cut through
+        depth and along-path distance), or ``field_facet`` (map panels) — no
+        argument selects it, the same as :attr:`ocean_skill.comparison
         .Comparison.family` — the prepared data's shape decides.
         """
-        return "series" if self.is_series else "field_facet"
+        if self.is_series:
+            return "series"
+        if self.is_section:
+            return "section"
+        return "field_facet"
 
     @property
     def family_reason(self) -> str:
         """Why :attr:`family` came out the way it did, for tracing a surprise."""
         if self.is_series:
             return "drawn as a line: the selection leaves one place, so the surviving time axis is the x"
+        if self.is_section:
+            return "drawn as a section: select={'transect': ...} leaves a cut through space, with depth on the other axis"
         return "drawn as map panels: a horizontal extent survives"
 
     def extremum(self, kind: str = "max") -> Any:
@@ -319,26 +347,64 @@ class Field:
         """Return this field as a spec item."""
         from ocean_skill.comparison import _depth_label, _selected_depth
 
-        row_dim, facet_dim = self.facet_dims
         # the vertical selection, spelled for a label ("surface", "50 m", "σ₀ = 26.5
         # kg/m³"). A renderer cannot recover it from the field once the transform has
         # collapsed the axis, and a plot of one level that does not say which level is
         # a plot of nothing in particular -- see the interactive movie's title.
         requested = _selected_depth(self.select)
-        return {
+        item = {
             "field": self.data,
-            "facet_dim": facet_dim,
-            "row_dim": row_dim,
             "units": self.data.attrs.get("units"),
             "standard_name": self.standard_name,
             "depth": _depth_label(requested),
             "label": self.label or self.source,
         }
+        if self.family == "section":
+            # facet_dim/row_dim are field_facet's own vocabulary -- a section has
+            # neither rows nor columns to lay out, only the one panel, so
+            # self.facet_dims (which would read the surviving vertical axis as a
+            # facet column to lay out, the wrong reading for it here) is not
+            # consulted at all.
+            return item
+        row_dim, facet_dim = self.facet_dims
+        return {**item, "facet_dim": facet_dim, "row_dim": row_dim}
+
+    def _require_section_shape(self) -> None:
+        """Raise unless this field's data is exactly (vertical, along) -- a section.
+
+        Two ways to fail this: nothing but ``along`` survives (the vertical axis
+        was collapsed away, e.g. ``select={'depth': 'surface'}`` alongside a
+        transect), or a further axis survives too (most often time, left standing
+        by an ``aggregate`` that does not fully collapse it). Either way this says
+        so rather than handing the map-drawing code a shape it does not
+        understand, which is what :attr:`is_section` alone does not check --
+        see its docstring.
+        """
+        from ocean_skill.align import ALONG_DIM
+
+        extra = sorted(str(d) for d in self.data.dims if d != ALONG_DIM)
+        if len(extra) == 1:
+            return
+        if not extra:
+            raise ValueError(
+                f"{self.source!r} has been reduced to one along-path axis with no "
+                "vertical axis surviving, so there is nothing to draw as a "
+                "section. Omit select={'depth': 'surface'} (or any reduction "
+                "that collapses depth) to keep the vertical axis standing."
+            )
+        raise ValueError(
+            f"{self.source!r} still has {extra} beyond its along-path and "
+            "vertical axes, so it is not a single section -- a section figure "
+            "has only depth and distance. Collapse the rest with aggregate= "
+            f'(e.g. {{"{extra[0]}": "mean"}}) or narrow it with select= (e.g. '
+            f'{{"{extra[0]}": "2012-01"}}), or reduce time or fan it -- '
+            "time-animated sections are a follow-up."
+        )
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw this field: as map panels, or as a line over time at one place.
+        """Draw this field: as map panels, as a vertical section, or as a line over time.
 
-        Which of the two is decided by the prepared data's own shape, never an
+        Which of the three is decided by the prepared data's own shape, never an
         argument — see :attr:`family`. Goes through the renderer registry, so
         ``renderer="holoviews"`` gives the interactive version of the same plot
         with no other change.
@@ -351,6 +417,9 @@ class Field:
             spec = PlotSpec(
                 family="series", items=self._series_items(), options=kwargs
             )
+        elif self.family == "section":
+            self._require_section_shape()
+            spec = PlotSpec(family="section", items=[self.as_item()], options=kwargs)
         else:
             if point_of(self.data) is not None:
                 # A point with no surviving time: neither a map (no horizontal
@@ -411,6 +480,13 @@ class Field:
                 f"{self.source!r} has been reduced to a point and draws as a line "
                 "over time (see .family), not a map -- there is nothing to play as "
                 "a movie. Use .plot() instead; it already shows the whole series."
+            )
+        if self.is_section:
+            raise ValueError(
+                f"{self.source!r} draws as a vertical section (see .family), not "
+                "map panels -- there is no axis here to play as a movie yet. "
+                "Time-animated sections are a follow-up. Use .plot() instead; it "
+                "already shows the whole section."
             )
         spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)

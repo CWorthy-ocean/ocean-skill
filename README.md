@@ -267,6 +267,32 @@ pick one vertical request. `sigma0` is potential density *anomaly* (density minu
 ROMS's own `rho` output is in-situ density and would silently name a different surface
 at any real depth.
 
+**A vertical slice through the model** — `select={"transect": {"<dim>": <index>}}`
+cuts along a named grid dimension instead of narrowing to one place, and draws as
+depth (or the model's own s-levels) against along-path distance rather than a map:
+
+```python
+osk.field(
+    "pac_dt_ramp", NITRATE,
+    select={"transect": {"xi_rho": 30}, "time": "2013-06-15"},
+).plot()                       # native s-levels, exact -- a free isel, no interpolation
+```
+
+Give `depth` a list of fixed levels to interpolate onto instead, the same
+`roms.to_depth` a map row uses:
+
+```python
+osk.field(
+    "pac_dt_ramp", NITRATE,
+    select={"transect": {"xi_rho": 30}, "depth": [0, 50, 100, 200]},
+    aggregate={"time": "mean"},
+).plot()
+```
+
+This build slices exactly along a grid dimension only — fast, exact, no
+interpolation. An arbitrary path (a fixed longitude off the grid, or a list of
+lon/lat waypoints) and matching a section against a dataset are follow-ups.
+
 **Where is the hot spot, and how did it get there?** — a map naturally raises that
 question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid
 indices), and the snapshot it fell on.

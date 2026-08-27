@@ -135,8 +135,12 @@ def add_depth_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
         zeta = xr.zeros_like(ds["h"])
     s = (hc * ds["sigma_r"] + ds["h"] * ds["Cs_r"]) / (hc + ds["h"])
     z_rho = zeta + (zeta + ds["h"]) * s
+    # The preferred order for the full field; `...` carries forward anything not
+    # named here (`along`, for a vertical section already sliced to one grid
+    # column -- see ocean_skill.transect.grid_slice) in whatever order it already
+    # has, rather than requiring every possible dim be spelled out.
     dims = ("time", "s_rho", "eta_rho", "xi_rho")
-    z_rho = z_rho.transpose(*[d for d in dims if d in z_rho.dims])
+    z_rho = z_rho.transpose(*[d for d in dims if d in z_rho.dims], ...)
     return ds.assign_coords(z_rho=z_rho)
 
 
@@ -164,8 +168,8 @@ def add_interface_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
         zeta = xr.zeros_like(ds["h"])
     s = (hc * ds["sigma_w"] + ds["h"] * ds["Cs_w"]) / (hc + ds["h"])
     z_w = zeta + (zeta + ds["h"]) * s
-    dims = ("time", "s_w", "eta_rho", "xi_rho")
-    z_w = z_w.transpose(*[d for d in dims if d in z_w.dims])
+    dims = ("time", "s_w", "eta_rho", "xi_rho")  # see add_depth_coord's note on `...`
+    z_w = z_w.transpose(*[d for d in dims if d in z_w.dims], ...)
     return ds.assign_coords(z_w=z_w)
 
 
@@ -333,12 +337,20 @@ def to_depth(
 
     grid = _z_grid(ds, s_dim)
     z_rho = _contiguous_column(ds["z_rho"], s_dim)
+    # Rho-point fields share z_rho's own horizontal dims; staggered u/v (xi_u/eta_v)
+    # need interpolation to rho first (deferred), so are skipped here. Read off
+    # z_rho's own dims rather than the hardcoded ("eta_rho", "xi_rho") pair, so a
+    # variable already sliced to one grid column or transect (see
+    # ocean_skill.transect.grid_slice, whose renamed "along" dim replaces one of the
+    # two) still matches -- it shares z_rho's dims exactly, since z_rho went through
+    # the same slice. `time` is deliberately excluded: z_rho can carry it (when zeta
+    # is present) while a time-invariant variable legitimately does not, and that
+    # variable must not be skipped just because it lacks an axis z_rho happens to have.
+    h_dims = set(ds["lon"].dims) if "lon" in ds.coords else {"eta_rho", "xi_rho"}
     out = {}
     for var in ds.data_vars:
         da = ds[var]
-        # only rho-point 3-D fields share z_rho's grid; staggered u/v (xi_u/eta_v) need
-        # interpolation to rho first (deferred), so skip them here.
-        if s_dim in da.dims and {"eta_rho", "xi_rho"} <= set(da.dims):
+        if s_dim in da.dims and h_dims <= set(da.dims):
             transformed = grid.transform(
                 _contiguous_column(da, s_dim),
                 "Z",
@@ -454,12 +466,15 @@ def to_sigma0(
     sigma0 = _contiguous_column(sigma0, s_dim)
     targets = xr.DataArray(values, dims="sigma0", coords={"sigma0": values})
 
+    # See the identical note in to_depth: read off lon's own dims rather than the
+    # hardcoded rho pair, so a variable already sliced to a transect matches too.
+    h_dims = set(ds["lon"].dims) if "lon" in ds.coords else {"eta_rho", "xi_rho"}
     out = {}
     for var in ds.data_vars:
         da = ds[var]
         # only rho-point 3-D fields share sigma0's grid; staggered u/v need
         # interpolation to rho first (deferred, as in to_depth), so skip them here.
-        if s_dim in da.dims and {"eta_rho", "xi_rho"} <= set(da.dims):
+        if s_dim in da.dims and h_dims <= set(da.dims):
             transformed = grid.transform(
                 _contiguous_column(da, s_dim),
                 "Z",
