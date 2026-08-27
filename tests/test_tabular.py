@@ -463,3 +463,85 @@ def test_the_depth_rides_on_the_variables_attrs_as_well_as_a_coordinate():
     )
     assert "depth" not in monthly.coords, "the fixture no longer poses the question"
     assert monthly.attrs["depth_m"] == pytest.approx(np.median(pressure))
+
+
+# -- profile: one instant, many depths, indexed on depth rather than time -------------
+
+
+def profile_frame(n: int = 5, *, depth=None, time=None):
+    """A single CTD cast: fixed position, one instant, varying depth."""
+    if depth is None:
+        depth = np.linspace(0.0, 50.0, n)
+    if time is None:
+        time = np.full(n, "2024-04-04T12:00:00Z")
+    return pd.DataFrame(
+        {
+            "Time[UTC]": time,
+            "Latitude[degrees_north]": np.full(n, 27.5),
+            "Longitude[degrees_east]": np.full(n, -96.5),
+            "Depth[m]": depth,
+            "Temperature[degC]": np.linspace(20.0, 15.0, n),
+            "Salinity[PSU]": np.linspace(35.0, 35.5, n),
+        }
+    )
+
+
+def test_probe_detects_a_profile():
+    """One instant, fixed position, depth varying -- the unambiguous cast shape."""
+    from ocean_skill import build
+
+    md = build._probe_dataframe(profile_frame())
+    assert md["featureType"] == "profile"
+    assert md["featureType_source"] == "inferred"
+
+
+def test_probe_detects_timeseriesprofile_when_both_time_and_depth_vary():
+    """A fixed station revisited more than once: both axes vary, unlike a single cast."""
+    from ocean_skill import build
+
+    time = pd.date_range("2024-04-01", periods=5, freq="D", tz="UTC").strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    md = build._probe_dataframe(profile_frame(time=time))
+    assert md["featureType"] == "timeSeriesProfile"
+
+
+def test_to_dataset_builds_a_depth_indexed_profile():
+    """featureType: profile routes to the depth build, not the time build."""
+    ds = tabular.to_dataset(profile_frame(), {"featureType": "profile"})
+    assert set(ds.dims) == {"depth"}
+    assert ds["time"].shape == () and ds["lon"].shape == () and ds["lat"].shape == ()
+    assert ds["Temperature"].dims == ("depth",)
+    assert ds["Temperature"].attrs["units"] == "degC"
+    assert float(ds["lon"]) == pytest.approx(-96.5)
+    assert ds.indexes["depth"].is_monotonic_increasing
+
+
+def test_profile_duplicate_depths_are_collapsed_with_a_warning():
+    """A mislabeled repeat-visit station is readable but flagged, not refused."""
+    depth = np.array([0.0, 0.0, 10.0, 20.0, 30.0])
+    with pytest.warns(UserWarning, match="1 duplicate depths"):
+        ds = tabular.to_dataset(profile_frame(depth=depth), {"featureType": "profile"})
+    assert ds.sizes["depth"] == 4
+    assert ds.indexes["depth"].is_monotonic_increasing
+
+
+def test_a_profile_with_no_depth_column_says_so():
+    frame = profile_frame().drop(columns=["Depth[m]"])
+    with pytest.raises(ValueError, match="no depth column"):
+        tabular.to_dataset(frame, {"featureType": "profile"})
+
+
+def test_a_profile_with_time_varying_across_the_cast_is_reported():
+    """Depths sampled seconds apart during a real cast carry distinct timestamps --
+    warn and use the earliest rather than refuse."""
+    time = [
+        "2024-04-04T12:00:00Z",
+        "2024-04-04T12:00:05Z",
+        "2024-04-04T12:00:10Z",
+        "2024-04-04T12:00:15Z",
+        "2024-04-04T12:00:20Z",
+    ]
+    with pytest.warns(UserWarning, match="time varies across the cast"):
+        ds = tabular.to_dataset(profile_frame(time=time), {"featureType": "profile"})
+    assert pd.Timestamp(ds["time"].values) == pd.Timestamp("2024-04-04T12:00:00")

@@ -406,13 +406,18 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
 
 
 def to_dataset(df, meta: dict[str, Any]):
-    """Return a station table as a 1-D :class:`xarray.Dataset` on ``time``.
+    """Return a station table as a 1-D :class:`xarray.Dataset`.
 
-    Position and depth become **scalar coordinates** (``lon``/``lat``/``depth``, the
-    names :mod:`ocean_skill.align` and :mod:`ocean_skill.metrics` look for), so the
-    only dimension left is the one a time-series comparison is about. Units ride on each
+    Indexed on ``time`` for the usual mooring/timeSeries case; position and depth
+    become **scalar coordinates** (``lon``/``lat``/``depth``, the names
+    :mod:`ocean_skill.align` and :mod:`ocean_skill.metrics` look for), so the only
+    dimension left is the one a time-series comparison is about. Units ride on each
     variable, so the alignment step's compatibility check and
     :func:`ocean_skill.units.convert_units` work on a mooring exactly as on a grid.
+
+    An entry declared ``featureType: "profile"`` is a different shape entirely -- one
+    instant, many depths -- and is built by :func:`_profile_dataset` instead: indexed
+    on ``depth``, with ``time``/``lon``/``lat`` as the scalar coordinates.
 
     QARTOD companion columns are **kept** rather than dropped: they are real information
     (and what a future ``qc()`` will read). What must not happen — a request for
@@ -424,6 +429,9 @@ def to_dataset(df, meta: dict[str, Any]):
     import xarray as xr
 
     subject = meta.get("datasetID") or meta.get("title") or "this source"
+    if str(meta.get("featureType") or "").strip().casefold() == "profile":
+        # A CTD-style cast is indexed on depth, not time -- a different build entirely.
+        return _profile_dataset(df, meta, subject=subject)
     time_col = _axis_column(df, meta, "T")
     if time_col is None:
         raise ValueError(
@@ -550,5 +558,110 @@ def to_dataset(df, meta: dict[str, Any]):
         if value := meta.get(key):
             # Strings only: zarr's JSON attrs cannot hold a timestamp, and the cache
             # writes this Dataset's descendants back out.
+            ds.attrs[key] = str(value)
+    return ds
+
+
+def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
+    """Return a CTD-style cast as a 1-D :class:`xarray.Dataset` on ``depth``.
+
+    The vertical twin of :func:`to_dataset`'s time-series build, for an entry
+    declared ``featureType: "profile"``: one instant, many depths, so ``depth`` is the
+    dimension and ``time``/``lon``/``lat`` become scalar coordinates instead. Called
+    from :func:`to_dataset`, not directly -- the ``featureType`` check that picks this
+    branch lives there.
+    """
+    import pandas as pd
+    import xarray as xr
+
+    depth_col = _axis_column(df, meta, "Z")
+    if depth_col is None:
+        raise ValueError(
+            f"{subject}: no depth column, so this table cannot become a profile. "
+            "Give the catalog entry an axes mapping such as "
+            '`axes={"Z": "depth (m)"}`, or name the column "depth".'
+        )
+
+    depth = pd.to_numeric(df[depth_col], errors="coerce")
+    frame = df.loc[depth.notna()].copy()
+    frame[depth_col] = depth[depth.notna()]
+    frame = frame.sort_values(depth_col)
+
+    duplicated = frame[depth_col].duplicated()
+    if bool(duplicated.any()):
+        # A station visited more than once repeats depths -- that is a
+        # timeSeriesProfile, not a profile (one instant). Collapsing here rather than
+        # refusing keeps a mislabeled cast readable, but says so: the featureType is
+        # the fix, not this fallback.
+        warnings.warn(
+            f"{subject}: {int(duplicated.sum())} duplicate depths "
+            f"(of {len(frame)}) — keeping the first of each. If this station was "
+            'visited more than once, it is a timeSeriesProfile, not a profile.',
+            stacklevel=_stacklevel.find(),
+        )
+        frame = frame.loc[~duplicated]
+
+    units = _units_map(frame, meta)
+    lon_col = _axis_column(frame, meta, "X")
+    lat_col = _axis_column(frame, meta, "Y")
+    time_col = _axis_column(frame, meta, "T")
+    lon = _scalar_position(frame, lon_col)
+    lat = _scalar_position(frame, lat_col)
+
+    time = None
+    if time_col is not None:
+        decoded = pd.to_datetime(frame[time_col], errors="coerce", utc=True)
+        decoded = decoded.dropna()
+        if not decoded.empty:
+            if decoded.nunique() > 1:
+                # A profile is one instant by definition -- see PROFILE_FEATURE_TYPES
+                # in ocean_skill.comparison. Depths sampled seconds apart during a cast
+                # commonly carry distinct timestamps; using the earliest is a label,
+                # not a measurement, so this only ever warns rather than refuses.
+                warnings.warn(
+                    f"{subject}: time varies across the cast ({decoded.nunique()} "
+                    "distinct values) -- a profile is a single instant. Using the "
+                    "earliest. If this is really a repeat-visit station, label the "
+                    "entry timeSeriesProfile instead.",
+                    stacklevel=_stacklevel.find(),
+                )
+            time = decoded.min().tz_convert("UTC").tz_localize(None)
+
+    data: dict[str, Any] = {}
+    attrs: dict[str, Any] = {}
+    for column in frame.columns:
+        if column in (depth_col, lon_col, lat_col, time_col):
+            continue
+        base, _ = split_units(column)
+        if is_coordinate_column(column):
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.isna().all():
+            original = frame[column].dropna().unique()
+            if original.size == 1:
+                attrs[base] = original[0]
+            continue
+        variable = xr.DataArray(values.to_numpy(), dims=("depth",), name=base)
+        if unit := (units.get(str(column)) or units.get(base)):
+            variable.attrs["units"] = unit
+        variable.attrs["standard_name"] = base
+        variable.attrs["source_column"] = str(column)
+        data[base] = variable
+
+    ds = xr.Dataset(data, coords={"depth": frame[depth_col].to_numpy()})
+    _, depth_unit = split_units(depth_col)
+    ds["depth"].attrs.update(
+        units=depth_unit or "m", positive="down", long_name="depth"
+    )
+    if lon is not None:
+        ds = ds.assign_coords(lon=lon, lat=lat)
+        ds["lon"].attrs.update(units="degrees_east", standard_name="longitude")
+        ds["lat"].attrs.update(units="degrees_north", standard_name="latitude")
+    if time is not None:
+        ds = ds.assign_coords(time=time)
+        ds["time"].attrs["time_zone"] = "UTC"
+    ds.attrs.update(attrs)
+    for key in ("featureType", "title", "institution", "datasetID"):
+        if value := meta.get(key):
             ds.attrs[key] = str(value)
     return ds

@@ -1554,15 +1554,37 @@ def _probe_dataframe(df) -> dict[str, Any]:
         md["units"] = units
         md["variables"] = sorted(set(std.values()))
 
-    # featureType: fixed lon/lat with time varying is the common ERDDAP-mooring case
-    # (timeSeries); lon/lat that actually vary suggest a trajectory instead. Override
+    # featureType by which axes actually vary -- the tabular counterpart of
+    # guess_feature_type's point-family branch. A gridded product never arrives as a
+    # DataFrame (grids go through _probe as a Dataset), so the grid/2-D split it makes
+    # on shared dimensions has no analogue here; only the point family applies. A fixed
+    # position with time varying is the common ERDDAP-mooring case (timeSeries); a fixed
+    # position with depth varying and no spread in time is a CTD-style cast (profile);
+    # both varying at a fixed position is a timeSeriesProfile; positions that actually
+    # vary make it a trajectory (a profiler among them, a trajectoryProfile). Override
     # via add_source's **metadata when this guess is wrong.
-    ftype = "timeSeries"
-    if "X" in axes and "Y" in axes:
-        lon_n = pd.to_numeric(df[axes["X"]], errors="coerce").nunique(dropna=True)
-        lat_n = pd.to_numeric(df[axes["Y"]], errors="coerce").nunique(dropna=True)
-        if lon_n > 1 or lat_n > 1:
-            ftype = "trajectory"
+    def _spread(axis: str, *, numeric: bool = True) -> bool:
+        col = axes.get(axis)
+        if col is None:
+            return False
+        series = (
+            pd.to_numeric(df[col], errors="coerce")
+            if numeric
+            else pd.to_datetime(df[col], errors="coerce", utc=True)
+        )
+        return series.nunique(dropna=True) > 1
+
+    position_varies = _spread("X") or _spread("Y")
+    has_z = _spread("Z")
+    has_t = _spread("T", numeric=False)
+    if position_varies:
+        ftype = "trajectoryProfile" if has_z else "trajectory"
+    elif has_t and has_z:
+        ftype = "timeSeriesProfile"
+    elif has_z:
+        ftype = "profile"
+    else:
+        ftype = "timeSeries"
     md["featureType"] = ftype
     md["featureType_source"] = "inferred"
     return md
