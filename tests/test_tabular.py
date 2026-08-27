@@ -205,6 +205,87 @@ def test_to_dataset_reads_bracket_frame_without_axes():
     assert "Temperature_flag" in ds.data_vars
 
 
+def seanoe_frame(n: int = 5, *, fill: bool = True):
+    """A SEANOE CTD-mooring CSV: time as *numbers* under a ``days_since`` unit, and a
+    ``9999`` fill row (its "not reported" marker) in lon/lat/pressure.
+
+    Reproduces the two bugs reported against the built catalog: ``time_coverage`` both
+    reading 1970-01-01 (the raw day numbers taken as Unix nanoseconds), and
+    ``geospatial_lon/lat/vertical_max`` reading 9999 (the fill value taken as a real
+    extreme).
+    """
+    # 2025-04-28 .. 2025-05-02 as "days since 1950-01-01"
+    day0 = (pd.Timestamp("2025-04-28") - pd.Timestamp("1950-01-01")).days
+    days = np.arange(day0, day0 + n, dtype="float64")
+    lon = np.full(n, -21.5248)
+    lat = np.full(n, 64.382)
+    pres = np.full(n, 12.966)
+    if fill:
+        lon[-1] = lat[-1] = pres[-1] = 9999.0
+    return pd.DataFrame(
+        {
+            "Time[days_since_1950-01-01T00:00:00Z]": days,
+            "Longitude[degrees_east]": lon,
+            "Latitude[degrees_north]": lat,
+            "Pressure[dbar]": pres,
+            "Temperature[degree_C]": np.linspace(6.0, 7.0, n),
+        }
+    )
+
+
+def test_decode_time_column_honors_days_since_in_the_name():
+    """The column's own ``days_since`` unit, not Unix nanoseconds, drives decoding."""
+    frame = seanoe_frame(fill=False)
+    decoded = tabular.decode_time_column(
+        frame["Time[days_since_1950-01-01T00:00:00Z]"],
+        "Time[days_since_1950-01-01T00:00:00Z]",
+    )
+    assert decoded.min().date().isoformat() == "2025-04-28"
+    assert decoded.max().date().isoformat() == "2025-05-02"
+
+
+def test_decode_time_column_falls_back_to_plain_parsing():
+    """A column with no CF unit still parses as before (ISO timestamp strings)."""
+    s = pd.Series(["2024-04-04T00:00:00Z", "2024-04-05T00:00:00Z"])
+    decoded = tabular.decode_time_column(s, "Time[UTC]")
+    assert decoded.min().date().isoformat() == "2024-04-04"
+
+
+def test_numeric_in_range_drops_out_of_range_fill_values():
+    s = pd.Series([-21.5, 9999.0, -20.0])
+    cleaned = tabular.numeric_in_range(s, "X")
+    assert cleaned.dropna().tolist() == [-21.5, -20.0]
+    # Latitude's tighter bound catches a value longitude would accept.
+    assert tabular.numeric_in_range(pd.Series([64.0, 100.0]), "Y").dropna().tolist() == [
+        64.0
+    ]
+
+
+def test_probe_seanoe_frame_gets_real_times_and_extents():
+    """The end-to-end reproduction: build's probe must not report 1970 or 9999."""
+    from ocean_skill import build
+
+    md = build._probe_dataframe(seanoe_frame())
+    assert md["time_coverage_start"] == "2025-04-28"
+    assert md["time_coverage_end"] == "2025-05-02"
+    assert md["geospatial_lon_max"] == pytest.approx(-21.5248)
+    assert md["geospatial_lat_max"] == pytest.approx(64.382)
+    assert md["geospatial_vertical_max"] == pytest.approx(12.966)
+    assert md["lon_convention"] == "-180-180"
+    # A fixed mooring with a lone fill row is still a timeSeries, not a trajectory.
+    assert md["featureType"] == "timeSeries"
+
+
+def test_to_dataset_seanoe_frame_reads_times_and_ignores_fill():
+    """to_dataset must agree with the probe: real dates, fixed position, no 9999."""
+    ds = tabular.to_dataset(seanoe_frame(), {})
+    assert pd.Timestamp(ds["time"].values.min()).date().isoformat() == "2025-04-28"
+    assert pd.Timestamp(ds["time"].values.max()).date().isoformat() == "2025-05-02"
+    assert float(ds["lon"]) == pytest.approx(-21.5248)
+    assert float(ds["lat"]) == pytest.approx(64.382)
+    assert float(ds["depth"]) == pytest.approx(12.966)
+
+
 def test_depth_of_recognizes_bracket_and_pressure():
     direct = pd.DataFrame({"Depth[m]": np.full(3, 28.0)})
     depth, source, approximate = tabular.depth_of(direct, {})

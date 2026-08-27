@@ -1514,12 +1514,12 @@ def _probe_dataframe(df) -> dict[str, Any]:
     *reads* such a table into xarray — one spelling of the convention, so a catalog
     entry cannot describe a frame differently from how the pipeline later opens it.
     """
-    import pandas as pd
-
     from ocean_skill.tabular import (
         coord_column,
+        decode_time_column,
         is_coordinate_column,
         is_qc_column,
+        numeric_in_range,
         split_units,
     )
 
@@ -1527,33 +1527,45 @@ def _probe_dataframe(df) -> dict[str, Any]:
 
     axes: dict[str, str] = {}
     if lon_col := coord_column(df, "X"):
-        axes["X"] = lon_col
-        lo = pd.to_numeric(df[lon_col], errors="coerce")
-        md["geospatial_lon_min"], md["geospatial_lon_max"] = (
-            float(lo.min()),
-            float(lo.max()),
-        )
-        md["lon_convention"] = "0-360" if md["geospatial_lon_max"] > 180 else "-180-180"
+        # numeric_in_range drops out-of-range fill values (e.g. a "not reported" row
+        # written as 9999 rather than left blank) the same way it already drops
+        # non-numeric/NaN -- otherwise one such row reports 9999 as this source's
+        # easternmost longitude.
+        lo = numeric_in_range(df[lon_col], "X").dropna()
+        if not lo.empty:
+            axes["X"] = lon_col
+            md["geospatial_lon_min"], md["geospatial_lon_max"] = (
+                float(lo.min()),
+                float(lo.max()),
+            )
+            md["lon_convention"] = (
+                "0-360" if md["geospatial_lon_max"] > 180 else "-180-180"
+            )
     if lat_col := coord_column(df, "Y"):
-        axes["Y"] = lat_col
-        la = pd.to_numeric(df[lat_col], errors="coerce")
-        md["geospatial_lat_min"], md["geospatial_lat_max"] = (
-            float(la.min()),
-            float(la.max()),
-        )
+        la = numeric_in_range(df[lat_col], "Y").dropna()
+        if not la.empty:
+            axes["Y"] = lat_col
+            md["geospatial_lat_min"], md["geospatial_lat_max"] = (
+                float(la.min()),
+                float(la.max()),
+            )
     if time_col := coord_column(df, "T"):
-        axes["T"] = time_col
-        t = pd.to_datetime(df[time_col], errors="coerce", utc=True)
-        md["time_coverage_start"] = str(t.min().date())
-        md["time_coverage_end"] = str(t.max().date())
+        # decode_time_column honors a CF "<n> since <date>" encoding stated in the
+        # column's own name (e.g. "Time[days_since_1950-01-01T00:00:00Z]") -- plain
+        # pd.to_datetime on the raw numbers instead reads them as nanoseconds since
+        # the Unix epoch, landing every timestamp within a heartbeat of 1970-01-01.
+        t = decode_time_column(df[time_col], time_col).dropna()
+        if not t.empty:
+            axes["T"] = time_col
+            md["time_coverage_start"] = str(t.min().date())
+            md["time_coverage_end"] = str(t.max().date())
     if depth_col := coord_column(df, "Z"):
         # Written for the catalog's own sake (search, map hover text -- see
         # plot/locations._format_depth) and as depth_of's rung-3 fallback for a
         # frame whose column depth_of's own (narrower, exact) alias list still
         # misses -- not consulted by coord_column/coord_axis_of again, so a
         # mismatch here can never desync axes from what to_dataset later excludes.
-        d = pd.to_numeric(df[depth_col], errors="coerce")
-        finite = d.dropna()
+        finite = numeric_in_range(df[depth_col], "Z").dropna()
         if not finite.empty:
             axes["Z"] = depth_col
             md["geospatial_vertical_min"], md["geospatial_vertical_max"] = (
@@ -1592,10 +1604,12 @@ def _probe_dataframe(df) -> dict[str, Any]:
         col = axes.get(axis)
         if col is None:
             return False
-        series = (
-            pd.to_numeric(df[col], errors="coerce")
-            if numeric
-            else pd.to_datetime(df[col], errors="coerce", utc=True)
+        # numeric_in_range/decode_time_column, not a bare pd.to_numeric/to_datetime:
+        # an axis that is actually fixed but carries a stray fill-value row (see
+        # numeric_in_range) would otherwise look like it "varies", misclassifying a
+        # mooring as a trajectory.
+        series = numeric_in_range(df[col], axis) if numeric else decode_time_column(
+            df[col], col
         )
         return series.nunique(dropna=True) > 1
 
