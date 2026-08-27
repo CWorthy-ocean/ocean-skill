@@ -63,6 +63,11 @@ class Panel:
     title: str
     ylabel: str
     lines: tuple[_style.StyledLine, ...]
+    #: A panel's own x label, for a family whose x is not the figure-wide
+    #: :attr:`Layout.xlabel` -- :mod:`ocean_skill.plot.profile` sets this to the
+    #: variable's own value label; ``series`` leaves it ``None`` and every panel
+    #: shares :attr:`Layout.xlabel` ("time") instead.
+    xlabel: str | None = None
     secondary: tuple[_style.StyledLine, ...] = ()
     secondary_ylabel: str | None = None
     #: Set only for a twin-axis panel, and only when every line on that axis shares one

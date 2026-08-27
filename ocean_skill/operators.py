@@ -319,9 +319,12 @@ def resolve_dim(obj, name: str) -> str | None:
     # dimensions that find_coord cannot see -- `s_rho` is a dimension with nothing
     # attached. Match the fallback names against the dimensions themselves, or
     # `{"Z": "mean"}` silently does nothing on exactly the model this exists for.
+    # Case-insensitively: a source's own spelling (WHOTS' `DEPTH`, say) is one a
+    # builder chose, not one this list can enumerate every capitalization of.
+    dims_by_lower = {str(d).lower(): str(d) for d in obj.dims}
     for candidate in _COORD_FALLBACKS[kind]:
-        if candidate in obj.dims:
-            return candidate
+        if candidate in dims_by_lower:
+            return dims_by_lower[candidate]
     return None
 
 

@@ -60,7 +60,10 @@ def find_coord(ds, kind: str):
         # which cf-xarray still reports as the T axis) — they carry no real values.
         if getattr(got, "name", None) in known:
             return got
+    # Case-insensitively: a source's own spelling (WHOTS' `DEPTH`, say) is one a
+    # builder chose, not one this list can enumerate every capitalization of.
+    known_by_lower = {str(k).lower(): str(k) for k in known}
     for nm in _COORD_FALLBACKS[kind]:
-        if nm in known:
-            return ds[nm]
+        if nm in known_by_lower:
+            return ds[known_by_lower[nm]]
     return None

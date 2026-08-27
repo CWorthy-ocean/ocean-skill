@@ -267,6 +267,56 @@ pick one vertical request. `sigma0` is potential density *anomaly* (density minu
 ROMS's own `rho` output is in-situ density and would silently name a different surface
 at any real depth.
 
+**A single water column, read down instead of across** — pin `select` to one
+`lon`/`lat` and leave depth standing (rather than pinning it to a scalar too, which
+draws a `series` over time instead), and a field draws as a `profile`: value on x,
+depth on y, inverted so the surface sits at the top and the seafloor at the bottom.
+
+```python
+osk.field(
+    "run_new", NITRATE,
+    select={"lon": -144.25, "lat": 50.0, "time": "2013-06-15",
+            "depth": [0, 10, 25, 50, 100]},
+).plot()                              # one cast, five interpolated levels
+```
+
+`select={"depth": "column"}` reaches every native model level instead of a fixed
+list — the model's own resolution, honest about how coarse the water column
+actually is (a ROMS grid, unlike an observational product, has no standard levels
+of its own to fall back on). Several times at one place fan into one line per
+cast, coloured/marked by time rather than by depth (depth is the axis itself
+here, not a fact to tell lines apart by):
+
+```python
+osk.field(
+    "run_new", NITRATE,
+    select={"lon": -144.25, "lat": 50.0, "depth": "column",
+            "time": ["2013-06-15", "2013-09-15"]},
+).plot()                              # two casts overlaid, one legend entry each
+```
+
+`compare()` draws the same way against a real profile — a WHOTS/Argo-style cast, or
+any reference whose catalog `featureType` is `profile`/`timeSeriesProfile` — scored
+`over="Z"` instead of `over="time"`:
+
+```python
+osk.compare(
+    reference="whots_temp", test="run_new", variables=[TEMPERATURE],
+    select={"depth": [0, 10, 25, 50, 60, 100], "time": "2013-06-15"},
+    over="Z",
+).plot()                              # test | reference overlaid, difference in the box
+```
+
+The test lane is linearly interpolated onto the reference's own levels — the
+vertical counterpart of the coarser-wins rule `over="time"` already follows,
+settled once rather than chosen, since a water column has no "composite vs.
+instantaneous" question a time axis does. `over=` rarely needs spelling out at
+all: a `profile` reference implies it outright (no time axis to draw instead), and
+a `timeSeriesProfile` reference — which carries both axes — reads whichever one
+your own `select`/`aggregate` narrows to a single value (a `depth=` pinned to one
+number keeps the familiar mooring-at-a-depth series; a `time=` pinned to one
+instant keeps the cast).
+
 **A vertical slice through the model** — `select={"transect": {"<dim>": <index>}}`
 cuts along a named grid dimension instead of narrowing to one place, and draws as
 depth (or the model's own s-levels) against along-path distance rather than a map:

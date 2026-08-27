@@ -56,6 +56,7 @@ __all__ = [
     "metric_panel_titles",
     "metric_panels",
     "metric_value_text",
+    "profile",
     "render",
     "section",
     "series",
@@ -1003,6 +1004,225 @@ def series(
     if fit_text:
         _fit_text_widths(fig)
     if save:
+        fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
+#: How a profile panel draws a line. No ``"step"`` -- unlike a time axis (whose
+#: instantaneous or period-mean values a step honestly represents as holding until
+#: the next sample), a profile's levels are irregularly spaced model or instrument
+#: depths with nothing between them the value legitimately holds at.
+PROFILE_MARKS = ("line", "line+marker", "marker")
+
+
+def _draw_profile_lines(
+    ax, lines, line_kwargs: dict[str, Any], *, mark: str = "line"
+) -> list:
+    """Draw one panel's lines: value on x, depth on y -- the transpose of
+    :func:`_draw_series_lines`, marking the same subsample the same way.
+    """
+    from ocean_skill.plot.profile import vertical_values
+    from ocean_skill.plot.style import markevery_indices
+
+    drawn = []
+    for line in lines:
+        values = line.spec.values
+        depth = vertical_values(values)
+        kwargs: dict[str, Any] = {}
+        wants_marker = mark in ("line+marker", "marker") or line.marker is not None
+        if wants_marker:
+            kwargs = {
+                "marker": line.marker or "o",
+                "markevery": markevery_indices(depth.size),
+                "markersize": 4,
+            }
+        if mark == "marker":
+            kwargs["linestyle"] = "none"
+        (artist,) = ax.plot(
+            np.asarray(values.values, dtype="float64"),
+            depth,
+            color=line.color,
+            label=line.label,
+            **{"linestyle": line.linestyle, **kwargs},
+            **line_kwargs,
+        )
+        drawn.append(artist)
+    return drawn
+
+
+def profile(
+    items,
+    *,
+    title: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
+    encode: dict[str, str | None] | None = None,
+    metrics_loc: str = "auto",
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    mark: str = "line",
+    legend: bool = True,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    panel_aspect: float | None = None,
+    labels: tuple[str, str] | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    fit_text: bool = True,
+    title_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+    line_kwargs: dict[str, Any] | None = None,
+):
+    """Draw vertical profiles: value on x, depth on y, surface at the top.
+
+    The vertical counterpart of :func:`series` — a station's compared value read
+    down the water column rather than through time — built from the same
+    :mod:`ocean_skill.plot.style` policy: ``reference`` solid, ``test`` dashed by
+    *role*, colour carrying the variable, and now a varying *cast* (``marker <-
+    time``) where ``series`` marks a varying depth, since here depth is the axis
+    itself rather than something to distinguish lines by. See
+    :mod:`ocean_skill.plot.profile` for the whole policy and ``encode=`` for
+    overriding a channel (``depth`` is refused there: it names the axis, not a
+    channel).
+
+    Composition follows :func:`ocean_skill.plot.profile.compose`'s defaults: one
+    variable overlays every source/cast in a single panel; two or more each take
+    their own column, sharing the one depth axis (the standard CTD layout — there
+    is no ``secondary_y`` here, since a second axis at the *top* of a profile panel
+    has no interactive twin). ``rows=``/``cols=`` facet on
+    ``variable``/``source``/``reference``/``time``/``comparison`` instead of the
+    default; one or the other, not both.
+
+    ``xlim`` bounds the value axis; ``ylim`` bounds depth in the same positive-down
+    metres every profile draws in — ``(shallow, deep)``, e.g. ``(0, 200)`` — not
+    axes order, since the axis is always inverted regardless of what is passed.
+
+    Sized like every other line family — ``size``/``zoom``/``figsize``, type from
+    geometry (:mod:`ocean_skill.plot.typography`) — with the statistics box placed
+    in whichever corner the data leaves emptiest, since a profile panel, unlike a
+    map, does not fill its axes.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot import profile as _profile_layout
+    from ocean_skill.plot.typography import (
+        PROFILE_ASPECT,
+        SERIES_OVERHEAD,
+        SERIES_PANEL_W_FRACTION,
+    )
+
+    if mark not in PROFILE_MARKS:
+        raise ValueError(
+            f"mark={mark!r} is not a profile mark; expected one of {PROFILE_MARKS}. "
+            '("step" belongs to a value that holds between samples, which a '
+            "profile's irregularly spaced levels are not.)"
+        )
+    layout = _profile_layout.compose(
+        items,
+        rows=rows,
+        cols=cols,
+        encode=encode,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    canvas = resolve_canvas(size, zoom)
+    _warn_if_overplotted(layout, canvas)
+    aspect = panel_aspect or PROFILE_ASPECT
+    figsize = figsize or auto_figsize(
+        aspect,
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        panel_w_fraction=SERIES_PANEL_W_FRACTION,
+        overhead=SERIES_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=layout.ncols,
+        nrows=layout.nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=False)
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    tick_label_kwargs = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    legend_kwargs = _merged(defaults["legend_kwargs"], legend_kwargs)
+    line_kwargs = _merged(defaults["line_kwargs"], line_kwargs)
+
+    fig, axes = plt.subplots(
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        figsize=figsize,
+        sharey=True,
+        squeeze=False,
+        layout="constrained",
+    )
+    flat = list(axes.ravel())
+
+    # One depth range for the whole figure -- explicit set_ylim on every axis
+    # rather than relying on invert_yaxis()'s toggle state, which sharey=True
+    # would otherwise flip twice on every axis but the first.
+    all_lines = [line for panel in layout.panels for line in panel.lines]
+    if ylim is not None:
+        y_bottom, y_top = float(ylim[1]), float(ylim[0])
+    elif all_lines:
+        depths = np.concatenate(
+            [_profile_layout.vertical_values(line.spec.values) for line in all_lines]
+        )
+        finite = depths[np.isfinite(depths)]
+        lo, hi = (
+            (float(np.nanmin(finite)), float(np.nanmax(finite)))
+            if finite.size
+            else (0.0, 1.0)
+        )
+        y_bottom, y_top = (hi, lo) if hi > lo else (lo + 1.0, lo)
+    else:
+        y_bottom, y_top = 1.0, 0.0
+
+    per_panel: list[tuple[Any, list]] = []
+    for index, panel in enumerate(layout.panels):
+        ax = flat[index]
+        handles = _draw_profile_lines(ax, panel.lines, line_kwargs, mark=mark)
+        per_panel.append((ax, handles))
+        ax.set_title(
+            panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
+        )
+        ax.set_xlabel(panel.xlabel or "", fontsize=scale["axes_label"])
+        if layout.ncols == 1 or index % layout.ncols == 0:
+            ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        ax.set_ylim(y_bottom, y_top)
+        ax.tick_params(axis="both", labelsize=scale["tick_label"])
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            if tick_label_kwargs:
+                label.set(**tick_label_kwargs)
+        _metrics_box(ax, panel, metrics_kwargs)
+
+    if title:
+        fig.suptitle(title, **suptitle_kwargs)
+    if legend:
+        _series_legend(fig, per_panel, layout, scale, legend_kwargs)
+    _warn_if_cramped(
+        fig,
+        ncols=layout.ncols,
+        canvas=canvas,
+        nrows=layout.nrows,
+        panels=[ax for ax in flat if ax.lines],
+    )
+    if fit_text:
+        _fit_text_widths(fig)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save, dpi=200, bbox_inches="tight")
     return fig
 
@@ -3650,6 +3870,7 @@ def _top_level_options() -> frozenset[str]:
             field_facet,
             series,
             section,
+            profile,
             skill_map,
             locations,
         )
@@ -3716,6 +3937,8 @@ def render(spec, **kwargs: Any):
         _check_options(series, opts)
     elif family == "section":
         _check_options(section, opts)
+    elif family == "profile":
+        _check_options(profile, opts)
     elif family == "skill_map":
         _check_options(skill_map, opts)
     elif family == "locations":
@@ -3767,6 +3990,8 @@ def render(spec, **kwargs: Any):
         return field_movie(spec.items, **opts)
     if family == "series":
         return series(spec.items, **opts)
+    if family == "profile":
+        return profile(spec.items, **opts)
     if family == "section":
         item = spec.single
         return section(

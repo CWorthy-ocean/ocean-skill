@@ -1141,6 +1141,73 @@ def _sorted_on(da, axis: str):
     return da
 
 
+def _match_vertical(test, reference, tdim: str, rdim: str):
+    """Bring the test lane onto the reference's own vertical levels, by interpolation.
+
+    The vertical counterpart of the ``{mean, nearest, exact}`` choice
+    :func:`match_axis` makes for time -- but settled once here, not chosen: a water
+    column has no "composite vs instantaneous" question to answer the way a time
+    axis does (there is no such thing as a depth level that is itself an *average*
+    over a range of depths), so the test lane is always linearly interpolated onto
+    the reference's own levels rather than binned or nearest-matched. A level
+    outside the test's own vertical range comes back NaN (no extrapolation), the
+    same convention :func:`ocean_skill.roms.to_depth` uses for exactly the same
+    reason.
+
+    Sign conventions are reconciled before interpolating -- ROMS's own ``z``/
+    ``z_rho`` read negative-down, an observational product's own axis usually
+    already reads positive-down -- and the *reference's* convention is what
+    survives: the shared axis keeps the reference's own literal values, exactly as
+    :func:`match_axis` keeps the reference's own stamps for a time match. Always
+    lands on the reference (never the test), unlike time's coarser-wins rule:
+    a station reference has one water column and nothing coarser to defer to.
+    """
+    for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
+        if dim not in lane.coords:
+            raise ValueError(
+                f"the {role} lane's {dim!r} axis has no coordinate of its own -- "
+                "still in native s-coordinates (ROMS ships no coordinate for a "
+                "bare s_rho index), which varies by grid column and so cannot be "
+                "matched against the reference's fixed levels before the test is "
+                'sampled at a point. Use select={"depth": [...]} (a list of '
+                "metres) to interpolate the test onto fixed levels first, rather "
+                'than select={"depth": "column"} or a band.'
+            )
+    ref_vals = np.asarray(reference[rdim].values, dtype="float64")
+    test_vals = np.asarray(test[tdim].values, dtype="float64")
+    ref_pos = np.abs(ref_vals)
+    test_pos = np.abs(test_vals)
+    order = np.argsort(test_pos)
+    test_sorted = test.isel({tdim: order}).assign_coords({tdim: test_pos[order]})
+    interpolated = test_sorted.interp({tdim: ref_pos}, method="linear")
+    if tdim != rdim:
+        interpolated = interpolated.rename({tdim: rdim})
+    interpolated = interpolated.assign_coords({rdim: (rdim, ref_vals)})
+
+    if not bool(np.isfinite(interpolated).any()):
+        warnings.warn(
+            f"interpolating the test lane onto the reference's {rdim!r} levels "
+            f"({np.nanmin(ref_vals):g} to {np.nanmax(ref_vals):g}) leaves nothing "
+            f"finite -- the test's own vertical range is "
+            f"{np.nanmin(test_vals):g} to {np.nanmax(test_vals):g}. The two "
+            "columns may not overlap at all.",
+            stacklevel=_stacklevel.find(),
+        )
+
+    report = {
+        "match_method": "interp",
+        "match_reason": (
+            "a vertical axis is matched by linear interpolation of the test lane "
+            "onto the reference's own levels, not binned or nearest-matched the "
+            "way time is"
+        ),
+        "match_target": "reference",
+        "axis": rdim,
+        "n_matched": int(reference.sizes[rdim]),
+    }
+    return interpolated, reference, report
+
+
 def match_axis(
     test,
     reference,
@@ -1167,7 +1234,7 @@ def match_axis(
     report is measured on the *coordinate*, never by walking the data: the counts are
     index arithmetic and stay free even when the lanes are a year of daily maps.
     """
-    from ocean_skill.operators import resolve_dim
+    from ocean_skill.operators import _CF_AXES, resolve_dim
 
     tdim, rdim = resolve_dim(test, over), resolve_dim(reference, over)
     for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
@@ -1177,6 +1244,13 @@ def match_axis(
                 f"are {list(lane.dims)}). For a comparison of single maps, leave over= "
                 "unset."
             )
+
+    if _CF_AXES.get(over) == "vertical":
+        # A water column has no "composite vs instantaneous" question the way a
+        # time axis does, so there is nothing here to choose the way `method`
+        # chooses for time -- see _match_vertical for what happens instead.
+        return _match_vertical(test, reference, tdim, rdim)
+
     test, reference = _sorted_on(test, tdim), _sorted_on(reference, rdim)
     tf = _axis_floats(test, tdim, "test")
     rf = _axis_floats(reference, rdim, "reference")
@@ -1927,11 +2001,19 @@ def _warn_if_depths_differ(test, reference) -> None:
     to select from, and correctly does nothing, so asking for the surface and receiving
     30 m used to pass without comment.
     """
-    # The coordinate first, then the variable's own attrs: a depth riding along `time`
-    # does not survive a reduction (resampling a mooring to monthly means drops it), so
-    # the attrs are what is left by the time a comparison gets here -- and this caveat
-    # matters most for exactly those records, whose instrument moved.
-    depth = reference.coords.get("depth")
+    # The coordinate first (via find_coord directly, not resolve_dim -- a station's
+    # instrument depth is ordinarily a *scalar* coordinate, which resolve_dim's own
+    # contract deliberately excludes, being about indexable dimensions rather than
+    # every coordinate an object carries; find_coord has no such restriction, and
+    # recognizes an observational product's own spelling -- WHOTS' "DEPTH", say --
+    # case-insensitively the same way {"Z": "mean"} finds a real vertical axis).
+    # Then the variable's own attrs: a depth riding along `time` does not survive a
+    # reduction (resampling a mooring to monthly means drops it), so the attrs are
+    # what is left by the time a comparison gets here -- and this caveat matters
+    # most for exactly those records, whose instrument moved.
+    from ocean_skill.cf import find_coord
+
+    depth = find_coord(reference, "vertical")
     values = None
     if depth is not None:
         values = np.asarray(depth.values, dtype="float64")
@@ -1950,7 +2032,7 @@ def _warn_if_depths_differ(test, reference) -> None:
     )
     if abs(value) <= 5.0:
         return
-    if any(name in test.coords for name in ("depth", "z", "z_rho", "lev")):
+    if find_coord(test, "vertical") is not None:
         return
     source = reference.attrs.get("depth_source") or "its own metadata"
     warnings.warn(
