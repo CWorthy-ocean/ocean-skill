@@ -85,7 +85,11 @@ CHANNELS: dict[str, str | None] = {
 }
 
 #: Fields a channel may be keyed on, i.e. what a :class:`LineSpec` knows about itself.
-FIELDS = ("variable", "source", "depth", "role")
+#: ``time`` is a profile's own field -- a station's several casts, one line each --
+#: and stays ``None`` on every series line, so ``CHANNELS``'s default marker channel
+#: (``depth`` there, ``time`` here -- see :mod:`ocean_skill.plot.profile`) never
+#: mistakes one family's lines for the other's.
+FIELDS = ("variable", "source", "depth", "time", "role")
 
 #: About how many markers a line should carry, however many samples it has. A marker per
 #: sample on a 3000-point mooring series is a filled band, not a line.
@@ -105,6 +109,7 @@ class LineSpec:
     source: str
     variable: str | None = None
     depth: float | None = None
+    time: str | None = None
     units: str | None = None
     values: Any = None
     item: int = 0
@@ -194,7 +199,7 @@ def series_label(spec: LineSpec, *, varying, ambiguous_sources=()) -> str:
     from ocean_skill.plot.summary import pretty_level
 
     parts = []
-    for field in ("source", "variable", "depth"):
+    for field in ("source", "variable", "depth", "time"):
         if field in varying or (field == "source" and not varying):
             value = spec.get(field)
             if value is not None:

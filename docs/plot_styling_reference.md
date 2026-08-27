@@ -941,6 +941,95 @@ label colours and key *entries*. Two differences, both deliberate:
 `line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
 static renderer, which warns rather than absorbing them silently.
 
+## The `profile` family (vertical profiles)
+
+The vertical twin of `series`: a select that pins `lon`/`lat` to one place and
+leaves depth standing, with no time axis surviving alongside it, draws value on x
+and depth on y instead of value against time.
+
+```python
+osk.compare(reference="whots_temp", test="run_new", variables=["temperature"],
+            select={"depth": [0, 10, 25, 50, 100], "time": "2013-06-15"},
+            over="Z").plot()
+```
+
+**One source, no comparison.** `osk.field(...).plot()` draws the same family for a
+single cast — one line, role `"value"`, drawn solid — the same reduction the
+`series` family follows at one place through time:
+
+```python
+osk.field("run_new", "temperature",
+          select={"lon": -144.25, "lat": 50.0, "time": "2013-06-15",
+                  "depth": "column"}).plot()
+```
+
+### Which channel carries what
+
+The same policy `series` uses, with `time` in place of `depth` as the marker
+channel — depth is the axis itself here, not a fact to tell lines apart by, so a
+profile's own `LineSpec.depth` is always `None`.
+
+| Channel | Default field | Notes |
+|---|---|---|
+| line style | **role** (not a field) | `reference` solid, `test` dashed — always |
+| colour | `variable` | one colour per variable, shared by both lanes of a pair |
+| dash pattern *within* the test side | `source` | a second model takes `:`, a third `-.` |
+| marker | `time` | drawn only when a cast's own instant actually varies |
+
+`encode={"marker": "depth"}` (or any channel keyed on `"depth"`, or `rows="depth"`/
+`cols="depth"`) is refused with a clear message: depth is the axis every panel
+already draws against.
+
+### Composition
+
+| Distinct variables | Default |
+|---|---|
+| one | one panel, every source/cast overlaid |
+| two or more | one column per variable, sharing the depth axis |
+
+No `secondary_y` here — a second value axis at the *top* of a profile panel has no
+interactive twin (bokeh has `multi_y`, not `multi_x`), so two or more variables
+each take their own column instead. `rows=`/`cols=` (one, not both) facet on
+`variable`, `source`, `reference`, `time` or `comparison`.
+
+### Axis conventions
+
+* **y is depth, positive down, inverted** — 0 m draws at the top, the deepest
+  sample at the bottom — the same convention `section` uses, and every other
+  depth label in this package (`facet_labels`' own `abs()`). A `sigma0` profile
+  (an isopycnal comparison) inverts the same way: denser water at the bottom.
+* **x is the compared value**, labelled the same way `series`' own y-axis is
+  (`"temperature [degC]"`).
+* **`ylim=(shallow, deep)`** is always read in positive-down metres — `(0, 200)`,
+  not axis order — since the axis is inverted regardless of what is passed.
+
+### `profile`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `mark` | `"line"` | `"line+marker"` or `"marker"` — no `"step"` (a profile's levels are irregularly spaced, with nothing between them a step-hold represents honestly) |
+| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
+| `legend` | `True` | draw the key at all |
+| `xlim` | `None` | value-axis limits, every panel |
+| `ylim` | `None` | depth limits, `(shallow, deep)` in positive-down metres |
+| `panel_aspect` | `0.62` | width/height of a panel — portrait, since a water column reads top-to-bottom |
+
+There is no `residual` option yet (a `test − reference` strip beside each depth
+panel is a follow-up) and no `profile_movie` (several casts over time played as
+frames, mirroring `facet_movie`) — both are named follow-ups, not gaps in the
+family's own logic.
+
+### Static versus interactive
+
+Both renderers draw the same lines, colours, dash patterns, titles, axis labels
+and key entries, through the same `ocean_skill.plot.profile.compose` layout —
+exactly the guarantee `series` makes. The depth axis reads surface-at-top in both
+by construction: statically via `ax.set_ylim(deep, shallow)`, interactively via
+`ylim=(deep, shallow)` on the bokeh figure (deliberately *not* also
+`invert_yaxis=True`, which would flip an already-descending range back to
+ascending). `line_kwargs` and `legend_kwargs` only affect the static renderer,
+which warns rather than absorbing them silently.
+
 ## The `section` family (vertical slices)
 
 A **grid-aligned** transect — `select={"transect": {"<dim>": <index>}}` — draws as

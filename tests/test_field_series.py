@@ -138,16 +138,31 @@ def test_a_fully_collapsed_point_refuses_to_plot(stub):
     stub(_point_series().mean("time"))
     f = _make()
     assert not f.is_series
-    with pytest.raises(ValueError, match="no surviving time axis"):
+    assert not f.is_profile
+    with pytest.raises(ValueError, match="no surviving time or depth axis"):
         f.plot()
 
 
-def test_a_point_profile_with_no_time_refuses_to_plot(stub):
-    """Depth survives, but there is no time to run a line along either."""
+def test_a_point_with_depth_and_no_time_draws_as_a_profile(stub):
+    """Depth survives with no time standing: a profile, not a refusal."""
     stub(_point_with_depth().isel(time=0))
     f = _make()
     assert not f.is_series
-    with pytest.raises(ValueError, match="no surviving time axis"):
+    assert f.is_profile
+    assert f.family == "profile"
+    fig = f.plot()
+    assert len(fig.axes[0].lines) == 1
+    ydata = fig.axes[0].lines[0].get_ydata()
+    assert sorted(ydata) == [0.0, 50.0, 100.0]
+
+
+def test_a_point_with_neither_time_nor_depth_refuses_to_plot(stub):
+    """Nothing survives at all: no map, no series, no profile to draw."""
+    stub(_point_with_depth().isel(time=0, depth=0))
+    f = _make()
+    assert not f.is_series
+    assert not f.is_profile
+    with pytest.raises(ValueError, match="no surviving time or depth axis"):
         f.plot()
 
 

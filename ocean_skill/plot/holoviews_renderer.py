@@ -1982,6 +1982,169 @@ def _series_metrics_text(hv, panel):
     )
 
 
+def _profile_curve(hv, line, dimensions, *, mark: str):
+    """Return one line as a bokeh element: value on x, depth on y.
+
+    The transpose of :func:`_series_curve`, marking the same subsample the same
+    way. There is no ``"step"`` branch -- :func:`ocean_skill.plot.matplotlib_
+    renderer.profile` refuses that mark outright (a profile's levels are
+    irregularly spaced, with nothing between them a step-hold represents
+    honestly); an interactive-only caller who passes it anyway simply gets an
+    ordinary line, matching every other mark this function does not recognize.
+    """
+    from ocean_skill.plot.profile import vertical_values
+    from ocean_skill.plot.style import markevery_indices
+
+    values = line.spec.values
+    x = np.asarray(values.values, dtype="float64")
+    y = vertical_values(values)
+    element = hv.Curve((x, y), *dimensions, label=line.label).opts(
+        color=line.color, line_dash=line.line_dash, line_width=1.4
+    )
+    if mark == "marker":
+        element = hv.Scatter((x, y), *dimensions, label=line.label).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    elif line.marker is not None or mark == "line+marker":
+        keep = markevery_indices(len(x))
+        element = element * hv.Scatter((x[keep], y[keep]), *dimensions).opts(
+            color=line.color, marker=line.bokeh_marker or "circle", size=5
+        )
+    return element
+
+
+def _profile_metrics_text(hv, panel, y_range):
+    """Return the statistics box as an ``hv.Text``, in the corner ``compose`` chose.
+
+    The transpose of :func:`_series_metrics_text`: "upper" means shallow (small
+    depth, drawn at the top once the axis inverts) and "lower" means deep -- the
+    same mapping :func:`ocean_skill.plot.profile._free_corners` uses to rank the
+    corners in the first place. ``y_range`` is the whole figure's shared depth
+    range (see :func:`_profile`), not this one panel's own lines, so the box lands
+    at the panel's actual top/bottom edge even when every panel in the figure
+    shares one axis.
+    """
+    xs = np.concatenate(
+        [np.asarray(line.spec.values.values, dtype="float64") for line in panel.lines]
+    )
+    x_low, x_high = float(np.nanmin(xs)), float(np.nanmax(xs))
+    vertical, horizontal = panel.metrics_corner.split()
+    x_at = x_low if horizontal == "left" else x_high
+    y_shallow, y_deep = min(y_range), max(y_range)
+    y_at = y_shallow if vertical == "upper" else y_deep
+    return hv.Text(
+        x_at,
+        y_at,
+        panel.metrics_text,
+        halign=horizontal,
+        valign="top" if vertical == "upper" else "bottom",
+    )
+
+
+def _profile(
+    items,
+    title=None,
+    rows=None,
+    cols=None,
+    encode=None,
+    metrics_loc="auto",
+    metric_keys=DEFAULT_METRIC_KEYS,
+    legend=True,
+    xlim=None,
+    ylim=None,
+    panel_aspect=None,
+    labels=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    mark: str = "line",
+    **_,
+):
+    """Draw the ``profile`` family interactively — the same layout, drawn with bokeh.
+
+    Composition, styling, labels, titles and the statistics text all come from
+    :mod:`ocean_skill.plot.profile` and :mod:`ocean_skill.plot.style`, the same as
+    the static renderer, so the two cannot disagree about anything but the drawing
+    call. The depth axis reads surface-at-top, seafloor (or the deepest sample) at
+    the bottom, the same way the static renderer's ``ax.set_ylim(deep, shallow)``
+    achieves it -- ``ylim=(deep, shallow)`` on the bokeh side, deliberately *not*
+    also ``invert_yaxis=True``, which would flip an already-descending range back
+    to ascending. One shared depth range across every panel in the figure,
+    computed once here exactly as
+    :func:`ocean_skill.plot.matplotlib_renderer.profile` computes it, rather than
+    left to each panel's own data range.
+    """
+    hv = _extension()
+
+    from ocean_skill.plot.profile import compose, vertical_values
+    from ocean_skill.plot.typography import PROFILE_ASPECT
+
+    layout = compose(
+        items,
+        rows=rows,
+        cols=cols,
+        encode=encode,
+        metric_keys=metric_keys,
+        metrics_loc=metrics_loc,
+    )
+    width, height, fontsize = _series_geometry(
+        font_scale=font_scale,
+        canvas_factor=_canvas_factor(size, zoom),
+        aspect=panel_aspect or PROFILE_ASPECT,
+    )
+
+    all_lines = [line for panel in layout.panels for line in panel.lines]
+    if ylim is not None:
+        y_range = (float(ylim[1]), float(ylim[0]))
+    elif all_lines:
+        depths = np.concatenate(
+            [vertical_values(line.spec.values) for line in all_lines]
+        )
+        finite = depths[np.isfinite(depths)]
+        lo, hi = (
+            (float(np.nanmin(finite)), float(np.nanmax(finite)))
+            if finite.size
+            else (0.0, 1.0)
+        )
+        y_range = (hi, lo) if hi > lo else (lo + 1.0, lo)
+    else:
+        y_range = (1.0, 0.0)
+
+    plots = []
+    for panel in layout.panels:
+        x_dim = hv.Dimension("value", label=panel.xlabel or "")
+        y_dim = hv.Dimension("depth", label=panel.ylabel)
+        overlay = hv.Overlay(
+            [_profile_curve(hv, line, (x_dim, y_dim), mark=mark) for line in panel.lines]
+        )
+        if panel.metrics_text:
+            overlay = overlay * _profile_metrics_text(hv, panel, y_range)
+        plot = overlay.opts(
+            hv.opts.Curve(
+                frame_width=width,
+                frame_height=height,
+                fontsize=fontsize,
+                show_grid=True,
+                tools=["hover"],
+                ylim=y_range,
+            ),
+            hv.opts.Overlay(
+                title=panel.title,
+                show_legend=bool(legend),
+                legend_position=_BOKEH_LEGEND_POSITION.get(
+                    panel.legend_corner, "top_right"
+                ),
+                fontsize=fontsize,
+            ),
+        )
+        if xlim is not None:
+            plot = plot.opts(hv.opts.Curve(xlim=tuple(xlim)))
+        plots.append(plot)
+
+    out = hv.Layout(plots).cols(layout.ncols)
+    return out.opts(title=title or "")
+
+
 def _target(
     items,
     title=None,
@@ -2395,7 +2558,7 @@ def render(spec, **kwargs: Any):
         "shared_axis_labels",
         *_STATIC_ONLY_KWARGS,
     ]
-    if family == "series":
+    if family in ("series", "profile"):
         # A line panel has no colormap, no map and no fixed axes, so the map-only drops
         # do not apply to it -- and `mark` and `metrics_kwargs` do.
         drops = [d for d in drops if d not in ("mark", "metrics")]
@@ -2434,6 +2597,8 @@ def render(spec, **kwargs: Any):
         return _facet_movie(spec.single, **opts)
     if family == "series":
         return _series(spec.items, **opts)
+    if family == "profile":
+        return _profile(spec.items, **opts)
     if family == "section":
         if "domain" in opts:
             warnings.warn(
