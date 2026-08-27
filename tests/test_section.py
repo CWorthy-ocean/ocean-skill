@@ -126,6 +126,86 @@ def test_a_transect_with_a_depth_list_interpolates_to_fixed_z(patched_read):
     assert f.family == "section"
 
 
+# -- arbitrary paths: waypoints and a fixed line, end to end ------------------------
+
+
+def test_a_waypoint_transect_reaches_family_section(patched_read):
+    name = patched_read(_roms_run())
+    f = osk.field(
+        name,
+        VAR,
+        select={"transect": {"waypoints": [[-95.5, 24.0], [-94.0, 27.0]]}},
+        cache=False,
+    )
+    da = f.data
+    assert set(da.dims) == {"s_rho", ALONG_DIM}
+    assert f.family == "section"
+
+
+def test_a_waypoint_transect_with_depths_matches_the_grid_aligned_shape(patched_read):
+    """Same output contract as the grid-aligned pathway (Stage A) -- the plot layer
+    (built once, against that contract) needs no changes to draw either one."""
+    name = patched_read(_roms_run())
+    f = osk.field(
+        name,
+        VAR,
+        select={
+            "transect": {"waypoints": [[-95.5, 24.0], [-94.0, 27.0]]},
+            "depth": [50.0, 500.0],
+        },
+        cache=False,
+    )
+    da = f.data
+    assert set(da.dims) == {"z", ALONG_DIM}
+    assert da.sizes["z"] == 2
+
+
+def test_a_fixed_lon_line_transect_reaches_family_section(patched_read):
+    name = patched_read(_roms_run())
+    f = osk.field(name, VAR, select={"transect": {"lon": -94.5}}, cache=False)
+    assert f.family == "section"
+    assert set(f.data.dims) == {"s_rho", ALONG_DIM}
+
+
+def test_a_bounded_lat_line_transect_stays_inside_its_bounds(patched_read):
+    name = patched_read(_roms_run())
+    f = osk.field(
+        name,
+        VAR,
+        select={"transect": {"lat": 25.0, "lon": {"min": -95.8, "max": -93.2}}},
+        cache=False,
+    )
+    lon = np.asarray(f.data["lon"])
+    assert lon.min() >= -96.0
+    assert lon.max() <= -93.0
+
+
+def test_a_waypoint_transect_renders_in_both_renderers():
+    da = xr.DataArray(
+        5.0 + np.linspace(0, 1, 6 * 8).reshape(6, 8),
+        dims=("z", ALONG_DIM),
+        coords={
+            "z": -np.array([0.0, 10.0, 25.0, 50.0, 100.0, 200.0]),
+            ALONG_DIM: np.linspace(0.0, 150.0, 8),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -93.0, 8)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 26.0, 8)),
+        },
+    )
+    item = {
+        "field": da,
+        "units": "degC",
+        "standard_name": None,
+        "depth": None,
+        "label": "roms_run",
+    }
+    fig = render(PlotSpec(family="section", items=[item]), renderer="matplotlib")
+    assert fig.axes
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    obj = render(PlotSpec(family="section", items=[item]), renderer="holoviews")
+    assert obj is not None
+
+
 # -- shape refusals: Field._require_section_shape -----------------------------------
 
 
@@ -236,3 +316,51 @@ def test_different_transect_indices_produce_different_cache_keys():
     a = key_for_prepared(source="s", variable="v", select={"transect": {"xi_rho": 1}})
     b = key_for_prepared(source="s", variable="v", select={"transect": {"xi_rho": 2}})
     assert a != b
+
+
+def test_waypoint_tuple_and_list_spellings_hash_identically():
+    a = key_for_prepared(
+        source="s",
+        variable="v",
+        select={"transect": {"waypoints": [[-95.0, 24.0], [-94.0, 25.0]]}},
+    )
+    b = key_for_prepared(
+        source="s",
+        variable="v",
+        select={"transect": {"waypoints": ((-95.0, 24.0), (-94.0, 25.0))}},
+    )
+    assert a == b
+
+
+def test_different_waypoints_spacing_and_method_each_produce_a_different_key():
+    base = key_for_prepared(
+        source="s",
+        variable="v",
+        select={"transect": {"waypoints": [[-95.0, 24.0], [-94.0, 25.0]]}},
+    )
+    different_points = key_for_prepared(
+        source="s",
+        variable="v",
+        select={"transect": {"waypoints": [[-95.0, 24.0], [-93.0, 25.0]]}},
+    )
+    different_spacing = key_for_prepared(
+        source="s",
+        variable="v",
+        select={
+            "transect": {
+                "waypoints": [[-95.0, 24.0], [-94.0, 25.0]],
+                "spacing_km": 5.0,
+            }
+        },
+    )
+    different_method = key_for_prepared(
+        source="s",
+        variable="v",
+        select={
+            "transect": {
+                "waypoints": [[-95.0, 24.0], [-94.0, 25.0]],
+                "method": "bilinear",
+            }
+        },
+    )
+    assert len({base, different_points, different_spacing, different_method}) == 4

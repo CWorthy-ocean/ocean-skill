@@ -38,6 +38,7 @@ from ocean_skill.catalog import catalogs, describe, find
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
+from ocean_skill.pick import pick_path
 from ocean_skill.plot.map_locations import map_locations
 from ocean_skill.plot.map_metrics import map_metrics
 from ocean_skill.sources import read
@@ -60,6 +61,7 @@ __all__ = [
     "map_locations",
     "map_metrics",
     "outputs",
+    "pick_path",
     "read",
     "summary",
 ]

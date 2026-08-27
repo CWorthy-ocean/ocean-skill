@@ -847,6 +847,73 @@ def test_a_curvilinear_point_select_works_with_no_matched_no_axis_warning():
     assert not log
 
 
+def test_a_lone_scalar_lon_on_a_curvilinear_grid_raises_loudly():
+    """The trap select's own lone-lon reading (see the test above it) can't fix:
+    a curvilinear lon_rho/lat_rho has no dimension to narrow, so this used to
+    resolve to nothing and silently vanish. Now it names the transect grammar.
+    """
+    grid = _curvilinear()
+    with pytest.raises(ValueError, match="select={'transect': {'lon_rho'"):
+        select(grid, {"lon_rho": -144.0})
+
+
+def test_a_lone_scalar_lat_on_a_curvilinear_grid_raises_loudly():
+    grid = _curvilinear()
+    with pytest.raises(ValueError, match="select={'transect': {'lat_rho'"):
+        select(grid, {"lat_rho": 49.0})
+
+
+def test_a_scalar_lon_paired_with_a_range_lat_raises_too():
+    """The bounded-line spelling -- one axis fixed, the other a range -- is the
+    identical trap: the fixed axis still has no dimension to narrow."""
+    grid = _curvilinear()
+    with pytest.raises(ValueError, match="curvilinear"):
+        select(grid, {"lon_rho": -144.0, "lat_rho": {"min": 45.0, "max": 50.0}})
+
+
+def test_the_curvilinear_line_error_reaches_through_prepare_too():
+    """The second call site: comparison._select_horizontal_then_aggregate, which
+    hits this before operators.select ever runs -- the key would otherwise die
+    silently in its own deferred/still_unmatched fallback (a generic warning
+    naming nothing about *why*).
+    """
+    from ocean_skill.comparison import _select_horizontal_then_aggregate
+
+    grid = _curvilinear()
+    with pytest.raises(ValueError, match="select={'transect': {'lon_rho'"):
+        _select_horizontal_then_aggregate(grid, {"lon_rho": -144.0}, None, "the test lane")
+
+
+def test_a_curvilinear_point_select_does_not_trip_the_line_error():
+    """A genuine point (both axes scalar) is unaffected -- point_in_spec already
+    claims it before the line check ever gets a look."""
+    grid = _curvilinear()
+    out = select(grid, {"lon_rho": -144.245, "lat_rho": 49.98})  # must not raise
+    assert out.dims == ()
+
+
+def test_a_curvilinear_box_select_does_not_trip_the_line_error():
+    """Nor a genuine box (both axes ranges) -- the box branch consumes its keys
+    before the line check ever sees them."""
+    grid = _curvilinear()
+    out = select(grid, {"lon_rho": {"min": -152, "max": -148}, "lat_rho": {"min": 46, "max": 49}})
+    assert "eta_rho" in out.dims and "xi_rho" in out.dims
+
+
+def test_the_curvilinear_line_error_leaves_rectilinear_and_trajectories_alone():
+    """A 1-D lon (rectilinear, or a trajectory's lon(time)) has no 2-D coordinate
+    to trip the check -- both keep whatever select= already did for them."""
+    grid = _gridded([10.0, 20.0, 30.0])
+    select(grid, {"lon": -95.5})  # rectilinear: must not raise (pinned above too)
+
+    trajectory = xr.DataArray(
+        [1.0, 2.0, 3.0],
+        dims="time",
+        coords={"lon": ("time", [-95.0, -94.0, -93.0]), "lat": ("time", [25.0] * 3)},
+    )
+    select(trajectory, {"lon": -94.0})  # must not raise either
+
+
 def test_a_masked_point_raises_rather_than_returning_nan():
     grid = _gridded([10.0, 20.0, 30.0])
     masked = grid.where((grid.lon > -96) | (grid.lat > 25))

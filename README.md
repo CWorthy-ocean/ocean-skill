@@ -289,9 +289,32 @@ osk.field(
 ).plot()
 ```
 
-This build slices exactly along a grid dimension only — fast, exact, no
-interpolation. An arbitrary path (a fixed longitude off the grid, or a list of
-lon/lat waypoints) and matching a section against a dataset are follow-ups.
+An **arbitrary path** — waypoints, or a fixed longitude/latitude line — samples the
+grid instead, by nearest-neighbour (default) or `method="bilinear"`:
+
+```python
+osk.field(
+    "pac_dt_ramp", NITRATE,
+    select={"transect": {"waypoints": [[150.0, 10.0], [175.0, 15.0], [-160.0, 20.0]]},
+            "depth": [0, 50, 100, 200]},
+    aggregate={"time": "mean"},
+).plot()                       # crosses the antimeridian without incident
+
+osk.field("pac_dt_ramp", NITRATE, select={"transect": {"lon": 200.0}}).plot()
+```
+
+Waypoints/lines densify to roughly the grid's own resolution before sampling
+(`spacing_km` overrides); a point straying off the domain is dropped with a
+warning, trimming the section to what the source actually covers. For clicking a
+path instead of typing coordinates, in a live notebook:
+
+```python
+picker = osk.pick_path("pac_dt_ramp")          # click waypoints on the domain map
+osk.field("pac_dt_ramp", NITRATE, select=picker.as_select()).plot()
+```
+
+Matching a section against a dataset (rather than a model-only `osk.field()`) is a
+follow-up.
 
 **Where is the hot spot, and how did it get there?** — a map naturally raises that
 question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid

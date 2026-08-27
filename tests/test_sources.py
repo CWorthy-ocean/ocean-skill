@@ -114,6 +114,21 @@ def test_a_select_naming_no_time_constrains_nothing(select):
     assert erddap_constraints(TABLE, select) == {}
 
 
+def test_a_transect_key_alongside_time_still_constrains_only_time():
+    """A select={'transect': ...} key means nothing to ERDDAP -- it names a model
+    grid dimension or a lon/lat path, neither of which a tabledap read narrows
+    server-side. It should be ignored outright, not raise and not somehow leak
+    into the constraints dict.
+    """
+    from ocean_skill.sources import erddap_constraints
+
+    select = {"time": "2012", "transect": {"waypoints": [[-95.0, 24.0], [-94.0, 25.0]]}}
+    assert erddap_constraints(TABLE, select) == {
+        "time>=": "2012-01-01T00:00:00Z",
+        "time<=": "2012-12-31T23:59:59Z",
+    }
+
+
 def test_only_tabledap_entries_are_constrained():
     """Every other source is opened lazily and narrows itself; see erddap_constraints.
 

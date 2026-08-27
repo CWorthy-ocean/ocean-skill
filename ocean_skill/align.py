@@ -760,6 +760,32 @@ def _interp_curvilinear(obj, lon_name: str, lat_name: str, lon: float, lat: floa
     return out.assign_coords({"lon": lon, "lat": lat})
 
 
+def _interp_locstream(obj, lons, lats):
+    """Bilinearly interpolate a curvilinear grid to N points, via xesmf.
+
+    :func:`_interp_curvilinear` generalized from one point to a whole path: the
+    locstream target's own dim is named :data:`ALONG_DIM` directly, rather than
+    xesmf's own ``"point"`` (as the single-point form uses, then discards via
+    ``isel(point=0, drop=True)``) -- so the regridded result already carries the
+    along-path dimension every caller downstream expects, with no rename step.
+
+    ``obj`` should already carry only variables safe to hand to one xesmf call --
+    see :func:`ocean_skill.transect._bilinear_dataset`, which builds that Dataset
+    and is this function's only caller.
+    """
+    import xesmf as xe
+
+    src = _as_xesmf(obj)
+    lons = np.asarray(lons, dtype="float64")
+    lats = np.asarray(lats, dtype="float64")
+    target = xr.Dataset({"lon": (ALONG_DIM, lons), "lat": (ALONG_DIM, lats)})
+    regridder = xe.Regridder(
+        grid_of(src), target, "bilinear", locstream_out=True, unmapped_to_nan=True
+    )
+    out = regridder(src, keep_attrs=True)
+    return out.assign_coords({"lon": (ALONG_DIM, lons), "lat": (ALONG_DIM, lats)})
+
+
 def _check_units(test, reference):
     """Return ``test`` in the reference's units, refusing an impossible difference.
 

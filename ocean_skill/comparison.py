@@ -769,6 +769,15 @@ def _select_horizontal_then_aggregate(
 
     from ocean_skill import _stacklevel, operators
 
+    # A lone scalar lon/lat on a curvilinear source (or one paired with a range --
+    # the bounded-line spelling) would otherwise die silently below: resolve_dim
+    # finds no dimension for a 2-D lon/lat, so the key never joins `applied` and
+    # falls through to `deferred` -> `still_unmatched` -> the generic "matched no
+    # axis" warning at the end of this function, which says nothing about *why*.
+    # Checked here, on the spec as the caller gave it, before either the point or
+    # box branch below has had a chance to consume a *real* point's/box's keys.
+    operators._refuse_curvilinear_line(da, horizontal, source)
+
     applied = {
         name
         for name in horizontal
