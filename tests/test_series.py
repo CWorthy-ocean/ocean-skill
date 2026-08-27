@@ -426,14 +426,15 @@ def test_a_mooring_reference_narrows_the_test_lane_from_metadata(
     assert reference_kwargs["time_window"] != window
 
 
-def test_a_profile_reference_narrows_without_implying_over(monkeypatch):
-    """Narrowing is decoupled from over= -- a profile keeps over=None either way.
+def test_a_profile_reference_narrows_independently_of_over(monkeypatch):
+    """Narrowing is decoupled from over= -- a profile's own over (``"Z"``, by its
+    featureType's own definition — see :func:`ocean_skill.comparison._implied_over`)
+    does not change whether its catalog position narrows the test lane.
 
     Checked directly against :meth:`Comparison._reference_narrowing` rather than
-    through a full ``align()``: an unreduced gridded *test* lane with ``over=None``
-    correctly refuses to align at all (:func:`ocean_skill.align._require_2d`) --
-    a real caller would narrow it with ``select=``/``aggregate=`` first, same as
-    any other map comparison. That refusal is orthogonal to what this test checks.
+    through a full ``align()``: an unreduced gridded *test* lane still needs its own
+    ``select=``/``aggregate=`` to become comparable over depth, same as any other
+    profile comparison. That reduction is orthogonal to what this test checks.
     """
     import ocean_skill.comparison as comparison_module
     from ocean_skill.comparison import Comparison
@@ -444,7 +445,7 @@ def test_a_profile_reference_narrows_without_implying_over(monkeypatch):
     monkeypatch.setattr(comparison_module, "_feature_type", lambda name: "profile")
 
     c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
-    assert c.over is None
+    assert c.over == "Z"
     assert c._reference_narrowing() == (bbox, None)
 
 

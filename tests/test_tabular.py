@@ -142,6 +142,140 @@ def test_build_and_tabular_share_one_parser():
     assert "z" not in md["variables"]
     assert md["units"]["sea_water_temperature (degree_Celsius)"] == "degree_Celsius"
 
+    # A frame in the bracketed, capitalized convention agrees the same way.
+    md = build._probe_dataframe(ctd_frame())
+    assert md["axes"] == {
+        "T": "Time[UTC]",
+        "X": "Longitude[degrees_east]",
+        "Y": "Latitude[degrees_north]",
+        "Z": "Depth[m]",
+    }
+    assert md["variables"] == ["Temperature"]
+
+
+# -- coordinate-column recognition: names beyond the ERDDAP convention ----------------
+
+
+def ctd_frame(n: int = 5):
+    """A non-ERDDAP mooring CSV's own convention: capitalized, ``[units]``-suffixed."""
+    time = pd.date_range("2024-04-04", periods=n, freq="D", tz="UTC")
+    return pd.DataFrame(
+        {
+            "Time[UTC]": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "Latitude[degrees_north]": np.full(n, 27.5),
+            "Longitude[degrees_east]": np.full(n, -96.5),
+            "Depth[m]": np.full(n, 28.0),
+            "Temperature[degC]": np.linspace(20.0, 21.0, n),
+            "Temperature_flag": np.zeros(n),
+        }
+    )
+
+
+def test_probe_recognizes_bracket_coordinates():
+    from ocean_skill import build
+
+    md = build._probe_dataframe(ctd_frame())
+    assert md["axes"] == {
+        "T": "Time[UTC]",
+        "X": "Longitude[degrees_east]",
+        "Y": "Latitude[degrees_north]",
+        "Z": "Depth[m]",
+    }
+    assert (md["geospatial_lon_min"], md["geospatial_lon_max"]) == (-96.5, -96.5)
+    assert (md["geospatial_lat_min"], md["geospatial_lat_max"]) == (27.5, 27.5)
+    assert (md["geospatial_vertical_min"], md["geospatial_vertical_max"]) == (
+        28.0,
+        28.0,
+    )
+    assert md["time_coverage_start"] == "2024-04-04"
+    assert md["time_coverage_end"] == "2024-04-08"
+    assert md["featureType"] == "timeSeries"
+    # The coordinates and the flag column are not data variables.
+    assert md["variables"] == ["Temperature"]
+
+
+def test_to_dataset_reads_bracket_frame_without_axes():
+    """No catalog ``axes`` at all — the regex fallback alone must find everything."""
+    ds = tabular.to_dataset(ctd_frame(), {})
+    assert set(ds.dims) == {"time"}
+    assert float(ds["lon"]) == pytest.approx(-96.5)
+    assert float(ds["lat"]) == pytest.approx(27.5)
+    assert float(ds["depth"]) == pytest.approx(28.0)
+    assert ds["Temperature"].attrs["units"] == "degC"
+    assert "Temperature_flag" in ds.data_vars
+
+
+def test_depth_of_recognizes_bracket_and_pressure():
+    direct = pd.DataFrame({"Depth[m]": np.full(3, 28.0)})
+    depth, source, approximate = tabular.depth_of(direct, {})
+    assert depth == pytest.approx(28.0)
+    assert source == "depth"
+    assert approximate is False
+
+    pressure_only = pd.DataFrame({"Pressure[dbar]": np.full(3, 28.2)})
+    depth, source, approximate = tabular.depth_of(pressure_only, {})
+    assert depth == pytest.approx(28.2)
+    assert source == "sea_water_pressure"
+    assert approximate is True
+
+    both = pd.DataFrame(
+        {"Depth[m]": np.full(3, 28.0), "PRES[dbar]": np.full(3, 28.2)}
+    )
+    depth, source, _ = tabular.depth_of(both, {})
+    assert source == "depth"
+    assert depth == pytest.approx(28.0)
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        ["month", "day_of_year", "year", "latency", "lateral_velocity"],
+        ["along", "longwave", "zone", "zooplankton", "flagellate_abundance"],
+    ],
+)
+def test_coordinate_matcher_refuses_lookalikes(columns):
+    """Words that contain a coordinate word as a substring are not the coordinate."""
+    from ocean_skill import build
+
+    frame = pd.DataFrame({c: np.arange(3) for c in columns})
+    for axis in ("T", "X", "Y", "Z"):
+        assert tabular.coord_column(frame, axis) is None
+    md = build._probe_dataframe(frame)
+    assert set(md.get("variables", [])) == set(columns)
+
+
+def test_a_lone_datetime_column_is_time_by_dtype():
+    frame = pd.DataFrame(
+        {
+            "sample": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "temperature": [10.0, 10.5, 11.0],
+        }
+    )
+    assert tabular.coord_column(frame, "T") == "sample"
+
+
+def test_two_datetime_columns_refuse_to_guess_time():
+    frame = pd.DataFrame(
+        {
+            "deployed": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "recovered": pd.date_range("2024-02-01", periods=3, freq="D"),
+        }
+    )
+    assert tabular.coord_column(frame, "T") is None
+
+
+def test_a_flag_column_is_a_qc_companion():
+    assert tabular.is_qc_column("Temperature_flag")
+    assert tabular.is_qc_column("QC_Flag[1]")
+    assert not tabular.is_qc_column("flagellate_abundance")
+
+
+def test_depth_of_column_search_is_case_insensitive():
+    frame = pd.DataFrame({"DEPTH": np.full(3, 12.0)})
+    depth, source, _ = tabular.depth_of(frame, {})
+    assert depth == pytest.approx(12.0)
+    assert source == "depth"
+
 
 # -- units, variables, coordinates ----------------------------------------------------
 

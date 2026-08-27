@@ -79,8 +79,10 @@ PROFILE_FEATURE_TYPES = frozenset({"profile", "timeSeriesProfile"})
 #: which is also true of a profile (one lon/lat, a depth axis instead of a line) and a
 #: trajectory (a bounding box rather than a point, but still a real spatial extent
 #: worth handing to the test lane's own crop). Narrowing from this set never implies
-#: anything about ``over`` -- a profile keeps ``over=None`` exactly as it does today;
-#: this only changes how much of the test gets read.
+#: anything about ``over`` -- whatever :func:`_implied_over` decides for a given
+#: featureType (``"Z"`` for a profile, ``None`` for a trajectory) stays exactly what
+#: it would be without this set in the picture; this only changes how much of the
+#: test gets read.
 NARROWING_FEATURE_TYPES = frozenset(
     {"timeSeries", "point", "station", "profile", "timeSeriesProfile", "trajectory"}
 )
