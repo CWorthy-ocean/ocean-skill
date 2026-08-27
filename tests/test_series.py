@@ -630,6 +630,110 @@ def test_the_depth_caveat_survives_the_reference_being_resampled():
         align.align(monthly_grid(), monthly, over="time")
 
 
+# -- _warn_if_no_overlap -----------------------------------------------------------
+
+
+def test_a_time_only_mismatch_names_the_offending_axis(monkeypatch):
+    """The Anvil case: a profile's own catalog record predates the model's run."""
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    bbox = (-21.9877, 64.264, -21.9877, 64.264)
+    monkeypatch.setattr(
+        comparison_module,
+        "_domain_of",
+        lambda name: bbox if name == "reference" else (-22.5, 64.0, -21.0, 64.6),
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_time_coverage_of",
+        lambda name: {
+            "reference": (pd.Timestamp("2025-01-08"), pd.Timestamp("2025-01-10")),
+            "test": (pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")),
+        }[name],
+    )
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    with pytest.warns(UserWarning, match="do not overlap in time"):
+        c._warn_if_no_overlap()
+
+
+def test_a_space_only_mismatch_names_the_offending_axis(monkeypatch):
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(
+        comparison_module,
+        "_domain_of",
+        lambda name: {
+            "reference": (170.0, 50.0, 170.0, 50.0),
+            "test": (-10.0, -5.0, 10.0, 5.0),
+        }[name],
+    )
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    with pytest.warns(UserWarning, match="do not overlap in space"):
+        c._warn_if_no_overlap()
+
+
+def test_both_axes_mismatched_are_both_named(monkeypatch):
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(
+        comparison_module,
+        "_domain_of",
+        lambda name: {
+            "reference": (170.0, 50.0, 170.0, 50.0),
+            "test": (-10.0, -5.0, 10.0, 5.0),
+        }[name],
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_time_coverage_of",
+        lambda name: {
+            "reference": (pd.Timestamp("2025-01-08"), pd.Timestamp("2025-01-10")),
+            "test": (pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")),
+        }[name],
+    )
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    with pytest.warns(UserWarning, match="do not overlap in space or time"):
+        c._warn_if_no_overlap()
+
+
+def test_overlapping_sources_say_nothing(monkeypatch, recwarn):
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(
+        comparison_module, "_domain_of", lambda name: (-22.5, 64.0, -21.0, 64.6)
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_time_coverage_of",
+        lambda name: (pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")),
+    )
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    c._warn_if_no_overlap()
+    assert not [w for w in recwarn.list if "overlap" in str(w.message)]
+
+
+def test_unknown_extents_are_not_treated_as_a_mismatch(monkeypatch, recwarn):
+    """Missing catalog metadata is 'unknown', not 'no' -- see Overlap's own contract."""
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: None)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    c._warn_if_no_overlap()
+    assert not [w for w in recwarn.list if "overlap" in str(w.message)]
+
+
 # -- model-vs-model point series: over= inference and sample_at routing ---------------
 
 #: Canonical name throughout this section so vocabulary resolution has nothing to
