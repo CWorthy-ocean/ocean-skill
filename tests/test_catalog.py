@@ -410,6 +410,36 @@ def test_variable_combines_with_other_filters(mixed_spellings):
     ]
 
 
+@pytest.fixture
+def pattern_spellings(monkeypatch):
+    """One source declares the canonical name, the other only a pattern spelling.
+
+    SEANOE's CTD-export column style (`Temperature_CTD`) is not an enumerated
+    alias -- only the vocabulary's regex tier recognizes it.
+    """
+    return _fake_index(
+        monkeypatch,
+        {
+            "seanoe_ctd_mooring": (
+                "SEANOE Hvalfjordur",
+                {"variables": ["Temperature_CTD"]},
+            ),
+            "GOM_his": (
+                "GOM offline run",
+                {"variables": ["sea_water_potential_temperature"]},
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize("spelling", ["temperature", "Temperature_CTD"])
+def test_a_pattern_recognized_spelling_finds_the_source(pattern_spellings, spelling):
+    assert sorted(pattern_spellings.find(variable=spelling)) == [
+        "GOM_his",
+        "seanoe_ctd_mooring",
+    ]
+
+
 # -- free text ----------------------------------------------------------------
 
 
@@ -513,3 +543,63 @@ def test_a_climatology_is_excluded_from_a_time_search(monkeypatch):
     assert "dated" in july
     assert "unprobed" in july, "unknown coverage is kept"
     assert "jan_climatology" not in july, "a calendar slot is not a date range"
+
+
+# -- vocabulary match report ---------------------------------------------------
+
+
+@pytest.fixture
+def match_report_sources(monkeypatch):
+    """One source with a mix of matched and unmatched declared variables."""
+    return _fake_index(
+        monkeypatch,
+        {
+            "seanoe_ctd_mooring": (
+                "SEANOE Hvalfjordur",
+                {
+                    "variables": [
+                        "sea_water_potential_temperature",
+                        "Instrument_Type",
+                    ]
+                },
+            ),
+            "GOM_bgc": (
+                "GOM offline run",
+                {"variables": [NITRATE_PER_VOLUME]},
+            ),
+        },
+    )
+
+
+def test_describe_source_includes_a_vocabulary_section(match_report_sources):
+    text = match_report_sources.describe("seanoe_ctd_mooring")
+    assert "vocabulary:" in text
+    assert "temperature" in text
+    assert "Instrument_Type" in text
+    assert "unmatched" in text
+
+
+def test_match_report_standalone_for_a_source(match_report_sources):
+    text = match_report_sources.match_report("seanoe_ctd_mooring")
+    assert "source: seanoe_ctd_mooring" in text
+    assert "temperature" in text and "sea_water_potential_temperature" in text
+    assert "Instrument_Type" in text
+
+
+def test_match_report_standalone_for_a_catalog(match_report_sources):
+    text = match_report_sources.match_report("GOM offline run")
+    assert "catalog: GOM offline run" in text
+    assert "nitrate" in text and NITRATE_PER_VOLUME in text
+
+
+def test_match_report_unknown_name_raises_like_describe(match_report_sources):
+    with pytest.raises(KeyError, match="neither a known source nor catalog"):
+        match_report_sources.match_report("not_a_thing")
+
+
+def test_describe_catalog_includes_a_vocabulary_section(isolated_catalogs):
+    """"foo" declares sea_water_temperature -- a plain alias of "temperature"."""
+    text = catalog.describe("example catalog")
+    assert "vocabulary:" in text
+    assert "temperature" in text
+    assert "sea_water_temperature" in text

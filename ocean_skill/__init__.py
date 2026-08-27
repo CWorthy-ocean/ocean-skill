@@ -12,7 +12,10 @@ The public API is intentionally small:
     osk.find(variable=...)       # search sources across catalogs
     osk.find(variable=...).map() # ... and map where the matches are
     osk.map_locations()          # map every discovered dataset (metadata only)
-    osk.describe("glodap")       # metadata for one source, or one whole catalog
+    osk.describe("glodap")       # metadata for one source, or one whole catalog --
+                                 # including which declared variables the vocabulary
+                                 # recognizes (and as what), and which it doesn't
+    osk.match_report("glodap")   # ... that vocabulary section alone, any time
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
     osk.compare(reference=..., test=..., variables=[...],
                 aggregate={"time": "mean"}).plot()   # no default reduction: say so
@@ -34,7 +37,7 @@ The public API is intentionally small:
 
 from ocean_skill import cache, outputs
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
-from ocean_skill.catalog import catalogs, describe, find
+from ocean_skill.catalog import catalogs, describe, find, match_report
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
@@ -60,6 +63,7 @@ __all__ = [
     "find",
     "map_locations",
     "map_metrics",
+    "match_report",
     "outputs",
     "pick_path",
     "read",

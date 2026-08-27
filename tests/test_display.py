@@ -48,6 +48,30 @@ def test_the_info_helpers_display_the_same_way():
         assert repr(text) == str(text)
 
 
+def test_match_report_displays_like_describe():
+    """osk.match_report() is the same Text contract describe()'s section rides on."""
+    report = osk.match_report(_a_source())
+
+    assert isinstance(report, Text)
+    assert repr(report) == str(report)
+    assert "\\n" not in repr(report), "newlines must render, not escape"
+    assert report.startswith(("source:", "catalog:"))
+
+
+def test_vocabulary_match_report_object_displays_like_text():
+    """The underlying vocabulary.MatchReport rides the same contract as Text."""
+    from ocean_skill.vocabulary import match_report as vocab_match_report
+
+    report = vocab_match_report(["sea_water_temperature", "Instrument_Type"])
+
+    assert repr(report) == str(report)
+    assert "<pre" in report._repr_html_()
+    # a variable name carrying markup must not inject into the notebook rendering
+    injected = vocab_match_report(["<script>x</script>"])
+    assert "<script>" not in injected._repr_html_()
+    assert "&lt;script&gt;" in injected._repr_html_()
+
+
 def test_notebook_html_is_escaped():
     """The content is catalog metadata — data must not be able to inject markup."""
     assert Text("<script>x</script>")._repr_html_().count("&lt;script&gt;") == 1

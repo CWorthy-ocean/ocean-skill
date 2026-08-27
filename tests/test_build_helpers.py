@@ -67,6 +67,44 @@ def test_build_catalog_writes_every_entry(netcdfs, tmp_path):
     assert cat.metadata["title"] == "MODIS Aqua"
 
 
+def test_save_prints_a_vocabulary_match_summary_not_a_persisted_map(
+    tmp_path, capsys
+):
+    """The summary is stdout only -- nothing written into the catalog file itself.
+
+    See ocean_skill.vocabulary.MatchReport on why: a persisted ``{nickname:
+    [variables]}`` map would go stale the moment the vocabulary changes and this
+    catalog isn't rebuilt.
+    """
+    path = tmp_path / "ctd.nc"
+    xr.Dataset(
+        {
+            "Temperature_CTD": (
+                ("lat", "lon"),
+                np.ones((4, 5)),
+                {
+                    "standard_name": "sea_water_potential_temperature",
+                    "units": "degC",
+                },
+            ),
+            "Instrument_Type": (
+                ("lat", "lon"),
+                np.ones((4, 5)),
+                {"standard_name": "instrument_type"},  # not a real CF name
+            ),
+        },
+        coords={"lat": np.linspace(10, 20, 4), "lon": np.linspace(-100, -90, 5)},
+    ).to_netcdf(path)
+
+    out_path = build_catalog({"ctd": str(path)}, tmp_path / "ctd_catalog.yaml")
+
+    printed = capsys.readouterr().out
+    assert "2 variables across 1 sources: 1 matched, 1 unmatched" in printed
+    assert "instrument_type" in printed
+    assert "nickname" not in out_path.read_text()
+    assert "instrument_type" in out_path.read_text()  # the raw standard_name, fine
+
+
 def test_shared_options_reach_every_entry(netcdfs, tmp_path):
     """The whole point: state `probe` (or storage_options) once, not per source."""
     out = build_catalog(

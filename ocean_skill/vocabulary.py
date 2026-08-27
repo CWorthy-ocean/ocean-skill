@@ -15,12 +15,25 @@ need not be a real CF name, it's just what's easy to read and call by):
 - ``aliases`` (optional): other real spellings of the same quantity — e.g.
   WOA/GLODAP's per-mass CF name for a species ROMS/MARBL writes per-volume, or a
   particular instrument's naming convention. Any number, not just one.
+- ``patterns`` (optional): regexes recognizing a whole *family* of spellings an
+  enumerated alias list would be tedious to spell out (``Temperature_CTD``,
+  ``CTD_Temperature``, ``ctd_temp``, ...). Matched **fullmatch, case-insensitive**
+  against the whole name — never a substring — so a pattern must be as narrow as an
+  alias is exact. Write enumerated decorations (``"temp(?:erature)?_ctd"``), never an
+  open-ended ``.*`` tail, and never a ``qc``/``flag``/``qartod`` token (that is the QC
+  layer's job, not the vocabulary's). A name matched by more than one entry's patterns
+  is ambiguous and is refused (warned, passed through unresolved) rather than guessed.
+  This is the same idea as cf-pandas' ``guess_regex``, deliberately narrower: bare
+  ``"month"`` matching cf-pandas' time regex is exactly the looseness these patterns
+  must not repeat (see :mod:`ocean_skill.tabular`'s coordinate matcher for the same
+  rule applied to column axes).
 
-A caller may use the short key, the canonical ``standard_name``, or any alias
-interchangeably, **in any capitalization** — :func:`resolve_name` maps all of them
-to the same canonical ``standard_name``, and :func:`resolve_and_report` additionally
-warns once, naming both, so it's never silently unclear which variable was actually
-used. Matching against a *dataset's* own variable names ignores case too (see
+A caller may use the short key, the canonical ``standard_name``, any alias, or
+anything one entry's ``patterns`` fullmatch, interchangeably, **in any
+capitalization** — :func:`resolve_name` maps all of them to the same canonical
+``standard_name``, and :func:`resolve_and_report` additionally warns once, naming
+both, so it's never silently unclear which variable was actually used. Matching
+against a *dataset's* own variable names ignores case too (see
 :func:`ocean_skill.units.find_variable`). A name with no entry here at all passes
 through unchanged — most CF standard_names need no vocabulary entry; this exists
 only for the ones spelled more than one way in the wild.
@@ -44,19 +57,27 @@ module's; :func:`_register_custom_criteria` below flattens each entry into the o
 
 from __future__ import annotations
 
+import html
 import re
 import warnings
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 from ocean_skill import _stacklevel
 
 __all__ = [
     "VOCABULARY",
+    "MatchReport",
     "add_alias",
+    "add_pattern",
     "equivalent_names",
     "is_known",
+    "match_report",
+    "nickname",
     "register",
     "resolve_and_report",
     "resolve_name",
+    "same_quantity",
 ]
 
 VOCABULARY: dict[str, dict[str, object]] = {
@@ -108,6 +129,16 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "aliases": [
             "moles_of_oxygen_per_unit_mass_in_sea_water",
             "O2",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+        ],
+        "patterns": [
+            # Argo/OceanSITES's own code, and the common mooring spelling --
+            # neither is a single literal worth enumerating case variants of (see
+            # the module docstring's "patterns" bullet). Must not claim
+            # "oxygen_saturation" above (a different quantity, not this pattern's
+            # alternation) or a `_qc`/`_flag`-decorated companion (no such token
+            # appears in it).
+            "doxy",
+            "dissolved_oxygen",
         ],
     },
     "oxygen_saturation": {
@@ -172,6 +203,15 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "sea_surface_subskin_temperature",
             "sea_surface_skin_temperature",
         ],
+        "patterns": [
+            # SEANOE's CTD-export column style (`Temperature_CTD`, `CTD_Temperature`,
+            # `temp_ctd`, any case) -- a family of decorations around one instrument
+            # name, not worth enumerating literally. Must not claim
+            # `temperature_qc`/`Temperature_flag` (no qc/flag token here), plain
+            # `air_temperature` (a different quantity), `atemp`, or bare `ctd`.
+            r"(?:sea_water_)?temp(?:erature)?_ctd",
+            r"ctd_temp(?:erature)?",
+        ],
     },
     "sea_ice": {
         # NSIDC's CDR (cdr_seaice_conc) and the ice field bundled into MUR, OISST
@@ -229,6 +269,14 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "sea_water_salinity",  # near-identical; see "temperature" above
             "sea_surface_salinity",  # the surface spelling, as for temperature
         ],
+        "patterns": [
+            # Argo/OceanSITES's `PSAL`, and the plain/CTD-export `sal`/`sal_psu`
+            # family. Must not claim `psalm`, `salt_flux`, `sla` (sea_level_anomaly
+            # is its own entry), `salinity_flag`, or `basalt` -- fullmatch refuses
+            # all of them. Deliberately does not extend to `salt` itself; that
+            # stays the exact literal alias above.
+            r"p?sal(?:inity)?(?:_(?:psu|ctd))?",
+        ],
     },
     "ssh": {
         "standard_name": "sea_surface_height_above_geoid",
@@ -270,6 +318,18 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # relatives) drop the "mass_" prefix. Without this, the one entry that
             # carries the whole daily MODIS record is invisible to find(variable=...).
             "concentration_of_chlorophyll_in_sea_water",
+        ],
+        "patterns": [
+            # The common short spellings. Must not claim the per-PFT ROMS/MARBL
+            # tracers spChl/diatChl/diazChl (a different, un-summed quantity --
+            # test_chl_shorthand_resolves_but_does_not_grab_per_pft_tracers pins
+            # this) or a `_qc`-decorated companion. Deliberately excludes
+            # `chlor_a`: that spelling is kept as the documented example of
+            # extending the vocabulary live via add_alias (see its docstring and
+            # examples/vocabulary_demo.py) rather than shipped recognized already.
+            "chla",
+            "chl_a",
+            "chlorophyll_a",
         ],
     },
     "mld": {
@@ -329,20 +389,72 @@ def _build_by_standard_name() -> dict[str, dict[str, object]]:
     return {entry["standard_name"]: entry for entry in VOCABULARY.values()}  # type: ignore[misc]
 
 
+#: standard_name -> the short key a caller actually types, for nickname() below.
+#: One entry per standard_name is guaranteed by the same collision check
+#: _build_index runs over every entry's spellings (a shipped-vocabulary regression
+#: test keeps this true: test_shipped_vocabulary_has_no_collisions).
+def _build_key_by_standard_name() -> dict[str, str]:
+    return {entry["standard_name"]: key for key, entry in VOCABULARY.items()}  # type: ignore[misc]
+
+
+def _build_patterns() -> list[tuple[re.Pattern[str], str]]:
+    """Compile every entry's ``patterns`` into one ``(regex, standard_name)`` pair.
+
+    One alternation per entry (not per pattern), case-insensitive. Raises
+    :class:`re.error` immediately -- at :func:`_refresh` time, before a caller ever
+    resolves a name -- if a pattern is not valid regex.
+    """
+    compiled: list[tuple[re.Pattern[str], str]] = []
+    for entry in VOCABULARY.values():
+        patterns = entry.get("patterns")
+        if not patterns:
+            continue
+        alt = "|".join(f"(?:{p})" for p in patterns)  # type: ignore[union-attr]
+        compiled.append((re.compile(alt, re.IGNORECASE), entry["standard_name"]))  # type: ignore[arg-type]
+    return compiled
+
+
 _INDEX: dict[str, str] = {}
 _BY_STANDARD_NAME: dict[str, dict[str, object]] = {}
+_KEY_BY_STANDARD_NAME: dict[str, str] = {}
+_PATTERNS: list[tuple[re.Pattern[str], str]] = []
+
+
+def _pattern_lookup(name: str) -> str | None:
+    """Run the regex tier shared by :func:`resolve_name` and :func:`is_known`.
+
+    Only reached once ``name`` has already missed the exact :data:`_INDEX` lookup.
+    Fullmatch (never a substring) against every entry with ``patterns``; a name
+    matched by more than one entry's patterns is ambiguous, so — mirroring
+    :func:`_build_index`'s refusal to silently pick a winner on a literal
+    collision — this warns and returns ``None`` rather than guessing.
+    """
+    hits = {sn for pattern, sn in _PATTERNS if pattern.fullmatch(name)}
+    if len(hits) > 1:
+        warnings.warn(
+            f"{name!r} matches vocabulary patterns from more than one entry "
+            f"({sorted(hits)!r}); refusing to guess. Narrow the patterns so only "
+            "one entry claims it.",
+            stacklevel=_stacklevel.find(),
+        )
+        return None
+    return next(iter(hits), None)
 
 
 def resolve_name(name: str) -> str:
     """Return the canonical CF standard_name for any spelling in :data:`VOCABULARY`.
 
-    Accepts a short key (``"oxygen"``), the canonical standard_name itself, or any
-    alias, **in any capitalization** (``"Oxygen"``, ``"OXYGEN"``)
-    — all resolve to the same standard_name. A name with no vocabulary entry at all
-    passes through unchanged (keeping its original case), so this is safe to call on
-    any variable name, curated or not.
+    Accepts a short key (``"oxygen"``), the canonical standard_name itself, any
+    alias, or anything one entry's ``patterns`` fullmatch (``"Temperature_CTD"``),
+    **in any capitalization** (``"Oxygen"``, ``"OXYGEN"``) — all resolve to the same
+    standard_name. A name with no vocabulary entry at all passes through unchanged
+    (keeping its original case), so this is safe to call on any variable name,
+    curated or not.
     """
-    return _INDEX.get(name.lower(), name)
+    exact = _INDEX.get(name.lower())
+    if exact is not None:
+        return exact
+    return _pattern_lookup(name) or name
 
 
 def resolve_and_report(name: str, *, context: str = "") -> str:
@@ -363,14 +475,17 @@ def resolve_and_report(name: str, *, context: str = "") -> str:
 
 
 def is_known(name: str) -> bool:
-    """Whether the vocabulary recognizes ``name`` at all (key, standard_name, alias).
+    """Whether the vocabulary recognizes ``name`` at all.
 
-    Lets a caller tell "this source does not have X" from "I cannot tell": catalog
-    metadata indexes CF standard_names, so a name the vocabulary has never heard of
-    (a raw model variable like ``spChl``) is unknowable from metadata alone and must
-    not be treated as absent.
+    True for a key, standard_name, alias, or a fullmatch against some entry's
+    ``patterns``. Lets a caller tell "this source does not have X" from "I cannot
+    tell": catalog metadata indexes CF standard_names, so a name the vocabulary has
+    never heard of (a raw model variable like ``spChl``) is unknowable from metadata
+    alone and must not be treated as absent. Kept consistent with
+    :func:`resolve_name`'s two tiers on purpose -- :func:`ocean_skill.comparison.
+    compare`'s absent-vs-unknowable check depends on that consistency.
     """
-    return name.lower() in _INDEX
+    return name.lower() in _INDEX or _pattern_lookup(name) is not None
 
 
 def equivalent_names(name: str) -> set[str]:
@@ -380,10 +495,118 @@ def equivalent_names(name: str) -> set[str]:
     the set that counts as "the same variable" when matching a requested variable
     against a source's declared ``variables`` (see
     :func:`ocean_skill.comparison.compare`). A name with no vocabulary entry
-    returns just itself.
+    returns just itself. This is always a *finite* set: an entry's ``patterns``
+    recognize a whole family of spellings with no enumeration, so they never appear
+    here -- use :func:`same_quantity` to compare a possibly pattern-matched name
+    against a declared one instead of set membership.
     """
     entry = _BY_STANDARD_NAME.get(resolve_name(name))
     return {name} if entry is None else set(_all_names(entry))
+
+
+def same_quantity(a: str, b: str) -> bool:
+    """Whether two spellings resolve to the same canonical quantity.
+
+    Unlike :func:`equivalent_names`' set membership, this also reaches spellings
+    only a pattern recognizes (``"Temperature_CTD"``) and two declared names
+    differing only by case -- case is never a meaningful distinction here (see
+    :func:`_build_index`). Two names the vocabulary has never heard of compare
+    equal only when they are literally the same spelling (case-insensitively),
+    since :func:`resolve_name` passes an unknown name through unchanged.
+    """
+    return resolve_name(a).lower() == resolve_name(b).lower()
+
+
+def nickname(name: str) -> str | None:
+    """Return the short vocabulary key ``name`` resolves to, or ``None``.
+
+    The reverse of typing a nickname: given a real-world spelling (an alias, a
+    pattern-recognized name like ``"Temperature_CTD"``, or the canonical
+    standard_name itself), return the short key a caller would have typed instead
+    (``"temperature"``). ``None`` for anything :func:`is_known` also says no to --
+    unrecognized or ambiguous (patterns from more than one entry).
+    """
+    return _KEY_BY_STANDARD_NAME.get(resolve_name(name))
+
+
+@dataclass(frozen=True)
+class MatchReport:
+    """Which declared variable names the vocabulary recognizes, and as what.
+
+    Built by :func:`match_report`. Always computed live against the *current*
+    vocabulary -- never persisted anywhere (a catalog's declared variables don't
+    change, but which of them the vocabulary recognizes can, the moment a new
+    alias or pattern ships) -- so a report is only ever as current as the moment
+    it was printed, and asking again after a vocabulary change gets a fresh answer.
+    """
+
+    #: nickname -> the declared names (sorted) that resolve to it.
+    matched: dict[str, list[str]]
+    #: Declared names the vocabulary does not recognize at all, sorted.
+    unmatched: list[str]
+
+    @property
+    def collisions(self) -> dict[str, list[str]]:
+        """Nicknames claimed by more than one declared name.
+
+        Not necessarily a mistake -- a raw/flag/qc triplet or a genuine duplicate
+        column both land here -- but always worth a curator's second look.
+        """
+        return {k: v for k, v in self.matched.items() if len(v) > 1}
+
+    def __str__(self) -> str:
+        lines: list[str] = []
+        if self.matched:
+            lines.append(f"matched ({len(self.matched)}):")
+            width = max(len(k) for k in self.matched)
+            for key in sorted(self.matched):
+                names = self.matched[key]
+                suffix = f"   ({len(names)} variables)" if len(names) > 1 else ""
+                lines.append(f"  {key:<{width}}  <- {', '.join(names)}{suffix}")
+        else:
+            lines.append("matched (0)")
+        if self.unmatched:
+            lines.append(f"unmatched ({len(self.unmatched)}):")
+            lines.append(f"  {', '.join(self.unmatched)}")
+        else:
+            lines.append("unmatched (0)")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def _repr_html_(self) -> str:
+        """Notebook rendering: monospace, wrapped, and escaped (see :mod:`_display`)."""
+        return (
+            "<pre style='white-space:pre-wrap; margin:0'>"
+            f"{html.escape(str(self))}</pre>"
+        )
+
+
+def match_report(names: Iterable[str]) -> MatchReport:
+    """Group ``names`` by the vocabulary nickname each resolves to.
+
+    For every name: :func:`nickname` decides which bucket it lands in, exactly
+    the same resolution :func:`resolve_name`/:func:`is_known` use everywhere
+    else -- this reports what the vocabulary *already* does, it doesn't add a
+    second notion of matching. An ambiguous pattern match (claimed by more than
+    one entry) warns from :func:`_pattern_lookup`; that warning is suppressed
+    here and the name simply lands in ``unmatched`` -- the report is the place
+    that surfaces it, not a warning fired once per :func:`osk.describe` call.
+    """
+    matched: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name in names:
+            key = nickname(name)
+            if key is None:
+                unmatched.append(name)
+            else:
+                matched.setdefault(key, []).append(name)
+    for names_list in matched.values():
+        names_list.sort()
+    return MatchReport(matched=matched, unmatched=sorted(unmatched))
 
 
 def _register_custom_criteria() -> None:
@@ -408,13 +631,21 @@ def _register_custom_criteria() -> None:
     silently returned an ERDDAP/OOI QC-flag companion
     (``..._in_sea_water_qc_agg``) as if it were the data variable whenever the real
     one was absent — found by testing, not hypothetical.
+
+    An entry's ``patterns`` join the same alternation, each wrapped ``(?:...)`` so
+    they inherit the anchors without escaping them. They are never registered as
+    criteria *keys* the way literal spellings are — every dataset-side lookup
+    (:func:`ocean_skill.units.find_variable`) arrives here already canonicalized by
+    :func:`resolve_name`, and the canonical standard_name is always a literal key.
     """
     import cf_xarray
 
     criteria: dict[str, dict[str, str]] = {}
     for entry in VOCABULARY.values():
         names = _all_names(entry)
-        pattern = "(?i)(?:" + "|".join(re.escape(n) for n in names) + ")$"
+        parts = [re.escape(n) for n in names]
+        parts += [f"(?:{p})" for p in entry.get("patterns", [])]  # type: ignore[union-attr]
+        pattern = "(?i)(?:" + "|".join(parts) + ")$"
         for name in names:
             criteria[name] = {"name": pattern}
     cf_xarray.set_options(custom_criteria=criteria)
@@ -423,16 +654,18 @@ def _register_custom_criteria() -> None:
 def _refresh() -> None:
     """Rebuild the resolver index and cf-xarray registration from :data:`VOCABULARY`.
 
-    Called once at import time, and again by :func:`register`/:func:`add_alias`
-    after any live edit -- editing ``VOCABULARY`` directly (e.g.
+    Called once at import time, and again by :func:`register`/:func:`add_alias`/
+    :func:`add_pattern` after any live edit -- editing ``VOCABULARY`` directly (e.g.
     ``VOCABULARY["chlorophyll"]["aliases"].append(...)``) does *not* alone update
     :func:`resolve_name` or cf-xarray's own registration, since both are cached at
     module load; call this afterwards if you edit the dict by hand instead of
-    through those two functions.
+    through those functions.
     """
-    global _INDEX, _BY_STANDARD_NAME
+    global _INDEX, _BY_STANDARD_NAME, _KEY_BY_STANDARD_NAME, _PATTERNS
     _INDEX = _build_index()
     _BY_STANDARD_NAME = _build_by_standard_name()
+    _KEY_BY_STANDARD_NAME = _build_key_by_standard_name()
+    _PATTERNS = _build_patterns()
     _register_custom_criteria()
 
 
@@ -441,12 +674,14 @@ def register(
     standard_name: str,
     *,
     aliases: list[str] | None = None,
+    patterns: list[str] | None = None,
 ) -> None:
     """Add (or replace) one vocabulary entry, live -- no restart needed.
 
-    For a wholly new concept. To add a spelling to a concept that already has an
-    entry, prefer :func:`add_alias` instead, so you don't have to repeat its
-    existing ``standard_name``/aliases just to add one more.
+    For a wholly new concept. To add a spelling or pattern to a concept that
+    already has an entry, prefer :func:`add_alias`/:func:`add_pattern` instead, so
+    you don't have to repeat its existing ``standard_name``/aliases just to add one
+    more.
 
     >>> from ocean_skill import vocabulary
     >>> vocabulary.register(
@@ -455,17 +690,22 @@ def register(
     >>> vocabulary.resolve_name("ph")
     'sea_water_ph_reported_on_total_scale'
     """
+    for pattern in patterns or []:
+        re.compile(pattern)  # validate before touching VOCABULARY at all
     existing = VOCABULARY.get(key)
     if existing is not None and existing["standard_name"] != standard_name:
         warnings.warn(
             f"register({key!r}, ...) replaces an existing entry pointing at "
             f"{existing['standard_name']!r} with {standard_name!r}; its current "
-            "aliases are discarded. Use add_alias() to extend an entry instead.",
+            "aliases and patterns are discarded. Use add_alias()/add_pattern() to "
+            "extend an entry instead.",
             stacklevel=2,
         )
     entry: dict[str, object] = {"standard_name": standard_name}
     if aliases:
         entry["aliases"] = list(aliases)
+    if patterns:
+        entry["patterns"] = list(patterns)
     VOCABULARY[key] = entry
     _refresh()
 
@@ -484,12 +724,40 @@ def add_alias(key: str, *names: str) -> None:
     if key not in VOCABULARY:
         raise KeyError(
             f"{key!r} is not a known vocabulary entry -- use register() to add a "
-            "new concept, or check VOCABULARY for the existing key to extend."
+            "new concept, or check VOCABULARY for the existing key to extend.",
         )
     existing = VOCABULARY[key].setdefault("aliases", [])
     for name in names:
         if name not in existing:
             existing.append(name)  # type: ignore[union-attr]
+    _refresh()
+
+
+def add_pattern(key: str, *patterns: str) -> None:
+    """Add regexes recognizing a *family* of spellings to an existing concept, live.
+
+    ``key`` must already be in :data:`VOCABULARY` (use :func:`register` to add a
+    new concept from scratch). Each pattern is matched fullmatch, case-insensitive
+    (see the module docstring's "patterns" bullet for the narrowness this requires
+    -- enumerated decorations, never an open-ended ``.*`` tail). Duplicates are
+    ignored; an invalid regex raises :class:`re.error` before anything is stored.
+
+    >>> from ocean_skill import vocabulary
+    >>> vocabulary.add_pattern("oxygen", "oxy(?:_umolkg)?")
+    >>> vocabulary.resolve_name("OXY_UMOLKG")
+    'mole_concentration_of_dissolved_molecular_oxygen_in_sea_water'
+    """
+    if key not in VOCABULARY:
+        raise KeyError(
+            f"{key!r} is not a known vocabulary entry -- use register() to add a "
+            "new concept, or check VOCABULARY for the existing key to extend.",
+        )
+    for pattern in patterns:
+        re.compile(pattern)  # validate before touching VOCABULARY at all
+    existing = VOCABULARY[key].setdefault("patterns", [])
+    for pattern in patterns:
+        if pattern not in existing:
+            existing.append(pattern)  # type: ignore[union-attr]
     _refresh()
 
 

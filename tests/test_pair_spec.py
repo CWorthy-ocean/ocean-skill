@@ -205,7 +205,8 @@ def test_cache_key_is_distinct_for_plain_vs_pair_and_across_reference_sides():
 
 def test_variable_label_uses_the_calculator_name_not_its_letters():
     """Regression: {"calculate": "mld"} used to be joined like a components list,
-    reading as "m+l+d" -- caught while wiring pair-specs through this function."""
+    reading as "m+l+d" -- caught while wiring pair-specs through this function.
+    """
     assert (
         _variable_label({"calculate": "mld", "method": "density_threshold"})
         == "mld (density_threshold)"
@@ -238,7 +239,8 @@ def test_short_variable_label_recurses_into_a_plain_test_side():
 def test_two_methods_sharing_a_standard_name_get_different_labels():
     """Regression: two pair-specs computing MLD by different methods, both carrying
     the same explicit standard_name (as the README recommends), used to draw as two
-    identically-labelled rows in the same figure -- unreadable, not just cosmetic."""
+    identically-labelled rows in the same figure -- unreadable, not just cosmetic.
+    """
     density = {**PAIR, "standard_name": MLD}
     temperature = {
         "test": {"calculate": "mld", "method": "temperature_threshold"},
@@ -251,7 +253,8 @@ def test_two_methods_sharing_a_standard_name_get_different_labels():
 
 def test_a_calculate_spec_with_no_method_gets_no_suffix():
     """The suffix is additive, not assumed -- a calculator that takes no method
-    (or wasn't given one) must not grow a stray "(None)"."""
+    (or wasn't given one) must not grow a stray "(None)".
+    """
     assert _variable_label({"calculate": "eke"}) == "eke"
     assert _short_variable_label({"calculate": "eke"}) == "eke"
 
@@ -317,6 +320,65 @@ def test_compare_fan_out_filters_each_side_of_a_pair_spec_independently():
     assert formed == [("GOM_bgc", "holte_talley")]
 
 
+def test_offers_reaches_a_source_advertising_a_pattern_spelling():
+    """A source declaring only a vocabulary-pattern spelling must still be found.
+
+    same_quantity(), not just equivalent_names()'s literal set, decides whether the
+    source offers the requested variable.
+    """
+    from unittest import mock
+
+    declared = {
+        "seanoe_ctd_mooring": {"variables": ["Temperature_CTD"]},
+        "other_obs": {"variables": ["some_other_variable"]},
+    }
+    formed = []
+    with (
+        mock.patch(
+            "ocean_skill.catalog.resolve", lambda n: mock.Mock(metadata=declared[n])
+        ),
+        mock.patch.object(
+            comparison.Comparison,
+            "align",
+            lambda self, refresh=False: formed.append(self.reference_name),
+        ),
+    ):
+        comparison.compare(
+            reference=["seanoe_ctd_mooring", "other_obs"],
+            test=["seanoe_ctd_mooring"],
+            variables=["temperature"],
+        )
+    assert formed == ["seanoe_ctd_mooring"]
+
+
+def test_offers_still_errs_open_for_a_raw_model_component():
+    """A raw per-PFT model tracer (spChl) is unknowable from metadata alone.
+
+    True with pattern-aware is_known included -- it must still fall open rather
+    than be excluded as "absent".
+    """
+    from unittest import mock
+
+    declared = {"model": {"variables": [CHL]}, "obs": {"variables": [CHL]}}
+    formed = []
+    with (
+        mock.patch(
+            "ocean_skill.catalog.resolve", lambda n: mock.Mock(metadata=declared[n])
+        ),
+        mock.patch.object(
+            comparison.Comparison,
+            "align",
+            lambda self, refresh=False: formed.append(self.test_name),
+        ),
+    ):
+        comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=[{"sum": ["spChl", "diatChl"], "standard_name": CHL}],
+        )
+    assert formed == ["model"]
+
+
 def test_compare_never_injects_a_depth_key_for_a_calculated_variable():
     """compare()'s depth fan-out defaults every variable to depths=("surface",),
     which used to reach _prepare's calculate guard as select={"depth": "surface"}
@@ -348,7 +410,8 @@ def test_compare_never_injects_a_depth_key_for_a_calculated_variable():
 
 def test_compare_resolves_string_sides_of_a_pair_before_filtering():
     """A plain-name side goes through the same vocabulary resolution a lone
-    variable= gets, so _offers compares against the canonical standard_name."""
+    variable= gets, so _offers compares against the canonical standard_name.
+    """
     from unittest import mock
 
     declared = {
@@ -420,7 +483,8 @@ def test_offers_does_not_fall_closed_for_a_calculator_with_no_registered_inputs(
 def test_compare_warns_rather_than_silently_dropping_an_explicit_depth():
     """Comparison(..., select={"depth": 50}) raises loudly for a calculated
     variable; compare(..., select={"depth": 50}) used to accept the identical
-    request and silently discard it with no message at all."""
+    request and silently discard it with no message at all.
+    """
     from unittest import mock
 
     declared = {"model": {"variables": []}, "holte_talley": {"variables": [MLD]}}
@@ -434,22 +498,22 @@ def test_compare_warns_rather_than_silently_dropping_an_explicit_depth():
             comparison.Comparison,
             "align",
             lambda self, refresh=False: seen.append(self.select),
-        ),
+        ),pytest.warns(UserWarning, match="calculated diagnostic")
     ):
-        with pytest.warns(UserWarning, match="calculated diagnostic"):
-            comparison.compare(
-                reference=["holte_talley"],
-                test=["model"],
-                variables=[pair],
-                depths=(0, 50, 100),
-            )
+        comparison.compare(
+            reference=["holte_talley"],
+            test=["model"],
+            variables=[pair],
+            depths=(0, 50, 100),
+        )
     assert seen == [{}], "the depth key must still be dropped, just not silently"
 
 
 def test_compare_stays_silent_for_the_bare_surface_default():
     """Only a genuine, explicit request is worth a warning -- depths=("surface",)
     is indistinguishable from never having asked, and warning on it would make the
-    warning fire on the common case rather than the contradiction it exists for."""
+    warning fire on the common case rather than the contradiction it exists for.
+    """
     from unittest import mock
 
     declared = {"model": {"variables": []}, "holte_talley": {"variables": [MLD]}}
@@ -473,7 +537,8 @@ def test_compare_stays_silent_for_the_bare_surface_default():
 
 def test_mismatch_warning_fires_on_a_cache_hit():
     """The mismatch check used to sit only on the freshly-computed path -- every
-    later process serving the same pair from disk cache silently skipped it."""
+    later process serving the same pair from disk cache silently skipped it.
+    """
     from unittest import mock
 
     c = Comparison(reference="r", test="t", variable=PAIR)
@@ -494,7 +559,8 @@ def test_mismatch_warning_does_not_trust_the_aligned_datasets_own_names():
     own test_name=/reference_name= parameters) -- .name there is always "test" and
     always "reference", always unequal, regardless of what the fields actually are.
     Falling back to it on a cache hit would warn on every hit lacking a
-    standard_name attr rather than only a real mismatch."""
+    standard_name attr rather than only a real mismatch.
+    """
     from unittest import mock
 
     c = Comparison(reference="r", test="t", variable=PAIR)
@@ -514,19 +580,19 @@ def test_mismatch_warning_does_not_trust_the_aligned_datasets_own_names():
 def test_a_one_sided_pair_in_a_variables_list_is_caught_before_any_fan_out_runs():
     """The one-sided check used to live only in Comparison.__init__, reachable only
     mid-fan-out -- after any earlier, valid variables in the same compare() call had
-    already aligned. A bad spec anywhere in the list must be caught up front."""
+    already aligned. A bad spec anywhere in the list must be caught up front.
+    """
     from unittest import mock
 
     ran = []
     with mock.patch.object(
         comparison.Comparison, "align", lambda self, refresh=False: ran.append(1)
-    ):
-        with pytest.raises(ValueError, match="reference"):
-            comparison.compare(
-                reference=["r"],
-                test=["t"],
-                variables=[{"test": "temperature"}, "salinity"],
-            )
+    ), pytest.raises(ValueError, match="reference"):
+        comparison.compare(
+            reference=["r"],
+            test=["t"],
+            variables=[{"test": "temperature"}, "salinity"],
+        )
     assert ran == [], "no comparison should have been aligned before the raise"
 
 
@@ -539,7 +605,8 @@ def test_field_names_a_one_sided_pair_spec_the_same_way_comparison_does():
 
 def test_a_derived_name_wrapping_a_calculate_spec_is_still_calculated():
     """register_derived("x", {"calculate": ...}) makes "x" a calculate-spec in every
-    way that matters, even spelled as a plain string."""
+    way that matters, even spelled as a plain string.
+    """
     register_derived("mld_via_derived", {"calculate": "mld", "method": "temperature_threshold"})
     assert _is_calculated("mld_via_derived")
     assert _is_calculated({"test": "mld_via_derived", "reference": "mld_dt_mean"})
@@ -548,7 +615,8 @@ def test_a_derived_name_wrapping_a_calculate_spec_is_still_calculated():
 def test_a_derived_calculate_spec_still_refuses_a_depth_selection():
     """Before the fix, _prepare's `calculated` flag only recognized a literal
     {"calculate": ...} dict, so a DERIVED name pointing at one skipped the
-    vertical-axis guard entirely and fell through into ROMS's depth machinery."""
+    vertical-axis guard entirely and fell through into ROMS's depth machinery.
+    """
     register_derived(
         "mld_via_derived_depth", {"calculate": "mld", "method": "temperature_threshold"}
     )
@@ -589,7 +657,8 @@ def test_identity_agrees_regardless_of_pair_spec_key_order():
     """Two logically-identical pair-specs differing only in dict key order used to
     escape dedup in _flatten (drawn twice) while the disk cache (which already
     sorts keys) treated them as one entry -- the two notions of "same comparison"
-    could disagree."""
+    could disagree.
+    """
     c1 = Comparison(reference="r", test="t", variable={"test": "a", "reference": "b"})
     c2 = Comparison(reference="r", test="t", variable={"reference": "b", "test": "a"})
     assert _identity(c1) == _identity(c2)
@@ -598,7 +667,8 @@ def test_identity_agrees_regardless_of_pair_spec_key_order():
 def test_display_depth_is_honest_about_having_no_vertical_axis():
     """A calculated diagnostic used to report "surface" in metrics()/repr/pooled
     labels -- a specific, wrong claim about where in the column the number came
-    from, not just an unhelpful default."""
+    from, not just an unhelpful default.
+    """
     assert _display_depth(PAIR, {}) == NO_VERTICAL_AXIS
     assert _display_depth("temperature", {}) != NO_VERTICAL_AXIS
 
