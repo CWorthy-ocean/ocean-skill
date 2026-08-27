@@ -2219,6 +2219,30 @@ class Comparison:
                 )
                 return self._aligned
 
+        # A vertical score (over="Z"/"vertical") needs a depth axis left standing to
+        # score down; a select that collapses depth to one level -- a scalar, or the
+        # bare surface default -- leaves match_axis nothing to match and fails deep
+        # inside align() with an opaque "no 'Z' axis to score over". Say so here
+        # instead, before either lane is read. osk.compare() fills a profile
+        # reference's own levels in for you when you name none (see
+        # _profile_depth_plan); a Comparison built directly, or a vertical score
+        # against a non-profile reference, still needs an explicit depth list.
+        from ocean_skill.operators import _CF_AXES
+
+        if _CF_AXES.get(self.over) == "vertical" and _collapses_vertical(
+            select_for(self.select, "reference"),
+            aggregate_for(self.aggregate, "reference"),
+        ):
+            raise ValueError(
+                "over= scores down the depth axis, but this comparison's select "
+                "collapses depth to a single level (or defaults to the surface), so "
+                "there is no vertical axis left to score against. Pass a depth "
+                '*list* to keep the column standing -- select={"depth": [5, 25, 50, '
+                "75, 100]}, or depths=[...] through osk.compare(). Against a profile "
+                "reference, osk.compare() fills in the reference's own levels "
+                "automatically when you name none."
+            )
+
         # The test lane goes first when an axis is being kept, so the reference can be
         # cropped to its extent *before* being read (see prepare_source's bbox=).
         # align() crops it anyway, but only once both lanes are in memory, and a product
@@ -3484,6 +3508,126 @@ def _fanned_select(
     return sel
 
 
+def _is_profile_reference(source: str, over: str | None) -> bool:
+    """Whether ``source`` is a single-cast profile whose own levels drive the compare.
+
+    Scope is deliberately just ``featureType == "profile"`` -- a single fixed point
+    with a depth axis and no time (:func:`ocean_skill.build.infer_feature_type`), so
+    there is exactly one, unambiguous depth axis to compare on. A
+    ``timeSeriesProfile``/``trajectoryProfile`` carries more than one candidate axis
+    and is left to an explicit ``depths=``/``select=`` for now (see the ``compare()``
+    docstring). An explicit ``over=`` that is *not* vertical -- a caller scoring, say,
+    time against a profile -- opts out: they have named the axis themselves.
+    """
+    from ocean_skill.operators import _CF_AXES
+
+    if over is not None and _CF_AXES.get(over) != "vertical":
+        return False
+    return _feature_type(source) == "profile"
+
+
+def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> list[float]:
+    """The reference profile's own vertical levels, read once and memoized.
+
+    Coordinate-only and cheap: a ``profile`` is a single water column, so this opens
+    the source (:func:`ocean_skill.sources.read`) only to read its depth axis -- the
+    same "open the source for its coordinate alone" move ``times=``'s dict form makes
+    via :func:`_time_bins`. Duplicate levels (a cast logged at the same depth twice --
+    the very "60 duplicate depths" a profile source can carry) are collapsed by
+    :func:`numpy.unique`, which also sorts them ascending; neither the reference's own
+    nearest-level ``isel`` nor the test's :func:`ocean_skill.roms.to_depth` cares about
+    order, so the axis's literal order is not preserved. Returns a plain list of floats.
+    """
+    if source in cache:
+        return cache[source]
+    import warnings
+
+    import numpy as np
+
+    from ocean_skill import operators, tabular
+    from ocean_skill.catalog import resolve
+    from ocean_skill.sources import read
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        meta = {}
+    # Coordinate-only: warnings that belong to *reading* this source (a cast's
+    # duplicate depths, a time-varying profile) are the align() lane's to emit when it
+    # reads the data for real -- firing them here too, just to learn the axis, would
+    # double them. A genuine problem (no vertical axis) raises below, unsuppressed.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        obj = read(source)
+        if tabular.is_frame(obj):
+            obj = tabular.to_dataset(obj, meta)
+    # The catalog's own declared Z axis wins when there is one (a builder records it
+    # for an uppercase, attr-less axis like a CTD's DEPTH), mirroring _prepare's own
+    # observational vertical resolution; resolve_dim is the fallback.
+    zname = (meta.get("axes") or {}).get("Z")
+    if zname is None or zname not in getattr(obj, "dims", ()):
+        zname = operators.resolve_dim(obj, "Z")
+    if zname is None or zname not in obj.dims:
+        raise ValueError(
+            f"{source!r} is catalogued as a profile, but no vertical axis could be "
+            "found to read its own levels from -- pass depths=[...] explicitly, or "
+            "check the catalog entry's axes/standard_names."
+        )
+    values = np.asarray(obj[zname].values, dtype="float64")
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError(
+            f"{source!r}'s vertical axis ({zname!r}) has no finite levels to compare "
+            "on -- pass depths=[...] explicitly."
+        )
+    depths = [float(v) for v in np.unique(values)]
+    cache[source] = depths
+    return depths
+
+
+def _profile_depth_plan(
+    ref: str,
+    select: dict[str, Any],
+    over: str | None,
+    calculated: bool,
+    fan_key: str,
+    fan_values: tuple[Any, ...],
+    explicit_depths: Any | None,
+    cache: dict[str, list[float]],
+) -> tuple[tuple[Any, ...], bool]:
+    """Per-reference ``(values, many_values)`` for compare()'s depth fan.
+
+    Three cases, in order:
+
+    * a calculated diagnostic has no vertical axis at all -- one comparison, no depth
+      (``(None,)``);
+    * a **profile** reference keeps its depth axis standing, so its whole depth list
+      is *one* comparison's y-axis, never a scalar-per-depth fan (which would collapse
+      the very axis the profile exists to keep). The levels are the caller's
+      ``depths=`` when given, else -- the case this feature adds -- the reference's own
+      (:func:`_profile_reference_depths`). An explicit ``select={"depth": [...]}`` is
+      left to the ordinary path, which already carries a whole list as one comparison
+      (``fan_values`` is then a 1-tuple holding that list);
+    * anything else keeps the ordinary depth fan unchanged.
+    """
+    if calculated:
+        return (None,), False
+    if fan_key == "depth" and _is_profile_reference(ref, over):
+        ref_sel = select_for(select, "reference")
+        has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
+        if not has_vertical_select:
+            if explicit_depths is not None:
+                levels = (
+                    list(explicit_depths)
+                    if isinstance(explicit_depths, list | tuple)
+                    else [explicit_depths]
+                )
+            else:
+                levels = _profile_reference_depths(ref, cache)
+            return (levels,), False
+    return fan_values, len(fan_values) > 1
+
+
 def _selected_time(select: dict[str, Any]) -> Any:
     """Return what a ``select`` asks for along time, or ``None`` if it names none.
 
@@ -3923,6 +4067,19 @@ def compare(
     sits a few metres down legitimately comes back all-NaN (with a warning) rather than
     silently reusing the surface field.
 
+    A reference whose ``featureType`` is ``profile`` is the exception, and needs no
+    ``depths=`` at all: it is a single water column that keeps its depth axis standing
+    (``over="Z"`` is implied), so the comparison is *one* profile down that column
+    rather than a map — and the levels to compare on are the reference's **own**, read
+    straight off it and interpolated onto by the test lane
+    (:func:`ocean_skill.align.match_axis`). Passing ``depths=[...]`` overrides those
+    levels; either way the whole list is the profile's y-axis, not fanned into one map
+    per depth. Only ``featureType == "profile"`` is auto-derived this way — a
+    ``timeSeriesProfile``/``trajectoryProfile`` carries more than one candidate axis,
+    so it still needs an explicit ``depths=``/``select={"depth": [...]}``, and a
+    vertical ``over=`` with no depth axis left standing is refused rather than compared
+    against a single collapsed level.
+
     A surface of constant depth is not always the most meaningful slice through a
     stratified column — ``select={"sigma0": 26.5}`` (or a list, faceted the same way
     ``depths`` is) asks for an isopycnal instead, via
@@ -4240,6 +4397,11 @@ def compare(
     # repeat, being pure sugar over a value the caller already gave).
     _time_bins_cache: dict[str, tuple[Any, ...]] = {}
 
+    # Same idea for a profile reference's own levels, read once per reference source
+    # (a single water column, so cheap) and reused across every variable/test/time it
+    # appears under -- see _profile_reference_depths / _profile_depth_plan.
+    _ref_depths_cache: dict[str, list[float]] = {}
+
     def _times_for(tst: str) -> tuple[Any, ...]:
         if times_fan is None:
             return (None,)
@@ -4309,11 +4471,37 @@ def compare(
                     "vertical axis.",
                     stacklevel=_stacklevel.find(),
                 )
-        these_values = (None,) if calculated else fan_values
         label_fn = _sigma_label if fan_key == "sigma0" else _depth_label
         many_vars = len(variables) > 1
-        many_values = not calculated and len(fan_values) > 1
         for ref in matching:
+            # A profile reference keeps the depth axis standing (over="Z"), so its
+            # whole depth list is one comparison's y-axis, not a fan of one-per-depth
+            # maps -- exactly as a section's depth list is (see _validate_section_
+            # request). And there is a natural default no map has: the reference's
+            # *own* levels. compare()'s ordinary per-depth fan would instead write a
+            # *scalar* depth into the select, collapsing the very axis the profile
+            # exists to keep, so a vertical-over reference takes its own branch here.
+            # For a non-profile reference _profile_depth_plan hands back the ordinary
+            # depth fan unchanged.
+            try:
+                these_values, many_values = _profile_depth_plan(
+                    ref,
+                    select,
+                    over,
+                    calculated,
+                    fan_key,
+                    fan_values,
+                    depths if depths_was_explicit else None,
+                    _ref_depths_cache,
+                )
+            except ValueError as exc:
+                # Reading a profile reference's own levels can fail (no vertical axis
+                # found, or none finite) -- treat it like any other per-reference
+                # failure: skip with a message unless the caller asked not to.
+                if not skip_missing:
+                    raise
+                print(f"  skipped {ref!r}: {exc}")
+                continue
             for tst in matching_tests:
                 try:
                     these_times = _times_for(tst)
