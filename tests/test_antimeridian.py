@@ -644,3 +644,64 @@ def test_a_non_straddling_facet_movie_keeps_tiles_without_a_warning():
     assert not any("Web Mercator" in str(w.message) for w in caught)
     kinds = [type(n).__name__ for n in _first_movie_frame(movie).traverse()]
     assert "WMTS" in kinds, kinds
+
+
+# --- an arbitrary-path transect across the dateline -----------------------------------
+#
+# The transect grammar (ocean_skill.transect) reuses this module's own machinery --
+# natural_convention, harmonize_longitude, _wrap_lon, subset_to_bbox -- rather than
+# reinventing it, so a waypoint path or a fixed-lon/lat line over pac_dt_ramp's
+# stress-case domain (77E-316E) is exactly as antimeridian-safe as everything else
+# this file pins.
+
+
+def test_a_waypoint_path_across_the_dateline_stays_inside_the_domain():
+    from ocean_skill.transect import apply_transect
+
+    field = _pacific_test()  # 0-360 native, 150-250 degrees east
+    # 147E -> 175E -> -160 (== 200E): the whole leg crosses 180
+    out = apply_transect(
+        field.to_dataset(name="chl"),
+        {"waypoints": [[147.0, 0.0], [175.0, 5.0], [-160.0, 10.0]]},
+        subject="test",
+    )
+    lon = np.asarray(out["lon"])
+    # every sampled point must land inside the field's own 150-250 domain, never
+    # jumping to the antipodal side the way an unwrapped linear interpolation would
+    assert lon.min() >= 150.0 - 1e-6
+    assert lon.max() <= 250.0 + 1e-6
+    assert np.all(np.diff(np.asarray(out["along"])) > 0)
+
+
+def test_a_lat_line_over_a_straddling_domain_gets_bounds_from_the_harmonized_bbox():
+    from ocean_skill.transect import apply_transect
+
+    field = _pacific_test()
+    out = apply_transect(field.to_dataset(name="chl"), {"lat": 0.0}, subject="test")
+    lon = np.asarray(out["lon"])
+    # the line's default bounds come from bbox_of() on the *harmonized* (0-360)
+    # field -- 150..250 -- not a raw ±180 read, which would report a near-global
+    # span (the whole point of harmonizing before bbox_of runs)
+    assert lon.min() >= 150.0 - 1.0  # a little slack for grid-cell snapping
+    assert lon.max() <= 250.0 + 1.0
+
+
+def test_a_fixed_lon_line_trims_to_a_rotated_domain_with_one_warning():
+    from ocean_skill.transect import apply_transect
+
+    lon, lat = _rotated_grid(ny=20, nx=30, lon0=150.0, lat0=10.0, degrees=30.0)
+    field = xr.DataArray(
+        np.ones(lon.shape),
+        dims=("eta", "xi"),
+        coords={"lon": (("eta", "xi"), lon), "lat": (("eta", "xi"), lat)},
+    )
+    # a lon near the middle of the rotated domain's span, with a lat_bounds range
+    # generous enough to spill off the true (rotated, non-rectangular) edge
+    target_lon = float(np.median(lon))
+    with pytest.warns(UserWarning, match="dropped"):
+        out = apply_transect(
+            field.to_dataset(name="v"),
+            {"lon": target_lon, "lat": {"min": float(lat.min()) - 5, "max": float(lat.max()) + 5}},
+            subject="test",
+        )
+    assert np.all(np.isfinite(np.asarray(out["lat"])))

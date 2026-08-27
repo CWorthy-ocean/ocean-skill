@@ -963,11 +963,34 @@ osk.field("run_new", "temperature",
           select={"transect": {"eta_rho": 12}, "depth": [0, 50, 100, 200]}).plot()
 ```
 
+**Arbitrary paths** — waypoints, or a fixed lon/lat line — sample the grid instead
+of indexing it, by nearest-neighbour (default) or bilinear interpolation:
+
+```python
+osk.field("run_new", "temperature",
+          select={"transect": {"waypoints": [[-96.0, 24.0], [-94.0, 26.0], [-92.0, 28.0]]},
+                  "depth": [0, 50, 100, 200]},
+          aggregate={"time": "mean"}).plot()
+
+osk.field("run_new", "temperature", select={"transect": {"lon": -94.5}}).plot()
+osk.field("run_new", "temperature",
+          select={"transect": {"lat": 25.0, "lon": {"min": -96, "max": -93}}}).plot()
+```
+
+Waypoints/lines are densified to roughly the model's own grid resolution before
+sampling (`spacing_km` overrides); `select={"transect": {"points": [...]}}` samples
+exactly the given points instead, with no densification. A path that partly leaves
+the domain is trimmed to it, with one warning naming how many points were dropped —
+the same trim either sampling method gives, so switching `method="nearest"` to
+`"bilinear"` never silently changes how much of the path is covered. Antimeridian
+crossings (the `pac_dt_ramp`-style 77°E–316°E domain) are handled the same way
+every other longitude-aware function in this package is.
+
+For an interactive alternative to typing waypoints by hand, `osk.pick_path(source)`
+opens a click-to-add-waypoints map in a live notebook — see its own docstring.
+
 Model-only for now (`osk.field`, not `osk.compare`) — matching a section against a
-dataset, and an arbitrary path (a fixed longitude that does not land on a grid
-column, or a list of lon/lat waypoints), are follow-ups; `select={"transect":
-{"lon": ...}}`/`{"waypoints": [...]}` name them and raise rather than silently
-doing something else.
+dataset is a follow-up.
 
 ### Axis conventions
 

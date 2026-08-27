@@ -499,6 +499,57 @@ def _box_selectable(
     return hit if (rectilinear or curvilinear) else None
 
 
+def _refuse_curvilinear_line(
+    obj, spec: dict[str, Any] | None, subject: str = "the source"
+) -> None:
+    """Raise when a lone scalar lon/lat in ``spec`` would silently no-op on a 2-D grid.
+
+    A curvilinear grid's longitude/latitude are 2-D fields, not dimensions --
+    ``select={"lon": -144.0}`` has no axis to narrow, so the ordinary per-axis
+    loop in :func:`select` silently skips it (the key resolves to no dimension,
+    indistinguishable from a genuinely absent one). The identical spec against a
+    *rectilinear* grid is a perfectly good meridional slice (see
+    :func:`point_in_spec`'s own note on the reading); this only fires where that
+    reading is impossible.
+
+    Left alone when ``spec`` is a genuine point (both axes scalar --
+    :func:`point_in_spec` already routes that through
+    :func:`~ocean_skill.align.sample_at`) or has already had its point/box keys
+    consumed by the time this runs (see the two call sites: here in
+    :func:`select`, after the point/box branches; and in
+    :func:`ocean_skill.comparison._select_horizontal_then_aggregate`, on the
+    *unconsumed* spec, before either branch has had a chance to run at all).
+    Fires on a lone scalar *or* a scalar paired with a range (the bounded-line
+    spelling, ``{'lon': -144.0, 'lat': {'min': ..., 'max': ...}}``), since both
+    leave one axis with nothing to narrow.
+    """
+    if not spec or point_in_spec(spec) is not None:
+        return
+    from ocean_skill.cf import find_coord
+
+    lon_coord, lat_coord = find_coord(obj, "longitude"), find_coord(obj, "latitude")
+    if (
+        lon_coord is None
+        or lat_coord is None
+        or lon_coord.ndim != 2
+        or lat_coord.ndim != 2
+    ):
+        return
+    for key in _POINT_LON_KEYS | _POINT_LAT_KEYS:
+        if key not in spec or _point_scalar(spec[key]) is None:
+            continue
+        word = "longitude" if key in _POINT_LON_KEYS else "latitude"
+        raise ValueError(
+            f"{subject}: select={{{key!r}: {spec[key]!r}}} names a fixed "
+            f"{word}, but this source's grid is curvilinear -- {word} is a "
+            "2-D field with no grid column to follow, so this key would "
+            "silently match nothing. For a line, use select={'transect': "
+            f"{{{key!r}: {spec[key]!r}}}}} (bound the other axis with e.g. "
+            "'lat': {'min': ..., 'max': ...}); for one place, give both lon "
+            "and lat together as scalars (a point)."
+        )
+
+
 def _descending(obj, dim: str) -> bool:
     """Whether ``dim``'s coordinate is stored high-to-low.
 
@@ -677,6 +728,7 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
 
         del spec[lon_key], spec[lat_key]
         obj = subset_to_box(obj, (lon_lo, lat_lo, lon_hi, lat_hi), subject=subject)
+    _refuse_curvilinear_line(obj, spec, subject)
     for name, value in spec.items():
         dim = resolve_dim(obj, name)
         if dim is None or dim not in obj.dims:

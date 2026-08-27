@@ -1,11 +1,12 @@
 """Tests for grid-aligned vertical slices: ocean_skill.transect and its wiring.
 
-Stage A of the vertical-slice feature supports exactly one pathway -- exactly along
-a grid dimension, a free ``isel`` with no interpolation -- read off
-``select={"transect": {"<dim>": <index>}}``. An arbitrary path (a fixed longitude
-that does not land on a grid column, or a list of lon/lat waypoints) is a later
-stage; :func:`ocean_skill.transect.as_transect` names it and refuses rather than
-silently doing something else with a similar-looking key.
+Grid-aligned sections -- exactly along a grid dimension, a free ``isel`` with no
+interpolation, read off ``select={"transect": {"<dim>": <index>}}`` -- are this
+file's subject. The arbitrary-path pathway (waypoints, a fixed lon/lat line, or a
+resolved ``points`` list, sampled by nearest-neighbour or bilinear interpolation)
+lives in ``tests/test_transect_paths.py``; the two share :func:`_attach_along_coord`
+and the rest of :mod:`ocean_skill.transect`'s output contract, but are different
+enough operations (a pure index vs. a sampled/interpolated grid) to test apart.
 
 Three layers, the house convention (see ``tests/test_isopycnal.py``): the pure
 functions (:func:`ocean_skill.transect.as_transect`/``grid_slice``,
@@ -85,16 +86,29 @@ def test_as_transect_reads_a_bare_dim_and_index():
     }
 
 
-def test_as_transect_refuses_the_arbitrary_path_forms_by_name():
-    """Waypoints/lon/lat are named and refused, not silently misread as a dim."""
+def test_as_transect_routes_the_arbitrary_path_forms_elsewhere():
+    """Waypoints/lon/lat are recognized as a different request, not a dim name.
+
+    The forms themselves are ``tests/test_transect_paths.py``'s subject; this
+    only pins that :func:`as_transect` no longer mistakes them for a grid
+    dimension (they used to raise "not yet built" here).
+    """
     for spec in (
         {"waypoints": [[-95.0, 25.0], [-93.0, 27.0]]},
         {"lon": -94.0},
         {"lat": 26.0},
         {"lon": -94.0, "lat": {"min": 24.0, "max": 28.0}},
     ):
-        with pytest.raises(NotImplementedError, match="arbitrary-path"):
-            as_transect(spec)
+        parsed = as_transect(spec)
+        assert parsed["kind"] != "grid"
+
+
+def test_as_transect_refuses_options_on_the_grid_form():
+    """spacing_km/method mean something only for an arbitrary path."""
+    with pytest.raises(ValueError, match="only apply to an arbitrary-path"):
+        as_transect({"xi_rho": 30, "method": "bilinear"})
+    with pytest.raises(ValueError, match="only apply to an arbitrary-path"):
+        as_transect({"xi_rho": 30, "spacing_km": 5.0})
 
 
 def test_as_transect_refuses_a_coordinate_value_as_a_grid_index():
