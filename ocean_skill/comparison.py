@@ -49,6 +49,21 @@ SURFACE = "surface"
 POINT_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
 
 
+#: CF featureTypes whose catalog metadata already names a place worth cropping the
+#: *test* lane to before it is read -- see :meth:`Comparison._reference_narrowing`.
+#: A superset of :data:`POINT_FEATURE_TYPES`: unlike the plot-recipe question that set
+#: answers (does this reference leave an axis for a line?), this one only asks
+#: whether the reference's own position is knowable read-free from its catalog entry,
+#: which is also true of a profile (one lon/lat, a depth axis instead of a line) and a
+#: trajectory (a bounding box rather than a point, but still a real spatial extent
+#: worth handing to the test lane's own crop). Narrowing from this set never implies
+#: anything about ``over`` -- a profile keeps ``over=None`` exactly as it does today;
+#: this only changes how much of the test gets read.
+NARROWING_FEATURE_TYPES = frozenset(
+    {"timeSeries", "point", "station", "profile", "timeSeriesProfile", "trajectory"}
+)
+
+
 def _feature_type(source: str) -> str | None:
     """Return a source's catalog featureType, or ``None`` if it is unresolvable."""
     from ocean_skill.catalog import resolve
@@ -194,6 +209,60 @@ def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     else:
         lon_min, lon_max = (lo % 360 for lo in (lon_min, lon_max))
     return lon_min, lat_min, lon_max, lat_max
+
+
+#: Padding applied to each end of a catalog-derived time window, in days. Mirrors why
+#: :func:`ocean_skill.align.time_span_of` pads a prepared lane by one step: matching at
+#: the very edge of the record needs a candidate just past it, and the record's own
+#: cadence is not knowable without reading it -- one day comfortably covers every
+#: mooring/profile cadence this package has seen, from sub-hourly to monthly.
+_TIME_COVERAGE_PAD_DAYS = 1.0
+
+
+def _time_coverage_of(source: str) -> tuple[Any, Any] | None:
+    """Return ``(start, stop)`` for a source's catalog-declared time coverage.
+
+    Read-free, the same contract as :func:`_domain_of`: used to crop the *test* lane
+    to the reference's own record before it is read (see
+    :meth:`Comparison._reference_narrowing`), not to crop the reference itself -- the
+    reference already carries its record; this exists only to keep from reading a
+    test lane's whole time axis when a fixed-position reference only ever asks about
+    a few months of it.
+
+    Two keys carry this, and they disagree in one way worth preferring correctly:
+    an ERDDAP tabledap entry's own ``minTime``/``maxTime`` (from ``intake_erddap``'s
+    ``allDatasets`` metadata) are full timestamps, while every entry's
+    ``time_coverage_start``/``time_coverage_end`` (written by
+    :mod:`ocean_skill.build`) are truncated to a bare date. Preferring ``minTime``/
+    ``maxTime`` when present avoids padding away precision that was never lost;
+    falling back to the truncated pair when they are absent (non-ERDDAP sources)
+    still works, with the day-level uncertainty covered by
+    :data:`_TIME_COVERAGE_PAD_DAYS` on top of the truncation itself -- a record
+    ending at 18:00 on its last declared date must not be cropped off at midnight.
+
+    Returns ``None`` when the source is unresolvable, declares neither pair, or
+    either value fails to parse -- a hand-edited or stale catalog entry should leave
+    the test lane unnarrowed rather than fail the comparison outright.
+    """
+    import pandas as pd
+
+    from ocean_skill.catalog import resolve
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        return None
+    start, stop = meta.get("minTime"), meta.get("maxTime")
+    if start is None or stop is None:
+        start, stop = meta.get("time_coverage_start"), meta.get("time_coverage_end")
+    if start is None or stop is None:
+        return None
+    try:
+        start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    except (TypeError, ValueError):
+        return None
+    pad = pd.Timedelta(days=_TIME_COVERAGE_PAD_DAYS)
+    return start - pad, stop + pad
 
 
 def as_select(select: Any) -> dict[str, Any]:
@@ -1191,16 +1260,23 @@ def prepare_source(
     :data:`ocean_skill.align.DEFAULT_PAD` *before* the load below, and joins the cache
     key. :func:`ocean_skill.align.align` does this crop anyway, but only once both lanes
     are in memory — fine for a single global map, the dominant cost for a global product
-    that kept a long time axis. Passing the test lane's own extent here changes nothing
+    that kept a long time axis. Passing a lane's own extent here changes nothing
     about the result and a great deal about the peak memory. It does cost this
     lane its cross-model reuse (a reference cropped to one model's domain is not the one
     another model wants), which is why the caller passes it only when it is worth that.
+    This runs in both directions: a skill map derives a bbox from its *test* lane to
+    crop the *reference* (see :meth:`Comparison.align`), and a point-like reference
+    (a mooring, a profile) offers its own catalog-declared position to crop the
+    *test* lane the same way, before the reference itself has even been read (see
+    :meth:`Comparison._reference_narrowing`).
 
     ``time_window`` is the same idea along time: ``(start, stop)`` the lane is cropped
     to, and part of the cache key for the same reason ``bbox`` is. A skill map derives
-    it from its test lane (see :meth:`Comparison.align`), so the caller knows the window
-    before this reads anything — which is what lets it reach an ERDDAP table as a
-    server-side constraint rather than as a crop applied to a record already downloaded.
+    it from its test lane's actual data, or from a point-like reference's own catalog
+    metadata (again :meth:`Comparison._reference_narrowing`) — either way the caller
+    knows the window before this reads anything, which is what lets it reach an ERDDAP
+    table as a server-side constraint rather than as a crop applied to a record
+    already downloaded.
 
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
@@ -1467,6 +1543,54 @@ class Comparison:
 
         return operators.point_in_spec(self.select)
 
+    def _reference_narrowing(
+        self,
+    ) -> tuple[tuple[float, float, float, float] | None, tuple[Any, Any] | None]:
+        """The ``(bbox, time_window)`` the reference's own catalog metadata offers.
+
+        Read-free, and unlike :meth:`_point_route` not gated on ``over`` at all: this
+        answers a different question -- not "does the plot recipe reduce to a line",
+        but "does the reference's catalog entry already name a place worth cropping
+        the *test* lane to before it is read" -- so it applies just as well to a
+        profile (``over`` stays ``None`` for one today, and this leaves that alone)
+        as to a mooring.
+
+        ``None`` for a pair-spec select, for the same reason :meth:`_point_route`
+        stays unrouted then: a deliberate ``select={"test": ..., "reference": ...}``
+        names two positions on purpose, and narrowing the test to the reference's
+        *catalog* position on top of that would silently override a choice the
+        caller already made explicitly. A featureType outside
+        :data:`NARROWING_FEATURE_TYPES` (gridded, or unresolvable) also returns
+        ``(None, None)`` -- a gridded reference's extent already crops the *other*
+        direction, from the test lane onto the reference, once both are read (see
+        :meth:`align`).
+
+        Each half is independent and may come back ``None`` on its own -- a NetCDF
+        source with a position but no declared time coverage still narrows the
+        test's space; an entry missing ``geospatial_*`` but carrying
+        ``time_coverage_*`` still narrows its time. Used by :meth:`align` to crop
+        the test lane before it is read, and by :attr:`_cache_key` so a run before a
+        catalog rebuild widened the reference's declared record does not silently
+        keep serving the narrower one.
+
+        A crop built from a stale or approximate catalog position is not free of
+        risk the way a crop built from data would be: on a grid coarser than
+        :data:`ocean_skill.align.DEFAULT_PAD`, the true nearest cell can fall
+        outside the cropped window even though the crop itself is not empty, and
+        :func:`ocean_skill.align.sample_at` would then silently pick a different
+        (nearby, in-crop) cell than an unnarrowed run would have -- the same
+        exposure an explicit user point select already carries via
+        :meth:`_point_route`, and caught the same way: ``sample_at``'s own
+        past-one-cell-offset warning. A window or bbox that misses the test lane
+        entirely raises instead, and :meth:`align` retries unnarrowed rather than
+        failing the comparison outright.
+        """
+        if is_pair_spec(self.select):
+            return None, None
+        if _feature_type(self.reference_name) not in NARROWING_FEATURE_TYPES:
+            return None, None
+        return _domain_of(self.reference_name), _time_coverage_of(self.reference_name)
+
     @property
     def standard_name(self) -> str | None:
         """The CF name this comparison represents, for colormaps/labels/metrics.
@@ -1518,6 +1642,19 @@ class Comparison:
             # given) would be byte-identical keys for two different results -- a
             # warm cache from the old behavior would silently serve it forever.
             extra["_point_sample"] = True
+        # Not gated on `over` the way the block above is -- _reference_narrowing()
+        # applies to a profile reference too, which keeps over=None. Carried as the
+        # actual values rather than a boolean flag (contrast `_point_sample`, which
+        # only needs to distinguish two *behaviors*): narrowing the test lane's time
+        # axis changes which of its steps ever reach the aligned pair, so a catalog
+        # rebuild that widens or narrows the reference's declared record has to
+        # invalidate the entry it changes, not just the ones from before this
+        # feature existed. Rounded the way prepare_source's own `_bbox` key is.
+        ref_bbox, ref_window = self._reference_narrowing()
+        if ref_bbox is not None:
+            extra["_ref_bbox"] = [round(float(b), 4) for b in ref_bbox]
+        if ref_window is not None:
+            extra["_ref_window"] = [str(w) for w in ref_window]
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -1679,10 +1816,25 @@ class Comparison:
         # select and used as a small bbox instead, leaving the test gridded for align()
         # to sample properly, at the reference's own (possibly curvilinear-snapped)
         # position.
+        #
+        # A reference the caller didn't hand-route this way can still narrow the test
+        # lane, from its own catalog metadata rather than from select= -- a mooring's
+        # (or profile's, or trajectory's) position and declared time coverage are
+        # already sitting in its catalog entry, read-free, and reading a whole model
+        # run to compare it against a few months at one point is the same waste the
+        # routed case exists to avoid (see :meth:`_reference_narrowing`). An explicit
+        # routed point wins spatially when both are in play -- it names the position
+        # the caller actually wants sampled, which the reference's own catalog entry
+        # cannot second-guess -- but the derived time window still applies either way,
+        # since where and when are independent questions and a routed select says
+        # nothing about the latter.
         route = self._point_route()
         drop_keys = route[:2] if route is not None else ()
-        point_bbox = (
-            (route[2], route[3], route[2], route[3]) if route is not None else None
+        derived_bbox, derived_window = self._reference_narrowing()
+        test_bbox = (
+            (route[2], route[3], route[2], route[3])
+            if route is not None
+            else derived_bbox
         )
         try:
             t, _ = self._prepare_lane(
@@ -1690,19 +1842,29 @@ class Comparison:
                 use_cache,
                 refresh,
                 role="test",
-                bbox=point_bbox,
+                bbox=test_bbox,
+                time_window=derived_window,
                 drop_keys=drop_keys,
             )
         except ValueError as err:
-            # A coarse test grid, or a point near the edge of its extent: the pad
-            # subset_to_bbox adds around one location can still miss the nearest cell.
-            # Retrying without the bbox reads the whole lane instead of failing the
-            # comparison outright, and lets align()'s own sample_at report the
-            # (possibly large) offset the way it already does for a real station.
-            if point_bbox is None or "no overlap" not in str(err):
+            # A coarse test grid, a point near the edge of its extent, or a stale
+            # catalog position: the pad subset_to_bbox adds can still miss the
+            # nearest cell either way. Retrying without the bbox reads the whole
+            # lane instead of failing the comparison outright, and lets align()'s
+            # own sample_at report the (possibly large) offset the way it already
+            # does for a real station. The time window is kept on the retry --
+            # a stale bbox and a stale window are independent failures, and
+            # subset_to_time silently declines to crop an empty window rather than
+            # raising, so keeping it here costs nothing even if it too was stale.
+            if test_bbox is None or "no overlap" not in str(err):
                 raise
             t, _ = self._prepare_lane(
-                self.test_name, use_cache, refresh, role="test", drop_keys=drop_keys
+                self.test_name,
+                use_cache,
+                refresh,
+                role="test",
+                time_window=derived_window,
+                drop_keys=drop_keys,
             )
         bbox = None
         window = None
@@ -3167,6 +3329,17 @@ def compare(
     1 km apart. The one thing this inference cannot see: a select that also pins time
     to a single instant leaves no axis for a line either, and there ``over`` stays
     unset rather than guessing.
+
+    A reference whose featureType names a place this way — mooring, profile, or
+    trajectory alike — also narrows the *test* lane automatically, in space and
+    time, from that same catalog entry's own declared position and time coverage,
+    before the test is ever read into memory (see
+    :meth:`Comparison._reference_narrowing`). This is what keeps a comparison
+    against one mooring from reading a model's whole multi-year, full-domain
+    history just to sample it at one point over a few months; a gridded reference
+    gets no such narrowing (its own extent already crops the *other* direction,
+    once both lanes are read) and still benefits from the ``select=``/
+    ``aggregate=`` narrowing the size warning below suggests.
 
     ``variables`` is required, deliberately not inferred from the sources' catalog
     metadata: a reference or test with several declared variables gives no way to
