@@ -38,6 +38,7 @@ __all__ = [
     "describe",
     "discover",
     "find",
+    "match_report",
     "resolve",
     "search_paths",
 ]
@@ -607,7 +608,7 @@ def find(
     # actually in play -- not on every entry of every query.
     wanted = None
     if variable:
-        from ocean_skill.vocabulary import equivalent_names
+        from ocean_skill.vocabulary import equivalent_names, same_quantity
 
         wanted = equivalent_names(variable)
 
@@ -629,8 +630,16 @@ def find(
                     continue
             elif is_clim is not climatology:
                 continue
-        if wanted is not None and not (wanted & set(meta.get("variables") or [])):
-            continue
+        if wanted is not None:
+            declared = set(meta.get("variables") or [])
+            # The literal intersection is the regex-free fast path; same_quantity
+            # additionally reaches a declared spelling only a vocabulary pattern
+            # recognizes (e.g. "Temperature_CTD") and declared names differing only
+            # by case, which the exact set intersection is blind to.
+            if not (wanted & declared) and not any(
+                same_quantity(variable, d) for d in declared
+            ):
+                continue
         if featureType and meta.get("featureType") != featureType:
             continue
         if bbox is not None and _bbox_overlaps(meta, bbox) is False:
@@ -679,33 +688,89 @@ def catalog_metadata(catalog: str) -> dict[str, Any]:
     raise KeyError(f"Unknown catalog {catalog!r}. Known: {catalog_names()}")
 
 
+def _declared_variables(name: str, index: dict[str, SourceRef]) -> list[str]:
+    """The declared variable names to run a vocabulary match report over.
+
+    A source's own declared ``variables``; a catalog's is the union across every
+    source it contains (sorted, deduplicated) -- the same rollup
+    :func:`ocean_skill.build.save`'s ``_rollup_metadata`` computes when writing the
+    catalog. Raises the same "neither a known source nor catalog" error
+    :func:`describe` does, since both dispatch on the same lookup.
+    """
+    if name in index:
+        return list(index[name].metadata.get("variables") or [])
+    names = catalog_names()
+    if name in names:
+        seen: set[str] = set()
+        for ref in index.values():
+            if ref.catalog == name:
+                seen.update(ref.metadata.get("variables") or [])
+        return sorted(seen)
+    raise KeyError(
+        f"{name!r} is neither a known source nor catalog."
+        f"{_did_you_mean(name, [*index, *names])} "
+        f"Known catalogs: {names}. {_find_hint(len(index))}"
+    )
+
+
 def describe(name: str) -> Text:
     """Human-readable summary of a source or a catalog — whichever ``name`` is.
 
     For a source: its catalog, path, and full entry metadata (featureType,
-    standard_names, extents, ...). For a catalog: its title/description/extents plus
-    the sources it contains. Meant for interactive use, e.g. ``osk.describe(name)``.
+    standard_names, extents, ...), followed by a live vocabulary match report over
+    its declared variables. For a catalog: its title/description/extents plus the
+    sources it contains, followed by the same report over the union of every
+    source's variables. Meant for interactive use, e.g. ``osk.describe(name)``. See
+    :func:`match_report` for the report alone, and
+    :class:`ocean_skill.vocabulary.MatchReport` for why it is never cached or
+    stored: it always reflects the vocabulary as it stands right now.
     """
+    from ocean_skill.vocabulary import match_report as _vocab_match_report
+
     index = discover()
     if name in index:
         ref = index[name]
         lines = [f"source: {ref.qualified}", f"  path: {ref.path}"]
         for k, v in sorted(ref.metadata.items()):
             lines.append(f"  {k}: {v}")
-        return Text("\n".join(lines))
-    if name in catalog_names():
+    elif name in catalog_names():
         md = catalog_metadata(name)
         srcs = sorted(ref.name for ref in index.values() if ref.catalog == name)
         lines = [f"catalog: {name}"]
         for k, v in sorted(md.items()):
             lines.append(f"  {k}: {v}")
         lines.append(f"  sources ({len(srcs)}): {', '.join(srcs)}")
-        return Text("\n".join(lines))
-    raise KeyError(
-        f"{name!r} is neither a known source nor catalog."
-        f"{_did_you_mean(name, [*index, *catalog_names()])} "
-        f"Known catalogs: {catalog_names()}. {_find_hint(len(index))}"
-    )
+    else:
+        raise KeyError(
+            f"{name!r} is neither a known source nor catalog."
+            f"{_did_you_mean(name, [*index, *catalog_names()])} "
+            f"Known catalogs: {catalog_names()}. {_find_hint(len(index))}"
+        )
+    report = _vocab_match_report(_declared_variables(name, index))
+    lines.append("  vocabulary:")
+    lines.extend(f"    {line}" for line in str(report).splitlines())
+    return Text("\n".join(lines))
+
+
+def match_report(name: str) -> Text:
+    """Live vocabulary match report for a source's or catalog's declared variables.
+
+    For a source: which of its declared ``variables`` resolve to a vocabulary
+    nickname (and to which), and which don't. For a catalog: the same report over
+    the union of every source's variables (see :func:`_declared_variables`).
+    Always computed against the vocabulary as it stands *right now* -- never
+    stored anywhere, so it can't go stale the way a snapshot written into a
+    catalog file would the moment a new alias or pattern ships (see
+    :class:`ocean_skill.vocabulary.MatchReport`). Meant for interactive use, e.g.
+    ``osk.match_report(name)`` -- or as the ``vocabulary:`` section
+    :func:`describe` already appends.
+    """
+    from ocean_skill.vocabulary import match_report as _vocab_match_report
+
+    index = discover()
+    names = _declared_variables(name, index)  # raises if name is unknown
+    header = f"source: {name}" if name in index else f"catalog: {name}"
+    return Text(f"{header}\n{_vocab_match_report(names)}")
 
 
 class _CatalogRegistry:
@@ -737,6 +802,10 @@ class _CatalogRegistry:
     def describe(self, name: str) -> Text:
         """Human-readable summary of a source or catalog (whichever ``name`` is)."""
         return describe(name)
+
+    def match_report(self, name: str) -> Text:
+        """Live vocabulary match report for a source or catalog (whichever ``name``)."""
+        return match_report(name)
 
     def __repr__(self) -> str:
         idx = self._index()

@@ -8,8 +8,10 @@ rather than reading anything over the network. Shows:
    demo reproduces, not a hypothetical -- see the ``chlorophyll`` entry below).
 2. ``add_alias()`` -- teach an *existing* concept one more real-world spelling,
    live, no restart needed.
-3. ``register()`` -- add a wholly new concept from scratch, live.
-4. How to make an addition permanent: edit ``ocean_skill/vocabulary.py``'s
+3. ``add_pattern()`` -- teach an *existing* concept a whole family of spellings via
+   a narrow, anchored regex, when an enumerated alias list would be tedious.
+4. ``register()`` -- add a wholly new concept from scratch, live.
+5. How to make an addition permanent: edit ``ocean_skill/vocabulary.py``'s
    ``VOCABULARY`` dict directly instead of calling these at runtime.
 
 Run:  python examples/vocabulary_demo.py
@@ -93,7 +95,25 @@ cmaps_for("chlor_a")  # no error -- resolves before looking up xcmocean's tables
 
 print()
 print("=" * 70)
-print("3. register(): add a wholly NEW concept from scratch, live")
+print("3. add_pattern(): teach an EXISTING concept a whole FAMILY of spellings")
+print("=" * 70)
+
+# Argo/OceanSITES write dissolved oxygen as OXY_UMOLKG (a per-mass unit baked
+# into the name) -- not worth an enumerated alias for every unit variant, so a
+# narrow, anchored pattern recognizes the whole family instead. Fullmatch,
+# case-insensitive, and refused for anything merely containing it (see the
+# vocabulary module docstring's "patterns" bullet).
+oxy_shaped = _tiny_dataset("OXY_UMOLKG")
+print("before add_pattern:", find_variable(oxy_shaped, "oxygen"))  # None
+
+vocabulary.add_pattern("oxygen", "oxy_umolkg")
+
+after_pattern = find_variable(oxy_shaped, "oxygen")
+print("after  add_pattern:", after_pattern.name if after_pattern is not None else None)
+
+print()
+print("=" * 70)
+print("4. register(): add a wholly NEW concept from scratch, live")
 print("=" * 70)
 
 vocabulary.register(
@@ -107,7 +127,7 @@ print("find_variable(ph_shaped, 'ph') ->", found.name if found is not None else 
 
 print()
 print("=" * 70)
-print("4. Every resolution says which variable it actually found")
+print("5. Every resolution says which variable it actually found")
 print("=" * 70)
 
 # sea_water_temperature (in-situ) is an alias of sea_water_potential_temperature.
@@ -127,9 +147,10 @@ print("Making an addition permanent")
 print("=" * 70)
 print(
     """
-add_alias()/register() only last for the current Python session -- they mutate the
-in-memory VOCABULARY dict and refresh the resolver + cf-xarray registration, but a
-fresh `import ocean_skill` starts from vocabulary.py's own file again.
+add_alias()/add_pattern()/register() only last for the current Python session --
+they mutate the in-memory VOCABULARY dict and refresh the resolver + cf-xarray
+registration, but a fresh `import ocean_skill` starts from vocabulary.py's own
+file again.
 
 To make a new alias or concept permanent, edit VOCABULARY in
 ocean_skill/vocabulary.py directly (the same dict these functions mutate at

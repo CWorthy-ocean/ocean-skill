@@ -10,6 +10,7 @@ clobbered entries, a QC companion standing in for real data).
 
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -27,10 +28,21 @@ OXYGEN = "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
 def pristine_vocabulary():
     """Restore VOCABULARY after a test mutates it.
 
-    ``register``/``add_alias`` mutate module state that would otherwise leak into
-    every later test in the session (and into cf-xarray's global registration).
+    ``register``/``add_alias``/``add_pattern`` mutate module state that would
+    otherwise leak into every later test in the session (and into cf-xarray's
+    global registration). Each entry's ``aliases``/``patterns`` lists are copied
+    too, not just the entry dicts -- ``add_alias``/``add_pattern`` extend an
+    *existing* concept's list in place (``setdefault(...).append(...)``), so a
+    shallow ``dict(v)`` copy would still share that list object with the "restored"
+    snapshot and the mutation would survive teardown.
     """
-    saved = {k: dict(v) for k, v in vocabulary.VOCABULARY.items()}
+    saved = {
+        k: {
+            field: (list(value) if isinstance(value, list) else value)
+            for field, value in v.items()
+        }
+        for k, v in vocabulary.VOCABULARY.items()
+    }
     yield vocabulary.VOCABULARY
     vocabulary.VOCABULARY.clear()
     vocabulary.VOCABULARY.update(saved)
@@ -303,6 +315,174 @@ def test_find_variable_keeps_coordinates():
     assert "mask" in da.coords
 
 
+# -- regex pattern recognition --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spelling,expected",
+    [
+        ("Temperature_CTD", "sea_water_potential_temperature"),
+        ("temp_ctd", "sea_water_potential_temperature"),
+        ("CTD_Temperature", "sea_water_potential_temperature"),
+        ("PSAL", "sea_water_practical_salinity"),
+        ("sal_psu", "sea_water_practical_salinity"),
+        ("DOXY", OXYGEN),
+        ("chl_a", CHL),
+        ("CHLA", CHL),
+    ],
+)
+def test_pattern_spelling_resolves_to_the_canonical_name(spelling, expected):
+    assert vocabulary.resolve_name(spelling) == expected
+
+
+@pytest.mark.parametrize(
+    "not_a_match",
+    ["my_temp_ctd", "temp_ctd_2", "psalm", "salt_flux", "chlamydomonas"],
+)
+def test_pattern_matching_is_fullmatch_not_substring(not_a_match):
+    """A pattern recognizes the whole name, never a name merely containing it."""
+    assert vocabulary.resolve_name(not_a_match) == not_a_match
+    assert not vocabulary.is_known(not_a_match)
+
+
+@pytest.mark.parametrize("spelling", ["Temperature_CTD", "PSAL", "DOXY", "chl_a"])
+def test_pattern_spellings_count_as_known(spelling):
+    """is_known must track resolve_name's two tiers.
+
+    Otherwise compare()'s absent-vs-unknowable check misjudges a pattern-recognized
+    name as genuinely absent.
+    """
+    assert vocabulary.is_known(spelling)
+
+
+@pytest.mark.parametrize(
+    "flagged", ["Temperature_CTD_flag", "sal_psu_qc_agg", "Temperature_CTD_qc_agg"]
+)
+def test_pattern_never_claims_a_flag_decorated_name(flagged):
+    assert vocabulary.resolve_name(flagged) == flagged
+    assert not vocabulary.is_known(flagged)
+
+
+def test_pattern_never_claims_a_flag_decorated_dataset_variable():
+    assert find_variable(_tiny("Temperature_CTD_qc_agg"), "temperature") is None
+
+
+def test_pattern_match_finds_the_dataset_variant_column():
+    """Proves the pattern reached cf-xarray's registration, not just resolve_name."""
+    ds = _tiny("Temperature_CTD")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        da = find_variable(ds, "temperature")
+    assert da is not None and da.name == "Temperature_CTD"
+
+
+def test_ambiguous_pattern_match_refuses_to_guess_and_warns(pristine_vocabulary):
+    """Two entries whose patterns both claim a name is a vocabulary bug, not a guess."""
+    vocabulary.register("concept_a", "standard_a", patterns=["shared_[0-9]"])
+    vocabulary.register("concept_b", "standard_b", patterns=["shared_[0-9]"])
+    with pytest.warns(UserWarning, match="matches vocabulary patterns"):
+        resolved = vocabulary.resolve_name("shared_1")
+    assert resolved == "shared_1"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert not vocabulary.is_known("shared_1")
+
+
+def test_chlor_a_is_still_the_live_extension_example(pristine_vocabulary):
+    """`chlor_a` is deliberately not a shipped pattern.
+
+    It stays the documented example of extending the vocabulary live via
+    add_alias (see the module docstring's "patterns" bullet and
+    examples/vocabulary_demo.py).
+    """
+    assert not vocabulary.is_known("chlor_a")
+    vocabulary.add_alias("chlorophyll", "chlor_a")
+    assert vocabulary.is_known("chlor_a")
+
+
+# -- nickname() and match_report() ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spelling,expected",
+    [
+        ("oxygen", "oxygen"),  # the key itself
+        (OXYGEN, "oxygen"),  # canonical standard_name
+        ("O2", "oxygen"),  # alias
+        ("DOXY", "oxygen"),  # pattern spelling
+        ("Fe", "iron"),
+    ],
+)
+def test_nickname_reverses_resolve_name_to_the_short_key(spelling, expected):
+    assert vocabulary.nickname(spelling) == expected
+
+
+def test_nickname_is_none_for_an_unknown_name():
+    assert vocabulary.nickname("Instrument_Type") is None
+
+
+def test_nickname_is_none_for_an_ambiguous_pattern_match(pristine_vocabulary):
+    vocabulary.register("concept_a", "standard_a", patterns=["shared_[0-9]"])
+    vocabulary.register("concept_b", "standard_b", patterns=["shared_[0-9]"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert vocabulary.nickname("shared_1") is None
+
+
+def test_match_report_groups_declared_names_by_nickname():
+    report = vocabulary.match_report(["PSAL", "DOXY", "Instrument_Type"])
+    assert report.matched == {"salinity": ["PSAL"], "oxygen": ["DOXY"]}
+    assert report.unmatched == ["Instrument_Type"]
+
+
+def test_match_report_on_no_variables_is_empty():
+    report = vocabulary.match_report([])
+    assert report.matched == {}
+    assert report.unmatched == []
+
+
+def test_match_report_collisions_flags_a_nickname_claimed_twice():
+    report = vocabulary.match_report(["Temperature", "Temperature_CTD", "PSAL"])
+    assert report.collisions == {
+        "temperature": ["Temperature", "Temperature_CTD"]
+    }
+    assert "salinity" not in report.collisions
+
+
+def test_match_report_suppresses_the_ambiguous_pattern_warning(pristine_vocabulary):
+    """The report is where an ambiguous match surfaces, not a repeated warning.
+
+    It shows up as unmatched instead of firing a warning every time someone runs
+    a report over it.
+    """
+    vocabulary.register("concept_a", "standard_a", patterns=["shared_[0-9]"])
+    vocabulary.register("concept_b", "standard_b", patterns=["shared_[0-9]"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = vocabulary.match_report(["shared_1"])
+    assert not caught
+    assert report.unmatched == ["shared_1"]
+
+
+def test_match_report_str_names_the_nicknames_and_unmatched_variables():
+    text = str(vocabulary.match_report(["PSAL", "Instrument_Type"]))
+    assert "salinity" in text and "PSAL" in text
+    assert "Instrument_Type" in text
+    assert "unmatched" in text
+
+
+def test_match_report_repr_html_escapes_and_wraps():
+    html = vocabulary.match_report(["PSAL"])._repr_html_()
+    assert html.startswith("<pre")
+    assert "PSAL" in html
+
+
+def test_match_report_html_escapes_angle_brackets_in_a_variable_name():
+    html = vocabulary.match_report(["<script>"])._repr_html_()
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
 # -- live extension -----------------------------------------------------------
 
 
@@ -351,6 +531,59 @@ def test_colliding_spellings_warn_rather_than_silently_picking_one(pristine_voca
     vocabulary.register("concept_a", "standard_a", aliases=["shared"])
     with pytest.warns(UserWarning, match="vocabulary collision"):
         vocabulary.register("concept_b", "standard_b", aliases=["shared"])
+
+
+def test_add_pattern_takes_effect_immediately(pristine_vocabulary):
+    """A new pattern must reach cf-xarray's registration, not just resolve_name."""
+    ds = _tiny("OXY_UMOLKG")
+    assert find_variable(ds, "oxygen") is None
+
+    vocabulary.add_pattern("oxygen", "oxy_umolkg")
+
+    assert vocabulary.resolve_name("OXY_UMOLKG") == OXYGEN
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert find_variable(ds, "oxygen").name == "OXY_UMOLKG"
+
+
+def test_add_pattern_rejects_an_unknown_concept(pristine_vocabulary):
+    with pytest.raises(KeyError, match="register"):
+        vocabulary.add_pattern("not_a_concept", "whatever")
+
+
+def test_add_pattern_is_idempotent(pristine_vocabulary):
+    vocabulary.add_pattern("oxygen", "oxy_umolkg")
+    vocabulary.add_pattern("oxygen", "oxy_umolkg")
+    assert vocabulary.VOCABULARY["oxygen"]["patterns"].count("oxy_umolkg") == 1
+
+
+def test_register_accepts_patterns_for_a_new_concept(pristine_vocabulary):
+    vocabulary.register(
+        "ph", "sea_water_ph_reported_on_total_scale", patterns=["ph_tot(?:al)?"]
+    )
+    assert vocabulary.resolve_name("ph_total") == "sea_water_ph_reported_on_total_scale"
+
+
+def test_an_invalid_pattern_in_register_is_rejected_before_adding_the_concept(
+    pristine_vocabulary,
+):
+    with pytest.raises(re.error):
+        vocabulary.register(
+            "ph", "sea_water_ph_reported_on_total_scale", patterns=["("]
+        )
+    assert "ph" not in vocabulary.VOCABULARY
+
+
+def test_an_invalid_pattern_in_add_pattern_is_rejected_before_mutating_the_entry(
+    pristine_vocabulary,
+):
+    before = list(vocabulary.VOCABULARY["oxygen"].get("patterns", []))
+    with pytest.raises(re.error):
+        vocabulary.add_pattern("oxygen", "(")
+    assert vocabulary.VOCABULARY["oxygen"].get("patterns", []) == before
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        vocabulary._refresh()  # still clean -- nothing was left half-added
 
 
 def test_shipped_vocabulary_has_no_collisions():

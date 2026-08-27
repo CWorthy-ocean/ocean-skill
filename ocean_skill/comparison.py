@@ -3942,7 +3942,11 @@ def compare(
 
     from ocean_skill import _stacklevel
     from ocean_skill.catalog import resolve
-    from ocean_skill.vocabulary import equivalent_names, resolve_and_report
+    from ocean_skill.vocabulary import (
+        equivalent_names,
+        resolve_and_report,
+        same_quantity,
+    )
 
     # Validated (and, for a pair, normalized to plain per-side dicts) once up front,
     # like `variables` below -- otherwise a one-sided {"test": ...} select/aggregate
@@ -4170,7 +4174,17 @@ def compare(
             # itself, which would silently skip the documented no-`inputs=` example
             # in register_calculator's own docstring.
             return True
-        if any(all(equivalent_names(n) & declared for n in opt) for opt in options):
+
+        def _declared_offers(n: str) -> bool:
+            # The literal intersection is the regex-free fast path; same_quantity
+            # additionally reaches a declared spelling only a vocabulary pattern
+            # recognizes, so a source advertising e.g. "Temperature_CTD" still
+            # counts as offering "temperature".
+            return bool(equivalent_names(n) & declared) or any(
+                same_quantity(n, d) for d in declared
+            )
+
+        if any(all(_declared_offers(n) for n in opt) for opt in options):
             return True  # positively offered
 
         # Not positively offered -- but "absent" and "unknowable" are different.

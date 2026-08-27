@@ -1184,7 +1184,32 @@ def save(cat, path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     _rollup_metadata(cat)
     cat.to_yaml_file(str(path))
+    _print_match_summary(path, cat)
     return path
+
+
+def _print_match_summary(path: Path, cat) -> None:
+    """Print a one-time vocabulary match summary for the catalog just saved.
+
+    Nothing here is written into ``cat`` or the YAML file -- only printed, and only
+    for this one build. A persisted ``{nickname: [variables]}`` map would go stale
+    the moment the vocabulary gains a new alias or pattern and nobody rebuilds this
+    catalog; see :class:`ocean_skill.vocabulary.MatchReport`. Rerun
+    :func:`ocean_skill.match_report` on the saved catalog any time afterward for a
+    report against whatever the vocabulary looks like *then* -- no rebuild needed.
+    """
+    from ocean_skill.vocabulary import match_report
+
+    names = cat.metadata.get("standard_names") or []
+    n_sources = len(list(cat) or list(getattr(cat, "entries", {})))
+    report = match_report(names)
+    n_matched = sum(len(v) for v in report.matched.values())
+    print(
+        f"ocean-skill: {path.name} — {len(names)} variables across {n_sources} "
+        f"sources: {n_matched} matched, {len(report.unmatched)} unmatched"
+    )
+    if report.unmatched:
+        print(f"  unmatched: {', '.join(report.unmatched)}")
 
 
 def _rollup_metadata(cat) -> None:
