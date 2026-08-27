@@ -110,6 +110,12 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "O2",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
         ],
     },
+    "oxygen_saturation": {
+        # A different quantity from "oxygen" above -- percent saturation, not a
+        # concentration -- so deliberately its own key/standard_name rather than an
+        # alias, the same reason "sea_level_anomaly" stays separate from "ssh".
+        "standard_name": "fractional_saturation_of_oxygen_in_sea_water",
+    },
     "dissolved_inorganic_carbon": {
         "standard_name": (
             "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water"
@@ -226,6 +232,24 @@ VOCABULARY: dict[str, dict[str, object]] = {
     },
     "ssh": {
         "standard_name": "sea_surface_height_above_geoid",
+    },
+    "conductivity": {
+        # OOI Papa's own name (ocean_skill/catalogs/ooi_papa.yaml) needs no alias here
+        # -- it already spells the CF name in full.
+        "standard_name": "sea_water_electrical_conductivity",
+    },
+    "pressure": {
+        # Also ROMS/MARBL's own concept via build.py's ROMS_STANDARD_NAMES (there
+        # mapped from `hbls`'s sibling depth-related tracers); tabular.py's
+        # depth_of() treats this standard_name as the pressure-to-depth conversion
+        # rung, so this key resolving correctly matters beyond just find(variable=).
+        "standard_name": "sea_water_pressure",
+    },
+    "sigma_theta": {
+        # ROMS' own diagnostic (ocean_skill.mld computes it the same way offline; see
+        # mld.py's sigma0.name assignment) and the standard CTD-derived quantity a
+        # mooring reports directly.
+        "standard_name": "sea_water_sigma_theta",
     },
     "co2_flux": {
         "standard_name": "surface_downward_mole_flux_of_carbon_dioxide",
