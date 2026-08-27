@@ -1475,11 +1475,15 @@ def _probe_dataframe(df) -> dict[str, Any]:
     by reading the actual data — no source-specific metadata endpoint, so any
     DataFrame-returning reader (ERDDAP or otherwise) is probed identically.
 
-    Columns are read as ``"<name>"`` or ``"<name> (<units>)"`` (the convention
-    ``intake_erddap``'s readers use) — either is accepted, and a
-    ``<name>_qc_agg``/``<name>_qc_tests`` QARTOD pair alongside a column is
-    recognized and excluded (it describes a variable rather than being one), the
-    same modifier-exclusion :func:`_probe` applies to a Dataset's auxiliary fields.
+    Columns are read as ``"<name>"``, ``"<name> (<units>)"``, or ``"<name>[<units>]"``
+    (the parenthesized form is ``intake_erddap``'s own convention; the bracketed one
+    turns up on mooring CSVs that are not ERDDAP-sourced) — coordinate columns
+    (time/lon/lat/depth) are recognized under any of those spellings, case-insensitive
+    and by regex rather than an exact name, via :func:`ocean_skill.tabular
+    .coord_column`. A ``<name>_qc_agg``/``<name>_qc_tests`` QARTOD pair alongside a
+    column, or any column whose name contains the word "flag", is recognized and
+    excluded (it describes a variable rather than being one), the same
+    modifier-exclusion :func:`_probe` applies to a Dataset's auxiliary fields.
 
     That column vocabulary lives in :mod:`ocean_skill.tabular`, which is also what
     *reads* such a table into xarray — one spelling of the convention, so a catalog
@@ -1487,15 +1491,17 @@ def _probe_dataframe(df) -> dict[str, Any]:
     """
     import pandas as pd
 
-    from ocean_skill.tabular import COORD_COLUMNS, is_qc_column, split_units
+    from ocean_skill.tabular import (
+        coord_column,
+        is_coordinate_column,
+        is_qc_column,
+        split_units,
+    )
 
     md: dict[str, Any] = {}
 
-    def _col_prefixed(prefix: str) -> str | None:
-        return next((c for c in df.columns if str(c).startswith(prefix)), None)
-
     axes: dict[str, str] = {}
-    if lon_col := _col_prefixed("longitude"):
+    if lon_col := coord_column(df, "X"):
         axes["X"] = lon_col
         lo = pd.to_numeric(df[lon_col], errors="coerce")
         md["geospatial_lon_min"], md["geospatial_lon_max"] = (
@@ -1503,18 +1509,32 @@ def _probe_dataframe(df) -> dict[str, Any]:
             float(lo.max()),
         )
         md["lon_convention"] = "0-360" if md["geospatial_lon_max"] > 180 else "-180-180"
-    if lat_col := _col_prefixed("latitude"):
+    if lat_col := coord_column(df, "Y"):
         axes["Y"] = lat_col
         la = pd.to_numeric(df[lat_col], errors="coerce")
         md["geospatial_lat_min"], md["geospatial_lat_max"] = (
             float(la.min()),
             float(la.max()),
         )
-    if time_col := _col_prefixed("time"):
+    if time_col := coord_column(df, "T"):
         axes["T"] = time_col
         t = pd.to_datetime(df[time_col], errors="coerce", utc=True)
         md["time_coverage_start"] = str(t.min().date())
         md["time_coverage_end"] = str(t.max().date())
+    if depth_col := coord_column(df, "Z"):
+        # Written for the catalog's own sake (search, map hover text -- see
+        # plot/locations._format_depth) and as depth_of's rung-3 fallback for a
+        # frame whose column depth_of's own (narrower, exact) alias list still
+        # misses -- not consulted by coord_column/coord_axis_of again, so a
+        # mismatch here can never desync axes from what to_dataset later excludes.
+        d = pd.to_numeric(df[depth_col], errors="coerce")
+        finite = d.dropna()
+        if not finite.empty:
+            axes["Z"] = depth_col
+            md["geospatial_vertical_min"], md["geospatial_vertical_max"] = (
+                float(finite.min()),
+                float(finite.max()),
+            )
     if axes:
         md["axes"] = axes
 
@@ -1524,7 +1544,7 @@ def _probe_dataframe(df) -> dict[str, Any]:
         if is_qc_column(col):
             continue
         base, unit = split_units(col)
-        if base in COORD_COLUMNS:
+        if is_coordinate_column(col):
             continue
         std[col] = base
         if unit:

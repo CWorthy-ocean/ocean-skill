@@ -13,9 +13,11 @@ done in ``align`` either (despite what that module's docstring used to say), bec
 same treatment — and because the conversion reads the *catalog entry's* metadata, which
 align never sees.
 
-This module also owns the column-naming vocabulary ERDDAP-style tables use --
-``"<name> (<units>)"``, ``<name>_qc_agg``/``<name>_qc_tests`` QARTOD companions, and
-which column names are coordinates rather than data. :mod:`ocean_skill.build` imports
+This module also owns the column-naming vocabulary tabular sources use --
+``"<name> (<units>)"``/``"<name>[<units>]"``, ``<name>_qc_agg``/``<name>_qc_tests``
+(or a name containing "flag") QARTOD companions, and which columns are coordinates
+(time/lon/lat/depth, recognized by a regex table -- see :func:`coord_column` -- not
+just the exact ERDDAP spelling) rather than data. :mod:`ocean_skill.build` imports
 those helpers rather than keeping its own copy, so the catalog that *describes* a table
 and the code that *reads* one cannot disagree about the convention.
 """
@@ -32,18 +34,33 @@ from ocean_skill import _stacklevel
 
 __all__ = [
     "COORD_COLUMNS",
+    "coord_axis_of",
+    "coord_column",
     "depth_of",
+    "is_coordinate_column",
     "is_frame",
     "is_qc_column",
     "split_units",
     "to_dataset",
 ]
 
-#: Column names that are coordinates, not comparable data.
+#: Column names that are coordinates, not comparable data. Superseded by
+#: :func:`coord_axis_of`, which also catches the ``Latitude[degrees_north]``-style
+#: spellings this fixed set cannot; kept (and still exported) because it is a plain,
+#: dependency-free way to ask "is this exact base a coordinate" without importing the
+#: regex table below.
 COORD_COLUMNS = frozenset({"time", "latitude", "longitude", "z", "depth", "altitude"})
 
 #: Suffixes ``intake_erddap`` gives a variable's QARTOD companion columns.
 _QC_SUFFIXES = ("_qc_agg", "_qc_tests")
+
+#: A QARTOD/QC flag column by name, independent of the intake_erddap suffixes above --
+#: some tables call their flag columns ``Temperature_flag`` or ``QC_Flag`` rather than
+#: ``..._qc_agg``. ``flag`` as a whole token only, split on any run of non-alphanumeric
+#: characters (underscore included, unlike ``\b`` -- ``\b`` does not see a boundary
+#: inside ``Temperature_flag``, since ``_`` counts as a word character) so
+#: ``flagellate_abundance`` is never caught by it.
+_QC_NAME = re.compile(r"(?:^|[^0-9A-Za-z])flag(?:[^0-9A-Za-z]|$)", re.IGNORECASE)
 
 #: ``"<name> (<units>)"`` — the spelling ``intake_erddap``'s readers produce. Any
 #: amount of whitespace (including none) between the name and the paren is accepted
@@ -60,9 +77,54 @@ _COLUMN_UNITS = re.compile(r"^(.+?)\s*\((.+)\)$")
 #: would still prefer that reading.
 _COLUMN_UNITS_BRACKET = re.compile(r"^(.+?)\s*\[(.+)\]$")
 
-#: Depth-bearing columns, most direct first. Pressure is last because it is a
-#: *conversion*, not a reading — see :func:`depth_of`.
-_DEPTH_COLUMNS = ("depth", "depth_reading", "z", "sea_water_pressure")
+#: Depth-bearing columns, most direct first, each with the spellings accepted for it
+#: (matched case-insensitively against :func:`split_units`'s base — so
+#: ``"Depth[m]"``/``"DEPTH"`` reach the same tier as ``"depth"``). Pressure is last
+#: because it is a *conversion*, not a reading — see :func:`depth_of` — and accepts a
+#: couple of shorter spellings (``pressure``, ``pres``) beyond the ERDDAP name.
+#: :data:`_DEPTH_COLUMNS`, the tuple of tier *names* (not spellings) used to report
+#: ``depth_source`` and to rank ``reading`` over ``pressure``, is derived from this so
+#: the two cannot drift apart.
+_DEPTH_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "depth": ("depth",),
+    "depth_reading": ("depth_reading",),
+    "z": ("z",),
+    "sea_water_pressure": ("sea_water_pressure", "pressure", "pres"),
+}
+_DEPTH_COLUMNS = tuple(_DEPTH_COLUMN_ALIASES)
+
+#: Word-token regexes for recognizing a column's axis by name, in the spirit of
+#: cf-pandas'/cf-xarray's own coordinate-criteria regexes (``cf_pandas.criteria
+#: .guess_regex``, ``cf_xarray.criteria``) but narrower on purpose. Matched against
+#: the units-stripped base (:func:`split_units`), case-insensitively, and anchored to
+#: whole tokens — split on any run of non-alphanumeric characters, underscore
+#: included, the same idiom :data:`_QC_NAME` uses — so a word buried inside a longer
+#: name never counts: "month" is not "time", "latency" is not "lat", "zone" is not
+#: "z", "along" is not "lon". cf-pandas' own time regex
+#: (``(?=.*time|min|hour|day|week|month|year)[0-9]*``) matches bare "month" for
+#: exactly this reason; this table refuses that on purpose rather than inheriting it.
+def _token_pattern(*words: str) -> re.Pattern:
+    alt = "|".join(re.escape(w) for w in words)
+    return re.compile(rf"(?:^|[^0-9A-Za-z])(?:{alt})(?:[^0-9A-Za-z]|$)", re.IGNORECASE)
+
+
+_COORD_PATTERNS: dict[str, re.Pattern] = {
+    "T": _token_pattern("time", "date", "datetime", "timestamp"),
+    "X": _token_pattern("longitude", "lon", "long"),
+    "Y": _token_pattern("latitude", "lat"),
+    "Z": _token_pattern("depth", "z", "pressure", "pres"),
+}
+
+#: The subset of ``Z``'s words that name a direct reading rather than a pressure
+#: conversion — used by :func:`coord_column` to prefer a depth-shaped column over a
+#: pressure-shaped one, the same ranking :data:`_DEPTH_COLUMN_ALIASES` encodes.
+_Z_DIRECT_PATTERN = _token_pattern("depth", "z")
+
+#: ``altitude`` is excluded from ``variables`` like the other coordinate names, but
+#: is not claimed as a ``Z`` axis: unlike depth/pressure it has no agreed-on sign
+#: convention here (positive up vs. positive down), so guessing which one a given
+#: file means would be worse than leaving it unassigned.
+_ALTITUDE = "altitude"
 
 #: Entry-metadata keys that state a depth when the data does not.
 _DEPTH_ATTRS = ("nominal_depth_m", "depth", "geospatial_vertical_min")
@@ -92,8 +154,20 @@ def is_frame(obj) -> bool:
 
 
 def is_qc_column(name) -> bool:
-    """Whether ``name`` is a variable's QARTOD companion rather than a variable."""
-    return str(name).endswith(_QC_SUFFIXES)
+    """Whether ``name`` is a variable's QARTOD companion rather than a variable.
+
+    Two independent tells: the ``intake_erddap`` QARTOD suffixes
+    (``..._qc_agg``/``..._qc_tests``), checked against the raw name since they are not
+    something :func:`split_units` would ever strip as units; and the word ``flag``
+    appearing anywhere in the units-stripped base (``Temperature_flag``,
+    ``QC_Flag[1]``) — tables that are not ERDDAP-sourced tend to spell their QC
+    companions this way instead.
+    """
+    raw = str(name)
+    if raw.endswith(_QC_SUFFIXES):
+        return True
+    base, _ = split_units(raw)
+    return bool(_QC_NAME.search(base))
 
 
 def split_units(column) -> tuple[str, str | None]:
@@ -110,17 +184,90 @@ def split_units(column) -> tuple[str, str | None]:
     return (match.group(1), match.group(2)) if match else (str(column), None)
 
 
-def _axis_column(df, meta: dict[str, Any], axis: str, prefix: str) -> str | None:
-    """Return the column holding ``axis`` (``T``/``X``/``Y``), or ``None``.
+def coord_column(df, axis: str) -> str | None:
+    """Return the column naming ``axis`` (``T``/``X``/``Y``/``Z``) by its own spelling.
+
+    Tried in column order against :data:`_COORD_PATTERNS`. ``Z`` is tried twice — a
+    depth/z-shaped name first, a pressure-shaped one only if no direct reading is
+    named — the same preference :func:`depth_of` gives an actual reading over a
+    conversion from pressure.
+
+    ``T`` alone has one more rung when no column *name* matches at all: a single
+    datetime64-typed column is assumed to be time (two or more, and the ambiguity is
+    left unresolved rather than guessed at). No such fallback exists for X/Y/Z —
+    dtype alone cannot tell a longitude column from any other float column the way it
+    can tell a timestamp from one.
+    """
+    if axis == "Z":
+        for pattern in (_Z_DIRECT_PATTERN, _COORD_PATTERNS["Z"]):
+            match = next(
+                (c for c in df.columns if pattern.search(split_units(str(c))[0])),
+                None,
+            )
+            if match is not None:
+                return str(match)
+        return None
+    pattern = _COORD_PATTERNS[axis]
+    match = next(
+        (c for c in df.columns if pattern.search(split_units(str(c))[0])), None
+    )
+    if match is not None:
+        return str(match)
+    if axis == "T":
+        import pandas as pd
+
+        datetime_cols = [
+            c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])
+        ]
+        if len(datetime_cols) == 1:
+            return str(datetime_cols[0])
+    return None
+
+
+def coord_axis_of(column) -> str | None:
+    """Return the axis (``T``/``X``/``Y``/``Z``) ``column`` names by its spelling.
+
+    ``None`` for a data column, and also for ``altitude`` — excluded from
+    ``variables`` the same as a real axis (see :func:`is_coordinate_column`) but not
+    claimed as ``Z``, since unlike depth/pressure it carries no agreed-on sign here.
+    Does not consult a datetime dtype the way :func:`coord_column`'s ``T`` fallback
+    does: this only ever sees one column's *name*, and a column being datetime64
+    says nothing about which axis a caller already believes it to be.
+    """
+    base = split_units(str(column))[0]
+    if base.strip().casefold() == _ALTITUDE:
+        return None
+    for axis, pattern in _COORD_PATTERNS.items():
+        if pattern.search(base):
+            return axis
+    return None
+
+
+def is_coordinate_column(column) -> bool:
+    """Whether ``column`` describes *where*/*when*, not a comparable measurement.
+
+    The exclusion :func:`ocean_skill.build._probe_dataframe` and :func:`to_dataset`
+    both apply before a column can become a ``variables``/data entry — the union of
+    :func:`coord_axis_of` (T/X/Y/Z by name) and ``altitude``, which
+    :func:`coord_axis_of` deliberately leaves unassigned to an axis but which is
+    still not a measurement to carry through as data.
+    """
+    base = split_units(str(column))[0].strip().casefold()
+    return base == _ALTITUDE or coord_axis_of(column) is not None
+
+
+def _axis_column(df, meta: dict[str, Any], axis: str) -> str | None:
+    """Return the column holding ``axis`` (``T``/``X``/``Y``/``Z``), or ``None``.
 
     The entry's ``axes`` map is the contract and is tried first — guessing would fail on
     exactly the spellings in play (``"time (UTC)"``, ``"latitude (degrees_north)"``).
-    The prefix match is the fallback for a frame from a reader that declared no axes.
+    :func:`coord_column`'s regex match is the fallback for a frame from a reader that
+    declared no axes.
     """
     named = (meta.get("axes") or {}).get(axis)
     if named is not None and named in df.columns:
         return str(named)
-    return next((str(c) for c in df.columns if str(c).startswith(prefix)), None)
+    return coord_column(df, axis)
 
 
 def _units_map(df, meta: dict[str, Any]) -> dict[str, str]:
@@ -163,9 +310,10 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
     attribute on the entry, or nothing at all — so this is a ranked search that always
     reports *which* rung it landed on, rather than a rule pretending they are alike:
 
-    1. a depth **column** with finite values (``depth``, ``depth_reading``, ``z``);
-    2. **pressure** (``sea_water_pressure``), converted at 1 dbar ~ 1 m and flagged
-       ``approximate``;
+    1. a depth **column** with finite values (``depth``, ``depth_reading``, ``z``, and
+       their case-insensitive/``[units]`` variants);
+    2. **pressure** (``sea_water_pressure``, ``pressure``, ``pres``), converted at
+       1 dbar ~ 1 m and flagged ``approximate``;
     3. an **attribute** on the catalog entry (``nominal_depth_m``, ``depth``,
        ``geospatial_vertical_min``);
     4. **nothing** — assume the surface, and say so.
@@ -182,8 +330,11 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
     """
     candidates: dict[str, np.ndarray] = {}
     placeholders: list[str] = []
-    for name in _DEPTH_COLUMNS:
-        column = next((c for c in df.columns if split_units(c)[0] == name), None)
+    for name, aliases in _DEPTH_COLUMN_ALIASES.items():
+        column = next(
+            (c for c in df.columns if split_units(c)[0].strip().casefold() in aliases),
+            None,
+        )
         if column is None:
             continue
         values = np.asarray(df[column], dtype="float64")
@@ -273,15 +424,15 @@ def to_dataset(df, meta: dict[str, Any]):
     import xarray as xr
 
     subject = meta.get("datasetID") or meta.get("title") or "this source"
-    time_col = _axis_column(df, meta, "T", "time")
+    time_col = _axis_column(df, meta, "T")
     if time_col is None:
         raise ValueError(
             f"{subject}: no time column, so this table cannot become a time series. "
             "Give the catalog entry an axes mapping such as "
             '`axes={"T": "time (UTC)"}`, or name the column "time".'
         )
-    lon_col = _axis_column(df, meta, "X", "longitude")
-    lat_col = _axis_column(df, meta, "Y", "latitude")
+    lon_col = _axis_column(df, meta, "X")
+    lat_col = _axis_column(df, meta, "Y")
 
     # Timezone matters twice over, and both bite silently. A tz-aware coordinate cannot
     # be written to zarr, and cache.save only *warns* when a write fails -- so a
@@ -327,8 +478,9 @@ def to_dataset(df, meta: dict[str, Any]):
         if column in (time_col, lon_col, lat_col):
             continue
         base, _ = split_units(column)
-        if base in COORD_COLUMNS:
-            # Coordinate columns by name (`z`, `depth`, `altitude`) describe where the
+        if is_coordinate_column(column):
+            # Coordinate columns (time/lon/lat/depth/pressure/altitude, by name or
+            # regex-recognized variant -- see is_coordinate_column) describe where the
             # measurements were taken; depth_of has already read them, and carrying a
             # flat placeholder alongside the data as if it were a variable invites it
             # being compared. The same exclusion build.py applies to standard_names.
