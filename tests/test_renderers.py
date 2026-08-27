@@ -997,6 +997,28 @@ def _section_field() -> xr.DataArray:
     )
 
 
+def _section_row_item() -> dict:
+    """One section_row spec item: what a section comparison's ``as_item()`` builds.
+
+    Reuses :func:`_section_field`'s fixed-depth (z, along) shape for all three
+    lanes -- a comparison section is always fixed-z (see
+    :func:`ocean_skill.plot.section.prepare_section_row`), the same shape the
+    model-only ``section`` family's own item carries under ``"field"`` instead of
+    a test/reference/difference trio under ``"aligned"``.
+    """
+    test = _section_field()
+    reference = test + 0.5
+    return {
+        "aligned": {"test": test, "reference": reference, "difference": test - reference},
+        "units": "mmol m-3",
+        "standard_name": None,
+        "depth": None,
+        "time": None,
+        "metrics": {"bias": 0.125, "rmse": 0.5, "corr": 0.98},
+        "labels": ("GOM_bgc", "woa23"),
+    }
+
+
 _INTERACTIVE_FAMILIES = {
     "field_row": lambda: [
         _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
@@ -1014,6 +1036,7 @@ _INTERACTIVE_FAMILIES = {
             "label": "GOM_bgc",
         }
     ],
+    "section_row": lambda: [_section_row_item()],
     "field_facet": lambda: [
         {
             "field": _facet_field(),
@@ -1094,7 +1117,7 @@ _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 #: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
 #: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
 #: covers instead: warned and dropped, same as any other unusable option.
-_NO_DOMAIN_FAMILIES = {"section"}
+_NO_DOMAIN_FAMILIES = {"section", "section_row"}
 
 
 def _hv_paths(obj) -> list:

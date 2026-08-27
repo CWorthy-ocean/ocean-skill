@@ -593,6 +593,15 @@ def path_of(obj) -> str | None:
     return ALONG_DIM
 
 
+#: Vertical-axis dimension names a section lane may carry: ``"z"`` from
+#: :func:`ocean_skill.roms.to_depth` (negative-down), or an observational
+#: product's own level axis (positive-down) before :func:`_align_along_path`
+#: renames it onto ``"z"``. One tuple so the two speak the same vocabulary --
+#: :func:`ocean_skill.comparison._prepare`'s own observational ``zname`` lookup
+#: is this list's tail (``SECTION_VERTICAL_DIMS[1:]``).
+SECTION_VERTICAL_DIMS: tuple[str, ...] = ("z", "depth", "depth_surface", "lev")
+
+
 def _wrap_lon(lon: float, convention: str) -> float:
     """Put a single longitude in ``convention``, as :func:`harmonize_longitude` does."""
     return lon % 360 if convention == "0-360" else ((lon + 180) % 360) - 180
@@ -1719,6 +1728,31 @@ def align(
     # to regrid, so doing it after would pay for every step of the finer lane and then
     # throw most of them away.
     report: dict[str, Any] = {}
+
+    # A vertical section has no cells to regrid onto either -- both lanes are already
+    # reduced to columns along one shared path (see Comparison's transect route, which
+    # prepares the reference at the test lane's own snapped points) -- so this is
+    # detected early, the same way a station reference is, and for the same reason: a
+    # mismatch or an incompatible over= has to be refused before match_axis/_require_2d
+    # apply rules that assume a real grid.
+    section_test, section_reference = path_of(test), path_of(reference)
+    if (section_test is None) != (section_reference is None):
+        raise ValueError(
+            "one lane is a vertical section (a select={'transect': ...} result) "
+            "and the other is not -- both must sample the same transect path. "
+            "This is Comparison's own job to arrange (it prepares the reference "
+            "at the test lane's own snapped points); a direct align() call needs "
+            "to pass two section lanes or two ordinary ones, not a mix."
+        )
+    is_section = section_test is not None
+    if is_section and over is not None:
+        raise ValueError(
+            "over= scores a pair cell by cell along one further axis, but a "
+            "vertical section already stands on two axes (depth and along-path "
+            "distance) -- scoring a third axis per section cell is a follow-up, "
+            "not yet built. Drop over= for a section comparison."
+        )
+
     if over is not None:
         test, reference, report = match_axis(
             test,
@@ -1734,8 +1768,12 @@ def align(
         over = str(report.pop("axis", over))
 
     keep = () if over is None else (over,)
-    _require_2d(test, "test", keep=keep)
-    _require_2d(reference, "reference", keep=keep)
+    if not is_section:
+        # A section's own shape (vertical + along-path) is validated with its own,
+        # more specific messages inside _align_along_path instead -- _require_2d's
+        # "beyond its horizontal axes" reading does not apply to it.
+        _require_2d(test, "test", keep=keep)
+        _require_2d(reference, "reference", keep=keep)
 
     test = _check_units(test, reference)
 
@@ -1744,11 +1782,23 @@ def align(
     # never gets cropped — and its derived cell corners fold, so a conservative
     # regrid paints the test across oceans it never covered (see
     # :func:`natural_convention`). The reference follows the test so both lanes,
-    # the bbox and the crop all speak one convention.
+    # the bbox and the crop all speak one convention. Safe for a section lane too:
+    # harmonize_longitude only re-sorts a longitude that is itself a *dimension*
+    # coordinate, and a section's lon rides on `along`, not on its own dimension --
+    # the path's order survives untouched.
     if convention == "auto":
         convention = natural_convention(test)
     test = harmonize_longitude(test, convention)
     reference = harmonize_longitude(reference, convention)
+
+    if is_section:
+        return _align_along_path(
+            test,
+            reference,
+            convention=convention,
+            test_name=test_name,
+            reference_name=reference_name,
+        )
 
     # A point reference has no grid to regrid onto: the test lane is *sampled* at the
     # station instead (see _align_at_point). Everything up to here -- the axis matching,
@@ -1930,6 +1980,239 @@ def _align_at_point(
     if over is not None:
         out.attrs["scored_over"] = over
         out.attrs.update(report)
+    return out
+
+
+def _along_spacing_km(da) -> float:
+    """Return the median along-path column spacing (km), or NaN if unmeasurable."""
+    values = np.asarray(da[ALONG_DIM], dtype="float64")
+    if values.size < 2:
+        return float("nan")
+    return float(np.median(np.diff(values)))
+
+
+def _section_target(test, reference) -> tuple[str, str]:
+    """Decide which lane's along-path columns the pair lands on: the coarser one.
+
+    The along-path counterpart of :func:`_regrid_target`, with the same measurement
+    and the same hysteresis (:data:`COARSER_BY`): whichever lane's columns are
+    spaced farther apart becomes the frame, since averaging the finer lane's
+    columns into the coarser one's is what a coarser resolution *means* — aimed
+    the other way it would invent along-path structure the coarse lane never had.
+    Ties (comparable resolutions — the ordinary model-vs-model case) keep the
+    reference, the same default direction :func:`_regrid_target` uses for the same
+    reason: it is the frame nothing has to justify.
+    """
+    test_km, reference_km = _along_spacing_km(test), _along_spacing_km(reference)
+    if (
+        not np.isfinite(test_km)
+        or not np.isfinite(reference_km)
+        or test_km <= 0
+        or reference_km <= 0
+    ):
+        return (
+            "reference",
+            "a lane's column spacing could not be measured, so the reference "
+            "stays the frame",
+        )
+    if test_km >= COARSER_BY * reference_km:
+        return (
+            "test",
+            f"the reference's columns (~{reference_km:.3g} km apart) are "
+            f"materially finer than the test's (~{test_km:.3g} km), so the "
+            "reference is binned onto the test's coarser columns",
+        )
+    return (
+        "reference",
+        f"the reference's columns (~{reference_km:.3g} km apart) are not "
+        f"materially finer than the test's (~{test_km:.3g} km), so the test is "
+        "binned onto the reference's columns",
+    )
+
+
+def _bin_into_frame(frame, moving, *, frame_lon: str, frame_lat: str):
+    """Return ``(frame_trimmed, moving_binned, offsets_km)``.
+
+    ``moving``'s along-path columns are grouped onto whichever of ``frame``'s
+    columns they are great-circle-nearest to (:func:`_haversine_km`, periodic in
+    longitude, so a path crossing the antimeridian needs no special-casing here),
+    then mean-reduced per group (``skipna=True`` — one masked column should not
+    blank out a whole bin). A ``frame`` column no ``moving`` column lands near
+    simply has no group and is dropped from ``frame_trimmed`` along with it —
+    the section shrinks to the columns both lanes actually speak to, rather than
+    padding the gap with fabricated data.
+
+    ``offsets_km`` is each ``moving`` column's distance to the ``frame`` column it
+    was grouped into, for the caller's own coverage check: a large offset means
+    ``moving``'s path wandered away from anything ``frame`` covers, not that
+    resolutions merely differ.
+    """
+    moving_lon_name, moving_lat_name = _lon_name(moving), _lat_name(moving)
+    frame_lon_vals = np.asarray(frame[frame_lon], dtype="float64")
+    frame_lat_vals = np.asarray(frame[frame_lat], dtype="float64")
+    moving_lon_vals = np.asarray(moving[moving_lon_name], dtype="float64")
+    moving_lat_vals = np.asarray(moving[moving_lat_name], dtype="float64")
+
+    j = np.array(
+        [
+            int(np.argmin(_haversine_km(frame_lon_vals, frame_lat_vals, lo, la)))
+            for lo, la in zip(moving_lon_vals, moving_lat_vals, strict=True)
+        ]
+    )
+    offsets_km = _haversine_km(frame_lon_vals[j], frame_lat_vals[j], moving_lon_vals, moving_lat_vals)
+
+    label = xr.DataArray(j, dims=ALONG_DIM, name="_osk_section_bin")
+    # Coordinates riding on the along dim (this lane's own lon/lat) do not survive
+    # a groupby reduction -- xarray drops them rather than guess how to combine
+    # them, and averaging lon/lat directly would be dubious near the antimeridian
+    # anyway. The frame's own positions are reattached below instead, which is
+    # the right answer regardless: once several `moving` columns are averaged
+    # into one, they no longer have a single position of their own -- they are
+    # now data attached to the frame's column.
+    attrs = dict(moving.attrs)
+    binned = moving.groupby(label).mean(ALONG_DIM, skipna=True)
+    binned.attrs = attrs
+    binned = binned.rename({"_osk_section_bin": ALONG_DIM})
+
+    kept = np.asarray(binned[ALONG_DIM].values)
+    frame_trimmed = frame.isel({ALONG_DIM: kept})
+    binned = binned.assign_coords(
+        {
+            ALONG_DIM: frame_trimmed[ALONG_DIM].values,
+            frame_lon: (ALONG_DIM, np.asarray(frame_trimmed[frame_lon].values)),
+            frame_lat: (ALONG_DIM, np.asarray(frame_trimmed[frame_lat].values)),
+        }
+    )
+    return frame_trimmed, binned, offsets_km
+
+
+def _align_along_path(
+    test, reference, *, convention: str, test_name: str, reference_name: str
+) -> xr.Dataset:
+    """Pair a model section with a reference sampled along the same path.
+
+    The section counterpart of the regrid in :func:`align`: both lanes are
+    already reduced to columns along one shared transect (test's own path;
+    reference sampled at the test's snapped points — see
+    :meth:`ocean_skill.comparison.Comparison.align`'s transect route), so there
+    is no 2-D grid to regrid onto and nothing here calls xesmf. What is left is
+    two housekeeping steps a real grid regrid does not need: putting both lanes'
+    depth lists on one shared ``z`` coordinate, and reconciling their along-path
+    columns, which differ even when both were asked for the same points — a
+    coarser lane's sampler collapses points that land in the same cell and
+    reports its own cells' positions, not the request's (see
+    :func:`ocean_skill.transect.sample_along`).
+    """
+    test_extra = [d for d in test.dims if d not in (ALONG_DIM, "z")]
+    if "z" not in test.dims:
+        raise ValueError(
+            f"the test lane still has its native vertical axis ({sorted(test.dims)}) "
+            "-- a section comparison needs fixed depths on both lanes: "
+            "select={'transect': ..., 'depth': [50, 200, ...]}."
+        )
+    if test_extra:
+        raise ValueError(
+            f"the test lane still has {test_extra} beyond depth and the "
+            "along-path axis -- collapse it with aggregate= or narrow it with "
+            "select= (most often a surviving time axis)."
+        )
+    ref_vdim = next((d for d in SECTION_VERTICAL_DIMS if d in reference.dims), None)
+    if ref_vdim is None:
+        raise ValueError(
+            "the reference has no vertical axis along this section -- a "
+            "surface-only product cannot be compared against a section, which "
+            "needs levels on both sides. Compare at the surface as a map "
+            "instead (drop select={'transect': ...})."
+        )
+    ref_extra = [d for d in reference.dims if d not in (ALONG_DIM, ref_vdim)]
+    if ref_extra:
+        raise ValueError(
+            f"the reference lane still has {ref_extra} beyond depth and the "
+            "along-path axis -- collapse it with aggregate= or narrow it with "
+            "select=."
+        )
+
+    if reference.sizes[ref_vdim] != test.sizes["z"]:
+        raise ValueError(
+            f"the test lane has {test.sizes['z']} depth(s) and the reference "
+            f"has {reference.sizes[ref_vdim]} -- both lanes need the same depth "
+            "list, in the same order (select={'depth': [...]})."
+        )
+    reference_levels = (
+        [-float(v) for v in np.asarray(reference["z"])]
+        if ref_vdim == "z"
+        else [float(v) for v in np.asarray(reference[ref_vdim])]
+    )
+    if ref_vdim != "z":
+        reference = reference.rename({ref_vdim: "z"})
+    reference = reference.assign_coords(z=test["z"])
+
+    # Captured before binning replaces each lane's own along coordinate (and so
+    # loses whatever attrs rode on it) with the frame's.
+    test_path_method = test[ALONG_DIM].attrs.get("path_method", "")
+    reference_path_method = reference[ALONG_DIM].attrs.get("path_method", "")
+
+    target, reason = _section_target(test, reference)
+    if target == "reference":
+        lon_r, lat_r = _lon_name(reference), _lat_name(reference)
+        reference, test, offsets_km = _bin_into_frame(
+            reference, test, frame_lon=lon_r, frame_lat=lat_r
+        )
+    else:
+        lon_t, lat_t = _lon_name(test), _lat_name(test)
+        test, reference, offsets_km = _bin_into_frame(
+            test, reference, frame_lon=lon_t, frame_lat=lat_t
+        )
+
+    frame = reference if target == "reference" else test
+    frame_spacing = _along_spacing_km(frame)
+    threshold = max(
+        1.5 * (frame_spacing if np.isfinite(frame_spacing) and frame_spacing > 0 else 1.0),
+        1.0,
+    )
+    uncovered = offsets_km > threshold
+    if uncovered.any():
+        moving_role = test_name if target == "reference" else reference_name
+        frame_role = reference_name if target == "reference" else test_name
+        along_km = np.asarray(frame[ALONG_DIM])
+        lo_km, hi_km = float(along_km.min()), float(along_km.max())
+        raise ValueError(
+            f"the {frame_role} lane does not cover {int(uncovered.sum())} of the "
+            f"{moving_role} lane's columns (roughly km {lo_km:.0f}-{hi_km:.0f} "
+            "along the path) -- trim the transect to the region both sources "
+            "span, or compare against a reference that covers it."
+        )
+
+    # No renaming needed here, unlike the station branch: once several of the
+    # moving lane's columns have been averaged into one, they no longer have a
+    # position of their own to disambiguate from the frame's -- both lanes
+    # already carry the frame's own lon/lat/along (see _bin_into_frame), so the
+    # Dataset below merges them as the same coordinate, not a conflicting one.
+    out = xr.Dataset(
+        {test_name: test, reference_name: reference, "difference": test - reference}
+    )
+    out["difference"].attrs = {
+        "long_name": f"{test_name} − {reference_name}",
+        "units": reference.attrs.get("units", ""),
+    }
+    out.attrs["section_length_km"] = float(np.asarray(frame[ALONG_DIM]).max())
+    out.attrs["n_points"] = int(frame.sizes[ALONG_DIM])
+    out.attrs["path_method"] = test_path_method
+    out.attrs["reference_path_method"] = reference_path_method
+    out.attrs["lon_convention"] = convention
+    out.attrs["reference_levels"] = reference_levels
+    out.attrs["max_column_offset_km"] = float(np.max(offsets_km)) if offsets_km.size else 0.0
+    out.attrs["section_target"] = target
+
+    coverage = np.isfinite(test).any("z") & np.isfinite(reference).any("z")
+    frac = float(coverage.mean()) if coverage.size else 0.0
+    if frac < 0.5:
+        warnings.warn(
+            f"only {frac:.0%} of the section's columns have any valid data on "
+            "both lanes -- likely land gaps in one or both sources, or a "
+            "reference that only partly covers the path.",
+            stacklevel=_stacklevel.find(),
+        )
     return out
 
 

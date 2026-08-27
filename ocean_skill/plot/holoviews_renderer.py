@@ -248,8 +248,6 @@ def _quadmesh(
         "rasterize": rasterize,
         "logz": log,
     }
-    if invert_y:
-        opts["invert_yaxis"] = True
     if bgcolor is not None:
         opts["bgcolor"] = bgcolor
     if rasterize:
@@ -305,7 +303,7 @@ def _quadmesh(
             # (the image comes back with zero finite values), and one in Web Mercator
             # metres is just ignored, since hvplot's geo xlim/ylim are read as lon/lat.
     try:
-        return da.hvplot.quadmesh(**opts)
+        result = da.hvplot.quadmesh(**opts)
     except Exception:  # pragma: no cover - geoviews/cartopy unavailable
         opts.pop("geo", None)
         opts.pop("coastline", None)
@@ -315,7 +313,15 @@ def _quadmesh(
         # dimensions to project them), which breaks on 2-D curvilinear lon/lat
         # coordinates -- there is no basemap to fall back to without geo anyway.
         opts.pop("tiles", None)
-        return da.hvplot.quadmesh(**opts)
+        result = da.hvplot.quadmesh(**opts)
+    if invert_y:
+        # Not folded into `opts` above: hvplot's own constructor-time option
+        # resolution does not recognize "invert_yaxis" for a quadmesh (it warns
+        # "option not found" and silently drops it, even though the *element's*
+        # bokeh plot class accepts it fine) -- confirmed by applying it via
+        # .opts() on the already-built element instead, which this does.
+        result = result.opts(invert_yaxis=True)
+    return result
 
 
 def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
@@ -767,6 +773,103 @@ def _section(
         invert_y=True,
         bgcolor="#d9d9d9",
     )
+
+
+def _section_row(
+    item: dict[str, Any],
+    labels=("test", "reference"),
+    shared_axes: bool = True,
+    metric_keys=DEFAULT_METRIC_KEYS,
+    title: str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    **_,
+):
+    """Test | reference | difference vertical sections, as three linked interactive maps.
+
+    The section counterpart of :func:`_field_row`: the same shared-axes linking and
+    the same metrics-folded-into-the-difference-title convention, but drawn through
+    :func:`ocean_skill.plot.section.prepare_section_row` and the same non-geographic
+    :func:`_quadmesh` bundle :func:`_section` draws its own single panel through
+    (``geo=False``, a section's own axis names/aspect/inverted-y/grey background)
+    rather than the geographic one :func:`_field_row` uses.
+
+    A comparison section is never stacked into a grid (see
+    :class:`~ocean_skill.comparison.ComparisonSet`'s own refusal on more than one
+    ``section_row``), so unlike :func:`_field_row` there is no ``row_label`` or
+    ``domain`` to thread through here. The title default is likewise owned inside
+    this function rather than a grid caller passing one in: it needs the path's own
+    endpoints (:attr:`~ocean_skill.plot.section.SectionGeometry.path_note`), which
+    only :func:`~ocean_skill.plot.section.prepare_section_row` can supply.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.section import prepare_section_row
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    hv = _extension()
+    factor = _canvas_factor(size, zoom)
+    values, geometry = prepare_section_row(item["aligned"])
+    t, r, d = values["test"], values["reference"], values["difference"]
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    if title is None:
+        title = suptitle_text(
+            standard_name, (item.get("depth"), item.get("time"), geometry.path_note)
+        )
+    seq, div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+    vmin, vmax = _limits(t, r)
+    if log:
+        vmin = max(vmin, 1e-6)
+    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    tl, rl = labels
+    raster = _should_rasterize(t, rasterize)
+
+    diff_title = "difference"
+    summary = _metrics_summary(item.get("metrics"), metric_keys)
+    if summary:
+        diff_title = f"difference ({summary})"
+
+    section_opts = dict(
+        geo=False,
+        x=geometry.x_name,
+        y=geometry.y_name,
+        aspect=SECTION_ASPECT,
+        invert_y=True,
+        bgcolor="#d9d9d9",
+        axis_labels=(geometry.x_label, geometry.y_label),
+        font_scale=font_scale,
+        canvas_factor=factor,
+        hover=hover,
+        rasterize=raster,
+    )
+    panels = [
+        _quadmesh(
+            t, title=str(tl), cmap=seq, clim=(vmin, vmax), units=units, log=log,
+            **section_opts,
+        ),
+        _quadmesh(
+            r, title=str(rl), cmap=seq, clim=(vmin, vmax), units=units, log=log,
+            **section_opts,
+        ),
+        _quadmesh(
+            d,
+            title=diff_title,
+            cmap=div,
+            clim=(-dmax, dmax),
+            units=f"test − reference {units}",
+            **section_opts,
+        ),
+    ]
+    row = panels[0] + panels[1] + panels[2]
+    row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        row = row.opts(title=str(title))
+    return row
 
 
 def _station_overlay(stations, name: str, colors, da, *, geo: bool):
@@ -2443,6 +2546,15 @@ def render(spec, **kwargs: Any):
             )
             opts.pop("domain", None)
         return _section(spec.single, **opts)
+    if family == "section_row":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of section_row -- a section has no map "
+                "to outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _section_row(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
     if family == "locations":

@@ -39,6 +39,7 @@ FAMILIES = (
     "facet_movie",
     "series",
     "section",
+    "section_row",
     "skill_map",
     "taylor",
     "target",
@@ -105,9 +106,21 @@ class PlotSpec:
         1-D ``lon``/``lat`` coordinates (see
         :func:`ocean_skill.align.path_of`) — so it draws as one depth-by-distance
         panel rather than map panels. Built by
-        :meth:`ocean_skill.field.Field.as_item`; there is no comparison
-        counterpart yet (matching a section against a dataset is a follow-up),
-        so no ``aligned``-carrying twin of this family exists.
+        :meth:`ocean_skill.field.Field.as_item`.
+
+        ``section_row`` is that comparison counterpart: ``field_row``'s item shape
+        (``aligned`` carrying the ``test``/``reference``/``difference`` trio, plus
+        ``metrics``/``units``/``standard_name``/``depth``/``time``/``labels``) but
+        each lane two-dimensional on depth and along-path distance rather than
+        longitude and latitude, fixed-depth (``z``, negative-down) on every lane —
+        two sources' native verticals share no axis to compare on, so a comparison
+        section is never native s-levels the way a model-only ``section`` may be.
+        Built by :meth:`ocean_skill.comparison.Comparison.as_item` for a
+        comparison whose ``select`` cuts a transect (see
+        :attr:`~ocean_skill.comparison.Comparison.is_section`); has no
+        ``field_grid``-style stack of its own (``section_grid`` is a follow-up —
+        see :class:`~ocean_skill.comparison.ComparisonSet`'s refusal on more than
+        one ``section_row``).
 
         ``locations`` carries no field payload at all: one item per catalog *source*,
         with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``

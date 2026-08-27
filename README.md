@@ -313,8 +313,26 @@ picker = osk.pick_path("pac_dt_ramp")          # click waypoints on the domain m
 osk.field("pac_dt_ramp", NITRATE, select=picker.as_select()).plot()
 ```
 
-Matching a section against a dataset (rather than a model-only `osk.field()`) is a
-follow-up.
+**Matching a section against a dataset** works the same way through `osk.compare()` —
+the reference is sampled at exactly the same points the model's own path resolved
+to, so comparing the two is pairing columns along the path, not regridding one grid
+onto another. The pair lands on whichever lane's along-path spacing is coarser (the
+same house rule a map comparison's own regridding follows), and an explicit
+`select={"depth": [...]}` list is required — two lanes' native verticals share no
+axis to guess a common one from:
+
+```python
+osk.compare(
+    test="pac_dt_ramp", reference="woa23_nitrate", variables=[NITRATE],
+    select={"transect": {"waypoints": [[150.0, 10.0], [175.0, 15.0], [-160.0, 20.0]]},
+            "depth": [0, 50, 100, 200, 400, 700, 1000],
+            "time": "2013"},
+    aggregate={"time": "mean"},
+).plot(renderer="both")        # test | reference | difference sections + metrics
+```
+
+Every transect form above works here too, and the reference can be another model
+run just as well as a climatology.
 
 **Where is the hot spot, and how did it get there?** — a map naturally raises that
 question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid

@@ -654,6 +654,11 @@ labels.
 physics.plot(shared_axis_labels=False)   # every panel gets its own lat/lon labels
 ```
 
+`section_row` takes the same parameter for the same reason, on its own single
+non-geographic axis: with no lat/lon gridlines to draw, it decides whether the
+depth label repeats on all three panels or only the leftmost, since the other
+two share the same depth axis.
+
 ### `labels` (summary diagrams)
 
 `taylor`, `target` and `paired` only. Chooses how each point is identified:
@@ -989,8 +994,8 @@ every other longitude-aware function in this package is.
 For an interactive alternative to typing waypoints by hand, `osk.pick_path(source)`
 opens a click-to-add-waypoints map in a live notebook — see its own docstring.
 
-Model-only for now (`osk.field`, not `osk.compare`) — matching a section against a
-dataset is a follow-up.
+Matching a section against a gridded dataset (`osk.compare`, not just `osk.field`)
+draws through the `section_row` family instead — see below.
 
 ### Axis conventions
 
@@ -1018,6 +1023,68 @@ options of `section()` — the static renderer raises naming the reason, the
 interactive one warns and drops. `mark="pcolormesh"` (default) or `"contourf"`,
 the same two the map families accept; bokeh always draws a mesh regardless (`mark`
 has no interactive effect, same as every map family).
+
+## The `section_row` family (a section matched against a dataset)
+
+A comparison whose `select` cuts a transect draws `test | reference | difference`
+sections instead of maps — `field_row` with `section`'s depth-by-distance axes
+substituted for the map:
+
+```python
+osk.compare(
+    test="run_new", reference="woa23_nitrate", variables=["nitrate"],
+    select={"transect": {"waypoints": [[147.0, 35.0], [175.0, 45.0], [-160.0, 50.0]]},
+            "depth": [0, 50, 100, 200, 400, 700, 1000],
+            "time": "2013"},
+    aggregate={"time": "mean"},
+).plot(renderer="both")
+```
+
+Every transect form `section` accepts works here too — grid index, waypoints, a
+fixed lon/lat line, resolved `points`, or `osk.pick_path`'s output — and the
+reference can be another model run just as well as a climatology.
+
+**Both lanes are reduced to columns at the same lon/lat positions along the
+path — never a 2-D regrid.** The test lane is prepared first; the reference is
+then sampled at exactly those same points, so comparing the two is pairing
+columns, not interpolating one grid onto another.
+
+**The pair lands on the coarser lane's along-path resolution** — the same
+house rule a map comparison's own regridding follows: whichever lane has fewer
+columns along the path keeps its own, and the finer lane's columns are
+mean-binned into them (nearest-column grouping, then a per-level mean).
+Comparable resolutions pair one-to-one instead, with no averaging — the
+identity for two lanes on the same grid. Which lane moved, if either did, is
+recorded in the aligned pair's attrs (`section_target`).
+
+A comparison section needs an explicit `select={"depth": [...]}` list — two
+lanes' native s-levels or observational levels share no axis to compare on, so
+nothing is guessed. A scalar depth, a depth band, a one-element list or a
+vertical aggregate are all refused for the same reason, each with a suggestion.
+`over=`, `sigma0` and a pair-spec `select` are refused too — each names its own
+follow-up.
+
+### Axis conventions and layout
+
+Exactly `section`'s: positive-down depth, y-axis inverted, along-path distance
+in kilometres, below-bathymetry/off-domain cells grey. Test and reference share
+one colour scale (10th–90th percentile of the pair); the difference panel is
+diverging and centred on zero; metrics go in the difference panel's corner box
+(statically) or fold into its title (interactively) — precisely as `field_row`
+draws a gridded comparison, just against depth and along-path distance rather
+than longitude and latitude. The title carries the depth list, time and the
+path's own endpoints (`29.0°N, 94.5°W → 27.5°N, 90.0°W`) in place of a region.
+
+There is no `domain`, `region`, `gridline_kwargs`, `tick_label_kwargs` or
+`row_label` — a section has no map to outline, and it is always the only (and
+so also the bottom) row. `metrics(weighted=False)` — cos-lat area weights mean
+nothing for section cells — and `pointwise_metrics()` is refused (there is no
+further axis to score over).
+
+A `section_row` is never stacked into a grid: more than one in a
+`ComparisonSet.plot()` is refused (`section_grid` is a follow-up), and
+`ComparisonSet.movie()` refuses a set containing one (time-animated sections
+are a follow-up too).
 
 ## The `locations` family (dataset map, and selection map)
 
