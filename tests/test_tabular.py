@@ -157,7 +157,12 @@ def test_build_and_tabular_share_one_parser():
 
 
 def ctd_frame(n: int = 5):
-    """A non-ERDDAP mooring CSV's own convention: capitalized, ``[units]``-suffixed."""
+    """A non-ERDDAP CTD profile's own convention: capitalized, ``[units]``-suffixed,
+    with a WOCE-style ``_flag`` companion column -- the pair-shaped tabular source
+    :mod:`ocean_skill.qc` is built around. Flag values cycle through the full WOCE
+    bottle set (2 good, 3 questionable, 4 bad, 9 missing) so any test reading this
+    fixture through a resolved qc contract sees a mix, not a single flat value.
+    """
     time = pd.date_range("2024-04-04", periods=n, freq="D", tz="UTC")
     return pd.DataFrame(
         {
@@ -166,7 +171,31 @@ def ctd_frame(n: int = 5):
             "Longitude[degrees_east]": np.full(n, -96.5),
             "Depth[m]": np.full(n, 28.0),
             "Temperature[degC]": np.linspace(20.0, 21.0, n),
-            "Temperature_flag": np.zeros(n),
+            "Temperature_flag": np.resize([2, 3, 4, 9], n),
+        }
+    )
+
+
+def mooring_frame(n: int = 5):
+    """The POST-RECIPE mooring shape: build-time rename already applied (plain
+    names, no ``_qc``/``_raw``/``_flag`` triplet survives -- see
+    ``docs/seanoe_qc_recipes.md``'s "Moorings" recipe), with the provider's 9999
+    fill sentinel on every numeric column, position included -- exactly what
+    :func:`ocean_skill.qc.mask_fill_values` (via a ``qc={"fill_values": [9999.0]}``
+    contract) exists to clean up, and what a mooring recipe needs with no flag
+    machinery at all.
+    """
+    time = pd.date_range("2024-04-04", periods=n, freq="D", tz="UTC")
+    lat = np.full(n, 27.5)
+    lon = np.full(n, -96.5)
+    temperature = np.linspace(9.0, 10.0, n)
+    lat[-1] = lon[-1] = temperature[-1] = 9999.0
+    return pd.DataFrame(
+        {
+            "Time[UTC]": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "Latitude[degrees_north]": lat,
+            "Longitude[degrees_east]": lon,
+            "Temperature[degC]": temperature,
         }
     )
 
@@ -284,6 +313,63 @@ def test_to_dataset_seanoe_frame_reads_times_and_ignores_fill():
     assert float(ds["lon"]) == pytest.approx(-21.5248)
     assert float(ds["lat"]) == pytest.approx(64.382)
     assert float(ds["depth"]) == pytest.approx(12.966)
+
+
+def test_to_dataset_masks_in_place_and_carries_flag_attrs_with_a_contract():
+    """The contract-carrying sibling of the metadata-less pin just above.
+
+    Same frame, but with a resolved qc contract in ``meta`` -- questionable/bad/
+    missing rows are masked to NaN *in place* on ``Temperature`` (no new column,
+    no rename), the flag column itself survives unmasked, and both carry the CF
+    attrs :func:`ocean_skill.qc.resolve_contract`/:func:`ocean_skill.tabular
+    .to_dataset` are meant to produce.
+    """
+    from ocean_skill import qc
+
+    frame = ctd_frame()
+    contract = qc.resolve_contract({"scheme": "woce_bottle"}, frame)
+    meta = {"qc": contract}
+    applied = qc.apply(frame, meta)
+    ds = tabular.to_dataset(applied, meta)
+
+    # flags = [2, 3, 4, 9, 2] -- keep=[GOOD] masks everything but the two 2s.
+    assert ds["Temperature"].isnull().values.tolist() == [False, True, True, True, False]
+    assert set(ds["Temperature_flag"].values.tolist()) == {2, 3, 4, 9}
+
+    assert ds["Temperature"].attrs["ancillary_variables"] == "Temperature_flag"
+    assert "qc_policy" in ds["Temperature"].attrs
+    flag_attrs = ds["Temperature_flag"].attrs
+    assert flag_attrs["flags_for"] == "Temperature"
+    assert "flag_values" in flag_attrs and "flag_meanings" in flag_attrs
+
+
+def test_probe_masks_a_moorings_9999_fill_before_extents_and_featuretype():
+    """The mooring shape: no flags, only ``fill_values`` -- still needs masking.
+
+    Without the fix, the poisoned last row would push the lat/lon extent to 9999
+    and misclassify this fixed station as a moving trajectory.
+    """
+    from ocean_skill import build
+
+    md = build._probe_dataframe(mooring_frame(), qc={"fill_values": [9999.0]})
+    assert (md["geospatial_lat_min"], md["geospatial_lat_max"]) == (27.5, 27.5)
+    assert (md["geospatial_lon_min"], md["geospatial_lon_max"]) == (-96.5, -96.5)
+    assert md["featureType"] == "timeSeries"
+    assert "qc" in md and md["qc"]["fill_values"] == [9999.0]
+    assert md["qc"]["flags"] == {}  # no flag columns in a post-recipe mooring frame
+
+
+def test_apply_masks_a_moorings_9999_fill_on_read_with_no_flags_involved():
+    from ocean_skill import qc
+
+    frame = mooring_frame()
+    contract = qc.resolve_contract({"fill_values": [9999.0]}, frame)
+    out = qc.apply(frame, {"qc": contract, "axes": {"T": "Time[UTC]"}})
+    assert np.isnan(out["Latitude[degrees_north]"].iloc[-1])
+    assert np.isnan(out["Longitude[degrees_east]"].iloc[-1])
+    assert np.isnan(out["Temperature[degC]"].iloc[-1])
+    # the time column itself is exempt from fill masking
+    assert out["Time[UTC]"].notna().all()
 
 
 def test_depth_of_recognizes_bracket_and_pressure():

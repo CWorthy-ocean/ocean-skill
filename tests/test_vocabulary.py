@@ -567,11 +567,16 @@ def test_register_accepts_patterns_for_a_new_concept(pristine_vocabulary):
 def test_an_invalid_pattern_in_register_is_rejected_before_adding_the_concept(
     pristine_vocabulary,
 ):
+    # "ph" is now a real concept (see VOCABULARY), so use a name that genuinely does
+    # not exist -- the point is that a rejected register leaves the concept unadded.
+    assert "nonexistent_test_concept" not in vocabulary.VOCABULARY
     with pytest.raises(re.error):
         vocabulary.register(
-            "ph", "sea_water_ph_reported_on_total_scale", patterns=["("]
+            "nonexistent_test_concept",
+            "sea_water_ph_reported_on_total_scale",
+            patterns=["("],
         )
-    assert "ph" not in vocabulary.VOCABULARY
+    assert "nonexistent_test_concept" not in vocabulary.VOCABULARY
 
 
 def test_an_invalid_pattern_in_add_pattern_is_rejected_before_mutating_the_entry(

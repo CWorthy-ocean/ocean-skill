@@ -299,6 +299,13 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # mooring reports directly.
         "standard_name": "sea_water_sigma_theta",
     },
+    "ph": {
+        # SEANOE's SeapHOx mooring members report this after the QC recipe's build-
+        # time rename drops the provider's own (wrong -- pH is unitless) units label
+        # ``pH_qc[mL/L]`` down to the plain ``pH`` column this key/alias resolves.
+        "standard_name": "sea_water_ph_reported_on_total_scale",
+        "aliases": ["pH", "ph_total"],
+    },
     "co2_flux": {
         "standard_name": "surface_downward_mole_flux_of_carbon_dioxide",
     },

@@ -16,13 +16,23 @@ from ocean_skill.catalog import SourceRef, resolve
 __all__ = ["erddap_constraints", "read"]
 
 
-def read(source: str | SourceRef, **kwargs: Any):
+def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
     """Open a catalog source and return a CF-standardized Dataset or DataFrame.
 
     Parameters
     ----------
     source
         An entry name (``"glodap"`` or ``"catalog:name"``) or a :class:`SourceRef`.
+    qc
+        Per-call override of the entry's own provider-QC policy (a tabular source
+        only — see :mod:`ocean_skill.qc`, whose module docstring is the fuller
+        spec): a dict such as ``{"keep": ["GOOD", "SUSPECT"]}`` narrows or widens
+        which flag meanings survive, and the string ``"off"`` leaves provider flag
+        values completely untouched (fill masking still runs). ``None`` (the
+        default) uses the entry's own saved contract unchanged; an entry with no
+        ``qc`` contract at all is a no-op regardless of what is passed here.
+        Keyword-only so it is never mistaken for a reader keyword and passed on to
+        ``entry(**kwargs)`` below.
     **kwargs
         Reader keywords, overriding the entry's own. The one that earns this is
         ``constraints=`` on an ERDDAP table: a mooring's whole record is a large
@@ -50,6 +60,14 @@ def read(source: str | SourceRef, **kwargs: Any):
     # DataFrame rather than a Dataset — same metadata contract, different renaming and
     # time-decoding calls, since pandas has no .variables/.assign_coords.
     is_frame = hasattr(obj, "columns")
+
+    if is_frame:
+        # Applied here, before the standard_names rename just below: the saved
+        # contract's flags/pairs reference the original (unrenamed) column names --
+        # see ocean_skill.qc's module docstring.
+        from ocean_skill.qc import apply as _apply_qc
+
+        obj = _apply_qc(obj, meta, qc)
 
     # Generic/obs: light CF rename from the entry's standard_names map (cf.standardize
     # will do axis detection + units later). Skip any rename whose target already exists
