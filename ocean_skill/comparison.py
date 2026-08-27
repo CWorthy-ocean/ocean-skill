@@ -1539,7 +1539,15 @@ def prepare_source(
     # grid-line indices it names -- and its lane is already one path, not a domain,
     # so the crop stays after _prepare for it. A "no overlap" raise here propagates
     # exactly as the post-_prepare crop's did, to align()'s unnarrowed retry.
-    pre_crop = "transect" not in (select or {})
+    #
+    # A tabular (point/station/profile) source arrives as a DataFrame -- _prepare
+    # converts it to a Dataset at its top (tabular.to_dataset), but subset_to_bbox
+    # here would see the frame first, which has no .coords. It is also the lane with
+    # no vertical transform to save, so pre-cropping buys nothing: leave it to the
+    # post-_prepare crop below, exactly as before this optimization existed.
+    from ocean_skill import tabular
+
+    pre_crop = "transect" not in (select or {}) and not tabular.is_frame(obj)
     if pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
