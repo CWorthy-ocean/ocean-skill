@@ -36,7 +36,7 @@ The public API is intentionally small:
     osk.outputs.info()           # where figures + metrics get written
 """
 
-from ocean_skill import cache, outputs
+from ocean_skill import cache, outputs, qc
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill.catalog import Overlap, catalogs, describe, find, match_report, overlap
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
@@ -69,6 +69,7 @@ __all__ = [
     "outputs",
     "overlap",
     "pick_path",
+    "qc",
     "read",
     "summary",
 ]

@@ -1386,16 +1386,23 @@ def _domain_outline(lon, lat) -> list[list[float]] | None:
     return [[round(float(lo), 3), round(float(la), 3)] for lo, la in ring]
 
 
-def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
+def _probe(
+    ds, name_map: dict[str, str] | None, *, qc: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Derive extents, axis mapping, variable mapping and featureType from a dataset.
 
     Works for a gridded ``xarray.Dataset`` or a tabular (point) ``pandas.DataFrame``
     alike — dispatching here rather than each reader/protocol needing its own
     metadata-deriving code, so an ERDDAP source, say, is probed the same way as a
     kerchunk one: by reading it and looking, not by a source-specific shortcut.
+
+    ``qc`` (the builder's own ``qc=`` argument) only means anything for the tabular
+    branch — see :func:`_probe_dataframe` — a gridded Dataset's QC flags are CF
+    ``flag_values``/``flag_meanings`` attributes already, out of scope here (see
+    the plan's "out of scope" list: ADCP/NetCDF flag handling is noted, not wired).
     """
     if hasattr(ds, "columns"):
-        return _probe_dataframe(ds)
+        return _probe_dataframe(ds, qc=qc)
     import numpy as np
 
     md: dict[str, Any] = {}
@@ -1493,7 +1500,7 @@ def _probe(ds, name_map: dict[str, str] | None) -> dict[str, Any]:
     return md
 
 
-def _probe_dataframe(df) -> dict[str, Any]:
+def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the tabular counterpart of :func:`_probe` above.
 
     Same contract (axes, extents, standard_names, variables, featureType), derived
@@ -1513,7 +1520,21 @@ def _probe_dataframe(df) -> dict[str, Any]:
     That column vocabulary lives in :mod:`ocean_skill.tabular`, which is also what
     *reads* such a table into xarray — one spelling of the convention, so a catalog
     entry cannot describe a frame differently from how the pipeline later opens it.
+
+    ``qc`` is the builder's own ``qc=`` argument (see :mod:`ocean_skill.qc` — its
+    module docstring is the fuller spec). It is resolved into a contract exactly
+    once, here, via :func:`ocean_skill.qc.resolve_contract`, *before* the axes/
+    extents below are computed, for two reasons: the resolved ``flags`` mapping is
+    what tells :func:`ocean_skill.tabular.coord_column` which columns to refuse as
+    axis candidates (a ``Pressure_flag`` column's own name still contains the word
+    "pressure", and its 1-9 codes would otherwise become a nonsense vertical
+    extent); and a declared ``fill_values`` is what a *working copy* of ``df`` gets
+    masked with before any extent is read off it — needed even for a source with
+    no flags at all (a mooring's 9999 sentinel poisoning both the geospatial extent
+    *and*, unmasked, the trajectory-vs-timeSeries featureType guess below, via a
+    lon/lat value that only ever differs because of the fill).
     """
+    from ocean_skill import qc as _qc
     from ocean_skill.tabular import (
         coord_column,
         decode_time_column,
@@ -1525,13 +1546,24 @@ def _probe_dataframe(df) -> dict[str, Any]:
 
     md: dict[str, Any] = {}
 
+    contract = _qc.resolve_contract(qc, df)
+    flag_cols: frozenset[str] = (
+        frozenset(contract.get("flags") or {}) if contract is not None else frozenset()
+    )
+    fill_values = (contract or {}).get("fill_values")
+    work = df
+    if fill_values:
+        time_hint = coord_column(df, "T", exclude=flag_cols)
+        work = _qc.mask_fill_values(df, fill_values, time_col=time_hint)
+
     axes: dict[str, str] = {}
-    if lon_col := coord_column(df, "X"):
+    if lon_col := coord_column(df, "X", exclude=flag_cols):
         # numeric_in_range drops out-of-range fill values (e.g. a "not reported" row
         # written as 9999 rather than left blank) the same way it already drops
         # non-numeric/NaN -- otherwise one such row reports 9999 as this source's
-        # easternmost longitude.
-        lo = numeric_in_range(df[lon_col], "X").dropna()
+        # easternmost longitude. Read off `work`, so a declared fill_values sentinel
+        # is already masked before the range check runs.
+        lo = numeric_in_range(work[lon_col], "X").dropna()
         if not lo.empty:
             axes["X"] = lon_col
             md["geospatial_lon_min"], md["geospatial_lon_max"] = (
@@ -1541,31 +1573,31 @@ def _probe_dataframe(df) -> dict[str, Any]:
             md["lon_convention"] = (
                 "0-360" if md["geospatial_lon_max"] > 180 else "-180-180"
             )
-    if lat_col := coord_column(df, "Y"):
-        la = numeric_in_range(df[lat_col], "Y").dropna()
+    if lat_col := coord_column(df, "Y", exclude=flag_cols):
+        la = numeric_in_range(work[lat_col], "Y").dropna()
         if not la.empty:
             axes["Y"] = lat_col
             md["geospatial_lat_min"], md["geospatial_lat_max"] = (
                 float(la.min()),
                 float(la.max()),
             )
-    if time_col := coord_column(df, "T"):
+    if time_col := coord_column(df, "T", exclude=flag_cols):
         # decode_time_column honors a CF "<n> since <date>" encoding stated in the
         # column's own name (e.g. "Time[days_since_1950-01-01T00:00:00Z]") -- plain
         # pd.to_datetime on the raw numbers instead reads them as nanoseconds since
         # the Unix epoch, landing every timestamp within a heartbeat of 1970-01-01.
-        t = decode_time_column(df[time_col], time_col).dropna()
+        t = decode_time_column(work[time_col], time_col).dropna()
         if not t.empty:
             axes["T"] = time_col
             md["time_coverage_start"] = str(t.min().date())
             md["time_coverage_end"] = str(t.max().date())
-    if depth_col := coord_column(df, "Z"):
+    if depth_col := coord_column(df, "Z", exclude=flag_cols):
         # Written for the catalog's own sake (search, map hover text -- see
         # plot/locations._format_depth) and as depth_of's rung-3 fallback for a
         # frame whose column depth_of's own (narrower, exact) alias list still
         # misses -- not consulted by coord_column/coord_axis_of again, so a
         # mismatch here can never desync axes from what to_dataset later excludes.
-        finite = numeric_in_range(df[depth_col], "Z").dropna()
+        finite = numeric_in_range(work[depth_col], "Z").dropna()
         if not finite.empty:
             axes["Z"] = depth_col
             md["geospatial_vertical_min"], md["geospatial_vertical_max"] = (
@@ -1578,7 +1610,7 @@ def _probe_dataframe(df) -> dict[str, Any]:
     std: dict[str, str] = {}
     units: dict[str, str] = {}
     for col in df.columns:
-        if is_qc_column(col):
+        if is_qc_column(col) or str(col) in flag_cols:
             continue
         base, unit = split_units(col)
         if is_coordinate_column(col):
@@ -1604,12 +1636,13 @@ def _probe_dataframe(df) -> dict[str, Any]:
         col = axes.get(axis)
         if col is None:
             return False
-        # numeric_in_range/decode_time_column, not a bare pd.to_numeric/to_datetime:
-        # an axis that is actually fixed but carries a stray fill-value row (see
-        # numeric_in_range) would otherwise look like it "varies", misclassifying a
-        # mooring as a trajectory.
-        series = numeric_in_range(df[col], axis) if numeric else decode_time_column(
-            df[col], col
+        # Read off the fill-masked working copy, and via numeric_in_range/
+        # decode_time_column rather than a bare pd.to_numeric/to_datetime: an axis that
+        # is actually fixed but carries a stray fill-value row (a declared fill, or an
+        # out-of-range sentinel numeric_in_range drops) would otherwise look like it
+        # "varies", misclassifying a mooring as a trajectory.
+        series = numeric_in_range(work[col], axis) if numeric else decode_time_column(
+            work[col], col
         )
         return series.nunique(dropna=True) > 1
 
@@ -1626,6 +1659,9 @@ def _probe_dataframe(df) -> dict[str, Any]:
         ftype = "timeSeries"
     md["featureType"] = ftype
     md["featureType_source"] = "inferred"
+
+    if contract is not None:
+        md["qc"] = contract
     return md
 
 
@@ -1708,7 +1744,7 @@ def _read_with_retries(reader, name):
             attempt += 1
 
 
-def _attach(cat, name, reader, *, probe, name_map, metadata):
+def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] | None = None):
     """Probe a reader, attach metadata, and put it in ``cat`` under ``name``.
 
     The step every source shares once its reader exists — whether that reader was
@@ -1726,12 +1762,22 @@ def _attach(cat, name, reader, *, probe, name_map, metadata):
     * the source reads but cannot be **probed** — odd axes, no recognizable
       coordinates. "Could not derive metadata" is not "this entry is invalid": it
       still reads fine, it is only less searchable. That warns and keeps the entry.
+
+    ``qc`` is threaded to :func:`_probe` (and, for a tabular source, resolved into
+    the saved contract there) *separately* from ``metadata`` on purpose: the
+    ``reader.metadata.update(metadata)`` call below runs after the probe result is
+    already merged in, so a caller's own metadata ordinarily overrides anything
+    derived — which is right for most keys, but wrong for ``qc``, where the
+    *resolved* contract (built from the raw ``qc=`` spec plus the actual data) is
+    what belongs in the saved entry, not the raw, unresolved spec clobbering it
+    after the fact. Callers (:func:`add_source`/:func:`add_sources`) keep ``qc``
+    out of ``metadata`` for exactly this reason.
     """
     if probe:
         # unreadable => unusable; let the caller decide, but retry a transient failure first
         data = _read_with_retries(reader, name)
         try:
-            reader.metadata.update(_probe(data, name_map))
+            reader.metadata.update(_probe(data, name_map, qc=qc))
         except Exception as exc:
             warnings.warn(
                 f"read {name!r} but could not derive metadata from it ({exc}); "
@@ -1783,6 +1829,7 @@ def add_source(
     probe: bool = True,
     storage_options: dict[str, Any] | None = None,
     reader_kwargs: dict[str, Any] | None = None,
+    qc: dict[str, Any] | None = None,
     **metadata: Any,
 ):
     """Add a source to ``cat``, deriving metadata by querying the data.
@@ -1813,9 +1860,21 @@ def add_source(
         source is large and a cache would download the whole file just to look. A
         probe read that fails transiently is re-attempted first (see
         :data:`PROBE_RETRIES`), so a flaky remote server does not cost the entry.
+        ``qc`` is only resolvable when ``probe=True`` (it needs the actual data to
+        detect/pair flag columns against), so it is a no-op when probing is skipped.
     storage_options
         fsspec options, e.g. ``{"simplecache": {"cache_storage": "./cache"}}`` paired
         with a ``simplecache::https://...`` URL.
+    reader_kwargs
+        Passed to ``reader`` verbatim; see ``reader`` above.
+    qc
+        Provider QC flags for a tabular (point) source — see :mod:`ocean_skill.qc`,
+        whose module docstring is the fuller spec. ``None`` (the default) still
+        runs flag *detection*; only scheme resolution needs anything declared here,
+        and even that can auto-adopt under the consensus rule. Kept as its own
+        parameter rather than folded into ``**metadata`` so the *resolved* contract
+        :func:`_probe` derives from it is what gets saved, not the raw spec
+        clobbering that resolution afterward — see :func:`_attach`.
     **metadata
         Extra metadata; caller values override derived ones.
     """
@@ -1827,7 +1886,9 @@ def add_source(
         )
     else:
         reader = _build_reader(reader, url, storage_options, reader_kwargs or {})
-    return _attach(cat, name, reader, probe=probe, name_map=name_map, metadata=metadata)
+    return _attach(
+        cat, name, reader, probe=probe, name_map=name_map, metadata=metadata, qc=qc
+    )
 
 
 def add_sources(
@@ -1873,6 +1934,11 @@ def add_sources(
     do once every retry is spent. On a flaky server the two go together: retry the
     reads that will recover, skip the few that genuinely will not.
 
+    ``qc=`` (see :func:`add_source`/:mod:`ocean_skill.qc`) works in ``**shared`` the
+    same as any other option -- one shared ``qc={"scheme": "woce_bottle"}`` for a
+    catalog whose entries all use the same flag convention, overridden per source
+    by putting ``qc`` in that source's own spec dict.
+
     Returns ``{name: reader}`` for the entries actually added.
     """
     # An already-built catalog carries readers, so there is nothing to construct --
@@ -1904,11 +1970,18 @@ def add_sources(
                     spec,
                     probe=opts.get("probe", True),
                     name_map=opts.get("name_map"),
+                    qc=opts.get("qc"),
                     metadata={
                         k: v
                         for k, v in opts.items()
                         if k
-                        not in ("probe", "name_map", "storage_options", "reader_kwargs")
+                        not in (
+                            "probe",
+                            "name_map",
+                            "storage_options",
+                            "reader_kwargs",
+                            "qc",
+                        )
                     },
                 )
             else:

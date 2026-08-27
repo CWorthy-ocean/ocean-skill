@@ -573,6 +573,18 @@ def aggregate_for(spec: Any, role: str) -> dict[str, Any] | None:
     return spec[role] if is_pair_spec(spec) else spec
 
 
+def qc_for(spec: Any, role: str) -> Any:
+    """Return the qc override one lane (``"test"``/``"reference"``) should use.
+
+    Mirrors :func:`select_for` exactly: a pair-spec's own side (e.g.
+    ``qc={"reference": {"keep": ["GOOD", "SUSPECT"]}, "test": None}``, one lane's
+    policy loosened, the other left at its catalog default); any other value
+    (``None``, a plain dict override, or the string ``"off"``) applies to both
+    lanes unchanged. See :mod:`ocean_skill.qc`.
+    """
+    return spec[role] if is_pair_spec(spec) else spec
+
+
 def _normalize_pair(
     spec: Any, kind: str, *, normalize_side=lambda x: x
 ) -> Any:
@@ -1428,6 +1440,7 @@ def prepare_source(
     require_reduced_keep: tuple[str, ...] = (),
     bbox: tuple[float, float, float, float] | None = None,
     time_window: tuple[Any, Any] | None = None,
+    qc: Any = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -1485,13 +1498,32 @@ def prepare_source(
     table as a server-side constraint rather than as a crop applied to a record
     already downloaded.
 
+    ``qc`` overrides the source's own saved provider-QC policy (see
+    :mod:`ocean_skill.qc`) at read time -- a dict (typically ``{"keep": [...]}``/
+    ``{"keep_provider": [...]}``), the string ``"off"``, or ``None`` to use the
+    entry's own contract unchanged. ``meta`` is read *before* the cache key below is
+    built (rather than after, as it used to be) specifically so the *resolved*
+    policy (:func:`ocean_skill.qc.effective_policy`) can be folded into the key --
+    a source with no ``qc`` contract at all folds in nothing, so its key is
+    byte-identical to what it was before this feature existed; two different
+    ``keep=``/``keep_provider=`` policies on a QC'd source fold in different
+    ``_qc`` entries and so land in different cache entries, the same way ``_bbox``
+    and ``_time_window`` already do above.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
     import ocean_skill as osk
     from ocean_skill import cache as _cache
+    from ocean_skill import qc as _qc
     from ocean_skill.catalog import resolve
     from ocean_skill.sources import erddap_constraints
+
+    # Hoisted above the key computation below (it used to be read only just before
+    # the actual osk.read() call) so effective_policy can decide what -- if
+    # anything -- belongs in the cache key. See the qc= paragraph above.
+    meta = resolve(source).metadata
+    effective_qc = _qc.effective_policy(qc, meta)
 
     key_select: dict[str, Any] = {**(select or {}), "_aggregate": aggregate}
     if bbox is not None:
@@ -1502,6 +1534,14 @@ def prepare_source(
         # region but different years share a `_bbox`. Without this they would share an
         # entry as well, and the second would be served the first one's window.
         key_select["_time_window"] = [str(w) for w in time_window]
+    if effective_qc is not None:
+        key_select["_qc"] = {
+            "keep": sorted(str(v) for v in (effective_qc.get("keep") or [])),
+            "keep_provider": sorted(
+                str(v) for v in (effective_qc.get("keep_provider") or [])
+            ),
+            "off": bool(effective_qc.get("off")),
+        }
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -1521,9 +1561,18 @@ def prepare_source(
     # to travel with the request rather than follow it -- see erddap_constraints, which
     # returns nothing for every other kind of source. The same `select` is applied in
     # memory regardless, so this changes the size of the download and nothing else.
-    meta = resolve(source).metadata
     constraints = erddap_constraints(meta, select, time_window)
-    obj = osk.read(source, constraints=constraints) if constraints else osk.read(source)
+    # qc= is only ever added to the call when actually given: several tests (and
+    # any other caller) monkeypatch osk.read with a restrictive lambda that takes
+    # no keywords at all, and qc=None must reach it exactly as it always did --
+    # osk.read's own qc=None default already means "use the entry's own contract
+    # unchanged", so omitting the keyword here changes nothing about the result.
+    read_kwargs = {"qc": qc} if qc is not None else {}
+    obj = (
+        osk.read(source, constraints=constraints, **read_kwargs)
+        if constraints
+        else osk.read(source, **read_kwargs)
+    )
     _warn_if_chunk_is_large(obj, source)
     # Crop horizontally and in time *before* _prepare, so the vertical transform it
     # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
@@ -1640,6 +1689,7 @@ class Comparison:
         metrics: tuple[str, ...] | None = None,
         label: str | None = None,
         cache: bool | None = None,
+        qc: Any = None,
     ):
         from ocean_skill.vocabulary import resolve_and_report
 
@@ -1721,6 +1771,11 @@ class Comparison:
         # None = follow the global setting (on unless osk.cache.disable()); an
         # explicit True/False overrides it for this comparison only.
         self.cache = cache
+        # Pair-spec-able exactly like select=/aggregate= (see qc_for) -- a plain
+        # override/"off" applies to both lanes, {"test": ..., "reference": ...}
+        # gives each its own policy. No normalize_side: unlike select there is no
+        # sugar to expand, just the pair-spec shape to validate.
+        self.qc = _normalize_pair(qc, "qc")
         self._aligned = None
         self._metrics = None
         self._pointwise_metrics = None
@@ -2086,6 +2141,13 @@ class Comparison:
             extra["_ref_bbox"] = [round(float(b), 4) for b in ref_bbox]
         if ref_window is not None:
             extra["_ref_window"] = [str(w) for w in ref_window]
+        if self.qc is not None:
+            # Not resolved against either lane's own contract here (unlike
+            # prepare_source's per-lane `_qc`, which folds in the *effective*
+            # policy) -- the raw qc= request is enough to tell two aligned pairs
+            # apart, and each lane's own prepared-field cache entry (which this
+            # aligned result is built from) already keys on the resolved policy.
+            extra["_qc"] = self.qc
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -2157,6 +2219,7 @@ class Comparison:
             require_reduced_keep=keep,
             bbox=bbox,
             time_window=time_window,
+            qc=qc_for(self.qc, role),
         )
 
     def _warn_on_pair_spec_mismatch(
@@ -3984,6 +4047,7 @@ def compare(
     skip_missing: bool = True,
     cache: bool | None = None,
     refresh: bool = False,
+    qc: Any = None,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -4046,6 +4110,17 @@ def compare(
     ``select={"depth": ...}`` sugar still applies to both lanes of a pair-spec select
     at once — write the vertical key into only one side, or into both agreeing on the
     same value, and let the sugar fan it out.
+
+    ``qc`` overrides a source's own saved provider-QC policy at read time (see
+    :mod:`ocean_skill.qc`) — a dict (typically ``{"keep": [...]}``), the string
+    ``"off"``, or pair-spec-able exactly like ``select``/``aggregate`` for a
+    per-lane policy::
+
+        osk.compare(reference="ctd_profile_2", test="his", variables=["temperature"],
+                    qc={"reference": {"keep": ["GOOD", "SUSPECT"]}})  # per-lane policy
+
+    A source with no ``qc`` contract at all (most sources) ignores this entirely,
+    whichever side of a comparison it is on.
 
     ``over`` is the third answer to "what happens to the time axis", and the one for a
     reference that varies in time as well as space. ``over="time"`` keeps the axis,
@@ -4585,6 +4660,7 @@ def compare(
                             metrics=metrics,
                             label=label,
                             cache=cache,
+                            qc=qc,
                         )
                         try:
                             c.align(refresh=refresh)

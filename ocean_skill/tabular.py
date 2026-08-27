@@ -280,7 +280,7 @@ def decode_time_column(series, column):
     return pd.to_datetime(series, errors="coerce", utc=True)
 
 
-def coord_column(df, axis: str) -> str | None:
+def coord_column(df, axis: str, *, exclude: frozenset = frozenset()) -> str | None:
     """Return the column naming ``axis`` (``T``/``X``/``Y``/``Z``) by its own spelling.
 
     Tried in column order against :data:`_COORD_PATTERNS`. ``Z`` is tried twice — a
@@ -293,11 +293,21 @@ def coord_column(df, axis: str) -> str | None:
     left unresolved rather than guessed at). No such fallback exists for X/Y/Z —
     dtype alone cannot tell a longitude column from any other float column the way it
     can tell a timestamp from one.
+
+    ``exclude`` skips named columns entirely -- for :mod:`ocean_skill.build`'s probe,
+    which passes the QC flag columns it has already detected, so a flag whose own
+    name loosely matches a coordinate token (``Pressure_flag``, whose base still
+    contains the word "pressure") can never be claimed as that axis in its place: its
+    integer flag codes (1-9) would otherwise become a nonsense vertical extent.
     """
     if axis == "Z":
         for pattern in (_Z_DIRECT_PATTERN, _COORD_PATTERNS["Z"]):
             match = next(
-                (c for c in df.columns if pattern.search(split_units(str(c))[0])),
+                (
+                    c
+                    for c in df.columns
+                    if str(c) not in exclude and pattern.search(split_units(str(c))[0])
+                ),
                 None,
             )
             if match is not None:
@@ -305,7 +315,12 @@ def coord_column(df, axis: str) -> str | None:
         return None
     pattern = _COORD_PATTERNS[axis]
     match = next(
-        (c for c in df.columns if pattern.search(split_units(str(c))[0])), None
+        (
+            c
+            for c in df.columns
+            if str(c) not in exclude and pattern.search(split_units(str(c))[0])
+        ),
+        None,
     )
     if match is not None:
         return str(match)
@@ -313,7 +328,9 @@ def coord_column(df, axis: str) -> str | None:
         import pandas as pd
 
         datetime_cols = [
-            c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])
+            c
+            for c in df.columns
+            if str(c) not in exclude and pd.api.types.is_datetime64_any_dtype(df[c])
         ]
         if len(datetime_cols) == 1:
             return str(datetime_cols[0])
@@ -521,14 +538,34 @@ def to_dataset(df, meta: dict[str, Any]):
     instant, many depths -- and is built by :func:`_profile_dataset` instead: indexed
     on ``depth``, with ``time``/``lon``/``lat`` as the scalar coordinates.
 
-    QARTOD companion columns are **kept** rather than dropped: they are real information
-    (and what a future ``qc()`` will read). What must not happen — a request for
-    temperature being satisfied by ``sea_water_temperature_qc_agg`` — is refused at the
-    matcher (:func:`ocean_skill.units.find_variable`), which protects gridded sources
+    QARTOD/flag companion columns are **kept** rather than dropped: they are real
+    information, and what :func:`ocean_skill.qc.apply` reads (called by
+    :func:`ocean_skill.sources.read`, before this conversion ever runs — this
+    function never applies a policy itself, only reflects what already happened via
+    ``meta["qc"]``/``df.attrs["qc_applied"]`` in the resulting attrs). What must not
+    happen — a request for temperature being satisfied by
+    ``sea_water_temperature_qc_agg`` — is refused at the matcher
+    (:func:`ocean_skill.units.find_variable`), which protects gridded sources
     carrying flag variables too.
+
+    A column the entry's ``qc`` contract names as a flag (``meta["qc"]["flags"]``)
+    is never treated as a coordinate even if its name loosely matches one (a
+    ``Pressure_flag`` column's base still contains the word "pressure"), and its
+    values are **not** dropped by the blind ``pd.to_numeric`` coercion below when
+    they are letter codes (SeaDataNet-style) rather than digits — they are encoded
+    through the contract's ``flag_to_qartod`` into QARTOD's own integer codes
+    instead. Its CF attrs record ``flag_values``/``flag_meanings`` (the provider's
+    own codes and verbatim definitions) and ``flag_qartod`` (what each of those
+    codes was mapped to); the data variable it is paired with gets
+    ``ancillary_variables`` pointing back at it, plus ``qc_policy`` recording the
+    policy actually applied at read time.
     """
+    import json
+
     import pandas as pd
     import xarray as xr
+
+    from ocean_skill.qc import QARTOD_FLAGS, _normalize_flag_value
 
     subject = meta.get("datasetID") or meta.get("title") or "this source"
     if str(meta.get("featureType") or "").strip().casefold() == "profile":
@@ -582,18 +619,89 @@ def to_dataset(df, meta: dict[str, Any]):
 
     depth, depth_source, approximate = depth_of(frame, meta, subject=subject)
 
+    # The entry's resolved qc contract (see ocean_skill.qc), if any -- flag columns
+    # named in it are never treated as coordinates below (bypassing
+    # is_coordinate_column even when their name loosely matches one, e.g.
+    # "Pressure_flag") and their values are read specially rather than through the
+    # blind pd.to_numeric coercion every other column gets. Policy actually applied
+    # at read time (ocean_skill.sources.read -> ocean_skill.qc.apply) rides on
+    # df.attrs["qc_applied"]; absent for an entry with no contract, or for a frame
+    # built by hand (the metadata-less fallback), so this tolerates its absence.
+    qc_meta = meta.get("qc") or {}
+    flag_pairs = {str(k): str(v) for k, v in (qc_meta.get("flags") or {}).items()}
+    flag_definitions = qc_meta.get("flag_definitions") or {}
+    flag_to_qartod = qc_meta.get("flag_to_qartod") or {}
+    data_to_flags: dict[str, list[str]] = {}
+    for fcol, dcol in flag_pairs.items():
+        data_to_flags.setdefault(dcol, []).append(fcol)
+    qc_applied = frame.attrs.get("qc_applied")
+    qc_policy_json = json.dumps(qc_applied, default=str) if qc_applied else None
+
     data: dict[str, Any] = {}
     attrs: dict[str, Any] = {}
     for column in frame.columns:
         if column in (time_col, lon_col, lat_col):
             continue
         base, _ = split_units(column)
-        if is_coordinate_column(column):
+        is_flag = str(column) in flag_pairs
+        if is_coordinate_column(column) and not is_flag:
             # Coordinate columns (time/lon/lat/depth/pressure/altitude, by name or
             # regex-recognized variant -- see is_coordinate_column) describe where the
             # measurements were taken; depth_of has already read them, and carrying a
             # flat placeholder alongside the data as if it were a variable invites it
             # being compared. The same exclusion build.py applies to standard_names.
+            # A contract flag column is exempted even if its own name loosely matches
+            # a coordinate token -- see the qc contract note above.
+            continue
+        if is_flag:
+            raw = frame[column]
+
+            def _flag_value(v):
+                # A real numeric provider code (an int, or a digit stored as a
+                # string like SeaDataNet's mostly-numeric column) keeps its own
+                # value -- flag_values below is meant to hold the *provider's*
+                # codes, not a QARTOD translation of them. Only a value that
+                # cannot be read as a number at all -- a letter code -- is
+                # encoded through the contract's flag_to_qartod into QARTOD's own
+                # integer codes instead of being lost to a blind pd.to_numeric
+                # coercion (which would otherwise make the whole column look
+                # all-NaN and be dropped below like any other placeholder).
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float(
+                        QARTOD_FLAGS.get(
+                            flag_to_qartod.get(_normalize_flag_value(v)), np.nan
+                        )
+                    )
+
+            values = raw.map(lambda v: np.nan if pd.isna(v) else _flag_value(v))
+            variable = xr.DataArray(values.to_numpy(), dims=("time",), name=base)
+            observed = sorted(
+                (
+                    n
+                    for v in raw.dropna().unique()
+                    if (n := _normalize_flag_value(v)) is not None
+                ),
+                key=str,
+            )
+            variable.attrs["flag_values"] = [
+                v if isinstance(v, int) else QARTOD_FLAGS.get(flag_to_qartod.get(v), -1)
+                for v in observed
+            ]
+            if flag_definitions:
+                variable.attrs["flag_meanings"] = " ".join(
+                    str(flag_definitions.get(v, v)).strip().replace(" ", "_")
+                    for v in observed
+                )
+            if flag_to_qartod:
+                variable.attrs["flag_qartod"] = " ".join(
+                    str(flag_to_qartod.get(v, "UNKNOWN")) for v in observed
+                )
+            variable.attrs["standard_name"] = "status_flag"
+            variable.attrs["source_column"] = str(column)
+            variable.attrs["flags_for"] = split_units(flag_pairs[str(column)])[0]
+            data[base] = variable
             continue
         values = pd.to_numeric(frame[column], errors="coerce")
         if values.isna().all():
@@ -610,6 +718,12 @@ def to_dataset(df, meta: dict[str, Any]):
             variable.attrs["units"] = unit
         variable.attrs["standard_name"] = base
         variable.attrs["source_column"] = str(column)
+        if str(column) in data_to_flags:
+            variable.attrs["ancillary_variables"] = " ".join(
+                split_units(f)[0] for f in data_to_flags[str(column)]
+            )
+            if qc_policy_json is not None:
+                variable.attrs["qc_policy"] = qc_policy_json
         # The depth also goes on each variable's own attrs, not only on a coordinate.
         # A coordinate along time does not survive a reduction -- resampling a mooring
         # to monthly means drops it -- and the depth is then invisible exactly where it

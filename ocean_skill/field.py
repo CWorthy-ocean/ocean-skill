@@ -94,6 +94,7 @@ class Field:
         aggregate: dict[str, Any] | None = None,
         label: str | None = None,
         cache: bool | None = None,
+        qc: Any = None,
     ):
         from ocean_skill.comparison import _require_pair_spec, as_select, is_pair_spec
         from ocean_skill.vocabulary import resolve_and_report
@@ -117,10 +118,10 @@ class Field:
                 "source and nothing to give the other side to. Pass the one spec this "
                 "source actually needs, or use osk.compare() for a pair-spec."
             )
-        # select/aggregate carry the same pair-spec spelling in a Comparison, one
-        # lane's own select/aggregate -- a Field is one source, so a pair here is the
-        # same mistake as a pair-spec variable, and gets the same clear error.
-        for name, arg in (("select", select), ("aggregate", aggregate)):
+        # select/aggregate/qc carry the same pair-spec spelling in a Comparison, one
+        # lane's own select/aggregate/qc -- a Field is one source, so a pair here is
+        # the same mistake as a pair-spec variable, and gets the same clear error.
+        for name, arg in (("select", select), ("aggregate", aggregate), ("qc", qc)):
             if isinstance(arg, dict):
                 _require_pair_spec(arg, kind=name)
             if is_pair_spec(arg):
@@ -140,6 +141,7 @@ class Field:
         self.aggregate = aggregate
         self.label = label
         self.cache = cache
+        self.qc = qc
         self._data = None
         self._actual_depth = None
 
@@ -169,6 +171,7 @@ class Field:
             self.aggregate,
             use_cache=self._use_cache(),
             refresh=refresh,
+            qc=self.qc,
         )
         if da is None:
             raise KeyError(f"{self.variable!r} not available in {self.source!r}")
@@ -735,6 +738,7 @@ def field(
     aggregate: dict[str, Any] | None = None,
     label: str | None = None,
     cache: bool | None = None,
+    qc: Any = None,
 ) -> Field | FieldSet:
     """Build a :class:`Field`: one model source, no reference.
 
@@ -802,7 +806,15 @@ def field(
         from ocean_skill.comparison import _canonical
 
         members = [
-            Field(source, v, select=select, aggregate=aggregate, label=label, cache=cache)
+            Field(
+                source,
+                v,
+                select=select,
+                aggregate=aggregate,
+                label=label,
+                cache=cache,
+                qc=qc,
+            )
             for v in variable
         ]
         kept: list[Field] = []
@@ -825,4 +837,5 @@ def field(
         aggregate=aggregate,
         label=label,
         cache=cache,
+        qc=qc,
     )

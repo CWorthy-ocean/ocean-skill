@@ -409,6 +409,12 @@ def _haystack(source: str, ref) -> str:
     while stack:
         key, value = stack.pop()
         parts.append(str(key))
+        if key == "qc":
+            # Machinery, not description: the resolved qc contract's own
+            # flag_definitions/scheme text (e.g. "questionable", "missing") would
+            # otherwise match nearly every free-text search over a QC'd catalog.
+            # The literal word "qc" (the key itself, appended above) still matches.
+            continue
         if isinstance(value, str):
             parts.append(value)
         elif isinstance(value, dict):
