@@ -865,7 +865,7 @@ def _surface_and_levels(sub, meta, name: str, depths) -> Any:
 NO_AGGREGATION: dict[str, Any] = {}
 
 
-def _require_reduced(da, role: str, source: str):
+def _require_reduced(da, role: str, source: str, *, keep: tuple[str, ...] = ()):
     """Squeeze away singleton axes, then raise unless what's left is a single map.
 
     A comparison regrids one field onto another and differences them, so it has to be
@@ -875,8 +875,18 @@ def _require_reduced(da, role: str, source: str):
     and it runs before :func:`prepare_source` computes anything, so being told to choose
     costs nothing rather than costing the whole vertical transform first.
 
-    A non-spatial axis of size 1 is squeezed away first, with ``drop=True`` — its
-    coordinate is discarded, not kept as a scalar. Keeping it would seem the more
+    ``keep`` names further axes a caller's own consumer draws rather than refuses --
+    a vertical section's depth axis, kept standing beside the along-path one that
+    already counts as "horizontal" here (a section's lon/lat ride on
+    :data:`~ocean_skill.align.ALONG_DIM`, not on a bare dimension of their own, so
+    it is already part of ``spatial`` below without needing to be named). Anything
+    in ``keep`` is exempt from both the singleton squeeze and the "still has"
+    refusal — a kept axis of size 1 legitimately needs its one coordinate value
+    to survive (a single requested depth is still a real depth, not a squeezed-away
+    detail), unlike an incidental singleton nobody asked to keep.
+
+    A non-spatial, non-kept axis of size 1 is squeezed away first, with ``drop=True``
+    — its coordinate is discarded, not kept as a scalar. Keeping it would seem the more
     generous move (provenance for a title), but neither title nor depth actually reads
     it: the displayed time comes from the caller's own ``select`` (:func:`_display_time`),
     and depth travels as ``attrs["actual_depth"]``, captured before this ever runs. What
@@ -893,7 +903,7 @@ def _require_reduced(da, role: str, source: str):
     """
     from ocean_skill.align import _lat_name, _lon_name
 
-    spatial: set[str] = set()
+    spatial: set[str] = set(keep)
     for name in (_lon_name(da), _lat_name(da)):
         if name is not None:
             spatial |= {str(d) for d in da[name].dims}
@@ -1413,6 +1423,7 @@ def prepare_source(
     use_cache: bool = True,
     refresh: bool = False,
     require_reduced: str | None = None,
+    require_reduced_keep: tuple[str, ...] = (),
     bbox: tuple[float, float, float, float] | None = None,
     time_window: tuple[Any, Any] | None = None,
 ):
@@ -1437,6 +1448,12 @@ def prepare_source(
     below does not include it, deliberately (the same field is the same field), so an
     entry written by a caller that tolerates a surviving axis would otherwise let a
     caller that does not sail straight past its own gate.
+
+    ``require_reduced_keep`` is that check's own ``keep=`` — the axes this
+    particular comparison draws rather than refuses (a vertical section's depth
+    axis, most often). Like ``require_reduced`` itself it is deliberately absent
+    from the cache key: the same field is the same field regardless of which
+    axes a caller happened to tolerate when it asked for it.
 
     That check also squeezes away any singleton axis it finds (see
     :func:`_require_reduced`), and the squeeze is applied only to what this function
@@ -1493,7 +1510,9 @@ def prepare_source(
         if hit is not None:
             da_hit, depth_hit = hit
             if da_hit is not None and require_reduced:
-                da_hit = _require_reduced(da_hit, require_reduced, source)
+                da_hit = _require_reduced(
+                    da_hit, require_reduced, source, keep=require_reduced_keep
+                )
             return da_hit, depth_hit
 
     # An ERDDAP table is fetched whole in one request, so the time narrowing below has
@@ -1512,7 +1531,7 @@ def prepare_source(
         # docstring. Its return (squeezed or not) is deliberately dropped: what gets
         # cached and crop-processed below must stay unsqueezed, and the squeeze that
         # matters happens again, on the way out, right before this function returns.
-        _require_reduced(da, require_reduced, source)
+        _require_reduced(da, require_reduced, source, keep=require_reduced_keep)
     if da is not None and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
@@ -1548,7 +1567,7 @@ def prepare_source(
         _cache.save_field(key, da, depth)
     # Squeezed on the way out, never into the cache -- see the docstring above.
     if da is not None and require_reduced:
-        da = _require_reduced(da, require_reduced, source)
+        da = _require_reduced(da, require_reduced, source, keep=require_reduced_keep)
     return da, depth
 
 
@@ -1673,6 +1692,83 @@ class Comparison:
         self._metrics = None
         self._pointwise_metrics = None
         self._actual_depth = None
+        self._validate_section_request()
+
+    def _validate_section_request(self) -> None:
+        """Refuse the not-yet-built ways a transect comparison could be asked for.
+
+        Each refusal names the follow-up it stands in for, and the exact
+        spelling that works today. Called once, at construction, so a malformed
+        request fails immediately rather than after the (expensive) test lane
+        has already been read and reduced. A no-op for any comparison whose
+        select names no transect at all.
+        """
+        has_transect = (
+            (
+                "transect" in (self.select.get("test") or {})
+                or "transect" in (self.select.get("reference") or {})
+            )
+            if is_pair_spec(self.select)
+            else "transect" in self.select
+        )
+        if not has_transect:
+            return
+        if is_pair_spec(self.select):
+            raise ValueError(
+                "select={'test': ..., 'reference': ...} names a transect on "
+                "one (or both) sides -- two independently-sampled paths share "
+                "no along-path axis to align on, so matching them is a "
+                "follow-up, not yet built. Give one shared "
+                "select={'transect': ...} instead; the reference is then "
+                "sampled at the test lane's own snapped points automatically."
+            )
+        if self.over is not None:
+            raise ValueError(
+                "over= scores a pair cell by cell along one further axis, but "
+                "a vertical section already stands on two axes (depth and "
+                "along-path distance) -- scoring a third axis per section "
+                "cell is a follow-up, not yet built. Drop over= for a "
+                "section comparison."
+            )
+        if "sigma0" in self.select:
+            raise ValueError(
+                "select={'transect': ..., 'sigma0': ...} asks for an "
+                "isopycnal section -- matching one against a reference is a "
+                "follow-up, not yet built. Use select={'depth': [...]} "
+                "instead."
+            )
+
+        from ocean_skill.transect import as_transect
+
+        as_transect(self.select["transect"])  # fail fast on a malformed spec too
+
+        depth = next((self.select[k] for k in _VERTICAL_KEYS if k in self.select), None)
+        valid_list = (
+            isinstance(depth, list | tuple)
+            and len(depth) >= 2
+            and all(
+                is_surface_request(d)
+                or (isinstance(d, int | float) and not isinstance(d, bool))
+                for d in depth
+            )
+        )
+        if not valid_list:
+            raise ValueError(
+                f"select={{'transect': ..., 'depth': {depth!r}}}: a section "
+                "comparison needs an explicit list of at least 2 fixed depths "
+                "-- the two lanes' native verticals share no axis, so there "
+                "is no default to guess: select={'transect': ..., 'depth': "
+                "[50, 200, ...]}."
+            )
+        for role in ("test", "reference"):
+            vertical_agg = _vertical_only(aggregate_for(self.aggregate, role))
+            if vertical_agg:
+                raise ValueError(
+                    f"aggregate={{{role!r}: {{{next(iter(vertical_agg))!r}: "
+                    "...}} would collapse a section's own vertical axis -- "
+                    "drop the vertical entry from aggregate= for a section "
+                    "comparison."
+                )
 
     def _point_select_implies_time(self) -> bool:
         """Whether the select alone narrows the reference to a place worth a line.
@@ -1734,6 +1830,69 @@ class Comparison:
         from ocean_skill import operators
 
         return operators.point_in_spec(self.select)
+
+    def _transect_route(self) -> dict[str, Any] | None:
+        """The normalized transect spec a shared select names, if routing.
+
+        ``None`` for a pair-spec select (a transect on either side names two
+        independently-sampled paths -- refused outright by this class's own
+        constructor validation rather than routed, since they share no
+        along-path axis to align on) or when the select names no transect at
+        all.
+
+        Used by :meth:`align` to prepare the reference lane at the test lane's
+        own snapped points (see :func:`ocean_skill.align.path_of` and
+        :func:`ocean_skill.align._align_along_path`), and by :attr:`_cache_key`
+        to mark a routed comparison's cache entry so it can never collide with
+        one from before this route existed.
+        """
+        if is_pair_spec(self.select) or "transect" not in self.select:
+            return None
+        from ocean_skill.transect import as_transect
+
+        return as_transect(self.select["transect"])
+
+    def _resolved_path(
+        self, t, troute: dict[str, Any]
+    ) -> tuple[dict[str, Any], tuple[float, float, float, float]]:
+        """The reference's transect select and bbox, from the test lane's own path.
+
+        Reads ``lon(along)``/``lat(along)`` straight off the already-prepared
+        test lane — whatever grid-aligned slice, waypoint path, line, or points
+        list the user asked for, this is *where it actually landed* — and
+        re-spells it as the resolved ``points`` form
+        (:func:`ocean_skill.transect.as_transect` already treats that as
+        idempotent, since it is what :func:`ocean_skill.transect.sample_along`
+        itself produces). The reference is then sampled at exactly those
+        points, not the user's original request repeated independently, which
+        is the whole point of the route: two lanes sampled at the same lon/lat
+        share an along-path axis to align on; two lanes each finding their own
+        nearest cells to the same request generally do not.
+
+        Points are rounded to 4 decimal places, matching the ``_bbox``
+        cache-key precedent in :func:`prepare_source`, so float noise carried
+        through the test lane's own vertical transform does not fragment the
+        reference's lane cache entry. The bbox returned alongside is built
+        from the unrounded positions.
+        """
+        from ocean_skill.align import _lat_name, _lon_name
+
+        lon_name, lat_name = _lon_name(t), _lat_name(t)
+        lons = np.asarray(t[lon_name], dtype="float64")
+        lats = np.asarray(t[lat_name], dtype="float64")
+        points = [
+            [round(float(lo), 4), round(float(la), 4)] for lo, la in zip(lons, lats)
+        ]
+        extra_select = {
+            "transect": {"points": points, "method": troute.get("method", "nearest")}
+        }
+        bbox = (
+            float(lons.min()),
+            float(lats.min()),
+            float(lons.max()),
+            float(lats.max()),
+        )
+        return extra_select, bbox
 
     def _reference_narrowing(
         self,
@@ -1834,6 +1993,15 @@ class Comparison:
             # given) would be byte-identical keys for two different results -- a
             # warm cache from the old behavior would silently serve it forever.
             extra["_point_sample"] = True
+        if self._transect_route() is not None:
+            # Same reasoning as _point_sample above: the reference's select
+            # carries the *user's* transect (waypoints, say), but what actually
+            # got sampled is the resolved points form the test lane's own path
+            # snapped to (see _prepare_lane's extra_select). Without this marker
+            # that resolved-points select and a hypothetical future select=
+            # naming the identical points directly would share a key despite
+            # not being guaranteed to mean the same thing forever.
+            extra["_transect_sample"] = True
         # Not gated on `over` the way the block above is -- _reference_narrowing()
         # applies to a profile reference too, which keeps over=None. Carried as the
         # actual values rather than a boolean flag (contrast `_point_sample`, which
@@ -1870,6 +2038,8 @@ class Comparison:
         bbox: tuple[float, float, float, float] | None = None,
         time_window: tuple[Any, Any] | None = None,
         drop_keys: tuple[str, ...] = (),
+        extra_select: dict[str, Any] | None = None,
+        keep: tuple[str, ...] = (),
     ):
         """Reduce one source to its comparable field, via the lane cache.
 
@@ -1886,10 +2056,25 @@ class Comparison:
         — used by :meth:`align` to keep the test lane gridded when a shared point
         select is routed through :func:`ocean_skill.align.sample_at` instead of also
         narrowing the test independently (see :meth:`_point_route`).
+
+        ``extra_select`` is ``drop_keys``' additive counterpart: keys written into
+        this lane's own select (overwriting any it already names) before it is
+        prepared. Used by the transect route to replace the reference's own
+        ``select={"transect": ...}`` with the resolved ``{"points": [...]}`` form
+        the test lane's snapped path resolved to (see :meth:`_transect_route`) —
+        the reference then samples exactly the test's own positions, and the
+        replacement select flows into :func:`prepare_source`'s ordinary key
+        hashing, so the reference's lane cache entry is automatically keyed on
+        which points it was actually sampled at, no separate plumbing needed.
+
+        ``keep`` is :func:`_require_reduced`'s own ``keep=`` — the axes this
+        comparison draws rather than refuses (a vertical section's depth axis).
         """
         select = select_for(self.select, role)
         if drop_keys:
             select = {k: v for k, v in select.items() if k not in drop_keys}
+        if extra_select:
+            select = {**select, **extra_select}
         return prepare_source(
             source,
             variable_for(self.variable, role),
@@ -1898,6 +2083,7 @@ class Comparison:
             use_cache=use_cache,
             refresh=refresh,
             require_reduced=None if self.over else role,
+            require_reduced_keep=keep,
             bbox=bbox,
             time_window=time_window,
         )
@@ -2028,6 +2214,16 @@ class Comparison:
             if route is not None
             else derived_bbox
         )
+        # A vertical section is the same "route around the ordinary select" idea as
+        # a point, one level down: the reference is not narrowed independently, it is
+        # sampled at wherever the *test* lane's own transect actually snapped to (see
+        # _resolved_path). SECTION_VERTICAL_DIMS is passed as require_reduced's keep=
+        # for both lanes so the vertical axis a section draws survives the "single
+        # map" check that would otherwise refuse it.
+        troute = self._transect_route()
+        from ocean_skill.align import SECTION_VERTICAL_DIMS
+
+        keep = SECTION_VERTICAL_DIMS if troute is not None else ()
         try:
             t, _ = self._prepare_lane(
                 self.test_name,
@@ -2037,6 +2233,7 @@ class Comparison:
                 bbox=test_bbox,
                 time_window=derived_window,
                 drop_keys=drop_keys,
+                keep=keep,
             )
         except ValueError as err:
             # A coarse test grid, a point near the edge of its extent, or a stale
@@ -2057,9 +2254,11 @@ class Comparison:
                 role="test",
                 time_window=derived_window,
                 drop_keys=drop_keys,
+                keep=keep,
             )
         bbox = None
         window = None
+        ref_extra = None
         if self.over is not None and t is not None:
             from ocean_skill.align import bbox_of, time_span_of
 
@@ -2068,14 +2267,34 @@ class Comparison:
             # still reads the whole record: MUR over a regional model's footprint is a
             # workable map per step and 2.2 TB across its 8838 daily ones.
             window = time_span_of(t)
-        r, r_depth = self._prepare_lane(
-            self.reference_name,
-            use_cache,
-            refresh,
-            role="reference",
-            bbox=bbox,
-            time_window=window,
-        )
+        elif troute is not None and t is not None:
+            ref_extra, bbox = self._resolved_path(t, troute)
+        try:
+            r, r_depth = self._prepare_lane(
+                self.reference_name,
+                use_cache,
+                refresh,
+                role="reference",
+                bbox=bbox,
+                time_window=window,
+                extra_select=ref_extra,
+                keep=keep,
+            )
+        except ValueError as err:
+            # The same hazard the test-lane retry above guards against, on the other
+            # lane: a coarse reference's nearest cells to the path can sit outside
+            # the pad subset_to_bbox added around the path's own tight extent.
+            if ref_extra is None or bbox is None or "no overlap" not in str(err):
+                raise
+            r, r_depth = self._prepare_lane(
+                self.reference_name,
+                use_cache,
+                refresh,
+                role="reference",
+                time_window=window,
+                extra_select=ref_extra,
+                keep=keep,
+            )
         if r is None or t is None:
             missing_role = "reference" if r is None else "test"
             missing = self.reference_name if r is None else self.test_name
@@ -2204,19 +2423,39 @@ class Comparison:
         return point_of(self.aligned["reference"]) is not None
 
     @property
+    def is_section(self) -> bool:
+        """Whether this comparison is a vertical slice through space, not a map.
+
+        Mirrors :attr:`is_series` one axis over: read off the *aligned pair* --
+        a section reference's lon/lat vary along
+        :data:`~ocean_skill.align.ALONG_DIM` rather than sitting at one place
+        (:func:`ocean_skill.align.path_of`) or spanning a real 2-D grid.
+        Mutually exclusive with :attr:`is_series` by construction (a path's
+        lon/lat vary, a station's do not), and survives a cache hit the same
+        way it does: the aligned Dataset's own coordinates carry the shape,
+        cache or no.
+        """
+        from ocean_skill.align import path_of
+
+        return path_of(self.aligned["reference"]) is not None
+
+    @property
     def family(self) -> str:
         """The plot family this comparison's own shape admits.
 
-        Four cases, in the order the data decides them: a place through time draws
-        as ``series``, a place through depth as ``profile``, a pair scored over any
-        other axis as ``skill_map``, and a pair of single maps as ``field_row``. No
-        argument selects it — the same rule :meth:`ocean_skill.field.Field.plot`
-        follows between a map and a facet grid.
+        Five cases, in the order the data decides them: a place through time draws
+        as ``series``, a place through depth as ``profile``, a vertical slice
+        through space as ``section_row``, a pair scored over any other axis as
+        ``skill_map``, and a pair of single maps as ``field_row``. No argument
+        selects it — the same rule :meth:`ocean_skill.field.Field.plot` follows
+        between a map and a facet grid.
         """
         if self.is_series:
             return "series"
         if self.is_profile:
             return "profile"
+        if self.is_section:
+            return "section_row"
         return "field_row" if self.over is None else "skill_map"
 
     @property
@@ -2233,6 +2472,11 @@ class Comparison:
             return f"drawn as lines: {self.over_reason}, so the time axis is kept"
         if self.is_profile:
             return f"drawn as a profile: {self.over_reason}, so the depth axis is kept"
+        if self.is_section:
+            return (
+                "drawn as test | reference | difference sections: the select cuts "
+                "a transect, so the vertical and along-path axes are kept"
+            )
         if self.over is not None:
             return f"drawn as metric maps: {self.over_reason}"
         return "drawn as test | reference | difference: no axis is being scored"
@@ -2280,6 +2524,14 @@ class Comparison:
                 "make: a per-cell metric over one column is the number metrics() "
                 "already gives. Use .metrics() for the numbers and .plot() for "
                 "the profile."
+            )
+        if self.is_section:
+            raise ValueError(
+                "this comparison is a vertical section with every axis already "
+                "drawn (depth and along-path distance) -- a per-cell metric "
+                "needs a further axis to score over, which sections do not "
+                "support yet (scoring per section cell is a follow-up). Use "
+                ".metrics() for the overall numbers."
             )
 
         requested = tuple(names) or self.metric_names or _metrics.DEFAULT_MAP_METRICS
@@ -2364,6 +2616,12 @@ class Comparison:
                 # otherwise never reach the metrics record, which is the one thing a
                 # spatial map of many stations' metrics (osk.map_metrics) needs from
                 # each of them.
+                #
+                # A section is unweighted for a different reason: metrics.area_weights
+                # would find the lat coordinate riding on the along-path axis and
+                # cos(lat)-weight a (depth, along) block by it -- meaningless there,
+                # since it ignores both the along-path spacing and each cell's own
+                # depth thickness. `n` counts section cells, not time steps.
                 **(
                     {
                         "weighted": False,
@@ -2372,6 +2630,8 @@ class Comparison:
                         "station_lat": self.aligned.attrs.get("station_lat"),
                     }
                     if self.is_series or self.is_profile
+                    else {"weighted": False, "sample_noun": "section cells"}
+                    if self.is_section
                     else {}
                 ),
                 variable=self.standard_name or str(self.variable),
@@ -2453,15 +2713,15 @@ class Comparison:
         family = self.family
         if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
-        if family not in ("series", "profile") and "domain" not in kwargs:
+        if family not in ("series", "section_row", "profile") and "domain" not in kwargs:
             # Outline the test (model) source's own true grid shape when the catalog
             # declares one, falling back to its bbox otherwise — matching Abigale
             # Wyatt's side-by-side plots. Pass domain=None to suppress it, or your own
             # bbox/ring to override; checking "not in kwargs" (rather than
             # kwargs.setdefault) keeps that override working once the default value
-            # is an ndarray, whose truthiness setdefault can't rely on. A line or
-            # profile plot has no map to outline, and either would refuse the option
-            # outright.
+            # is an ndarray, whose truthiness setdefault can't rely on. A line, a
+            # profile or a section plot has no map to outline, and any of the three
+            # would refuse the option outright.
             convention = self.aligned.attrs.get("lon_convention")
             outline = _outline_of(self.test_name, convention)
             kwargs["domain"] = (
@@ -2887,9 +3147,12 @@ class ComparisonSet:
         # identity is a rotated left-edge row label. The grid is what more than one
         # comparison needs; one does not.
         single_row = family == "field_row" and len(self.comparisons) == 1
-        if family in ("field_row", "field_grid", "series", "profile"):
+        if family in ("field_row", "field_grid", "series", "section_row", "profile"):
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
-        if family not in ("series", "profile") and "domain" not in kwargs:
+        if (
+            family not in ("series", "section_row", "profile")
+            and "domain" not in kwargs
+        ):
             # Outlines the first row's test (model) true grid shape (or its bbox,
             # lacking one); rows sharing one test source (the common case) all get the
             # same outline. Pass domain=None to suppress, or your own bbox/ring if rows
@@ -2898,6 +3161,15 @@ class ComparisonSet:
             outline = _outline_of(first.test_name, convention)
             kwargs["domain"] = (
                 outline if outline is not None else _domain_of(first.test_name)
+            )
+        if family == "section_row" and len(self.comparisons) > 1:
+            # field_row's own >1 case stacks as field_grid below; a section has no
+            # such stacked family yet (section_grid is a follow-up), so this says so
+            # rather than silently rendering N comparisons as if they were one.
+            raise ValueError(
+                f"{len(self.comparisons)} section comparisons in one figure would "
+                "need a section_grid family, which does not exist yet -- plot "
+                "each comparison separately."
             )
         # field_row is one comparison's family; a set of *more than one* stacks as a
         # grid. A lone comparison keeps field_row and its single-row title.
@@ -2950,6 +3222,14 @@ class ComparisonSet:
                 "have no frames to play yet: their depth axis is already the y axis "
                 "of the figure, and time-animated profiles are a follow-up. Use "
                 ".plot() instead."
+            )
+        sections = [c for c in self.comparisons if c.is_section]
+        if sections:
+            raise ValueError(
+                f"{len(sections)} of these comparisons are vertical sections, "
+                "which have no frames to play here: the axis a movie would step "
+                "through is already reduced (time-animated sections are a "
+                "follow-up, not yet built). Use .plot() instead."
             )
         first = self.comparisons[0]
         # a row label (drawn rotated at a grid row's left edge) and a frame label (drawn
@@ -3608,6 +3888,21 @@ def compare(
     :func:`ocean_skill.roms.to_sigma0`; ROMS sources only, and not alongside
     ``depths=`` or another vertical ``select`` key.
 
+    ``select={"transect": ...}`` matches a **vertical section** instead of a map:
+    the model is cut along a grid line, a waypoint path, a fixed lon/lat line, or
+    an exact list of points (see :mod:`ocean_skill.transect`), and the reference is
+    sampled at exactly the same points the model's path snapped to — never an
+    independent narrowing of the reference, and never a 2-D regrid — so the two
+    lanes' along-path columns pair up rather than each finding their own nearest
+    cells to the caller's original request. The depth list belongs inside
+    ``select`` here, as ``select={"transect": ..., "depth": [50, 200, ...]}``, not
+    in ``depths=``: a section's two lanes share no native vertical axis, so there
+    is no default to guess, and asking for one is refused with that spelling. A
+    pair-spec ``select`` naming a transect on either side is refused too — two
+    independently-sampled paths share no along-path axis to align on, which is a
+    follow-up, not yet built — and so is ``over=`` alongside a transect, a section
+    already standing on two axes with no third one to score.
+
     ``times=`` is the month-by-month analogue of ``depths=``: instead of one map,
     fan out one comparison per time bin, each reduced on its own. A dict names how
     to *derive* the bins from the **test** source's own time axis, in the same
@@ -3671,6 +3966,55 @@ def compare(
             "vertical request: a set of fixed depths, or a set of density "
             "surfaces, not both."
         )
+
+    # A transect select needs its own checks before the ordinary vertical fan
+    # runs, since a section wants none of the usual defaults: no ("surface",)
+    # sentinel (there is no free surface to hoist to once both lanes are being
+    # matched along a path), no fan across several depths (the depth *list* is
+    # the section's whole y axis, one Comparison), and no per-cell over=
+    # scoring (a section already stands on two axes). This pre-empts each of
+    # those turning into a confusing error further down instead of a clear one
+    # here, and it is cheap: the same check Comparison.__init__ runs on
+    # construction, just early enough to name the compare()-level spelling.
+    has_transect = (
+        (
+            "transect" in (select.get("test") or {})
+            or "transect" in (select.get("reference") or {})
+        )
+        if is_pair_spec(select)
+        else "transect" in select
+    )
+    if has_transect:
+        if is_pair_spec(select):
+            raise ValueError(
+                "select={'test': ..., 'reference': ...} names a transect on "
+                "one (or both) sides -- two independently-sampled paths share "
+                "no along-path axis to align on, so matching them is a "
+                "follow-up, not yet built. Give one shared "
+                "select={'transect': ...} instead."
+            )
+        if depths_was_explicit:
+            raise ValueError(
+                "compare() got both depths= and select={'transect': ...} -- a "
+                "section's depth list belongs in the select: "
+                "select={'transect': ..., 'depth': [50, 200, ...]}."
+            )
+        if not explicit_vertical_select:
+            raise ValueError(
+                "select={'transect': ...} needs an explicit depth list "
+                "alongside it -- the two lanes' native verticals share no "
+                "axis, so there is no default to guess: "
+                "select={'transect': ..., 'depth': [50, 200, ...]}."
+            )
+        if over is not None:
+            raise ValueError(
+                "over= scores a pair cell by cell along one further axis, but "
+                "a vertical section already stands on two axes (depth and "
+                "along-path distance) -- scoring a third axis per section "
+                "cell is a follow-up, not yet built. Drop over= for a "
+                "section comparison."
+            )
+
     # `fan_key`/`fan_values` generalize `depths` to whichever vertical axis is
     # actually being asked for -- a set of depths (the default) or, when `select`
     # carries `sigma0`, a set of isopycnals instead. Kept as one pair of names

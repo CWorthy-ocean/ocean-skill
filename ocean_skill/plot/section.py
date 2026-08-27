@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 import xarray as xr
 
-__all__ = ["SectionGeometry", "prepare_section"]
+__all__ = ["SectionGeometry", "prepare_section", "prepare_section_row"]
 
 
 @dataclass
@@ -109,6 +109,21 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
 
     native_s = vertical != "z" and "z_rho" in da.coords
     depth_source = da["z_rho"] if native_s else da[vertical]
+    if not native_s and float(np.nanmax(np.asarray(depth_source))) > 0:
+        # Fixed-z only: this coordinate is about to be negated below, on the
+        # assumption that it already reads negative-down (the model's own
+        # convention, from roms.to_depth). A positive-down coordinate reaching
+        # here instead -- an observational "depth"/"lev" axis that was renamed
+        # onto "z" without being sign-flipped first -- would silently draw
+        # upside-down: negative tick values, the seafloor at the top. Native-s
+        # is exempt, since z_rho under a positive free surface is legitimately
+        # slightly positive right at the surface, not a sign-convention bug.
+        raise ValueError(
+            f"prepare_section expects {vertical!r} to be negative-down (the "
+            "model's own convention), but its largest value is positive -- "
+            "this coordinate needs to be sign-flipped to negative-down before "
+            "reaching here, not drawn as given."
+        )
     depth = (-depth_source).rename("depth")
     depth.attrs["units"] = "m"
 
@@ -131,3 +146,48 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
         path_note=_path_note(da, lon_name, lat_name),
     )
     return result, geometry
+
+
+def prepare_section_row(
+    aligned: dict[str, xr.DataArray] | xr.Dataset,
+) -> tuple[dict[str, xr.DataArray], SectionGeometry]:
+    """Return ``(values, geometry)`` for a test | reference | difference row.
+
+    ``aligned`` is a comparison's aligned trio — indexed by ``"test"``,
+    ``"reference"``, ``"difference"`` — not necessarily an :class:`xr.Dataset`
+    (test fixtures pass a plain ``dict`` with the same three keys, and this
+    function only ever indexes it, never calls a Dataset-only method, so both
+    work identically).
+
+    Every lane must already carry a ``"z"`` dimension: a comparison lane is
+    always fixed-depth (see :func:`ocean_skill.align._align_along_path`,
+    which renames the reference's own vertical dim onto ``"z"`` and adopts the
+    test's coordinate values) — native s-levels have no shared axis across two
+    different sources to hold a ``test - reference`` difference on, so a
+    section that still carries ``s_rho``/``s_w`` here is a caller error, not
+    something this function can silently paper over.
+
+    Each lane is run through :func:`prepare_section` independently, but the
+    trio is aligned by construction (same ``z``, same ``along``/``distance``,
+    same ``lon``/``lat`` -- see the alignment function's docstring), so their
+    geometries are identical; only the test lane's is returned, matching
+    :func:`ocean_skill.plot.matplotlib_renderer._field_row`'s single-geometry
+    contract for a row of panels.
+    """
+    if "z" not in aligned["test"].dims:
+        raise ValueError(
+            "prepare_section_row expects a fixed-depth 'z' dimension on every "
+            f"lane -- got dims {sorted(aligned['test'].dims)} on the test lane. "
+            "A comparison section is always fixed-depth (see "
+            "ocean_skill.align._align_along_path); pass select={'depth': [...]} "
+            "rather than native s-levels."
+        )
+
+    values: dict[str, xr.DataArray] = {}
+    geometry: SectionGeometry | None = None
+    for lane in ("test", "reference", "difference"):
+        values[lane], lane_geometry = prepare_section(aligned[lane])
+        if lane == "test":
+            geometry = lane_geometry
+    assert geometry is not None
+    return values, geometry

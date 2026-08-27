@@ -364,3 +364,229 @@ def test_different_waypoints_spacing_and_method_each_produce_a_different_key():
         },
     )
     assert len({base, different_points, different_spacing, different_method}) == 4
+
+
+# -- section_row: the comparison counterpart of section, both renderers -------------
+#
+# Stage C: a comparison whose select cuts a transect (Comparison.is_section) draws as
+# test | reference | difference sections through this family instead of section --
+# structurally field_row with prepare_section's geometry substituted for the map.
+
+
+def _section_row_item(*, labels=("roms_run", "woa23"), offset: float = 3.0):
+    """One section_row spec item: a fixed-depth (z, along) trio, aligned by construction."""
+    test = xr.DataArray(
+        5.0 + np.linspace(0, 1, 6 * 8).reshape(6, 8),
+        dims=("z", ALONG_DIM),
+        coords={
+            "z": -np.array([0.0, 10.0, 25.0, 50.0, 100.0, 200.0]),
+            ALONG_DIM: np.linspace(0.0, 150.0, 8),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -93.0, 8)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 26.0, 8)),
+        },
+    )
+    reference = test + offset
+    return {
+        "aligned": {"test": test, "reference": reference, "difference": test - reference},
+        "units": "degC",
+        "standard_name": None,
+        "depth": "0-200 m",
+        "time": "2012-01",
+        "metrics": {"bias": 0.125, "rmse": 0.5, "corr": 0.98},
+        "labels": labels,
+    }
+
+
+def test_section_row_panels_are_all_inverted_with_positive_depth():
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    for ax in fig.axes[:3]:
+        ylim = ax.get_ylim()
+        assert ylim[0] > ylim[1], "y-axis must be inverted: shallow at the top"
+        assert ylim[0] >= 0, "depth reads positive-down"
+
+
+def test_section_row_panels_are_grey_below_the_data():
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    for ax in fig.axes[:3]:
+        assert ax.get_facecolor() == (0.85, 0.85, 0.85, 1.0)
+
+
+def test_section_row_test_and_reference_share_one_colour_scale():
+    from matplotlib.collections import QuadMesh
+
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh)) for ax in fig.axes[:3]
+    ]
+    test_norm, reference_norm, diff_norm = (m.norm for m in meshes)
+    assert (test_norm.vmin, test_norm.vmax) == (reference_norm.vmin, reference_norm.vmax)
+    assert diff_norm.vmin == pytest.approx(-diff_norm.vmax)
+    assert diff_norm.vmin != test_norm.vmin
+
+
+def test_section_row_metrics_land_in_the_difference_panels_corner_box():
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    boxed = [ax for ax in fig.axes[:3] if getattr(ax, "_osk_metrics_text", None)]
+    assert len(boxed) == 1
+    text = boxed[0]._osk_metrics_text.get_text()
+    assert "bias=0.125" in text
+    assert "rmse=0.5" in text
+
+
+def test_section_row_labels_become_panel_titles():
+    # As real integration does (Comparison.plot()): `labels` reaches the spec through
+    # options, not the item -- the item's own "labels" key is for a grid's per-row
+    # fallback, which section_row (never stacked into one) has no caller for.
+    fig = render(
+        PlotSpec(
+            family="section_row",
+            items=[_section_row_item()],
+            options={"labels": ("roms_run", "woa23")},
+        ),
+        renderer="matplotlib",
+    )
+    titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+    assert "roms_run" in titles
+    assert "woa23" in titles
+    assert "difference" in titles
+
+
+def test_section_row_suptitle_carries_the_path_note():
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    assert fig._suptitle is not None
+    text = fig._suptitle.get_text()
+    assert "→" in text  # the path's own endpoints, from SectionGeometry.path_note
+
+
+def test_section_row_depth_ylabel_only_on_the_first_panel():
+    fig = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="matplotlib",
+    )
+    axes = fig.axes[:3]
+    assert axes[0].get_ylabel() != ""
+    assert axes[1].get_ylabel() == ""
+    assert axes[2].get_ylabel() == ""
+
+
+def test_section_row_renders_interactively():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="holoviews",
+    )
+    qms = obj.traverse(lambda x: x, [hv.QuadMesh])
+    assert len(qms) == 3
+
+
+def test_section_row_panels_have_grey_background_and_inverted_depth():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="holoviews",
+    )
+    for qm in obj.traverse(lambda x: x, [hv.QuadMesh]):
+        plot_kwargs = qm.opts.get("plot").kwargs
+        assert plot_kwargs.get("bgcolor") == "#d9d9d9"
+        assert plot_kwargs.get("invert_yaxis") is True
+
+
+def test_section_row_metrics_fold_into_the_difference_title():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="holoviews",
+    )
+    titles = [
+        qm.opts.get("plot").kwargs.get("title")
+        for qm in obj.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert any("bias=0.125" in (t or "") for t in titles)
+
+
+def test_section_row_shares_the_static_colour_limits_interactively():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section_row", items=[_section_row_item()]),
+        renderer="holoviews",
+    )
+    # hvplot's clim= sets the value dimension's own range rather than a plot-level
+    # option, so it reads back off vdims[0].range, not .opts.get("plot").
+    clims = [
+        qm.vdims[0].range for qm in obj.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    test_clim, reference_clim, diff_clim = clims
+    assert test_clim == reference_clim
+    assert diff_clim[0] == pytest.approx(-diff_clim[1])
+
+
+def test_section_row_refuses_a_native_s_trio():
+    native = xr.DataArray(
+        np.zeros((3, 4)),
+        dims=("s_rho", ALONG_DIM),
+        coords={
+            ALONG_DIM: np.linspace(0.0, 30.0, 4),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -94.0, 4)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 25.0, 4)),
+        },
+    )
+    aligned = {"test": native, "reference": native.copy(), "difference": native.copy()}
+    item = {**_section_row_item(), "aligned": aligned}
+    with pytest.raises(ValueError, match="fixed-depth"):
+        render(PlotSpec(family="section_row", items=[item]), renderer="matplotlib")
+
+
+def test_section_row_refuses_a_positive_down_z():
+    field = xr.DataArray(
+        5.0 + np.linspace(0, 1, 3 * 4).reshape(3, 4),
+        dims=("z", ALONG_DIM),
+        coords={
+            "z": np.array([0.0, 50.0, 200.0]),  # positive-down: the bug this guards
+            ALONG_DIM: np.linspace(0.0, 30.0, 4),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -94.0, 4)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 25.0, 4)),
+        },
+    )
+    aligned = {"test": field, "reference": field.copy(), "difference": field.copy()}
+    item = {**_section_row_item(), "aligned": aligned}
+    with pytest.raises(ValueError, match="negative-down"):
+        render(PlotSpec(family="section_row", items=[item]), renderer="matplotlib")
+
+
+def test_domain_is_not_an_option_of_section_row():
+    with pytest.raises(TypeError, match="not an option of section_row"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=[_section_row_item()],
+                options={"domain": (0.0, 0.0, 1.0, 1.0)},
+            ),
+            renderer="matplotlib",
+        )

@@ -59,6 +59,7 @@ __all__ = [
     "profile",
     "render",
     "section",
+    "section_row",
     "series",
     "skill_map",
 ]
@@ -693,6 +694,86 @@ def _draw_row(
     if metrics:
         # stashed on the axes, as the row label is, so that field_movie can retext it
         # per frame rather than re-deriving where the box was put
+        axes[2]._osk_metrics_text = axes[2].text(
+            0.02,
+            0.02,
+            _metrics_text(metrics, metric_keys),
+            transform=axes[2].transAxes,
+            zorder=5,
+            **metrics_kwargs,
+        )
+    return ims, (f"[{units}]" if units else "")
+
+
+def _draw_section_row(
+    axes,
+    values: dict[str, Any],
+    geometry,
+    *,
+    labels: tuple[str, str],
+    units: str | None,
+    standard_name: str | None,
+    metrics: dict[str, Any] | None,
+    mark: str,
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    title_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    scale: dict[str, float],
+    defaults: dict[str, dict[str, Any]],
+):
+    """Draw one test|reference|difference section row into three existing axes.
+
+    The section counterpart of :func:`_draw_row`: the same shared/symmetric colour
+    norms and corner metrics box, but drawn as :func:`section` draws its one panel
+    (grey facecolor for below-bathymetry/off-domain cells, positive-down depth with
+    the y-axis inverted) rather than as a map — these are plain Cartesian axes, not
+    cartopy ``GeoAxes``, so there is no gridliner, no coastline, no domain ring.
+
+    ``values``/``geometry`` are :func:`ocean_skill.plot.section.prepare_section_row`'s
+    own return, unpacked by the caller so this function stays a pure drawing step.
+    """
+    import matplotlib.colors as mcolors
+
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
+
+    t, r, d = values["test"], values["reference"], values["difference"]
+    tl, rl = labels
+    seq, div = cmaps_for(standard_name)
+    vmin, vmax = _limits(t, r)
+    seq_norm = norm_for(standard_name, vmin, vmax)
+    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
+
+    panels = [
+        (t, tl, seq, seq_norm),
+        (r, rl, seq, seq_norm),
+        (d, "difference", div, div_norm),
+    ]
+    ims = []
+    for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
+        ax.set_facecolor("0.85")
+        draw = ax.contourf if mark == "contourf" else ax.pcolormesh
+        kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+        im = draw(
+            da[geometry.x_name], da[geometry.y_name], da, cmap=cmap, norm=norm, **kw
+        )
+        ax.invert_yaxis()
+        ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+        # Only the leftmost panel labels depth -- the other two share the same axis,
+        # the same convention _draw_row uses for latitude on a row of maps.
+        if not shared_axis_labels or j == 0:
+            ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+        ax.tick_params(axis="both", labelsize=scale["tick_label"])
+        if shared_axis_labels and j != 0:
+            ax.tick_params(axis="y", labelleft=False)
+        ax.set_title(lab, **title_kwargs)
+        ax.title._osk_size_pinned = title_pinned
+        ims.append(im)
+
+    if metrics:
         axes[2]._osk_metrics_text = axes[2].text(
             0.02,
             0.02,
@@ -2772,6 +2853,133 @@ def section(
     return fig
 
 
+def section_row(
+    aligned,
+    *,
+    labels: tuple[str, str] | None = None,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    depth: str | None = None,
+    time: str | None = None,
+    metrics: dict[str, Any] | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+):
+    """Draw one ``test | reference | difference`` row of vertical sections.
+
+    :func:`field_row` with :func:`ocean_skill.plot.section.prepare_section`'s
+    geometry substituted for the map — a comparison whose select cuts a transect
+    (see :func:`ocean_skill.comparison.Comparison.is_section`) gets this family
+    instead, the same way one that reduces to a single time axis gets
+    :func:`series`. Test and reference share one colour scale (the 10th-90th
+    percentile of the pair); the difference panel uses a diverging map centred on
+    zero; metrics go in the difference panel's corner box — all exactly as
+    :func:`field_row` draws a gridded comparison, just against depth and
+    along-path distance instead of longitude and latitude.
+
+    There is no ``domain``, ``region``, ``gridline_kwargs``, ``tick_label_kwargs``
+    or ``row_label``: a section has no map to outline or gridline, and this is
+    always the only (and so also the bottom) row — see :func:`section` for the
+    single-panel case these omissions also apply to.
+
+    ``title`` defaults to the variable name followed by the depth list, time and
+    the path's own endpoints (``29.0°N, 94.5°W → 27.5°N, 90.0°W``) —
+    :func:`ocean_skill.plot.section.SectionGeometry.path_note` standing in for
+    the region a gridded comparison's title names instead.
+
+    Everything else — sizing (``size``/``zoom``/``figsize``), ``font_scale``,
+    ``fit_text``, ``align_colorbars``, ``metric_keys``, the ``*_kwargs`` dicts,
+    ``rasterize``/``hover`` (interactive-only, see
+    :func:`_warn_if_interactive_only`) — means exactly what it does in
+    :func:`field_row`.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.section import prepare_section_row
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+    values, geometry = prepare_section_row(aligned)
+    if title is None:
+        title = suptitle_text(standard_name, (depth, time, geometry.path_note))
+
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=True,  # one row: bars below, panels get the full cell width
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=1,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
+    ims, lab = _draw_section_row(
+        axes,
+        values,
+        geometry,
+        labels=labels or ("test", "reference"),
+        units=units,
+        standard_name=standard_name,
+        metrics=metrics,
+        mark=mark,
+        metric_keys=metric_keys,
+        title_kwargs=title_kwargs,
+        metrics_kwargs=metrics_kwargs,
+        shared_axis_labels=shared_axis_labels,
+        scale=scale,
+        defaults=defaults,
+    )
+    _draw_colorbar(
+        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+    )
+    _draw_colorbar(
+        fig,
+        ims[2],
+        axes[2],
+        f"difference {lab}",
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+    )
+
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=list(axes))
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def skill_map(
     items: list[dict[str, Any]],
     *,
@@ -3870,6 +4078,7 @@ def _top_level_options() -> frozenset[str]:
             field_facet,
             series,
             section,
+            section_row,
             profile,
             skill_map,
             locations,
@@ -3937,6 +4146,8 @@ def render(spec, **kwargs: Any):
         _check_options(series, opts)
     elif family == "section":
         _check_options(section, opts)
+    elif family == "section_row":
+        _check_options(section_row, opts)
     elif family == "profile":
         _check_options(profile, opts)
     elif family == "skill_map":
@@ -4000,6 +4211,17 @@ def render(spec, **kwargs: Any):
             standard_name=item.get("standard_name"),
             depth=item.get("depth"),
             label=item.get("label"),
+            **opts,
+        )
+    if family == "section_row":
+        item = spec.single
+        return section_row(
+            item["aligned"],
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            depth=item.get("depth"),
+            time=item.get("time"),
+            metrics=item.get("metrics"),
             **opts,
         )
     if family in ("taylor", "target", "paired"):
