@@ -332,6 +332,60 @@ def test_a_non_erddap_lane_is_read_exactly_as_before(lane):
     assert da.sizes["time"] == 28
 
 
+def test_a_derived_reference_window_reaches_a_tabledap_test_as_a_constraint(lane):
+    """A ``pd.Timestamp`` window -- what ``_time_coverage_of`` produces when deriving
+    a crop from a point-like reference's catalog metadata -- survives the same
+    stamping path as the ``np.datetime64`` window a skill map derives from its test
+    lane's own data (see the test above this one). The two producers disagree on
+    dtype; ``erddap_constraints``'s ``_stamp`` must not."""
+    import pandas as pd
+
+    window = (pd.Timestamp("2015-03-01"), pd.Timestamp("2015-03-31"))
+    da, kwargs = lane(TABLEDAP, select=None, aggregate=None, time_window=window)
+    assert kwargs["constraints"] == {
+        "time>=": "2015-03-01T00:00:00Z",
+        "time<=": "2015-03-31T00:00:00Z",
+    }
+    assert da.sizes["time"] == 31
+
+
+def test_a_derived_bbox_and_window_apply_together(monkeypatch):
+    """``bbox=`` and ``time_window=`` crop independently and their effects compose --
+    the shape a metadata-derived narrowing hands the test lane (spatial *and*
+    temporal at once), on a non-ERDDAP (in-memory-cropped) source."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import prepare_source
+
+    time = pd.date_range("2015-01-01", periods=10, freq="D")
+    lat = np.array([10.0, 20.0, 30.0])
+    lon = np.array([100.0, 110.0, 120.0])
+    values = np.arange(10 * 3 * 3, dtype=float).reshape(10, 3, 3)
+    ds = xr.Dataset(
+        {"temp": (("time", "lat", "lon"), values)},
+        coords={"time": time, "lat": lat, "lon": lon},
+    )
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata={}))
+
+    da, _ = prepare_source(
+        "grid",
+        "temp",
+        None,
+        None,
+        use_cache=False,
+        bbox=(105.0, 15.0, 115.0, 25.0),
+        time_window=(np.datetime64("2015-01-03"), np.datetime64("2015-01-05")),
+    )
+    assert list(da["lon"].values) == [110.0]
+    assert list(da["lat"].values) == [20.0]
+    assert da.sizes["time"] == 3
+
+
 def test_two_windows_over_one_source_do_not_share_a_cache_entry(monkeypatch, station):
     """A cropped lane is not the uncropped one, and `_bbox` alone did not say so."""
     from ocean_skill.cache import key_for_prepared

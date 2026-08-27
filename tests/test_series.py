@@ -302,6 +302,12 @@ def station_lanes(monkeypatch):
 
     Mirrors ``tests/test_skill_maps.py``'s ``stub``: a comparison is built and aligned
     without a catalog or a network, so the featureType is stated rather than read.
+
+    The ``prepare_source`` stub records ``(source, kwargs)`` onto ``lanes.calls`` --
+    a plain list attached to the returned dict -- so a test can assert what a
+    metadata-derived ``bbox=``/``time_window=`` reached the test lane with, the way
+    :func:`_model_comparison` below lets a routed one be checked through real
+    ``align()`` machinery instead.
     """
     from ocean_skill import comparison
 
@@ -311,10 +317,16 @@ def station_lanes(monkeypatch):
         # a gridded reference, for the mixed-set case below
         "satellite": monthly_grid(start="2014-06-01"),
     }
-    monkeypatch.setattr(
-        comparison, "prepare_source", lambda source, *a, **k: (lanes[source], None)
-    )
+    calls: list[tuple[str, dict]] = []
+    lanes["calls"] = calls
+
+    def _prepare_source(source, *a, **k):
+        calls.append((source, k))
+        return lanes[source], None
+
+    monkeypatch.setattr(comparison, "prepare_source", _prepare_source)
     monkeypatch.setattr(comparison, "_domain_of", lambda name: None)
+    monkeypatch.setattr(comparison, "_time_coverage_of", lambda name: None)
     monkeypatch.setattr(
         comparison,
         "_feature_type",
@@ -376,6 +388,171 @@ def test_the_shape_of_the_data_can_overrule_the_featuretype(station_lanes, monke
 
 def test_an_explicit_over_wins_over_the_featuretype(station_lanes):
     assert _comparison(over="time").over_reason == "over= as asked"
+
+
+# -- reference-metadata narrowing of the test lane --------------------------------
+
+
+def _lane_kwargs(lanes, source):
+    """The last recorded ``prepare_source`` kwargs for ``source``, from station_lanes."""
+    matches = [k for s, k in lanes["calls"] if s == source]
+    assert matches, f"prepare_source was never called for {source!r}"
+    return matches[-1]
+
+
+def test_a_mooring_reference_narrows_the_test_lane_from_metadata(
+    station_lanes, monkeypatch
+):
+    """The motivating case: a mooring's own catalog position/window crop the test."""
+    import ocean_skill.comparison as comparison_module
+
+    bbox = (-144.3, 49.9, -144.3, 49.9)
+    window = (pd.Timestamp("2024-04-04"), pd.Timestamp("2024-08-14"))
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: bbox)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: window)
+
+    _comparison()
+
+    test_kwargs = _lane_kwargs(station_lanes, "product")
+    assert test_kwargs["bbox"] == bbox
+    assert test_kwargs["time_window"] == window
+    # the reference is never narrowed *by its own* metadata -- it owns the metadata,
+    # and the two-point-mismatch warning exists to catch exactly that mistake. It
+    # still gets the pre-existing, unrelated crop derived from the (now-narrowed)
+    # test lane's own domain (see align()'s bbox_of(t)/time_span_of(t)), which is
+    # not this feature and is not the injected bbox/window themselves.
+    reference_kwargs = _lane_kwargs(station_lanes, "papa")
+    assert reference_kwargs["bbox"] != bbox
+    assert reference_kwargs["time_window"] != window
+
+
+def test_a_profile_reference_narrows_without_implying_over(monkeypatch):
+    """Narrowing is decoupled from over= -- a profile keeps over=None either way.
+
+    Checked directly against :meth:`Comparison._reference_narrowing` rather than
+    through a full ``align()``: an unreduced gridded *test* lane with ``over=None``
+    correctly refuses to align at all (:func:`ocean_skill.align._require_2d`) --
+    a real caller would narrow it with ``select=``/``aggregate=`` first, same as
+    any other map comparison. That refusal is orthogonal to what this test checks.
+    """
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    bbox = (-144.3, 49.9, -144.3, 49.9)
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: bbox)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+    monkeypatch.setattr(comparison_module, "_feature_type", lambda name: "profile")
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
+    assert c.over is None
+    assert c._reference_narrowing() == (bbox, None)
+
+
+def test_a_trajectory_reference_narrows_to_its_extent_box(monkeypatch):
+    """A trajectory's declared extent is a real box, not a degenerate point."""
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    bbox = (-150.0, 40.0, -140.0, 55.0)
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: bbox)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+    monkeypatch.setattr(comparison_module, "_feature_type", lambda name: "trajectory")
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
+    assert c._reference_narrowing() == (bbox, None)
+
+
+def test_a_gridded_reference_is_never_narrowed(monkeypatch):
+    """The policy table's other half: featureType outside NARROWING_FEATURE_TYPES."""
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(
+        comparison_module, "_domain_of", lambda name: (-150.0, 40.0, -140.0, 55.0)
+    )
+    monkeypatch.setattr(comparison_module, "_feature_type", lambda name: "grid")
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
+    assert c._reference_narrowing() == (None, None)
+
+
+def test_missing_metadata_leaves_the_test_lane_unnarrowed(station_lanes):
+    """The default station_lanes stubs return None -- byte-identical to no feature."""
+    _comparison()
+    test_kwargs = _lane_kwargs(station_lanes, "product")
+    assert test_kwargs["bbox"] is None
+    assert test_kwargs["time_window"] is None
+
+
+def test_a_pair_spec_select_skips_the_derived_narrowing(station_lanes, monkeypatch):
+    """A deliberate {"test":..., "reference":...} names two positions on purpose."""
+    import ocean_skill.comparison as comparison_module
+
+    monkeypatch.setattr(
+        comparison_module, "_domain_of", lambda name: (-144.3, 49.9, -144.3, 49.9)
+    )
+    _comparison(select={"test": {"lon": -145.0}, "reference": {"lon": -144.3}})
+    assert _lane_kwargs(station_lanes, "product")["bbox"] is None
+
+
+# -- _time_coverage_of ------------------------------------------------------------
+
+
+def _resolved(monkeypatch, metadata):
+    """Patch ``catalog.resolve`` to hand back ``metadata`` for any source name."""
+    from types import SimpleNamespace
+
+    from ocean_skill import catalog
+
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=metadata))
+
+
+def test_time_coverage_prefers_minmax_time_over_the_truncated_pair(monkeypatch):
+    """ERDDAP's own minTime/maxTime are full timestamps; time_coverage_* is a date."""
+    from ocean_skill.comparison import _time_coverage_of
+
+    _resolved(
+        monkeypatch,
+        {
+            "minTime": "2024-04-04T06:00:00Z",
+            "maxTime": "2024-08-14T18:00:00Z",
+            "time_coverage_start": "2024-04-04",
+            "time_coverage_end": "2024-08-14",
+        },
+    )
+    start, stop = _time_coverage_of("mooring")
+    assert start == pd.Timestamp("2024-04-04T06:00:00Z") - pd.Timedelta(days=1)
+    assert stop == pd.Timestamp("2024-08-14T18:00:00Z") + pd.Timedelta(days=1)
+
+
+def test_time_coverage_falls_back_to_the_truncated_pair_and_pads_a_day(monkeypatch):
+    """No minTime/maxTime (a non-ERDDAP source): time_coverage_* still works, with
+    the truncation covered by the same day of padding."""
+    from ocean_skill.comparison import _time_coverage_of
+
+    _resolved(
+        monkeypatch,
+        {"time_coverage_start": "2024-04-04", "time_coverage_end": "2024-08-14"},
+    )
+    start, stop = _time_coverage_of("mooring")
+    assert start == pd.Timestamp("2024-04-03")
+    assert stop == pd.Timestamp("2024-08-15")
+
+
+def test_time_coverage_is_none_without_either_pair(monkeypatch):
+    from ocean_skill.comparison import _time_coverage_of
+
+    _resolved(monkeypatch, {"minTime": "2024-04-04T00:00:00Z"})  # maxTime missing
+    assert _time_coverage_of("mooring") is None
+    _resolved(monkeypatch, {})
+    assert _time_coverage_of("mooring") is None
+
+
+def test_time_coverage_is_none_on_garbage_rather_than_raising(monkeypatch):
+    from ocean_skill.comparison import _time_coverage_of
+
+    _resolved(monkeypatch, {"minTime": "not a date", "maxTime": "also not one"})
+    assert _time_coverage_of("mooring") is None
 
 
 def test_the_overall_metrics_of_a_station_are_not_area_weighted(station_lanes):
@@ -521,13 +698,19 @@ def _curvilinear_monthly(nx: int = 11, ny: int = 10, seed: int = 5):
     return da.to_dataset()
 
 
-def _model_comparison(monkeypatch, *, test, reference, **kwargs):
+def _model_comparison(monkeypatch, *, test, reference, metadata=None, **kwargs):
     """Build a ``Comparison`` between two gridded, featureType-less sources.
 
     Patches ``osk.read``/``catalog.resolve`` rather than ``comparison.prepare_source``
     (contrast ``station_lanes`` above) -- the point of this section is that a point
     select's routing through ``operators.select``/``align.sample_at`` actually runs,
     which a stubbed ``prepare_source`` would skip entirely.
+
+    ``metadata`` optionally supplies ``{"run_baseline": {...}, "run_new": {...}}`` for
+    the ``catalog.resolve(...).metadata`` a source reports -- read by
+    :func:`ocean_skill.comparison._feature_type`/``_domain_of``/``_time_coverage_of``,
+    so this is what lets a reference-metadata-derived narrowing run through the real
+    ``align()`` machinery here, the same way an explicit point ``select`` already does.
     """
     from types import SimpleNamespace
 
@@ -536,8 +719,11 @@ def _model_comparison(monkeypatch, *, test, reference, **kwargs):
     from ocean_skill.comparison import Comparison
 
     grids = {"run_new": test, "run_baseline": reference}
+    meta = metadata or {}
     monkeypatch.setattr(osk, "read", lambda name, **kw: grids[name])
-    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata={}))
+    monkeypatch.setattr(
+        catalog, "resolve", lambda name: SimpleNamespace(metadata=meta.get(name, {}))
+    )
     return Comparison(
         reference="run_baseline",
         test="run_new",
@@ -666,6 +852,110 @@ def test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it(monkeypatch):
     )
     aligned = c.align()  # must not raise "no overlap"
     assert float(aligned["test_lon"]) == -140.0
+
+
+def _point_station(*, lon=STATION[0], lat=STATION[1], seed=3):
+    """A single-position reference shaped like this section's other sources -- a
+    ``Dataset``, ``MODEL_VAR``-named -- so the real, unstubbed ``align()`` pipeline's
+    own ``point_of`` finds it, the way it would a real mooring.
+    """
+    time = pd.date_range("2014-06-01", "2014-09-01", freq="MS") + pd.Timedelta(days=14)
+    values = 100 + np.random.RandomState(seed).rand(time.size)
+    da = xr.DataArray(values, coords={"time": time}, dims="time", name=MODEL_VAR)
+    da = da.assign_coords(lon=lon, lat=lat)
+    da.attrs["units"] = "degC"
+    return da.to_dataset()
+
+
+def test_a_stale_metadata_position_falls_back_to_the_full_lane(monkeypatch):
+    """A wildly wrong catalog position must not fail the comparison outright.
+
+    Mirrors ``test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it``, but
+    the miss here comes from a stale reference-*metadata* bbox rather than a coarse
+    grid -- the same retry (:meth:`Comparison.align`'s "no overlap" catch) covers
+    both, and the real, unstubbed station branch still finds the reference's actual
+    (not the metadata's claimed) position once the full lane is read.
+    """
+    c = _model_comparison(
+        monkeypatch,
+        test=_coarse_grid([-160.0, -150.0, -140.0, -130.0], [40.0, 50.0, 60.0]),
+        reference=_point_station(),
+        metadata={
+            "run_baseline": {
+                "featureType": "timeSeries",
+                "geospatial_lon_min": -10.0,
+                "geospatial_lon_max": -10.0,
+                "geospatial_lat_min": 0.0,
+                "geospatial_lat_max": 0.0,
+            }
+        },
+    )
+    aligned = c.align()  # must not raise "no overlap"
+    assert float(aligned["test_lon"]) == -140.0
+
+
+def test_an_explicit_point_select_beats_the_metadata_position(monkeypatch):
+    """Where to sample is what the caller asked for, not a guess from the catalog.
+
+    A shared point ``select`` already routes the test lane's crop (see
+    ``test_the_routed_point_select_samples_co_located_with_no_distance_warning``);
+    a reference whose catalog metadata *also* claims a (here, deliberately different
+    and otherwise plausible) position must not be allowed to override it -- the
+    caller's explicit choice wins spatially, exactly as :meth:`Comparison.align`
+    documents.
+    """
+    c = _model_comparison(
+        monkeypatch,
+        test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+        reference=_offset_grid(seed=2),
+        select=POINT_SELECT,
+        metadata={
+            "run_baseline": {
+                "featureType": "timeSeries",
+                "geospatial_lon_min": -141.0,
+                "geospatial_lon_max": -141.0,
+                "geospatial_lat_min": 54.0,
+                "geospatial_lat_max": 54.0,
+            }
+        },
+    )
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        aligned = c.align()
+    assert not any("km apart" in str(w.message) for w in log)
+    # sampled at the caller's own point -- not the reference's stale metadata claim
+    assert (float(aligned["test_lon"]), float(aligned["test_lat"])) == (-144.1, 50.9)
+
+
+def test_the_cache_key_changes_when_the_reference_window_changes(monkeypatch):
+    """A catalog rebuild that widens the reference's declared record must not serve
+    a stale aligned pair back from a warm cache."""
+
+    def key_for(max_time):
+        meta = {
+            "run_baseline": {
+                "featureType": "timeSeries",
+                "minTime": "2014-06-01T00:00:00Z",
+                "maxTime": max_time,
+            }
+        }
+        c = _model_comparison(
+            monkeypatch,
+            test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
+            reference=_offset_grid(seed=2),
+            select=POINT_SELECT,
+            metadata=meta,
+        )
+        # Read the key *before* the next call's monkeypatch.setattr reassigns
+        # catalog.resolve out from under it -- _cache_key resolves the reference's
+        # metadata lazily, at access time, not at construction time.
+        return c._cache_key
+
+    a = key_for("2014-08-01T00:00:00Z")
+    b = key_for("2014-08-01T00:00:00Z")
+    widened = key_for("2015-01-01T00:00:00Z")
+    assert a == b
+    assert a != widened
 
 
 def test_the_cache_key_is_stable_and_differs_from_a_pair_spec(monkeypatch):
