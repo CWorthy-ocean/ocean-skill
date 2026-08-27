@@ -32,6 +32,8 @@ from ocean_skill.plot.typography import (
     PANEL_W_FRACTION,
     PANEL_W_FRACTION_HORIZONTAL_CBAR,
     REFERENCE_GRID,
+    ROW_OVERHEAD,
+    ROW_OVERHEAD_HORIZONTAL_CBAR,
     SUPTITLE_ALLOWANCE,
     Canvas,
     auto_figsize,
@@ -55,6 +57,7 @@ __all__ = [
     "metric_panels",
     "metric_value_text",
     "render",
+    "section",
     "series",
     "skill_map",
 ]
@@ -2430,6 +2433,125 @@ def metric_arrays(skill, names) -> dict[str, Any]:
     return out
 
 
+def section(
+    field,
+    *,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    depth: str | None = None,
+    label: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+):
+    """Draw one vertical section: depth against along-path distance.
+
+    The model-only counterpart of :func:`field_facet`'s single-map case, minus the
+    map itself: a section has no cartopy projection, since its two axes are depth
+    and along-path distance rather than longitude and latitude. See
+    :func:`ocean_skill.plot.section.prepare_section` for the axis conventions this
+    draws against -- positive-down depth with the y-axis inverted, so 0 m sits at
+    the top and the deepest cell at the bottom; the along-path axis in kilometres
+    (or in degrees, for a fixed-longitude/latitude line, whose along coordinate
+    still varies in the *other* direction).
+
+    ``mark="pcolormesh"`` (default) or ``"contourf"``, the same two this package's
+    map families accept. Cells below the modelled seafloor -- or wherever the path
+    has left the source's domain -- carry no data, and draw as the same grey a
+    map's land does (``ax.set_facecolor``), so the seafloor's shape is visible
+    without singling those cells out.
+
+    There is no ``domain``, ``gridline_kwargs`` or ``tick_label_kwargs``: a section
+    has no map to outline or gridline, and its plain Cartesian ticks need no
+    gridliner styling to carry. Everything else -- sizing, ``font_scale``,
+    ``colorbar_kwargs``/``suptitle_kwargs`` -- means what it does in
+    :func:`field_row`.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
+    option set to each renderer (see :func:`_warn_if_interactive_only`) — a
+    section's mesh is small enough that neither changes anything here.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.section import prepare_section
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+    values, geometry = prepare_section(field)
+    if title is None:
+        title = suptitle_text(standard_name, (depth, geometry.path_note), label=label)
+
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=True,  # one panel: a bar below leaves it the full width
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=1,
+        ncols=1,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize, ncols=1, nrows=1, font_scale=font_scale, figure_ncols=REFERENCE_GRID[0]
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+
+    cmap, _ = cmaps_for(standard_name)
+    vmin, vmax = _limits(values)
+    norm = norm_for(standard_name, vmin, vmax)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+    ax.set_facecolor("0.85")  # the map families' land grey, doing the same job here:
+    # a below-bathymetry (or off-domain) cell is genuinely absent data, not zero.
+    draw = ax.contourf if mark == "contourf" else ax.pcolormesh
+    kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+    im = draw(
+        values[geometry.x_name],
+        values[geometry.y_name],
+        values,
+        cmap=cmap,
+        norm=norm,
+        **kw,
+    )
+    ax.invert_yaxis()
+    ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+    ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+    ax.tick_params(axis="both", labelsize=scale["tick_label"])
+
+    lab = units or ""
+    _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=[ax])
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def skill_map(
     items: list[dict[str, Any]],
     *,
@@ -3522,7 +3644,15 @@ def _top_level_options() -> frozenset[str]:
 
     return frozenset(
         name
-        for fn in (field_row, field_grid, field_facet, series, skill_map, locations)
+        for fn in (
+            field_row,
+            field_grid,
+            field_facet,
+            series,
+            section,
+            skill_map,
+            locations,
+        )
         for name in inspect.signature(fn).parameters
     )
 
@@ -3584,6 +3714,8 @@ def render(spec, **kwargs: Any):
         _check_options(facet_movie, opts)
     elif family == "series":
         _check_options(series, opts)
+    elif family == "section":
+        _check_options(section, opts)
     elif family == "skill_map":
         _check_options(skill_map, opts)
     elif family == "locations":
@@ -3635,6 +3767,16 @@ def render(spec, **kwargs: Any):
         return field_movie(spec.items, **opts)
     if family == "series":
         return series(spec.items, **opts)
+    if family == "section":
+        item = spec.single
+        return section(
+            item["field"],
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            depth=item.get("depth"),
+            label=item.get("label"),
+            **opts,
+        )
     if family in ("taylor", "target", "paired"):
         # summary families work from metric records, which the spec carries per item
         fn = {"taylor": taylor, "target": target, "paired": paired}[family]

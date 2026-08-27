@@ -846,6 +846,21 @@ def _prepare(
     if tabular.is_frame(obj):
         obj = tabular.to_dataset(obj, meta)
 
+    # A transect is sliced first, on the whole Dataset, before anything else in this
+    # function runs -- earlier than the horizontal select just below. Applying it to
+    # the whole Dataset rather than to the one resolved variable keeps h/mask_rho/
+    # Cs_r/Cs_w consistent with the sliced field for free: the ROMS ladder further
+    # down re-attaches those from `obj` (see the "Static grid fields only" note), so
+    # if `obj` is already sliced, whatever it re-attaches already matches. Popped
+    # (not just read) so it never reaches the horizontal select below, which knows
+    # nothing about it.
+    transect_spec = select.pop("transect", None)
+    is_section = transect_spec is not None
+    if is_section:
+        from ocean_skill.transect import apply_transect
+
+        obj = apply_transect(obj, transect_spec, subject=source)
+
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
     sigma = select.get("sigma0")
     if depth is not None and sigma is not None:
@@ -878,8 +893,17 @@ def _prepare(
     # for the ladder to throw all but the top one away; the isel there becomes a
     # no-op once it has already happened here. Hoisted only for the plain scalar
     # case -- a band, a level list, or an isopycnal slice all still need the full
-    # column, so they are left for the ladder.
-    if not calculated and sigma is None and surface and meta.get("model") == "roms":
+    # column, so they are left for the ladder. A section with no depth key at all
+    # (`surface` is True for that too -- see is_surface_request) is *not* hoisted:
+    # its default is the model's own levels standing, not the top one, so the ladder
+    # further down has to see `depth is None` still meaning that, unmolested.
+    if (
+        not calculated
+        and sigma is None
+        and surface
+        and not (is_section and depth is None)
+        and meta.get("model") == "roms"
+    ):
         name = da.name or "field"
         da = roms.surface(da.to_dataset(name=name), meta)[name]
 
@@ -940,7 +964,17 @@ def _prepare(
         for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
             if grid_var in obj.variables and grid_var not in sub.variables:
                 sub = sub.assign({grid_var: obj[grid_var]})
-        if sigma is not None:
+        if is_section and depth is None:
+            # A section with no depth request draws the model's own s-levels --
+            # no transform, so no xgcm grid needed and nothing interpolated. But
+            # add_depth_coord still runs: without it the vertical axis would be
+            # bare sigma-level *indices* (0..N-1), which say nothing about where
+            # in the water column they actually are. Attaching z_rho is a
+            # coordinate assignment, not an interpolation, so it costs nothing
+            # extra here the way to_depth's transform would.
+            if "z_rho" not in sub.coords:
+                sub = roms.add_depth_coord(sub, meta)
+        elif sigma is not None:
             # An isopycnal slice needs the full water column of temperature and
             # salinity, not just the one variable this lane resolved -- reduced by
             # the *same* horizontal select and non-vertical aggregate the sliced

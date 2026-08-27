@@ -38,6 +38,7 @@ FAMILIES = (
     "field_movie",
     "facet_movie",
     "series",
+    "section",
     "skill_map",
     "taylor",
     "target",
@@ -96,6 +97,17 @@ class PlotSpec:
         :func:`ocean_skill.plot.series.item_roles`/``line_specs``), with no
         statistics box and no residual (``residual=True`` is refused if any item in
         the figure is this shape).
+
+        ``section`` joins ``field_facet`` as a single-source exception: one item,
+        carrying ``field`` (one DataArray) rather than ``aligned``. Its ``field``
+        has two axes rather than ``field_facet``'s horizontal pair — a vertical
+        axis (native s-levels or fixed depths) and one along-path axis carrying
+        1-D ``lon``/``lat`` coordinates (see
+        :func:`ocean_skill.align.path_of`) — so it draws as one depth-by-distance
+        panel rather than map panels. Built by
+        :meth:`ocean_skill.field.Field.as_item`; there is no comparison
+        counterpart yet (matching a section against a dataset is a follow-up),
+        so no ``aligned``-carrying twin of this family exists.
 
         ``locations`` carries no field payload at all: one item per catalog *source*,
         with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``

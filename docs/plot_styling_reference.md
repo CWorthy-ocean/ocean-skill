@@ -941,6 +941,61 @@ label colours and key *entries*. Two differences, both deliberate:
 `line_kwargs` and `legend_kwargs` are matplotlib call signatures and only affect the
 static renderer, which warns rather than absorbing them silently.
 
+## The `section` family (vertical slices)
+
+A **grid-aligned** transect — `select={"transect": {"<dim>": <index>}}` — draws as
+one panel: depth (or the model's own s-levels) against along-path distance, rather
+than a map. It is a plain `isel` along a named grid dimension, so it is exact and
+needs no interpolation:
+
+```python
+osk.field("run_new", "temperature",
+          select={"transect": {"xi_rho": 30}, "time": "2012-06"},
+          aggregate={"time": "mean"}).plot()
+```
+
+With no `depth` key, the section shows the model's own s-levels — the cheapest and
+most exact reading, since nothing is interpolated. Give `depth` a list of fixed
+levels to interpolate onto instead (the same `roms.to_depth` a map row uses):
+
+```python
+osk.field("run_new", "temperature",
+          select={"transect": {"eta_rho": 12}, "depth": [0, 50, 100, 200]}).plot()
+```
+
+Model-only for now (`osk.field`, not `osk.compare`) — matching a section against a
+dataset, and an arbitrary path (a fixed longitude that does not land on a grid
+column, or a list of lon/lat waypoints), are follow-ups; `select={"transect":
+{"lon": ...}}`/`{"waypoints": [...]}` name them and raise rather than silently
+doing something else.
+
+### Axis conventions
+
+* **y is depth, positive down, inverted** — 0 m draws at the top, the seafloor at
+  the bottom — matching every other depth label in this package (`facet_labels`'
+  own `abs()`).
+* **x is along-path distance in kilometres** (great-circle, from the sliced grid's
+  own lon/lat), labelled `distance along transect (km)`.
+* **Below-bathymetry (or off-domain) cells** carry no data and draw as the same
+  grey a map's land does — the seafloor's shape is visible without singling those
+  cells out.
+* **Native s-levels** draw with a true, per-column depth (`z_rho`, curved with the
+  bathymetry) rather than a flat sigma-level index; a fixed-depth list draws flat
+  rows, one per requested depth.
+
+Both conventions are decided once, in `ocean_skill.plot.section.prepare_section`,
+and read by both renderers — a section cannot look different statically than
+interactively.
+
+### Static versus interactive
+
+Both draw the same mesh, colour scale and axis conventions. A section has no map to
+outline or gridline, so `domain`, `gridline_kwargs` and `tick_label_kwargs` are not
+options of `section()` — the static renderer raises naming the reason, the
+interactive one warns and drops. `mark="pcolormesh"` (default) or `"contourf"`,
+the same two the map families accept; bokeh always draws a mesh regardless (`mark`
+has no interactive effect, same as every map family).
+
 ## The `locations` family (dataset map, and selection map)
 
 `osk.map_locations()` / `osk.find(...).map()` draw where catalog datasets *are*, from

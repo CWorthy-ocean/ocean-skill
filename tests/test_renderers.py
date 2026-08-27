@@ -977,6 +977,26 @@ def _facet_field() -> xr.DataArray:
     return xr.concat([base + i for i in range(4)], dim="time").assign_coords(time=times)
 
 
+def _section_field() -> xr.DataArray:
+    """Build a small fixed-depth section: the payload the section family takes."""
+    n_along, n_z = 12, 6
+    along = np.linspace(0.0, 220.0, n_along)
+    lon = np.linspace(260.0, 262.0, n_along)
+    lat = np.linspace(20.0, 21.0, n_along)
+    z = -np.array([0, 10, 25, 50, 100, 200], dtype="float64")  # negative-down
+    values = 5.0 + np.linspace(0, 1, n_z * n_along).reshape(n_z, n_along)
+    return xr.DataArray(
+        values,
+        dims=("z", "along"),
+        coords={
+            "z": ("z", z),
+            "along": ("along", along),
+            "lon": ("along", lon),
+            "lat": ("along", lat),
+        },
+    )
+
+
 _INTERACTIVE_FAMILIES = {
     "field_row": lambda: [
         _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
@@ -985,6 +1005,15 @@ _INTERACTIVE_FAMILIES = {
         _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
     ],
     "skill_map": lambda: [_skill_item()],
+    "section": lambda: [
+        {
+            "field": _section_field(),
+            "units": "mmol m-3",
+            "standard_name": None,
+            "depth": None,
+            "label": "GOM_bgc",
+        }
+    ],
     "field_facet": lambda: [
         {
             "field": _facet_field(),
@@ -1061,6 +1090,12 @@ def test_a_named_canvas_reaches_the_interactive_frame_too(family):
 _DOMAIN_RING = [[261.0, 19.0], [269.0, 20.0], [268.0, 25.0], [262.0, 24.0]]
 _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 
+#: Families with no map to outline, so ``domain=`` is not a real option of theirs --
+#: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
+#: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
+#: covers instead: warned and dropped, same as any other unusable option.
+_NO_DOMAIN_FAMILIES = {"section"}
+
 
 def _hv_paths(obj) -> list:
     """Every ``hv.Path`` element in ``obj``, unwrapping a movie's widget pane."""
@@ -1096,7 +1131,9 @@ def test_domain_draws_the_shape_it_was_given(two_rows):
     assert not _hv_paths(none_out)
 
 
-@pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
+@pytest.mark.parametrize(
+    "family", sorted(_INTERACTIVE_FAMILIES.keys() - _NO_DOMAIN_FAMILIES)
+)
 def test_domain_reaches_every_interactive_family(family):
     """Every family takes ``**_``, so one that forgot to name ``domain`` absorbs it.
 
@@ -1108,6 +1145,18 @@ def test_domain_reaches_every_interactive_family(family):
         renderer="holoviews",
     )
     assert _hv_paths(out), f"{family}: domain= was accepted and dropped"
+
+
+@pytest.mark.parametrize("family", sorted(_NO_DOMAIN_FAMILIES))
+def test_domain_warns_and_is_dropped_for_a_domainless_family(family):
+    """A section has no map to outline: domain= warns and is dropped, not silently."""
+    items = _INTERACTIVE_FAMILIES[family]()
+    with pytest.warns(UserWarning, match="not an option"):
+        out = render(
+            PlotSpec(family=family, items=items, options={"domain": _DOMAIN_RING}),
+            renderer="holoviews",
+        )
+    assert not _hv_paths(out)
 
 
 def _matplotlib_dashed_lines(fig):
