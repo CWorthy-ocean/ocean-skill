@@ -372,9 +372,16 @@ def to_depth(
     # A target shallower than the topmost cell centre (or deeper than the bottom one)
     # interpolates to nothing and silently yields an all-NaN level — most often when
     # asking for exactly 0 m. Say so, and point at surface() for the surface case.
+    # Reduced over every non-z dim in one pass per variable, then computed once: the
+    # transform is lazy dask, so a per-level `.any()` used to force a full recompute
+    # of it for every target depth (dozens, against a profile's own levels).
     for var in result.data_vars:
+        other = [dim for dim in result[var].dims if dim != "z"]
+        finite = np.isfinite(result[var])
+        finite = finite.any(dim=other) if other else finite
+        finite = np.asarray(finite)
         for i, d in enumerate(depths):
-            if not bool(np.isfinite(result[var].isel(z=i)).any()):
+            if not bool(finite[i]):
                 hint = " use surface() for the surface field" if d < 5 else ""
                 warnings.warn(
                     f"{var!r} at {d:g} m is entirely NaN: the target lies outside the "

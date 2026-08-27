@@ -1525,6 +1525,29 @@ def prepare_source(
     constraints = erddap_constraints(meta, select, time_window)
     obj = osk.read(source, constraints=constraints) if constraints else osk.read(source)
     _warn_if_chunk_is_large(obj, source)
+    # Crop horizontally and in time *before* _prepare, so the vertical transform it
+    # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
+    # expensive step in the pipeline) only ever touches the cells this lane keeps.
+    # Applied to the whole Dataset, not the resolved variable, so z_rho/zeta/h stay
+    # consistent with the cropped field; exact rather than approximate, since the
+    # transform is per-column and commutes with a horizontal/time subset -- cropping
+    # first gives byte-identical values to cropping the transform's output, for a
+    # fraction of the work (a profile narrowed to one catalog point would otherwise
+    # interpolate the entire domain onto the reference's own levels just to keep one
+    # column). A transect is the exception: it index-slices the grid itself at the
+    # top of _prepare (apply_transect), so a window applied first would shift the
+    # grid-line indices it names -- and its lane is already one path, not a domain,
+    # so the crop stays after _prepare for it. A "no overlap" raise here propagates
+    # exactly as the post-_prepare crop's did, to align()'s unnarrowed retry.
+    pre_crop = "transect" not in (select or {})
+    if pre_crop and bbox is not None:
+        from ocean_skill.align import subset_to_bbox
+
+        obj = subset_to_bbox(obj, bbox)
+    if pre_crop and time_window is not None:
+        from ocean_skill.align import subset_to_time
+
+        obj = subset_to_time(obj, time_window)
     da, depth = _prepare(
         obj, meta, variable, dict(select or {}), aggregate, source=source
     )
@@ -1534,11 +1557,11 @@ def prepare_source(
         # cached and crop-processed below must stay unsqueezed, and the squeeze that
         # matters happens again, on the way out, right before this function returns.
         _require_reduced(da, require_reduced, source, keep=require_reduced_keep)
-    if da is not None and bbox is not None:
+    if da is not None and not pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
         da = subset_to_bbox(da, bbox)
-    if da is not None and time_window is not None:
+    if da is not None and not pre_crop and time_window is not None:
         from ocean_skill.align import subset_to_time
 
         da = subset_to_time(da, time_window)
