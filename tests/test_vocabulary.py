@@ -625,3 +625,78 @@ def test_alkalinity_variants_that_are_different_quantities_stay_separate():
         "sea_water_alkalinity_natural_analogue_expressed_as_mole_equivalent",
     ):
         assert not vocabulary.is_known(other), f"{other} is a distinct quantity"
+
+
+# -- coordinate vocabulary ------------------------------------------------------
+
+
+def test_matches_axis_recognizes_plain_spellings():
+    assert vocabulary.matches_axis("Depth", "Z")
+    assert vocabulary.matches_axis("Longitude", "X")
+    assert vocabulary.matches_axis("Latitude", "Y")
+    assert vocabulary.matches_axis("time", "T")
+
+
+@pytest.mark.parametrize("name", ["Depth_bottom", "bottom_depth", "BOTTOM_Z"])
+def test_matches_axis_refuses_a_bottom_depth_name(name):
+    """The motivating fix: "bottom" disqualifies an otherwise depth-shaped name."""
+    assert not vocabulary.matches_axis(name, "Z")
+    assert vocabulary.excluded_from_axis(name, "Z")
+
+
+def test_excluded_from_axis_is_false_for_axes_with_no_exclude_list():
+    """Only Z has an ``exclude`` entry; T/X/Y never refuse a name this way."""
+    assert not vocabulary.excluded_from_axis("bottom", "T")
+    assert not vocabulary.excluded_from_axis("bottom", "X")
+    assert not vocabulary.excluded_from_axis("bottom", "Y")
+
+
+def test_matches_axis_direct_only_excludes_pressure_spellings():
+    assert vocabulary.matches_axis("pressure", "Z")
+    assert not vocabulary.matches_axis("pressure", "Z", direct_only=True)
+    assert vocabulary.matches_axis("depth", "Z", direct_only=True)
+
+
+def test_coord_vocabulary_fallbacks_never_collide_with_their_own_exclude_list():
+    """Regression guard backing the claim in :func:`ocean_skill.cf.find_coord`.
+
+    If a fallback name were ever added that an exclude token would also refuse,
+    the name-fallback path in ``find_coord`` would need its own exclusion check --
+    right now it doesn't, because this can never happen.
+    """
+    for entry in vocabulary.COORD_VOCABULARY.values():
+        for fallback in entry["fallbacks"]:
+            for exclude_word in entry.get("exclude", ()):
+                assert exclude_word not in fallback.lower()
+
+
+def test_coord_report_groups_declared_columns_by_axis():
+    report = vocabulary.coord_report(
+        ["Latitude", "Longitude", "Depth", "Depth_bottom", "Temperature_CTD"]
+    )
+    assert report.matched == {"X": ["Longitude"], "Y": ["Latitude"], "Z": ["Depth"]}
+    assert report.missing == ["T"]
+
+
+def test_coord_report_on_no_columns_is_all_missing():
+    report = vocabulary.coord_report([])
+    assert report.matched == {}
+    assert report.missing == ["T", "X", "Y", "Z"]
+
+
+def test_coord_report_collisions_flags_an_axis_claimed_twice():
+    report = vocabulary.coord_report(["Depth", "Pressure"])
+    assert "Z" in report.collisions
+    assert set(report.collisions["Z"]) == {"Depth", "Pressure"}
+
+
+def test_coord_report_str_names_the_axis_and_its_kind():
+    text = str(vocabulary.coord_report(["Depth"]))
+    assert "Z (vertical)" in text and "Depth" in text
+    assert "missing" in text
+
+
+def test_coord_report_repr_html_escapes_and_wraps():
+    html = vocabulary.coord_report(["Depth"])._repr_html_()
+    assert html.startswith("<pre")
+    assert "Depth" in html

@@ -274,11 +274,11 @@ def detect_concat(file) -> tuple[str, tuple[str, ...]]:
     concatenation needs its values to order the result.
 
     Finding "the time variable" is :func:`find_coord`'s job — cf-xarray first, which
-    settles every CF-compliant model immediately, then the
-    :data:`_COORD_FALLBACKS` name list. That fallback is what a model costs: one
-    string, not a configuration block. (It is load-bearing for ROMS, whose output
-    has *no* coordinate variables at all and writes ``units="second"``, so
-    cf-xarray finds nothing — verified, not assumed.)
+    settles every CF-compliant model immediately, then
+    :data:`ocean_skill.vocabulary.COORD_FALLBACKS`'s name list. That fallback is
+    what a model costs: one string, not a configuration block. (It is load-bearing
+    for ROMS, whose output has *no* coordinate variables at all and writes
+    ``units="second"``, so cf-xarray finds nothing — verified, not assumed.)
 
     Raises if no time variable can be found, rather than guessing a dimension:
     concatenating along the wrong axis silently scrambles the record order.
@@ -303,7 +303,7 @@ def detect_concat(file) -> tuple[str, tuple[str, ...]]:
             raise ValueError(
                 f"cannot find a time variable in {file} to concatenate along; pass "
                 "concat_dim= and loadable_variables= explicitly, or add its name to "
-                "ocean_skill.cf._COORD_FALLBACKS['time']."
+                "ocean_skill.vocabulary.COORD_VOCABULARY['T']['fallbacks']."
             )
         name = str(time.name)
         # The variable and its dimension are often named differently (ROMS:

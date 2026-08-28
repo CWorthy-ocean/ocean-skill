@@ -605,6 +605,107 @@ def test_describe_catalog_includes_a_vocabulary_section(isolated_catalogs):
     assert "sea_water_temperature" in text
 
 
+# -- coordinate report ---------------------------------------------------------
+
+
+@pytest.fixture
+def coord_report_sources(monkeypatch):
+    """A healthy source, and one built before the "bottom" exclusion shipped."""
+    return _fake_index(
+        monkeypatch,
+        {
+            "seanoe_ctd_mooring": (
+                "SEANOE Hvalfjordur",
+                {
+                    "standard_names": {
+                        "Temperature_CTD": "sea_water_potential_temperature",
+                        "Instrument_Type": "Instrument_Type",
+                    },
+                    "axes": {"X": "Longitude", "Y": "Latitude", "Z": "Depth"},
+                },
+            ),
+            "stale_seanoe": (
+                "SEANOE Hvalfjordur",
+                {"standard_names": {}, "axes": {"Z": "Depth_bottom"}},
+            ),
+        },
+    )
+
+
+def test_describe_source_includes_a_coordinates_section(coord_report_sources):
+    text = coord_report_sources.describe("seanoe_ctd_mooring")
+    assert "coordinates:" in text
+    assert "Z (vertical)" in text and "Depth" in text
+
+
+def test_match_report_includes_a_coordinates_section(coord_report_sources):
+    """A coordinate report whenever there's a match report -- the user's ask."""
+    text = coord_report_sources.match_report("seanoe_ctd_mooring")
+    assert "coordinates:" in text
+    assert "Z (vertical)" in text and "Depth" in text
+
+
+def test_coord_report_standalone_for_a_source(coord_report_sources):
+    text = coord_report_sources.coord_report("seanoe_ctd_mooring")
+    assert "source: seanoe_ctd_mooring" in text
+    assert "Z (vertical)" in text and "Depth" in text
+
+
+def test_coord_report_standalone_for_a_catalog(coord_report_sources):
+    text = coord_report_sources.coord_report("SEANOE Hvalfjordur")
+    assert "catalog: SEANOE Hvalfjordur" in text
+    assert "Z (vertical)" in text and "Depth" in text
+
+
+def test_coord_report_unknown_name_raises_like_describe(coord_report_sources):
+    with pytest.raises(KeyError, match="neither a known source nor catalog"):
+        coord_report_sources.coord_report("not_a_thing")
+
+
+def test_coord_report_flags_a_stale_bottom_axis(coord_report_sources):
+    """Regression guard: axes["Z"] = "Depth_bottom" is exactly the slow-comparison bug."""
+    text = coord_report_sources.coord_report("stale_seanoe")
+    assert "now excluded from the coordinate vocabulary" in text
+    assert "Depth_bottom" in text
+    assert "missing" in text and "Z" in text
+
+
+def test_describe_flags_a_stale_bottom_axis_too(coord_report_sources):
+    text = coord_report_sources.describe("stale_seanoe")
+    assert "note:" in text
+    assert "Depth_bottom" in text
+
+
+def test_coord_report_for_a_dataframe():
+    """A live report, straight from column names -- no catalog involved at all."""
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "Latitude": [1.0],
+            "Longitude": [2.0],
+            "Depth_bottom": [500.0],
+            "Depth": [12.0],
+        }
+    )
+    text = catalog.coord_report(df)
+    assert "Z (vertical)" in text and "Depth" in text
+    assert "Depth_bottom" not in text
+
+
+def test_coord_report_for_an_xarray_dataset():
+    import numpy as np
+    import xarray as xr
+
+    ds = xr.Dataset(
+        {"temp": (("depth",), np.array([1.0, 2.0]))},
+        coords={"depth": [10.0, 20.0], "depth_bottom": 500.0},
+    )
+    text = catalog.coord_report(ds)
+    assert "Z (vertical)" in text and "depth" in text
+    assert "depth_bottom" not in text
+
+
 # -- overlap() ----------------------------------------------------------------------
 
 

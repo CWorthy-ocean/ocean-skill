@@ -16,10 +16,11 @@ align never sees.
 This module also owns the column-naming vocabulary tabular sources use --
 ``"<name> (<units>)"``/``"<name>[<units>]"``, ``<name>_qc_agg``/``<name>_qc_tests``
 (or a name containing "flag") QARTOD companions, and which columns are coordinates
-(time/lon/lat/depth, recognized by a regex table -- see :func:`coord_column` -- not
-just the exact ERDDAP spelling) rather than data. :mod:`ocean_skill.build` imports
-those helpers rather than keeping its own copy, so the catalog that *describes* a table
-and the code that *reads* one cannot disagree about the convention.
+(time/lon/lat/depth, recognized via :data:`ocean_skill.vocabulary.COORD_VOCABULARY`
+-- see :func:`coord_column` -- not just the exact ERDDAP spelling) rather than data.
+:mod:`ocean_skill.build` imports those helpers rather than keeping its own copy, so
+the catalog that *describes* a table and the code that *reads* one cannot disagree
+about the convention.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from typing import Any
 
 import numpy as np
 
-from ocean_skill import _stacklevel
+from ocean_skill import _stacklevel, vocabulary
 
 __all__ = [
     "COORD_COLUMNS",
@@ -95,32 +96,16 @@ _DEPTH_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
 }
 _DEPTH_COLUMNS = tuple(_DEPTH_COLUMN_ALIASES)
 
-#: Word-token regexes for recognizing a column's axis by name, in the spirit of
-#: cf-pandas'/cf-xarray's own coordinate-criteria regexes (``cf_pandas.criteria
-#: .guess_regex``, ``cf_xarray.criteria``) but narrower on purpose. Matched against
-#: the units-stripped base (:func:`split_units`), case-insensitively, and anchored to
-#: whole tokens — split on any run of non-alphanumeric characters, underscore
-#: included, the same idiom :data:`_QC_NAME` uses — so a word buried inside a longer
-#: name never counts: "month" is not "time", "latency" is not "lat", "zone" is not
-#: "z", "along" is not "lon". cf-pandas' own time regex
-#: (``(?=.*time|min|hour|day|week|month|year)[0-9]*``) matches bare "month" for
-#: exactly this reason; this table refuses that on purpose rather than inheriting it.
-def _token_pattern(*words: str) -> re.Pattern:
-    alt = "|".join(re.escape(w) for w in words)
-    return re.compile(rf"(?:^|[^0-9A-Za-z])(?:{alt})(?:[^0-9A-Za-z]|$)", re.IGNORECASE)
-
-
-_COORD_PATTERNS: dict[str, re.Pattern] = {
-    "T": _token_pattern("time", "date", "datetime", "timestamp"),
-    "X": _token_pattern("longitude", "lon", "long"),
-    "Y": _token_pattern("latitude", "lat"),
-    "Z": _token_pattern("depth", "z", "pressure", "pres"),
-}
-
-#: The subset of ``Z``'s words that name a direct reading rather than a pressure
-#: conversion — used by :func:`coord_column` to prefer a depth-shaped column over a
-#: pressure-shaped one, the same ranking :data:`_DEPTH_COLUMN_ALIASES` encodes.
-_Z_DIRECT_PATTERN = _token_pattern("depth", "z")
+#: Whether a column's axis is recognized by name at all is decided by
+#: :data:`ocean_skill.vocabulary.COORD_VOCABULARY` (via :func:`vocabulary.
+#: matches_axis`) -- one table, shared with :mod:`ocean_skill.cf`'s gridded-name
+#: fallback matching, so the two matchers cannot drift apart. ``Z``'s ranking of a
+#: direct depth/z reading over a pressure conversion is the vocabulary's ``direct``
+#: entry, the same ranking :data:`_DEPTH_COLUMN_ALIASES` encodes for
+#: :func:`depth_of`; ``Z``'s ``exclude`` entry (``"bottom"``) is what keeps
+#: ``Depth_bottom``/``bottom_depth`` -- the seafloor/station depth, a data column --
+#: from ever being claimed as the vertical coordinate just because "depth" appears
+#: in the name.
 
 #: ``altitude`` is excluded from ``variables`` like the other coordinate names, but
 #: is not claimed as a ``Z`` axis: unlike depth/pressure it has no agreed-on sign
@@ -283,10 +268,14 @@ def decode_time_column(series, column):
 def coord_column(df, axis: str, *, exclude: frozenset = frozenset()) -> str | None:
     """Return the column naming ``axis`` (``T``/``X``/``Y``/``Z``) by its own spelling.
 
-    Tried in column order against :data:`_COORD_PATTERNS`. ``Z`` is tried twice — a
-    depth/z-shaped name first, a pressure-shaped one only if no direct reading is
-    named — the same preference :func:`depth_of` gives an actual reading over a
-    conversion from pressure.
+    Tried in column order against :data:`ocean_skill.vocabulary.COORD_VOCABULARY`
+    (via :func:`vocabulary.matches_axis`). ``Z`` is tried twice — a depth/z-shaped
+    name first, a pressure-shaped one only if no direct reading is named — the same
+    preference :func:`depth_of` gives an actual reading over a conversion from
+    pressure. A name carrying the whole token "bottom" (``Depth_bottom``,
+    ``bottom_depth``) never matches ``Z`` at either rung — see
+    :data:`ocean_skill.vocabulary.COORD_VOCABULARY`'s ``exclude`` entry — since it
+    states the seafloor/station depth, not the vertical coordinate.
 
     ``T`` alone has one more rung when no column *name* matches at all: a single
     datetime64-typed column is assumed to be time (two or more, and the ambiguity is
@@ -301,24 +290,27 @@ def coord_column(df, axis: str, *, exclude: frozenset = frozenset()) -> str | No
     integer flag codes (1-9) would otherwise become a nonsense vertical extent.
     """
     if axis == "Z":
-        for pattern in (_Z_DIRECT_PATTERN, _COORD_PATTERNS["Z"]):
+        for direct_only in (True, False):
             match = next(
                 (
                     c
                     for c in df.columns
-                    if str(c) not in exclude and pattern.search(split_units(str(c))[0])
+                    if str(c) not in exclude
+                    and vocabulary.matches_axis(
+                        split_units(str(c))[0], "Z", direct_only=direct_only
+                    )
                 ),
                 None,
             )
             if match is not None:
                 return str(match)
         return None
-    pattern = _COORD_PATTERNS[axis]
     match = next(
         (
             c
             for c in df.columns
-            if str(c) not in exclude and pattern.search(split_units(str(c))[0])
+            if str(c) not in exclude
+            and vocabulary.matches_axis(split_units(str(c))[0], axis)
         ),
         None,
     )
@@ -350,8 +342,8 @@ def coord_axis_of(column) -> str | None:
     base = split_units(str(column))[0]
     if base.strip().casefold() == _ALTITUDE:
         return None
-    for axis, pattern in _COORD_PATTERNS.items():
-        if pattern.search(base):
+    for axis in ("T", "X", "Y", "Z"):
+        if vocabulary.matches_axis(base, axis):
             return axis
     return None
 

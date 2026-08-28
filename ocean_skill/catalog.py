@@ -36,6 +36,7 @@ __all__ = [
     "catalog_metadata",
     "catalog_names",
     "catalogs",
+    "coord_report",
     "describe",
     "discover",
     "find",
@@ -808,18 +809,100 @@ def _declared_variables(name: str, index: dict[str, SourceRef]) -> list[str]:
     )
 
 
+def _declared_columns(name: str, index: dict[str, SourceRef]) -> list[str]:
+    """The raw declared column names to run a coordinate report over.
+
+    Unlike :func:`_declared_variables`, this must include coordinate columns --
+    the very thing :func:`ocean_skill.build`'s probe excludes from ``variables``
+    (see :func:`ocean_skill.tabular.is_coordinate_column`). So it's the union of a
+    source's ``standard_names`` keys (every declared column, raw name, coordinates
+    included) and its ``axes`` map's values (the column an entry's own build
+    already picked out as an axis -- needed for a reader that declared no
+    ``standard_names`` map at all, or for a *stale* entry whose ``axes`` names a
+    column the vocabulary no longer recognizes there, see
+    :func:`_coord_staleness_notes`). A catalog's is the union across every source
+    it contains. Raises the same "neither a known source nor catalog" error
+    :func:`_declared_variables` does, since both dispatch on the same lookup.
+    """
+
+    def _columns(ref: SourceRef) -> set[str]:
+        md = ref.metadata
+        cols = set((md.get("standard_names") or {}).keys())
+        cols.update((md.get("axes") or {}).values())
+        return cols
+
+    if name in index:
+        return sorted(_columns(index[name]))
+    names = catalog_names()
+    if name in names:
+        seen: set[str] = set()
+        for ref in index.values():
+            if ref.catalog == name:
+                seen.update(_columns(ref))
+        return sorted(seen)
+    raise KeyError(
+        f"{name!r} is neither a known source nor catalog."
+        f"{_did_you_mean(name, [*index, *names])} "
+        f"Known catalogs: {names}. {_find_hint(len(index))}"
+    )
+
+
+def _coord_staleness_notes(name: str, index: dict[str, SourceRef]) -> list[str]:
+    """Notes when a source's stored ``axes`` are now excluded by the coordinate vocabulary.
+
+    A catalog's ``axes`` map is a snapshot written at build time (see
+    :mod:`ocean_skill.build`'s probes); the vocabulary is live (see
+    :class:`ocean_skill.vocabulary.CoordReport`). If the vocabulary later adds an
+    exclusion -- exactly what ``COORD_VOCABULARY``'s ``"bottom"`` token did to any
+    catalog already built with ``axes["Z"] = "Depth_bottom"`` -- the stored map goes
+    stale. Deliberately checks only :func:`ocean_skill.vocabulary.excluded_from_axis`
+    (an *active* refusal), not whether the name would satisfy a full token match:
+    plenty of legitimately-stored axis names never token-match at all -- gridded
+    sources routinely reach ``axes["Z"]`` via cf-xarray's own attribute-based
+    detection (rather than name matching), and ``"altitude"`` in particular is
+    excluded from :func:`ocean_skill.tabular.coord_axis_of`'s token match by design
+    (no agreed sign convention) without being wrong as a stored Z name. Re-deriving
+    "is this still the *best* match" would need rereading the data, which this
+    (like :func:`describe`) deliberately does not do.
+    """
+    from ocean_skill import tabular, vocabulary
+
+    refs = (
+        [index[name]]
+        if name in index
+        else [ref for ref in index.values() if ref.catalog == name]
+    )
+    multiple = len(refs) > 1
+    notes: list[str] = []
+    for ref in refs:
+        axes = ref.metadata.get("axes") or {}
+        for axis, col in axes.items():
+            base = tabular.split_units(str(col))[0]
+            if vocabulary.excluded_from_axis(base, axis):
+                prefix = f"{ref.name}: " if multiple else ""
+                notes.append(
+                    f"{prefix}stored axes[{axis!r}] = {col!r} is now excluded from "
+                    "the coordinate vocabulary -- rebuild this catalog"
+                )
+    return notes
+
+
 def describe(name: str) -> Text:
     """Human-readable summary of a source or a catalog — whichever ``name`` is.
 
     For a source: its catalog, path, and full entry metadata (featureType,
     standard_names, extents, ...), followed by a live vocabulary match report over
-    its declared variables. For a catalog: its title/description/extents plus the
-    sources it contains, followed by the same report over the union of every
-    source's variables. Meant for interactive use, e.g. ``osk.describe(name)``. See
-    :func:`match_report` for the report alone, and
-    :class:`ocean_skill.vocabulary.MatchReport` for why it is never cached or
-    stored: it always reflects the vocabulary as it stands right now.
+    its declared variables, then a live coordinate report over its declared
+    columns (which of T/X/Y/Z are recognized, and as which column). For a catalog:
+    its title/description/extents plus the sources it contains, followed by the
+    same two reports over the union of every source's columns. Meant for
+    interactive use, e.g. ``osk.describe(name)``. See :func:`match_report` and
+    :func:`coord_report` for either report alone, and
+    :class:`ocean_skill.vocabulary.MatchReport`/:class:`~ocean_skill.vocabulary.
+    CoordReport` for why neither is ever cached or stored: both always reflect the
+    vocabulary as it stands right now.
     """
+    from ocean_skill.vocabulary import coord_report as _vocab_coord_report
     from ocean_skill.vocabulary import match_report as _vocab_match_report
 
     index = discover()
@@ -844,6 +927,10 @@ def describe(name: str) -> Text:
     report = _vocab_match_report(_declared_variables(name, index))
     lines.append("  vocabulary:")
     lines.extend(f"    {line}" for line in str(report).splitlines())
+    coords = _vocab_coord_report(_declared_columns(name, index))
+    lines.append("  coordinates:")
+    lines.extend(f"    {line}" for line in str(coords).splitlines())
+    lines.extend(f"    note: {note}" for note in _coord_staleness_notes(name, index))
     return Text("\n".join(lines))
 
 
@@ -858,14 +945,77 @@ def match_report(name: str) -> Text:
     catalog file would the moment a new alias or pattern ships (see
     :class:`ocean_skill.vocabulary.MatchReport`). Meant for interactive use, e.g.
     ``osk.match_report(name)`` -- or as the ``vocabulary:`` section
-    :func:`describe` already appends.
+    :func:`describe` already appends. Also includes the same live coordinate
+    report :func:`coord_report` gives (and :func:`describe` appends as its own
+    ``coordinates:`` section) -- a coordinate report whenever there's a match
+    report, so a mismatch like ``Depth`` losing out to ``Depth_bottom`` is never
+    more than one call away from the variable report that prompted the look.
     """
+    from ocean_skill.vocabulary import coord_report as _vocab_coord_report
     from ocean_skill.vocabulary import match_report as _vocab_match_report
 
     index = discover()
     names = _declared_variables(name, index)  # raises if name is unknown
     header = f"source: {name}" if name in index else f"catalog: {name}"
-    return Text(f"{header}\n{_vocab_match_report(names)}")
+    lines = [header, str(_vocab_match_report(names))]
+    lines.append("coordinates:")
+    coords = _vocab_coord_report(_declared_columns(name, index))
+    lines.extend(f"  {line}" for line in str(coords).splitlines())
+    lines.extend(f"  note: {note}" for note in _coord_staleness_notes(name, index))
+    return Text("\n".join(lines))
+
+
+def coord_report(source) -> Text:
+    """Live coordinate report: which of T/X/Y/Z is recognized, and as what.
+
+    ``source`` may be:
+
+    - a catalog/source **name** (``str``): the same declared-column report
+      :func:`describe`/:func:`match_report` already append, plus a note for any
+      stored ``axes`` entry the vocabulary no longer agrees with (see
+      :func:`_coord_staleness_notes`) -- no data is read.
+    - a :class:`pandas.DataFrame`: the live per-axis report
+      :func:`ocean_skill.tabular.coord_column` gives right now, over the frame's
+      actual columns.
+    - an :class:`xarray.Dataset`/:class:`~xarray.DataArray`: the live report
+      :func:`ocean_skill.cf.find_coord` gives, cf-xarray attribute matching
+      included -- not just name matching.
+
+    Meant for interactive use, e.g. ``osk.coord_report("glodap")`` or
+    ``osk.coord_report(df)`` after a manual :func:`ocean_skill.sources.read`. See
+    :func:`match_report` for the analogous variable-vocabulary report, and
+    :class:`ocean_skill.vocabulary.CoordReport` for why a live report is never
+    cached: it always reflects the vocabulary as it stands right now.
+    """
+    from ocean_skill import cf, tabular
+    from ocean_skill.vocabulary import CoordReport
+    from ocean_skill.vocabulary import coord_report as _vocab_coord_report
+
+    if isinstance(source, str):
+        index = discover()
+        names = _declared_columns(source, index)  # raises if name is unknown
+        header = f"source: {source}" if source in index else f"catalog: {source}"
+        lines = [header, str(_vocab_coord_report(names))]
+        lines.extend(_coord_staleness_notes(source, index))
+        return Text("\n".join(lines))
+
+    if tabular.is_frame(source):
+        matched = {
+            axis: [col]
+            for axis in ("T", "X", "Y", "Z")
+            if (col := tabular.coord_column(source, axis)) is not None
+        }
+    else:
+        from ocean_skill.vocabulary import COORD_VOCABULARY
+
+        matched = {}
+        for axis, entry in COORD_VOCABULARY.items():
+            found = cf.find_coord(source, entry["kind"])
+            name = getattr(found, "name", None)
+            if name is not None:
+                matched[axis] = [str(name)]
+    missing = [axis for axis in ("T", "X", "Y", "Z") if axis not in matched]
+    return Text(str(CoordReport(matched=matched, missing=missing)))
 
 
 class _CatalogRegistry:
@@ -901,6 +1051,10 @@ class _CatalogRegistry:
     def match_report(self, name: str) -> Text:
         """Live vocabulary match report for a source or catalog (whichever ``name``)."""
         return match_report(name)
+
+    def coord_report(self, name: str) -> Text:
+        """Live coordinate report for a source or catalog (whichever ``name``)."""
+        return coord_report(name)
 
     def __repr__(self) -> str:
         idx = self._index()
