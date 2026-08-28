@@ -59,6 +59,7 @@ dependencies:
   - ruff>=0.12
   - pytest
   - pytest-cov
+  - pytest-xdist
   - ipykernel         # register this env as a Jupyter kernel for the docs/ notebooks
   # --- pip-installed (intake-2 era / not reliably on conda-forge) ---
   - pip

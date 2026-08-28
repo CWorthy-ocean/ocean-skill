@@ -11,13 +11,10 @@ from __future__ import annotations
 
 import warnings
 
-import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-
-matplotlib.use("Agg")
 
 NITRATE = "nitrate"
 SILICATE = "silicate"
@@ -148,7 +145,7 @@ def _point_series(n: int = 12):
 @pytest.fixture
 def stub(monkeypatch):
     """Return a setter that swaps ``comparison.prepare_source`` for one field."""
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
 
     def use(field_da):
         monkeypatch.setattr(comparison, "prepare_source", lambda *a, **k: (field_da, None))
@@ -236,7 +233,8 @@ def test_time_facet_argmax_sets_snapshot_time(stub):
 def _ns_resolution(da):
     """Force ``da``'s time coordinate to datetime64[ns] -- the resolution whose
     ``.item()`` collapses to a bare ns-since-epoch int, reproducing the reported
-    bug regardless of xarray's ambient default resolution."""
+    bug regardless of xarray's ambient default resolution.
+    """
     return da.assign_coords(time=da["time"].values.astype("datetime64[ns]"))
 
 

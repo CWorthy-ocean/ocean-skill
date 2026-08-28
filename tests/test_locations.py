@@ -244,10 +244,9 @@ def test_build_items_accepts_names_and_catalog_filter(index):
 
 
 def test_build_items_nothing_mappable_raises(index):
-    with pytest.raises(ValueError, match="no datasets"):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            build_items(["unprobed"])
+    with pytest.raises(ValueError, match="no datasets"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        build_items(["unprobed"])
 
 
 def test_default_extent_min_span_for_a_lone_mooring(index):
@@ -330,9 +329,6 @@ def _hover_stub(name: str) -> dict[str, str]:
 
 
 def test_matplotlib_locations_draws_ring_and_line_kinds():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from ocean_skill.plot.matplotlib_renderer import locations
 
     ring = np.array([[170.0, -10.0], [180.0, -10.0], [180.0, 10.0], [170.0, 10.0]])
@@ -367,9 +363,6 @@ def test_matplotlib_locations_draws_ring_and_line_kinds():
 
 def test_matplotlib_locations_mixes_catalog_and_selection_items(index):
     """A selection map's items sit alongside catalog items without disturbing them."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     from ocean_skill.plot.matplotlib_renderer import locations
 
     catalog_items, extent = _items(index)
@@ -400,9 +393,6 @@ def test_matplotlib_locations_mixes_catalog_and_selection_items(index):
 
 
 def test_matplotlib_locations_smoke(index):
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     from ocean_skill.plot.registry import render
@@ -423,9 +413,6 @@ def test_matplotlib_locations_smoke(index):
 
 
 def test_matplotlib_locations_extent_and_tiles_warning(index):
-    import matplotlib
-
-    matplotlib.use("Agg")
     from ocean_skill.plot.matplotlib_renderer import locations
 
     items, _ = _items(index)
@@ -539,9 +526,6 @@ def test_holoviews_locations_ring_and_line_kinds():
 
 
 def test_map_locations_by_name_and_find_map(index):
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     from ocean_skill.plot.map_locations import map_locations

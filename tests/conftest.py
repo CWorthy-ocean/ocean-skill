@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import matplotlib
 import pytest
+
+# Set once, at conftest import time -- before pytest collects (imports) a single test
+# module, on every worker. That beats the race individual test files used to guard
+# against by calling ``matplotlib.use("Agg")`` at their own module top: whichever file
+# pytest happened to collect first won the race and fixed the backend for the rest of
+# the process. Doing it here removes the race instead of winning it, so every one of
+# those per-file calls (module-level and in-body alike) is now redundant and dropped.
+matplotlib.use("Agg")
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +59,20 @@ def fresh_regridder_memo():
     align.clear_regridder_memo()
     yield
     align.clear_regridder_memo()
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Close every figure after each test.
+
+    The backend is already Agg (set at module import time, above); this just keeps
+    one test's figures from accumulating into the next -- more likely to matter once
+    tests run concurrently under xdist.
+    """
+    yield
+    import matplotlib.pyplot as plt
+
+    plt.close("all")
 
 
 @pytest.fixture(autouse=True)

@@ -212,10 +212,6 @@ def _scatter_collections(ax):
 
 
 def test_the_overlay_draws_one_dot_per_station_in_both_renderers():
-    import matplotlib
-
-    matplotlib.use("Agg")
-
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
 
@@ -242,10 +238,6 @@ def test_the_overlay_draws_one_dot_per_station_in_both_renderers():
 
 def test_an_item_without_stations_draws_exactly_as_before():
     """The overlay is additive: a plain skill_map item is unaffected."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
 
@@ -378,9 +370,6 @@ def mooring_set(monkeypatch):
 
 
 def test_comparisonset_map_metrics_draws_every_station(mooring_set):
-    import matplotlib
-
-    matplotlib.use("Agg")
     import matplotlib.collections as mcoll
 
     fig = mooring_set.map_metrics(grid="regular", metrics=("bias", "corr"))

@@ -8,12 +8,8 @@ one choice to both panels.
 
 from __future__ import annotations
 
-import matplotlib
-import pytest
-
-matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
+import pytest
 
 from ocean_skill.plot.summary import paired, target, taylor
 

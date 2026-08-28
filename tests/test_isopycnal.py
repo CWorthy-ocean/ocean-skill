@@ -327,10 +327,8 @@ def _item(field, facet_dim, row_dim=None):
     }
 
 
+@pytest.mark.slow
 def test_static_renderer_labels_sigma0_rows_as_a_density():
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = _sigma0_grid()
     fig = render(PlotSpec(family="field_facet", items=[_item(field, "time", "sigma0")]))
     panels = [ax for ax in fig.axes if not getattr(ax, "_osk_cbar_parents", None)]
@@ -343,6 +341,7 @@ def test_static_renderer_labels_sigma0_rows_as_a_density():
     assert labels == ["σ₀ = 24 kg/m³", "σ₀ = 25 kg/m³"]
 
 
+@pytest.mark.slow
 def test_holoviews_renderer_titles_sigma0_rows_as_a_density_too():
     """The same figure through the interactive renderer.
 

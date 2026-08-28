@@ -23,19 +23,12 @@ import xarray as xr
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
 
+# Every test here builds a multi-frame animation and several write a real gif/mp4 to
+# disk. Skipped by default (`pytest.ini`'s `-m "not slow"`); run explicitly with
+# `pytest -m slow` or `pytest -m ""`.
+pytestmark = pytest.mark.slow
+
 NITRATE = "mole_concentration_of_nitrate_in_sea_water"
-
-
-@pytest.fixture(autouse=True)
-def agg_backend():
-    """Draw headless: every test here builds a figure, none of them wants a window."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    yield
-    import matplotlib.pyplot as plt
-
-    plt.close("all")
 
 
 def _field(offset: float, *, shape: tuple[int, int] = (8, 10)) -> xr.DataArray:
