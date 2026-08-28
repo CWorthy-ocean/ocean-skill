@@ -943,11 +943,13 @@ def test_a_curvilinear_reference_point_select_is_a_series(monkeypatch):
     assert not any("matched no axis" in str(w.message) for w in log)
 
 
-def test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it(monkeypatch):
-    """The pad around one point can miss a coarse grid's nearest cell entirely.
-
-    Retrying without the bbox reads the whole (small) lane instead of failing the
-    comparison outright -- the point still gets sampled, just less cheaply.
+def test_a_coarse_test_grid_is_windowed_by_cells_not_missed_by_a_degree_pad(
+    monkeypatch,
+):
+    """A degree-based pad around one point could miss a coarse grid's nearest cell
+    entirely; the cell-based point window that replaced it centres on the true
+    nearest cell directly, so there is no "no overlap" miss (and no unnarrowed
+    re-read) to fall back from here -- one read of the (small) test grid.
     """
     c = _model_comparison(
         monkeypatch,
@@ -955,8 +957,24 @@ def test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it(monkeypatch):
         reference=_offset_grid(seed=2),
         select=POINT_SELECT,
     )
-    aligned = c.align()  # must not raise "no overlap"
+    import ocean_skill as osk
+
+    reads = {"run_new": 0}
+    already_patched_read = osk.read
+
+    def counting_read(name, **kw):
+        if name in reads:
+            reads[name] += 1
+        return already_patched_read(name, **kw)
+
+    monkeypatch.setattr(osk, "read", counting_read)
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        aligned = c.align()
+    messages = [str(w.message) for w in log]
+    assert not any("stale" in m or "no overlap" in m for m in messages)
     assert float(aligned["test_lon"]) == -140.0
+    assert reads["run_new"] == 1
 
 
 def _point_station(*, lon=STATION[0], lat=STATION[1], seed=3):
@@ -972,31 +990,49 @@ def _point_station(*, lon=STATION[0], lat=STATION[1], seed=3):
     return da.to_dataset()
 
 
-def test_a_stale_metadata_position_falls_back_to_the_full_lane(monkeypatch):
-    """A wildly wrong catalog position must not fail the comparison outright.
+def test_a_stale_metadata_position_is_corrected_by_the_post_read_verification(
+    monkeypatch,
+):
+    """A wildly wrong catalog position must not leave the test lane windowed
+    around the wrong place.
 
-    Mirrors ``test_a_coarse_test_grid_falls_back_when_the_bbox_pad_misses_it``, but
-    the miss here comes from a stale reference-*metadata* bbox rather than a coarse
-    grid -- the same retry (:meth:`Comparison.align`'s "no overlap" catch) covers
-    both, and the real, unstubbed station branch still finds the reference's actual
-    (not the metadata's claimed) position once the full lane is read.
+    A degenerate bbox derived from the reference's catalog metadata windows the
+    test lane by cells, centred on *that* position -- so a stale metadata position
+    no longer raises "no overlap" (:func:`ocean_skill.align.subset_to_bbox`'s point
+    crop never does). :meth:`Comparison._verify_point_window` is what still
+    guarantees the real, unstubbed station branch samples the reference's *actual*
+    (not the metadata's claimed) position: it checks the window against
+    ``align.point_of(reference)`` and re-reads the test lane around it when the
+    two disagree by more than the window can absorb.
+
+    The test grid here is deliberately *larger* than the point window
+    (:data:`ocean_skill.align.POINT_WINDOW_CELLS`) on both axes -- a grid smaller
+    than the window (as this test used before) is windowed to its whole self
+    regardless of where the window is centred, which would let this test keep
+    passing even with the verification step removed. Here the window built
+    around the stale position (-131, 41) provably excludes the true nearest cell
+    to the station's real position, so this fails without the fix: (-136, 46) is
+    the nearest cell *inside* that stale window, not the true nearest cell
+    (-144, 50) on the whole grid.
     """
     c = _model_comparison(
         monkeypatch,
-        test=_coarse_grid([-160.0, -150.0, -140.0, -130.0], [40.0, 50.0, 60.0]),
+        test=_coarse_grid(np.arange(-160.0, -129.0), np.arange(40.0, 61.0)),
         reference=_point_station(),
         metadata={
             "run_baseline": {
                 "featureType": "timeSeries",
-                "geospatial_lon_min": -10.0,
-                "geospatial_lon_max": -10.0,
-                "geospatial_lat_min": 0.0,
-                "geospatial_lat_max": 0.0,
+                "geospatial_lon_min": -131.0,
+                "geospatial_lon_max": -131.0,
+                "geospatial_lat_min": 41.0,
+                "geospatial_lat_max": 41.0,
             }
         },
     )
-    aligned = c.align()  # must not raise "no overlap"
-    assert float(aligned["test_lon"]) == -140.0
+    match = "catalog position is .* from its data's actual"
+    with pytest.warns(UserWarning, match=match):
+        aligned = c.align()  # must not raise "no overlap"
+    assert (float(aligned["test_lon"]), float(aligned["test_lat"])) == (-144.0, 50.0)
 
 
 def test_an_explicit_point_select_beats_the_metadata_position(monkeypatch):
@@ -1030,6 +1066,63 @@ def test_an_explicit_point_select_beats_the_metadata_position(monkeypatch):
     assert not any("km apart" in str(w.message) for w in log)
     # sampled at the caller's own point -- not the reference's stale metadata claim
     assert (float(aligned["test_lon"]), float(aligned["test_lat"])) == (-144.1, 50.9)
+
+
+def test_a_routed_point_against_a_much_coarser_reference_is_still_verified(
+    monkeypatch,
+):
+    """A routed point select shares the same verification a derived one gets.
+
+    The reference is far coarser than the test grid, so its nearest cell to the
+    routed point (-144.3, 50.0) snaps to (-145.8, 50.0) -- ~107 km away, more
+    than the test lane's own point window can absorb (~79 km, three of the
+    test grid's own fine 0.2-degree cells) but still inside the padded region
+    the reference lane itself is cropped to (so the reference lane's own read
+    still succeeds). Without :meth:`Comparison._verify_point_window` the test
+    lane would stay windowed around the raw request and sample its own
+    window's edge instead of the cell nearest the reference's actual position.
+    """
+    fine_lon = np.arange(-150.05, -138.05, 0.2)
+    fine_lat = np.arange(45.05, 55.05, 0.2)
+    c = _model_comparison(
+        monkeypatch,
+        test=_coarse_grid(fine_lon, fine_lat, seed=1),
+        reference=_coarse_grid([-145.8, -100.0], [50.0], seed=6),
+        select=POINT_SELECT,
+    )
+    with pytest.warns(UserWarning, match="snapped to a different cell"):
+        aligned = c.align()
+    assert (float(aligned["lon"]), float(aligned["lat"])) == (-145.8, 50.0)
+    assert abs(float(aligned["test_lon"]) - (-145.8)) < 0.15
+    assert abs(float(aligned["test_lat"]) - 50.0) < 0.15
+
+
+def test_a_non_degenerate_derived_box_still_warns_before_the_unnarrowed_retry(
+    monkeypatch,
+):
+    """A trajectory reference's declared *extent* (not a point) that misses the
+    test grid entirely still falls back to reading the whole test lane -- but
+    now says so, where before this fix it did silently."""
+    c = _model_comparison(
+        monkeypatch,
+        # Same grid on both sides (no offset) so align() differences the two
+        # fields directly rather than regridding -- this test is only about the
+        # retry+warning during the test lane's *own* prep, not the regrid step.
+        test=_offset_grid(seed=1),
+        reference=_offset_grid(seed=2),
+        metadata={
+            "run_baseline": {
+                "featureType": "trajectory",
+                "geospatial_lon_min": -10.0,
+                "geospatial_lon_max": -9.9,
+                "geospatial_lat_min": 0.0,
+                "geospatial_lat_max": 0.1,
+            }
+        },
+        aggregate={"time": "mean"},
+    )
+    with pytest.warns(UserWarning, match="does not overlap .* grid"):
+        c.align()
 
 
 def test_the_cache_key_changes_when_the_reference_window_changes(monkeypatch):

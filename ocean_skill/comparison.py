@@ -87,6 +87,14 @@ NARROWING_FEATURE_TYPES = frozenset(
     {"timeSeries", "point", "station", "profile", "timeSeriesProfile", "trajectory"}
 )
 
+#: featureTypes a fixed instrument reports at -- one lon/lat *and* one depth, unlike
+#: a profile (one lon/lat, a whole column) or a ``timeSeriesProfile``/
+#: ``trajectoryProfile`` (more than one candidate vertical reading). Used by
+#: :func:`_station_depth_from_metadata` to decide whether a reference's own
+#: ``geospatial_vertical_*`` names the one depth to compare the model at, rather
+#: than the model's default surface.
+_FIXED_STATION_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
+
 
 def _feature_type(source: str) -> str | None:
     """Return a source's catalog featureType, or ``None`` if it is unresolvable."""
@@ -1488,7 +1496,12 @@ def prepare_source(
     crop the *reference* (see :meth:`Comparison.align`), and a point-like reference
     (a mooring, a profile) offers its own catalog-declared position to crop the
     *test* lane the same way, before the reference itself has even been read (see
-    :meth:`Comparison._reference_narrowing`).
+    :meth:`Comparison._reference_narrowing`). A **degenerate** ``bbox`` (one point,
+    not a region) is cropped very differently
+    (:func:`ocean_skill.align.subset_to_bbox`'s point branch) and folds an extra
+    marker into the key below, so a lane cached before that policy existed — a
+    wide, degree-padded crop, still a correct superset — is not silently kept
+    forever just because its ``_bbox`` matches.
 
     ``time_window`` is the same idea along time: ``(start, stop)`` the lane is cropped
     to, and part of the cache key for the same reason ``bbox`` is. A skill map derives
@@ -1529,6 +1542,12 @@ def prepare_source(
     if bbox is not None:
         # rounded so that float noise in an extent does not fragment the cache
         key_select["_bbox"] = [round(float(b), 4) for b in bbox]
+        from ocean_skill.align import POINT_WINDOW_CELLS, _is_point_bbox
+
+        if _is_point_bbox(bbox):
+            # Re-keys only point-narrowed lanes -- see the bbox= docstring
+            # paragraph above -- so every other warm entry is untouched.
+            key_select["_point_window"] = POINT_WINDOW_CELLS
     if time_window is not None:
         # A cropped lane is not the uncropped one, and two test lanes over the same
         # region but different years share a `_bbox`. Without this they would share an
@@ -2012,17 +2031,21 @@ class Comparison:
         catalog rebuild widened the reference's declared record does not silently
         keep serving the narrower one.
 
-        A crop built from a stale or approximate catalog position is not free of
-        risk the way a crop built from data would be: on a grid coarser than
-        :data:`ocean_skill.align.DEFAULT_PAD`, the true nearest cell can fall
-        outside the cropped window even though the crop itself is not empty, and
-        :func:`ocean_skill.align.sample_at` would then silently pick a different
-        (nearby, in-crop) cell than an unnarrowed run would have -- the same
-        exposure an explicit user point select already carries via
-        :meth:`_point_route`, and caught the same way: ``sample_at``'s own
-        past-one-cell-offset warning. A window or bbox that misses the test lane
-        entirely raises instead, and :meth:`align` retries unnarrowed rather than
-        failing the comparison outright.
+        The bbox this returns is *degenerate* for every ``NARROWING_FEATURE_TYPES``
+        member but ``trajectory`` (a mooring/profile/station is one position, not a
+        region), which routes it through :func:`ocean_skill.align.subset_to_bbox`'s
+        point crop rather than its padded one: the window is centred on the true
+        nearest cell regardless of a stale or approximate catalog position, so it
+        never misses the grid the way a degree-padded crop around a wrong position
+        could. The residual risk -- a stale position, or a coarse reference
+        snapping to a cell the window does not reach -- is caught after both lanes
+        are read, by :meth:`align`'s own :meth:`_verify_point_window`, which
+        re-reads the test lane around the reference's *actual* resolved position
+        when the two disagree by more than the window can absorb. Only a
+        ``trajectory``'s non-degenerate extent still takes the padded crop, which
+        *can* miss the test lane's grid entirely and raise -- :meth:`align` retries
+        unnarrowed rather than failing the comparison outright, same as before this
+        crop existed.
         """
         if is_pair_spec(self.select):
             return None, None
@@ -2279,6 +2302,94 @@ class Comparison:
                 stacklevel=_stacklevel.find(),
             )
 
+    def _verify_point_window(
+        self,
+        t,
+        r,
+        test_bbox: tuple[float, float, float, float] | None,
+        *,
+        use_cache: bool,
+        refresh: bool,
+        drop_keys: tuple[str, ...],
+        keep: tuple[str, ...],
+        derived_window: tuple[Any, Any] | None,
+    ):
+        """Re-read the test lane if it was windowed around the wrong point.
+
+        A degenerate ``test_bbox`` windows the test lane to a small neighbourhood
+        of *one* position (:func:`ocean_skill.align.subset_to_bbox`'s point crop),
+        built from either a routed ``select`` or the reference's own catalog
+        metadata -- neither of which is guaranteed to be exactly where the
+        reference is actually sampled from: a stale catalog position can be
+        wrong outright, and a coarse reference grid snaps a routed point to its
+        own nearest cell, which can sit more than a window's width away on a much
+        finer test grid. :func:`ocean_skill.align._align_at_point` samples the
+        test lane at ``align.point_of(r)`` -- the reference's *actual* resolved
+        position -- regardless, so a window centred anywhere else would silently
+        confine that sample to the wrong neighbourhood.
+
+        This is the replacement for what used to be a blunt safety net: before
+        the point crop existed, a stale/mismatched position simply raised
+        ``"no overlap"`` and :meth:`align` fell back to reading the whole test
+        lane, at which point ``sample_at`` always found the reference's real
+        position because nothing had been cropped away. A window crop trades
+        that guarantee for a much smaller read, so this restores it deliberately:
+        checked once against the point that will actually be sampled, and only
+        re-read (once) if the window missed it.
+        """
+        from ocean_skill.align import (
+            POINT_WINDOW_CELLS,
+            _cell_km,
+            _haversine_km,
+            _is_point_bbox,
+            _lat_name,
+            _lon_name,
+            point_of,
+        )
+
+        if test_bbox is None or not _is_point_bbox(test_bbox):
+            return t
+        target = point_of(r)
+        if target is None or t is None:
+            return t
+        cell = _cell_km(t, _lon_name(t), _lat_name(t))
+        if cell <= 0:
+            return t
+        dist = _haversine_km(target[0], target[1], test_bbox[0], test_bbox[1])
+        if dist <= (POINT_WINDOW_CELLS - 2) * cell:
+            return t
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        if self._point_route() is not None:
+            warnings.warn(
+                f"{self.reference_name!r}'s actual position is {dist:.1f} km from "
+                f"the requested point {(test_bbox[0], test_bbox[1])} -- the "
+                "reference grid is coarser than the window, and snapped to a "
+                "different cell. Re-reading the test lane around the reference's "
+                "actual position.",
+                stacklevel=_stacklevel.find(),
+            )
+        else:
+            warnings.warn(
+                f"{self.reference_name!r}'s catalog position is {dist:.1f} km "
+                "from its data's actual position -- the catalog metadata may be "
+                "stale. Re-reading the test lane around the actual position.",
+                stacklevel=_stacklevel.find(),
+            )
+        new_t, _ = self._prepare_lane(
+            self.test_name,
+            use_cache,
+            refresh,
+            role="test",
+            bbox=(target[0], target[1], target[0], target[1]),
+            time_window=derived_window,
+            drop_keys=drop_keys,
+            keep=keep,
+        )
+        return t if new_t is None else new_t
+
     # -- pipeline ---------------------------------------------------------------
     def align(self, *, refresh: bool = False):
         """Read both sources, reduce them, and regrid onto the coarser lane's grid.
@@ -2395,17 +2506,30 @@ class Comparison:
                 keep=keep,
             )
         except ValueError as err:
-            # A coarse test grid, a point near the edge of its extent, or a stale
-            # catalog position: the pad subset_to_bbox adds can still miss the
-            # nearest cell either way. Retrying without the bbox reads the whole
-            # lane instead of failing the comparison outright, and lets align()'s
-            # own sample_at report the (possibly large) offset the way it already
-            # does for a real station. The time window is kept on the retry --
-            # a stale bbox and a stale window are independent failures, and
-            # subset_to_time silently declines to crop an empty window rather than
-            # raising, so keeping it here costs nothing even if it too was stale.
+            # A coarse test grid or a stale catalog *region* can still miss the test
+            # grid entirely. Retrying without the bbox reads the whole lane instead
+            # of failing the comparison outright.
+            #
+            # A *degenerate* (point) test_bbox no longer reaches this branch at all
+            # -- ocean_skill.align.subset_to_bbox's point crop never raises "no
+            # overlap" (see its :func:`~ocean_skill.align._point_window`); a stale
+            # or far-off point still gets a small window, verified against the
+            # reference's actual position below. So by the time this fires,
+            # test_bbox named a real *region* (a trajectory's declared extent, most
+            # often) that missed the test grid.
             if test_bbox is None or "no overlap" not in str(err):
                 raise
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"the region derived from {self.reference_name!r}'s catalog "
+                f"metadata does not overlap {self.test_name!r}'s grid -- likely a "
+                "stale or approximate catalog extent. Reading the whole test lane "
+                "instead of the derived crop.",
+                stacklevel=_stacklevel.find(),
+            )
             t, _ = self._prepare_lane(
                 self.test_name,
                 use_cache,
@@ -2442,9 +2566,21 @@ class Comparison:
         except ValueError as err:
             # The same hazard the test-lane retry above guards against, on the other
             # lane: a coarse reference's nearest cells to the path can sit outside
-            # the pad subset_to_bbox added around the path's own tight extent.
+            # the pad subset_to_bbox added around the path's own tight extent (a
+            # single-point path is the degenerate case, and does not raise here --
+            # see the test-lane retry's comment above).
             if ref_extra is None or bbox is None or "no overlap" not in str(err):
                 raise
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"the path's own extent does not overlap {self.reference_name!r}'s "
+                "grid -- reading the whole reference lane instead of the derived "
+                "crop.",
+                stacklevel=_stacklevel.find(),
+            )
             r, r_depth = self._prepare_lane(
                 self.reference_name,
                 use_cache,
@@ -2461,6 +2597,16 @@ class Comparison:
                 f"{variable_for(self.variable, missing_role)!r} not available in "
                 f"{missing!r}"
             )
+        t = self._verify_point_window(
+            t,
+            r,
+            test_bbox,
+            use_cache=use_cache,
+            refresh=refresh,
+            drop_keys=drop_keys,
+            keep=keep,
+            derived_window=derived_window,
+        )
         self._warn_on_pair_spec_mismatch(t, r)
         self._actual_depth = r_depth
         # .load() so a computed result is a computed result: a cache hit hands back
@@ -3679,6 +3825,51 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     return depths
 
 
+def _station_depth_from_metadata(source: str) -> float | None:
+    """The depth a fixed-position reference's own catalog metadata implies, if any.
+
+    Read-free, the ``timeSeries``/``point``/``station`` counterpart of
+    :func:`_profile_reference_depths`: a mooring's catalog entry can carry its own
+    ``geospatial_vertical_min``/``_max`` (see :func:`ocean_skill.build._extent`,
+    or a builder that reads it straight off an entry's attributes), which is the
+    one depth a fixed instrument sits at -- unlike a profile, which stands its
+    *whole* column rather than naming a single depth, or a
+    ``timeSeriesProfile``/``trajectoryProfile``, which carries more than one
+    candidate vertical reading (see :func:`_is_profile_reference`'s own scope
+    note). Scoped to :data:`_FIXED_STATION_FEATURE_TYPES` for exactly that reason.
+
+    ``None`` -- meaning "nothing to derive, leave the default (or the caller's own
+    ``depths=``/``select=``) alone" -- when the featureType is not one of that
+    set, no vertical extent is declared, it is not finite, or it is negative: every
+    other consumer of these keys (:data:`ocean_skill.tabular._DEPTH_ATTRS`,
+    :func:`ocean_skill.build._extent`) assumes positive-down metres, and a
+    negative value here is more likely a units mixup than a real depth. The
+    midpoint of ``_min``/``_max`` is returned -- equal to either bound when a
+    builder only ever wrote one exact depth (``_min == _max``).
+    """
+    if _feature_type(source) not in _FIXED_STATION_FEATURE_TYPES:
+        return None
+    from ocean_skill.catalog import resolve
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        return None
+    lo = meta.get("geospatial_vertical_min")
+    if lo is None:
+        return None
+    hi = meta.get("geospatial_vertical_max", lo)
+    try:
+        lo, hi = float(lo), float(hi)
+    except (TypeError, ValueError):
+        return None
+    import math
+
+    if not (math.isfinite(lo) and math.isfinite(hi)) or lo < 0 or hi < 0:
+        return None
+    return (lo + hi) / 2.0
+
+
 def _profile_depth_plan(
     ref: str,
     select: dict[str, Any],
@@ -3691,7 +3882,7 @@ def _profile_depth_plan(
 ) -> tuple[tuple[Any, ...], bool]:
     """Per-reference ``(values, many_values)`` for compare()'s depth fan.
 
-    Three cases, in order:
+    Four cases, in order:
 
     * a calculated diagnostic has no vertical axis at all -- one comparison, no depth
       (``(None,)``);
@@ -3702,6 +3893,13 @@ def _profile_depth_plan(
       (:func:`_profile_reference_depths`). An explicit ``select={"depth": [...]}`` is
       left to the ordinary path, which already carries a whole list as one comparison
       (``fan_values`` is then a 1-tuple holding that list);
+    * a **fixed-station** reference (a mooring, say) names its own depth the same
+      way, but as one scalar rather than a column -- comparing it against the
+      model's default surface would silently score the wrong level. Only when the
+      caller named no ``depths=`` and no vertical ``select=`` of their own, exactly
+      like the profile case; a warning says which depth was chosen and why, since
+      unlike a profile's *whole* column, this quietly overrides a real default
+      (surface) rather than filling in one that never existed;
     * anything else keeps the ordinary depth fan unchanged.
     """
     if calculated:
@@ -3719,6 +3917,23 @@ def _profile_depth_plan(
             else:
                 levels = _profile_reference_depths(ref, cache)
             return (levels,), False
+    if fan_key == "depth" and explicit_depths is None:
+        ref_sel = select_for(select, "reference")
+        has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
+        if not has_vertical_select:
+            depth = _station_depth_from_metadata(ref)
+            if depth is not None:
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    f"{ref!r} sits at ~{depth:g} m per its catalog entry -- "
+                    f"comparing the model at {depth:g} m, not the surface. Pass "
+                    "depths=[...] to override.",
+                    stacklevel=_stacklevel.find(),
+                )
+                return (depth,), False
     return fan_values, len(fan_values) > 1
 
 
@@ -4186,6 +4401,15 @@ def compare(
     vertical ``over=`` with no depth axis left standing is refused rather than compared
     against a single collapsed level.
 
+    A **fixed-station** reference (``featureType`` ``timeSeries``/``point``/``station``
+    -- a mooring, most often) is auto-derived the same way, but to a single depth
+    rather than a whole column: its catalog entry's own
+    ``geospatial_vertical_min``/``_max`` (see :func:`ocean_skill.build._extent`) names
+    where the instrument sits, and that depth is compared against rather than the
+    model's default surface -- with a warning naming the depth chosen, since unlike
+    the profile case this replaces a real default rather than filling in a missing
+    one. ``depths=`` or an explicit vertical ``select`` still overrides it, silently.
+
     A surface of constant depth is not always the most meaningful slice through a
     stratified column — ``select={"sigma0": 26.5}`` (or a list, faceted the same way
     ``depths`` is) asks for an isopycnal instead, via
@@ -4587,8 +4811,11 @@ def compare(
             # *own* levels. compare()'s ordinary per-depth fan would instead write a
             # *scalar* depth into the select, collapsing the very axis the profile
             # exists to keep, so a vertical-over reference takes its own branch here.
-            # For a non-profile reference _profile_depth_plan hands back the ordinary
-            # depth fan unchanged.
+            # A fixed-station reference (a mooring) gets the same "natural default"
+            # treatment, but as a scalar depth from its own metadata rather than a
+            # whole column -- see _station_depth_from_metadata. For any other
+            # reference _profile_depth_plan hands back the ordinary depth fan
+            # unchanged (the surface default, unless the caller named depths=).
             try:
                 these_values, many_values = _profile_depth_plan(
                     ref,

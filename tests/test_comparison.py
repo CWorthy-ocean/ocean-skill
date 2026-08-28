@@ -402,3 +402,63 @@ def test_two_windows_over_one_source_do_not_share_a_cache_entry(monkeypatch, sta
         )
     }
     assert len(keys) == 2
+
+
+def test_a_point_bbox_folds_a_marker_into_the_lane_key(monkeypatch):
+    """A degenerate (point) bbox is cropped by cells, not by the degree pad a
+    region bbox still gets -- a lane cached under the old, wider policy must not
+    silently keep being served just because its rounded `_bbox` still matches.
+    """
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import ocean_skill as osk
+    from ocean_skill import cache, catalog
+    from ocean_skill.comparison import prepare_source
+
+    time = pd.date_range("2015-01-01", periods=3, freq="D")
+    ds = xr.Dataset(
+        {"temp": (("time", "lat", "lon"), np.ones((3, 2, 2)))},
+        coords={"time": time, "lat": [10.0, 20.0], "lon": [100.0, 110.0]},
+    )
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata={}))
+
+    saved_keys = []
+    real_save_field = cache.save_field
+
+    def recording_save_field(key, *a, **kw):
+        saved_keys.append(key)
+        return real_save_field(key, *a, **kw)
+
+    monkeypatch.setattr(cache, "save_field", recording_save_field)
+
+    prepare_source(
+        "grid", "temp", None, None, use_cache=True, bbox=(102.0, 12.0, 102.0, 12.0)
+    )
+    prepare_source(
+        "grid", "temp", None, None, use_cache=True, bbox=(100.0, 10.0, 110.0, 20.0)
+    )
+    assert len(saved_keys) == 2
+    assert len(set(saved_keys)) == 2  # a point crop and a region crop never collide
+
+    from ocean_skill.align import POINT_WINDOW_CELLS
+    from ocean_skill.cache import key_for_prepared
+
+    point_key = key_for_prepared(
+        source="grid",
+        variable="temp",
+        select={
+            "_aggregate": None,
+            "_bbox": [102.0, 12.0, 102.0, 12.0],
+            "_point_window": POINT_WINDOW_CELLS,
+        },
+    )
+    assert point_key in saved_keys
+    pre_existing_key = key_for_prepared(
+        source="grid",
+        variable="temp",
+        select={"_aggregate": None, "_bbox": [102.0, 12.0, 102.0, 12.0]},
+    )
+    assert pre_existing_key not in saved_keys

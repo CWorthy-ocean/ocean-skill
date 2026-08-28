@@ -42,8 +42,8 @@ __all__ = [
     "point_of",
     "resolve_match_method",
     "sample_at",
-    "subset_to_box",
     "subset_to_bbox",
+    "subset_to_box",
 ]
 
 #: Sampling methods :func:`sample_at` understands, and what each means at a point.
@@ -136,8 +136,92 @@ def natural_convention(obj) -> Literal["0-360", "-180-180"]:
 #: Degrees of margin kept around the test's own extent when the reference is cropped to
 #: it. Named rather than repeated because two places crop with it and they must agree: a
 #: lane pre-cropped with a *smaller* pad than :func:`align` uses would silently hand the
-#: comparison a narrower reference than the same call without the pre-crop.
+#: comparison a narrower reference than the same call without the pre-crop. Ignored for
+#: a *degenerate* (point) bbox -- see :data:`POINT_WINDOW_CELLS` below, and note both
+#: agreeing call sites (:func:`ocean_skill.comparison.prepare_source`'s pre-crop and
+#: :func:`align`'s own in-memory crop) go through :func:`subset_to_bbox`, so the
+#: exception holds at both without being spelled out twice.
 DEFAULT_PAD = 1.0
+
+#: Cells of margin kept on each side of the nearest cell when :func:`subset_to_bbox`
+#: is asked for a *degenerate* bbox -- ``lon_min == lon_max and lat_min == lat_max``,
+#: what a single-station reference's catalog position (or a routed point ``select``)
+#: produces. A degree-based pad is the wrong unit here: on a small regional grid (a
+#: fjord model a couple of degrees across) it can keep nearly the whole domain, which
+#: is the 2.5 GB a single mooring comparison used to read to sample one cell from.
+#: 1 cell covers a nearest-neighbour sample; the interpolating (bilinear) methods
+#: need their immediate stencil too; 5 leaves a margin past both, and an 11x11 window
+#: is negligible next to a domain this exists to avoid reading whole.
+POINT_WINDOW_CELLS = 5
+
+
+def _is_point_bbox(bbox) -> bool:
+    """Whether ``bbox`` names one position rather than a region.
+
+    Exact equality, not a tolerance: both producers of a degenerate bbox --
+    :meth:`ocean_skill.comparison.Comparison._reference_narrowing` (from a
+    catalog entry's identical ``geospatial_*_min``/``_max``) and
+    :meth:`ocean_skill.comparison.Comparison._point_route` (the same float
+    repeated as both ends of the pair) -- emit exact duplicates, so a tolerance
+    would only risk misclassifying a real, if small, region. A near-degenerate
+    bbox falls through to the ordinary padded crop below.
+    """
+    return bbox is not None and bbox[0] == bbox[2] and bbox[1] == bbox[3]
+
+
+def _point_window(
+    obj,
+    lon_name: str,
+    lat_name: str,
+    lon: float,
+    lat: float,
+    cells: int = POINT_WINDOW_CELLS,
+):
+    """Window ``obj`` to the nearest cell to ``(lon, lat)``, padded by ``cells``.
+
+    The degenerate-bbox counterpart of :func:`_curvilinear_window`'s padded-degree
+    crop: a station reference is eventually *sampled* at one cell
+    (:func:`sample_at`), so cropping in degrees -- sized for a region, not a point --
+    can keep most of a small grid for nothing. This instead finds the true nearest
+    cell first and keeps a small index window around it, which is provably enough
+    for both a nearest-neighbour sample (the cell itself) and an interpolating one
+    (its immediate stencil), and is a cost optimization exactly like
+    :func:`subset_to_bbox`'s curvilinear branch already is -- not a selection, so no
+    ``.where`` mask, and never empty: an out-of-domain point still has a nearest
+    cell, so this never raises the way the padded crop does. A window near a global
+    axis's own seam does not wrap, same as the padded crop's index slice today.
+
+    ``lon`` is wrapped into ``obj``'s own longitude convention first
+    (:func:`_bbox_lon_in_convention`), matching :func:`sample_at`'s own wrap -- the
+    curvilinear nearest search is convention-safe regardless (:func:`_haversine_km`
+    is 360-periodic in longitude), but the rectilinear search below is not.
+    """
+    lon_values = np.asarray(obj[lon_name])
+    lon, _ = _bbox_lon_in_convention(lon_values, lon, lon)
+    if lon_name not in obj.dims and lon_values.ndim == 2:
+        # Curvilinear: no dimension to slice along, so window the smallest index
+        # rectangle around the nearest cell, exactly as _curvilinear_window windows
+        # around a padded box.
+        iy, ix = _nearest_indices(lon_values, np.asarray(obj[lat_name]), lon, lat)
+        dims = obj[lon_name].dims
+        window = {
+            dims[0]: slice(max(iy - cells, 0), iy + cells + 1),
+            dims[1]: slice(max(ix - cells, 0), ix + cells + 1),
+        }
+        return obj.isel(window)
+    sel: dict[str, slice] = {}
+    if lon_name in obj.dims:
+        axis = np.asarray(obj[lon_name], dtype="float64")
+        # Seam-safe angular difference rather than .sel(method="nearest"): the axis
+        # and the (now-wrapped) point can still straddle the axis's own seam (a
+        # ±180 axis and a point just past 180, or vice versa).
+        i = int(np.nanargmin(np.abs(((axis - lon) + 180.0) % 360.0 - 180.0)))
+        sel[lon_name] = slice(max(i - cells, 0), i + cells + 1)
+    if lat_name in obj.dims:
+        axis = np.asarray(obj[lat_name], dtype="float64")
+        i = int(np.nanargmin(np.abs(axis - lat)))
+        sel[lat_name] = slice(max(i - cells, 0), i + cells + 1)
+    return obj.isel(sel) if sel else obj
 
 
 def _bbox_lon_in_convention(values, lon_min: float, lon_max: float):
@@ -298,12 +382,25 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     :func:`subset_to_box`, no ``.where`` mask is applied: this crop is a cost
     optimization ahead of a regrid, not a selection, and windowing to a superset
     of the box is exactly what the rectilinear branch below does too.
+
+    A **degenerate** ``bbox`` (``lon_min == lon_max and lat_min == lat_max`` — a
+    single station's catalog position, or a routed point ``select``) takes a
+    different crop entirely (:func:`_point_window`): ``pad`` (a *region* margin, in
+    degrees) is the wrong unit for a *point* eventually sampled at one cell, and on
+    a small grid can keep nearly the whole domain for nothing. The window is
+    instead sized in cells around the true nearest one
+    (:data:`POINT_WINDOW_CELLS`), ``pad`` is ignored, and this never raises — an
+    out-of-domain point still has a nearest cell, so a small (if unhelpful) window
+    comes back rather than "no overlap"; the caller decides what the far-off nearest
+    cell means (see :func:`sample_at`'s own offset warning).
     """
     from ocean_skill.operators import oriented_slice
 
     lon, lat = _lon_name(obj), _lat_name(obj)
     if lon is None or lat is None:
         return obj
+    if _is_point_bbox(bbox):
+        return _point_window(obj, lon, lat, float(bbox[0]), float(bbox[1]))
     lon_values = np.asarray(obj[lon])
     if lon not in obj.dims and lon_values.ndim == 2:
         out, inside = _curvilinear_window(obj, lon, lat, bbox, pad=pad)
