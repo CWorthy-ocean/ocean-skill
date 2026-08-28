@@ -9,7 +9,6 @@ without going through ``compare()``.
 
 from __future__ import annotations
 
-import matplotlib
 import numpy as np
 import pytest
 import xarray as xr
@@ -18,8 +17,6 @@ from ocean_skill.plot import profile as _profile
 from ocean_skill.plot import style as _style
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
-
-matplotlib.use("Agg")
 
 TEMPERATURE = "sea_water_temperature"
 SALINITY = "sea_water_practical_salinity"
@@ -221,7 +218,8 @@ def test_the_y_axis_reads_surface_at_top_in_both_renderers():
 
 def test_negative_down_z_and_positive_down_depth_render_identical_positive_depths():
     """ROMS's ``z`` (negative-down) and an obs product's ``depth`` (positive-down)
-    must draw the very same y-values."""
+    must draw the very same y-values.
+    """
     from_model = _profile_item(zdim="z", negative_down=True)
     from_obs = _profile_item(zdim="DEPTH", negative_down=False)
     fig_model = render(_spec([from_model]), renderer="matplotlib")
@@ -290,7 +288,8 @@ def test_multi_time_items_get_distinct_legend_labels():
 
 def test_profile_specs_never_carry_a_depth_channel():
     """Depth is the axis, never a style fact -- unlike series, whose LineSpec.depth
-    is what earns a varying depth its markers."""
+    is what earns a varying depth its markers.
+    """
     specs = _profile._line_specs(_profile_item(), 0)
     assert all(spec.depth is None for spec in specs)
 

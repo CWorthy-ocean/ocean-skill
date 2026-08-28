@@ -9,13 +9,10 @@ a line instead of map panels (see :attr:`Field.family`).
 
 from __future__ import annotations
 
-import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-
-matplotlib.use("Agg")
 
 NITRATE = "nitrate"
 SILICATE = "silicate"
@@ -69,7 +66,7 @@ def _point_with_depth(n: int = 6, depths=(0.0, 50.0, 100.0)):
 @pytest.fixture
 def stub(monkeypatch):
     """Return a setter that swaps ``comparison.prepare_source`` for one field."""
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
 
     def use(field_da):
         monkeypatch.setattr(comparison, "prepare_source", lambda *a, **k: (field_da, None))

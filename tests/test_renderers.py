@@ -19,6 +19,11 @@ import xarray as xr
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
 
+# Every test here draws a real figure through one or both renderers -- by far the
+# heaviest file in the suite (~120s). Skipped by default (`pytest.ini`'s
+# `-m "not slow"`); run explicitly with `pytest -m slow` or `pytest -m ""`.
+pytestmark = pytest.mark.slow
+
 
 def _field(offset: float = 0.0) -> xr.DataArray:
     return xr.DataArray(
@@ -78,9 +83,6 @@ _TOP_LEVEL = {"labels": ("GOM_bgc", "woa23_nitrate"), "title": "GOM vs WOA"}
 
 
 def test_matplotlib_grid_labels_each_row_from_its_own_source(two_rows):
-    import matplotlib
-
-    matplotlib.use("Agg")
     fig = render(
         PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
         renderer="matplotlib",
@@ -90,36 +92,46 @@ def test_matplotlib_grid_labels_each_row_from_its_own_source(two_rows):
     assert "woa23_phosphate" in titles
 
 
-def test_holoviews_grid_labels_each_row_from_its_own_source(two_rows):
-    """Regression: row 2 used to inherit row 1's reference name."""
+def test_the_holoviews_grid(two_rows):
+    """Everything one render of a two-row interactive grid has to get right at once.
+
+    Five claims, all against the same figure — merged into one render because each
+    used to build and throw away an identical grid just to check a different part of
+    it. Kept as one function, not one assertion, so a failure still says which claim
+    broke.
+    """
+    import holoviews as hv
+    from bokeh.models import Div
+    from bokeh.plotting import figure
+
     out = render(
         PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
         renderer="holoviews",
     )
     titles = _holoviews_panel_titles(out)
+
+    # Regression: row 2 used to inherit row 1's reference name.
     assert any("woa23_nitrate" in t for t in titles)
     assert any("woa23_phosphate" in t for t in titles), (
         f"row 2 lost its own reference label; got {titles}"
     )
 
-
-def test_holoviews_grid_identifies_each_row_variable(two_rows):
-    """The static renderer's rotated row label has to survive in some form."""
-    out = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
-        renderer="holoviews",
-    )
-    titles = _holoviews_panel_titles(out)
+    # The static renderer's rotated row label has to survive in some form.
     assert any("nitrate" in t for t in titles)
     assert any("phosphate" in t for t in titles)
 
+    # Metrics reach the interactive title too.
+    assert any("bias=0.125" in t for t in titles)
 
-def test_holoviews_grid_shows_metrics(two_rows):
-    out = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
-        renderer="holoviews",
-    )
-    assert any("bias=0.125" in t for t in _holoviews_panel_titles(out))
+    # The overall title, both renderers.
+    divs = list(hv.render(out, backend="bokeh").select({"type": Div}))
+    assert any("GOM vs WOA" in (d.text or "") for d in divs)
+
+    # Shared zoom means one shared bokeh Range object, not merely an option set.
+    figs = list(hv.render(out, backend="bokeh").select({"type": figure}))
+    assert len(figs) == 6
+    assert len({id(f.x_range) for f in figs}) == 1
+    assert len({id(f.y_range) for f in figs}) == 1
 
 
 def test_holoviews_metric_keys_selects_which_metrics(two_rows):
@@ -136,18 +148,6 @@ def test_holoviews_metric_keys_selects_which_metrics(two_rows):
     assert not any("bias" in t for t in titles)
 
 
-def test_holoviews_grid_renders_the_overall_title(two_rows):
-    import holoviews as hv
-    from bokeh.models import Div
-
-    out = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
-        renderer="holoviews",
-    )
-    divs = list(hv.render(out, backend="bokeh").select({"type": Div}))
-    assert any("GOM vs WOA" in (d.text or "") for d in divs)
-
-
 def _grid_item(standard_name, depth, time, reference):
     """A grid row carrying the depth/time an as_item() would, for title tests."""
     it = _item(standard_name, reference, standard_name)
@@ -156,7 +156,8 @@ def _grid_item(standard_name, depth, time, reference):
 
 def test_grid_suptitle_composes_only_what_every_row_shares():
     """The variable/depth/time common to all rows makes the top title; whatever the fan
-    varied is already the row label, so it is left out — no duplication, no stray part."""
+    varied is already the row label, so it is left out — no duplication, no stray part.
+    """
     from ocean_skill.plot.matplotlib_renderer import grid_suptitle
 
     n = "mole_concentration_of_nitrate_in_sea_water"
@@ -198,10 +199,8 @@ def test_grid_suptitle_composes_only_what_every_row_shares():
 def test_a_stacked_grid_draws_the_shared_title_in_both_renderers():
     """A shared depth/time reaches the drawn figure as a suptitle, both renderers."""
     import holoviews as hv
-    import matplotlib
     from bokeh.models import Div
 
-    matplotlib.use("Agg")
     n = "mole_concentration_of_nitrate_in_sea_water"
     p = "mole_concentration_of_phosphate_in_sea_water"
     items = [_grid_item(n, "surface", "2010-01", "woa_n"),
@@ -218,10 +217,8 @@ def test_a_stacked_grid_draws_the_shared_title_in_both_renderers():
 
 def test_a_grid_with_nothing_shared_still_draws_no_suptitle(two_rows):
     """The default must not invent a title where the rows have no common identity —
-    two_rows are different variables with no depth/time, so the grid stays untitled."""
-    import matplotlib
-
-    matplotlib.use("Agg")
+    two_rows are different variables with no depth/time, so the grid stays untitled.
+    """
     fig = render(PlotSpec(family="field_grid", items=two_rows, options={}))
     assert fig._suptitle is None
 
@@ -230,7 +227,8 @@ def test_a_one_comparison_set_plots_as_a_single_row_not_a_grid(monkeypatch):
     """``compare()`` always returns a set, even of one. A lone comparison should draw as
     a single ``field_row`` — with its ``variable · depth · time`` suptitle — not a
     one-row grid whose only identity is a rotated left-edge label; two or more still
-    stack as a grid."""
+    stack as a grid.
+    """
     from ocean_skill.comparison import ComparisonSet
 
     class _C:
@@ -271,21 +269,6 @@ def test_a_one_comparison_set_plots_as_a_single_row_not_a_grid(monkeypatch):
 
     ComparisonSet([_C("woa_n", "nitrate"), _C("woa_p", "phosphate")]).plot(domain=None)
     assert captured["family"] == "field_grid"
-
-
-def test_holoviews_grid_links_pan_and_zoom(two_rows):
-    """Shared zoom means one shared bokeh Range object, not merely an option set."""
-    import holoviews as hv
-    from bokeh.plotting import figure
-
-    out = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
-        renderer="holoviews",
-    )
-    figs = list(hv.render(out, backend="bokeh").select({"type": figure}))
-    assert len(figs) == 6
-    assert len({id(f.x_range) for f in figs}) == 1
-    assert len({id(f.y_range) for f in figs}) == 1
 
 
 def test_holoviews_grid_can_unlink_pan_and_zoom(two_rows):
@@ -501,9 +484,6 @@ def _row_item(**over):
 
 
 def _mpl_row(**over):
-    import matplotlib
-
-    matplotlib.use("Agg")
     item = _row_item(**over)
     return render(PlotSpec(family="field_row", items=[item], options={}))
 
@@ -543,10 +523,8 @@ def test_an_explicit_row_title_wins_and_an_empty_one_drops_it():
     and ``title=""`` suppresses the suptitle outright, in both renderers.
     """
     import holoviews as hv
-    import matplotlib
     from bokeh.models import Div
 
-    matplotlib.use("Agg")
     item = _row_item()
     spec = PlotSpec(family="field_row", items=[item], options={"title": "my run"})
     assert render(spec)._suptitle.get_text() == "my run"
@@ -1192,9 +1170,6 @@ def _matplotlib_dashed_lines(fig):
 
 
 def test_matplotlib_draws_the_domain_ring_on_every_panel(two_rows):
-    import matplotlib
-
-    matplotlib.use("Agg")
     fig = render(
         PlotSpec(
             family="field_grid", items=two_rows, options={"domain": _DOMAIN_RING}
@@ -1210,9 +1185,6 @@ def test_matplotlib_draws_the_domain_ring_on_every_panel(two_rows):
 
 
 def test_matplotlib_domain_bbox_still_draws_a_rectangle(two_rows):
-    import matplotlib
-
-    matplotlib.use("Agg")
     fig = render(
         PlotSpec(
             family="field_grid", items=two_rows, options={"domain": _DOMAIN_BBOX}
@@ -1231,10 +1203,8 @@ def test_matplotlib_axes_frame_the_field_not_a_much_larger_domain_ring():
     """A field_row's axes must stay framed on the (small) field, not autoscale out
     to a much larger domain outline drawn only for context -- the ring is drawn
     via ax.add_artist rather than ax.plot for exactly this reason (see the
-    add_artist fix in ocean_skill.plot.matplotlib_renderer._draw_map)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
+    add_artist fix in ocean_skill.plot.matplotlib_renderer._draw_map).
+    """
     item = _row_item()  # a field spanning lon 260-270, lat 18-26
     huge_domain = (0.0, -80.0, 360.0, 80.0)  # a near-global ring for contrast
     fig = render(
@@ -1250,9 +1220,6 @@ def test_matplotlib_axes_frame_the_field_not_a_much_larger_domain_ring():
 
 
 def test_matplotlib_domain_none_draws_nothing(two_rows):
-    import matplotlib
-
-    matplotlib.use("Agg")
     fig = render(
         PlotSpec(family="field_grid", items=two_rows, options={"domain": None}),
         renderer="matplotlib",
@@ -1347,9 +1314,6 @@ def test_static_field_row_accepts_rasterize_and_hover_with_a_warning():
     Same precedent as ``tiles=`` in ``matplotlib_renderer.locations`` -- the static
     side must not raise on options that are only the interactive renderer's.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     spec = PlotSpec(
         family="field_row", items=[_row_item()], options={"rasterize": False}
     )

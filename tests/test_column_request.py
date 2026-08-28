@@ -10,12 +10,9 @@ the model's own resolution.
 
 from __future__ import annotations
 
-import matplotlib
 import numpy as np
 import pytest
 import xarray as xr
-
-matplotlib.use("Agg")
 
 from ocean_skill import roms
 from ocean_skill.comparison import COLUMN, _depth_label, _prepare, is_column_request
@@ -93,7 +90,8 @@ def test_column_at_a_point_keeps_every_native_level(roms_column):
 
 def test_column_carries_z_rho_and_dz_for_a_profile_to_draw_against(roms_column):
     """The two things the plotting layer and a later vertical aggregate each need:
-    z_rho (real depth per cell) and dz (thickness weights)."""
+    z_rho (real depth per cell) and dz (thickness weights).
+    """
     ds, meta = roms_column
     da, _ = _prepare(ds, meta, "temp", {"depth": COLUMN, "eta_rho": 0, "xi_rho": 0})
     assert "z_rho" in da.coords
@@ -103,7 +101,8 @@ def test_column_carries_z_rho_and_dz_for_a_profile_to_draw_against(roms_column):
 
 def test_column_levels_span_the_whole_column_not_just_a_band(roms_column):
     """Unlike depth_average's own band tests, nothing here is excluded: an unbounded
-    band touches every cell from the surface to the seafloor."""
+    band touches every cell from the surface to the seafloor.
+    """
     ds, meta = roms_column
     # h[1, 1] == 5000.0 m -- the abyssal corner of this grid (see the fixture's h).
     da, _ = _prepare(ds, meta, "temp", {"depth": COLUMN, "eta_rho": 1, "xi_rho": 1})
@@ -114,7 +113,8 @@ def test_column_levels_span_the_whole_column_not_just_a_band(roms_column):
 
 def test_a_vertical_aggregate_still_collapses_a_column_request(roms_column):
     """{"Z": "mean"} on a column is the same thickness-weighted mean depth_average
-    gives a band -- the column is just an unbounded band."""
+    gives a band -- the column is just an unbounded band.
+    """
     ds, meta = roms_column
     da, _ = _prepare(
         ds,
@@ -146,7 +146,7 @@ def test_column_on_an_observational_source_is_refused():
 
 
 def test_a_column_profile_draws_end_to_end_in_both_renderers(roms_column, monkeypatch):
-    import ocean_skill.comparison as comparison
+    from ocean_skill import comparison
     from ocean_skill.field import field as make_field
 
     ds, meta = roms_column

@@ -24,6 +24,11 @@ from ocean_skill.plot import typography as tg
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
 
+# Every test here draws a real figure through one or both renderers (~77s total).
+# Skipped by default (`pytest.ini`'s `-m "not slow"`); run explicitly with
+# `pytest -m slow` or `pytest -m ""`.
+pytestmark = pytest.mark.slow
+
 NITRATE = "mole_concentration_of_nitrate_in_sea_water"
 MONTHLY = {"time": {"resample": "1MS", "reduce": "mean"}}
 CLIMATOLOGY = {"time": {"groupby": "month", "reduce": "mean"}}
@@ -286,9 +291,6 @@ def test_the_suptitle_does_not_grow_on_a_one_column_grid():
 
 
 def test_matplotlib_draws_one_panel_per_period(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]))
     assert _mpl_titles(fig) == [
@@ -308,9 +310,6 @@ def test_the_figure_names_the_variable_it_draws(daily):
     and the source it came from is not on the page — so an alkalinity figure and a
     nitrate one were indistinguishable once out of the session that drew them.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]))
     assert fig._suptitle.get_text() == "nitrate"
@@ -320,9 +319,6 @@ def test_the_figure_names_the_variable_it_draws(daily):
 
 def test_the_variable_name_is_a_default_and_not_a_fixture(daily):
     """An explicit title wins outright, and an empty one drops the suptitle."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     spec = PlotSpec(family="field_facet", items=[_item(field, "time")])
     assert render(spec, title="GOM run, 2012")._suptitle.get_text() == "GOM run, 2012"
@@ -352,9 +348,6 @@ def test_the_title_sits_over_the_panels_not_over_the_canvas(daily):
     right of the figure's middle, where matplotlib puts a suptitle. Unmoved, the title
     lands in the left margin, naming nothing.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]), ncols=1)
     fig.canvas.draw()
@@ -377,9 +370,6 @@ def test_a_single_wide_map_keeps_its_title_close_to_the_map(daily):
     dropping it well below the suptitle. A bar on the map's own long edge sizes the
     figure honestly instead.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = daily.sel(time="2012-01-16")  # a scalar time coord: one wide map, no facet
     item = {
         "field": field,
@@ -408,9 +398,6 @@ def test_a_single_wide_map_keeps_its_title_close_to_the_map(daily):
 
 def test_a_field_with_no_cf_name_gets_no_title_rather_than_a_guess(daily):
     """A derived expression has no standard_name to shorten; silence beats invention."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     item = {**_item(field, "time"), "standard_name": None}
     assert render(PlotSpec(family="field_facet", items=[item]))._suptitle is None
@@ -423,10 +410,8 @@ def test_the_suptitle_carries_the_source_and_depth_in_both_renderers(daily):
     missing from a plain "nitrate" — and both renderers compose them the same way.
     """
     import holoviews as hv
-    import matplotlib
     from bokeh.models import Div
 
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     item = {**_item(field, "time"), "depth": "surface", "label": "ccs"}
     fig = render(PlotSpec(family="field_facet", items=[item]))
@@ -444,10 +429,8 @@ def test_a_collapsed_single_map_also_carries_when_in_both_renderers(daily):
     the interactive single-panel fix — a lone panel used to crash instead of drawing.
     """
     import holoviews as hv
-    import matplotlib
     from bokeh.plotting import figure
 
-    matplotlib.use("Agg")
     field = daily.sel(time="2012-01-16")  # a scalar time coord, not a facet dim
     item = {
         "field": field,
@@ -505,9 +488,6 @@ def test_a_big_facet_panel_is_rasterized_and_a_small_one_is_not():
 
 def test_a_faceted_vertical_suppresses_the_depth_part(daily):
     """A ``row_dim`` of levels already names the depth down the left edge."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     item = {
         **_item(_by_depth(daily), "time", "depth"),
         "depth": "surface, 50 m, 100 m",
@@ -584,9 +564,6 @@ def test_every_panel_shares_one_colour_scale(daily):
     Per-panel scaling would draw a doubling from March to April as no change at all,
     since each panel would re-centre on its own range.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     # a strong trend, so per-panel norms would be obviously different from shared ones
     field = aggregate(daily, MONTHLY)
     field = field + xr.DataArray(
@@ -610,9 +587,6 @@ def test_every_panel_shares_one_colour_scale(daily):
 
 
 def test_only_one_colorbar_is_drawn(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     fig = render(PlotSpec(family="field_facet", items=[_item(field, "time")]))
     bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
@@ -622,9 +596,6 @@ def test_only_one_colorbar_is_drawn(daily):
 
 def test_blank_cells_are_hidden_not_drawn():
     """Seven panels in an eight-cell grid: the spare cell carries no map."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     # 213 days is January through July inclusive — seven whole months, no short bin
     seven = aggregate(_daily(213), MONTHLY)
     assert seven.sizes["time"] == 7
@@ -635,9 +606,6 @@ def test_blank_cells_are_hidden_not_drawn():
 
 
 def test_an_unknown_facet_dim_is_refused(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     with pytest.raises(ValueError, match="not a dimension"):
         render(PlotSpec(family="field_facet", items=[_item(field, "week")]))
@@ -764,9 +732,6 @@ def test_a_missing_variable_is_reported_against_its_source(monkeypatch):
 
 
 def test_field_plot_draws_the_facet_family(prepared, monkeypatch):
-    import matplotlib
-
-    matplotlib.use("Agg")
     from ocean_skill.field import field as make_field
 
     fig = make_field("stub", "nitrate", label="run A").plot()
@@ -782,9 +747,6 @@ def test_field_plot_draws_no_domain_box_even_with_one_declared(monkeypatch):
     """
     from types import SimpleNamespace
 
-    import matplotlib
-
-    matplotlib.use("Agg")
     from ocean_skill.field import field as make_field
 
     entry = SimpleNamespace(metadata={"domain_outline": [[1.0, 1.0], [9.0, 1.0]]})
@@ -822,27 +784,26 @@ def _mpl_panels(fig):
     return [ax for ax in fig.axes if not getattr(ax, "_osk_cbar_parents", None)]
 
 
-def test_depth_by_month_fills_a_determined_grid(daily):
-    """Three levels by six months is 3x6 — no aspect-ratio choice left to make."""
-    import matplotlib
+def test_the_depth_by_month_grid(daily):
+    """Everything one render of a 3-level x 6-month grid has to get right at once.
 
-    matplotlib.use("Agg")
+    Five claims, all against the same figure — merged into one render because each
+    used to build and throw away an identical grid just to check a different part of
+    it. Kept as one function, not one assertion, so a failure still says which claim
+    broke.
+    """
+    from matplotlib.collections import QuadMesh
+
     fig = render(
         PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
     )
     panels = _mpl_panels(fig)
+
+    # Three levels by six months is 3x6 — no aspect-ratio choice left to make.
     assert len(panels) == 18
     assert all(ax.get_visible() for ax in panels)
 
-
-def test_the_month_is_titled_once_and_the_depth_named_down_the_side(daily):
-    """Repeating "Jan 2012" on all three rows is noise; the row carries the level."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    fig = render(
-        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
-    )
+    # Repeating "Jan 2012" on all three rows is noise; the row carries the level.
     assert _mpl_titles(fig) == [
         "Jan 2012",
         "Feb 2012",
@@ -853,30 +814,19 @@ def test_the_month_is_titled_once_and_the_depth_named_down_the_side(daily):
     ]
     labels = [
         ax._osk_row_label.get_text()
-        for ax in _mpl_panels(fig)
+        for ax in panels
         if getattr(ax, "_osk_row_label", None) is not None
     ]
     assert labels == ["0 m", "50 m", "100 m"]
 
-
-def test_each_depth_row_keeps_its_own_colour_scale(daily):
-    """Nitrate at 100 m and at the surface have unrelated ranges.
-
-    One scale across both would push every surface panel to the bottom of the bar and
-    hide the monthly change the figure exists to show — but *within* a row the months
-    must still share, or the change is hidden the other way.
-    """
-    import matplotlib
-    from matplotlib.collections import QuadMesh
-
-    matplotlib.use("Agg")
-    fig = render(
-        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
-    )
+    # Nitrate at 100 m and at the surface have unrelated ranges. One scale across both
+    # would push every surface panel to the bottom of the bar and hide the monthly
+    # change the figure exists to show — but *within* a row the months must still
+    # share, or the change is hidden the other way.
     per_row = [
         {
             (im.norm.vmin, im.norm.vmax)
-            for ax in _mpl_panels(fig)[r * 6 : (r + 1) * 6]
+            for ax in panels[r * 6 : (r + 1) * 6]
             for im in ax.collections
             if isinstance(im, QuadMesh)
         }
@@ -885,50 +835,32 @@ def test_each_depth_row_keeps_its_own_colour_scale(daily):
     assert all(len(scales) == 1 for scales in per_row), "months differ within a row"
     assert len({next(iter(s)) for s in per_row}) == 3, "rows share one scale"
 
-
-def test_one_colorbar_per_depth_row(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    fig = render(
-        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
-    )
+    # One colorbar per depth row, each spanning that row's six months.
     bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
     assert len(bars) == 3
     assert all(len(b._osk_cbar_parents) == 6 for b in bars)
 
-
-def test_untitled_panels_still_pin_their_title_position(daily):
-    """Every panel must skip matplotlib's automatic title placement, titled or not.
-
-    Over a cartopy GeoAxes carrying gridline labels, matplotlib 3.11 computes an
-    infinite title ``y``, which makes the axes report a NaN tight bbox and drop out of
-    ``bbox_inches="tight"`` — silently, since the maps that survive look intact. The
-    explicit ``y`` in DEFAULT_TITLE_KWARGS disarms it by clearing ``_autotitlepos``,
-    but only on an axes ``set_title`` was actually called on; the twelve panels below
-    the top row of a 3x6 grid are deliberately untitled and used not to be.
-
-    Asserts the private ``_autotitlepos`` because that flag *is* the mechanism — the
-    drawn output is identical on matplotlib 3.10, so nothing visible distinguishes a
-    protected figure from a vulnerable one until the version that breaks.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    fig = render(
-        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
-    )
-    panels = _mpl_panels(fig)
+    # Every panel must skip matplotlib's automatic title placement, titled or not.
+    #
+    # Over a cartopy GeoAxes carrying gridline labels, matplotlib 3.11 computes an
+    # infinite title ``y``, which makes the axes report a NaN tight bbox and drop out
+    # of ``bbox_inches="tight"`` — silently, since the maps that survive look intact.
+    # The explicit ``y`` in DEFAULT_TITLE_KWARGS disarms it by clearing
+    # ``_autotitlepos``, but only on an axes ``set_title`` was actually called on; the
+    # twelve panels below the top row of a 3x6 grid are deliberately untitled and used
+    # not to be.
+    #
+    # Asserts the private ``_autotitlepos`` because that flag *is* the mechanism — the
+    # drawn output is identical on matplotlib 3.10, so nothing visible distinguishes a
+    # protected figure from a vulnerable one until the version that breaks.
     untitled = [ax for ax in panels if not ax.get_title()]
     assert len(untitled) == 12, "the rows below the top should carry no month title"
     assert all(ax._autotitlepos is False for ax in panels)
 
 
 def test_shared_limits_collapses_to_one_scale_and_one_bar(daily):
-    import matplotlib
     from matplotlib.collections import QuadMesh
 
-    matplotlib.use("Agg")
     fig = render(
         PlotSpec(
             family="field_facet",
@@ -948,9 +880,6 @@ def test_shared_limits_collapses_to_one_scale_and_one_bar(daily):
 
 
 def test_ncols_cannot_contradict_a_two_axis_grid(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
     with pytest.raises(ValueError, match="contradicts row_dim"):
         render(
             PlotSpec(
@@ -962,9 +891,6 @@ def test_ncols_cannot_contradict_a_two_axis_grid(daily):
 
 
 def test_one_axis_cannot_be_both_rows_and_columns(daily):
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     with pytest.raises(ValueError, match="cannot be both"):
         render(PlotSpec(family="field_facet", items=[_item(field, "time", "time")]))
@@ -989,9 +915,6 @@ def test_holoviews_draws_the_depth_by_month_grid_too(daily):
 
 def test_both_renderers_arrange_the_panels_the_same_way(daily):
     """A plot that rearranges itself when you switch renderer is not the same plot."""
-    import matplotlib
-
-    matplotlib.use("Agg")
     field = aggregate(daily, MONTHLY)
     spec = PlotSpec(family="field_facet", items=[_item(field, "time")])
     fig = render(spec, renderer="matplotlib")

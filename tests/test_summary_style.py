@@ -10,10 +10,6 @@ regardless of an explicit ``colors=`` — see ``test_paired_legend_swatches_hono
 
 from __future__ import annotations
 
-import matplotlib
-
-matplotlib.use("Agg")
-
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import pytest

@@ -40,7 +40,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-cov"]
+test = ["pytest", "pytest-cov", "pytest-xdist"]
 
 [project.urls]
 Homepage = "https://github.com/"   # TODO: set when a remote exists

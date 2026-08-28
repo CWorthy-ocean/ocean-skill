@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import warnings
 
-import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
@@ -24,8 +23,6 @@ from ocean_skill.plot import series as _series
 from ocean_skill.plot import style as _style
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
-
-matplotlib.use("Agg")
 
 TEMPERATURE = "sea_water_temperature"
 SALINITY = "sea_water_practical_salinity"
@@ -538,7 +535,8 @@ def test_panel_title_reads_a_curvilinear_scalar_position():
 def test_a_box_mean_comparison_reads_mean_over_the_region_not_a_place():
     """A box-mean lands on the box midpoint -- the same scalar-coord machinery a
     station's point sample uses (see ocean_skill.operators._horizontal_mean) -- but
-    the title must say what it actually is, not claim a station that isn't there."""
+    the title must say what it actually is, not claim a station that isn't there.
+    """
     from ocean_skill.comparison import _region_label
 
     item = _item()

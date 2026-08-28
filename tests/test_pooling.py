@@ -12,12 +12,8 @@ data, so a stand-in carrying that specification exercises the real code paths.
 
 from __future__ import annotations
 
-import matplotlib
-import pytest
-
-matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
+import pytest
 
 from ocean_skill.comparison import (
     ComparisonSet,

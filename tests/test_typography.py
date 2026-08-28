@@ -17,20 +17,18 @@ from __future__ import annotations
 
 import warnings
 
-import matplotlib
-
-# Before pyplot is imported anywhere. Layout depends on the backend's DPI, so a test
-# that measures drawn geometry gives different numbers under the default macosx backend
-# than under Agg — which made this module's results depend on whether another test
-# module (test_renderers, test_summary_labels) had already forced Agg first.
-matplotlib.use("Agg")
-
 import numpy as np
 import pytest
 import xarray as xr
 
 from ocean_skill.plot import typography as tg
 from ocean_skill.plot.matplotlib_renderer import field_grid, field_row
+
+# Every test here draws a real figure and measures its geometry (layout depends on the
+# backend's DPI, so this needs Agg -- set once, process-wide, in conftest.py). Skipped
+# by default (`pytest.ini`'s `-m "not slow"`); run explicitly with `pytest -m slow` or
+# `pytest -m ""`.
+pytestmark = pytest.mark.slow
 
 PANEL_ROLES = [r for r, (base, _) in tg.FONT_STEPS.items() if base == "panel"]
 FIGURE_ROLES = [r for r, (base, _) in tg.FONT_STEPS.items() if base == "figure"]
@@ -1053,9 +1051,6 @@ def test_a_one_column_series_grid_does_not_get_a_giant_suptitle():
     times as wide as a cell of the three-map row everything is calibrated against — and
     gets a suptitle twice the size of every other figure in the same report.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
     import numpy as np
     import pandas as pd
     import xarray as xr

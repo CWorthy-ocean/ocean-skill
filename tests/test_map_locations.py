@@ -330,9 +330,6 @@ def test_build_map_items_rejects_an_unsupported_type():
 
 
 def test_map_locations_mixes_a_name_and_an_object():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     papa_meta = {
@@ -356,9 +353,6 @@ def test_map_locations_mixes_a_name_and_an_object():
 
 
 def test_map_locations_object_alone_renders_both_backends():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     c = _comparison(select={"lon": -144.3, "lat": 50.0})
@@ -382,9 +376,6 @@ def test_map_locations_rejects_an_unsupported_list_item():
 
 
 def test_comparison_map_locations_method():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     c = _comparison(select={"lon": -144.3, "lat": 50.0})
@@ -395,9 +386,6 @@ def test_comparison_map_locations_method():
 
 
 def test_comparisonset_map_locations_method():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     c1 = _comparison(select={"lon": -144.3, "lat": 50.0})
@@ -414,9 +402,6 @@ def test_comparisonset_map_locations_method():
 
 
 def test_field_map_locations_method():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     f = Field("grid_src", "nitrate", select={"lon": -144.3, "lat": 50.0})
@@ -426,9 +411,6 @@ def test_field_map_locations_method():
 
 
 def test_fieldset_map_locations_method():
-    import matplotlib
-
-    matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
     fs = FieldSet(

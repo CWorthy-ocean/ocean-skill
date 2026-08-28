@@ -43,7 +43,8 @@ def _gridded_test_lane(n_time: int = 6) -> xr.Dataset:
     """A gridded product with a real, fixed depth axis -- the non-ROMS shape of the
     "test" side; exercises the same fixed-level select the model side would (see
     tests/test_vertical_match.py for the ROMS-shaped ('z', negative-down) case,
-    already covered directly against roms.to_depth's own machinery)."""
+    already covered directly against roms.to_depth's own machinery).
+    """
     depth = np.array([2.79, 25.0, 60.0, 118.79])  # positive-down, like WHOTS itself
     lon = np.array([-158.5, -157.5])
     lat = np.array([22.25, 23.25])
@@ -100,7 +101,8 @@ def test_whots_depth_axis_resolves_despite_being_uppercase(whots_and_model):
 def test_a_bare_read_of_whots_implies_a_profile(whots_and_model, monkeypatch):
     """No explicit over=: the featureType alone (both axes present, both unset --
     depth defaults to SURFACE, a scalar) implies a mooring-at-the-surface series,
-    not a profile -- the pre-existing reading, unchanged."""
+    not a profile -- the pre-existing reading, unchanged.
+    """
     from ocean_skill.comparison import Comparison
 
     with warnings.catch_warnings():
@@ -115,7 +117,8 @@ def test_a_depth_list_with_time_pinned_reads_as_a_profile_end_to_end(
     whots_and_model,
 ):
     """select={"depth": [...], "time": <instant>}: time collapses, depth survives
-    -- over="Z" is implied, and the comparison draws as a profile."""
+    -- over="Z" is implied, and the comparison draws as a profile.
+    """
     from ocean_skill.comparison import Comparison
 
     with warnings.catch_warnings():
@@ -141,9 +144,7 @@ def test_a_depth_list_with_time_pinned_reads_as_a_profile_end_to_end(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        import matplotlib
 
-        matplotlib.use("Agg")
         fig = c.plot()
     ax = fig.axes[0]
     bottom, top = ax.get_ylim()
