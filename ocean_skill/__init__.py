@@ -16,6 +16,7 @@ The public API is intentionally small:
                                  # including which declared variables the vocabulary
                                  # recognizes (and as what), and which it doesn't
     osk.match_report("glodap")   # ... that vocabulary section alone, any time
+    osk.coord_report("glodap")   # ... and which of T/X/Y/Z it recognizes, as what
     osk.overlap("his", "glodap") # do these two sources even share space/time? (read-free)
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
     osk.compare(reference=..., test=..., variables=[...],
@@ -38,7 +39,15 @@ The public API is intentionally small:
 
 from ocean_skill import cache, outputs, qc
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
-from ocean_skill.catalog import Overlap, catalogs, describe, find, match_report, overlap
+from ocean_skill.catalog import (
+    Overlap,
+    catalogs,
+    coord_report,
+    describe,
+    find,
+    match_report,
+    overlap,
+)
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
@@ -60,6 +69,7 @@ __all__ = [
     "cache",
     "catalogs",
     "compare",
+    "coord_report",
     "describe",
     "field",
     "find",

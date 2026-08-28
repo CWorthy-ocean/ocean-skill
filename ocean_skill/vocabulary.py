@@ -66,13 +66,20 @@ from dataclasses import dataclass
 from ocean_skill import _stacklevel
 
 __all__ = [
+    "COORD_AXIS_BY_KIND",
+    "COORD_FALLBACKS",
+    "COORD_VOCABULARY",
     "VOCABULARY",
+    "CoordReport",
     "MatchReport",
     "add_alias",
     "add_pattern",
+    "coord_report",
     "equivalent_names",
+    "excluded_from_axis",
     "is_known",
     "match_report",
+    "matches_axis",
     "nickname",
     "register",
     "resolve_and_report",
@@ -536,6 +543,159 @@ def nickname(name: str) -> str | None:
     return _KEY_BY_STANDARD_NAME.get(resolve_name(name))
 
 
+#: Coordinate-recognition vocabulary -- the axis analogue of :data:`VOCABULARY`
+#: above. One entry per axis (``T``/``X``/``Y``/``Z``):
+#:
+#: - ``kind``: the name :func:`ocean_skill.cf.find_coord` takes for this axis
+#:   (``"time"``, ``"longitude"``, ``"latitude"``, ``"vertical"``).
+#: - ``tokens``: whole-token spellings that name it, matched case-insensitively
+#:   against a units-stripped column/variable name (see :func:`matches_axis`).
+#: - ``direct`` (``Z`` only): the subset of ``tokens`` naming an actual reading
+#:   rather than a pressure conversion -- ranked ahead of the full set so
+#:   :func:`ocean_skill.tabular.coord_column` prefers a depth-shaped column over a
+#:   pressure-shaped one.
+#: - ``exclude``: whole-token spellings that DISQUALIFY an otherwise-matching name.
+#:   ``bottom`` is the motivating case: ``Depth_bottom``/``bottom_depth`` states the
+#:   seafloor/station depth -- a data column, never the vertical coordinate --
+#:   even though "depth" is right there in the name.
+#: - ``fallbacks``: exact-name fallbacks :func:`ocean_skill.cf.find_coord` tries
+#:   when cf-xarray detects nothing at all (ROMS writes ``units="degrees East"``
+#:   and ``ocean_time`` with ``units="second"``, so cf-xarray finds neither).
+#:   Order matters -- rho-points before the staggered/coarse variants. ``sigma0``
+#:   is the isopycnal axis :func:`ocean_skill.roms.to_sigma0` produces -- a
+#:   vertical axis in every way that matters here, just not a depth.
+#:
+#: One definition, consumed by :mod:`ocean_skill.tabular` (column-name matching)
+#: and :mod:`ocean_skill.cf` (cf-xarray + gridded name-fallback matching), so the
+#: two matchers -- and any future one -- cannot drift apart the way
+#: :data:`VOCABULARY` keeps variable matching from drifting between callers.
+COORD_VOCABULARY: dict[str, dict[str, object]] = {
+    "T": {
+        "kind": "time",
+        "tokens": ("time", "date", "datetime", "timestamp"),
+        "fallbacks": ("time", "ocean_time", "t", "T"),
+    },
+    "X": {
+        "kind": "longitude",
+        "tokens": ("longitude", "lon", "long"),
+        "fallbacks": (
+            "lon_rho",
+            "lon",
+            "longitude",
+            "nav_lon",
+            "x_rho",
+            "lon_u",
+            "lon_v",
+        ),
+    },
+    "Y": {
+        "kind": "latitude",
+        "tokens": ("latitude", "lat"),
+        "fallbacks": (
+            "lat_rho",
+            "lat",
+            "latitude",
+            "nav_lat",
+            "y_rho",
+            "lat_u",
+            "lat_v",
+        ),
+    },
+    "Z": {
+        "kind": "vertical",
+        "tokens": ("depth", "z", "pressure", "pres"),
+        "direct": ("depth", "z"),
+        "exclude": ("bottom",),
+        "fallbacks": (
+            "depth",
+            "z",
+            "lev",
+            "s_rho",
+            "z_rho",
+            "depth_surface",
+            "sigma0",
+        ),
+    },
+}
+
+
+def _token_pattern(*words: str) -> re.Pattern:
+    """Compile a whole-token, case-insensitive alternation over ``words``.
+
+    Split on any run of non-alphanumeric characters, underscore included (the same
+    idiom :data:`ocean_skill.tabular._QC_NAME` uses), so a word buried inside a
+    longer name never counts: "month" is not "time", "latency" is not "lat", "zone"
+    is not "z", "along" is not "lon". This is the spirit of cf-pandas'/cf-xarray's
+    own coordinate-criteria regexes (``cf_pandas.criteria.guess_regex``,
+    ``cf_xarray.criteria``), deliberately narrower: cf-pandas' own time regex
+    (``(?=.*time|min|hour|day|week|month|year)[0-9]*``) matches bare "month" for
+    exactly this reason; this refuses that on purpose rather than inheriting it.
+    """
+    alt = "|".join(re.escape(w) for w in words)
+    return re.compile(rf"(?:^|[^0-9A-Za-z])(?:{alt})(?:[^0-9A-Za-z]|$)", re.IGNORECASE)
+
+
+#: kind -> axis (``"vertical"`` -> ``"Z"``), for callers like
+#: :func:`ocean_skill.cf.find_coord` that take a kind rather than an axis letter.
+COORD_AXIS_BY_KIND: dict[str, str] = {
+    entry["kind"]: axis for axis, entry in COORD_VOCABULARY.items()  # type: ignore[misc]
+}
+
+#: kind -> exact-name fallbacks, derived from :data:`COORD_VOCABULARY` so the two
+#: cannot drift apart.
+COORD_FALLBACKS: dict[str, tuple[str, ...]] = {
+    entry["kind"]: entry["fallbacks"] for entry in COORD_VOCABULARY.values()  # type: ignore[misc]
+}
+
+_COORD_PATTERNS: dict[str, re.Pattern] = {
+    axis: _token_pattern(*entry["tokens"]) for axis, entry in COORD_VOCABULARY.items()  # type: ignore[misc]
+}
+#: Z's direct-reading subset (see ``COORD_VOCABULARY["Z"]["direct"]``) -- an axis
+#: with no ``direct`` entry falls back to its full token set, so this dict always
+#: has one pattern per axis.
+_COORD_DIRECT_PATTERNS: dict[str, re.Pattern] = {
+    axis: _token_pattern(*entry.get("direct", entry["tokens"]))  # type: ignore[arg-type]
+    for axis, entry in COORD_VOCABULARY.items()
+}
+_COORD_EXCLUDE_PATTERNS: dict[str, re.Pattern | None] = {
+    axis: (_token_pattern(*entry["exclude"]) if entry.get("exclude") else None)  # type: ignore[arg-type]
+    for axis, entry in COORD_VOCABULARY.items()
+}
+
+
+def excluded_from_axis(base: str, axis: str) -> bool:
+    """Whether ``base`` (a units-stripped name) is disqualified from ``axis``.
+
+    True only for :data:`COORD_VOCABULARY`'s ``exclude`` tokens (currently just
+    ``Z``'s ``"bottom"``) -- checked as a *separate* pass rather than folded into
+    the matching pattern as a lookahead, because :meth:`re.Pattern.search`'s
+    lookahead only sees text *after* the attempted match position: a
+    ``(?!.*bottom)`` prefix on the ``Z`` pattern would still match the ``depth`` in
+    ``bottom_depth`` (there, the exclude token comes *before* the match), so it
+    must be tried independently over the whole name instead.
+    """
+    pattern = _COORD_EXCLUDE_PATTERNS.get(axis)
+    return pattern is not None and bool(pattern.search(base))
+
+
+def matches_axis(base: str, axis: str, *, direct_only: bool = False) -> bool:
+    """Whether ``base`` (a units-stripped name) is a plausible name for ``axis``.
+
+    True when ``axis``'s token pattern matches and ``base`` isn't
+    :func:`excluded_from_axis` for it -- callers never need to check exclusion
+    themselves. ``direct_only`` (``Z`` only) restricts to the ``direct`` reading
+    subset (depth/z), skipping the pressure-conversion spellings -- see
+    :func:`ocean_skill.tabular.coord_column`, which tries it both ways.
+    """
+    patterns = _COORD_DIRECT_PATTERNS if direct_only else _COORD_PATTERNS
+    pattern = patterns.get(axis)
+    return (
+        pattern is not None
+        and bool(pattern.search(base))
+        and not excluded_from_axis(base, axis)
+    )
+
+
 @dataclass(frozen=True)
 class MatchReport:
     """Which declared variable names the vocabulary recognizes, and as what.
@@ -614,6 +774,93 @@ def match_report(names: Iterable[str]) -> MatchReport:
     for names_list in matched.values():
         names_list.sort()
     return MatchReport(matched=matched, unmatched=sorted(unmatched))
+
+
+@dataclass(frozen=True)
+class CoordReport:
+    """Which declared column names the coordinate vocabulary recognizes as which axis.
+
+    Built by :func:`coord_report`. The coordinate analogue of :class:`MatchReport`:
+    live, never persisted -- which axis a name resolves to can change the moment
+    :data:`COORD_VOCABULARY` changes (the ``bottom`` exclusion this class exists to
+    make visible is exactly that kind of change), so a report is only ever as
+    current as the moment it was printed.
+    """
+
+    #: axis (``"T"``/``"X"``/``"Y"``/``"Z"``) -> the declared names (sorted) that
+    #: resolve to it.
+    matched: dict[str, list[str]]
+    #: Axes of ``T``/``X``/``Y``/``Z`` no declared name resolves to, in that order.
+    missing: list[str]
+
+    @property
+    def collisions(self) -> dict[str, list[str]]:
+        """Axes claimed by more than one declared name.
+
+        Not necessarily a mistake -- a reading/pressure pair both named Z-shaped is
+        the common case -- but always worth a curator's second look, the same as
+        :attr:`MatchReport.collisions`.
+        """
+        return {k: v for k, v in self.matched.items() if len(v) > 1}
+
+    def __str__(self) -> str:
+        lines: list[str] = []
+        if self.matched:
+            lines.append(f"matched ({len(self.matched)}):")
+            labels = {
+                axis: f"{axis} ({COORD_VOCABULARY[axis]['kind']})"
+                for axis in self.matched
+            }
+            width = max(len(label) for label in labels.values())
+            for axis in ("T", "X", "Y", "Z"):
+                if axis not in self.matched:
+                    continue
+                names = self.matched[axis]
+                suffix = f"   ({len(names)} columns)" if len(names) > 1 else ""
+                lines.append(f"  {labels[axis]:<{width}}  <- {', '.join(names)}{suffix}")
+        else:
+            lines.append("matched (0)")
+        if self.missing:
+            lines.append(f"missing ({len(self.missing)}): {', '.join(self.missing)}")
+        else:
+            lines.append("missing (0)")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def _repr_html_(self) -> str:
+        """Notebook rendering: monospace, wrapped, and escaped (see :mod:`_display`)."""
+        return (
+            "<pre style='white-space:pre-wrap; margin:0'>"
+            f"{html.escape(str(self))}</pre>"
+        )
+
+
+def coord_report(names: Iterable[str]) -> CoordReport:
+    """Group ``names`` by the coordinate axis (``T``/``X``/``Y``/``Z``) each resolves to.
+
+    For every name: :func:`ocean_skill.tabular.coord_axis_of` decides which axis
+    (if any) it lands under -- the same resolution every other coordinate-column
+    caller uses, units-stripping and the ``bottom`` exclusion included -- so this
+    reports what matching *already* does, exactly as :func:`match_report` does for
+    variables. A name matching no axis (or excluded from the only axis it would
+    otherwise match, like ``Depth_bottom``) simply doesn't appear in ``matched`` --
+    unlike :func:`match_report`, there's no separate "unmatched names" list, since
+    most declared names are legitimately not coordinates at all. What matters here
+    is which of the four axes got a match and which did not, hence ``missing``.
+    """
+    from ocean_skill import tabular
+
+    matched: dict[str, list[str]] = {}
+    for name in names:
+        axis = tabular.coord_axis_of(name)
+        if axis is not None:
+            matched.setdefault(axis, []).append(name)
+    for names_list in matched.values():
+        names_list.sort()
+    missing = [axis for axis in ("T", "X", "Y", "Z") if axis not in matched]
+    return CoordReport(matched=matched, missing=missing)
 
 
 def _register_custom_criteria() -> None:

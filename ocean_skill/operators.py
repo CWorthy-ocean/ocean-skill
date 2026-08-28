@@ -308,7 +308,8 @@ def resolve_dim(obj, name: str) -> str | None:
     kind = _CF_AXES.get(name)
     if kind is None:
         return name if name in getattr(obj, "coords", ()) else None
-    from ocean_skill.cf import _COORD_FALLBACKS, find_coord
+    from ocean_skill.cf import find_coord
+    from ocean_skill.vocabulary import COORD_FALLBACKS
 
     found = find_coord(obj, kind)
     # The coordinate may be multi-dimensional (curvilinear lon/lat); only a
@@ -322,7 +323,7 @@ def resolve_dim(obj, name: str) -> str | None:
     # Case-insensitively: a source's own spelling (WHOTS' `DEPTH`, say) is one a
     # builder chose, not one this list can enumerate every capitalization of.
     dims_by_lower = {str(d).lower(): str(d) for d in obj.dims}
-    for candidate in _COORD_FALLBACKS[kind]:
+    for candidate in COORD_FALLBACKS[kind]:
         if candidate in dims_by_lower:
             return dims_by_lower[candidate]
     return None

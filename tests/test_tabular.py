@@ -411,6 +411,48 @@ def test_coordinate_matcher_refuses_lookalikes(columns):
     assert set(md.get("variables", [])) == set(columns)
 
 
+@pytest.mark.parametrize("bottom_name", ["Depth_bottom", "bottom_depth", "BOTTOM_Z"])
+def test_a_bottom_depth_column_is_never_the_z_axis(bottom_name):
+    """The station/seafloor depth is a data column, never the vertical coordinate.
+
+    Regression guard for the real SEANOE CTD mooring bug: ``coord_column`` picked
+    ``Depth_bottom`` over the actual ``Depth`` reading because it happened to come
+    first and "depth" is a substring token of "Depth_bottom" too.
+    """
+    assert tabular.coord_axis_of(bottom_name) is None
+    assert not tabular.is_coordinate_column(bottom_name)
+
+
+def test_coord_column_prefers_depth_over_a_bottom_depth_column():
+    """Column order alone must not let ``Depth_bottom`` win over the real ``Depth``."""
+    frame = pd.DataFrame(
+        {
+            "Latitude": [1.0],
+            "Longitude": [2.0],
+            "Depth_bottom": [500.0],
+            "CTDPRES": [10.0],
+            "Depth": [12.0],
+            "Temperature_CTD": [20.0],
+        }
+    )
+    assert tabular.coord_column(frame, "Z") == "Depth"
+
+
+def test_coord_column_is_none_when_only_a_bottom_depth_column_is_present():
+    frame = pd.DataFrame({"bottom_depth": [500.0], "temperature": [20.0]})
+    assert tabular.coord_column(frame, "Z") is None
+
+
+def test_a_bottom_depth_column_becomes_a_data_variable():
+    """Excluded from Z means it's no longer a coordinate at all -- it's data."""
+    from ocean_skill import build
+
+    frame = pd.DataFrame({"Depth_bottom": [500.0], "Depth": [12.0]})
+    md = build._probe_dataframe(frame)
+    assert md["axes"]["Z"] == "Depth"
+    assert "Depth_bottom" in md.get("variables", [])
+
+
 def test_a_lone_datetime_column_is_time_by_dtype():
     frame = pd.DataFrame(
         {
@@ -701,7 +743,8 @@ def test_a_profile_with_no_depth_column_says_so():
 
 def test_a_profile_with_time_varying_across_the_cast_is_reported():
     """Depths sampled seconds apart during a real cast carry distinct timestamps --
-    warn and use the earliest rather than refuse."""
+    warn and use the earliest rather than refuse.
+    """
     time = [
         "2024-04-04T12:00:00Z",
         "2024-04-04T12:00:05Z",
