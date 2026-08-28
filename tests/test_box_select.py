@@ -262,3 +262,83 @@ def test_subset_to_bbox_keeps_the_no_overlap_wording_on_a_curvilinear_miss():
     grid = _curvilinear()
     with pytest.raises(ValueError, match="no overlap"):
         A.subset_to_bbox(grid, (100.0, 47.0, 105.0, 49.0), pad=0.0)
+
+
+# ------------------------------------------- a degenerate (point) bbox windows cells
+
+
+def test_is_point_bbox_requires_exact_equality():
+    """A near-degenerate box (a real, if tiny, region) still takes the padded path."""
+    assert A._is_point_bbox((-148.0, 47.0, -148.0, 47.0))
+    assert not A._is_point_bbox((-148.0, 47.0, -147.999, 47.0))
+    assert not A._is_point_bbox(None)
+
+
+def test_a_degenerate_bbox_windows_a_curvilinear_grid_to_cells_not_degrees():
+    grid = _curvilinear()
+    lon, lat = -148.3, 47.2
+    out = A.subset_to_bbox(grid, (lon, lat, lon, lat))
+    assert out.sizes["xi_rho"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    assert out.sizes["eta_rho"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    # centred on the true global-nearest cell, not just some window containing it
+    iy, ix = A._nearest_indices(
+        np.asarray(grid["lon_rho"]), np.asarray(grid["lat_rho"]), lon, lat
+    )
+    nearest_lon = float(grid["lon_rho"].values[iy, ix])
+    nearest_lat = float(grid["lat_rho"].values[iy, ix])
+    match = (out["lon_rho"].values == nearest_lon) & (
+        out["lat_rho"].values == nearest_lat
+    )
+    assert match.any()
+    # pad is ignored for a point -- a huge pad changes nothing
+    huge_pad = A.subset_to_bbox(grid, (lon, lat, lon, lat), pad=50.0)
+    xr.testing.assert_equal(out, huge_pad)
+
+
+def test_a_degenerate_bbox_windows_a_rotated_curvilinear_grid_too():
+    """A rotated grid's rows/columns are not lines of constant lon/lat -- same
+    nearest-cell-plus-margin window applies regardless."""
+    grid = _rotated_grid()
+    lon = float(grid["lon_rho"].values[10, 15])
+    lat = float(grid["lat_rho"].values[10, 15])
+    out = A.subset_to_bbox(grid, (lon, lat, lon, lat))
+    assert out.sizes["xi_rho"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    assert out.sizes["eta_rho"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    match = (out["lon_rho"].values == lon) & (out["lat_rho"].values == lat)
+    assert match.any()
+
+
+def test_a_degenerate_bbox_windows_a_rectilinear_grid():
+    grid = _gridded(lat=(10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0))
+    lon, lat = -95.5, 42.0
+    out = A.subset_to_bbox(grid, (lon, lat, lon, lat))
+    assert out.sizes["lon"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    assert out.sizes["lat"] <= 2 * A.POINT_WINDOW_CELLS + 1
+
+
+def test_a_degenerate_bbox_windows_a_descending_latitude_axis_too():
+    grid = _gridded(lat=(80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0))
+    lon, lat = -95.5, 42.0
+    out = A.subset_to_bbox(grid, (lon, lat, lon, lat))
+    assert out.sizes["lon"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    assert out.sizes["lat"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    # the nearest value (40.0) is still in the kept window
+    assert 40.0 in out["lat"].values
+
+
+def test_a_point_far_outside_the_grid_never_raises():
+    """Unlike a region bbox, a point always has *some* nearest cell."""
+    grid = _curvilinear()
+    out = A.subset_to_bbox(grid, (40.0, -60.0, 40.0, -60.0))
+    assert out.sizes["xi_rho"] > 0 and out.sizes["eta_rho"] > 0
+
+
+def test_a_point_windowed_bbox_samples_identically_to_the_full_grid():
+    grid = _curvilinear()
+    lon, lat = -148.3, 47.2
+    windowed = A.subset_to_bbox(grid, (lon, lat, lon, lat))
+    full_sample = A.sample_at(grid, lon, lat)
+    windowed_sample = A.sample_at(windowed, lon, lat)
+    assert float(windowed_sample) == float(full_sample)
+    assert float(windowed_sample["lon_rho"]) == float(full_sample["lon_rho"])
+    assert float(windowed_sample["lat_rho"]) == float(full_sample["lat_rho"])

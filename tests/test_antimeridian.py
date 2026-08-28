@@ -88,6 +88,34 @@ def test_natural_convention_treats_180_as_a_seam_not_a_wrap():
     assert A.natural_convention(straddler) == "0-360"
 
 
+def test_a_degenerate_bbox_windows_the_pacific_domain_without_raising():
+    """A point request spelled in ±180 must resolve to the same cell a request
+    spelled in 0-360 would.
+
+    A mooring's catalog position is typically ±180; the model's native grid here
+    is 0-360 -- the wrap happens once, inside the point crop itself.
+    """
+    field = _pacific_test()  # 0-360 native, 150-250 degrees east
+    lon_180, lat = -170.0, 0.0  # -170 == 190 in 0-360, inside the domain
+    out = A.subset_to_bbox(field, (lon_180, lat, lon_180, lat))
+    assert out.sizes["xi"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    assert out.sizes["eta"] <= 2 * A.POINT_WINDOW_CELLS + 1
+    # the true nearest cell, found directly on the native (0-360) grid -- haversine
+    # is 360-periodic, so the same cell is nearest regardless of which convention
+    # the request happened to be spelled in.
+    lon_vals, lat_vals = np.asarray(field["lon"]), np.asarray(field["lat"])
+    iy, ix = A._nearest_indices(lon_vals, lat_vals, 190.0, 0.0)
+    nearest_lon, nearest_lat = float(lon_vals[iy, ix]), float(lat_vals[iy, ix])
+    match = (out["lon"].values == nearest_lon) & (out["lat"].values == nearest_lat)
+    assert match.any()
+
+
+def test_a_degenerate_bbox_outside_the_pacific_domain_still_returns_a_window():
+    field = _pacific_test()
+    out = A.subset_to_bbox(field, (0.0, 0.0, 0.0, 0.0))  # far outside 150-250E
+    assert out.sizes["xi"] > 0 and out.sizes["eta"] > 0
+
+
 @pytest.mark.parametrize("method", ["bilinear", "conservative_normed"])
 def test_a_dateline_straddling_test_stays_inside_its_own_longitudes(method):
     """The bug in one line: a Pacific-only model must not fill a global map."""
