@@ -3017,6 +3017,8 @@ def skill_map(
     suptitle_kwargs: dict[str, Any] | None = None,
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
+    shared_limits: bool = False,
+    layout: str = "rows",
     font_scale: float = 1.0,
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
@@ -3033,13 +3035,21 @@ def skill_map(
     ratio where it is over- or under-dispersed. There is no test/reference/difference
     row here because there is nothing to set beside anything: the maps *are* it.
 
-    Each panel therefore gets **its own colour scale and its own colorbar**, unlike
-    :func:`field_facet`, whose panels share one because they are one quantity at
-    different times. Bias and a dimensionless correlation have no shared scale to have,
-    and there is deliberately no ``shared_limits`` to ask for one. The colours come from
+    Each panel gets its own colour scale by default, unlike :func:`field_facet`, whose
+    panels share one because they are one quantity at different times — a different
+    *metric* (bias vs. a dimensionless correlation) has no shared scale to have, and
+    there is no way to ask for one across metrics. The colours come from
     :func:`ocean_skill.colormaps.metric_colors`, which both renderers call, so a bias
     panel is symmetric about zero and a correlation panel spans (−1, 1) whichever
     backend drew it.
+
+    **Across rows of the *same* metric**, though — several comparisons stacked, one
+    row each — sharing a scale is exactly what makes them comparable by colour:
+    ``shared_limits=True`` pools that metric's values over every row before choosing
+    its limits, and draws one colorbar per metric spanning the rows instead of one per
+    panel. The default (``False``) keeps each row's own scale, which is honest about
+    that row's own range but means two rows of "the same" metric can carry different
+    colours for the same shade.
 
     Each panel is also annotated with that metric's **overall** value — the same number
     reduced over space *and* the scored axis together, from ``metrics``' record — in
@@ -3048,10 +3058,14 @@ def skill_map(
     is how a good average hides a bad region.
 
     Several items (a :func:`compare` fan-out) become rows: metrics across, comparisons
-    down, each row named at its left edge as :func:`field_grid`'s are. With a single
-    item the panels are one series with no inherent order, so the grid is free and
-    ``ncols`` defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads
-    the orientation off the domain's shape exactly as :func:`field_facet` does.
+    down, each row named at its left edge as :func:`field_grid`'s are — this is
+    ``layout="rows"``, the default. ``layout="columns"`` transposes it: comparisons
+    across, metrics down, each row named at its left edge instead and each comparison
+    titled at its column's top — the natural arrangement for putting two or three
+    models side by side. ``layout`` only has an effect with more than one item; a
+    single item's panels have no inherent order, so the grid is free and ``ncols``
+    defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads the
+    orientation off the domain's shape exactly as :func:`field_facet` does.
 
     ``metric_names`` picks and orders the panels from what the item carries; a name it
     does not carry raises (see :func:`metric_panels`). Every other parameter means
@@ -3089,21 +3103,34 @@ def skill_map(
     for item in items[1:]:  # every row must be able to fill every column
         metric_panels(item["skill"], names)
 
+    if layout not in ("rows", "columns"):
+        raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
     titles = metric_panel_titles(names)
     aspect = _aspect_of(items[0]["skill"][names[0]])
     canvas = resolve_canvas(size, zoom)
     stacked = len(items) > 1
     if stacked:
-        # two axes fix the grid, as field_facet's row_dim does: metrics across, one row
-        # per comparison. An ncols disagreeing with that would drop panels.
-        if ncols is not None and int(ncols) != len(names):
-            raise ValueError(
-                f"ncols={ncols} contradicts a {len(items)}-comparison set: the grid is "
-                f"{len(items)} x {len(names)} (one column per metric), so there is no "
-                "column count left to choose."
-            )
-        nrows, ncols = len(items), len(names)
-        panels = [(row, name) for row in range(nrows) for name in names]
+        # two axes fix the grid, as field_facet's row_dim does. An ncols disagreeing
+        # with the layout's own axis would drop panels.
+        if layout == "columns":
+            if ncols is not None and int(ncols) != len(items):
+                raise ValueError(
+                    f"ncols={ncols} contradicts layout='columns' with a "
+                    f"{len(items)}-comparison set: the grid is {len(names)} x "
+                    f"{len(items)} (one column per comparison), so there is no "
+                    "column count left to choose."
+                )
+            nrows, ncols = len(names), len(items)
+            panels = [(item_idx, name) for name in names for item_idx in range(len(items))]
+        else:
+            if ncols is not None and int(ncols) != len(names):
+                raise ValueError(
+                    f"ncols={ncols} contradicts a {len(items)}-comparison set: the grid is "
+                    f"{len(items)} x {len(names)} (one column per metric), so there is no "
+                    "column count left to choose."
+                )
+            nrows, ncols = len(items), len(names)
+            panels = [(row, name) for row in range(nrows) for name in names]
     else:
         if ncols is None:
             ncols, nrows = facet_layout(len(names), aspect, canvas=canvas)
@@ -3176,18 +3203,44 @@ def skill_map(
     flat = list(axes.ravel())
     arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
 
+    # One colour scale per metric, pooled over every row, when asked to share: fit
+    # only once names are known and every row's array is in hand, before any panel
+    # is drawn, so every row of a metric — however many — draws with the same norm.
+    shared_colors: dict[str, Any] = {}
+    if shared_limits and stacked:
+        for name in names:
+            pooled = np.concatenate(
+                [np.asarray(arrays[i][name]).ravel() for i in range(len(items))]
+            )
+            shared_colors[name] = metric_colors(
+                name, pooled, standard_name=items[0].get("standard_name")
+            )
+
+    # Colorbars are drawn per panel by default, but a shared scale wants exactly one
+    # bar per metric spanning every row it appears in -- collected here as panels are
+    # drawn, then (only in the shared case) issued once each after the loop.
+    panel_axes: dict[str, list[Any]] = {name: [] for name in names}
+    panel_mappable: dict[str, Any] = {}
+
     for i, (row_index, name) in enumerate(panels):
         ax = flat[i]
         row, col = divmod(i, ncols)
         item = items[row_index]
-        colors = metric_colors(
-            name,
-            arrays[row_index][name],
-            standard_name=item.get("standard_name"),
+        colors = (
+            shared_colors[name]
+            if shared_limits and stacked
+            else metric_colors(
+                name, arrays[row_index][name], standard_name=item.get("standard_name")
+            )
         )
-        # Below the top row of a stacked grid every panel repeats its column's metric;
-        # the comparison is named down the left edge instead.
-        label = titles[names.index(name)] if (not stacked or row == 0) else None
+        # Every row shows every metric once, so within a layout's own repeating axis
+        # the label only needs to appear once: "rows" repeats metrics across columns,
+        # so the metric title is shown on the top row only (row-label carries the
+        # comparison down the left edge instead); "columns" transposes both roles.
+        if layout == "columns" and stacked:
+            label = item.get("row_label") if row == 0 else None
+        else:
+            label = titles[names.index(name)] if (not stacked or row == 0) else None
         im = _draw_map(
             ax,
             item["skill"][name],
@@ -3224,11 +3277,18 @@ def skill_map(
             )
         if label is not None:
             ax.title._osk_size_pinned = title_pinned
-        if col == 0 and stacked and item.get("row_label"):
-            _add_row_label(ax, item["row_label"], merged_row_label)
+        edge_label = (
+            titles[names.index(name)]
+            if (layout == "columns" and stacked)
+            else item.get("row_label")
+        )
+        if col == 0 and stacked and edge_label:
+            _add_row_label(ax, edge_label, merged_row_label)
             ax._osk_row_label._osk_size_pinned = _pinned(
                 row_label_kwargs, "row_label_kwargs"
             )
+        panel_axes[name].append(ax)
+        panel_mappable[name] = im
         # the metric's overall value, in the same corner box a comparison row uses for
         # the same reason -- stashed on the axes as that one is
         overall = _metrics_text(item.get("metrics"), (name,))
@@ -3241,14 +3301,29 @@ def skill_map(
                 zorder=5,
                 **merged_metrics,
             )
-        _draw_colorbar(
-            fig,
-            im,
-            ax,
-            _units_label(item["skill"][name]),
-            colorbar_kwargs,
-            defaults["colorbar_kwargs"],
-        )
+        if not (shared_limits and stacked):
+            _draw_colorbar(
+                fig,
+                im,
+                ax,
+                _units_label(item["skill"][name]),
+                colorbar_kwargs,
+                defaults["colorbar_kwargs"],
+            )
+
+    if shared_limits and stacked:
+        # One bar per metric, spanning every row it appears in -- _draw_colorbar
+        # already accepts a list of parent axes (a field grid's own difference-panel
+        # bar does the same), and _align_colorbars below re-fits it to their union.
+        for name in names:
+            _draw_colorbar(
+                fig,
+                panel_mappable[name],
+                panel_axes[name],
+                _units_label(items[0]["skill"][name]),
+                colorbar_kwargs,
+                defaults["colorbar_kwargs"],
+            )
 
     # Cells past the last panel carry no map and so no label artists — hidden rather
     # than deleted, which keeps the drawn panels on the grid they were sized for.

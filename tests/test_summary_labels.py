@@ -197,10 +197,8 @@ def test_both_renderers_agree_on_legend_entries(comparisons, items, grouping):
         dict(c.metrics(), label=c.label, run="A" if i < 2 else "B")
         for i, c in enumerate(comparisons)
     ]
-    _, _, handles = _group_styles(
-        recs, grouping.get("color_by"), grouping.get("marker_by")
-    )
-    static = [h.get_label() for h in handles]
+    styles = _group_styles(recs, grouping.get("color_by"), grouping.get("marker_by"))
+    static = [h.get_label() for h in styles.handles]
 
     obj = _interactive_target(items, labels="legend", **grouping)
     interactive = [e.label for e in _points(obj)]
@@ -215,8 +213,8 @@ def test_both_renderers_use_the_same_colours(comparisons, items):
     from ocean_skill.plot.summary import _group_styles
 
     recs = [dict(c.metrics(), label=c.label) for c in comparisons]
-    cols, _, _ = _group_styles(recs, "variable", None)
-    static = [mcolors.to_hex(c) for c in cols]
+    styles = _group_styles(recs, "variable", None)
+    static = [mcolors.to_hex(c) for c in styles.colors]
 
     obj = _interactive_target(items, labels="legend", color_by="variable")
     interactive = [e.opts.get("style").kwargs["color"] for e in _points(obj)]
@@ -233,6 +231,6 @@ def test_more_than_ten_comparisons_still_get_distinct_colours():
     from ocean_skill.plot.summary import _group_styles
 
     recs = [{"label": f"c{i}"} for i in range(12)]
-    cols, _, _ = _group_styles(recs)
+    styles = _group_styles(recs)
 
-    assert len(set(cols)) == 12
+    assert len(set(styles.colors)) == 12

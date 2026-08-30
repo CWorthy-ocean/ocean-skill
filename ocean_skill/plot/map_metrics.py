@@ -67,6 +67,10 @@ _UNEVEN_N_RATIO = 5.0
 #: k-fold splitter); fewer falls back to a single fixed-damping spline.
 _MIN_STATIONS_FOR_CV = 5
 
+#: Interpolation methods :func:`interpolate_records` accepts, from most local/blocky
+#: to smoothest — see its ``method`` parameter for what each one trades off.
+_INTERP_METHODS = ("nearest", "knn", "linear", "cubic", "spline")
+
 
 def _position_columns(columns) -> tuple[str, str]:
     """Return the ``(lon, lat)`` column names a record set actually carries.
@@ -257,6 +261,26 @@ def _fit_spline(easting, northing, values, *, name: str):
     return spline
 
 
+def _make_gridder(method: str, knn_k: int):
+    """Return an unfit verde gridder for one of the non-spline ``method`` choices.
+
+    ``"spline"`` itself is not handled here — it keeps its own cross-validated path
+    (:func:`_fit_spline`), which this would otherwise have to duplicate or downgrade
+    to a plain, non-cross-validated :class:`verde.Spline`.
+    """
+    import verde as vd
+
+    if method in ("nearest", "voronoi"):
+        return vd.KNeighbors(k=1)  # each cell takes its single nearest station's value
+    if method == "knn":
+        return vd.KNeighbors(k=knn_k, reduction=np.mean)
+    if method == "linear":
+        return vd.Linear()
+    if method == "cubic":
+        return vd.Cubic()
+    raise ValueError(f"method={method!r} — expected one of {_INTERP_METHODS}")
+
+
 def _model_grid(test_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     """``(lon2d, lat2d, ocean_mask)`` from a test source's own grid, or ``None``.
 
@@ -302,6 +326,9 @@ def interpolate_records(
     grid: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     spacing: float | None = None,
     maxdist: float | None = None,
+    method: str = "spline",
+    knn_k: int = 5,
+    block_spacing: float | None = None,
 ) -> xr.Dataset:
     """Interpolate scattered per-station metric values onto a map.
 
@@ -331,10 +358,37 @@ def interpolate_records(
     Duplicate (near-identical) positions are pooled to their median first, and
     stations with widely different record lengths raise a warning — see
     :func:`_reduce_duplicates` and :func:`_warn_uneven_records`.
+
+    ``method`` picks the interpolator, trading smoothness for honesty about where
+    the data actually says something:
+
+    * ``"spline"`` (default) — the smooth, cross-validated fit described above.
+      Good where a gradual gradient between stations is plausible, but it can
+      invent one across water two stations' values say nothing about (blending a
+      good station into a bad one across a strait it cannot see).
+    * ``"nearest"`` — each cell takes its single nearest station's value (Voronoi
+      tiles): hard-edged, disjoint, and invents nothing between stations. It also
+      adapts to density for free — a dense cluster gets small tiles, an isolated
+      station a large one — without any parameter to tune.
+    * ``"knn"`` — the mean of the ``knn_k`` nearest stations: still local, with
+      softer edges than ``"nearest"``.
+    * ``"linear"`` / ``"cubic"`` — piecewise over a Delaunay triangulation of the
+      stations: faceted rather than smooth, and only defined inside the data's
+      convex hull (``NaN`` elsewhere — no extrapolation into empty water).
+
+    ``block_spacing``, if given, is a distance in the same units as the
+    projection (metres) over which stations are pooled to their median
+    (:class:`verde.BlockMean`) before fitting — for any ``method``. This keeps a
+    dense cluster of stations (a repeat CTD survey, say) from dominating a
+    sparser region purely by outnumbering it, independent of the interpolator's
+    own duplicate-position handling (:func:`_reduce_duplicates`, which only
+    merges near-*identical* positions).
     """
     import pandas as pd
     import verde as vd
 
+    if method not in _INTERP_METHODS:
+        raise ValueError(f"method={method!r} — expected one of {_INTERP_METHODS}")
     metric_names = tuple(metric_names) if metric_names else DEFAULT_MAP_METRICS
     df = records if isinstance(records, pd.DataFrame) else pd.DataFrame(list(records))
     if df.empty:
@@ -386,8 +440,17 @@ def interpolate_records(
 
     data_vars = {}
     for name in metric_names:
-        spline = _fit_spline(easting, northing, df[name].to_numpy(), name=name)
-        predicted = spline.predict((geast, gnorth))
+        if method == "spline":
+            fitter = _fit_spline(easting, northing, df[name].to_numpy(), name=name)
+        else:
+            values = df[name].to_numpy(dtype="float64")
+            good = np.isfinite(values)
+            e, n, v = easting[good], northing[good], values[good]
+            if block_spacing:
+                (e, n), v, _ = vd.BlockMean(spacing=block_spacing).filter((e, n), v)
+            fitter = _make_gridder(method, knn_k)
+            fitter.fit((e, n), v)
+        predicted = fitter.predict((geast, gnorth))
         predicted = np.where(ocean & trusted, predicted, np.nan)
         metric = REGISTRY.get(name)
         data_vars[name] = xr.DataArray(
@@ -411,6 +474,9 @@ def build_items(
     grid: str = "model",
     spacing: float | None = None,
     maxdist: float | None = None,
+    method: str = "spline",
+    knn_k: int = 5,
+    block_spacing: float | None = None,
     rows: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ``skill_map`` family's items: one interpolated row per entry.
@@ -433,6 +499,11 @@ def build_items(
     own), or it is read off a :class:`ComparisonSet`. Falls back to a regular
     lon/lat grid, with a warning, when no grid is available; ``grid="regular"``
     always uses the fallback.
+
+    ``method``/``knn_k``/``block_spacing`` are forwarded to
+    :func:`interpolate_records` — see its docstring for what each interpolation
+    method trades off (smooth vs. honest-about-gaps) and what ``block_spacing``
+    fixes for uneven station density.
     """
     metric_names = tuple(metrics) if metrics else DEFAULT_MAP_METRICS
     if rows is None:
@@ -481,7 +552,8 @@ def build_items(
         df = _records_from(entry)
         lon_key, lat_key = _position_columns(df.columns)
         skill = interpolate_records(
-            df, metric_names, grid=model_grid, spacing=spacing, maxdist=maxdist
+            df, metric_names, grid=model_grid, spacing=spacing, maxdist=maxdist,
+            method=method, knn_k=knn_k, block_spacing=block_spacing,
         )
         item: dict[str, Any] = {
             "skill": skill,
@@ -511,6 +583,9 @@ def map_metrics(
     grid: str = "model",
     spacing: float | None = None,
     maxdist: float | None = None,
+    method: str = "spline",
+    knn_k: int = 5,
+    block_spacing: float | None = None,
     rows: Mapping[str, Any] | None = None,
     renderer: str = "matplotlib",
     mark: str = "contourf",
@@ -525,6 +600,8 @@ def map_metrics(
         osk.map_metrics(mooring_set, grid="regular")        # skip the model's own grid
         osk.map_metrics(metrics_df, test="ciofs3")          # a plain CIOFS report table
         osk.map_metrics(rows={"DJF": winter_set, "JJA": summer_set})  # seasonal facet
+        osk.map_metrics(mooring_set, method="nearest")      # Voronoi tiles, no smoothing
+        osk.map_metrics(dense_ctd_set, block_spacing=15_000)  # pool a dense cluster first
 
     Each panel is one metric's per-station values (see
     :meth:`~ocean_skill.comparison.Comparison.metrics`) fit to a smooth surface
@@ -538,7 +615,8 @@ def map_metrics(
     Every argument through ``rows`` builds the figure's data (see
     :func:`build_items`, which this delegates to); everything else is a plot
     option forwarded to the renderer, exactly as for any other family
-    (``docs/plot_styling_reference.md``).
+    (``docs/plot_styling_reference.md``). ``method``/``knn_k``/``block_spacing``
+    choose the interpolator (see :func:`interpolate_records`).
     """
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
@@ -550,6 +628,9 @@ def map_metrics(
         grid=grid,
         spacing=spacing,
         maxdist=maxdist,
+        method=method,
+        knn_k=knn_k,
+        block_spacing=block_spacing,
         rows=rows,
     )
     plot_kwargs.setdefault("mark", mark)
