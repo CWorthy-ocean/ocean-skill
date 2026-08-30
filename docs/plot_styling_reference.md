@@ -586,6 +586,49 @@ and where it is only filling a gap between stations. There is no parameter for t
 it rides on the item, not on `skill_map`'s own signature — so it is not something you
 pass, only something a `map_metrics` figure always shows.
 
+### `method`, `knn_k`, `block_spacing` (`map_metrics`)
+
+Which interpolator fits the scattered per-station values before `map_metrics` draws
+them — see [`docs/skill_maps.md`](skill_maps.md#interpolated-maps-for-scattered-stations)
+for the honesty trade-off each one makes. `method="spline"` (the default) is a smooth,
+cross-validated fit; `"nearest"` tiles the map by whichever station is closest (hard
+edges, no invented gradients, density-adaptive for free); `"knn"` softens that with the
+mean of the `knn_k` nearest stations (default 5); `"linear"`/`"cubic"` triangulate
+instead (faceted, and only defined inside the stations' convex hull). `block_spacing`
+(metres) pools stations within each block to their median before fitting, for any
+method — the fix for a dense cluster otherwise outvoting a sparser region.
+
+**Default:** `method="spline"`, `knn_k=5`, `block_spacing=None` (no pre-pooling)
+
+```python
+mooring_set.map_metrics(method="nearest")
+mooring_set.map_metrics(method="knn", knn_k=8)
+mooring_set.map_metrics(method="nearest", block_spacing=15_000)
+```
+
+### `shared_limits`, `layout` (`skill_map`)
+
+Two rows of `skill_map` — several comparisons stacked, one row each — default to
+independent colour scales per row (see the family's own docstring for why: a
+different *metric* genuinely has no shared scale to have). `shared_limits=True` pools
+each metric's values over every row before choosing its limits and draws one
+colorbar per metric spanning the rows, so the same metric reads on one scale across
+comparisons — the CIOFS3-vs-Hindcast case a stacked figure exists for. The static
+renderer consolidates the bar itself; the interactive one gives every panel the same
+limits but still draws its own bar (bokeh has no cross-panel colorbar).
+
+`layout="columns"` transposes the grid — comparisons across, metrics down — instead
+of the default `"rows"` (comparisons down, metrics across). Both options apply only
+with more than one item; a single comparison's panels have no rows to share or
+transpose.
+
+**Default:** `shared_limits=False`, `layout="rows"`
+
+```python
+mooring_set.map_metrics(rows={"CIOFS3": ciofs3_set, "Hindcast": hindcast_set},
+                         shared_limits=True, layout="columns")
+```
+
 ### `ncols` (`field_facet` and `skill_map`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
@@ -708,8 +751,9 @@ the points rather than varying with nothing to explain them.
 A third *grouping* channel (size, or filled vs hollow) is possible but deliberately
 absent: three encodings on one point tend to be slower to decode than two diagrams
 side by side. If you need a third dimension, split it across figures.
-[`marker_scale`](#marker_scale-summary-diagrams) below is not this — it resizes every
-point by the same factor, a style knob rather than a way to tell points apart.
+[`marker_scale`](#colors--alpha--marker_scale-summary-diagrams) below is not this — its
+uniform form resizes every point by the same factor, a style knob rather than a way to
+tell points apart.
 
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
@@ -733,65 +777,105 @@ Keyed by each comparison's `reference` (its catalog source name — what every m
 record already carries), falling back to the `label` for a hand-built record with no
 `reference` column. When neither `color_by` nor `marker_by` is given, `groups` defaults
 `color_by="group"`; an explicit `color_by`/`marker_by` is never overridden, so `groups`
-can still supply the *other* channel.
+can still supply the *other* channel. Since `groups` becomes `color_by` this way,
+[`colors`/`alpha`/`marker_scale`](#colors--alpha--marker_scale-summary-diagrams) below
+key on the group labels the same way they'd key on any other `color_by` field.
 
 Honored by **both renderers** for `target` (`taylor`/`paired` delegate to matplotlib
 interactively, as `labels` does above).
 
-### `colors` (summary diagrams)
+### `colors` / `alpha` / `marker_scale` (summary diagrams)
 
-An explicit colour list, one entry per comparison, for when the automatic cycle isn't
-wanted — matching a house palette, say, or keeping colours stable as comparisons are
-added and removed:
+These three style what a point looks like — colour, transparency, and size — and all
+three key on **the same field colour already groups by**: `color_by` if given, else
+`marker_by`, else each comparison's own label. That shared field is what lets them
+compose with grouping instead of fighting it, and what lets one call style particular
+groups without touching the rest — fade one group, enlarge another, leave everything
+else at its default:
 
 ```python
-suite.target(colors=["#1b9e77", "#d95f02", "#7570b3"])
+suite.target(color_by="variable",
+             colors={"sea_water_temperature": "r"},
+             alpha={"sea_water_salinity": 0.15},
+             marker_scale={"sea_water_temperature": 1.5})
 ```
 
-`color_by` overrides it outright: naming a grouping field already decides colour, so
-an explicit list would either be ignored or fight the grouping, and `color_by` wins.
-Statically the list is taken one-per-point in comparison order (shorter than the
-number of points is an error); interactively it cycles the same way `COLOR_CYCLE`
-does, so a shorter list repeats rather than raising.
+Each accepts a few shapes, in order of how much control they give:
+
+| form | effect |
+|---|---|
+| not given | the usual default (colour cycle, opaque, unscaled) |
+| a scalar (`alpha`/`marker_scale`) or single colour (`colors`) | broadcast to every point |
+| a list | a palette assigned to the grouping levels, in the order they first appear |
+| a `{level: value}` dict | styles only the named levels; every other level keeps its default |
+
+A dict's keys are the field's **raw values** (`"sea_water_temperature"`, not the
+legend's short spelling `"temp"`) — pretty names aren't guaranteed unique across
+variables, so the raw value is the one key space that always resolves unambiguously. A
+key that isn't one of the field's actual levels raises, naming the levels that *are*
+available (with their pretty spelling alongside, so the fix is a paste); a level the
+dict doesn't mention isn't an error — it just keeps its default, which is what makes
+"style only these two groups" possible in the first place.
+
+`colors` used to be silently discarded whenever `color_by` (or `groups`, which sets
+`color_by` internally) was also given, and a single colour or a list shorter than the
+number of points crashed with an opaque `zip()` error. Both are fixed: `colors` now
+always composes with grouping or raises loudly, never dropped without a trace.
+
+`marker_scale`'s reference star and the grey marker-block legend swatch (when colour
+and marker are carrying two different fields) belong to no single group, so a dict
+`marker_scale` leaves them at their default size rather than guessing which entry
+applies — pass a scalar instead if you want the star to scale too. `alpha` never
+touches the reference star, point labels, or the static legend's swatches, dict or not
+— fading the point everything else is read against, or the text identifying a point,
+defeats the point of drawing it. (Interactively the legend glyph is drawn from the
+point itself, so it inherits that point's alpha — a small, unavoidable divergence from
+the static legend.)
+
+`marker_scale`'s uniform (non-dict) form is a style knob, not a third grouping
+channel — see the note at the end of [`color_by` / `marker_by`](#color_by--marker_by)
+above; it resizes points by the same factor rather than encoding anything in the size.
 
 Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
 above).
 
-### `marker_scale` (summary diagrams)
+### `overlay`, `summary_points` (summary diagrams)
 
-**Default:** `1.0`
-
-Multiplies the size of every marker on the diagram together — sample points, the
-reference star, and the legend swatches — keeping their proportions, the way
-`font_scale` multiplies every text role together:
-
-```python
-suite.taylor(marker_scale=1.5)   # larger points, star, and key entries alike
-```
-
-This is a uniform style knob, not a third grouping channel — see the note at the end
-of [`color_by` / `marker_by`](#color_by--marker_by) above. It resizes every point by
-the same factor rather than encoding anything in the size itself.
-
-Honored by **both renderers** for `target` (`taylor`/`paired` are static-only).
-
-### `alpha` (summary diagrams)
-
-**Default:** `None` (opaque)
-
-Fades the data points — fill and edge together — for a set with heavy overlap:
+A second, emphasized layer drawn on top of the base cloud — for two related reasons.
+**Highlighting** a subset: `overlay=` takes the same kind of thing the main argument
+does (a list, a `ComparisonSet`, hand-built records) and draws it bigger, opaque, and
+black-edged, so it reads as "look here" against the fainter cloud beneath:
 
 ```python
-suite.target(alpha=0.5)
+suite.taylor(color_by="variable", overlay=[best_station, worst_station])
 ```
 
-The reference star, point labels, and the static legend's swatches stay fully opaque,
-since fading the one point every other point is read against, or the text identifying
-them, defeats the point of drawing them at all. (Interactively the legend glyph is
-drawn from the point itself, so it inherits the point's alpha — a small, unavoidable
-divergence from the static legend.)
+**Summarizing** a group: `summary_points=True` (or `"median"`/`"mean"`) instead builds
+one ★-marked centroid per group internally — the reduced position of that group's own
+cloud, median by default (robust to the odd outlier a mean isn't):
 
-Honored by **both renderers** for `target` (`taylor`/`paired` are static-only).
+```python
+suite.taylor(color_by="region", summary_points=True)  # one star per region
+```
+
+Both compose — an overlay can highlight specific points *and* summarize groups in one
+call. Either way, the overlay point is styled to match **the colour its own group
+already has in the base cloud** — never independently re-cycled, which matters because
+an overlay is usually a small subset (one station, one centroid) whose own encounter
+order rarely matches the base cloud's. Neither introduces a new legend entry: the
+group already has one from the base cloud.
+
+`overlay_marker_scale`/`overlay_alpha` size and fade the overlay layer specifically
+(default `1.8`/`1.0` — bigger and fully opaque, independent of the base layer's own
+`marker_scale`/`alpha`), and accept the same `{level: value}` dict form those do. A
+centroid's marker is always `"*"` (a bokeh `"star"` interactively); a highlighted
+point keeps its group's own marker.
+
+**Default:** `overlay=None`, `overlay_marker_scale=1.8`, `overlay_alpha=1.0`,
+`summary_points=False`
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
+`marker_scale`/`alpha` are above).
 
 ### `circles` (target only)
 

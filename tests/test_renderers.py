@@ -861,6 +861,107 @@ def test_several_comparisons_become_rows_of_metrics(skill_item):
     assert len(_colorbar_axes(fig)) == 2 * len(_SKILL_METRICS)
 
 
+# --- skill_map: shared_limits and layout='columns' ------------------------------------
+
+
+def test_shared_limits_pools_one_scale_per_metric_across_rows():
+    """Two rows of the *same* metric drawn on one scale, unlike the unshared default.
+
+    ``offset`` on the second item shifts its bias values well outside the first
+    item's own range, so an independent-per-row scale (the default) would give the
+    two rows different limits — the property this test would otherwise miss.
+    """
+    from matplotlib.collections import QuadMesh
+
+    items = [_skill_item("nitrate"), _skill_item("phosphate", offset=5.0)]
+    fig = render(_skill_spec(items, shared_limits=True))
+    norms_by_title = {}
+    for ax in fig.axes:
+        if not ax.get_title():
+            continue
+        mesh = next(c for c in ax.collections if isinstance(c, QuadMesh))
+        norms_by_title.setdefault(ax.get_title(), set()).add(
+            (mesh.norm.vmin, mesh.norm.vmax)
+        )
+    for title, norms in norms_by_title.items():
+        assert len(norms) == 1, f"{title!r} rows must share one scale, got {norms}"
+    # one bar per metric (spanning both rows), not one per panel
+    assert len(_colorbar_axes(fig)) == len(_SKILL_METRICS)
+    assert all(len(parents) == 2 for _, parents in _colorbar_axes(fig))
+
+
+def test_shared_limits_defaults_to_off_and_leaves_a_single_item_unaffected(skill_item):
+    """The default (independent scales) is exactly ``test_several_comparisons_...``'s
+    behaviour; a single item has no other row to share with either way."""
+    fig = render(_skill_spec(skill_item, shared_limits=True))
+    assert len(_colorbar_axes(fig)) == len(_SKILL_METRICS)
+    assert all(len(parents) == 1 for _, parents in _colorbar_axes(fig))
+
+
+def test_layout_columns_transposes_comparisons_and_metrics_static():
+    """``layout='columns'`` puts comparisons across, metrics down (matplotlib)."""
+    items = [_skill_item("nitrate"), _skill_item("phosphate", offset=0.4)]
+    spec = _skill_spec(items, metric_names=("bias", "corr"), layout="columns")
+    fig = render(spec)
+    titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+    assert titles == ["nitrate", "phosphate"], (
+        "the comparison label titles only the top row (bias); the second row "
+        "(corr) repeats no title, exactly as a metric title repeats no row "
+        "label in the default 'rows' layout"
+    )
+    row_labels = [
+        ax._osk_row_label.get_text()
+        for ax in fig.axes
+        if getattr(ax, "_osk_row_label", None) is not None
+    ]
+    assert row_labels == ["bias", "corr"], "metrics now label the left edge"
+
+
+def test_layout_columns_transposes_comparisons_and_metrics_interactive():
+    """The interactive twin: same transpose, checked on the ``hv.Layout`` itself.
+
+    Bokeh's own rendered figure order is not a contract this package makes (see
+    ``test_skill_map_draws_the_same_panels_in_both_renderers``, compared as sets for
+    exactly that reason) — but the ``hv.Layout``'s own append order is, since
+    ``.cols()`` groups it into rows of that length in the order panels were combined.
+    Calling ``_skill_map`` directly (rather than through the full ``render()``
+    dispatch) reaches that object before anything discards the order.
+    """
+    import holoviews as hv
+
+    from ocean_skill.plot.holoviews_renderer import _skill_map
+
+    items = [_skill_item("nitrate"), _skill_item("phosphate", offset=0.4)]
+    result = _skill_map(items, metric_names=("bias", "corr"), layout="columns")
+    titles = []
+    for k in result.keys():
+        el = result[k]
+        # geo=True (the default) always wraps the mesh in a coastline Overlay, even
+        # with no domain outline of its own -- unwrap to the mesh for its title.
+        mesh = next(v for v in el if isinstance(v, hv.QuadMesh)) if isinstance(
+            el, hv.Overlay
+        ) else el
+        titles.append(mesh.opts.get(group="plot").kwargs["title"])
+    # comparisons vary fastest: nitrate-bias, phosphate-bias, nitrate-corr, phosphate-corr
+    assert [t.split(" (")[0] for t in titles] == [
+        "nitrate — bias",
+        "phosphate — bias",
+        "nitrate — corr",
+        "phosphate — corr",
+    ]
+
+
+def test_layout_rejects_an_unknown_value(skill_item):
+    with pytest.raises(ValueError, match="layout="):
+        render(_skill_spec(skill_item, layout="diagonal"))
+
+
+def test_ncols_disagreeing_with_layout_columns_is_refused():
+    items = [_skill_item("nitrate"), _skill_item("phosphate")]
+    with pytest.raises(ValueError, match="layout='columns'"):
+        render(_skill_spec(items, layout="columns", ncols=5))
+
+
 def test_skill_map_panels_are_not_squeezed(skill_item):
     """Catches the one sizing mistake nothing else here would notice.
 

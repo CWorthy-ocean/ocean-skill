@@ -33,7 +33,6 @@ from ocean_skill.plot.matplotlib_renderer import (
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
-from ocean_skill.plot.style import COLOR_CYCLE
 from ocean_skill.plot.typography import (
     PAGE_W,
     bokeh_fontsize,
@@ -921,6 +920,8 @@ def _skill_map(
     domain=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    shared_limits: bool = False,
+    layout: str = "rows",
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -946,6 +947,16 @@ def _skill_map(
     the first metric's map, same fix as :func:`_field_row`'s: a metric map is a
     curvilinear mesh too, and hits the same per-cell loop past
     :data:`RASTERIZE_ABOVE_CELLS`.
+
+    ``shared_limits=True`` pools each metric's values over every row before choosing
+    its colour limits, the same as the static family — every panel of one metric then
+    carries the same scale, comparable by colour. Each panel still shows its own
+    colorbar (bokeh has no cross-panel bar the way a matplotlib figure does), but with
+    identical limits they read as one. ``layout="columns"`` transposes the grid —
+    comparisons across, metrics down — by reordering which panels tile before
+    ``.cols()`` and does not otherwise change what each panel's title says, since a
+    bokeh panel already carries both the metric and (when stacked) the comparison's
+    own label in its own title.
     """
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot.matplotlib_renderer import (
@@ -969,10 +980,12 @@ def _skill_map(
     for item in items[1:]:
         metric_panels(item["skill"], names)
 
+    if layout not in ("rows", "columns"):
+        raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
     titles = metric_panel_titles(names)
     stacked = len(items) > 1
     if stacked:
-        ncols = len(names)
+        ncols = len(items) if layout == "columns" else len(names)
     elif ncols is None:
         ncols, _nrows = facet_layout(
             len(names),
@@ -985,47 +998,73 @@ def _skill_map(
     outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo)
     raster = _should_rasterize(items[0]["skill"][names[0]], rasterize)
 
-    panels = []
-    for row, item in enumerate(items):
+    # One colour scale per metric, pooled over every row, when asked to share -- the
+    # interactive twin of the static family's shared_limits (each panel still draws
+    # its own colorbar; bokeh has no cross-panel bar, but identical limits read as one).
+    shared_colors: dict[str, Any] = {}
+    if shared_limits and stacked:
         for name in names:
-            colors = metric_colors(
+            pooled = np.concatenate(
+                [np.asarray(arrays[i][name]).ravel() for i in range(len(items))]
+            )
+            shared_colors[name] = metric_colors(
+                name, pooled, standard_name=items[0].get("standard_name")
+            )
+
+    # "rows" (default) tiles metrics across within a comparison's row; "columns"
+    # transposes by tiling comparisons across within a metric's row instead -- paired
+    # with ncols above, .cols() below wraps into the same transposed grid either way.
+    order = (
+        [(row, name) for name in names for row in range(len(items))]
+        if (stacked and layout == "columns")
+        else [(row, name) for row in range(len(items)) for name in names]
+    )
+
+    panels = []
+    for row, name in order:
+        item = items[row]
+        colors = (
+            shared_colors[name]
+            if shared_limits and stacked
+            else metric_colors(
                 name, arrays[row][name], standard_name=item.get("standard_name")
             )
-            base = titles[names.index(name)]
-            # bokeh has no rotated row label, so the comparison joins the panel's own
-            # title -- the same move _field_row makes for a field grid's row_label
-            if stacked and item.get("row_label"):
-                base = f"{item['row_label']} — {base}"
-            value = metric_value_text(item.get("metrics"), name)
-            mesh = _quadmesh(
-                item["skill"][name],
-                title=f"{base} ({value})" if value else base,
-                cmap=colors.cmap,
-                clim=colors.clim(),
-                units=str(item["skill"][name].attrs.get("units", "") or ""),
-                geo=geo,
-                log=colors.log,
-                font_scale=font_scale,
-                canvas_factor=factor,
-                hover=hover,
-                rasterize=raster,
-            )
-            points = _station_overlay(
-                item.get("stations"), name, colors, item["skill"][name], geo=geo
-            )
-            for extra in (outline, points):
-                if extra is not None:
-                    mesh = mesh * extra
-            panels.append(mesh)
+        )
+        base = titles[names.index(name)]
+        # bokeh has no rotated row label, so the comparison joins the panel's own
+        # title -- the same move _field_row makes for a field grid's row_label
+        if stacked and item.get("row_label"):
+            base = f"{item['row_label']} — {base}"
+        value = metric_value_text(item.get("metrics"), name)
+        mesh = _quadmesh(
+            item["skill"][name],
+            title=f"{base} ({value})" if value else base,
+            cmap=colors.cmap,
+            clim=colors.clim(),
+            units=str(item["skill"][name].attrs.get("units", "") or ""),
+            geo=geo,
+            log=colors.log,
+            font_scale=font_scale,
+            canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
+        )
+        points = _station_overlay(
+            item.get("stations"), name, colors, item["skill"][name], geo=geo
+        )
+        for extra in (outline, points):
+            if extra is not None:
+                mesh = mesh * extra
+        panels.append(mesh)
 
-    layout = panels[0]
+    result = panels[0]
     for extra in panels[1:]:
-        layout = layout + extra
+        result = result + extra
     if len(panels) > 1:
-        layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+        result = result.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
-        layout = layout.opts(title=str(title))
-    return layout
+        result = result.opts(title=str(title))
+    return result
 
 
 #: Name of the dimension a movie's frames vary along, i.e. what the slider is labelled.
@@ -2307,6 +2346,10 @@ def _target(
     colors=None,
     marker_scale: float = 1.0,
     alpha: float | None = None,
+    overlay=None,
+    overlay_marker_scale: float | dict = 1.8,
+    overlay_alpha: float | dict = 1.0,
+    summary_points: bool | str = False,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
@@ -2317,10 +2360,27 @@ def _target(
     (``"annotate"``), which matches the static target. ``font_scale`` likewise: text is
     sized from the frame by the shared type scale, so the point labels here and on the
     static target are the same size relative to the diagram.
+
+    ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` also mean
+    exactly what they do statically — see :func:`ocean_skill.plot.summary.taylor`'s
+    docstring for the full explanation. A centroid's marker is drawn as a bokeh
+    ``"star"`` here (the static family's ``"*"`` translated to this renderer's own
+    marker vocabulary); everything else about the overlay layer is unchanged.
     """
     import pandas as pd
 
-    from ocean_skill.plot.summary import TARGET_FIGSIZE, _resolve_labels, pretty_level
+    from ocean_skill.plot.summary import (
+        TARGET_FIGSIZE,
+        _overlay_point_specs,
+        _resolve_colors,
+        _resolve_labels,
+        _resolve_overlay_style,
+        _resolve_per_level,
+        _scalar_scale,
+        _Styles,
+        _summary_point_specs,
+        pretty_level,
+    )
 
     hv = _extension()
     # diagram_scale_factor, not _canvas_factor: this figure is square by construction
@@ -2373,12 +2433,18 @@ def _target(
     grouped_by_marker = marker_by in df.columns
     marker_levels = list(dict.fromkeys(df[marker_by])) if grouped_by_marker else []
 
-    # Mirrors summary._group_styles' precedence: color_by (a field-driven grouping)
-    # wins outright; otherwise an explicit palette replaces COLOR_CYCLE, indexed by
-    # level the same way. With no grouping at all color_dim is "label", one level per
-    # point in record order, so this reproduces the static per-point colours exactly.
-    palette = list(colors) if colors and not color_by else COLOR_CYCLE
-    alpha_opts = {} if alpha is None else {"fill_alpha": alpha, "line_alpha": alpha}
+    # Mirrors summary._group_styles exactly: colour/alpha/size style by color_dim, the
+    # same field the points are already grouped and legended by, so a dict keys the
+    # same levels a caller sees in the legend either renderer draws. With no grouping
+    # at all color_dim is "label", one level per point in record order, so this
+    # reproduces the static per-point styling exactly.
+    level_colors = _resolve_colors(colors, color_levels, color_dim)
+    level_alphas = _resolve_per_level(
+        alpha, color_levels, color_dim, default=None, param="alpha"
+    )
+    level_scales = _resolve_per_level(
+        marker_scale, color_levels, color_dim, default=1.0, param="marker_scale"
+    )
 
     def _label(color_level, marker_level):
         # pretty_level, not str(): the static legend spells levels through it, and the
@@ -2394,12 +2460,18 @@ def _target(
 
     elements = []
     for mi, marker_level in enumerate(marker_levels or [None]):
-        for ci, color_level in enumerate(color_levels):
+        for color_level in color_levels:
             frame = df[df[color_dim] == color_level]
             if marker_levels:
                 frame = frame[frame[marker_by] == marker_level]
             if frame.empty:
                 continue
+            level_alpha = level_alphas[color_level]
+            alpha_opts = (
+                {}
+                if level_alpha is None
+                else {"fill_alpha": level_alpha, "line_alpha": level_alpha}
+            )
             elements.append(
                 hv.Points(
                     frame,
@@ -2407,8 +2479,8 @@ def _target(
                     vdims=cols,
                     label=_label(color_level, marker_level),
                 ).opts(
-                    size=11 * marker_scale,
-                    color=palette[ci % len(palette)],
+                    size=11 * level_scales[color_level],
+                    color=level_colors[color_level],
                     marker=_BOKEH_MARKERS[mi % len(_BOKEH_MARKERS)],
                     tools=["hover"],
                     # Below, matching the static diagrams: target points scatter around
@@ -2447,13 +2519,91 @@ def _target(
         + [
             hv.HLine(0).opts(color="lightgrey", line_width=1),
             hv.VLine(0).opts(color="lightgrey", line_width=1),
-            # the reference sits at the origin, as in the static version
+            # the reference sits at the origin, as in the static version. A dict
+            # marker_scale has no single level to key the reference on, so it stays
+            # unscaled (_scalar_scale's fallback), matching the static reference star.
             hv.Scatter([(0.0, 0.0)]).opts(
-                marker="star", size=16 * marker_scale, color="black"
+                marker="star", size=16 * _scalar_scale(marker_scale), color="black"
             ),
         ]
     )
-    return (guides * points).opts(
+
+    # A second, emphasized layer on top of everything -- a highlighted subset
+    # (overlay=), a per-group centroid (summary_points=), or both. Each overlay
+    # entry is its own small hv.Scatter rather than one grouped hv.Points per
+    # (marker_level, color_level) the way the base layer batches -- an overlay is
+    # inherently a handful of points, so there is no batching to gain from.
+    overlay_specs = []
+    if overlay is not None:
+        overlay_specs += _overlay_point_specs(
+            overlay,
+            groups,
+            lambda r: (r["crmsd"] / r["std_reference"])
+            * np.sign(r["std_test"] - r["std_reference"]),
+            lambda r: r["bias"] / r["std_reference"],
+        )
+    if summary_points:
+        overlay_specs += _summary_point_specs(
+            recs, df["x"].to_numpy(), df["y"].to_numpy(), color_dim, summary_points
+        )
+    overlay_layer = None
+    if overlay_specs:
+        marker_map = (
+            {
+                lev: _BOKEH_MARKERS[i % len(_BOKEH_MARKERS)]
+                for i, lev in enumerate(marker_levels)
+            }
+            if grouped_by_marker
+            else {}
+        )
+        base_styles = _Styles(
+            colors=[level_colors[r.get(color_dim)] for r in recs],
+            markers=(
+                [marker_map[r.get(marker_by)] for r in recs]
+                if grouped_by_marker
+                else [_BOKEH_MARKERS[0]] * len(recs)
+            ),
+            alphas=[],
+            scales=[],
+            handles=[],
+        )
+        overlay_recs = [spec[2] for spec in overlay_specs]
+        overlay_styles = _resolve_overlay_style(
+            overlay_recs,
+            recs,
+            base_styles,
+            style_field=color_dim,
+            marker_by=marker_by,
+            overlay_marker_scale=overlay_marker_scale,
+            overlay_alpha=overlay_alpha,
+        )
+        overlay_elements = []
+        for (xi, yi, _rec, mk_override), col, mk, al, scl in zip(
+            overlay_specs,
+            overlay_styles.colors,
+            overlay_styles.markers,
+            overlay_styles.alphas,
+            overlay_styles.scales,
+            strict=True,
+        ):
+            marker = "star" if mk_override == "*" else mk
+            alpha_opts = {} if al is None else {"fill_alpha": al, "line_alpha": al}
+            overlay_elements.append(
+                hv.Scatter([(xi, yi)]).opts(
+                    size=16 * scl,
+                    color=col,
+                    marker=marker,
+                    line_color="black",
+                    line_width=1.2,
+                    **alpha_opts,
+                )
+            )
+        overlay_layer = hv.Overlay(overlay_elements)
+
+    result = guides * points
+    if overlay_layer is not None:
+        result = result * overlay_layer
+    return result.opts(
         # equal frame dims + data_aspect keeps the guide circles circular; fixed
         # width/height would fight the aspect and squash them into ellipses
         frame_width=round(frame_size[0]),

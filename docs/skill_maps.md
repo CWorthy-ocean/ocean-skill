@@ -209,6 +209,29 @@ interpolation ([DIVAnd](https://github.com/gher-uliege/DIVAnd.jl)) is Julia-only
 out of scope here; a distance mask (`maxdist=`) at least keeps the surface from
 extrapolating confidently across a large open gap between survey lines.
 
+**Should the surface vary smoothly at all?** The spline above is the default because a
+gradual gradient between stations is often plausible, but it can invent one across
+water two stations say nothing about — blending a good station into a bad one across a
+strait the fit cannot see. `method=` picks a different interpolator when that isn't
+the story you want to tell:
+
+```python
+mooring_set.map_metrics(method="nearest")       # Voronoi tiles: hard edges, no invented gradients
+mooring_set.map_metrics(method="knn", knn_k=8)   # softer than nearest, still local
+mooring_set.map_metrics(method="linear")         # faceted; NaN outside the stations' convex hull
+```
+
+`"nearest"` also adapts to station density for free — a dense survey cluster gets
+small tiles, an isolated mooring a large one — with no smoothing parameter to tune.
+`"linear"`/`"cubic"` triangulate instead: faceted rather than smooth, and never
+extrapolate past the outermost stations. If a dense cluster of stations threatens to
+dominate a sparser region regardless of method (pure vote-counting, not real signal),
+pool it first with `block_spacing=` (metres):
+
+```python
+mooring_set.map_metrics(method="nearest", block_spacing=15_000)  # pool a 15 km cluster
+```
+
 See [`ocean_skill/plot/map_metrics.py`](../ocean_skill/plot/map_metrics.py) for the
 full mechanics (duplicate-position pooling, the antimeridian-safe projection, the
 model-grid vs. regular-grid fallback), and

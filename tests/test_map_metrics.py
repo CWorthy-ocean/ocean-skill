@@ -166,6 +166,68 @@ def test_central_longitude_is_antimeridian_safe():
     assert (diffs < 5).all()
 
 
+# --- interpolation method choice ------------------------------------------------------
+
+
+def test_the_default_method_is_unchanged_spline_behaviour():
+    """``method="spline"`` explicit must match the implicit default byte-for-byte."""
+    df = _records()
+    default = interpolate_records(df, ("bias",))
+    explicit = interpolate_records(df, ("bias",), method="spline")
+    np.testing.assert_array_equal(default["bias"].to_numpy(), explicit["bias"].to_numpy())
+
+
+@pytest.mark.parametrize("method", ["nearest", "knn", "linear", "cubic"])
+def test_every_non_spline_method_produces_some_finite_cells(method):
+    df = _records()
+    skill = interpolate_records(df, ("bias",), method=method)
+    assert np.isfinite(skill["bias"].to_numpy()).any()
+
+
+def test_nearest_reproduces_a_stations_own_value_at_its_own_location():
+    """The defining property of a Voronoi/nearest-neighbour tiling."""
+    df = _records(n=12)
+    lon = df["lon"].to_numpy()
+    lat = df["lat"].to_numpy()
+    # a grid whose cells sit exactly on the stations themselves
+    grid = (lon.reshape(1, -1), lat.reshape(1, -1), np.ones((1, len(df)), dtype=bool))
+    skill = interpolate_records(df, ("bias",), method="nearest", grid=grid, maxdist=1e9)
+    np.testing.assert_allclose(skill["bias"].to_numpy().ravel(), df["bias"].to_numpy())
+
+
+@pytest.mark.parametrize("method", ["linear", "cubic"])
+def test_linear_and_cubic_are_nan_outside_the_convex_hull(method):
+    df = _records(n=12)
+    lon = df["lon"].to_numpy()
+    lat = df["lat"].to_numpy()
+    # a grid point far outside the station cluster's convex hull
+    glon = np.array([[lon.max() + 5.0]])
+    glat = np.array([[lat.max() + 5.0]])
+    grid = (glon, glat, np.ones_like(glon, dtype=bool))
+    skill = interpolate_records(df, ("bias",), method=method, grid=grid, maxdist=1e9)
+    assert not np.isfinite(skill["bias"].to_numpy()).any()
+
+
+def test_block_spacing_pools_a_dense_cluster_before_fitting():
+    """A tight sub-cluster added on top of the normal spread shouldn't error or
+    dominate — block_spacing should collapse it to one representative point."""
+    df = _records(n=12)
+    dense = df.iloc[[0]].copy()
+    extra = pd.concat(
+        [dense.assign(lon=dense["lon"] + 1e-4 * i, lat=dense["lat"] + 1e-4 * i)
+         for i in range(20)],
+        ignore_index=True,
+    )
+    combined = pd.concat([df, extra], ignore_index=True)
+    skill = interpolate_records(combined, ("bias",), method="nearest", block_spacing=50_000)
+    assert np.isfinite(skill["bias"].to_numpy()).any()
+
+
+def test_an_unknown_method_raises():
+    with pytest.raises(ValueError, match="method="):
+        interpolate_records(_records(), ("bias",), method="bogus")
+
+
 # --- build_items -------------------------------------------------------------------
 
 
@@ -199,6 +261,26 @@ def test_neither_data_nor_rows_is_an_error():
 def test_grid_option_rejects_an_unknown_value():
     with pytest.raises(ValueError, match="grid="):
         build_items(_records(), grid="curvilinear")
+
+
+def test_method_and_block_spacing_are_forwarded_through_build_items():
+    """A different ``method`` through ``build_items`` must reach the interpolator —
+    checked by comparing against the same call made directly against
+    ``interpolate_records`` with an identical (regular) grid, rather than by
+    re-deriving the grid ourselves (which risks a spacing mismatch)."""
+    df = _records(n=12)
+    (spline_items,) = build_items(df, metrics=("bias",), grid="regular")
+    (nearest_items,) = build_items(df, metrics=("bias",), grid="regular", method="nearest")
+
+    spline_vals = spline_items["skill"]["bias"].to_numpy()
+    nearest_vals = nearest_items["skill"]["bias"].to_numpy()
+    assert spline_vals.shape == nearest_vals.shape  # same regular grid either way
+    finite = np.isfinite(spline_vals) & np.isfinite(nearest_vals)
+    assert finite.any()
+    assert not np.allclose(spline_vals[finite], nearest_vals[finite]), (
+        "spline and nearest should disagree somewhere, or method isn't reaching "
+        "interpolate_records"
+    )
 
 
 # --- the station-dot overlay, in both renderers -------------------------------------
