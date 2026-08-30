@@ -115,6 +115,19 @@ def test_timeseriesprofile_band_with_a_vertical_mean_collapses(monkeypatch):
     assert c.over == "time"
 
 
+def test_timeseriesprofile_with_a_scalar_season_select_implies_over_Z(monkeypatch):
+    """A season fan's deferred select={"season": "JJA"} collapses time the same
+    way a scalar select={"time": "2015-06-15"} does -- one season's climatology
+    field is no more a line than one time instant is, so depth is kept instead."""
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(
+        select={"depth": [0.0, 25.0, 50.0], "season": "JJA"},
+        aggregate={"time": {"groupby": "season", "seasons": ["JJA"], "reduce": "mean"}},
+    )
+    assert c.over == "Z"
+    assert "time is narrowed to one value" in c.over_reason
+
+
 # -- explicit over= always wins, whatever the featureType says --------------------------
 
 
@@ -139,3 +152,37 @@ def test_gridded_featuretype_implies_nothing_by_itself(monkeypatch):
     c = _comparison()
     assert c.over is None
     assert c.over_reason == "the reference is gridded"
+
+
+# -- a scalar season select must not spuriously imply over="time" -----------------
+
+
+def test_a_point_select_with_a_scalar_season_does_not_imply_over_time(monkeypatch):
+    """Without the season guard, a point select plus a season groupby aggregate
+    (which _collapses_time reads as "keeps the axis") would wrongly imply
+    over="time" -- but a fanned season select has already narrowed it to one
+    field, exactly like a scalar select={"time": ...} does."""
+    _feature(monkeypatch, "grid")
+    c = _comparison(
+        select={"lon": -158.0, "lat": 22.0, "season": "JJA"},
+        aggregate={"time": {"groupby": "season", "seasons": ["JJA"], "reduce": "mean"}},
+    )
+    assert c.over is None
+    assert c.over_reason == "the reference is gridded"
+
+
+def test_a_spatial_mean_with_a_scalar_season_does_not_imply_over_time(monkeypatch):
+    _feature(monkeypatch, "grid")
+    c = _comparison(
+        select={
+            "lon": {"min": -160.0, "max": -156.0},
+            "lat": {"min": 20.0, "max": 24.0},
+            "season": "JJA",
+        },
+        aggregate={
+            "lon": "mean",
+            "lat": "mean",
+            "time": {"groupby": "season", "seasons": ["JJA"], "reduce": "mean"},
+        },
+    )
+    assert c.over is None

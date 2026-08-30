@@ -138,7 +138,15 @@ def _time_collapsed(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
     ``select={"time": "2015-06-15"}`` -- the natural way to ask for a cast at one
     instant -- has to count on its own; a range or a list keeps the axis, mirroring
     :func:`_collapses_vertical`'s identical band/list-survives reading.
+
+    A scalar ``select={"season": "JJA"}`` counts the same way, whatever else
+    ``select``/``agg`` say about the underlying time window: it is the deferred
+    select :func:`compare`'s season fan (or a hand-written one) applies against
+    the axis a ``{"groupby": "season"}`` aggregate created, narrowing that axis
+    back down to one group -- exactly as reduced as a scalar time instant.
     """
+    if isinstance(select.get("season"), str):
+        return True
     for key in _TIME_KEYS:
         if key not in select:
             continue
@@ -1888,11 +1896,15 @@ class Comparison:
         reference's own ``aggregate`` has also collapsed time itself
         (:func:`_collapses_time`), in which case there is no axis left for a line
         to run along and inferring one would be wrong rather than merely unasked.
+        A scalar ``select={"season": ...}`` collapses it the same way -- one
+        season's climatology field is no more a line than one time instant is.
         """
         from ocean_skill import operators
 
         ref_select = select_for(self.select, "reference")
         if operators.point_in_spec(ref_select) is None:
+            return False
+        if isinstance(ref_select.get("season"), str):
             return False
         return not _collapses_time(aggregate_for(self.aggregate, "reference"))
 
@@ -1907,12 +1919,16 @@ class Comparison:
         nature -- there is no map left to draw either way -- unless the same
         aggregate has also collapsed time itself (:func:`_collapses_time`), in
         which case there is no axis left for a line to run along and inferring
-        one would be wrong rather than merely unasked.
+        one would be wrong rather than merely unasked. A scalar
+        ``select={"season": ...}`` collapses it the same way -- one season's
+        climatology field is no more a line than one time instant is.
         """
         from ocean_skill import operators
 
         ref_agg = _without_vertical(aggregate_for(self.aggregate, "reference"))
         if operators.spatial_mean_in_spec(ref_agg) is None:
+            return False
+        if isinstance(select_for(self.select, "reference").get("season"), str):
             return False
         return not _collapses_time(aggregate_for(self.aggregate, "reference"))
 
@@ -3944,7 +3960,17 @@ def _selected_time(select: dict[str, Any]) -> Any:
     ``Comparison`` built directly (or a pair-spec's own side) may use any spelling
     in :data:`ocean_skill.sources._TIME_KEYS`, and reading only one back would
     silently under-report a caller's own request.
+
+    A scalar ``select={"season": ...}`` is checked first and, if present, is
+    what's returned -- the season fan's distinguishing identity, even when a
+    time window (narrowing which years feed the climatology) rides alongside
+    it in the same select. This is what makes a fanned comparison's metrics
+    table, repr, and row titles read the season name, exactly as a resample
+    bin's own value does today.
     """
+    season = select.get("season")
+    if isinstance(season, str):
+        return season
     from ocean_skill.sources import _TIME_KEYS
 
     for key in _TIME_KEYS:
@@ -4039,13 +4065,22 @@ def _normalize_time_value(value: Any) -> Any:
 
 
 def _normalize_times(times: Any) -> tuple[str, Any] | None:
-    """Return ``("bins", spec)``, ``("list", tuple)``, or ``None`` for ``times=None``.
+    """Return what ``times=`` means: a fan-out kind and its spec, or ``None``.
 
-    A dict names how to *derive* bins from the test source's own time axis
-    (:func:`_time_bins`) — it must carry ``"resample"`` and ``"reduce"``, the same
-    vocabulary ``aggregate={"time": ...}`` already uses. Anything else names an
-    explicit set of time values, one comparison per entry, mirroring how a bare
-    ``depths=50`` is sugar for ``depths=(50,)``.
+    ``("bins", spec)``, ``("seasons", spec)``, ``("list", tuple)``, or ``None``
+    for ``times=None``. A dict names how to *derive* bins from the test
+    source's own time axis (:func:`_time_bins`) — it must carry
+    ``"resample"`` and ``"reduce"``, the same vocabulary
+    ``aggregate={"time": ...}`` already uses. ``{"groupby": "season",
+    "reduce": ...}`` is the one climatology ``times=`` *can* fan over
+    directly, since a season list is a fixed, spec-enumerable set of names --
+    no data has to be read to know what the bins are, unlike a real
+    calendar's months or years. Anything else names an explicit set of time
+    values, one comparison per entry, mirroring how a bare ``depths=50`` is
+    sugar for ``depths=(50,)``.
+
+    Seasons are validated here, eagerly, so a typo in ``seasons=[...]`` fails
+    before ``compare()`` has opened a single source.
     """
     if times is None:
         return None
@@ -4056,11 +4091,35 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
                 "takes no {'test': ..., 'reference': ...} pair-spec. Use select= "
                 "for a per-lane time entry instead."
             )
+        if times.get("groupby") == "season":
+            if "resample" in times:
+                raise ValueError(
+                    f"times={times!r} sets both 'groupby': 'season' and "
+                    "'resample', which are different ways to fan: 'groupby': "
+                    "'season' enumerates a fixed set of season names without "
+                    "reading any data, 'resample' derives bins from the test "
+                    "source's own time axis. Pick one."
+                )
+            if "reduce" not in times:
+                raise ValueError(
+                    f"times={times!r} needs 'reduce' (how each season's "
+                    "months collapse, e.g. 'mean') alongside {'groupby': "
+                    "'season'} -- the same vocabulary as "
+                    "aggregate={'time': ...}."
+                )
+            from ocean_skill import operators
+
+            seasons = operators._validate_seasons(
+                times.get("seasons") or operators.DEFAULT_SEASONS
+            )
+            return "seasons", {**times, "seasons": seasons}
         if "groupby" in times:
             raise ValueError(
                 f"times={times!r} names a climatology (every January of the "
                 "record folded into one field), which is not a set of time "
-                "steps to fan into separate comparisons. Build the climatology "
+                "steps to fan into separate comparisons. Only 'groupby': "
+                "'season' names a fixed, spec-enumerable set of bins that "
+                "times= can fan over directly; build any other climatology "
                 "with aggregate={'time': {'groupby': ...}} instead, then "
                 "osk.field() to plot its months as panels, or select= to pick "
                 "one month out of it."
@@ -4069,8 +4128,10 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
             raise ValueError(
                 f"times={times!r} needs both 'resample' (a bin width, e.g. "
                 "'1MS') and 'reduce' (how each bin collapses, e.g. 'mean') -- "
-                "the same vocabulary as aggregate={'time': ...}. Or pass an "
-                "explicit list of time values instead, one comparison per entry."
+                "the same vocabulary as aggregate={'time': ...} -- or "
+                "'groupby': 'season' to fan one comparison per season. Or "
+                "pass an explicit list of time values instead, one "
+                "comparison per entry."
             )
         return "bins", dict(times)
     values = (
@@ -4241,6 +4302,56 @@ def _has_time_entry(spec: Any) -> bool:
         else (spec or {},)
     )
     return any(k in side for side in sides for k in _TIME_KEYS)
+
+
+def _has_season_entry(spec: Any) -> bool:
+    """Whether a normalized select names an existing ``"season"`` entry, either side."""
+    sides = (
+        (spec.get("test") or {}, spec.get("reference") or {})
+        if is_pair_spec(spec)
+        else (spec or {},)
+    )
+    return any("season" in side for side in sides)
+
+
+def _fanned_season_select(sel: dict[str, Any], season: str) -> dict[str, Any]:
+    """Write ``{"season": season}`` into ``sel`` on both sides, keeping any time entry.
+
+    Unlike :func:`_fanned_time_select`'s bins form -- which *replaces* a select's
+    time entry with the fanned bin value, since a resample bin already narrows
+    the raw time axis directly -- a season select narrows an axis the aggregate
+    itself creates, not the raw one. So an existing time entry is left exactly
+    as it was: an ordinary narrowing of which years feed the climatology,
+    orthogonal to which season group comes back out of it.
+    """
+    if is_pair_spec(sel):
+        return {
+            "test": {**(sel.get("test") or {}), "season": season},
+            "reference": {**(sel.get("reference") or {}), "season": season},
+        }
+    return {**(sel or {}), "season": season}
+
+
+def _merged_season_aggregate(
+    aggregate: Any, time_entry: dict[str, Any], season: str
+) -> Any:
+    """Fold ``times=``'s season entry into ``aggregate``, on both sides of a pair-spec.
+
+    Unlike :func:`_merged_time_aggregate`'s bins form, ``groupby`` is *not*
+    dropped: ``select={"season": ...}`` (:func:`_fanned_season_select`) narrows
+    an axis the aggregate itself has to create -- there is no raw ``"season"``
+    axis on the source to select against directly -- so each fanned comparison
+    still runs its own season groupby, restricted via ``seasons`` to computing
+    only the one season it needs.
+    """
+    reduction = {k: v for k, v in time_entry.items() if k != "seasons"}
+    reduction["seasons"] = [season]
+    if is_pair_spec(aggregate):
+        return {
+            "test": {**(aggregate.get("test") or {}), "time": reduction},
+            "reference": {**(aggregate.get("reference") or {}), "time": reduction},
+        }
+    return {**(aggregate or {}), "time": reduction}
 
 
 def compare(
@@ -4444,19 +4555,33 @@ def compare(
     derivation and no aggregate merged in for you: pair it with your own
     ``aggregate={"time": "mean"}`` the way you would without ``times=`` at all.
 
-    A ``select`` time entry alongside the dict form narrows *which* bins are
-    enumerated — the window, not a conflict, mirroring how ``depths=`` can default
-    from a select entry already present; alongside the list form it is dropped
-    with a warning, since the list already says exactly which comparisons to
-    build. ``times=`` and ``over="time"`` answer the same question two ways — fan
-    into separate comparisons, or keep the axis and score against it — and
-    ``compare()`` refuses both at once. The resulting :class:`ComparisonSet` plots
-    as monthly rows (``.plot()``), animates as monthly frames (``.movie()``), or
-    scores as skill through time (``.taylor()``/``.target()``); its ``.metrics()``
-    table carries a ``time`` column. Against a reference whose time axis is not a
-    decoded calendar (a climatology read with ``decode_times=False``) ``times=``
-    has no axis to fan against — use the pair-spec ``select``/``aggregate``
-    pattern above instead.
+    ``times={"groupby": "season", "reduce": "mean"}`` fans one comparison per
+    season instead — DJF/MAM/JJA/SON, in that (calendar) order by default, or a
+    custom ``seasons=[...]`` list of month-initial strings (any number, e.g.
+    ``["JFMA", "MJJA", "SOND"]``). Unlike the bins form, this needs no source
+    opened first — the season names are known from the spec alone — and each
+    fanned comparison computes only its own season (merging
+    ``aggregate={"time": {"groupby": "season", "seasons": [<that season>],
+    "reduce": ...}}`` and ``select={"season": <that season>}`` for you). A season
+    with no data in a given pair is skipped like any other missing pair (see
+    ``skip_missing``); pass ``spread="std"`` alongside ``reduce`` for a
+    mean-and-spread comparison, the same as ``aggregate=`` accepts directly.
+
+    A ``select`` time entry alongside the resample-bins form narrows *which*
+    bins are enumerated — the window, not a conflict, mirroring how ``depths=``
+    can default from a select entry already present; a ``select={"season":
+    ...}`` entry alongside the season form, or any time entry alongside the
+    list form, is dropped with a warning instead, since both already say
+    exactly which comparisons to build. ``times=`` and ``over="time"`` answer
+    the same question two ways — fan into separate comparisons, or keep the
+    axis and score against it — and ``compare()`` refuses both at once. The
+    resulting :class:`ComparisonSet` plots as monthly or seasonal rows
+    (``.plot()``), animates as frames (``.movie()``), or scores as skill
+    through time (``.taylor()``/``.target()``); its ``.metrics()`` table
+    carries a ``time`` column (season names for the season form). Against a
+    reference whose time axis is not a decoded calendar (a climatology read
+    with ``decode_times=False``) ``times=`` has no axis to fan against — use
+    the pair-spec ``select``/``aggregate`` pattern above instead.
 
     Each pair's aligned result is cached to disk and reused on a later run with the
     same arguments (see :mod:`ocean_skill.cache`, which prints where once per
@@ -4580,6 +4705,7 @@ def compare(
     times_fan = _normalize_times(times)
     time_freq: str | None = None
     time_window: Any = None
+    season_entry: dict[str, Any] | None = None
     if times_fan is not None:
         if over is not None and over in _TIME_KEYS:
             raise ValueError(
@@ -4614,6 +4740,31 @@ def compare(
             time_entry = dict(times_fan[1])
             time_freq = time_entry["resample"]
             aggregate = _merged_time_aggregate(aggregate, time_entry)
+        elif times_fan[0] == "seasons":
+            if _has_time_entry(aggregate):
+                raise ValueError(
+                    "compare() got both times={'groupby': 'season', 'reduce': "
+                    "...} and an aggregate= time entry: times= already says "
+                    "how each season reduces (its own 'reduce'), so a "
+                    "separate aggregate={'time': ...} would conflict with "
+                    "it. Drop the aggregate time entry, or drop times= and "
+                    "use aggregate={'time': {'groupby': 'season', ...}} "
+                    "yourself with osk.field() to keep the axis standing as "
+                    "panels instead."
+                )
+            # Unlike the bins form, a season select narrows an axis the
+            # aggregate creates rather than the raw one, so there is no window
+            # to read off select= here -- an existing 'season' entry is
+            # simply replaced, one comparison per requested season, below.
+            if _has_season_entry(select):
+                warnings.warn(
+                    f"compare() got both times={times!r} and a select= "
+                    "'season' entry; times= already says exactly which "
+                    "seasons to build, so the select= entry is dropped "
+                    "rather than narrowing each of them further.",
+                    stacklevel=_stacklevel.find(),
+                )
+            season_entry = times_fan[1]
         elif _has_time_entry(select):
             warnings.warn(
                 f"compare() got both times={times!r} and a select= time entry; "
@@ -4737,6 +4888,10 @@ def compare(
             return (None,)
         if times_fan[0] == "list":
             return times_fan[1]
+        if times_fan[0] == "seasons":
+            # Spec-enumerated, not data-derived -- unlike a resample bin, a
+            # season name needs no source opened to know it exists.
+            return tuple(season_entry["seasons"])
         if tst not in _time_bins_cache:
             bins = _time_bins(tst, time_freq, time_window)
             _time_bins_cache[tst] = tuple(
@@ -4853,12 +5008,28 @@ def compare(
                     sel = _fanned_select(select, fan_key, d, calculated)
                     for t in these_times:
                         # `times=` is the same sugar along time, nested inside the
-                        # depth fan -- see :func:`_fanned_time_select`. Skipped
+                        # depth fan -- see :func:`_fanned_time_select` (bins/list)
+                        # and :func:`_fanned_season_select` (seasons). Skipped
                         # entirely when times= was never asked for, so `sel` (and
                         # every label below) is untouched and this loop iterates
                         # exactly once, matching today's behaviour byte for byte.
+                        is_seasons = times_fan is not None and times_fan[0] == "seasons"
                         sel_t = (
-                            sel if times_fan is None else _fanned_time_select(sel, t)
+                            sel
+                            if times_fan is None
+                            else _fanned_season_select(sel, t)
+                            if is_seasons
+                            else _fanned_time_select(sel, t)
+                        )
+                        # A season fan merges per-iteration -- each comparison
+                        # computes only its own season (see
+                        # _merged_season_aggregate) -- unlike the bins form, which
+                        # merges once outside this loop since every bin shares the
+                        # same resample+reduce.
+                        agg_t = (
+                            _merged_season_aggregate(aggregate, season_entry, t)
+                            if is_seasons
+                            else aggregate
                         )
                         # Label only what varies across the set: repeating the
                         # variable name on every point of a single-variable
@@ -4877,7 +5048,7 @@ def compare(
                             test=tst,
                             variable=var,
                             select=sel_t,
-                            aggregate=aggregate,
+                            aggregate=agg_t,
                             method=method,
                             over=over,
                             time_method=time_method,

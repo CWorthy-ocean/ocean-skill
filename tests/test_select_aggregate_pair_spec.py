@@ -214,6 +214,56 @@ def test_a_resample_select_is_applied_once_not_twice(monthly):
     assert float(da.isel(time=0, lat=0, lon=0)) == pytest.approx(5.0)
 
 
+def test_a_season_select_key_the_aggregate_creates_is_applied_after_it(monthly):
+    """The season analogue of the month test above -- and the mechanism the WOA
+    per-lane recipe in this module's own docstring needs for a seasonal test
+    lane: {"season": "JJA"} matches nothing before the groupby runs and exactly
+    one field after."""
+    da, _ = _prepare(
+        monthly,
+        {},
+        "a",
+        {"season": "JJA"},
+        {"time": {"groupby": "season", "reduce": "mean"}},
+    )
+    assert "season" not in da.dims
+    # month k is worth k; JJA averages months 6, 7, 8
+    assert float(da.isel(lat=0, lon=0)) == pytest.approx((6 + 7 + 8) / 3)
+
+
+def test_seasonal_test_lane_against_a_time_meaned_reference():
+    """The seasonal analogue of the WOA month recipe this module documents: a
+    model spanning several years needs a season picked out of its own
+    climatology, while a reference already reduced to one field just needs its
+    lone time step meaned away -- both through the same per-lane aggregate/select
+    pair-spec machinery, unchanged."""
+    c = Comparison(
+        reference="woa23_nitrate_month01",
+        test="model",
+        variable=NITRATE,
+        select={"test": {"season": "JJA"}, "reference": {}},
+        aggregate={
+            "test": {"time": {"groupby": "season", "reduce": "mean"}},
+            "reference": {"time": "mean"},
+        },
+    )
+    calls = {}
+
+    def fake_prepare_source(source, variable, select, aggregate, **kwargs):
+        calls[kwargs.get("require_reduced") or "test"] = (select, aggregate)
+        return None, None
+
+    with mock.patch("ocean_skill.comparison.prepare_source", fake_prepare_source):
+        c._prepare_lane("model", True, False, role="test")
+        c._prepare_lane("woa23_nitrate_month01", True, False, role="reference")
+
+    assert calls["test"] == (
+        {"season": "JJA"},
+        {"time": {"groupby": "season", "reduce": "mean"}},
+    )
+    assert calls["reference"] == ({}, {"time": "mean"})
+
+
 def test_a_key_matching_neither_pass_warns_but_does_not_raise(monthly):
     with pytest.warns(UserWarning, match="matched no axis"):
         da, _ = _prepare(

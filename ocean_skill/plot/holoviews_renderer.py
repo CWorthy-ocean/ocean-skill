@@ -28,7 +28,6 @@ import numpy as np
 
 from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for
-from ocean_skill.plot.locations import TAB10 as _TAB10
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
     metric_value_text,
@@ -2116,6 +2115,42 @@ def _profile_curve(hv, line, dimensions, *, mark: str):
     return element
 
 
+def _profile_bands(hv, line, dimensions) -> list:
+    """Return one ``hv.Polygons`` per finite run of one line's mean±spread envelope.
+
+    HoloViews' ``hv.Area`` only fills *vertically* (between two y arrays along
+    x), and a profile's envelope needs the transpose of that -- value on x,
+    depth on y -- so each run is built as its own closed ``hv.Polygons``
+    instead, one *element* per :func:`~ocean_skill.plot.style.band_runs` run
+    (not one multi-patch element for the whole line): the static renderer
+    draws one ``fill_betweenx`` collection per run the same way, which is what
+    lets the two renderers' band *count* agree, not just their shapes. Each is
+    in the line's own colour and carries no ``label`` -- unlabeled, so it earns
+    no legend entry, matching the static renderer's un-legended
+    ``fill_betweenx``.
+
+    ``kdims`` must be a *list*, not the ``dimensions`` tuple as given: HoloViews
+    reads a bare 2-tuple of dimensions as its own ``(name, label)`` shorthand
+    for a single dimension, which is not what this is.
+    """
+    from ocean_skill.plot.profile import vertical_values
+    from ocean_skill.plot.style import BAND_ALPHA, band_runs
+
+    depth = vertical_values(line.spec.values)
+    values = np.asarray(line.spec.values.values, dtype="float64")
+    bands = []
+    for axis, lo, hi in band_runs(depth, values, line.spec.spread):
+        xs = np.concatenate([lo, hi[::-1]])
+        ys = np.concatenate([axis, axis[::-1]])
+        patch = np.column_stack([xs, ys])
+        bands.append(
+            hv.Polygons([patch], list(dimensions)).opts(
+                fill_color=line.color, fill_alpha=BAND_ALPHA, line_alpha=0
+            )
+        )
+    return bands
+
+
 def _profile_metrics_text(hv, panel, y_range):
     """Return the statistics box as an ``hv.Text``, in the corner ``compose`` chose.
 
@@ -2217,8 +2252,18 @@ def _profile(
     for panel in layout.panels:
         x_dim = hv.Dimension("value", label=panel.xlabel or "")
         y_dim = hv.Dimension("depth", label=panel.ylabel)
+        dims = (x_dim, y_dim)
+        # Bands first, so every line's envelope sits beneath every line -- the
+        # same two-pass order the static renderer's fill_betweenx-then-plot
+        # draws in, and here it also matters for z-order within the Overlay.
+        bands = [
+            band
+            for line in panel.lines
+            if line.spec.spread is not None
+            for band in _profile_bands(hv, line, dims)
+        ]
         overlay = hv.Overlay(
-            [_profile_curve(hv, line, (x_dim, y_dim), mark=mark) for line in panel.lines]
+            bands + [_profile_curve(hv, line, dims, mark=mark) for line in panel.lines]
         )
         if panel.metrics_text:
             overlay = overlay * _profile_metrics_text(hv, panel, y_range)

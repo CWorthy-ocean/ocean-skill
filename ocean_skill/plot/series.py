@@ -130,6 +130,21 @@ def _depth_of(aligned) -> float | None:
     return None if value is None else float(value)
 
 
+def season_of(aligned) -> str | None:
+    """Return the season an item's aligned data was narrowed to, if it is scalar.
+
+    Mirrors :func:`_depth_of`: a surviving ``season`` *dimension* is fanned into
+    one item per season before composition ever sees it (see
+    :func:`ocean_skill.plot.profile.fan_season`), leaving each item's own
+    ``season`` a scalar coordinate -- the same convention a profile's ``time``
+    already follows for one cast.
+    """
+    season = aligned.coords.get("season")
+    if season is None or season.dims:
+        return None
+    return str(season.values)
+
+
 def item_roles(item: dict[str, Any]) -> tuple[str, ...]:
     """The roles one item draws: ``("value",)`` alone, or ``("reference", "test")``.
 
@@ -144,10 +159,18 @@ def item_roles(item: dict[str, Any]) -> tuple[str, ...]:
 
 
 def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
-    """Return the line(s) one item draws: a lone value, or a reference/test pair."""
+    """Return the line(s) one item draws: a lone value, or a reference/test pair.
+
+    ``season``/``spread`` are populated here whenever the aligned data carries
+    them, even though a series line does not yet draw a season facet or an
+    envelope from them (:mod:`ocean_skill.plot.profile` is the family that does)
+    -- landing the fields now means the profile family's compose logic can stay
+    the only thing that reads them, with nothing else to change here later.
+    """
     aligned = item["aligned"]
     variable = item.get("standard_name") or item.get("label")
     depth = _depth_of(aligned)
+    season = season_of(aligned)
     if item_roles(item) == ("value",):
         source = str((item.get("labels") or (item.get("label") or "value",))[0])
         units = item.get("units") or aligned["value"].attrs.get("units")
@@ -157,6 +180,8 @@ def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
                 source=source,
                 variable=variable,
                 depth=depth,
+                season=season,
+                spread=_style.spread_of(aligned, "value", aligned["value"]),
                 units=units,
                 values=aligned["value"],
                 item=index,
@@ -167,6 +192,7 @@ def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     common = {
         "variable": variable,
         "depth": depth,
+        "season": season,
         "units": units,
         "item": index,
     }
@@ -175,10 +201,15 @@ def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
             role="reference",
             source=str(reference_source),
             values=aligned["reference"],
+            spread=_style.spread_of(aligned, "reference", aligned["reference"]),
             **common,
         ),
         _style.LineSpec(
-            role="test", source=str(test_source), values=aligned["test"], **common
+            role="test",
+            source=str(test_source),
+            values=aligned["test"],
+            spread=_style.spread_of(aligned, "test", aligned["test"]),
+            **common,
         ),
     ]
 
@@ -202,11 +233,13 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
         return labels[1]
     if by == "depth":
         return _depth_of(item["aligned"])
+    if by == "season":
+        return season_of(item["aligned"])
     if by == "comparison":
         return index
     raise ValueError(
         f"cannot facet a series by {by!r}; expected one of variable, source, "
-        "reference, depth, comparison."
+        "reference, depth, season, comparison."
     )
 
 
@@ -344,13 +377,29 @@ def free_corners(lines) -> list[str]:
 
 
 def _metrics_text(items, metric_keys, *, prefix: bool) -> str:
-    """Return the box's text: a line per comparison, prefixed when there are several."""
+    """Return the box's text: a line per distinct comparison, prefixed if several.
+
+    Deduped by the *identity* of each item's ``metrics`` object, not by the
+    rendered text: several items can share one comparison's metrics -- a season
+    axis fanned into several profile items, most concretely
+    (:func:`ocean_skill.plot.profile.fan_season`, which copies an item's
+    ``metrics`` by reference into every fanned slice) -- and those draw their
+    row once, not once per item. Two genuinely different comparisons whose
+    numbers happen to coincide are a different ``metrics`` object each and are
+    never merged just because their rendered rows read the same.
+    """
     from ocean_skill.plot.matplotlib_renderer import _metrics_text as one_row
     from ocean_skill.plot.summary import pretty_level
 
     lines = []
+    seen: set[int] = set()
     for item in items:
-        text = one_row(item.get("metrics"), metric_keys).replace("\n", " ")
+        metrics = item.get("metrics")
+        key = id(metrics) if metrics is not None else id(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        text = one_row(metrics, metric_keys).replace("\n", " ")
         if not text:
             continue
         if prefix:
@@ -446,11 +495,16 @@ def compose(
         # corner judged empty by the primary lines is where the secondary ones run.
         specs = [line.spec for line in primary + second]
         box = _metrics_text([i for _, i in group], metric_keys, prefix=len(group) > 1)
-        if len(group) > METRICS_BOX_MAX_ROWS and box:
+        # Row count, not item count: several items can share one comparison's
+        # metrics (a fanned season axis, most concretely) and dedup to one row
+        # in _metrics_text -- counting items here would drop a box that, once
+        # deduped, easily fits.
+        row_count = box.count("\n") + 1 if box else 0
+        if row_count > METRICS_BOX_MAX_ROWS:
             warnings.warn(
-                f"{len(group)} comparisons share a panel, so their statistics box "
-                "would be a table drawn on a figure; it is left off. Every number is "
-                "in the metrics CSV (ComparisonSet.save) either way.",
+                f"{row_count} distinct stats rows would share one panel, which "
+                "would be a table drawn on a figure; it is left off. Every number "
+                "is in the metrics CSV (ComparisonSet.save) either way.",
                 stacklevel=_stacklevel.find(),
             )
             box = ""

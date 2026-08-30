@@ -19,7 +19,9 @@ import pytest
 import xarray as xr
 
 from ocean_skill.operators import (
+    DEFAULT_SEASONS,
     DERIVED,
+    SPREAD_COORD,
     aggregate,
     combine,
     point_in_spec,
@@ -133,6 +135,148 @@ def test_groupby_gives_a_climatology(marbl, group, size):
     out = aggregate(marbl["spChl"], {"time": {"groupby": group, "reduce": "mean"}})
     assert out.sizes[group] == size
     assert "time" not in out.dims
+
+
+# -- season groupby and spread -------------------------------------------------
+
+
+def test_season_groupby_defaults_to_calendar_order(marbl):
+    """xarray's own ``groupby("time.season")`` sorts alphabetically (DJF, JJA, MAM,
+    SON); routing through ``SeasonGrouper`` with :data:`DEFAULT_SEASONS` fixes that.
+    """
+    out = aggregate(marbl["spChl"], {"time": {"groupby": "season", "reduce": "mean"}})
+    assert list(out.season.values) == list(DEFAULT_SEASONS)
+
+
+def test_custom_seasons_group_their_own_months(marbl):
+    out = aggregate(
+        marbl["spChl"],
+        {
+            "time": {
+                "groupby": "season",
+                "seasons": ["JFMA", "MJJA", "SOND"],
+                "reduce": "mean",
+            }
+        },
+    )
+    assert list(out.season.values) == ["JFMA", "MJJA", "SOND"]
+
+
+@pytest.mark.parametrize("bad", ["XYZ", "JFD", "J", "", "a" * 13])
+def test_invalid_season_string_is_refused_with_a_clear_error(marbl, bad):
+    with pytest.raises(ValueError):
+        aggregate(
+            marbl["spChl"],
+            {"time": {"groupby": "season", "seasons": [bad], "reduce": "mean"}},
+        )
+
+
+def test_duplicate_seasons_are_refused(marbl):
+    with pytest.raises(ValueError, match="repeats"):
+        aggregate(
+            marbl["spChl"],
+            {
+                "time": {
+                    "groupby": "season",
+                    "seasons": ["DJF", "DJF"],
+                    "reduce": "mean",
+                }
+            },
+        )
+
+
+def test_seasons_key_requires_groupby_season(marbl):
+    with pytest.raises(ValueError, match="'seasons'"):
+        aggregate(
+            marbl["spChl"],
+            {"time": {"groupby": "month", "seasons": ["DJF"], "reduce": "mean"}},
+        )
+
+
+def test_a_season_with_no_data_is_dropped_with_a_warning():
+    """The verified xarray crash this works around: SeasonGrouper raises
+    CoordinateValidationError if a requested season has zero months present."""
+    time = xr.date_range("2000-06-01", "2000-08-31", freq="D")
+    da = xr.DataArray(np.ones(len(time)), coords={"time": time}, dims="time")
+    with pytest.warns(UserWarning, match="have no data"):
+        out = aggregate(da, {"time": {"groupby": "season", "reduce": "mean"}})
+    assert list(out.season.values) == ["JJA"]
+
+
+def test_all_requested_seasons_missing_raises_keyerror():
+    time = xr.date_range("2000-06-01", "2000-08-31", freq="D")
+    da = xr.DataArray(np.ones(len(time)), coords={"time": time}, dims="time")
+    with pytest.raises(KeyError, match="none of the requested seasons"):
+        aggregate(
+            da, {"time": {"groupby": "season", "seasons": ["DJF"], "reduce": "mean"}}
+        )
+
+
+def test_an_incomplete_season_warns_naming_the_missing_month():
+    time = xr.date_range("2000-01-01", "2000-02-28", freq="D")  # Jan + Feb, no Dec
+    da = xr.DataArray(np.ones(len(time)), coords={"time": time}, dims="time")
+    with pytest.warns(UserWarning, match="missing December"):
+        out = aggregate(
+            da, {"time": {"groupby": "season", "seasons": ["DJF"], "reduce": "mean"}}
+        )
+    assert list(out.season.values) == ["DJF"]
+
+
+def test_a_cftime_axis_groups_by_season():
+    time = xr.date_range("2012-01-01", periods=12, freq="MS", use_cftime=True)
+    da = xr.DataArray(np.arange(12, dtype=float), coords={"time": time}, dims="time")
+    out = aggregate(da, {"time": {"groupby": "season", "reduce": "mean"}})
+    assert list(out.season.values) == list(DEFAULT_SEASONS)
+
+
+def test_an_undecoded_time_axis_gives_a_decode_times_error():
+    da = xr.DataArray(np.arange(5.0), coords={"time": np.arange(5.0)}, dims="time")
+    with pytest.raises(ValueError, match="decode_times=False"):
+        aggregate(da, {"time": {"groupby": "season", "reduce": "mean"}})
+
+
+def test_spread_rides_as_a_coordinate(marbl):
+    out = aggregate(
+        marbl["spChl"],
+        {"time": {"groupby": "season", "reduce": "mean", "spread": "std"}},
+    )
+    assert SPREAD_COORD in out.coords
+    assert out.coords[SPREAD_COORD].dims == out.dims
+    assert out.coords[SPREAD_COORD].attrs["statistic"] == "std"
+    assert out.coords[SPREAD_COORD].attrs.get("units") == "mg/m^3"
+    from xarray.groupers import SeasonGrouper
+
+    expected = marbl["spChl"].groupby(
+        {"time": SeasonGrouper(list(DEFAULT_SEASONS))}
+    ).std("time")
+    assert np.allclose(out.coords[SPREAD_COORD].values, expected.values)
+
+
+def test_spread_survives_selecting_one_season(marbl):
+    out = aggregate(
+        marbl["spChl"],
+        {"time": {"groupby": "season", "reduce": "mean", "spread": "std"}},
+    )
+    one = out.sel(season="JJA")
+    assert SPREAD_COORD in one.coords
+    assert one.coords[SPREAD_COORD].ndim == one.ndim
+
+
+def test_spread_with_an_unknown_statistic_is_refused(marbl):
+    with pytest.raises(KeyError, match="unknown 'spread' reduction"):
+        aggregate(
+            marbl["spChl"],
+            {"time": {"groupby": "season", "reduce": "mean", "spread": "bogus"}},
+        )
+
+
+def test_spread_works_with_resample_and_plain_reduce(marbl):
+    resampled = aggregate(
+        marbl["spChl"], {"time": {"resample": "3MS", "reduce": "mean", "spread": "std"}}
+    )
+    assert SPREAD_COORD in resampled.coords
+    plain = aggregate(marbl["spChl"], {"time": {"reduce": "mean", "spread": "std"}})
+    assert SPREAD_COORD in plain.coords
 
 
 def test_quantile_is_not_broken_by_positional_dispatch(marbl):

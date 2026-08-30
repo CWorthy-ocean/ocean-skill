@@ -135,7 +135,17 @@ class PlotSpec:
         :mod:`ocean_skill.plot.style` as the marker channel, in the same slot
         ``series`` gives its own ``depth``) -- several casts at one place are
         several items, not one item with a surviving time axis, exactly as
-        ``series`` fans a surviving depth axis into one item per level. Built by
+        ``series`` fans a surviving depth axis into one item per level. A
+        surviving ``season`` axis (``aggregate={"time": {"groupby": "season",
+        ...}}``) is fanned the same way, into one item per season in
+        coordinate (chronological) order, by
+        :func:`ocean_skill.plot.profile.fan_season` — the one call site both
+        :meth:`ocean_skill.field.Field.as_item` and
+        :meth:`ocean_skill.comparison.Comparison.as_item` share, so a fanned
+        item's own ``season`` also rides as a scalar coordinate, read the same
+        way ``time`` is. A ``spread`` coordinate (``aggregate={..., "spread":
+        "std"}``) rides alongside the value through the same fan and draws as a
+        shaded mean±spread band, in both renderers, when present. Built by
         :meth:`ocean_skill.field.Field.as_item` (a model column at one point) and
         :meth:`ocean_skill.comparison.Comparison.as_item` (``over=`` a vertical
         axis, at a station).

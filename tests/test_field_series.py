@@ -48,6 +48,22 @@ def _gridded_map(nt: int = 3):
     )
 
 
+def _point_with_season(depths=(0.0, 50.0, 100.0), seasons=("DJF", "MAM", "JJA", "SON")):
+    """A point profile whose time axis was reduced to a season groupby -- the
+    shape ``operators.aggregate({"time": {"groupby": "season", ...}})`` leaves
+    standing on a model column."""
+    depth = np.array(depths)
+    values = 8.0 + np.arange(len(seasons))[:, None] + 0.01 * depth[None, :]
+    da = xr.DataArray(
+        values,
+        dims=("season", "depth"),
+        coords={"season": list(seasons), "depth": depth},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    )
+    return da.assign_coords(lon=-144.245, lat=49.978)
+
+
 def _point_with_depth(n: int = 6, depths=(0.0, 50.0, 100.0)):
     """A point whose vertical axis also survives -- one line per level."""
     time = pd.date_range("2015-01-01", periods=n, freq="MS")
@@ -180,6 +196,39 @@ def test_a_non_vertical_extra_axis_is_refused(stub):
     stub(_point_with_depth().expand_dims(member=[1, 2]))
     with pytest.raises(ValueError, match=r"\['member'\]"):
         _make().plot()
+
+
+# -- a surviving season axis fans into one profile item per season ---------------------
+
+
+def test_a_seasonal_point_column_is_a_profile_fanned_per_season(stub):
+    """The one exception to _profile_items' "no axis beyond depth" rule: a
+    surviving season axis fans into one item per season, in coordinate
+    (chronological) order -- the same idiom as fanning depth levels for a
+    series."""
+    stub(_point_with_season())
+    f = _make()
+    assert not f.is_series
+    assert f.is_profile
+    assert f.family == "profile"
+    items = f._profile_items()
+    assert len(items) == 4
+    assert [item["aligned"]["season"].item() for item in items] == [
+        "DJF",
+        "MAM",
+        "JJA",
+        "SON",
+    ]
+    for item in items:
+        assert "season" not in item["aligned"].dims  # scalar, not a surviving axis
+        assert list(item["aligned"]["value"].dims) == ["depth"]
+
+
+def test_a_non_season_extra_axis_on_a_profile_is_still_refused(stub):
+    """Fanning is season-specific -- any other extra axis keeps today's error."""
+    stub(_point_with_season().rename(season="month"))
+    with pytest.raises(ValueError, match=r"\['month'\]"):
+        _make()._profile_items()
 
 
 # -- .movie() has nothing to play for a point series ------------------------------------

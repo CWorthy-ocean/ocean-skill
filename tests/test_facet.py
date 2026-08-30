@@ -161,6 +161,32 @@ def test_the_panels_say_which_reduction_made_them(daily):
     assert facet_labels(climatology["month"])[:2] == ["Jan", "Feb"]
 
 
+def test_a_season_groupby_labels_panels_in_calendar_order():
+    """xarray's own groupby("time.season") sorts alphabetically (DJF, JJA, MAM,
+    SON); routing through SeasonGrouper with the default season list fixes the
+    facet order to calendar order instead -- and a custom seasons= list keeps
+    whatever order it was given. A full two years (not the six-month ``daily``
+    fixture, which does not cover every season) so every default season has
+    data and none is dropped."""
+    from ocean_skill.plot.matplotlib_renderer import facet_labels
+
+    two_years = _daily(731)
+    seasonal = aggregate(two_years, {"time": {"groupby": "season", "reduce": "mean"}})
+    assert facet_labels(seasonal["season"]) == ["DJF", "MAM", "JJA", "SON"]
+
+    custom = aggregate(
+        two_years,
+        {
+            "time": {
+                "groupby": "season",
+                "seasons": ["JFMA", "MJJA", "SOND"],
+                "reduce": "mean",
+            }
+        },
+    )
+    assert facet_labels(custom["season"]) == ["JFMA", "MJJA", "SOND"]
+
+
 def test_a_level_labels_attr_wins_the_row_labels():
     """A mixed vertical selection says its ``z=0.0`` row is the surface, not 0 m.
 
@@ -200,6 +226,16 @@ def test_both_renderers_title_submonthly_panels_by_day(daily):
     days = select(daily, {"time": slice("2012-01-16", "2012-01-18")})
     spec = PlotSpec(family="field_facet", items=[_item(days, "time")])
     expected = {"2012-01-16", "2012-01-17", "2012-01-18"}
+    assert set(_mpl_titles(render(spec))) == expected
+    assert set(_hv_titles(render(spec, renderer="holoviews"))) == expected
+
+
+def test_both_renderers_title_season_panels_the_same_way():
+    """The season labels reach the page identically in both renderers -- both
+    read facet_labels() (matplotlib_renderer.py), so the two cannot disagree."""
+    seasonal = aggregate(_daily(731), {"time": {"groupby": "season", "reduce": "mean"}})
+    spec = PlotSpec(family="field_facet", items=[_item(seasonal, "season")])
+    expected = {"DJF", "MAM", "JJA", "SON"}
     assert set(_mpl_titles(render(spec))) == expected
     assert set(_hv_titles(render(spec, renderer="holoviews"))) == expected
 

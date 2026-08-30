@@ -22,8 +22,11 @@ import xarray as xr
 from ocean_skill import comparison
 from ocean_skill.comparison import (
     _display_time,
+    _fanned_season_select,
     _fanned_time_select,
+    _has_season_entry,
     _has_time_entry,
+    _merged_season_aggregate,
     _merged_time_aggregate,
     _normalize_time_value,
     _normalize_times,
@@ -60,6 +63,38 @@ def test_a_dict_missing_resample_or_reduce_is_refused():
 def test_a_groupby_dict_is_refused_as_a_climatology_not_a_fan():
     with pytest.raises(ValueError, match="climatology"):
         _normalize_times({"groupby": "month", "reduce": "mean"})
+
+
+def test_a_groupby_season_dict_is_the_seasons_form():
+    from ocean_skill.operators import DEFAULT_SEASONS
+
+    assert _normalize_times({"groupby": "season", "reduce": "mean"}) == (
+        "seasons",
+        {"groupby": "season", "reduce": "mean", "seasons": list(DEFAULT_SEASONS)},
+    )
+
+
+def test_custom_seasons_are_validated_and_order_preserved():
+    kind, spec = _normalize_times(
+        {"groupby": "season", "reduce": "mean", "seasons": ["jfma", "mjja", "sond"]}
+    )
+    assert kind == "seasons"
+    assert spec["seasons"] == ["JFMA", "MJJA", "SOND"]
+
+
+def test_seasons_form_requires_reduce():
+    with pytest.raises(ValueError, match="needs 'reduce'"):
+        _normalize_times({"groupby": "season"})
+
+
+def test_seasons_form_refuses_resample_alongside():
+    with pytest.raises(ValueError, match="different ways to fan"):
+        _normalize_times({"groupby": "season", "resample": "1MS", "reduce": "mean"})
+
+
+def test_an_invalid_season_fails_before_any_source_is_opened():
+    with pytest.raises(ValueError, match="not a run of consecutive months"):
+        _normalize_times({"groupby": "season", "reduce": "mean", "seasons": ["XYZ"]})
 
 
 def test_a_pair_spec_shaped_dict_is_refused():
@@ -131,6 +166,13 @@ def test_display_time_reads_the_test_side_of_a_pair_spec():
     assert _display_time(pair) == "2010-01"
 
 
+def test_selected_time_reads_a_scalar_season_first():
+    """A season fan's distinguishing identity, even alongside a time window that
+    only narrows which years feed the climatology."""
+    assert _selected_time({"season": "JJA"}) == "JJA"
+    assert _selected_time({"season": "JJA", "time": {"min": "2010", "max": "2012"}}) == "JJA"
+
+
 # -- _fanned_time_select: strip-then-write-back, like _fanned_select -------------
 
 
@@ -173,6 +215,74 @@ def test_merged_time_aggregate_folds_into_both_sides_of_a_pair_spec():
         "test": {"Z": "mean", "time": reduction},
         "reference": {"time": reduction},
     }
+
+
+# -- _fanned_season_select / _merged_season_aggregate / _has_season_entry --------
+
+
+def test_has_season_entry_reads_either_side_of_a_pair_spec():
+    assert _has_season_entry({"season": "JJA"}) is True
+    assert _has_season_entry({"depth": 50}) is False
+    assert _has_season_entry({"test": {"season": "JJA"}, "reference": {}}) is True
+    assert _has_season_entry({"test": {}, "reference": {}}) is False
+
+
+def test_fanned_season_select_writes_a_flat_select():
+    assert _fanned_season_select({"depth": 50}, "JJA") == {"depth": 50, "season": "JJA"}
+
+
+def test_fanned_season_select_writes_both_sides_of_a_pair_spec():
+    sel = {"test": {"depth": 50}, "reference": {}}
+    assert _fanned_season_select(sel, "JJA") == {
+        "test": {"depth": 50, "season": "JJA"},
+        "reference": {"season": "JJA"},
+    }
+
+
+def test_fanned_season_select_keeps_a_time_window():
+    """Unlike the bins form's strip-then-replace, a season select narrows an axis
+    the aggregate creates -- an existing time entry (which years feed the
+    climatology) is orthogonal to it and survives untouched."""
+    sel = {"time": {"min": "2010", "max": "2012"}}
+    assert _fanned_season_select(sel, "JJA") == {
+        "time": {"min": "2010", "max": "2012"},
+        "season": "JJA",
+    }
+
+
+def test_merged_season_aggregate_narrows_to_one_season_per_comparison():
+    entry = {"groupby": "season", "reduce": "mean", "seasons": ["DJF", "JJA"]}
+    assert _merged_season_aggregate(None, entry, "JJA") == {
+        "time": {"groupby": "season", "reduce": "mean", "seasons": ["JJA"]}
+    }
+    assert _merged_season_aggregate({"Z": "mean"}, entry, "JJA") == {
+        "Z": "mean",
+        "time": {"groupby": "season", "reduce": "mean", "seasons": ["JJA"]},
+    }
+
+
+def test_merged_season_aggregate_keeps_groupby_unlike_the_bins_form():
+    """The bins form drops 'resample' because select already isolates the bin;
+    a season select narrows an axis the aggregate itself has to create, so
+    'groupby' has to survive for that axis to exist at all."""
+    entry = {"groupby": "season", "reduce": "mean", "seasons": ["DJF"]}
+    reduction = _merged_season_aggregate(None, entry, "DJF")["time"]
+    assert reduction["groupby"] == "season"
+
+
+def test_merged_season_aggregate_folds_into_both_sides_of_a_pair_spec():
+    entry = {"groupby": "season", "reduce": "mean", "seasons": ["JJA"]}
+    pair = {"test": {"Z": "mean"}, "reference": None}
+    assert _merged_season_aggregate(pair, entry, "JJA") == {
+        "test": {"Z": "mean", "time": {"groupby": "season", "reduce": "mean", "seasons": ["JJA"]}},
+        "reference": {"time": {"groupby": "season", "reduce": "mean", "seasons": ["JJA"]}},
+    }
+
+
+def test_merged_season_aggregate_preserves_spread():
+    entry = {"groupby": "season", "reduce": "mean", "spread": "std", "seasons": ["JJA"]}
+    reduction = _merged_season_aggregate(None, entry, "JJA")["time"]
+    assert reduction["spread"] == "std"
 
 
 # -- _time_bins / _time_select_value: reading a source's own time axis -----------
@@ -394,6 +504,151 @@ def test_times_none_leaves_the_fan_and_its_labels_unchanged(stubbed_fan):
         reference=["obs"], test=["model"], variables=["temperature"], depths=(50,)
     )
     assert stubbed_fan == [({"depth": 50}, None, "temperature")]
+
+
+# -- compare()'s times= fan: seasons form -----------------------------------------
+
+
+def test_seasons_fan_one_comparison_per_default_season_in_calendar_order(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        times={"groupby": "season", "reduce": "mean"},
+    )
+    assert [label for _, _, label in stubbed_fan] == ["DJF", "MAM", "JJA", "SON"]
+    for season, (sel, agg, _label) in zip(
+        ["DJF", "MAM", "JJA", "SON"], stubbed_fan, strict=True
+    ):
+        assert sel == {"depth": "surface", "season": season}
+        assert agg == {
+            "time": {"groupby": "season", "reduce": "mean", "seasons": [season]}
+        }
+
+
+def test_custom_seasons_fan_in_given_order(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        times={"groupby": "season", "seasons": ["JFMA", "MJJA", "SOND"], "reduce": "mean"},
+    )
+    assert [label for _, _, label in stubbed_fan] == ["JFMA", "MJJA", "SOND"]
+
+
+def test_a_single_season_earns_no_label(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        times={"groupby": "season", "seasons": ["JJA"], "reduce": "mean"},
+    )
+    assert [label for _, _, label in stubbed_fan] == ["temperature"]
+
+
+def test_seasons_fan_writes_both_sides_of_a_pair_spec_select(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        select={"test": {"depth": 50}, "reference": {}},
+        times={"groupby": "season", "seasons": ["JJA"], "reduce": "mean"},
+    )
+    sel, _agg, _label = stubbed_fan[0]
+    # depths=/select= sugar (unrelated to times=) already writes the depth it
+    # derives into both sides, same as with no times= involved at all.
+    assert sel == {
+        "test": {"depth": 50, "season": "JJA"},
+        "reference": {"depth": 50, "season": "JJA"},
+    }
+
+
+def test_a_select_season_entry_is_replaced_with_a_warning(stubbed_fan):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=["temperature"],
+            select={"season": "DJF"},
+            times={"groupby": "season", "seasons": ["JJA"], "reduce": "mean"},
+        )
+    assert any("select= 'season' entry" in str(w.message) for w in caught)
+    sel, _agg, _label = stubbed_fan[0]
+    assert sel == {"depth": "surface", "season": "JJA"}
+
+
+def test_seasons_fan_and_aggregate_time_entry_conflict():
+    with pytest.raises(ValueError, match="got both times="):
+        comparison.compare(
+            reference="dummy_ref",
+            test="dummy_test",
+            variables=["temperature"],
+            times={"groupby": "season", "reduce": "mean"},
+            aggregate={"time": "mean"},
+        )
+
+
+def test_seasons_fan_and_over_time_conflict():
+    with pytest.raises(ValueError, match="got both times="):
+        comparison.compare(
+            reference="dummy_ref",
+            test="dummy_test",
+            variables=["temperature"],
+            times={"groupby": "season", "reduce": "mean"},
+            over="time",
+        )
+
+
+def test_a_dataless_season_is_skipped_not_fatal():
+    """One season's aggregate raises KeyError (operators' all-missing case); the
+    others still form, matching a missing-variable/missing-bin skip."""
+    from ocean_skill.comparison import select_for
+
+    formed = []
+    declared = {"model": {"variables": []}, "obs": {"variables": []}}
+
+    def fake_align(self, refresh=False):
+        if select_for(self.select, "test").get("season") == "DJF":
+            raise KeyError("no data")
+        formed.append(select_for(self.select, "test").get("season"))
+
+    with (
+        mock.patch(
+            "ocean_skill.catalog.resolve", lambda n: mock.Mock(metadata=declared[n])
+        ),
+        mock.patch.object(comparison.Comparison, "align", fake_align),
+    ):
+        out = comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=["temperature"],
+            times={"groupby": "season", "reduce": "mean"},
+        )
+    assert formed == ["MAM", "JJA", "SON"]
+    assert len(out) == 3
+
+
+def test_a_dataless_season_reraises_with_skip_missing_false():
+    declared = {"model": {"variables": []}, "obs": {"variables": []}}
+
+    def fake_align(self, refresh=False):
+        raise KeyError("no data")
+
+    with (
+        mock.patch(
+            "ocean_skill.catalog.resolve", lambda n: mock.Mock(metadata=declared[n])
+        ),
+        mock.patch.object(comparison.Comparison, "align", fake_align),
+    ):
+        with pytest.raises(KeyError):
+            comparison.compare(
+                reference=["obs"],
+                test=["model"],
+                variables=["temperature"],
+                times={"groupby": "season", "reduce": "mean"},
+                skip_missing=False,
+            )
 
 
 # -- compare()'s times= fan: dict (bins) form -------------------------------------
@@ -698,6 +953,20 @@ def test_repr_omits_time_when_none_was_selected():
     c = comparison.Comparison(reference="obs", test="model", variable=TEMPERATURE)
     assert "@ surface" in repr(c)
     assert "2010" not in repr(c)
+
+
+def test_metrics_reports_the_season(stub_lane):
+    c = comparison.Comparison(
+        reference="obs", test="model", variable=TEMPERATURE, select={"season": "JJA"}
+    )
+    assert c.metrics()["time"] == "JJA"
+
+
+def test_repr_names_the_season():
+    c = comparison.Comparison(
+        reference="obs", test="model", variable=TEMPERATURE, select={"season": "JJA"}
+    )
+    assert "@ JJA" in repr(c)
 
 
 def test_pooling_names_the_month_once_it_is_the_only_thing_that_varies(stub_lane):
