@@ -969,6 +969,56 @@ def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
     )
 
 
+def _sample_test_at_instant(test, reference, over):
+    """Sample a time-varying test lane at a single-instant reference's own time.
+
+    A ``profile`` reference is one CTD cast: a depth column at a single instant, its
+    time a *scalar* coordinate rather than an axis (see
+    :func:`ocean_skill.tabular._profile_dataset`). Scored down depth (``over="Z"``),
+    the model lane it is compared against still carries its whole time axis, and a
+    pointwise metric has nothing to reduce it with -- the vertical score keeps depth,
+    not time, so :func:`_require_2d` would refuse the leftover axis. The pairing a
+    profile comparison actually means is the model snapshot nearest the cast, so that
+    is what this selects, collapsing the test's time to that one instant.
+
+    Deliberately narrow -- returns the test unchanged unless every part holds:
+
+    * the reference is a **point/profile** (:func:`point_of`). A gridded reference's
+      scalar time is nominal (an annual climatology stamped ``2000-01-01``), not an
+      instant to snap a model to, and its own leftover-axis error still stands.
+    * the reference's time is a **scalar** (0-D) coordinate, not a time axis it is
+      being matched on.
+    * the test's own time axis is **not** the one being scored ``over`` -- that is the
+      mooring recipe, where :func:`match_axis` already owns the time pairing.
+
+    The chosen snapshot's stamp and its distance from the cast are recorded on the
+    result's attrs, the way :func:`sample_at` records its spatial offset: a large gap
+    (the model run barely covers the cast date) is the caller's to judge, not this to
+    refuse.
+    """
+    if point_of(reference) is None:
+        return test
+    rtime = find_coord(reference, "time")
+    if rtime is None or rtime.ndim != 0:
+        return test
+    from ocean_skill.operators import resolve_dim
+
+    tdim = resolve_dim(test, "T")
+    if tdim is None or tdim not in test.dims:
+        return test
+    if over is not None and tdim == over:
+        return test  # scored over time -- match_axis owns this pairing
+    picked = test.sel({tdim: rtime.values}, method="nearest")
+    chosen = picked[tdim].values if tdim in picked.coords else None
+    if chosen is not None:
+        picked.attrs["test_time"] = str(chosen)
+        offset = (np.datetime64(chosen) - np.datetime64(rtime.values)) / np.timedelta64(
+            1, "h"
+        )
+        picked.attrs["time_to_reference_hours"] = float(np.abs(offset))
+    return picked
+
+
 # ------------------------------------------------------------------- axis alignment
 
 #: How much finer one lane must be before its steps are *averaged into* the other's bins
@@ -2006,6 +2056,12 @@ def align(
 
     keep = () if over is None else (over,)
     if not is_section:
+        # A profile reference is one cast at one instant, so a time-varying test lane
+        # is sampled at that instant before the dimensionality check -- otherwise its
+        # leftover time axis (which the vertical score keeps depth, not time, so
+        # nothing has reduced) is refused below. A no-op for every other shape (see
+        # _sample_test_at_instant).
+        test = _sample_test_at_instant(test, reference, over)
         # A section's own shape (vertical + along-path) is validated with its own,
         # more specific messages inside _align_along_path instead -- _require_2d's
         # "beyond its horizontal axes" reading does not apply to it.
@@ -2216,7 +2272,7 @@ def _align_at_point(
     out.attrs["station_lon"], out.attrs["station_lat"] = station
     out.attrs["point_method"] = test.attrs.get("point_method", method)
     out.attrs["lon_convention"] = convention
-    for key in ("nearest_distance_km", "cell_km"):
+    for key in ("nearest_distance_km", "cell_km", "test_time", "time_to_reference_hours"):
         if key in test.attrs:
             out.attrs[key] = test.attrs[key]
     if over is not None:
@@ -2461,12 +2517,24 @@ def _align_along_path(
 
 
 def _rename_position(da, prefix: str):
-    """Rename a sampled lane's own lon/lat so they can sit beside the station's."""
+    """Rename a sampled lane's own lon/lat (and cast-instant time) beside the station's.
+
+    lon/lat always: the sampled cell sits at its own position, not the station's, and
+    the two must coexist for the metrics to report the offset. Time only when it is a
+    *scalar* coordinate -- a profile test sampled at the cast instant
+    (:func:`_sample_test_at_instant`) carries a snapshot stamp that differs from the
+    reference's cast stamp and would collide under one ``time`` name. A shared time
+    *dimension* (the mooring recipe, both lanes on one matched axis) is left untouched:
+    renaming it would split the very axis the pair was matched onto.
+    """
     renames = {
         name: f"{prefix}_{axis}"
         for name, axis in ((_lon_name(da), "lon"), (_lat_name(da), "lat"))
         if name is not None
     }
+    tname = _time_name(da)
+    if tname is not None and tname in da.coords and tname not in da.dims:
+        renames[tname] = f"{prefix}_time"
     return da.rename(renames) if renames else da
 
 
