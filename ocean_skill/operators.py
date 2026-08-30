@@ -45,8 +45,8 @@ import warnings
 from typing import Any
 
 __all__ = [
-    "CALCULATOR_INPUTS",
     "CALCULATORS",
+    "CALCULATOR_INPUTS",
     "COMBINERS",
     "DERIVED",
     "REDUCERS",
@@ -1074,14 +1074,29 @@ def aggregate(da, spec: dict[str, Any] | None):
 
         {"time": "mean"}
         {"time": {"groupby": "month", "reduce": "mean"}}     # climatology: 12 fields
+        {"time": {"groupby": "season", "reduce": "mean"}}  # DJF/MAM/JJA/SON, in order
+        {"time": {"groupby": "season", "seasons": ["JFMA", "MJJA", "SOND"],
+                   "reduce": "mean"}}
         {"time": {"resample": "1MS", "reduce": "mean"}}      # consecutive months
         {"time": {"reduce": "quantile", "q": 0.9}}
         {"depth": {"reduce": "integrate"}}
+        {"time": {"groupby": "season", "reduce": "mean", "spread": "std"}}  # mean+std
 
     ``groupby`` and ``resample`` both *keep* an axis rather than collapsing it, and
     they keep different ones — see this module's docstring. Setting both is an error
     rather than a precedence rule, since either alone is a complete answer and
     silently honouring one would give a plausible figure of the wrong thing.
+
+    ``groupby: "season"`` defaults to the standard DJF/MAM/JJA/SON, in that
+    (calendar, not alphabetical) order. A ``seasons`` list gives a custom
+    definition instead — any number of month-initial strings, e.g. ``["JFMA",
+    "MJJA", "SOND"]`` for three, wrapping December to January is fine (``"NDJ"``).
+    A requested season with no data in ``da`` is dropped with a warning (all of
+    them missing raises instead); a season present but missing part of its months
+    warns as well. ``spread`` names a second reduction (usually ``"std"``) computed
+    over the same groups as ``reduce`` and attached as a same-shaped ``"spread"``
+    coordinate on the result, riding alongside the value through any later
+    ``select``/``sel`` or vertical interpolation.
 
     **Both horizontal axes reduced by a plain "mean" together** is one joint
     area-weighted spatial mean rather than two sequential unweighted ones — see
@@ -1209,12 +1224,149 @@ def _warn_short_bins(coord, freq: str, dim: str) -> None:
     )
 
 
+#: Default season definition, in calendar order. ``groupby: "season"`` uses these
+#: unless a spec sets ``seasons`` explicitly. Routing through
+#: :class:`~xarray.groupers.SeasonGrouper` (rather than xarray's own
+#: ``groupby("time.season")``) is what pins this order: xarray's own accessor
+#: sorts the result alphabetically (DJF, JJA, MAM, SON), which reads out of
+#: calendar order in a panel title or a legend.
+DEFAULT_SEASONS: tuple[str, ...] = ("DJF", "MAM", "JJA", "SON")
+
+#: Name of the non-dimension coordinate a ``spread`` reduction rides on. Not an
+#: attribute -- an attribute cannot hold an array and would not survive a zarr
+#: round trip -- and not a second data variable, either: a coordinate slices and
+#: interpolates *with* the value it describes, for free, which is what lets a
+#: spread survive ``.sel(season=...)`` and vertical interpolation onto a
+#: reference's own levels with no extra code anywhere downstream.
+SPREAD_COORD = "spread"
+
+#: The twelve months' initials, in calendar order. Used to validate a season
+#: string as a genuine run of consecutive months (doubled below so a wraparound
+#: season like ``"NDJ"`` is a plain substring search).
+_MONTH_WHEEL = "JFMAMJJASOND"
+
+
+def _season_months(season: str) -> tuple[int, ...]:
+    """Return the 1-12 month numbers named by a season string like ``"DJF"``.
+
+    Deliberately stricter than :class:`~xarray.groupers.SeasonGrouper` itself,
+    which resolves a season from only its first two letters and its length --
+    ``"DJQ"`` silently resolves to December/January/February there, the third
+    letter never checked. Requiring every letter to spell out a real run of
+    consecutive months (December-to-January wraparound allowed, e.g. ``"NDJ"``)
+    means a typo fails here, with the season named, instead of downstream as a
+    bare ``KeyError`` naming a two-letter digram -- or not failing at all.
+    """
+    if not isinstance(season, str) or not season:
+        raise ValueError(f"season must be a non-empty string, got {season!r}")
+    letters = season.upper()
+    if len(letters) < 2:
+        raise ValueError(
+            f"season {letters!r} names only one month, which is ambiguous "
+            "(several months share an initial); use groupby: 'month' for a "
+            "single month, or spell out the season, e.g. 'DJF'."
+        )
+    if len(letters) > 12:
+        raise ValueError(f"season {letters!r} names more than 12 months")
+    start = (_MONTH_WHEEL * 2).find(letters)
+    if start == -1:
+        raise ValueError(
+            f"season {letters!r} is not a run of consecutive months' initials "
+            f"({_MONTH_WHEEL}, wrapping December to January is fine, e.g. "
+            "'NDJ') -- check for a typo."
+        )
+    return tuple((start + i) % 12 + 1 for i in range(len(letters)))
+
+
+def _validate_seasons(seasons: Any) -> list[str]:
+    """Validate and normalize a ``seasons`` list, preserving the caller's order.
+
+    Order matters: :class:`~xarray.groupers.SeasonGrouper` keeps whatever order
+    it is given, which is how :data:`DEFAULT_SEASONS` fixes the panel/legend
+    order to calendar order instead of xarray's own alphabetical
+    ``groupby("time.season")`` sort.
+    """
+    if isinstance(seasons, str) or not hasattr(seasons, "__iter__"):
+        raise ValueError(
+            f"'seasons' must be a list of season strings, got {seasons!r}"
+        )
+    seasons = [str(s).upper() for s in seasons]
+    if not seasons:
+        raise ValueError("'seasons' must not be empty")
+    for season in seasons:
+        _season_months(season)  # raises with the season named, on a bad string
+    seen: set[str] = set()
+    duplicates = sorted({s for s in seasons if s in seen or seen.add(s)})
+    if duplicates:
+        raise ValueError(
+            f"'seasons' repeats {duplicates!r} -- each season names the group "
+            "the output is indexed under, so a duplicate would collide."
+        )
+    return seasons
+
+
+def _filter_seasons(seasons: list[str], coord, dim: str) -> list[str]:
+    """Drop requested seasons with no data, warning about what was dropped.
+
+    :class:`~xarray.groupers.SeasonGrouper` raises a
+    ``CoordinateValidationError`` when a requested season has zero months
+    present -- there is no group to reduce, but it still tries to size an axis
+    entry for it. Reading the months present is coordinate-only, like
+    :func:`_bin_counts`: cheap enough to run unconditionally, even against a
+    lazy multi-file model run.
+    """
+    import calendar
+
+    import numpy as np
+
+    try:
+        months_present = {int(m) for m in np.unique(coord.dt.month.values)}
+    except (AttributeError, TypeError) as err:
+        raise ValueError(
+            f"{dim!r}'s time axis is not a decoded calendar axis, so a season "
+            "groupby cannot read months off it. This is usually a climatology "
+            "read with decode_times=False -- give it a fixed select= instead."
+        ) from err
+    kept, dropped, incomplete = [], [], []
+    for season in seasons:
+        months = set(_season_months(season))
+        if not months & months_present:
+            dropped.append(season)
+            continue
+        kept.append(season)
+        missing = months - months_present
+        if missing:
+            names = ", ".join(calendar.month_name[m] for m in sorted(missing))
+            incomplete.append(f"{season!r} is missing {names}")
+    if dropped:
+        warnings.warn(
+            f"season(s) {sorted(dropped)!r} have no data along {dim!r} (months "
+            f"present: {sorted(months_present)!r}) and were dropped.",
+            stacklevel=3,
+        )
+    if incomplete:
+        warnings.warn(
+            "some requested seasons are missing part of their months, so "
+            "their means are over fewer months than a full season: "
+            f"{'; '.join(incomplete)}.",
+            stacklevel=3,
+        )
+    if not kept:
+        raise KeyError(
+            f"none of the requested seasons {seasons!r} have any data along "
+            f"{dim!r}; months present are {sorted(months_present)!r}."
+        )
+    return kept
+
+
 def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
     """Apply one reduction (optionally after a groupby or resample) along ``dim``."""
     opts = {"reduce": how} if isinstance(how, str) else dict(how)
     group = opts.pop("groupby", None)
     freq = opts.pop("resample", None)
     name = opts.pop("reduce", None)
+    seasons = opts.pop("seasons", None)
+    spread = opts.pop("spread", None)
     if not name:
         raise ValueError(f"aggregate spec for {dim!r} needs a 'reduce', got {how!r}")
     if group is not None and freq is not None:
@@ -1225,6 +1377,18 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
             "resample bins by interval (consecutive periods -- January 2012, "
             "February 2012, ...). Pick one."
         )
+    if seasons is not None and group != "season":
+        raise ValueError(
+            f"aggregate spec for {dim!r} sets 'seasons' without "
+            "{'groupby': 'season'} -- 'seasons' only names a custom season "
+            "definition, so it has nothing to do without a season groupby."
+        )
+    spread_unknown = spread is not None and spread not in REDUCERS
+    if spread_unknown and getattr(da, spread, None) is None:
+        raise KeyError(
+            f"unknown 'spread' reduction {spread!r} for {dim!r}: not an xarray "
+            f"method and not in REDUCERS ({sorted(REDUCERS)})"
+        )
 
     attrs = dict(da.attrs)
     target = dim
@@ -1233,9 +1397,29 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
     # weights never describe.
     weights = _weights_for(da, target) if name == "mean" else None
     if group is not None:
-        # A climatology groups along the dim, then reduces *within* each group, so
-        # the reduction still names the original dim.
-        da = da.groupby(f"{dim}.{group}")
+        if group == "season":
+            # A season groupby is a climatology like any other -- it groups along
+            # the dim, then reduces within each group -- but the group labels are a
+            # spec-provided season definition, not one xarray already knows, and
+            # xarray's own naive-crash-on-empty-season and alphabetical-sort
+            # behaviours both need working around first.
+            #
+            # xarray.groupers.SeasonGrouper needs a reasonably recent xarray
+            # (the new Grouper protocol it belongs to); environment.yml pins
+            # nothing yet ("loose for now"), so this is the one place that
+            # requirement is written down. An xarray without it fails here
+            # with ModuleNotFoundError naming this submodule -- upgrade xarray.
+            from xarray.groupers import SeasonGrouper
+
+            wanted = _validate_seasons(
+                seasons if seasons is not None else DEFAULT_SEASONS
+            )
+            kept = _filter_seasons(wanted, da[target], target)
+            da = da.groupby({target: SeasonGrouper(kept)})
+        else:
+            # A climatology groups along the dim, then reduces *within* each group,
+            # so the reduction still names the original dim.
+            da = da.groupby(f"{dim}.{group}")
         weights = None
     elif freq is not None:
         # Resampling keeps the dim's *name* (unlike groupby, which renames it to the
@@ -1245,23 +1429,37 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
             _warn_short_bins(da[target], freq, target)
         da = da.resample({target: freq})
         weights = None
+    reducible = da
 
-    if weights is not None:
+    def _run(obj, reduction_name: str):
         # A weighted mean is the only reduction where per-cell extent changes the
         # answer: summing a depth band without thickness weights would count a 17 m
-        # cell the same as a 0.5 m one. max/std/quantile operate on the cells as a
-        # set, so they need no weighting.
-        out = da.weighted(weights).mean(target, **opts)
-    elif name in REDUCERS:
-        out = REDUCERS[name](da, target, **opts)
-    else:
-        fn = getattr(da, name, None)
+        # cell the same as a 0.5 m one. max/std/quantile -- including a `spread`
+        # reduction -- operate on the cells as a set, so they need no weighting;
+        # ``weights`` is already None here whenever a groupby/resample ran.
+        if weights is not None and reduction_name == "mean":
+            return obj.weighted(weights).mean(target, **opts)
+        if reduction_name in REDUCERS:
+            return REDUCERS[reduction_name](obj, target, **opts)
+        fn = getattr(obj, reduction_name, None)
         if fn is None:
             raise KeyError(
-                f"unknown reduction {name!r} for {dim!r}: not an xarray method and "
-                f"not in REDUCERS ({sorted(REDUCERS)})"
+                f"unknown reduction {reduction_name!r} for {dim!r}: not an xarray "
+                f"method and not in REDUCERS ({sorted(REDUCERS)})"
             )
-        out = fn(**{_dim_kwarg(fn): target}, **opts)
+        return fn(**{_dim_kwarg(fn): target}, **opts)
+
+    out = _run(reducible, name)
+
+    if spread is not None:
+        # Rides as a coordinate alongside the value -- see SPREAD_COORD's docstring
+        # for why -- computed off the same grouped/resampled object as the mean, so
+        # a seasonal std is the spread *within* each season, not across all of them.
+        spread_arr = _run(reducible, spread).rename(SPREAD_COORD)
+        spread_arr.attrs = {"statistic": spread}
+        if "units" in attrs:
+            spread_arr.attrs["units"] = attrs["units"]
+        out = out.assign_coords({SPREAD_COORD: spread_arr})
 
     out.attrs = {**attrs, **out.attrs}  # reductions drop attrs; units must survive
     return out

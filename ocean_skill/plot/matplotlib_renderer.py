@@ -1101,9 +1101,27 @@ def _draw_profile_lines(
 ) -> list:
     """Draw one panel's lines: value on x, depth on y -- the transpose of
     :func:`_draw_series_lines`, marking the same subsample the same way.
+
+    A mean±spread envelope, when a line carries one, draws first in its own
+    pass -- a horizontal fill (:func:`~matplotlib.axes.Axes.fill_betweenx`,
+    value on x, depth on y, matching the panel's own orientation) in every
+    line's own colour, split into :func:`~ocean_skill.plot.style.band_runs`'
+    contiguous finite runs. Not appended to ``drawn``: a band earns no legend
+    entry of its own, and matplotlib's default z-order (collections below
+    lines) already puts it beneath every line regardless.
     """
     from ocean_skill.plot.profile import vertical_values
-    from ocean_skill.plot.style import markevery_indices
+    from ocean_skill.plot.style import BAND_ALPHA, band_runs, markevery_indices
+
+    for line in lines:
+        if line.spec.spread is None:
+            continue
+        depth = vertical_values(line.spec.values)
+        values = np.asarray(line.spec.values.values, dtype="float64")
+        for axis, lo, hi in band_runs(depth, values, line.spec.spread):
+            ax.fill_betweenx(
+                axis, lo, hi, color=line.color, alpha=BAND_ALPHA, linewidth=0
+            )
 
     drawn = []
     for line in lines:

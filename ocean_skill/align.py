@@ -42,8 +42,8 @@ __all__ = [
     "point_of",
     "resolve_match_method",
     "sample_at",
-    "subset_to_box",
     "subset_to_bbox",
+    "subset_to_box",
 ]
 
 #: Sampling methods :func:`sample_at` understands, and what each means at a point.
@@ -862,11 +862,13 @@ def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
         f"the {role} field still has {extra} beyond its horizontal axes, so it "
         "is not a single map. Collapse it with aggregate= (e.g. "
         '{"time": "mean"}) or narrow it with select= (e.g. {"time": "2012-01"}); '
-        'a groupby such as {"groupby": "month"} -- or a resample such as '
-        '{"resample": "1MS"} -- deliberately keeps a dimension and cannot be '
-        "compared against a single field. To plot those panels as they are, "
-        "use a model-only field() rather than a comparison, or score against the "
-        'axis pointwise with compare(..., over="time").'
+        'a groupby such as {"groupby": "month"} or {"groupby": "season"} -- or a '
+        'resample such as {"resample": "1MS"} -- deliberately keeps a dimension '
+        "and cannot be compared against a single field. To plot those panels as "
+        "they are, use a model-only field() rather than a comparison; score "
+        'against the axis pointwise with compare(..., over="time"); or, for a '
+        "season groupby specifically, fan one comparison per season with "
+        "compare(..., times={'groupby': 'season', 'reduce': ...})."
     )
 
 
@@ -1727,6 +1729,70 @@ def _regrid_target(
     )
 
 
+def _split_spread(test, reference):
+    """Pop each lane's own spread coordinate, if any, before they meet in one Dataset.
+
+    A season (or any groupby/resample) ``spread`` rides as a same-shape
+    non-dimension coordinate on the value it describes (see
+    :data:`ocean_skill.operators.SPREAD_COORD`), which works while the two lanes
+    are apart — but not once they land together in one ``xr.Dataset``: the test
+    and reference's own spreads are two different arrays, and two coordinates
+    sharing one name that disagree raise a ``MergeError`` on construction
+    (arithmetic between the two, like the ``difference`` variable, is unaffected
+    — it silently drops a conflicting coordinate rather than erroring).
+
+    Returns ``(test, reference, attach)`` — the two lanes with the coordinate
+    stripped, and a callback that re-attaches whichever spread(s) were found onto
+    the finished ``Dataset`` as separate ``test_spread``/``reference_spread`` data
+    variables, following the same "extra variable riding beside
+    test/reference/difference" precedent ``out["coverage"]`` already sets.
+    """
+    from ocean_skill.operators import SPREAD_COORD
+
+    test_spread = test.coords.get(SPREAD_COORD)
+    reference_spread = reference.coords.get(SPREAD_COORD)
+    if test_spread is not None:
+        test = test.drop_vars(SPREAD_COORD)
+    if reference_spread is not None:
+        reference = reference.drop_vars(SPREAD_COORD)
+
+    def attach(out: xr.Dataset) -> xr.Dataset:
+        if test_spread is not None:
+            out["test_spread"] = test_spread.drop_vars(
+                SPREAD_COORD, errors="ignore"
+            ).rename("test_spread")
+        if reference_spread is not None:
+            out["reference_spread"] = reference_spread.drop_vars(
+                SPREAD_COORD, errors="ignore"
+            ).rename("reference_spread")
+        return out
+
+    return test, reference, attach
+
+
+def _drop_spread_before_regrid(lane, role: str):
+    """Drop a spread coordinate from a lane about to be horizontally regridded.
+
+    xesmf's regridder works on plain lon/lat grids and is not expected to carry a
+    non-dimension coordinate like ``spread`` through the remap, so it is dropped
+    here, with a warning, rather than left to whatever xesmf happens to do with
+    it (silently discard it, most likely, but not a contract to depend on).
+    """
+    from ocean_skill.operators import SPREAD_COORD
+
+    if SPREAD_COORD not in lane.coords:
+        return lane
+    warnings.warn(
+        f"a spread computed on the {role} lane is not carried through a "
+        "horizontal regrid -- the aligned result will not have a "
+        f"{role}_spread variable. This only affects a mean+spread envelope "
+        "plotted from a regridded map; a station/profile comparison (no "
+        "regrid) is unaffected.",
+        stacklevel=_stacklevel.find(),
+    )
+    return lane.drop_vars(SPREAD_COORD)
+
+
 def align(
     test,
     reference,
@@ -1921,6 +1987,7 @@ def align(
         else:
             src, tgt = _as_xesmf(test), _as_xesmf(reference)
             src_role, tgt_role = "test", "reference"
+        src = _drop_spread_before_regrid(src, src_role)
         need_bounds = method.startswith("conservative")
         # memoized on the two grids' own content -- see _regridder_for -- so a fan
         # of comparisons against one fixed reference (compare()'s times= fan, most
@@ -1943,6 +2010,7 @@ def align(
         test_out, reference_out = (
             (tgt, regridded) if target == "test" else (regridded, tgt)
         )
+    test_out, reference_out, _attach_spread = _split_spread(test_out, reference_out)
     out = xr.Dataset(
         {
             test_name: test_out,
@@ -1950,6 +2018,7 @@ def align(
             "difference": test_out - reference_out,
         }
     )
+    out = _attach_spread(out)
     out["difference"].attrs = {
         "long_name": f"{test_name} − {reference_name}",
         "units": reference_out.attrs.get("units", ""),
@@ -2034,6 +2103,7 @@ def _align_at_point(
     # loses the offset the metrics report, so the test's are renamed. The station keeps
     # the plain names, the comparison being at the station.
     test = _rename_position(test, test_name)
+    test, reference, _attach_spread = _split_spread(test, reference)
     out = xr.Dataset(
         {
             test_name: test,
@@ -2041,6 +2111,7 @@ def _align_at_point(
             "difference": test - reference,
         }
     )
+    out = _attach_spread(out)
     out["difference"].attrs = {
         "long_name": f"{test_name} − {reference_name}",
         "units": reference.attrs.get("units", ""),
@@ -2262,9 +2333,11 @@ def _align_along_path(
     # position of their own to disambiguate from the frame's -- both lanes
     # already carry the frame's own lon/lat/along (see _bin_into_frame), so the
     # Dataset below merges them as the same coordinate, not a conflicting one.
+    test, reference, _attach_spread = _split_spread(test, reference)
     out = xr.Dataset(
         {test_name: test, reference_name: reference, "difference": test - reference}
     )
+    out = _attach_spread(out)
     out["difference"].attrs = {
         "long_name": f"{test_name} − {reference_name}",
         "units": reference.attrs.get("units", ""),

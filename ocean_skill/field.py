@@ -375,24 +375,29 @@ class Field:
         return items
 
     def _profile_items(self) -> list[dict[str, Any]]:
-        """Return this field's data as one single-source profile item.
+        """Return this field's data as one or more single-source profile items.
 
         The vertical twin of :meth:`_series_items`, and simpler: a profile's
         depth axis survives *whole*, one line down the water column, rather than
         being fanned into one item per level -- depth is the axis a profile line
         draws against, not a fact several series lines are told apart by (see
-        :mod:`ocean_skill.plot.profile`). Anything beyond it left standing is
-        refused, the same as :meth:`_series_items` refuses a third axis a line
-        has no room for.
+        :mod:`ocean_skill.plot.profile`). A surviving season axis is the one
+        exception, fanned into one item per season
+        (:func:`ocean_skill.plot.profile.fan_season`) exactly the way
+        :meth:`_series_items` fans depth levels -- several seasons in one panel
+        are several lines, which is several items, the same idiom either way.
+        Any other axis beyond depth left standing is refused, the same as
+        :meth:`_series_items` refuses a third axis a line has no room for.
         """
         import xarray as xr
 
         from ocean_skill.operators import resolve_dim
+        from ocean_skill.plot.profile import SEASON_DIM, fan_season
 
         da = self.data
         zdim = resolve_dim(da, "Z")
         extra = [str(d) for d in da.dims if d != zdim]
-        if extra:
+        if extra and extra != [SEASON_DIM]:
             raise ValueError(
                 f"this profile still has {extra} beyond depth, and a profile "
                 f"line has only one axis to give away. Collapse it with "
@@ -405,7 +410,8 @@ class Field:
             "label": self.label or self.source,
             "labels": (self.label or self.source,),
         }
-        return [{"aligned": xr.Dataset({"value": da}), "metrics": None, **base}]
+        item = {"aligned": xr.Dataset({"value": da}), "metrics": None, **base}
+        return fan_season([item]) if extra else [item]
 
     def as_item(self) -> dict[str, Any]:
         """Return this field as a spec item."""

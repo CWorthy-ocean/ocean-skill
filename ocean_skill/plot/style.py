@@ -29,20 +29,24 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
+import numpy as np
 from matplotlib import colormaps
 from matplotlib.colors import to_hex
 
 __all__ = [
+    "BAND_ALPHA",
     "BOKEH_DASHES",
     "CHANNELS",
     "COLOR_CYCLE",
     "LINESTYLES",
     "LineSpec",
     "StyledLine",
+    "band_runs",
     "linestyle_for",
     "markevery_indices",
     "resolve",
     "series_label",
+    "spread_of",
     "varying_fields",
 ]
 
@@ -88,12 +92,21 @@ CHANNELS: dict[str, str | None] = {
 #: ``time`` is a profile's own field -- a station's several casts, one line each --
 #: and stays ``None`` on every series line, so ``CHANNELS``'s default marker channel
 #: (``depth`` there, ``time`` here -- see :mod:`ocean_skill.plot.profile`) never
-#: mistakes one family's lines for the other's.
-FIELDS = ("variable", "source", "depth", "time", "role")
+#: mistakes one family's lines for the other's. ``season`` is the same idea one
+#: level up: a surviving ``{"groupby": "season"}`` axis fans into one line per
+#: season (:func:`ocean_skill.plot.profile.fan_season`), and this is what lets a
+#: profile's default colour switch to season when one is present (decided at
+#: compose time, not in :data:`CHANNELS`, since a series line has no use for it
+#: yet).
+FIELDS = ("variable", "source", "depth", "time", "role", "season")
 
 #: About how many markers a line should carry, however many samples it has. A marker per
 #: sample on a 3000-point mooring series is a filled band, not a line.
 MARKER_TARGET = 20
+
+#: Fill opacity for a mean±spread envelope, in both renderers -- one number so a
+#: static and an interactive band read as the same shade.
+BAND_ALPHA = 0.25
 
 
 @dataclass(frozen=True)
@@ -103,6 +116,13 @@ class LineSpec:
     ``values`` is the 1-D DataArray itself; everything else is the facts a channel may
     be keyed on. Frozen because a resolved style is a function of these — two lines with
     the same facts must get the same style, whoever asks.
+
+    ``season``/``spread`` are not independent facts to add: ``season`` is what a
+    surviving season axis fans into (see :data:`FIELDS`), and ``spread`` (a
+    same-length half-width array, or ``None``) is the envelope :func:`spread_of`
+    reads off the same aligned data ``values`` came from -- carried here so a
+    renderer draws the band from the same object it draws the line from, never a
+    second lookup that could disagree.
     """
 
     role: str
@@ -113,6 +133,8 @@ class LineSpec:
     units: str | None = None
     values: Any = None
     item: int = 0
+    season: str | None = None
+    spread: Any = None
 
     def get(self, field: str):
         """Return the value of one channel field, by name."""
@@ -199,7 +221,7 @@ def series_label(spec: LineSpec, *, varying, ambiguous_sources=()) -> str:
     from ocean_skill.plot.summary import pretty_level
 
     parts = []
-    for field in ("source", "variable", "depth", "time"):
+    for field in ("source", "variable", "depth", "time", "season"):
         if field in varying or (field == "source" and not varying):
             value = spec.get(field)
             if value is not None:
@@ -288,3 +310,58 @@ def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[Style
 def with_values(line: StyledLine, values) -> StyledLine:
     """Return ``line`` carrying different data — for a residual sharing its style."""
     return replace(line, spec=replace(line.spec, values=values))
+
+
+def spread_of(aligned, name: str, da) -> np.ndarray | None:
+    """Return ``da``'s own spread (half-width) array, or ``None`` if it has none.
+
+    Two shapes, probed in order:
+
+    1. A same-shape ``"spread"`` coordinate riding on ``da`` itself -- a
+       single-source item's value, straight off ``operators.aggregate``'s
+       ``spread`` option (see ``operators.SPREAD_COORD``).
+    2. A ``f"{name}_spread"`` data variable on ``aligned`` -- a comparison's
+       test/reference pair, where ``align._split_spread`` moves each lane's own
+       spread there rather than leaving two same-named coordinates that would
+       disagree once the two lanes share one Dataset.
+
+    ``None`` either way means: no envelope for this line, degrading silently to
+    today's plain line.
+    """
+    from ocean_skill.operators import SPREAD_COORD
+
+    coord = getattr(da, "coords", {}).get(SPREAD_COORD) if da is not None else None
+    if coord is not None:
+        return np.asarray(coord.values, dtype="float64")
+    variable = aligned.get(f"{name}_spread") if hasattr(aligned, "get") else None
+    if variable is not None:
+        return np.asarray(variable.values, dtype="float64")
+    return None
+
+
+def band_runs(axis_values, values, spread):
+    """Return contiguous all-finite ``(axis, lo, hi)`` runs for a mean±spread band.
+
+    Splitting on non-finite samples here — rather than each renderer handling NaN
+    its own way — is what lets a static and an interactive envelope provably draw
+    the same shape: both read the identical runs from this one function. A run of
+    a single finite point is dropped; there is no band to fill between one point
+    and itself.
+    """
+    axis = np.asarray(axis_values, dtype="float64")
+    values = np.asarray(values, dtype="float64")
+    spread = np.asarray(spread, dtype="float64")
+    lo, hi = values - spread, values + spread
+    finite = np.isfinite(axis) & np.isfinite(lo) & np.isfinite(hi)
+    runs = []
+    start = None
+    for i, ok in enumerate(finite):
+        if ok and start is None:
+            start = i
+        elif not ok and start is not None:
+            if i - start > 1:
+                runs.append((axis[start:i], lo[start:i], hi[start:i]))
+            start = None
+    if start is not None and len(finite) - start > 1:
+        runs.append((axis[start:], lo[start:], hi[start:]))
+    return runs

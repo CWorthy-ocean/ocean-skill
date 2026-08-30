@@ -27,12 +27,42 @@ from ocean_skill import _stacklevel
 from ocean_skill.plot import series as _series_layout
 from ocean_skill.plot import style as _style
 
-__all__ = ["compose", "panel_title", "vertical_values"]
+__all__ = ["compose", "fan_season", "panel_title", "vertical_values"]
 
 #: Fraction of a panel's axes a corner box occupies -- the same measure
 #: :data:`ocean_skill.plot.series._CORNER_W`/``_CORNER_H`` use, imported rather than
 #: redefined so the two families' corner logic cannot drift apart on this constant.
 _CORNER_W, _CORNER_H = _series_layout._CORNER_W, _series_layout._CORNER_H
+
+#: The dimension name a season groupby produces (see
+#: :func:`ocean_skill.operators._reduce_dim`'s ``SeasonGrouper`` route) --
+#: always this literal name, whatever custom ``seasons=`` a caller passed. One
+#: constant so :func:`fan_season` and every reader of the scalar coordinate it
+#: leaves behind (:func:`ocean_skill.plot.series.season_of`) agree on it.
+SEASON_DIM = "season"
+
+
+def fan_season(items: list[dict]) -> list[dict]:
+    """Split a surviving season dim into one item per season, chronologically.
+
+    The codebase's standing idiom for "several lines in one profile panel" is
+    several *items*, not one item with a surviving axis (see
+    ``Field._series_items`` fanning depth levels) -- a surviving season axis
+    fans the same way. ``.isel`` leaves ``season`` as a scalar coordinate on
+    each slice (the convention a profile's own ``time`` already follows -- see
+    :func:`_time_of`), and slices a same-dims ``spread`` coordinate along with
+    it for free. Idempotent: a fanned item carries a scalar coordinate, not a
+    dimension, so calling this on already-fanned items is a no-op.
+    """
+    fanned = []
+    for item in items:
+        aligned = item["aligned"]
+        if SEASON_DIM not in aligned.dims:
+            fanned.append(item)
+            continue
+        for k in range(aligned.sizes[SEASON_DIM]):
+            fanned.append({**item, "aligned": aligned.isel({SEASON_DIM: k})})
+    return fanned
 
 
 def _vertical_coord(da):
@@ -110,11 +140,15 @@ def _time_of(aligned) -> str | None:
 def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     """Return the line(s) one item draws -- :func:`ocean_skill.plot.series.line_specs`
     with ``time`` (this cast's own instant) in place of ``depth`` (always ``None``
-    here; see the module docstring).
+    here; see the module docstring). ``season`` -- a fanned season, if this item's
+    aligned data was narrowed to one -- and ``spread`` -- a mean±spread envelope,
+    if the aggregate computed one -- are the same fields series carries, read the
+    same way (:func:`ocean_skill.plot.series.season_of`/``spread_of``).
     """
     aligned = item["aligned"]
     variable = item.get("standard_name") or item.get("label")
     time = _time_of(aligned)
+    season = _series_layout.season_of(aligned)
     if _series_layout.item_roles(item) == ("value",):
         source = str((item.get("labels") or (item.get("label") or "value",))[0])
         units = item.get("units") or aligned["value"].attrs.get("units")
@@ -124,6 +158,8 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
                 source=source,
                 variable=variable,
                 time=time,
+                season=season,
+                spread=_style.spread_of(aligned, "value", aligned["value"]),
                 units=units,
                 values=aligned["value"],
                 item=index,
@@ -131,16 +167,27 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
         ]
     test_source, reference_source = item.get("labels") or ("test", "reference")
     units = item.get("units") or aligned["reference"].attrs.get("units")
-    common = {"variable": variable, "time": time, "units": units, "item": index}
+    common = {
+        "variable": variable,
+        "time": time,
+        "season": season,
+        "units": units,
+        "item": index,
+    }
     return [
         _style.LineSpec(
             role="reference",
             source=str(reference_source),
             values=aligned["reference"],
+            spread=_style.spread_of(aligned, "reference", aligned["reference"]),
             **common,
         ),
         _style.LineSpec(
-            role="test", source=str(test_source), values=aligned["test"], **common
+            role="test",
+            source=str(test_source),
+            values=aligned["test"],
+            spread=_style.spread_of(aligned, "test", aligned["test"]),
+            **common,
         ),
     ]
 
@@ -169,17 +216,19 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
         return labels[1]
     if by == "time":
         return _time_of(item["aligned"])
+    if by == "season":
+        return _series_layout.season_of(item["aligned"])
     if by == "depth":
         raise ValueError(
             "cannot facet a profile by 'depth': depth is the axis every panel "
             "already draws against, not a fact to split panels on. Facet on "
-            "variable, source, reference, time or comparison instead."
+            "variable, source, reference, time, season or comparison instead."
         )
     if by == "comparison":
         return index
     raise ValueError(
         f"cannot facet a profile by {by!r}; expected one of variable, source, "
-        "reference, time, comparison."
+        "reference, time, season, comparison."
     )
 
 
@@ -188,7 +237,7 @@ def _refuse_depth_encode(encode: dict[str, str | None] | None) -> None:
         raise ValueError(
             "cannot encode a profile channel by 'depth': depth is the axis every "
             "panel already draws against, not a fact to style a line by. Encode "
-            "by variable, source, role or time instead."
+            "by variable, source, role, time or season instead."
         )
 
 
@@ -213,6 +262,12 @@ def panel_title(specs, *, varying) -> str:
     place = _place_of(reference.values)
     if place:
         parts.append(place)
+    # Shown only when every line in the panel shares one season -- a cols="season"
+    # facet titles each panel with its season; an overlay of several seasons
+    # already tells them apart by colour/legend, so no single "when" is claimed.
+    seasons = {s.season for s in specs if s.season}
+    if len(seasons) == 1:
+        parts.append(next(iter(seasons)))
     times = {s.time for s in specs if s.time}
     if len(times) == 1:
         parts.append(next(iter(times)))
@@ -284,7 +339,7 @@ def compose(
     two or more          one column per variable, sources/casts overlaid within each
     ===================  ==================================================================
     """
-    items = list(items)
+    items = fan_season(list(items))
     if not items:
         raise ValueError("a profile needs at least one comparison to draw")
     if rows is not None and cols is not None:
@@ -299,9 +354,15 @@ def compose(
     # marker <- time replaces series' marker <- depth: every profile spec's own
     # depth is None (depth is the axis, not a style channel here), so time takes
     # its place as the default marker key, overridable like any other channel.
+    # color <- season only when a season actually varies across the figure (an
+    # overlay of several fanned seasons, the default reading of a seasonal
+    # profile) -- decided here rather than in CHANNELS itself, since a series
+    # line has no use for it yet, and an explicit encode= still wins either way.
+    seasons_vary = len({s.season for s in all_specs if s.season is not None}) > 1
+    defaults = {"marker": "time", **({"color": "season"} if seasons_vary else {})}
     styled = {
         (line.spec.item, line.spec.role): line
-        for line in _style.resolve(all_specs, encode={"marker": "time", **(encode or {})})
+        for line in _style.resolve(all_specs, encode={**defaults, **(encode or {})})
     }
     varying = _style.varying_fields(all_specs)
 
@@ -337,9 +398,14 @@ def compose(
         box = _series_layout._metrics_text(
             [i for _, i in group], metric_keys, prefix=len(group) > 1
         )
-        if len(group) > _series_layout.METRICS_BOX_MAX_ROWS and box:
+        # Row count, not item count: a fanned season axis puts several items in
+        # one group that all share one comparison's metrics, deduped to one row
+        # by _metrics_text -- counting items here would drop a box that, once
+        # deduped, easily fits.
+        row_count = box.count("\n") + 1 if box else 0
+        if row_count > _series_layout.METRICS_BOX_MAX_ROWS:
             warnings.warn(
-                f"{len(group)} comparisons share a panel, so their statistics box "
+                f"{row_count} distinct stats rows would share one panel, which "
                 "would be a table drawn on a figure; it is left off. Every number "
                 "is in the metrics CSV (ComparisonSet.save) either way.",
                 stacklevel=_stacklevel.find(),

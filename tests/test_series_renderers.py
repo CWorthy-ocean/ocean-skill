@@ -655,6 +655,38 @@ def test_mark_reaches_both_renderers_rather_than_being_dropped():
     assert obj.traverse(lambda x: x, [hv.Scatter])
 
 
+# -- season/spread plumbing lands, but series drawing is deliberately unchanged ---------
+
+
+def test_series_specs_carry_spread_and_season_fields_but_draw_unchanged():
+    """A pin for the deferred scope: ``line_specs`` already reads a scalar
+    ``season`` coordinate and a ``spread`` coordinate off aligned data (the same
+    readers :mod:`ocean_skill.plot.profile` uses), but neither a season facet
+    nor an envelope is drawn for a series yet -- that plumbing landed once,
+    for both families, ahead of the series-specific drawing work it is there
+    to support later."""
+    item = _item()
+    item["aligned"]["reference"] = item["aligned"]["reference"].assign_coords(
+        season="JJA"
+    )
+    item["aligned"]["test"] = item["aligned"]["test"].assign_coords(season="JJA")
+    item["aligned"]["reference_spread"] = item["aligned"]["reference"] * 0 + 0.3
+    item["aligned"]["test_spread"] = item["aligned"]["test"] * 0 + 0.4
+
+    specs = _series.line_specs(item)
+    by_role = {s.role: s for s in specs}
+    assert by_role["reference"].season == "JJA"
+    assert by_role["test"].season == "JJA"
+    assert np.allclose(by_role["reference"].spread, 0.3)
+    assert np.allclose(by_role["test"].spread, 0.4)
+
+    # Drawing is unaffected: no band, no season-keyed colour default -- a series
+    # figure looks exactly as it did before either field existed.
+    fig = render(PlotSpec(family="series", items=[item]), renderer="matplotlib")
+    assert len(fig.axes[0].collections) == 0
+    assert len(fig.axes[0].lines) == 2
+
+
 def test_series_accepts_no_kwargs_catch_all():
     """A ``**kwargs`` in the signature would silently disable option validation."""
     import inspect
