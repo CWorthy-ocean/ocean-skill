@@ -3412,19 +3412,27 @@ class ComparisonSet:
         return items
 
     def _metric_items(self) -> list[dict[str, Any]]:
-        """Spec items carrying only what a summary diagram reads: metrics and a label.
+        """Spec items carrying only what a summary diagram reads: metrics, a label,
+        and the reference's units.
 
         The summary families are the one place :meth:`_items` is more than is needed and
         the extra costs real work: for a set scored ``over`` an axis, ``as_item`` builds
         a metric map per comparison (:meth:`Comparison.pointwise_metrics`) that a Taylor
-        or target point never looks at. Both renderers take exactly ``metrics`` and
-        ``label`` off these items — see ``matplotlib_renderer._Record`` and the
-        interactive target — so this is the whole contract, not a subset of it.
+        or target point never looks at. Both renderers take exactly ``metrics``,
+        ``label``, and ``units`` off these items — see ``matplotlib_renderer._Record``
+        and the interactive target — so this is the whole contract, not a subset of it.
+        ``units`` mirrors :meth:`Comparison.as_item`, defensively: a hand-built
+        comparison (see ``test_pooling``) has no ``aligned`` to read it from and gets
+        ``None`` instead, which the absolute-axes diagrams already treat as "unknown".
         """
-        return [
-            {"metrics": c.metrics(), "label": self._label_for(i)}
-            for i, c in enumerate(self.comparisons)
-        ]
+        items = []
+        for i, c in enumerate(self.comparisons):
+            aligned = getattr(c, "aligned", None)
+            units = aligned["reference"].attrs.get("units") if aligned is not None else None
+            items.append(
+                {"metrics": c.metrics(), "label": self._label_for(i), "units": units}
+            )
+        return items
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render all comparisons as stacked rows in one figure.

@@ -4325,7 +4325,8 @@ def render(spec, **kwargs: Any):
 
 
 class _Record:
-    """Adapt a spec item to the ``.metrics()``/``.label`` interface summaries need."""
+    """Adapt a spec item to the ``.metrics()``/``.label``/``.units`` interface
+    summaries need."""
 
     def __init__(self, item: dict[str, Any]):
         self._item = item
@@ -4336,6 +4337,10 @@ class _Record:
     @property
     def label(self):
         return self._item.get("label")
+
+    @property
+    def units(self):
+        return self._item.get("units")
 
 
 register_renderer("matplotlib", render)

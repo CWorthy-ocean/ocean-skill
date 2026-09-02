@@ -2335,7 +2335,8 @@ def _profile(
 def _target(
     items,
     title=None,
-    circles=(0.5, 1.0),
+    normalize: bool = True,
+    circles=None,
     labels="annotate",
     color_by=None,
     marker_by=None,
@@ -2366,6 +2367,11 @@ def _target(
     docstring for the full explanation. A centroid's marker is drawn as a bokeh
     ``"star"`` here (the static family's ``"*"`` translated to this renderer's own
     marker vocabulary); everything else about the overlay layer is unchanged.
+
+    ``normalize``/``circles`` mean exactly what they do in
+    :func:`ocean_skill.plot.summary.target` — including the mixed-variable and
+    mixed-reference warnings, and axis labels named with the shared units when
+    ``normalize=False``.
     """
     import pandas as pd
 
@@ -2379,6 +2385,10 @@ def _target(
         _scalar_scale,
         _Styles,
         _summary_point_specs,
+        _target_labels,
+        _target_rings,
+        _target_xy,
+        _warn_mixed_variables,
         pretty_level,
     )
 
@@ -2393,7 +2403,10 @@ def _target(
     sizes = bokeh_scale(frame_size, font_scale=font_scale)
     fontsize = bokeh_fontsize(frame_size, font_scale=font_scale)
     labels_mode = _resolve_labels(labels)
-    recs = [dict(i.get("metrics", {}), label=i.get("label") or "") for i in items]
+    recs = [
+        dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
+        for i in items
+    ]
     df = pd.DataFrame(recs)
     if groups:
         # Mirrors summary._records: keyed by each record's own reference (its
@@ -2404,9 +2417,10 @@ def _target(
         ]
         if not color_by and not marker_by:
             color_by = "group"
-    sref = df["std_reference"].to_numpy()
-    df["x"] = df["crmsd"].to_numpy() / sref * np.sign(df["std_test"].to_numpy() - sref)
-    df["y"] = df["bias"].to_numpy() / sref
+    if not normalize:
+        _warn_mixed_variables(recs, "target")
+    xy = np.array([_target_xy(r, normalize) for r in recs])
+    df["x"], df["y"] = xy[:, 0], xy[:, 1]
 
     # Mirrors summary._group_styles: colour follows marker groups when no colour
     # dimension was named, so the legend has one entry per group rather than a
@@ -2502,8 +2516,12 @@ def _target(
             yoffset=0.06,
             text_color="black",
         )
+    rings, boundary = _target_rings(circles, normalize, recs)
+    ring_floor = max(rings) * 1.25 if rings else 0.0
     lim = max(
-        1.15 * float(np.max(np.hypot(df["x"], df["y"]))), max(circles) * 1.25, 1.2
+        1.15 * float(np.max(np.hypot(df["x"], df["y"]))),
+        ring_floor,
+        1.2 if normalize else 0.0,
     )
 
     theta = np.linspace(0, 2 * np.pi, 181)
@@ -2511,10 +2529,14 @@ def _target(
         [
             hv.Path([np.column_stack([rad * np.cos(theta), rad * np.sin(theta)])]).opts(
                 color="grey",
-                line_dash="dashed" if rad == 1.0 else "dotted",
+                line_dash=(
+                    "dashed"
+                    if boundary is not None and np.isclose(rad, boundary)
+                    else "dotted"
+                ),
                 line_width=1,
             )
-            for rad in circles
+            for rad in rings
         ]
         + [
             hv.HLine(0).opts(color="lightgrey", line_width=1),
@@ -2538,9 +2560,8 @@ def _target(
         overlay_specs += _overlay_point_specs(
             overlay,
             groups,
-            lambda r: (r["crmsd"] / r["std_reference"])
-            * np.sign(r["std_test"] - r["std_reference"]),
-            lambda r: r["bias"] / r["std_reference"],
+            lambda r: _target_xy(r, normalize)[0],
+            lambda r: _target_xy(r, normalize)[1],
         )
     if summary_points:
         overlay_specs += _summary_point_specs(
@@ -2603,6 +2624,7 @@ def _target(
     result = guides * points
     if overlay_layer is not None:
         result = result * overlay_layer
+    xlabel, ylabel = _target_labels(normalize, recs, tex=False)
     return result.opts(
         # equal frame dims + data_aspect keeps the guide circles circular; fixed
         # width/height would fight the aspect and squash them into ellipses
@@ -2610,8 +2632,8 @@ def _target(
         frame_height=round(frame_size[1]),
         data_aspect=1,
         fontsize=fontsize,
-        xlabel="signed centred RMSD / σ_ref  (← under | over →)",
-        ylabel="bias / σ_ref",
+        xlabel=xlabel,
+        ylabel=ylabel,
         xlim=(-lim, lim),
         ylim=(-lim, lim),
         title=title or "Target diagram",
