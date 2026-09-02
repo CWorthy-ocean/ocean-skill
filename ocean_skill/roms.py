@@ -375,19 +375,31 @@ def to_depth(
     # Reduced over every non-z dim in one pass per variable, then computed once: the
     # transform is lazy dask, so a per-level `.any()` used to force a full recompute
     # of it for every target depth (dozens, against a profile's own levels).
+    # One warning per variable, not one per level: a profile's own depths can drive
+    # dozens of below-the-bottom targets (a CTD cast reaching past the model's
+    # deepest cell centre is routine), and one line each buries the signal. Collapse
+    # the run of NaN depths for a variable into a single line naming their span.
     for var in result.data_vars:
         other = [dim for dim in result[var].dims if dim != "z"]
         finite = np.isfinite(result[var])
         finite = finite.any(dim=other) if other else finite
         finite = np.asarray(finite)
-        for i, d in enumerate(depths):
-            if not bool(finite[i]):
-                hint = " use surface() for the surface field" if d < 5 else ""
-                warnings.warn(
-                    f"{var!r} at {d:g} m is entirely NaN: the target lies outside the "
-                    f"model's cell-centre range, so nothing can be interpolated;{hint}",
-                    stacklevel=2,
-                )
+        nan_depths = [float(d) for i, d in enumerate(depths) if not bool(finite[i])]
+        if not nan_depths:
+            continue
+        hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
+        if len(nan_depths) == 1:
+            where = f"at {nan_depths[0]:g} m is"
+        else:
+            where = (
+                f"at {len(nan_depths)} target depths "
+                f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
+            )
+        warnings.warn(
+            f"{var!r} {where} entirely NaN: the target lies outside the "
+            f"model's cell-centre range, so nothing can be interpolated;{hint}",
+            stacklevel=2,
+        )
     return result
 
 
@@ -512,14 +524,26 @@ def to_sigma0(
     }
 
     # A target denser or lighter than the column holds anywhere interpolates to
-    # nothing and silently yields an all-NaN level. Say so, per level.
+    # nothing and silently yields an all-NaN level. One warning per variable naming
+    # the span of dead surfaces, not one line each (see to_depth's identical note).
     for var in result.data_vars:
-        for i, target in enumerate(values):
-            if not bool(np.isfinite(result[var].isel(sigma0=i)).any()):
-                warnings.warn(
-                    f"{var!r} at sigma0={target:g} kg/m3 is entirely NaN: the "
-                    "target density lies outside this water column's sigma0 range "
-                    "everywhere, so nothing can be interpolated.",
-                    stacklevel=2,
-                )
+        nan_targets = [
+            float(target)
+            for i, target in enumerate(values)
+            if not bool(np.isfinite(result[var].isel(sigma0=i)).any())
+        ]
+        if not nan_targets:
+            continue
+        if len(nan_targets) == 1:
+            where = f"at sigma0={nan_targets[0]:g} kg/m3 is"
+        else:
+            where = (
+                f"at {len(nan_targets)} target surfaces "
+                f"(sigma0 {min(nan_targets):g}-{max(nan_targets):g} kg/m3) are"
+            )
+        warnings.warn(
+            f"{var!r} {where} entirely NaN: the target density lies outside this "
+            "water column's sigma0 range everywhere, so nothing can be interpolated.",
+            stacklevel=2,
+        )
     return result
