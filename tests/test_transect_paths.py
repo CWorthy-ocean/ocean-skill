@@ -366,6 +366,29 @@ def test_bilinear_curvilinear_drops_a_staggered_variable_with_a_warning(roms_gri
     assert "chl" in out.data_vars
 
 
+def test_bilinear_land_neighbor_renormalizes_instead_of_going_nan(roms_grid):
+    """A path point one cell from the coast must not go NaN just because one of its
+    four bilinear neighbors is land -- it renormalizes over whichever are wet,
+    matching the map path's regrid (see ``tests/test_regrid_target.py``); a point
+    with no wet neighbor at all is correctly still NaN.
+    """
+    pytest.importorskip("xesmf")
+    ds, _ = roms_grid
+    mask = np.ones(ds["mask_rho"].shape)
+    mask[:, -1] = 0.0  # the easternmost column (lon ~ -93.0) is land
+    ds = ds.assign(mask_rho=(ds["mask_rho"].dims, mask))
+    ds = ds.assign(chl=ds["chl"].where(ds["mask_rho"] == 1))
+
+    lons = np.array([-93.5, -93.0, -94.0])  # half-land, all-land, fully wet
+    lats = np.array([25.0, 25.0, 25.0])
+    with pytest.warns(UserWarning, match="passes within one cell of land"):
+        out = sample_along(ds, lons, lats, method="bilinear", subject="test")
+    values = np.asarray(out["chl"].isel(s_rho=-1))
+    assert np.isfinite(values[0])  # half-land support -- renormalized, not NaN
+    assert not np.isfinite(values[1])  # all-land support -- still correctly NaN
+    assert values[2] == pytest.approx(5.5)  # fully wet -- unaffected, exact plane
+
+
 def test_bilinear_dataset_classification_without_needing_xesmf_installed(
     monkeypatch, roms_grid
 ):

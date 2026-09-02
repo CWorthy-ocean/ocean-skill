@@ -111,13 +111,17 @@ def test_spread_is_interpolated_onto_reference_levels():
     """The whole point: a season aggregate's ``spread`` coordinate on the test
     lane rides through ``_match_vertical``'s interpolation for free, and the
     reference's own spread survives untouched, landing as two separate data
-    variables with no MergeError."""
+    variables with no MergeError.
+    """
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
     depth = np.array([5.0, 20.0, 60.0])
     test = _gridded_test(z, spread=[1.0, 1.1, 1.2, 1.3, 1.4])
     reference = _station_reference(depth, spread=[0.5, 0.6, 0.7])
 
-    out = A.align(test, reference, over="Z", test_name="test", reference_name="reference")
+    out = A.align(
+        test, reference, over="Z", method="nearest", test_name="test",
+        reference_name="reference",
+    )
 
     assert "test_spread" in out.data_vars
     assert "reference_spread" in out.data_vars
@@ -133,7 +137,7 @@ def test_no_spread_means_no_spread_variables():
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
     depth = np.array([5.0, 20.0, 60.0])
     out = A.align(
-        _gridded_test(z), _station_reference(depth), over="Z",
+        _gridded_test(z), _station_reference(depth), over="Z", method="nearest",
         test_name="test", reference_name="reference",
     )
     assert "test_spread" not in out.data_vars
@@ -145,7 +149,10 @@ def test_only_the_reference_carrying_a_spread_still_works():
     depth = np.array([5.0, 20.0, 60.0])
     test = _gridded_test(z)
     reference = _station_reference(depth, spread=[0.5, 0.6, 0.7])
-    out = A.align(test, reference, over="Z", test_name="test", reference_name="reference")
+    out = A.align(
+        test, reference, over="Z", method="nearest", test_name="test",
+        reference_name="reference",
+    )
     assert "reference_spread" in out.data_vars
     assert "test_spread" not in out.data_vars
 
