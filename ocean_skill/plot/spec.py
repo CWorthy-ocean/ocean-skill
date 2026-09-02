@@ -72,11 +72,13 @@ class PlotSpec:
         overall value each panel is annotated with.
 
         The summary families (``taylor``, ``target``, ``paired``) are the smallest
-        items of all: ``metrics`` and ``label``, with no field payload at all. That is
-        not a subset of the others but the whole of what a diagram of points reads, and
-        it is what lets those families pool comparisons the map families could not share
-        a figure with — a scored map, an unscored one and a station series are all one
-        record of scalars here. See
+        items of all: ``metrics`` and ``label``, plus an optional ``units`` (the
+        reference's units, read for the absolute-axes ``normalize=False`` labels; a
+        pooled comparison with nothing to read it from carries ``None``), with no
+        field payload at all. That is not a subset of the others but the whole of what
+        a diagram of points reads, and it is what lets those families pool comparisons
+        the map families could not share a figure with — a scored map, an unscored one
+        and a station series are all one record of scalars here. See
         :meth:`ocean_skill.comparison.ComparisonSet._metric_items`.
 
         ``skill_map`` items carry one further *optional* key, ``stations``: a dict of

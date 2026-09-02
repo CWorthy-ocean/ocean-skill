@@ -245,6 +245,13 @@ def test_a_set_without_overrides_still_draws_its_comparisons_own_labels():
     assert ComparisonSet([a])._metric_items()[0]["label"] == "mine"
 
 
+def test_metric_items_units_default_to_none_without_an_aligned_pair():
+    """A hand-built comparison (no ``aligned``) has nowhere to read units from — the
+    absolute-axes diagrams treat that the same as units genuinely being unknown."""
+    a = _FakeComparison(label="mine")
+    assert ComparisonSet([a])._metric_items()[0]["units"] is None
+
+
 # --- the front door ------------------------------------------------------------------
 
 

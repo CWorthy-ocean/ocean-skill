@@ -18,6 +18,7 @@ Inside the unit circle the model beats the observed mean as a predictor.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -93,12 +94,115 @@ def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str
     for c in comparisons:
         rec = dict(c.metrics())
         rec["label"] = getattr(c, "label", None) or rec.get("variable", "")
+        aligned = getattr(c, "aligned", None)
+        rec["units"] = (
+            aligned["reference"].attrs.get("units")
+            if aligned is not None
+            else getattr(c, "units", None)
+        )
         if groups:
             rec["group"] = groups.get(
                 rec.get("reference"), groups.get(rec["label"], "other")
             )
         out.append(rec)
     return out
+
+
+def _uniform_reference_std(recs, *, rtol: float = 1e-3) -> float | None:
+    """The reference standard deviation every record shares, or ``None`` if they differ.
+
+    ``normalize=False`` axes are only as meaningful as the assumption that one
+    reference std describes every point — the Target diagram's guide rings and the
+    Taylor diagram's reference star/arc/contours all need a single number, and there
+    is no principled way to pick one when the records disagree.
+    """
+    srefs = [r["std_reference"] for r in recs]
+    if srefs and np.allclose(srefs, srefs[0], rtol=rtol):
+        return float(srefs[0])
+    return None
+
+
+def _warn_mixed_variables(recs, diagram: str) -> None:
+    """Warn when ``normalize=False`` records don't all describe the same variable.
+
+    Absolute axes are in each comparison's own units; pooling several variables (or
+    the same variable from sources whose units disagree) onto one diagram makes the
+    axes describe more than one unit at once. This only warns — the data caveat
+    belongs in a message, not scribbled on the figure.
+    """
+    variables = {r.get("variable") for r in recs if r.get("variable")}
+    if len(variables) > 1:
+        warnings.warn(
+            f"{diagram}(normalize=False): comparisons span multiple variables "
+            f"{sorted(variables)!r} — the axes are in each comparison's own units, "
+            "which may not agree.",
+            stacklevel=3,
+        )
+
+
+def _shared_units(recs) -> str | None:
+    """The one units string every record agrees on, or ``None`` if missing/mixed."""
+    units = {r["units"] for r in recs if r.get("units")}
+    return units.pop() if len(units) == 1 else None
+
+
+def _target_xy(rec, normalize: bool) -> tuple[float, float]:
+    """A Target diagram's ``(x, y)`` for one metric record.
+
+    x is the centred RMSD **signed** by ``sign(std_test − std_reference)`` — negative
+    means the model is under-dispersed — and y is the bias. ``normalize=True`` divides
+    both by the record's own reference standard deviation (Jolliff et al. 2009's
+    convention, so comparisons in different units share one diagram); ``False`` leaves
+    them in the variable's native units.
+    """
+    denom = rec["std_reference"] if normalize else 1.0
+    sign = np.sign(rec["std_test"] - rec["std_reference"])
+    return (rec["crmsd"] / denom) * sign, rec["bias"] / denom
+
+
+def _target_rings(circles, normalize: bool, recs) -> tuple[tuple[float, ...], float | None]:
+    """Resolve Target's guide-ring radii and the "beats-the-mean" dashed boundary.
+
+    ``circles=None`` asks for the default rings, always in the axes' own units:
+    ``(0.5, 1.0)`` normalized, or the same fractions of the shared reference standard
+    deviation when ``normalize=False`` and every record shares one. With mixed
+    references there is no single boundary to draw, so the default becomes no rings
+    at all (with a warning) rather than guessing whose reference to use.
+
+    Explicit ``circles`` are always honored, in the axes' own units, even with mixed
+    references — they are the caller's own radii, not a boundary this function has
+    to justify. The returned boundary (``None`` when it isn't well defined) is only
+    used to decide which ring, if any, gets the dashed "reference" styling.
+    """
+    if normalize:
+        return (tuple(circles) if circles is not None else (0.5, 1.0)), 1.0
+    boundary = _uniform_reference_std(recs)
+    if circles is not None:
+        return tuple(circles), boundary
+    if boundary is not None:
+        return (0.5 * boundary, boundary), boundary
+    warnings.warn(
+        "target(normalize=False): comparisons have different reference standard "
+        "deviations, so no default guide rings are drawn (there is no single "
+        "'beats the observed mean' boundary to show); pass circles= explicitly, "
+        "in the axes' own units, to draw rings anyway.",
+        stacklevel=3,
+    )
+    return (), None
+
+
+def _target_labels(normalize: bool, recs, *, tex: bool) -> tuple[str, str]:
+    """Target's x/y axis labels — one source so both renderers agree on the wording.
+
+    ``tex`` picks matplotlib mathtext (``$\\sigma_{ref}$``) over the plain-unicode
+    spelling (``σ_ref``) holoviews needs instead; the two used to drift independently.
+    """
+    if normalize:
+        sigma = "$\\sigma_{ref}$" if tex else "σ_ref"
+        return f"signed centred RMSD / {sigma}  (← under | over →)", f"bias / {sigma}"
+    units = _shared_units(recs)
+    suffix = f" [{units}]" if units else ""
+    return f"signed centred RMSD{suffix}  (← under | over →)", f"bias{suffix}"
 
 
 #: Label offsets (display points) cycled by index so consecutive labels point in
@@ -592,7 +696,11 @@ def taylor(
     ``normalize=True`` divides each standard deviation by its own reference, so
     comparisons in different units (or of different variables) share one diagram; the
     reference then sits at radius 1. Turn it off only when every comparison shares a
-    reference and you want the native units.
+    reference and you want the native units — the radial axis is then labelled with
+    them when every record agrees on one. With ``normalize=False``, a reference
+    standard deviation that differs across comparisons (or comparisons that span more
+    than one variable) draws the same diagram but warns, since the star, dashed arc,
+    and RMS contours describe only the first comparison's reference.
 
     ``color_by``/``marker_by`` name a field of the metric records (``variable``,
     ``depth``, ``test``, ...) so several groups can share one diagram — colour for one
@@ -655,6 +763,16 @@ def taylor(
         color_by = "group"
     style_field = color_by or marker_by or "label"
 
+    if not normalize:
+        _warn_mixed_variables(recs, "taylor")
+        if _uniform_reference_std(recs) is None:
+            warnings.warn(
+                "taylor(normalize=False): comparisons have different reference "
+                "standard deviations; the reference star, dashed arc, and RMS "
+                "contours all use the first comparison's.",
+                stacklevel=2,
+            )
+
     refstd = 1.0 if normalize else recs[0]["std_reference"]
     figsize = figsize or _diagram_figsize(TAYLOR_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, font_scale=font_scale, override=scale)
@@ -669,7 +787,10 @@ def taylor(
         fig=fig,
         rect=rect,
         label="reference",
-        srange=(0, max(1.6, 1.15 * max(stds))),
+        # `srange` is multiples of `refstd` (see TaylorDiagram.__init__), but `stds`
+        # is in raw units when `normalize=False` — dividing back by `refstd` keeps
+        # this a no-op when normalized (refstd == 1) and correct otherwise.
+        srange=(0, max(1.6, 1.15 * max(stds) / refstd)),
     )
     star_scale = _scalar_scale(marker_scale)
     if star_scale != 1.0:
@@ -756,6 +877,10 @@ def taylor(
         # be sized independently of the rest of it
         axis.major_ticklabels.set_fontsize(scale["tick_label"])
         axis.label.set_fontsize(scale["axes_label"])
+    if not normalize:
+        units = _shared_units(recs)
+        if units:
+            dia._ax.axis["left"].label.set_text(f"Standard deviation [{units}]")
 
     if labels == "legend":
         _legend_below(
@@ -785,12 +910,13 @@ def target(
     comparisons,
     *,
     title: str | None = None,
+    normalize: bool = True,
     save: str | Path | None = None,
     colors=None,
     color_by: str | None = None,
     marker_by: str | None = None,
     groups: dict[str, Any] | None = None,
-    circles=(0.5, 1.0),
+    circles=None,
     ax=None,
     labels: str | None = "annotate",
     figsize: tuple[float, float] | None = None,
@@ -808,9 +934,20 @@ def target(
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
 
     x is the centred RMSD **signed** by ``sign(std_test − std_reference)`` — negative
-    means the model is under-dispersed — and y is the bias; both normalized by the
-    reference standard deviation. Distance from the origin is the normalized total RMSD,
-    so points inside the unit circle out-perform the observed mean as a predictor.
+    means the model is under-dispersed — and y is the bias. ``normalize=True`` (the
+    default) divides both by the reference standard deviation, so distance from the
+    origin is the normalized total RMSD and points inside the unit circle out-perform
+    the observed mean as a predictor; comparisons in different units (or of different
+    variables) then share one diagram. ``normalize=False`` leaves both in native units
+    — the axis labels then name them when every comparison agrees on one — and warns
+    if the comparisons span more than one variable, since the axes may then mix units.
+
+    ``circles`` sets the guide-ring radii, always in the axes' own units — left at its
+    default (``None``) that is ``(0.5, 1.0)`` normalized, or ``(0.5, 1.0)`` scaled by
+    the shared reference standard deviation when ``normalize=False`` and every
+    comparison shares one; with mixed references there is no single boundary to draw,
+    so the default becomes no rings at all (with a warning). Pass ``circles``
+    explicitly to draw rings regardless.
 
     ``color_by``/``marker_by``/``groups`` mean exactly what they do in :func:`taylor`.
 
@@ -838,14 +975,16 @@ def target(
     if groups and not color_by and not marker_by:
         color_by = "group"
     style_field = color_by or marker_by or "label"
+    if not normalize:
+        _warn_mixed_variables(recs, "target")
 
-    sref = np.array([r["std_reference"] for r in recs])
-    x = np.array([r["crmsd"] for r in recs]) / sref
-    x *= np.sign(np.array([r["std_test"] for r in recs]) - sref)  # the signed part
-    y = np.array([r["bias"] for r in recs]) / sref
+    xy = np.array([_target_xy(r, normalize) for r in recs])
+    x, y = xy[:, 0], xy[:, 1]
     point_labels = [r["label"] for r in recs]
 
-    lim = max(1.15 * float(np.max(np.hypot(x, y))), max(circles) * 1.25, 1.2)
+    rings, boundary = _target_rings(circles, normalize, recs)
+    ring_floor = max(rings) * 1.25 if rings else 0.0
+    lim = max(1.15 * float(np.max(np.hypot(x, y))), ring_floor, 1.2 if normalize else 0.0)
     figsize = figsize or _diagram_figsize(TARGET_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, font_scale=font_scale, override=scale)
     owns_figure = ax is None
@@ -855,20 +994,21 @@ def target(
         # drawn into someone else's figure (paired); they fit the text once at the end
         fig = ax.figure
 
-    for radius in circles:
+    for radius in rings:
+        dashed = boundary is not None and np.isclose(radius, boundary)
         ax.add_patch(
             plt.Circle(
                 (0, 0),
                 radius,
                 fill=False,
                 color="0.55",
-                ls="--" if radius == 1.0 else ":",
+                ls="--" if dashed else ":",
                 lw=0.9,
                 zorder=1,
             )
         )
         ax.annotate(
-            f"{radius:g}",
+            f"{radius:.3g}",
             (radius * 0.71, radius * 0.71),
             fontsize=scale["contour_label"],
             color="0.45",
@@ -903,9 +1043,8 @@ def target(
         overlay_specs += _overlay_point_specs(
             overlay,
             groups,
-            lambda r: (r["crmsd"] / r["std_reference"])
-            * np.sign(r["std_test"] - r["std_reference"]),
-            lambda r: r["bias"] / r["std_reference"],
+            lambda r: _target_xy(r, normalize)[0],
+            lambda r: _target_xy(r, normalize)[1],
         )
     if summary_points:
         overlay_specs += _summary_point_specs(recs, x, y, style_field, summary_points)
@@ -942,12 +1081,8 @@ def target(
 
     # Axes labelling before the key: _legend_below places itself below the lowest label
     # already drawn, so the x label has to exist by then or the key lands on top of it.
-    ax.set(
-        xlim=(-lim, lim),
-        ylim=(-lim, lim),
-        xlabel="signed centred RMSD / $\\sigma_{ref}$  (← under | over →)",
-        ylabel="bias / $\\sigma_{ref}$",
-    )
+    xlabel, ylabel = _target_labels(normalize, recs, tex=True)
+    ax.set(xlim=(-lim, lim), ylim=(-lim, lim), xlabel=xlabel, ylabel=ylabel)
     ax.xaxis.label.set_size(scale["axes_label"])
     ax.yaxis.label.set_size(scale["axes_label"])
     ax.tick_params(labelsize=scale["tick_label"])

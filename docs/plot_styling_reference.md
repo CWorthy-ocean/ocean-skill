@@ -879,11 +879,17 @@ Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, a
 
 ### `circles` (target only)
 
-**Default:** `(0.5, 1.0)`
+**Default:** `None` (adaptive — see below)
 
-Radii of the dashed/dotted guide rings. The ring at `1.0` marks where a model's total
-normalized RMSD equals the observed mean's own standard deviation — inside it, the
-model out-performs the observed mean as a predictor:
+Radii of the dashed/dotted guide rings, always in the axes' own units. Left at its
+default, that is `(0.5, 1.0)` normalized; with `normalize=False` it becomes the same
+fractions of the shared reference standard deviation — `(0.5·σ_ref, σ_ref)` — as long
+as every comparison shares one. Either way the dashed ring marks where the model's
+total RMSD equals that reference standard deviation — inside it, the model
+out-performs the observed mean as a predictor. With `normalize=False` and comparisons
+that do *not* share a reference standard deviation, there is no single boundary to draw,
+so the default becomes no rings at all, with a warning; pass `circles` explicitly (still
+in the axes' own units) to draw rings anyway:
 
 ```python
 suite.target(circles=(0.5, 1.0, 1.5))
@@ -891,21 +897,29 @@ suite.target(circles=(0.5, 1.0, 1.5))
 
 Honored by **both renderers**.
 
-### `normalize` (Taylor only)
+### `normalize` (Taylor and target)
 
 **Default:** `True`
 
-Divides each standard deviation by its own reference, so comparisons of different
-variables or in different units can share one diagram, with every reference sitting at
-radius 1:
+Divides each standard deviation, centred RMSD, and bias by its own comparison's
+reference, so comparisons of different variables or in different units can share one
+diagram, with every reference sitting at radius 1 (Taylor) or the origin (target):
 
 ```python
 suite.taylor(normalize=False)   # native units; only sound with a shared reference
+suite.target(normalize=False)   # same, for the target diagram
 ```
 
 Turn it off only when every comparison shares one reference and the native units
-matter more than a common scale. (`taylor` delegates to matplotlib interactively, so
-this applies to both renderers either way.)
+matter more than a common scale. Axis labels then name the shared units when every
+comparison agrees on one, and stay unitless otherwise. Two warnings guard against a
+diagram that looks fine but isn't: comparisons that span more than one variable (the
+axes may then mix units), and — for `taylor` specifically — comparisons whose reference
+standard deviations differ (the star, dashed arc, and RMS contours describe only the
+first comparison's reference; `target`'s analogous case is covered by `circles` above).
+Honored by **both renderers** for `target`; `taylor` (and `paired`, which forwards to
+both) delegates to matplotlib interactively, so this applies to both renderers either
+way.
 
 ---
 
