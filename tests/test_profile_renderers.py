@@ -32,6 +32,7 @@ def _profile_item(
     zdim: str = "z",
     negative_down: bool = True,
     n: int = 8,
+    max_depth: float = 150.0,
     time: str | None = None,
 ) -> dict:
     """One comparison item, shaped exactly as ``Comparison.as_item()`` builds it.
@@ -41,7 +42,7 @@ def _profile_item(
     :func:`ocean_skill.roms.to_depth`) and an observational product's ``depth``
     (already positive-down).
     """
-    depths = np.linspace(5.0, 150.0, n)
+    depths = np.linspace(5.0, max_depth, n)
     coord = -depths if negative_down else depths
     values = 20.0 - 0.08 * depths
     reference_da = xr.DataArray(
@@ -460,20 +461,197 @@ def test_rows_and_cols_together_are_refused():
         )
 
 
-# -- composition: variables become columns, not a secondary axis ------------------------
+# -- composition: two variables merge onto one panel with a top axis by default ---------
 
 
-def test_two_variables_become_two_columns_sharing_the_depth_axis():
+def test_two_variables_go_to_a_top_axis_by_default():
     items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
     fig = render(_spec(items), renderer="matplotlib")
+    assert len(fig.axes) == 2  # the panel and its twin
+    assert len(_matplotlib_titles(fig)) == 1
+    assert fig.axes[1].xaxis.get_label_position() == "top"
+    assert fig.axes[1].get_xlabel() == "salinity [1e-3]"
+
+    obj = render(_spec(items), renderer="holoviews")
+    assert len(_holoviews_titles(obj)) == 1
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    plot = hv.render(obj, backend="bokeh")
+    (bokeh_fig,) = plot.select({"type": figure})
+    assert "secondary" in bokeh_fig.extra_x_ranges
+    from bokeh.models import LinearAxis
+
+    (top_axis,) = [a for a in bokeh_fig.above if isinstance(a, LinearAxis)]
+    assert top_axis.axis_label == "salinity [1e-3]"
+
+
+def test_secondary_x_false_gives_two_columns_sharing_the_depth_axis():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, secondary_x=False), renderer="matplotlib")
     assert len(fig.axes) == 2
     assert len(_matplotlib_titles(fig)) == 2
     # only the leftmost column carries the shared depth label
     assert fig.axes[0].get_ylabel() == "Depth [m]"
     assert fig.axes[1].get_ylabel() == ""
 
-    obj = render(_spec(items), renderer="holoviews")
+    obj = render(_spec(items, secondary_x=False), renderer="holoviews")
     assert len(_holoviews_titles(obj)) == 2
+
+
+def test_secondary_glyphs_ride_the_secondary_range():
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3", offset=-0.2)]
+    obj = render(_spec(items), renderer="holoviews")
+    plot = hv.render(obj, backend="bokeh")
+    (bokeh_fig,) = plot.select({"type": figure})
+    renderers = [r for r in bokeh_fig.renderers if hasattr(r, "x_range_name")]
+    on_secondary = {r.x_range_name for r in renderers if "secondary" in r.x_range_name}
+    on_default = {r.x_range_name for r in renderers if r.x_range_name == "default"}
+    assert on_secondary == {"secondary"}
+    assert on_default == {"default"}
+
+
+def test_a_twin_panel_records_its_value_axis_label_colours():
+    layout = _profile.compose(
+        [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    )
+    panel = layout.panels[0]
+    assert panel.xlabel_color == panel.lines[0].color
+    assert panel.secondary_xlabel_color == panel.secondary[0].color
+    assert panel.xlabel_color != panel.secondary_xlabel_color
+
+
+def test_twin_axis_label_colours_match_their_lines_in_both_renderers():
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items), renderer="matplotlib")
+    ax, twin = fig.axes
+    assert ax.xaxis.label.get_color() == ax.get_lines()[0].get_color()
+    assert twin.xaxis.label.get_color() == twin.get_lines()[0].get_color()
+
+    obj = render(_spec(items), renderer="holoviews")
+    plot = hv.render(obj, backend="bokeh")
+    (bokeh_fig,) = plot.select({"type": figure})
+    by_label = {axis.axis_label: axis for axis in bokeh_fig.xaxis}
+    assert by_label[ax.get_xlabel()].axis_label_text_color == ax.get_lines()[0].get_color()
+    assert (
+        by_label[twin.get_xlabel()].axis_label_text_color
+        == twin.get_lines()[0].get_color()
+    )
+
+
+def test_an_axis_carrying_two_colours_leaves_value_labels_uncoloured():
+    items = [
+        _profile_item(test="run_new", reference="whots"),
+        _profile_item(SALINITY, units="1e-3", test="run_old", reference="argo"),
+    ]
+    layout = _profile.compose(items, encode={"color": "source"})
+    panel = layout.panels[0]
+    assert panel.xlabel_color is None
+    assert panel.secondary_xlabel_color is None
+
+
+def test_single_variable_secondary_x_is_a_no_op():
+    layout = _profile.compose([_profile_item()], secondary_x=True)
+    assert len(layout.panels) == 1
+    assert layout.panels[0].secondary == ()
+    fig = render(_spec([_profile_item()]), renderer="matplotlib")
+    assert len(fig.axes) == 1
+
+
+def test_three_variables_ignore_secondary_x():
+    items = [
+        _profile_item(),
+        _profile_item(SALINITY, units="1e-3"),
+        _profile_item("sea_water_ph_reported_on_total_scale", units="1"),
+    ]
+    fig = render(_spec(items), renderer="matplotlib")
+    assert len(fig.axes) == 3
+
+
+def test_a_facet_wins_over_secondary_x():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, cols="variable"), renderer="matplotlib")
+    assert len(fig.axes) == 2
+    assert len(_matplotlib_titles(fig)) == 2
+
+
+def test_merged_metrics_box_prefixes_each_variables_row():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, metric_keys=("bias",)), renderer="matplotlib")
+    box = fig.axes[0].texts[0].get_text()
+    assert box.count("\n") == 1  # two rows
+    rows = box.split("\n")
+    assert any("temperature" in r.lower() for r in rows)
+    assert any("salinity" in r.lower() for r in rows)
+
+
+def test_merged_panel_lines_agree_across_renderers():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3", offset=-0.2)]
+    static = _matplotlib_lines(render(_spec(items), renderer="matplotlib"))
+    interactive = _holoviews_lines(render(_spec(items), renderer="holoviews"))
+    assert [(a, b, c) for a, b, c, _ in static] == interactive
+
+
+def test_spread_bands_follow_their_variable_onto_the_twin_axis():
+    items = [
+        _seasonal_single_item(spread=0.5, seasons=("JJA",)),
+        _seasonal_single_item(
+            variable=SALINITY, units="1e-3", spread=0.3, seasons=("JJA",)
+        ),
+    ]
+    fig = render(_spec(items), renderer="matplotlib")
+    ax, twin = fig.axes
+    assert ax.collections  # temperature's band on the primary axis
+    assert twin.collections  # salinity's band on the twin
+
+    obj = render(_spec(items), renderer="holoviews")
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    plot = hv.render(obj, backend="bokeh")
+    (bokeh_fig,) = plot.select({"type": figure})
+    from bokeh.models import MultiPolygons
+
+    secondary_patches = [
+        r
+        for r in bokeh_fig.renderers
+        if isinstance(r.glyph, MultiPolygons) and r.x_range_name == "secondary"
+    ]
+    assert secondary_patches
+
+
+def test_depth_range_spans_both_variables():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3", max_depth=300.0)]
+    fig = render(_spec(items), renderer="matplotlib")
+    bottom, _ = fig.axes[0].get_ylim()
+    assert bottom == pytest.approx(300.0)
+
+
+def test_the_title_clears_the_twin_axis_instead_of_overlapping_it():
+    """A twin's own ticks and axis label are drawn above the shared top spine,
+    exactly where the title's default pad would otherwise land it (matplotlib
+    does not know to stack them on its own)."""
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items), renderer="matplotlib")
+    ax, twin = fig.axes
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    title_bottom = ax.title.get_window_extent(renderer).y0
+    twin_label_top = twin.xaxis.label.get_window_extent(renderer).y1
+    assert title_bottom >= twin_label_top
+
+
+def test_secondary_y_on_a_profile_hints_at_secondary_x():
+    with pytest.raises(TypeError, match="secondary_x"):
+        render(_spec([_profile_item()], secondary_y=True), renderer="matplotlib")
+    with pytest.warns(UserWarning, match="secondary_x"):
+        render(_spec([_profile_item()], secondary_y=True), renderer="holoviews")
 
 
 def test_a_single_variable_stays_one_panel():
@@ -776,7 +954,15 @@ def test_profile_is_registered_everywhere_it_has_to_be():
     from ocean_skill.plot.spec import FAMILIES
 
     assert "profile" in FAMILIES
-    for option in ("xlim", "ylim", "panel_aspect", "legend", "encode", "mark"):
+    for option in (
+        "xlim",
+        "ylim",
+        "panel_aspect",
+        "legend",
+        "encode",
+        "mark",
+        "secondary_x",
+    ):
         assert option in _top_level_options(), option
 
 

@@ -375,3 +375,25 @@ def test_rows_facet_overrides_the_secondary_axis(stub):
     stub(_point_series())
     fig = _make_set([NITRATE, SILICATE]).plot(rows="variable")
     assert len([ax for ax in fig.axes if ax.get_title()]) == 2
+
+
+# -- the same twin-axis merge, but for a profile FieldSet -------------------------------
+
+
+def test_two_profile_variables_share_a_panel_with_a_top_axis(stub):
+    stub(_point_with_depth().isel(time=0))
+    fs = _make_set([NITRATE, SILICATE])
+    fig = fs.plot()
+    assert len(fig.axes) == 2  # one panel plus its twin
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 1
+
+    import holoviews as hv
+
+    obj = _make_set([NITRATE, SILICATE]).plot(renderer="holoviews")
+    assert len(obj.traverse(lambda x: x, [hv.Curve])) == 2
+
+
+def test_secondary_x_false_stacks_two_profile_variables(stub):
+    stub(_point_with_depth().isel(time=0))
+    fig = _make_set([NITRATE, SILICATE]).plot(secondary_x=False)
+    assert len([ax for ax in fig.axes if ax.get_title()]) == 2

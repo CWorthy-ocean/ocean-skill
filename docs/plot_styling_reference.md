@@ -1091,12 +1091,30 @@ already draws against.
 | Distinct variables | Default |
 |---|---|
 | one | one panel, every source/cast overlaid |
-| two or more | one column per variable, sharing the depth axis |
+| two | one panel, the second variable on a top x axis |
+| three or more | one column per variable, sharing the depth axis |
 
-No `secondary_y` here — a second value axis at the *top* of a profile panel has no
-interactive twin (bokeh has `multi_y`, not `multi_x`), so two or more variables
-each take their own column instead. `rows=`/`cols=` (one, not both) facet on
-`variable`, `source`, `reference`, `time` or `comparison`.
+`secondary_x=False` gives the two-variable case its own column each instead — the
+classic CTD layout — sharing the one depth axis. `rows=`/`cols=` (one, not both)
+facet on `variable`, `source`, `reference`, `time` or `comparison`, and a facet
+wins over `secondary_x` when both apply.
+
+`secondary_x` is the profile counterpart of `series`' `secondary_y`, transposed:
+a profile's value axis is x (depth is y), so its twin grows a *top* x axis rather
+than a right-hand y axis. Statically it is `ax.twiny()`; interactively bokeh has
+no `multi_x` the way it has `multi_y` (and `multi_y` does not become one under
+`invert_axes`, either — a dead path in the current holoviews/bokeh, not a
+missing feature), so the top axis is drawn by hand: a second `Range1d`
+registered as `extra_x_ranges`, a `LinearAxis` added above the frame, and the
+secondary variable's glyphs re-pointed at it. That range is fixed, so a
+box-zoom (which acts on the bottom axis only) does not stretch or shear the
+twin along with it.
+
+On a two-variable panel, each x-axis label — and its tick numbers — take the
+colour of the lines drawn against that axis, exactly as `series` colours a
+twin's y-axis labels. A single-axis panel keeps the default label colour; so
+does any axis whose lines don't share one colour (`encode={"color": "source"}`,
+for example).
 
 ### Axis conventions
 
@@ -1113,10 +1131,11 @@ each take their own column instead. `rows=`/`cols=` (one, not both) facet on
 
 | Parameter | Default | Effect |
 |---|---|---|
+| `secondary_x` | `True` | merge two variables onto one panel with a top x axis; `False` gives each its own column |
 | `mark` | `"line"` | `"line+marker"` or `"marker"` — no `"step"` (a profile's levels are irregularly spaced, with nothing between them a step-hold represents honestly) |
 | `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
 | `legend` | `True` | draw the key at all |
-| `xlim` | `None` | value-axis limits, every panel |
+| `xlim` | `None` | value-axis limits; bounds only the bottom (primary) axis when `secondary_x` merges a second variable in |
 | `ylim` | `None` | depth limits, `(shallow, deep)` in positive-down metres |
 | `panel_aspect` | `0.62` | width/height of a panel — portrait, since a water column reads top-to-bottom |
 
@@ -1135,6 +1154,12 @@ by construction: statically via `ax.set_ylim(deep, shallow)`, interactively via
 `invert_yaxis=True`, which would flip an already-descending range back to
 ascending). `line_kwargs` and `legend_kwargs` only affect the static renderer,
 which warns rather than absorbing them silently.
+
+A `secondary_x` panel's top axis is one place the two renderers reach the same
+picture by different means: `ax.twiny()` statically, a bokeh finalize hook
+(`extra_x_ranges` + a `LinearAxis` added `"above"` + `x_range_name` on the
+secondary glyphs) interactively — the same technique `series`' own twin-axis
+label colouring already uses to reach into a rendered bokeh figure.
 
 ## The `section` family (vertical slices)
 

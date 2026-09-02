@@ -74,6 +74,12 @@ class Panel:
     #: colour — that is the one case where a label can honestly say "this is my axis".
     ylabel_color: str | None = None
     secondary_ylabel_color: str | None = None
+    #: The ``xlabel`` counterparts of the three fields above -- set only by the
+    #: profile family, whose value axis is x (depth is y), so its twin is a top
+    #: x axis rather than series' right-hand y axis.
+    secondary_xlabel: str | None = None
+    xlabel_color: str | None = None
+    secondary_xlabel_color: str | None = None
     residual: tuple[_style.StyledLine, ...] = ()
     metrics_text: str = ""
     metrics_corner: str = "upper left"
