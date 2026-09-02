@@ -911,12 +911,15 @@ suite.target(normalize=False)   # same, for the target diagram
 ```
 
 Turn it off only when every comparison shares one reference and the native units
-matter more than a common scale. Axis labels then name the shared units when every
-comparison agrees on one, and stay unitless otherwise. Two warnings guard against a
-diagram that looks fine but isn't: comparisons that span more than one variable (the
-axes may then mix units), and — for `taylor` specifically — comparisons whose reference
-standard deviations differ (the star, dashed arc, and RMS contours describe only the
-first comparison's reference; `target`'s analogous case is covered by `circles` above).
+matter more than a common scale. Axis labels name the units only for a single-variable
+diagram, and stay unitless otherwise — including when several variables happen to share
+a unit string (DIC and alkalinity both convert to `mmol/m^3` here, say, but remain two
+quantities on two natural scales, so one label would misrepresent the axis). Two
+warnings guard against a diagram that looks fine but isn't: comparisons that span more
+than one variable (the axes may then mix units), and — for `taylor` specifically —
+comparisons whose reference standard deviations differ (the star, dashed arc, and RMS
+contours describe only the first comparison's reference; `target`'s analogous case is
+covered by `circles` above).
 Honored by **both renderers** for `target`; `taylor` (and `paired`, which forwards to
 both) delegates to matplotlib interactively, so this applies to both renderers either
 way.

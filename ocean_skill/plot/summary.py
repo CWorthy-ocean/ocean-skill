@@ -141,7 +141,20 @@ def _warn_mixed_variables(recs, diagram: str) -> None:
 
 
 def _shared_units(recs) -> str | None:
-    """The one units string every record agrees on, or ``None`` if missing/mixed."""
+    """The one units string every record agrees on, or ``None`` if missing/mixed —
+    or if the records don't even describe the same variable.
+
+    A pipeline that converts everything onto one canonical unit (this project's own
+    ``units.convert_units`` defaults every concentration to ``mmol/m^3``) routinely
+    leaves DIC and alkalinity, say, agreeing on ``units`` while still being two
+    different quantities on two different natural scales. Labeling the axis with
+    that shared unit would read as reassurance that the mixed-variable warning is
+    actively contradicting, so units are only shown for a genuinely single-variable
+    diagram.
+    """
+    variables = {r.get("variable") for r in recs if r.get("variable")}
+    if len(variables) > 1:
+        return None
     units = {r["units"] for r in recs if r.get("units")}
     return units.pop() if len(units) == 1 else None
 
@@ -697,7 +710,12 @@ def taylor(
     comparisons in different units (or of different variables) share one diagram; the
     reference then sits at radius 1. Turn it off only when every comparison shares a
     reference and you want the native units — the radial axis is then labelled with
-    them when every record agrees on one. With ``normalize=False``, a reference
+    them, but only for a genuinely single-variable diagram: comparisons that share a
+    unit string while describing different variables (DIC and alkalinity both land on
+    this project's own canonical ``"mmol/m^3"``, say, while remaining different
+    quantities on different natural scales) still get an unlabelled axis, since naming
+    one unit would read as reassurance the warning below is actively contradicting.
+    With ``normalize=False``, a reference
     standard deviation that differs across comparisons (or comparisons that span more
     than one variable) draws the same diagram but warns, since the star, dashed arc,
     and RMS contours describe only the first comparison's reference.
@@ -939,8 +957,9 @@ def target(
     origin is the normalized total RMSD and points inside the unit circle out-perform
     the observed mean as a predictor; comparisons in different units (or of different
     variables) then share one diagram. ``normalize=False`` leaves both in native units
-    — the axis labels then name them when every comparison agrees on one — and warns
-    if the comparisons span more than one variable, since the axes may then mix units.
+    — the axis labels then name them for a single-variable diagram, but stay unlabelled
+    once the comparisons span more than one variable (which also warns), even if those
+    variables happen to share a unit string, since the two natural scales still differ.
 
     ``circles`` sets the guide-ring radii, always in the axes' own units — left at its
     default (``None``) that is ``(0.5, 1.0)`` normalized, or ``(0.5, 1.0)`` scaled by
