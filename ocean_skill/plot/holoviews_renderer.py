@@ -2190,6 +2190,83 @@ def _profile_bands(hv, line, dimensions) -> list:
     return bands
 
 
+def _value_range(lines, limit=None) -> tuple[float, float]:
+    """A value axis's ``(low, high)``, padded 5% like matplotlib's own default margin.
+
+    HoloViews auto-ranges an ``Overlay``'s x axis over *every* element it contains,
+    secondary-axis curves included, so the primary range has to be pinned explicitly
+    once a twin axis joins the panel (see :func:`_secondary_x_hook`) -- computed here
+    the same way for both axes so neither renderer frames its data more tightly than
+    the other.
+    """
+    if limit is not None:
+        return float(limit[0]), float(limit[1])
+    arrays = []
+    for line in lines:
+        values = np.asarray(line.spec.values.values, dtype="float64")
+        arrays.append(values)
+        if line.spec.spread is not None:
+            spread = np.asarray(line.spec.spread, dtype="float64")
+            arrays += [values - spread, values + spread]
+    xs = np.concatenate(arrays) if arrays else np.array([])
+    finite = xs[np.isfinite(xs)]
+    lo, hi = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
+    pad = 0.05 * (hi - lo) or 0.5
+    return lo - pad, hi + pad
+
+
+def _secondary_x_hook(panel, primary_range, secondary_range):
+    """Bokeh finalize hook: grow a second x axis along the top of the frame.
+
+    HoloViews' own ``multi_y`` cannot do this even with ``invert_axes=True`` --
+    it always creates the extra range under ``extra_y_ranges`` and never adds a
+    matching axis to the layout, an orphaned range with nothing drawn against it
+    (checked against the installed holoviews/bokeh; a dead path, not a missing
+    feature to wait for). This hook does by hand what the static renderer's
+    ``ax.twiny()`` does for free: a second ``Range1d`` registered under
+    ``extra_x_ranges``, a ``LinearAxis`` added "above" the frame, and every
+    secondary glyph re-pointed at it by ``x_range_name``.
+
+    Secondary glyphs are found by *dimension name* -- ``"secondary"``, the one
+    identity a line's Curve, its unlabeled markevery Scatter, and its unlabeled
+    Polygons bands all carry (labels don't: the marker overlay and the bands
+    have none). Any future secondary element built without that kdim would
+    silently draw against the primary range instead.
+    """
+    from bokeh.models import LinearAxis, Range1d
+
+    def hook(plot, element):
+        fig = plot.state
+        fig.extra_x_ranges = {
+            "secondary": Range1d(start=secondary_range[0], end=secondary_range[1])
+        }
+        top = LinearAxis(
+            x_range_name="secondary", axis_label=panel.secondary_xlabel or ""
+        )
+        if panel.secondary_xlabel_color:
+            top.axis_label_text_color = panel.secondary_xlabel_color
+            top.major_label_text_color = panel.secondary_xlabel_color
+        fig.add_layout(top, "above")
+        fig.x_range.start, fig.x_range.end = primary_range
+        if panel.xlabel_color:
+            # fig.xaxis now holds both the bottom and the top axis just added --
+            # matched by label, the same way _axis_label_color_hook matches a
+            # series twin's y axes.
+            for axis in fig.xaxis:
+                if axis.axis_label == (panel.xlabel or ""):
+                    axis.axis_label_text_color = panel.xlabel_color
+                    axis.major_label_text_color = panel.xlabel_color
+        for subplot in plot.subplots.values():
+            frame = subplot.current_frame
+            if frame is None or not frame.kdims or frame.kdims[0].name != "secondary":
+                continue
+            glyph = subplot.handles.get("glyph_renderer")
+            if glyph is not None:
+                glyph.x_range_name = "secondary"
+
+    return hook
+
+
 def _profile_metrics_text(hv, panel, y_range):
     """Return the statistics box as an ``hv.Text``, in the corner ``compose`` chose.
 
@@ -2223,6 +2300,7 @@ def _profile(
     title=None,
     rows=None,
     cols=None,
+    secondary_x=True,
     encode=None,
     metrics_loc="auto",
     metric_keys=DEFAULT_METRIC_KEYS,
@@ -2250,6 +2328,12 @@ def _profile(
     computed once here exactly as
     :func:`ocean_skill.plot.matplotlib_renderer.profile` computes it, rather than
     left to each panel's own data range.
+
+    A ``secondary_x`` panel's top axis is drawn by :func:`_secondary_x_hook` --
+    HoloViews' ``multi_y`` has no x-axis counterpart, and even ``invert_axes=True``
+    does not make one (a dead path in the installed holoviews/bokeh, not a missing
+    feature). The secondary range is a fixed ``Range1d``, so a box-zoom (which
+    acts on ``fig.x_range`` only) does not stretch or shear the twin along with it.
     """
     hv = _extension()
 
@@ -2260,6 +2344,7 @@ def _profile(
         items,
         rows=rows,
         cols=cols,
+        secondary_x=secondary_x,
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
@@ -2270,7 +2355,9 @@ def _profile(
         aspect=panel_aspect or PROFILE_ASPECT,
     )
 
-    all_lines = [line for panel in layout.panels for line in panel.lines]
+    all_lines = [
+        line for panel in layout.panels for line in panel.lines + panel.secondary
+    ]
     if ylim is not None:
         y_range = (float(ylim[1]), float(ylim[0]))
     elif all_lines:
@@ -2301,31 +2388,61 @@ def _profile(
             if line.spec.spread is not None
             for band in _profile_bands(hv, line, dims)
         ]
-        overlay = hv.Overlay(
-            bands + [_profile_curve(hv, line, dims, mark=mark) for line in panel.lines]
-        )
+        curves = [_profile_curve(hv, line, dims, mark=mark) for line in panel.lines]
+        if panel.secondary:
+            # "secondary" is the dimension *name* _secondary_x_hook keys on to
+            # find which glyphs to re-point at the top axis -- it must match
+            # exactly, on every element type a secondary line can produce.
+            second_dims = (
+                hv.Dimension("secondary", label=panel.secondary_xlabel or ""),
+                y_dim,
+            )
+            bands += [
+                band
+                for line in panel.secondary
+                if line.spec.spread is not None
+                for band in _profile_bands(hv, line, second_dims)
+            ]
+            curves += [
+                _profile_curve(hv, line, second_dims, mark=mark)
+                for line in panel.secondary
+            ]
+        overlay = hv.Overlay(bands + curves)
         if panel.metrics_text:
             overlay = overlay * _profile_metrics_text(hv, panel, y_range)
-        plot = overlay.opts(
-            hv.opts.Curve(
-                frame_width=width,
-                frame_height=height,
-                fontsize=fontsize,
-                show_grid=True,
-                tools=["hover"],
-                ylim=y_range,
-            ),
-            hv.opts.Overlay(
-                title=panel.title,
-                show_legend=bool(legend),
-                legend_position=_BOKEH_LEGEND_POSITION.get(
-                    panel.legend_corner, "top_right"
-                ),
-                fontsize=fontsize,
-            ),
+        curve_opts = dict(
+            frame_width=width,
+            frame_height=height,
+            fontsize=fontsize,
+            show_grid=True,
+            tools=["hover"],
+            ylim=y_range,
         )
-        if xlim is not None:
-            plot = plot.opts(hv.opts.Curve(xlim=tuple(xlim)))
+        if xlim is not None and not panel.secondary:
+            # With a twin, xlim reaches the primary axis through the hook's
+            # pinned range instead -- applying it as a Curve opt here would
+            # clamp the shared pre-hook range under the secondary curves too.
+            curve_opts["xlim"] = tuple(xlim)
+        overlay_opts = dict(
+            title=panel.title,
+            show_legend=bool(legend),
+            legend_position=_BOKEH_LEGEND_POSITION.get(
+                panel.legend_corner, "top_right"
+            ),
+            fontsize=fontsize,
+        )
+        if panel.secondary:
+            overlay_opts["hooks"] = [
+                _secondary_x_hook(
+                    panel,
+                    _value_range(panel.lines, xlim),
+                    _value_range(panel.secondary),
+                )
+            ]
+        plot = overlay.opts(
+            hv.opts.Curve(**curve_opts),
+            hv.opts.Overlay(**overlay_opts),
+        )
         plots.append(plot)
 
     out = hv.Layout(plots).cols(layout.ncols)
@@ -2918,6 +3035,13 @@ def render(spec, **kwargs: Any):
     if family == "series":
         return _series(spec.items, **opts)
     if family == "profile":
+        if "secondary_y" in opts:
+            warnings.warn(
+                "'secondary_y' is not an option of profile -- a profile's value "
+                "axis is x (depth is y), so its twin is secondary_x. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("secondary_y", None)
         return _profile(spec.items, **opts)
     if family == "section":
         if "domain" in opts:

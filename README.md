@@ -295,6 +295,18 @@ osk.field(
 ).plot()                              # two casts overlaid, one legend entry each
 ```
 
+Two variables at one cast merge onto one panel too, the same way `series` merges
+two — just transposed, since a profile's value axis is x rather than y, so its
+twin is a top x axis (`secondary_x`) rather than a right-hand y axis:
+
+```python
+osk.field(
+    "run_new", ["temperature", "salinity"],
+    select={"lon": -144.25, "lat": 50.0, "time": "2013-06-15", "depth": "column"},
+).plot()                              # 2 variables: one panel, salinity on a top axis
+osk.field(..., ...).plot(secondary_x=False)  # ...or two side-by-side columns instead
+```
+
 `compare()` draws the same way against a real profile — a WHOTS/Argo-style cast, or
 any reference whose catalog `featureType` is `profile`/`timeSeriesProfile` — scored
 `over="Z"` instead of `over="time"`:

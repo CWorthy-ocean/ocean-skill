@@ -1155,6 +1155,7 @@ def profile(
     title: str | None = None,
     rows: str | None = None,
     cols: str | None = None,
+    secondary_x: bool = True,
     encode: dict[str, str | None] | None = None,
     metrics_loc: str = "auto",
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
@@ -1190,16 +1191,22 @@ def profile(
     channel).
 
     Composition follows :func:`ocean_skill.plot.profile.compose`'s defaults: one
-    variable overlays every source/cast in a single panel; two or more each take
-    their own column, sharing the one depth axis (the standard CTD layout — there
-    is no ``secondary_y`` here, since a second axis at the *top* of a profile panel
-    has no interactive twin). ``rows=``/``cols=`` facet on
+    variable overlays every source/cast in a single panel; two variables merge
+    onto that one panel too, the second drawn against a *top* x axis
+    (``secondary_x`` — the profile twin of :func:`series`' ``secondary_y``,
+    transposed because a profile's value axis is x rather than y);
+    ``secondary_x=False`` gives each variable its own column instead, sharing
+    the one depth axis (the standard CTD layout); three or more variables always
+    fall back to one column each. ``rows=``/``cols=`` facet on
     ``variable``/``source``/``reference``/``time``/``comparison`` instead of the
-    default; one or the other, not both.
+    default; one or the other, not both, and a facet wins over ``secondary_x``.
 
-    ``xlim`` bounds the value axis; ``ylim`` bounds depth in the same positive-down
-    metres every profile draws in — ``(shallow, deep)``, e.g. ``(0, 200)`` — not
-    axes order, since the axis is always inverted regardless of what is passed.
+    ``xlim`` bounds the (primary) value axis; with ``secondary_x`` merging a
+    second variable in, it bounds only the bottom axis, the same rule ``ylim``
+    follows for :func:`series`' twin. ``ylim`` bounds depth in the same
+    positive-down metres every profile draws in — ``(shallow, deep)``, e.g.
+    ``(0, 200)`` — not axes order, since the axis is always inverted regardless
+    of what is passed.
 
     Sized like every other line family — ``size``/``zoom``/``figsize``, type from
     geometry (:mod:`ocean_skill.plot.typography`) — with the statistics box placed
@@ -1225,6 +1232,7 @@ def profile(
         items,
         rows=rows,
         cols=cols,
+        secondary_x=secondary_x,
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
@@ -1269,7 +1277,9 @@ def profile(
     # One depth range for the whole figure -- explicit set_ylim on every axis
     # rather than relying on invert_yaxis()'s toggle state, which sharey=True
     # would otherwise flip twice on every axis but the first.
-    all_lines = [line for panel in layout.panels for line in panel.lines]
+    all_lines = [
+        line for panel in layout.panels for line in panel.lines + panel.secondary
+    ]
     if ylim is not None:
         y_bottom, y_top = float(ylim[1]), float(ylim[0])
     elif all_lines:
@@ -1291,10 +1301,22 @@ def profile(
         ax = flat[index]
         handles = _draw_profile_lines(ax, panel.lines, line_kwargs, mark=mark)
         per_panel.append((ax, handles))
-        ax.set_title(
-            panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
-        )
+        panel_title_kwargs = _without_font(title_kwargs)
+        if panel.secondary and "pad" not in panel_title_kwargs:
+            # A twin's own ticks and axis label are about to be drawn above the
+            # shared top spine -- exactly where the title's default pad would
+            # otherwise land it. Clear them by the twin's own vertical extent
+            # (tick length + tick labels + axis label, in points) before the
+            # constrained-layout engine ever measures either.
+            panel_title_kwargs = {
+                **panel_title_kwargs,
+                "pad": 17 + 1.2 * (scale["tick_label"] + scale["axes_label"]),
+            }
+        ax.set_title(panel.title, fontsize=scale["title"], **panel_title_kwargs)
         ax.set_xlabel(panel.xlabel or "", fontsize=scale["axes_label"])
+        if panel.xlabel_color:
+            ax.xaxis.label.set_color(panel.xlabel_color)
+            ax.tick_params(axis="x", labelcolor=panel.xlabel_color)
         if layout.ncols == 1 or index % layout.ncols == 0:
             ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
         if xlim is not None:
@@ -1304,6 +1326,20 @@ def profile(
         for label in ax.get_xticklabels() + ax.get_yticklabels():
             if tick_label_kwargs:
                 label.set(**tick_label_kwargs)
+        if panel.secondary:
+            # A top x axis, not twinx()'s right-hand y: a profile's value axis is
+            # x, so its twin grows the same way series' grows a twin y -- placed
+            # after set_ylim, whose explicit (y_bottom, y_top) the twin inherits
+            # by sharing the parent's y axis (sharey=True across the grid would
+            # otherwise leave the twin free to autoscale on its own).
+            twin = ax.twiny()
+            handles += _draw_profile_lines(twin, panel.secondary, line_kwargs, mark=mark)
+            per_panel[-1] = (ax, handles)
+            twin.set_xlabel(panel.secondary_xlabel or "", fontsize=scale["axes_label"])
+            twin.tick_params(labelsize=scale["tick_label"])
+            if panel.secondary_xlabel_color:
+                twin.xaxis.label.set_color(panel.secondary_xlabel_color)
+                twin.tick_params(axis="x", labelcolor=panel.secondary_xlabel_color)
         _metrics_box(ax, panel, metrics_kwargs)
 
     if title:
@@ -4199,7 +4235,15 @@ def _check_options(fn, opts) -> None:
     lines = []
     for key in sorted(unknown):
         owner = _nested_owner(key)
-        if owner:
+        if key == "secondary_y" and fn.__name__ == "profile":
+            # secondary_y is a real option -- of series, not profile -- so
+            # _nested_owner (which only redirects into *_kwargs dicts) has
+            # nothing to say about it; name the actual spelling instead.
+            lines.append(
+                "  'secondary_y' is not an option of profile() -- a profile's "
+                "value axis is x (depth is y), so its twin is secondary_x"
+            )
+        elif owner:
             lines.append(
                 f"  {key!r} goes inside {owner}, e.g. {owner}={{{key!r}: ...}}"
             )

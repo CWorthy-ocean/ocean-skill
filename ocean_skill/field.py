@@ -616,19 +616,21 @@ class Field:
 
 
 class FieldSet:
-    """Several variables of one source, drawn together as one ``series`` figure.
+    """Several variables of one source, drawn together as one ``series``/``profile`` figure.
 
     ``osk.field(source, [v1, v2, ...])`` builds one :class:`Field` per variable,
     sharing the same ``select``/``aggregate``/``label``/``cache`` (there is no
     per-variable select yet — see :func:`field`), and pools them here. The layout is
-    whatever :mod:`ocean_skill.plot.series` already does with several variables: one
-    panel and a secondary y-axis for two, one row per variable for three or more, all
-    overlaid within a row by source. There is nothing to configure beyond what
-    :meth:`Field.plot` already exposes, because the composition rule *is* the feature.
+    whatever :mod:`ocean_skill.plot.series` or :mod:`ocean_skill.plot.profile` already
+    does with several variables: one panel with a twin axis for two (a right-hand
+    y axis for a series, a top x axis for a profile — ``secondary_y``/``secondary_x``
+    respectively), one row/column per variable for three or more, all overlaid within
+    a panel by source. There is nothing to configure beyond what :meth:`Field.plot`
+    already exposes, because the composition rule *is* the feature.
 
-    Series only — a set with a member that reduces to a map rather than a point has
-    nothing in common to draw as one figure, and :meth:`plot` says so rather than
-    guessing which one it should be.
+    Series or profile only, and every member must reduce the same way — a set with a
+    member that reduces to a map rather than a point has nothing in common to draw as
+    one figure, and :meth:`plot` says so rather than guessing which one it should be.
     """
 
     def __init__(self, fields: list[Field]):

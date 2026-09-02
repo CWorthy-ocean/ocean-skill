@@ -321,22 +321,23 @@ def compose(
     *,
     rows: str | None = None,
     cols: str | None = None,
+    secondary_x: bool = True,
     encode: dict[str, str | None] | None = None,
     metric_keys=(),
     metrics_loc: str = "auto",
 ) -> _series_layout.Layout:
     """Group ``items`` into panels and resolve every line's style and labelling.
 
-    Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does,
-    minus the one channel a profile has no room for: at most one user facet
-    (``rows=`` or ``cols=``), no ``secondary_y`` (a second value axis at the *top*
-    of the panel has no interactive twin -- bokeh has no multi-x the way it has
-    ``multi_y`` -- so two or more variables become their own column instead,
-    sharing the one depth axis, the standard CTD layout):
+    Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does:
+    at most one user facet (``rows=`` or ``cols=``), plus at most one
+    ``secondary_x`` -- the profile twin of series' ``secondary_y``, transposed:
+    a profile's value axis is x (depth is y), so the second axis it grows is a
+    *top* x axis rather than a right-hand y axis.
 
     ===================  ==================================================================
     one variable         one panel, every source/cast overlaid
-    two or more          one column per variable, sources/casts overlaid within each
+    two variables        one panel, the second on a top x axis (``secondary_x``)
+    three or more         one column per variable, sources/casts overlaid within each
     ===================  ==================================================================
     """
     items = fan_season(list(items))
@@ -350,22 +351,6 @@ def compose(
         )
     _refuse_depth_encode(encode)
 
-    all_specs = [s for i, item in enumerate(items) for s in _line_specs(item, i)]
-    # marker <- time replaces series' marker <- depth: every profile spec's own
-    # depth is None (depth is the axis, not a style channel here), so time takes
-    # its place as the default marker key, overridable like any other channel.
-    # color <- season only when a season actually varies across the figure (an
-    # overlay of several fanned seasons, the default reading of a seasonal
-    # profile) -- decided here rather than in CHANNELS itself, since a series
-    # line has no use for it yet, and an explicit encode= still wins either way.
-    seasons_vary = len({s.season for s in all_specs if s.season is not None}) > 1
-    defaults = {"marker": "time", **({"color": "season"} if seasons_vary else {})}
-    styled = {
-        (line.spec.item, line.spec.role): line
-        for line in _style.resolve(all_specs, encode={**defaults, **(encode or {})})
-    }
-    varying = _style.varying_fields(all_specs)
-
     indexed = list(enumerate(items))
     facet = rows or cols
     variables = []
@@ -373,13 +358,34 @@ def compose(
         key = _group_key(item, "variable", 0)
         if key not in variables:
             variables.append(key)
+    use_secondary = facet is None and secondary_x and len(variables) == 2
+
+    all_specs = [s for i, item in enumerate(items) for s in _line_specs(item, i)]
+    # marker <- time replaces series' marker <- depth: every profile spec's own
+    # depth is None (depth is the axis, not a style channel here), so time takes
+    # its place as the default marker key, overridable like any other channel.
+    # color <- season only when a season actually varies across the figure (an
+    # overlay of several fanned seasons, the default reading of a seasonal
+    # profile) AND there is no twin axis -- on a merged panel the two variables
+    # need their own colours (CHANNELS' own color <- variable) so each axis label
+    # can honestly say whose lines are whose; an explicit encode= still wins.
+    seasons_vary = len({s.season for s in all_specs if s.season is not None}) > 1
+    defaults = {
+        "marker": "time",
+        **({"color": "season"} if seasons_vary and not use_secondary else {}),
+    }
+    styled = {
+        (line.spec.item, line.spec.role): line
+        for line in _style.resolve(all_specs, encode={**defaults, **(encode or {})})
+    }
+    varying = _style.varying_fields(all_specs)
 
     if facet is not None:
         groups: dict[Any, list[tuple[int, dict]]] = {}
         for index, item in indexed:
             groups.setdefault(_group_key(item, facet, index), []).append((index, item))
         grouped = list(groups.values())
-    elif len(variables) <= 1:
+    elif use_secondary or len(variables) <= 1:
         grouped = [indexed]
     else:
         grouped = [
@@ -389,12 +395,29 @@ def compose(
 
     panels = []
     for group in grouped:
+        primary_items, secondary_items = group, []
+        if use_secondary:
+            primary_items = [
+                (n, i) for n, i in group if _group_key(i, "variable", 0) == variables[0]
+            ]
+            secondary_items = [
+                (n, i) for n, i in group if _group_key(i, "variable", 0) == variables[1]
+            ]
         primary = tuple(
             styled[(n, role)]
-            for n, it in group
+            for n, it in primary_items
             for role in _series_layout.item_roles(it)
         )
-        specs = [line.spec for line in primary]
+        second = tuple(
+            styled[(n, role)]
+            for n, it in secondary_items
+            for role in _series_layout.item_roles(it)
+        )
+        # Title and corner ranking see the *whole* panel, secondary axis included:
+        # a title naming one variable while a second is drawn beside it is wrong,
+        # and a corner judged empty by the primary lines is where the secondary
+        # ones run.
+        specs = [line.spec for line in primary + second]
         box = _series_layout._metrics_text(
             [i for _, i in group], metric_keys, prefix=len(group) > 1
         )
@@ -411,15 +434,28 @@ def compose(
                 stacklevel=_stacklevel.find(),
             )
             box = ""
-        ranked = _free_corners(primary)
+        ranked = _free_corners(primary + second)
         free = ranked[0] if metrics_loc == "auto" else metrics_loc
         legend_at = next((c for c in ranked if c != free), _series_layout.CORNERS[1])
+        # Colour a value label like its lines only where a twin axis makes the
+        # label/axis pairing ambiguous; a lone axis already says what it is via
+        # its title.
+        colored = bool(second)
         panels.append(
             _series_layout.Panel(
                 title=panel_title(specs, varying=varying),
                 ylabel=_vertical_label(specs),
                 lines=primary,
                 xlabel=_series_layout._ylabel([line.spec for line in primary]),
+                secondary=second,
+                secondary_xlabel=_series_layout._ylabel([line.spec for line in second])
+                or None
+                if second
+                else None,
+                xlabel_color=_series_layout._label_color(primary) if colored else None,
+                secondary_xlabel_color=(
+                    _series_layout._label_color(second) if colored else None
+                ),
                 metrics_text=box,
                 metrics_corner=free,
                 legend_corner=legend_at,
@@ -434,25 +470,30 @@ def compose(
             "something coarser, if it comes out cramped.",
             stacklevel=_stacklevel.find(),
         )
-    crowded = [p for p in panels if len(p.lines) > _series_layout.LINE_CAP]
+    crowded = [p for p in panels if len(p.lines) + len(p.secondary) > _series_layout.LINE_CAP]
     if crowded:
         warnings.warn(
-            f"{max(len(p.lines) for p in crowded)} lines in one panel is past what "
-            "a reader can follow. Drawing it anyway; rows= or cols= splits them "
-            "into panels.",
+            f"{max(len(p.lines) + len(p.secondary) for p in crowded)} lines in one "
+            "panel is past what a reader can follow. Drawing it anyway; rows= or "
+            "cols= splits them into panels.",
             stacklevel=_stacklevel.find(),
         )
 
     labels = []
     for panel in panels:
-        for line in panel.lines:
+        for line in panel.lines + panel.secondary:
             if line.label not in labels:
                 labels.append(line.label)
-    shared = len({tuple(line.label for line in p.lines) for p in panels}) == 1
-    # No explicit facet, and more than one variable: the default columns-per-
-    # variable layout (see the docstring table) -- the one case ncols follows the
-    # panel count without the caller having asked for cols= itself.
-    as_columns = cols is not None or (facet is None and len(variables) > 1)
+    shared = (
+        len({tuple(line.label for line in p.lines + p.secondary) for p in panels}) == 1
+    )
+    # No explicit facet, and more than one variable that did not merge onto a
+    # twin axis: the default columns-per-variable layout (see the docstring
+    # table) -- the one case ncols follows the panel count without the caller
+    # having asked for cols= itself.
+    as_columns = cols is not None or (
+        facet is None and len(variables) > 1 and not use_secondary
+    )
     ncols = len(panels) if as_columns else 1
     nrows = 1 if as_columns else len(panels)
     return _series_layout.Layout(
