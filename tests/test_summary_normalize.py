@@ -244,6 +244,23 @@ def test_target_absolute_labels_omit_units_when_mixed():
     assert fig.axes[0].get_ylabel() == "bias"
 
 
+def test_target_absolute_labels_omit_units_for_different_variables_sharing_a_unit():
+    """DIC and alkalinity both land on "mmol/m^3" through this project's own unit
+    conversion (see units.convert_units) while still being different quantities on
+    different natural scales — a shared unit string alone shouldn't be read as license
+    to label the axis, or it would read as reassurance the mixed-variable warning is
+    actively contradicting."""
+    comparisons = [
+        _FakeComparison(label="dic", std_test=2.4, std_reference=2.0, bias=0.6, crmsd=0.8,
+                          variable="dissolved_inorganic_carbon", units="mmol/m^3"),
+        _FakeComparison(label="alk", std_test=1.9, std_reference=2.0, bias=-0.3, crmsd=0.5,
+                          variable="alkalinity", units="mmol/m^3"),
+    ]
+    with pytest.warns(UserWarning, match="multiple variables"):
+        fig = target(comparisons, normalize=False, labels=None)
+    assert fig.axes[0].get_ylabel() == "bias"
+
+
 # --------------------------------------------------------------------------- taylor
 
 
