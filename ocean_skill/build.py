@@ -159,6 +159,28 @@ def tolerant_hdf_attrs():
         vzhdf._extract_attrs = original
 
 
+@contextlib.contextmanager
+def _silence_unstable_zarr_dtype():
+    r"""Mute zarr-python's ``UnstableSpecificationWarning`` while building refs.
+
+    ROMS char variables (e.g. ``spherical``, a single ``'T'``) are numpy ``|S1``.
+    virtualizarr models every array's metadata as a Zarr **V3** object internally, and
+    zarr-python warns that ``|S1`` has no ratified V3 spec. But we only ever serialize
+    **kerchunk** references, which are Zarr **V2** metadata where ``|S1`` is fully
+    specified and stable — so the warning is noise here. It is scoped to the kerchunk
+    write path on purpose: if a V3-native writer (icechunk, ``to_zarr``) is ever added,
+    it must NOT be wrapped in this, because then the instability is real.
+    """
+    try:
+        from zarr.errors import UnstableSpecificationWarning
+    except ImportError:  # older/newer zarr without this symbol: nothing to mute
+        yield
+        return
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UnstableSpecificationWarning)
+        yield
+
+
 def _is_remote(target) -> bool:
     """Whether ``target`` is an http(s) URL rather than a local path."""
     return str(target).startswith(("http://", "https://"))
@@ -489,8 +511,11 @@ def make_kerchunk(
         else None
     )
 
-    ctx = tolerant_hdf_attrs() if tolerant_attrs else contextlib.nullcontext()
-    with ctx:
+    with contextlib.ExitStack() as stack:
+        if tolerant_attrs:
+            stack.enter_context(tolerant_hdf_attrs())
+        # scoped to this kerchunk (Zarr V2) path only — see the context manager
+        stack.enter_context(_silence_unstable_zarr_dtype())
         urls = dict(_store_for(p) for p in paths)
         vds = open_virtual_mfdataset(
             urls=list(urls),
@@ -519,19 +544,20 @@ def make_kerchunk(
                 combine_attrs="drop_conflicts",
             )
 
-    spec = (
-        _auto_subchunk_spec(vds, target_chunk_mb * 1024**2)
-        if target_chunk_mb is not None
-        else {}
-    )
-    if subchunk:
-        spec = {**spec, **subchunk}  # explicit wins per dim named; auto fills the rest
-    if spec:
-        vds = _subchunk(vds, spec)
+        spec = (
+            _auto_subchunk_spec(vds, target_chunk_mb * 1024**2)
+            if target_chunk_mb is not None
+            else {}
+        )
+        if subchunk:
+            # explicit wins per dim named; auto fills the rest
+            spec = {**spec, **subchunk}
+        if spec:
+            vds = _subchunk(vds, spec)
 
-    out = Path(out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    vds.vz.to_kerchunk(str(out), format=fmt or _kerchunk_format(out))
+        out = Path(out).expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        vds.vz.to_kerchunk(str(out), format=fmt or _kerchunk_format(out))
     return out
 
 
