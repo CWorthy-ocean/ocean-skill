@@ -169,6 +169,33 @@ def test_a_masked_neighbour_under_interpolation_names_nearest_as_the_remedy():
         align.sample_at(grid.where(grid.lon > -142), *STATION, method="bilinear")
 
 
+def test_an_interpolating_method_at_a_station_warns_and_recommends_nearest():
+    """``align()``'s station branch, not just :func:`sample_at` directly."""
+    with pytest.warns(UserWarning, match='method="nearest" is recommended'):
+        align.align(monthly_grid(), monthly_station(), over="time", method="bilinear")
+
+
+def test_nearest_at_a_station_does_not_warn():
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        align.align(monthly_grid(), monthly_station(), over="time", method="nearest")
+    assert not [w for w in log if "is recommended" in str(w.message)]
+
+
+def test_the_translated_conservative_default_does_not_warn():
+    """``conservative_normed`` silently becomes ``"nearest"`` at a station -- the
+    warning is for an *interpolating* method reaching the station branch, not for
+    the package's own default being used as given.
+    """
+    with warnings.catch_warnings(record=True) as log:
+        warnings.simplefilter("always")
+        align.align(
+            monthly_grid(), monthly_station(), over="time",
+            method="conservative_normed",
+        )
+    assert not [w for w in log if "is recommended" in str(w.message)]
+
+
 def test_a_conservative_method_cannot_sample_a_point():
     with pytest.raises(ValueError, match="has no area"):
         align.sample_at(
@@ -528,7 +555,8 @@ def test_time_coverage_prefers_minmax_time_over_the_truncated_pair(monkeypatch):
 
 def test_time_coverage_falls_back_to_the_truncated_pair_and_pads_a_day(monkeypatch):
     """No minTime/maxTime (a non-ERDDAP source): time_coverage_* still works, with
-    the truncation covered by the same day of padding."""
+    the truncation covered by the same day of padding.
+    """
     from ocean_skill.comparison import _time_coverage_of
 
     _resolved(
@@ -1102,7 +1130,8 @@ def test_a_non_degenerate_derived_box_still_warns_before_the_unnarrowed_retry(
 ):
     """A trajectory reference's declared *extent* (not a point) that misses the
     test grid entirely still falls back to reading the whole test lane -- but
-    now says so, where before this fix it did silently."""
+    now says so, where before this fix it did silently.
+    """
     c = _model_comparison(
         monkeypatch,
         # Same grid on both sides (no offset) so align() differences the two
@@ -1127,7 +1156,8 @@ def test_a_non_degenerate_derived_box_still_warns_before_the_unnarrowed_retry(
 
 def test_the_cache_key_changes_when_the_reference_window_changes(monkeypatch):
     """A catalog rebuild that widens the reference's declared record must not serve
-    a stale aligned pair back from a warm cache."""
+    a stale aligned pair back from a warm cache.
+    """
 
     def key_for(max_time):
         meta = {
@@ -1187,7 +1217,8 @@ BOX_MEAN = {"lat": "mean", "lon": "mean"}
 def test_a_shared_box_mean_implies_over_time(monkeypatch):
     """An area-weighted spatial mean is exactly as reduced as a station -- there
     is no map left to draw either way -- so over="time" is inferred the same way
-    a point select already implies it."""
+    a point select already implies it.
+    """
     c = _model_comparison(
         monkeypatch,
         test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
@@ -1205,7 +1236,8 @@ def test_a_shared_box_mean_lands_both_lanes_on_the_same_position_with_no_distanc
 ):
     """Both lanes reduce the *same requested box* to its own midpoint, independent
     of their own grids -- unlike a point select's nearest-cell routing, there is no
-    grid-dependent offset for the two to disagree about."""
+    grid-dependent offset for the two to disagree about.
+    """
     c = _model_comparison(
         monkeypatch,
         test=_offset_grid(lat_off=0.4, lon_off=0.4, seed=1),
@@ -1241,7 +1273,8 @@ def test_a_pair_spec_of_two_different_boxes_still_warns_about_the_distance(
     monkeypatch,
 ):
     """The escape hatch mirrors the point-select one: two real, different boxes
-    keep their own distance warning rather than being silently forced together."""
+    keep their own distance warning rather than being silently forced together.
+    """
     other_box = {**BOX_SELECT, "lon": {"min": -148.0, "max": -145.0}}
     c = _model_comparison(
         monkeypatch,

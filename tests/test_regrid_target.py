@@ -155,6 +155,85 @@ def test_coverage_masks_the_regridded_reference_on_the_test_grid():
     assert float(out["test"].sel(lat=20.0, lon=-150.0, method="nearest")) == 10.0
 
 
+# -- a NaN source cell (land) no longer poisons a partially-covered destination cell --
+
+
+def _test_with_land_band(cutoff_lat=20.0, value=10.0):
+    """The fine test lane with everything at or north of ``cutoff_lat`` masked.
+
+    The coarse reference cell centered on 20.0 (:func:`_coarse_reference`'s 2-degree
+    grid) spans roughly 19-21, so this band leaves it genuinely partly covered --
+    neither fully valid nor fully land -- which is exactly the coastal case the bug
+    report was about.
+    """
+    test = _fine_test(value=value)
+    return test.where(test.lat < cutoff_lat)
+
+
+def test_a_partly_land_covered_cell_stays_finite_not_nan():
+    """The bug report: a NaN source cell must not poison a cell it only partly covers."""
+    out = A.align(
+        _test_with_land_band(), _coarse_reference(),
+        method="conservative_normed", min_coverage=1e-9,
+    )
+    partly_covered = out["test"].sel(lat=20.0, lon=-150.0, method="nearest")
+    assert np.isfinite(partly_covered)
+    # conservative_normed renormalizes over the valid fraction -- the mean of a
+    # constant field is that same constant, not something smaller
+    assert float(partly_covered) == pytest.approx(10.0)
+    # a cell entirely inside the land band is still correctly NaN -- this isn't
+    # "nothing is ever masked now", only "a NaN cell no longer poisons a cell it
+    # merely overlaps"
+    fully_land = out["test"].sel(lat=24.0, lon=-150.0, method="nearest")
+    assert not np.isfinite(fully_land)
+
+
+def test_coverage_is_a_true_fraction_not_nan_or_one():
+    """``coverage`` must report how much of a cell is valid, not NaN-or-1."""
+    out = A.align(
+        _test_with_land_band(), _coarse_reference(),
+        method="conservative_normed", min_coverage=1e-9,
+    )
+    open_ocean = out["coverage"].sel(lat=14.0, lon=-150.0, method="nearest")
+    assert float(open_ocean) == pytest.approx(1.0)
+    partly_covered = out["coverage"].sel(lat=20.0, lon=-150.0, method="nearest")
+    assert 0.0 < float(partly_covered) < 1.0
+    fully_land = out["coverage"].sel(lat=24.0, lon=-150.0, method="nearest")
+    assert float(fully_land) == pytest.approx(0.0)
+
+
+def test_min_coverage_threshold_still_drops_a_too_thinly_covered_cell():
+    """The renormalized value is real, but still gated by ``min_coverage``."""
+    common = dict(method="conservative_normed")
+    strict = A.align(_test_with_land_band(), _coarse_reference(), min_coverage=0.5, **common)
+    lenient = A.align(_test_with_land_band(), _coarse_reference(), min_coverage=0.3, **common)
+    cell = dict(lat=20.0, lon=-150.0, method="nearest")
+    assert not np.isfinite(strict["test"].sel(**cell))
+    assert np.isfinite(lenient["test"].sel(**cell))
+
+
+def test_plain_conservative_is_exempt_from_the_renormalization():
+    """A NaN source cell still poisons plain ``"conservative"`` -- unlike ``_normed``.
+
+    Renormalizing it too would silently turn plain ``"conservative"`` into
+    ``"conservative_normed"`` even on fully valid data (skipna divides by the row's
+    own weight sum, which for ``"conservative"`` is the geometric overlap fraction,
+    not 1) -- verified separately against installed xesmf. Here: on data with a NaN
+    land band, the two methods must disagree at the partly-covered cell.
+    """
+    normed = A.align(
+        _test_with_land_band(), _coarse_reference(),
+        method="conservative_normed", min_coverage=1e-9,
+    )
+    plain = A.align(
+        _test_with_land_band(), _coarse_reference(),
+        method="conservative", min_coverage=1e-9,
+    )
+    cell = dict(lat=20.0, lon=-150.0, method="nearest")
+    assert np.isfinite(normed["test"].sel(**cell))
+    assert not np.isfinite(plain["test"].sel(**cell))
+
+
 # -- the antimeridian, in the new direction -------------------------------------------
 
 

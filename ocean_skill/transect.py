@@ -611,8 +611,10 @@ def sample_along(
         land_frac = float((np.asarray(sampled["mask_rho"]) < 1).mean())
         if land_frac > 0:
             warnings.warn(
-                f"{subject}: {land_frac:.0%} of the transect crosses land "
-                "(mask_rho == 0); those columns are NaN.",
+                f"{subject}: {land_frac:.0%} of the transect passes within one cell "
+                "of land (mask_rho < 1 at at least one bilinear neighbor); those "
+                "columns are renormalized over whichever neighbors are wet, and are "
+                "NaN only where every neighbor is land.",
                 stacklevel=_stacklevel.find(),
             )
 

@@ -49,6 +49,11 @@ def aligned():
     )
     out = _align.align(test, reference, test_name="test", reference_name="reference")
     out.attrs["actual_depth"] = 100.0
+    # Building this fixture is a real regrid, which now persists its regridder
+    # weights as a side effect (see align._build_regridder) -- every test using
+    # this fixture cares about its own cache.save()/entries()/clear() calls, not
+    # the fixture's own incidental weights entry, so start from a clean slate.
+    cache.clear("weights")
     return out
 
 

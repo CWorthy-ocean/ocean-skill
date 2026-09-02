@@ -172,20 +172,39 @@ def obs_dir() -> Path:
 configure_fsspec_cache()
 
 
-#: The two things worth caching, each its own directory under ``<base>/cache``.
+#: The three things worth caching, each its own directory under ``<base>/cache``.
 #:
 #: ``prepared`` is one file per *lane*: one source reduced to a single comparable 2-D
 #: field (variable resolved, time-averaged, vertically interpolated, units converted)
 #: — keyed on ``(source, variable, select)`` alone, with no reference and no regrid
 #: method in it. ``aligned`` is one file per *pair*, the regridded test+reference+
-#: difference.
+#: difference. ``weights`` is one file per xesmf regridder — the ESMF weight matrix
+#: itself (see :func:`ocean_skill.align._regridder_for`), the single most expensive
+#: step in the whole pipeline to recompute.
 #:
-#: Both earn their place. The aligned entry is the fast path: one read serves a whole
-#: repeat plot with no regridding. The prepared entries make a *miss* cheap — comparing
-#: one model against several references, or at several regrid methods, otherwise
-#: re-reads and re-transforms that model's lane once per pair, and the vertical
-#: transform is the most expensive step in the pipeline.
-KINDS = ("prepared", "aligned")
+#: All three earn their place. The aligned entry is the fast path: one read serves a
+#: whole repeat plot with no regridding. The prepared entries make a *miss* cheap —
+#: comparing one model against several references, or at several regrid methods,
+#: otherwise re-reads and re-transforms that model's lane once per pair, and the
+#: vertical transform is expensive too. The weights entry makes even a prepared/aligned
+#: *miss* cheap: rebuilding a Dataset from a fresh model run still regrids onto the
+#: same GLODAP or WOA grid it always has, and ESMF weight generation, not the transform,
+#: is what actually takes minutes on a fine ROMS grid.
+#:
+#: ``weights`` is keyed differently from the other two -- see
+#: :func:`ocean_skill.align._regridder_for`: its key is a content hash of the two
+#: grids' own coordinates plus the method, not an "identity" like a source name, so the
+#: "not of the underlying data" caveat above does not apply to it -- two numerically
+#: identical grids always hit, from any source name, and a grid that changed shape or
+#: values always misses.
+KINDS = ("prepared", "aligned", "weights")
+
+#: File extension each :data:`KINDS` entry is stored under -- the two Dataset kinds as
+#: zarr stores (a directory), regridder weights as the plain netCDF file
+#: ``regridder.to_netcdf`` writes. :func:`entries` and :func:`clear` need this to find
+#: and remove the right thing; a weights entry is not a Dataset and never goes through
+#: :func:`load`/:func:`save`.
+_EXTENSIONS = {"prepared": "zarr", "aligned": "zarr", "weights": "nc"}
 
 
 def path(kind: str = "aligned") -> Path:
@@ -410,8 +429,22 @@ def entries(kind: str | None = None) -> list[Path]:
     for k in [kind] if kind else KINDS:
         root = path(k)
         if root.exists():
-            found.extend(sorted(root.glob("*.zarr")))
+            found.extend(sorted(root.glob(f"*.{_EXTENSIONS[k]}")))
     return found
+
+
+def _remove_entry(entry: Path) -> None:
+    """Delete one cache entry, a zarr store (directory) or a weights file, either way.
+
+    ``shutil.rmtree`` on a plain file silently does nothing even with
+    ``ignore_errors=True`` -- exactly the failure mode a weights entry would hit if
+    :func:`clear` kept using it unconditionally, the way it could when every entry was
+    a zarr store.
+    """
+    if entry.is_dir():
+        shutil.rmtree(entry, ignore_errors=True)
+    else:
+        entry.unlink(missing_ok=True)
 
 
 def _size_bytes() -> int:
@@ -451,6 +484,6 @@ def clear(kind: str | None = None) -> int:
     unless one is named.
     """
     found = entries(kind)
-    for store in found:
-        shutil.rmtree(store, ignore_errors=True)
+    for entry in found:
+        _remove_entry(entry)
     return len(found)

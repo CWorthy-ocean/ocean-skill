@@ -17,6 +17,7 @@ bounding box so we regrid over the overlap rather than a whole globe. The result
 from __future__ import annotations
 
 import hashlib
+import os
 import warnings
 from collections import OrderedDict
 from typing import Any, Literal
@@ -854,14 +855,16 @@ def _interp_curvilinear(obj, lon_name: str, lat_name: str, lon: float, lat: floa
     a point sample and a regridded map agree by construction rather than by two
     implementations happening to match. ROMS is why this exists: ``lon_rho``/``lat_rho``
     are 2-D, so xarray's own ``.interp`` has no orthogonal axes to work along.
-    """
-    import xesmf as xe
 
+    No ``skipna`` here, deliberately: a station's contract is to report a masked
+    neighbor rather than paper over it (see :func:`sample_at`'s "no valid data" error,
+    which names ``method="nearest"`` as the remedy) -- and the rectilinear branch of
+    that same contract (xarray's own ``.interp``) has no ``skipna`` to give it, so the
+    two backends would disagree about the identical coastline if only this one did.
+    """
     src = _as_xesmf(obj)
     target = xr.Dataset({"lon": ("point", [lon]), "lat": ("point", [lat])})
-    regridder = xe.Regridder(
-        grid_of(src), target, "bilinear", locstream_out=True, unmapped_to_nan=True
-    )
+    regridder = _regridder_for(grid_of(src), target, "bilinear", locstream_out=True)
     out = regridder(src, keep_attrs=True).isel(point=0, drop=True)
     return out.assign_coords({"lon": lon, "lat": lat})
 
@@ -878,17 +881,22 @@ def _interp_locstream(obj, lons, lats):
     ``obj`` should already carry only variables safe to hand to one xesmf call --
     see :func:`ocean_skill.transect._bilinear_dataset`, which builds that Dataset
     and is this function's only caller.
-    """
-    import xesmf as xe
 
+    ``skipna=True``: a path point one cell from the coast should not go NaN just
+    because one of its four bilinear neighbors is land -- it is renormalized over
+    whichever neighbors are wet instead, the way the map path's regrid now is (see
+    :func:`align`). ``mask_rho``/``h`` ride through this same call
+    (:func:`ocean_skill.transect._bilinear_dataset`) and carry no NaN, so ``skipna``
+    is a no-op for them. Unlike the station path (:func:`_interp_curvilinear`), a
+    transect has no "report, don't paper over it" contract to preserve -- it is
+    already a field product, meaned across whatever is valid at the binning step.
+    """
     src = _as_xesmf(obj)
     lons = np.asarray(lons, dtype="float64")
     lats = np.asarray(lats, dtype="float64")
     target = xr.Dataset({"lon": (ALONG_DIM, lons), "lat": (ALONG_DIM, lats)})
-    regridder = xe.Regridder(
-        grid_of(src), target, "bilinear", locstream_out=True, unmapped_to_nan=True
-    )
-    out = regridder(src, keep_attrs=True)
+    regridder = _regridder_for(grid_of(src), target, "bilinear", locstream_out=True)
+    out = regridder(src, keep_attrs=True, skipna=True)
     return out.assign_coords({"lon": (ALONG_DIM, lons), "lat": (ALONG_DIM, lats)})
 
 
@@ -1691,11 +1699,20 @@ def _match_exactly(test, reference, tdim, rdim):
 
 
 def _coverage(regridder, src, over: str | None, role: str = "test"):
-    """Regrid a field of ones over the source's valid cells: the fraction covered.
+    """Regrid a 0/1 indicator of the source's valid cells: the fraction covered.
 
     ``src`` is whichever lane the regrid reads from — the finer one — so the mask
     always describes how much valid *source* data landed in each coarser target cell;
     ``role`` names that lane for the warning below.
+
+    Fed a plain 0/1 field rather than 1-and-NaN: this call is deliberately
+    ``skipna=False`` (there is nothing to skip), and both ``conservative_normed`` and
+    ``bilinear`` weight rows sum to 1 over whatever they map, so the regridded
+    indicator *is* the valid-weight fraction — the same quantity :func:`align`'s
+    ``skipna=True`` application divides by, computed the same way, so the two stay in
+    sync. Feeding NaN instead (`.where(finite)` with no fill) would regrid to NaN in
+    every partially-covered cell rather than a fraction, defeating the whole point of
+    a coverage threshold.
 
     With a surviving axis this is one extra regrid *per step*, which is worth avoiding
     when it buys nothing. A model's missing cells are its land mask, which does not
@@ -1709,14 +1726,16 @@ def _coverage(regridder, src, over: str | None, role: str = "test"):
     if over is not None and over in finite.dims:
         if src.chunks is None and bool((finite.any(over) == finite.all(over)).all()):
             one = finite.isel({over: 0}, drop=True)
-            return regridder(xr.ones_like(src.isel({over: 0}, drop=True)).where(one))
+            return regridder(
+                xr.ones_like(src.isel({over: 0}, drop=True)).where(one, 0.0)
+            )
         warnings.warn(
             f"the {role}'s valid cells change along {over!r}, so coverage is computed "
             f"for every one of its {src.sizes[over]} steps rather than once. Expected "
             "of a field with a moving mask; surprising for a model land mask.",
             stacklevel=_stacklevel.find(),
         )
-    return regridder(xr.ones_like(src).where(finite))
+    return regridder(xr.ones_like(src).where(finite, 0.0))
 
 
 #: How many distinct (method, source grid, target grid) weight sets to keep alive at
@@ -1751,7 +1770,93 @@ def _grid_token(grid: xr.Dataset) -> tuple:
     )
 
 
-def _regridder_for(src_grid: xr.Dataset, tgt_grid: xr.Dataset, method: str):
+def _weights_path(method: str, locstream_out: bool, src_grid, tgt_grid):
+    """Return the on-disk path a regridder's weights for this key would live at.
+
+    Content-hashed, not identity-hashed like the aligned/prepared caches (see
+    :data:`ocean_skill.cache.KINDS`): the key is the two grids' own coordinate values
+    (:func:`_grid_token`), the method, whether the target is a locstream (a station or
+    transect target regridder is not interchangeable with a gridded one of the same
+    shape), and the installed xesmf version, since its weight-file format is not
+    guaranteed stable across releases. Two numerically identical grids always hit,
+    from any source name; a grid that changed shape or values always misses.
+    """
+    import xesmf as xe
+
+    from ocean_skill import cache as _cache
+
+    payload = repr(
+        (
+            method,
+            locstream_out,
+            xe.__version__,
+            _grid_token(src_grid),
+            _grid_token(tgt_grid),
+        )
+    )
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:32]
+    return _cache.path("weights") / f"{digest}.nc"
+
+
+def _build_regridder(src_grid, tgt_grid, method: str, locstream_out: bool):
+    """Build (or reuse from disk) an ``xe.Regridder``, the pipeline's slowest step.
+
+    ESMF weight generation -- not the vertical transform, not the I/O -- is what
+    actually takes minutes on a fine ROMS grid, and it depends only on the two grids'
+    geometry, so it is worth persisting past the process that first paid for it (the
+    in-memory :data:`_REGRIDDER_MEMO` only survives one process). When caching is on
+    and a weights file already exists for this key, xesmf reads it directly instead of
+    calling ESMF (``weights=<path>`` skips :meth:`~xesmf.BaseRegridder._compute_weights`
+    entirely); otherwise it is built normally and then written, so the next call --
+    another notebook cell, another process, a rerun tomorrow -- hits.
+
+    A corrupt or stale-format weights file is a miss, not an error, mirroring
+    :func:`ocean_skill.cache.load`: warn, delete it, and rebuild from scratch rather
+    than letting a bad cache entry break a pipeline that would otherwise have worked.
+    """
+    import xesmf as xe
+
+    from ocean_skill import cache as _cache
+
+    kwargs = dict(locstream_out=locstream_out, unmapped_to_nan=True)
+    if not _cache.enabled():
+        return xe.Regridder(src_grid, tgt_grid, method, **kwargs)
+
+    weights_file = _weights_path(method, locstream_out, src_grid, tgt_grid)
+    if weights_file.exists():
+        try:
+            return xe.Regridder(
+                src_grid, tgt_grid, method, weights=weights_file, **kwargs
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"ignoring unreadable regridder weights cache entry {weights_file} "
+                f"({exc}); rebuilding.",
+                stacklevel=_stacklevel.find(),
+            )
+            weights_file.unlink(missing_ok=True)
+
+    regridder = xe.Regridder(src_grid, tgt_grid, method, **kwargs)
+    tmp = weights_file.parent / f".{weights_file.name}.tmp"
+    try:
+        weights_file.parent.mkdir(parents=True, exist_ok=True)
+        regridder.to_netcdf(filename=str(tmp))
+        os.replace(tmp, weights_file)
+    except Exception as exc:
+        warnings.warn(
+            f"could not cache regridder weights ({exc}).", stacklevel=_stacklevel.find()
+        )
+        tmp.unlink(missing_ok=True)
+    return regridder
+
+
+def _regridder_for(
+    src_grid: xr.Dataset,
+    tgt_grid: xr.Dataset,
+    method: str,
+    *,
+    locstream_out: bool = False,
+):
     """Return a weight-built ``xe.Regridder`` for this (grid, grid, method), memoized.
 
     A :func:`compare` fan over time builds one :class:`Comparison` per bin, each
@@ -1761,21 +1866,24 @@ def _regridder_for(src_grid: xr.Dataset, tgt_grid: xr.Dataset, method: str):
     the data, only the geometry. Recomputing that per bin would pay the pipeline's
     most expensive step N times for a result that is identical N times over; this
     keys on the grids' own content (:func:`_grid_token`) so fresh-but-equal lane
-    objects hit, evicting least-recently-used past :data:`_REGRIDDER_MEMO_SIZE`.
+    objects hit, evicting least-recently-used past :data:`_REGRIDDER_MEMO_SIZE`. A
+    process-restart or a cross-process miss still hits the disk layer inside
+    :func:`_build_regridder`, which is the one that actually skips ESMF.
 
     Direction is already resolved by the time this is called (the caller passes
     ``src``/``tgt`` in the order :func:`_regrid_target` decided), so it is part of
     the key only in the sense that swapping the two arguments changes the token
-    order -- there is no separate "direction" component to track.
+    order -- there is no separate "direction" component to track. ``locstream_out``
+    is part of the key for the same reason a station/transect target regridder
+    (:func:`_interp_curvilinear`, :func:`_interp_locstream`) shares this cache too --
+    it changes what the built regridder actually is even when the grids match.
     """
-    import xesmf as xe
-
-    key = (method, _grid_token(src_grid), _grid_token(tgt_grid))
+    key = (method, locstream_out, _grid_token(src_grid), _grid_token(tgt_grid))
     cached = _REGRIDDER_MEMO.get(key)
     if cached is not None:
         _REGRIDDER_MEMO.move_to_end(key)
         return cached
-    regridder = xe.Regridder(src_grid, tgt_grid, method, unmapped_to_nan=True)
+    regridder = _build_regridder(src_grid, tgt_grid, method, locstream_out)
     _REGRIDDER_MEMO[key] = regridder
     if len(_REGRIDDER_MEMO) > _REGRIDDER_MEMO_SIZE:
         _REGRIDDER_MEMO.popitem(last=False)
@@ -1999,11 +2107,21 @@ def align(
     :func:`grid_of` when absent. Against a station it names how the lane travels to the
     position instead — nearest cell or interpolated.
 
-    ``min_coverage`` drops reference cells that the test only partly covers. Plain
-    ``"conservative"`` divides by the *whole* destination cell area, so a half-covered
-    coastal or edge cell reads about half its true value — a large, purely artificial
-    difference. ``"conservative_normed"`` renormalizes by the covered fraction, and the
-    coverage mask then removes cells too sparsely covered to be meaningful.
+    A NaN source cell — land under a model's mask, a column ``to_depth`` left below
+    the seafloor — is excluded at application time (xesmf's ``skipna``) rather than
+    poisoning every destination cell its stencil touches: each destination cell is
+    renormalized over its own valid fraction, so a coarse coastal cell with, say, 70%
+    ocean support gets the mean of that 70%, not NaN. Plain ``"conservative"`` is
+    exempt from this — a NaN source cell still poisons every destination cell its
+    stencil touches, same as always, since dividing by the *whole* destination cell
+    area (rather than renormalizing) is its whole point. That division does mean a
+    destination cell extending past the *edge of the source's geometric domain* (no
+    NaN involved — the source grid simply does not reach that far) legitimately reads
+    a proportionally reduced value under either method; only a NaN *value inside* the
+    domain behaves differently between the two. ``min_coverage`` then drops
+    destination cells whose valid fraction — reported as the result's ``coverage``
+    variable — falls below the given threshold, whichever of the two reasons above
+    it came from.
 
     ``convention="auto"`` (the default) expresses both lanes in whichever longitude
     convention keeps the *test* contiguous (:func:`natural_convention`): ±180 for
@@ -2148,7 +2266,13 @@ def align(
         regridder = _regridder_for(
             grid_of(src, need_bounds), grid_of(tgt, need_bounds), method
         )
-        regridded = regridder(src, keep_attrs=True)
+        # skipna=True renormalizes each destination cell over its own valid source
+        # fraction instead of letting one NaN source cell (land, a below-seafloor
+        # to_depth column) poison the whole cell -- see the docstring above. Plain
+        # "conservative" is exempt: it divides by the full destination area by
+        # design, and skipna's renormalization would silently turn it into
+        # conservative_normed even where nothing is missing.
+        regridded = regridder(src, keep_attrs=True, skipna=method != "conservative")
 
         # Coverage = the same regrid applied to a field of ones over the valid
         # source cells: however the direction resolved, it is the finer lane's
@@ -2222,12 +2346,28 @@ def _align_at_point(
     to the reference. The package default (``"conservative_normed"``) becomes
     ``"nearest"``, since area-averaging onto a station's zero area is not a thing; an
     explicitly conservative method says so rather than being quietly reinterpreted.
+    ``"nearest"`` is the recommended choice at a station generally, not only in place
+    of ``"conservative_normed"``: an explicit ``"bilinear"``/``"linear"`` warns, below.
     """
     if method.startswith("conservative"):
         # Not a warning when it is the package default -- Comparison passes it on every
         # call without the caller having chosen it, so warning would be noise on the
         # common path. sample_at raises for a conservative method asked for explicitly.
         method = NEAREST
+    elif method in _INTERPOLATING:
+        # An explicit choice, not the translated default above -- worth a warning: one
+        # extra xesmf regridder build for a single point buys little over the nearest
+        # cell (a station sits within a cell width of its "true" position however it
+        # is sampled) and can go NaN near the coast if a neighboring cell is masked,
+        # where "nearest" would not.
+        warnings.warn(
+            f"method={method!r} interpolates the test lane to the station -- one "
+            "xesmf regridder built for a single point, which costs real time for "
+            "little value over the containing cell, and can return NaN if a "
+            'neighboring cell is masked (land). method="nearest" is recommended at '
+            "a station.",
+            stacklevel=_stacklevel.find(),
+        )
     if point_of(test) is None:
         test = sample_at(
             test,

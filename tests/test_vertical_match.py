@@ -137,7 +137,7 @@ def test_native_s_levels_on_the_test_side_are_refused_with_a_hint():
 def test_align_over_Z_against_a_station_produces_a_profile_shaped_result():
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
     depth = np.array([5.0, 20.0, 60.0])
-    out = A.align(_gridded_test(z), _station_reference(depth), over="Z")
+    out = A.align(_gridded_test(z), _station_reference(depth), over="Z", method="nearest")
     assert set(out.data_vars) >= {"test", "reference", "difference"}
     assert out["reference"].dims == ("DEPTH",)
     assert out["test"].dims == ("DEPTH",)
@@ -154,4 +154,4 @@ def test_align_over_Z_does_not_warn_about_missing_depth():
     depth = np.array([5.0, 20.0, 60.0])
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        A.align(_gridded_test(z), _station_reference(depth), over="Z")
+        A.align(_gridded_test(z), _station_reference(depth), over="Z", method="nearest")

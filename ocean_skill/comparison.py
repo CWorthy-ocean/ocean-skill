@@ -1712,6 +1712,7 @@ class Comparison:
         time_method: str = "auto",
         tolerance: float | None = None,
         bin_anchor: str = "auto",
+        min_coverage: float = 0.5,
         min_pairs: int = DEFAULT_MIN_PAIRS,
         metrics: tuple[str, ...] | None = None,
         label: str | None = None,
@@ -1792,6 +1793,7 @@ class Comparison:
         self.time_method = time_method
         self.tolerance = tolerance
         self.bin_anchor = bin_anchor
+        self.min_coverage = min_coverage
         self.min_pairs = min_pairs
         self.metric_names = tuple(metrics) if metrics else None
         self.label = label
@@ -2151,6 +2153,16 @@ class Comparison:
                 "_bin_anchor": self.bin_anchor,
             }
         )
+        # Unlike `min_pairs`, `min_coverage` changes the *aligned* pair itself (which
+        # regridded cells survive `align`'s `min_coverage` threshold -- see
+        # ocean_skill.align.align), not a downstream metric mask, so it has to be
+        # part of the key regardless of `over`. Unconditional rather than gated on
+        # "!= the default": every entry cached before this knob existed was built
+        # with today's fixed bug (NaN land cells silently masking cells they only
+        # partly cover, see align._coverage) and holds a stale coverage field and
+        # stale masked-out cells either way -- gating it would let those keep
+        # matching a request that means something different now.
+        extra["_min_coverage"] = self.min_coverage
         if self._point_route() is not None:
             # Without this, a routed comparison (test kept gridded, sampled at the
             # reference's snapped cell) and the same select= run before routing
@@ -2640,6 +2652,7 @@ class Comparison:
             time_method=self.time_method,
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
+            min_coverage=self.min_coverage,
             metadata=self._reference_metadata(),
             test_metadata=self._test_metadata(),
         ).load()
@@ -4368,6 +4381,7 @@ def compare(
     time_method: str = "auto",
     tolerance: float | None = None,
     bin_anchor: str = "auto",
+    min_coverage: float = 0.5,
     min_pairs: int = DEFAULT_MIN_PAIRS,
     metrics: tuple[str, ...] | None = None,
     skip_missing: bool = True,
@@ -4458,6 +4472,16 @@ def compare(
     ``time_method``/``tolerance``/``bin_anchor`` tune the matching, ``min_pairs`` how
     many pairs a cell needs before it is reported, and ``metrics`` which maps are
     computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
+
+    ``min_coverage`` (default 0.5) is the map-regrid counterpart of ``min_pairs``: when
+    the finer lane (a model, most often) is regridded onto the coarser one's cells (a
+    1° GLODAP climatology, say), a destination cell is dropped if less than this
+    fraction of it is covered by valid source data — reported as the aligned result's
+    ``coverage`` variable. NaN source cells (a land mask, a below-seafloor column) no
+    longer poison a cell's *value* outright — see :func:`ocean_skill.align.align` — so
+    lowering ``min_coverage`` (down to 0, to keep any cell with even one valid source
+    cell) is the knob for a marginal sea or a fragmentary reference like GLODAP, where
+    real coastal cells would otherwise be dropped for being only partly covered.
 
     ``over="time"`` is also implied, without being asked, whenever there is no map
     left to draw: a reference whose catalog ``featureType`` is a mooring/station/point
@@ -5054,6 +5078,7 @@ def compare(
                             time_method=time_method,
                             tolerance=tolerance,
                             bin_anchor=bin_anchor,
+                            min_coverage=min_coverage,
                             min_pairs=min_pairs,
                             metrics=metrics,
                             label=label,
