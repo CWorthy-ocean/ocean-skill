@@ -14,7 +14,6 @@ un-normalized diagram needs it divided back down, or the radial axis dwarfs the 
 
 from __future__ import annotations
 
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
@@ -37,6 +36,7 @@ class _FakeComparison:
         variable="sea_water_temperature",
         units="degC",
         reference="ref1",
+        time=None,
     ):
         self.label = label
         self.units = units
@@ -48,6 +48,7 @@ class _FakeComparison:
             "crmsd": crmsd,
             "variable": variable,
             "reference": reference,
+            "time": time,
         }
 
     def metrics(self):
@@ -211,6 +212,242 @@ def test_target_absolute_lim_tracks_the_data_not_the_normalized_floor():
     assert xlim[1] < 0.2
 
 
+# -------------------------------------------------------------------------- robust
+
+
+def _radial_comparisons(radii, *, prefix="p"):
+    """Comparisons whose normalized Target radius is exactly each of ``radii``.
+
+    ``std_test == std_reference`` zeroes the signed crmsd term, so radius reduces to
+    ``|bias|`` — the simplest possible dial for testing the limit formula itself.
+    """
+    return [
+        _FakeComparison(label=f"{prefix}{i}", std_test=1.0, std_reference=1.0, bias=r,
+                          crmsd=0.0)
+        for i, r in enumerate(radii)
+    ]
+
+
+def _taylor_lines(fig):
+    """Every Line2D on a Taylor diagram, including its parasite (aux) axes."""
+    out = []
+    for ax in fig.axes:
+        for target_ax in (ax, *getattr(ax, "parasites", [])):
+            out += list(target_ax.lines)
+    return out
+
+
+def _taylor_texts(fig) -> list[str]:
+    """Every annotation string on a Taylor diagram, including its parasite axes."""
+    out = []
+    for ax in fig.axes:
+        for target_ax in (ax, *getattr(ax, "parasites", [])):
+            out += [t.get_text() for t in target_ax.texts]
+    return out
+
+
+def _target_arrows(ax):
+    """Every arrow annotation on ``ax`` (an ``Annotation`` with an arrow_patch set)."""
+    return [t for t in ax.texts if getattr(t, "arrow_patch", None) is not None]
+
+
+def test_target_robust_limits_from_quantile_not_max():
+    """21 points puts the 0.95 quantile exactly on an order statistic: 20 inliers."""
+    comparisons = _radial_comparisons([1.0] * 20 + [100.0])
+
+    fig_default = target(comparisons, labels=None)
+    assert fig_default.axes[0].get_xlim()[1] == pytest.approx(115.0)
+
+    with pytest.warns(UserWarning, match="1 of 21 points fall outside"):
+        fig_robust = target(comparisons, robust=True, labels=None)
+    # max(1.15 * 1.0, ring_floor=1.25, 1.2) == 1.25 — the guide-ring floor, not the
+    # data.
+    assert fig_robust.axes[0].get_xlim()[1] == pytest.approx(1.25)
+
+
+def test_target_robust_float_is_the_quantile():
+    comparisons = _radial_comparisons([1.0, 2.0, 3.0, 4.0])
+    with pytest.warns(UserWarning, match="2 of 4 points fall outside"):
+        fig = target(comparisons, robust=0.5, labels=None)
+    # np.quantile([1, 2, 3, 4], 0.5) == 2.5
+    assert fig.axes[0].get_xlim()[1] == pytest.approx(1.15 * 2.5)
+
+
+def test_target_robust_warns_how_many_excluded():
+    comparisons = _radial_comparisons([1.0] * 20 + [100.0])
+    with pytest.warns(UserWarning, match=r"1 of 21 points fall outside"):
+        target(comparisons, robust=True, labels=None)
+
+
+def test_target_robust_no_exclusions_no_warning(recwarn):
+    comparisons = _radial_comparisons([1.0] * 5)
+    fig_default = target(comparisons, labels=None)
+    fig_robust = target(comparisons, robust=True, labels=None)
+    assert not [w for w in recwarn.list if "robust" in str(w.message)]
+    robust_xlim = fig_robust.axes[0].get_xlim()
+    default_xlim = fig_default.axes[0].get_xlim()
+    assert robust_xlim == pytest.approx(default_xlim)
+
+
+def test_target_robust_points_saved_by_the_floor_are_not_reported(recwarn):
+    comparisons = _radial_comparisons([0.1] * 19 + [1.2])
+    fig = target(comparisons, robust=True, labels=None)
+    assert not [w for w in recwarn.list if "robust" in str(w.message)]
+    assert fig.axes[0].get_xlim()[1] == pytest.approx(1.25)
+
+
+def test_target_robust_rejects_out_of_range():
+    comparisons = _radial_comparisons([1.0])
+    with pytest.raises(ValueError):
+        target(comparisons, robust=95, labels=None)
+    with pytest.raises(ValueError):
+        target(comparisons, robust=0, labels=None)
+
+
+def test_target_robust_ignores_nan_radii():
+    comparisons = _radial_comparisons([1.0] * 5)
+    comparisons.append(
+        _FakeComparison(label="nanpoint", std_test=1.0, std_reference=1.0,
+                          bias=float("nan"), crmsd=0.0)
+    )
+    fig = target(comparisons, robust=True, labels=None)
+    assert fig.axes[0].get_xlim()[1] == pytest.approx(1.25)
+
+
+def test_target_robust_clips_arrows_at_the_frame():
+    comparisons = [
+        _FakeComparison(label="t1", std_test=1.0, std_reference=1.0, bias=0.3,
+                          crmsd=0.2, time="2010"),
+        _FakeComparison(label="t2", std_test=1.0, std_reference=1.0, bias=0.1,
+                          crmsd=0.1, time="2020"),
+    ]
+    # `ax.patch` is a plain Rectangle, and `Artist.set_clip_path` special-cases that:
+    # it sets `clip_box` (an equivalent, cheaper clip) rather than `clip_path`, so
+    # `clip_box`, not `clip_path`, is the one that actually toggles here.
+    fig_robust = target(comparisons, arrows=True, robust=True, labels=None)
+    arrows_robust = _target_arrows(fig_robust.axes[0])
+    assert arrows_robust, "expected an arrow between the two time steps"
+    assert all(a.arrow_patch.get_clip_box() is not None for a in arrows_robust)
+
+    fig_default = target(comparisons, arrows=True, labels=None)
+    arrows_default = _target_arrows(fig_default.axes[0])
+    assert arrows_default
+    assert all(a.arrow_patch.get_clip_box() is None for a in arrows_default)
+
+
+def test_taylor_robust_srange_from_quantile():
+    stds = [3.0] * 20 + [100.0]
+    comparisons = [
+        _FakeComparison(label=f"m{i}", std_test=s, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+        for i, s in enumerate(stds)
+    ]
+    # The floating axes pad their view limits ~1% past `smax`, hence the loose
+    # tolerance.
+    fig_default = taylor(comparisons, labels=None)
+    assert fig_default.axes[0].get_xlim()[1] == pytest.approx(1.15 * 100.0, rel=0.02)
+
+    with pytest.warns(UserWarning, match="1 of 21 points"):
+        fig_robust = taylor(comparisons, robust=True, labels=None)
+    assert fig_robust.axes[0].get_xlim()[1] == pytest.approx(1.15 * 3.0, abs=0.1)
+
+
+def test_taylor_robust_warns_and_clips_outliers():
+    """A mid-correlation outlier lands inside the axes' bounding rectangle but outside
+    the polar wedge — the case the automatic rectangle clip alone would miss.
+    """
+    comparisons = [
+        _FakeComparison(label=f"m{i}", std_test=1.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+        for i in range(20)
+    ]
+    comparisons.append(
+        _FakeComparison(label="outlier", std_test=5.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.7)
+    )
+    with pytest.warns(UserWarning, match="1 of 21 points"):
+        fig = taylor(comparisons, robust=True, labels=None)
+    samples = [ln for ln in _taylor_lines(fig) if ln.get_marker() == "o"]
+    assert samples, "expected sample points on the diagram"
+    assert all(ln.get_clip_path() is not None for ln in samples)
+
+
+def test_taylor_default_render_untouched():
+    comparisons = [
+        _FakeComparison(label=f"m{i}", std_test=1.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+        for i in range(3)
+    ]
+    fig = taylor(comparisons, labels=None)
+    samples = [ln for ln in _taylor_lines(fig) if ln.get_marker() == "o"]
+    assert samples
+    assert all(ln.get_clip_path() is None for ln in samples)
+
+
+def test_taylor_robust_annotate_skips_excluded_labels():
+    comparisons = [
+        _FakeComparison(label=f"m{i}", std_test=1.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+        for i in range(20)
+    ]
+    comparisons.append(
+        _FakeComparison(label="outlier", std_test=5.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.7)
+    )
+    with pytest.warns(UserWarning, match="1 of 21 points"):
+        fig = taylor(comparisons, robust=True, labels="annotate")
+    texts = _taylor_texts(fig)
+    assert "outlier" not in texts
+    assert "m0" in texts
+
+
+def test_target_lim_overrides_everything():
+    comparisons = _radial_comparisons([1.0] * 20 + [100.0])
+    fig = target(comparisons, lim=3.0, labels=None)
+    assert fig.axes[0].get_xlim() == pytest.approx((-3.0, 3.0))
+
+
+def test_taylor_lim_sets_radial_axis():
+    comparisons = [
+        _FakeComparison(label=f"m{i}", std_test=1.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+        for i in range(3)
+    ]
+    fig = taylor(comparisons, lim=2.5, labels=None)
+    assert fig.axes[0].get_xlim()[1] == pytest.approx(2.5, abs=0.1)
+
+
+def test_robust_and_lim_raise():
+    comparisons = _radial_comparisons([1.0])
+    with pytest.raises(ValueError):
+        target(comparisons, robust=True, lim=3.0, labels=None)
+    taylor_comparisons = [
+        _FakeComparison(label="m1", std_test=1.0, std_reference=1.0, bias=0.0,
+                          crmsd=0.0, corr=0.9)
+    ]
+    with pytest.raises(ValueError):
+        taylor(taylor_comparisons, robust=True, lim=3.0, labels=None)
+
+
+def test_both_renderers_agree_on_robust_lim():
+    comparisons = _radial_comparisons([1.0] * 20 + [100.0])
+    with pytest.warns(UserWarning, match="1 of 21 points"):
+        fig = target(comparisons, labels=None, robust=True)
+    static_xlim = fig.axes[0].get_xlim()
+
+    with pytest.warns(UserWarning, match="1 of 21 points"):
+        obj = _interactive_target(_items(comparisons), robust=True)
+    interactive_xlim = obj.opts.get().kwargs["xlim"]
+
+    assert static_xlim == pytest.approx(interactive_xlim)
+
+
+def test_paired_robust_does_not_raise():
+    comparisons = _radial_comparisons([1.0] * 20 + [100.0])
+    with pytest.warns(UserWarning, match="robust"):
+        paired(comparisons, robust=True)
+
+
 # -------------------------------------------------------------------------- labels
 
 
@@ -249,7 +486,8 @@ def test_target_absolute_labels_omit_units_for_different_variables_sharing_a_uni
     conversion (see units.convert_units) while still being different quantities on
     different natural scales — a shared unit string alone shouldn't be read as license
     to label the axis, or it would read as reassurance the mixed-variable warning is
-    actively contradicting."""
+    actively contradicting.
+    """
     comparisons = [
         _FakeComparison(label="dic", std_test=2.4, std_reference=2.0, bias=0.6, crmsd=0.8,
                           variable="dissolved_inorganic_carbon", units="mmol/m^3"),
@@ -295,7 +533,8 @@ def test_taylor_normalize_false_labels_radial_axis_with_units():
 
 def test_paired_normalize_false_does_not_raise():
     """Regression: `paired` forwards kwargs to both panels; static `target` had no
-    `normalize` and no `**kwargs`, so this used to raise `TypeError`."""
+    `normalize` and no `**kwargs`, so this used to raise `TypeError`.
+    """
     comparisons = [
         _FakeComparison(label="m1", std_test=2.4, std_reference=2.0, bias=0.6, crmsd=0.8),
     ]

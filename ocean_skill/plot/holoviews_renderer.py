@@ -2515,6 +2515,8 @@ def _target(
     items,
     title=None,
     normalize: bool = True,
+    robust: bool | float = False,
+    lim: float | None = None,
     circles=None,
     labels="annotate",
     color_by=None,
@@ -2555,10 +2557,11 @@ def _target(
     ``"hex"`` here (the static family's ``"h"`` translated to this renderer's own
     marker vocabulary); everything else about the overlay layer is unchanged.
 
-    ``normalize``/``circles`` mean exactly what they do in
+    ``normalize``/``circles``/``robust``/``lim`` mean exactly what they do in
     :func:`ocean_skill.plot.summary.target` — including the mixed-variable and
-    mixed-reference warnings, and axis labels named with the shared units when
-    ``normalize=False``.
+    mixed-reference warnings, axis labels named with the shared units when
+    ``normalize=False``, and (for ``robust``/``lim``) the clipped-not-annotated
+    handling of whatever falls outside the axes.
 
     ``arrows`` means exactly what it does statically — see
     :func:`ocean_skill.plot.summary.target`'s docstring. Bokeh has no arrow glyph, so
@@ -2581,6 +2584,7 @@ def _target(
         _Styles,
         _summary_point_specs,
         _target_labels,
+        _target_lim,
         _target_rings,
         _target_xy,
         _warn_mixed_variables,
@@ -2761,11 +2765,9 @@ def _target(
             text_color="black",
         )
     rings, boundary = _target_rings(circles, normalize, recs)
-    ring_floor = max(rings) * 1.25 if rings else 0.0
-    lim = max(
-        1.15 * float(np.max(np.hypot(df["x"], df["y"]))),
-        ring_floor,
-        1.2 if normalize else 0.0,
+    lim = _target_lim(
+        df["x"].to_numpy(), df["y"].to_numpy(), rings, normalize=normalize,
+        robust=robust, lim=lim,
     )
 
     theta = np.linspace(0, 2 * np.pi, 181)

@@ -969,6 +969,33 @@ Honored by **both renderers** for `target`; `taylor` (and `paired`, which forwar
 both) delegates to matplotlib interactively, so this applies to both renderers either
 way.
 
+### `robust` / `lim` (Taylor and target)
+
+**Default:** `robust=False`, `lim=None`
+
+Both diagrams size their axes from the single farthest point, so one bad comparison
+crushes everything else against the origin (target) or the reference arc (Taylor).
+`robust=True` frames them from the 95th percentile of the points' radii instead
+(xarray's `robust=` convention); a float in `(0, 1)` picks the quantile itself:
+
+```python
+suite.target(robust=True)   # 95th percentile
+suite.paired(robust=0.9)    # both panels, 90th
+```
+
+Points beyond the limit fall off-axes — clipped, never annotated on the figure — and
+a warning says how many of how many were left out. The usual floors still apply (the
+guide rings, plus normalized target's `1.2` and Taylor's `1.6·σ_ref`), so `robust`
+never zooms in past them; with only a handful of points the quantile sits at the max
+and nothing is excluded.
+
+`lim` skips the data entirely: the exact axes reach in the axes' own units — target's
+square half-width, Taylor's radial (standard deviation) maximum. It overrides the
+floors and doesn't warn (cropping is then your own choice). Passing both raises.
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
+`normalize` is above).
+
 ---
 
 ## The `series` family (time series)
