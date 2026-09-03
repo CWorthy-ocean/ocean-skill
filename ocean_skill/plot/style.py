@@ -68,11 +68,10 @@ BOKEH_DASHES = {"-": "solid", "--": "dashed", ":": "dotted", "-.": "dashdot"}
 
 #: matplotlib markers, and bokeh's names for the same shapes in the same order — the
 #: cycle ``summary._MARKERS`` uses, kept in step for the same reason as the colours.
-MARKERS = ("o", "^", "*", "s", "D", "v", "P", "X")
+MARKERS = ("o", "^", "s", "D", "v", "P", "X")
 BOKEH_MARKERS = (
     "circle",
     "triangle",
-    "star",
     "square",
     "diamond",
     "inverted_triangle",

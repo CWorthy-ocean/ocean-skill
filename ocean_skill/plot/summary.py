@@ -242,8 +242,9 @@ def _offset_labels(ax, xs, ys, labels, size, colors=None):
 
 #: Marker cycle used when ``marker_by`` splits the set into groups (models, runs, ...).
 #: Shape carries one dimension and colour another, so a single diagram can show, say,
-#: three models across six regions without becoming unreadable.
-_MARKERS = ("o", "^", "*", "s", "D", "v", "P", "X")
+#: three models across six regions without becoming unreadable. No star here: the
+#: reference point owns ``"*"`` on every summary diagram, so a group must never draw one.
+_MARKERS = ("o", "^", "s", "D", "v", "P", "X")
 
 
 def pretty_level(field, value) -> str:
@@ -464,8 +465,9 @@ def _summary_point_specs(recs, coord1, coord2, style_field, summary_points):
     per-group centroid overlay convenience. ``coord1``/``coord2`` are the same
     per-record coordinates the base cloud plots (Taylor's normalized std/corr, or
     Target's signed x/y), reduced (median by default, or ``summary_points="mean"``)
-    across each group named by ``style_field``. ``marker`` is always ``"*"``, so a
-    centroid never reads as just another individual point.
+    across each group named by ``style_field``. ``marker`` is always ``"h"`` (hexagon),
+    so a centroid never reads as just another individual point -- and never as the
+    reference, which owns the star.
     """
     key = "median" if summary_points is True else summary_points
     if key not in _SUMMARY_REDUCERS:
@@ -481,7 +483,7 @@ def _summary_point_specs(recs, coord1, coord2, style_field, summary_points):
         c1 = float(reduce([coord1[i] for i in idxs]))
         c2 = float(reduce([coord2[i] for i in idxs]))
         label = pretty_level(style_field, level) if style_field != "label" else str(level)
-        specs.append((c1, c2, {style_field: level, "label": label}, "*"))
+        specs.append((c1, c2, {style_field: level, "label": label}, "h"))
     return specs
 
 
@@ -491,7 +493,7 @@ def _overlay_point_specs(overlay, groups, coord1_of, coord2_of):
     argument does (comparisons, a ``ComparisonSet``, hand-built records), goes through
     the same :func:`_records`, and is drawn on top of the base cloud rather than
     replacing it. ``marker`` is always ``None`` here (draw with the group's own
-    marker, not a centroid's forced ``"*"``) — the two spec sources are concatenated
+    marker, not a centroid's forced ``"h"``) — the two spec sources are concatenated
     before styling, so they compose in one call.
     """
     return [(coord1_of(r), coord2_of(r), r, None) for r in _records(overlay, groups)]
@@ -892,7 +894,7 @@ def taylor(
     contrast starker. This is the general mechanism for two related things —
     highlighting specific points (pass the subset you want to point out) and
     ``summary_points=True`` (or ``"median"``/``"mean"``), which instead builds one
-    ★-marked centroid per group internally, the reduced (median by default) position
+    hexagon-marked centroid per group internally, the reduced (median by default) position
     of that group's own cloud. Both can be given at once. Neither introduces a new
     legend entry — an overlay point's group already has one from the base cloud.
     ``overlay_marker_scale``/``overlay_alpha`` size and fade the overlay layer
@@ -1132,7 +1134,7 @@ def target(
 
     ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` mean
     exactly what they do in :func:`taylor` — a second, emphasized layer (a highlighted
-    subset, a per-group ★ centroid, or both) drawn on top of the base cloud, styled to
+    subset, a per-group hexagon centroid, or both) drawn on top of the base cloud, styled to
     match its own group's colour rather than re-cycled independently. See its
     docstring for the full explanation.
 

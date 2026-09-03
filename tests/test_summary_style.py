@@ -428,18 +428,16 @@ def test_interactive_colors_dict_rejects_an_unknown_level(items):
 # has no encounter order of its own to cycle by.
 
 
-def test_taylor_summary_points_draws_one_star_per_group_matching_its_colour(
+def test_taylor_summary_points_draws_one_hexagon_per_group_matching_its_colour(
     comparisons,
 ):
     fig = taylor(comparisons, color_by="variable", summary_points=True, labels=None)
     lines = _taylor_lines(fig)
     samples = {ln.get_markerfacecolor() for ln in lines if ln.get_marker() == "o"}
-    stars = [ln for ln in lines if ln.get_marker() == "*"]
-    # one centroid star per group (3 variables), plus the diagram's own reference star
-    # -- distinguished by colour, since the reference star is always black
-    group_stars = [ln for ln in stars if ln.get_markerfacecolor() != "k"]
-    assert len(group_stars) == 3
-    assert {ln.get_markerfacecolor() for ln in group_stars} <= samples, (
+    # centroids are hexagons, never stars -- the star is reserved for the reference
+    hexagons = [ln for ln in lines if ln.get_marker() == "h"]
+    assert len(hexagons) == 3, "one centroid hexagon per group (3 variables)"
+    assert {ln.get_markerfacecolor() for ln in hexagons} <= samples, (
         "every centroid's colour must be one already used by the base cloud"
     )
 
@@ -522,12 +520,12 @@ def test_interactive_target_summary_points_matches_static_colour(comparisons, it
     static_hex = {mcolors.to_hex(c) for c in static_colors}
 
     obj = _interactive_target(items, color_by="variable", summary_points=True)
-    stars = [
+    centroids = [
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") == "star"
+        and e.opts.get(group="style").kwargs.get("marker") == "hex"
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
-    interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in stars}
+    interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in centroids}
     assert interactive_colors == static_hex
