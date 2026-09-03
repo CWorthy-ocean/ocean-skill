@@ -489,6 +489,35 @@ def test_holoviews_locations_carto_tiles_warn(index):
         _locations(items, extent=extent, tiles="CartoLight")
 
 
+def test_holoviews_locations_warns_on_broken_proj_pairing(index, monkeypatch):
+    """A tiled locations map must say so, not just draw the wrong map silently.
+
+    It is exactly the case a broken cartopy/PROJ pairing corrupts (see
+    ocean_skill.plot.proj_check).
+    """
+    import cartopy.crs as ccrs
+    import numpy as np
+
+    from ocean_skill.plot import proj_check
+    from ocean_skill.plot.holoviews_renderer import _locations
+
+    real = ccrs.GOOGLE_MERCATOR.transform_points
+
+    def broken(src_crs, x, y):
+        pts = np.array(real(src_crs, x, y), dtype=float)
+        pts[:, 1] += 25_000.0
+        return pts
+
+    monkeypatch.setattr(ccrs.GOOGLE_MERCATOR, "transform_points", broken)
+    proj_check.projection_skew.cache_clear()
+    try:
+        items, extent = _items(index)
+        with pytest.warns(UserWarning, match="cartopy"):
+            _locations(items, extent=extent)
+    finally:
+        proj_check.projection_skew.cache_clear()
+
+
 def _selection_map_items():
     """A ring, a line, a point and a box — one of each new/reused kind."""
     ring = np.array([[170.0, -10.0], [180.0, -10.0], [180.0, 10.0], [170.0, 10.0]])

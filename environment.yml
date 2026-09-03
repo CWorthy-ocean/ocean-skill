@@ -39,6 +39,11 @@ dependencies:
   # --- plotting (static + interactive) ---
   - matplotlib-base
   - cartopy
+  - proj<9.8         # PROJ 9.8 made "eqc" ellipsoidal (OSGeo/PROJ#4656); cartopy<=0.25's
+                      # PlateCarree assumes spherical eqc and then mis-projects every
+                      # transform by up to ~0.23° latitude (SciTools/cartopy#2645, fixed
+                      # by #2653 but unreleased as of cartopy 0.25 -- milestone 0.26).
+                      # Drop this pin once cartopy>=0.26 is required.
   - cmocean
   - holoviews
   - hvplot
