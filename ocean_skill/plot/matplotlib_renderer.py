@@ -488,7 +488,12 @@ def _map_projection(*fields):
     import cartopy.crs as ccrs
 
     from ocean_skill.align import natural_convention
+    from ocean_skill.plot.proj_check import warn_projection_skew
 
+    # Every geo panel drawn here goes through cartopy, so this is the one place to
+    # catch a broken cartopy/PROJ pairing (see ocean_skill.plot.proj_check) for the
+    # whole static family — cheap, since the check itself is cached per process.
+    warn_projection_skew()
     for field in fields:
         if field is None or "lon" not in getattr(field, "coords", ()):
             continue
@@ -4010,8 +4015,10 @@ def locations(
     from matplotlib.lines import Line2D
 
     from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, style_for
+    from ocean_skill.plot.proj_check import warn_projection_skew
     from ocean_skill.plot.summary import _MARKERS
 
+    warn_projection_skew()
     if tiles:
         warnings.warn(
             "tiles= only affects the interactive renderer; the static map draws "
@@ -4370,7 +4377,8 @@ def render(spec, **kwargs: Any):
 
 class _Record:
     """Adapt a spec item to the ``.metrics()``/``.label``/``.units`` interface
-    summaries need."""
+    summaries need.
+    """
 
     def __init__(self, item: dict[str, Any]):
         self._item = item

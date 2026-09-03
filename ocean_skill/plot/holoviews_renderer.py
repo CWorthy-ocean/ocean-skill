@@ -263,6 +263,14 @@ def _quadmesh(
     if geo:
         projection = _output_projection(da)
         opts |= {"geo": True, "projection": projection}
+        if projection is not None:
+            # a straddling field actually gets reprojected into this 180-centred
+            # frame below (see the ``project`` branch) -- a real cartopy transform,
+            # not just relabelled axes, so it is exactly what a broken PROJ pairing
+            # would skew (see ocean_skill.plot.proj_check).
+            from ocean_skill.plot.proj_check import warn_projection_skew
+
+            warn_projection_skew()
         if coastline:
             # hvplot's coastline is a geoviews Feature, which the plot re-projects
             # from scratch every time it renders a frame. Fine for the single draw
@@ -1090,8 +1098,18 @@ def _check_tiles(tiles: str | bool | None) -> str | bool | None:
     otherwise reported as ``"cannot swap from dimension 'lon'"`` from deep inside
     hvplot's projection handling, which names neither the argument at fault nor
     anything a reader could act on.
+
+    Also where every tiled map's cartopy/PROJ pairing gets checked (see
+    :func:`~ocean_skill.plot.proj_check.warn_projection_skew`): drawing data under web
+    tiles is exactly the case that reprojects PlateCarree -> Web Mercator, which is what
+    that skew corrupts.
     """
-    if not tiles or tiles is True:
+    if not tiles:
+        return tiles
+    from ocean_skill.plot.proj_check import warn_projection_skew
+
+    warn_projection_skew()
+    if tiles is True:
         return tiles
     try:
         from geoviews import tile_sources
@@ -1306,9 +1324,15 @@ def _to_mercator(lons, lats):
     Shared by :func:`_locations` (its extent rectangles) and :func:`_domain_overlay`
     (a domain outline) — both draw plain holoviews elements under web tiles, which
     take no part in geoviews's automatic projection and so need this done by hand.
+    This is the one function in the module that always does a real PlateCarree ->
+    Web Mercator transform by hand, so it checks for itself rather than trusting
+    every caller to have checked first (see :func:`~ocean_skill.plot.proj_check`).
     """
     import cartopy.crs as ccrs
 
+    from ocean_skill.plot.proj_check import warn_projection_skew
+
+    warn_projection_skew()
     pts = ccrs.GOOGLE_MERCATOR.transform_points(
         ccrs.PlateCarree(),
         np.asarray(lons, dtype=float),
