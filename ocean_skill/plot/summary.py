@@ -247,6 +247,20 @@ def _offset_labels(ax, xs, ys, labels, size, colors=None):
 _MARKERS = ("o", "^", "s", "D", "v", "P", "X")
 
 
+def _field_levels(recs, field) -> list:
+    """Distinct values of ``field`` across ``recs``, in order of first appearance.
+
+    Module level (not just inside :func:`_group_styles`) because :func:`_grid_handles`
+    needs the same level ordering to line points up with their legend cell.
+    """
+    seen = []
+    for r in recs:
+        v = r.get(field)
+        if v not in seen:
+            seen.append(v)
+    return seen
+
+
 def pretty_level(field, value) -> str:
     """Legend text for one level: short variable names, units on depths.
 
@@ -366,12 +380,7 @@ def _group_styles(
     _pretty = pretty_level
 
     def _levels(field):
-        seen = []
-        for r in recs:
-            v = r.get(field)
-            if v not in seen:
-                seen.append(v)
-        return seen
+        return _field_levels(recs, field)
 
     if marker_by:
         mlevels = _levels(marker_by)
@@ -454,6 +463,65 @@ def _group_styles(
             for r, c, mk, scl in zip(recs, cols, marks, scales, strict=True)
         ]
     return _Styles(cols, marks, alphas, scales, handles)
+
+
+def _grid_handles(
+    recs, color_by, marker_by, colors=None, marker_scale=1.0, alpha=None, star_scale=1.0
+):
+    """Legend handles laid out as a colour x marker matrix, column-major.
+
+    ``fig.legend`` fills its columns top-to-bottom (confirmed against matplotlib's own
+    layout, not assumed), so passing exactly ``ncols * (len(rows) + 1)`` handles — a row
+    label column, one column per ``marker_by`` level, a trailing reference column — draws
+    an exact grid: rows are ``color_by`` levels in their colour, columns are ``marker_by``
+    levels in their marker shape, and each cell is the same glyph its points are drawn
+    with. A (colour, marker) combination with no data gets an invisible blank the same
+    size as its row instead of a glyph, so the grid doubles as a coverage matrix. Every
+    blank is sized to match the row (or, for the header row, a neutral size) so a column's
+    entries line up with its neighbours' regardless of ``marker_scale``.
+
+    Requires both ``color_by`` and ``marker_by`` — callers are expected to have already
+    handled the case where one or both is missing (there is no cross-product to grid).
+    """
+    from matplotlib.lines import Line2D
+
+    rows = _field_levels(recs, color_by)
+    cols = _field_levels(recs, marker_by)
+    level_colors = _resolve_colors(colors, rows, color_by)
+    level_scales = _resolve_per_level(
+        marker_scale, rows, color_by, default=1.0, param="marker_scale"
+    )
+    present = {(r.get(color_by), r.get(marker_by)) for r in recs}
+    header_size = 7 * _scalar_scale(marker_scale)
+
+    def _blank(ms, label=""):
+        return Line2D(
+            [], [], ls="", marker="o", mfc="none", mec="none", ms=ms, label=label
+        )
+
+    handles = [_blank(header_size)]
+    for lev in rows:
+        handles.append(_blank(7 * level_scales[lev], pretty_level(color_by, lev)))
+
+    for j, mlev in enumerate(cols):
+        handles.append(_blank(header_size, pretty_level(marker_by, mlev)))
+        m = _MARKERS[j % len(_MARKERS)]
+        for lev in rows:
+            ms = 7 * level_scales[lev]
+            if (lev, mlev) in present:
+                c = level_colors[lev]
+                handles.append(
+                    Line2D([], [], ls="", marker=m, mfc=c, mec=c, ms=ms, label="")
+                )
+            else:
+                handles.append(_blank(ms))
+
+    handles.append(_blank(header_size))
+    handles.append(_reference_handle(star_scale))
+    for lev in rows[1:]:
+        handles.append(_blank(7 * level_scales[lev]))
+
+    return handles, len(cols) + 2
 
 
 #: A ``summary_points`` reduction accepts these spellings; ``True`` means the first.
@@ -681,8 +749,9 @@ def _draw_arrows(ax, chains, points, colors, *, zorder: float) -> None:
 
 
 #: How a diagram identifies its points. ``"legend"`` puts a key below the axes,
-#: ``"annotate"`` writes each label beside its marker, ``None`` does neither.
-LABEL_MODES = ("legend", "annotate")
+#: ``"annotate"`` writes each label beside its marker, ``"grid"`` keys the
+#: color_by x marker_by cross-product as a matrix, ``None`` does neither.
+LABEL_MODES = ("legend", "annotate", "grid")
 
 
 def _resolve_labels(labels):
@@ -693,8 +762,28 @@ def _resolve_labels(labels):
         raise ValueError(
             f"labels={labels!r} is not one of {LABEL_MODES} or None — "
             "'legend' keys the points below the axes, 'annotate' writes each "
-            "label beside its marker."
+            "label beside its marker, 'grid' keys the color_by x marker_by "
+            "cross-product as a matrix."
         )
+    return labels
+
+
+def _fallback_grid_without_both_channels(labels, color_by, marker_by):
+    """``"grid"`` needs both channels to have a cross-product to tabulate.
+
+    Called after any ``groups``-defaulting of ``color_by``/``marker_by`` has already
+    happened, so ``groups=`` alone is enough to earn a real grid. With only one channel
+    (or neither), a matrix would have one row or one column — exactly the flat legend
+    — so this warns and falls back to it rather than drawing a degenerate grid or
+    raising, which would be unfriendly to a caller whose grouping fields vary.
+    """
+    if labels == "grid" and not (color_by and marker_by):
+        warnings.warn(
+            'labels="grid" keys the color_by x marker_by cross-product, which needs '
+            "both to be set; drawing the flat legend instead.",
+            stacklevel=3,
+        )
+        return "legend"
     return labels
 
 
@@ -753,6 +842,20 @@ def _lowest_artist_bottom(fig, renderer) -> float:
     return min(bottoms) if bottoms else 0.0
 
 
+def _legend_anchor_top(fig) -> float:
+    """Figure-fraction y of the top of a key placed just below everything drawn so far.
+
+    Shared by :func:`_legend_below` and :func:`_grid_legend_below` so a flat key and a
+    grid key clear the axes labels identically — see :func:`_legend_below` for why this
+    is measured rather than a fixed offset.
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    fig_h_px = fig.get_size_inches()[1] * fig.dpi
+    pad_px = _LEGEND_PAD * fig.dpi / 72.0
+    return (_lowest_artist_bottom(fig, renderer) - pad_px) / fig_h_px
+
+
 def _legend_below(fig, handles, size):
     """Draw one key beneath the axes, clear of them, in as many columns as fit.
 
@@ -774,12 +877,7 @@ def _legend_below(fig, handles, size):
     only if a single column is still too wide does the text shrink, floored at
     ``MIN_PT``.
     """
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    fig_h_px = fig.get_size_inches()[1] * fig.dpi
-    pad_px = _LEGEND_PAD * fig.dpi / 72.0
-    # figure fraction of the top of the key: just below everything already drawn
-    top = (_lowest_artist_bottom(fig, renderer) - pad_px) / fig_h_px
+    top = _legend_anchor_top(fig)
 
     def draw(ncol):
         return fig.legend(
@@ -804,6 +902,44 @@ def _legend_below(fig, handles, size):
         if width <= limit or ncol == 1:
             break
     if legend is not None and width > limit > 0:
+        shrunk = max(size * limit / width, MIN_PT)
+        for text in legend.get_texts():
+            text.set_fontsize(shrunk)
+    return legend
+
+
+def _grid_legend_below(fig, handles, ncols, size):
+    """Draw the :func:`_grid_handles` matrix beneath the axes, clear of them.
+
+    Unlike :func:`_legend_below`, ``ncols`` is not negotiable — it is the number of
+    matrix columns, and matplotlib's column-major fill is what turns the handle list
+    back into a grid, so dropping a column would scramble it rather than narrow it.
+    Width overflow can therefore only be bought back with text size, exactly as
+    :func:`_legend_below` does once it is down to one column.
+
+    ``handlelength``/``handletextpad``/``columnspacing`` are tightened from
+    matplotlib's defaults, which are sized for a legend with few, long entries — this
+    one has many short (often empty) ones, and the header/row-label text otherwise
+    sits noticeably further from its glyph column than the grid reads as intending.
+    """
+    top = _legend_anchor_top(fig)
+    legend = fig.legend(
+        handles=handles,
+        labels=[h.get_label() for h in handles],
+        loc="upper center",
+        ncol=ncols,
+        fontsize=size,
+        frameon=False,
+        numpoints=1,
+        columnspacing=1.2,
+        handlelength=1.4,
+        handletextpad=0.4,
+        bbox_to_anchor=(0.5, top),
+    )
+    fig.canvas.draw()
+    limit = fig.get_size_inches()[0] * fig.dpi
+    width = legend.get_window_extent(fig.canvas.get_renderer()).width
+    if width > limit > 0:
         shrunk = max(size * limit / width, MIN_PT)
         for text in legend.get_texts():
             text.set_fontsize(shrunk)
@@ -861,10 +997,18 @@ def taylor(
     metrics first; it defaults ``color_by`` to ``"group"`` when neither ``color_by``
     nor ``marker_by`` is otherwise given.
 
-    ``labels`` chooses how points are identified: ``"legend"`` (a key below the axes)
-    or ``"annotate"`` (each label written beside its marker); ``None`` for neither.
-    Annotation is the better choice for a handful of points, a legend once there are
-    enough that the labels would collide.
+    ``labels`` chooses how points are identified: ``"legend"`` (a key below the axes),
+    ``"annotate"`` (each label written beside its marker), or ``"grid"`` (a matrix key:
+    one row per ``color_by`` level in that row's colour, one column per ``marker_by``
+    level in that column's marker, each cell the exact glyph its points are drawn
+    with — reading off a point's row and column tells you both groups it belongs to at
+    once, which the flat ``"legend"`` leaves the reader to cross-reference); ``None``
+    for neither. Annotation is the better choice for a handful of points, a legend once
+    there are enough that the labels would collide, and grid once both ``color_by`` and
+    ``marker_by`` are set and the reader would otherwise have to mentally combine two
+    separate swatch blocks. ``"grid"`` needs both grouping fields — given only one (or
+    neither) it warns and falls back to ``"legend"``, since a one-channel matrix is just
+    the flat legend.
 
     Text sizes follow the figure size rather than being fixed, so a diagram drawn at
     twice the default is not a diagram with half-size labels; ``font_scale`` multiplies
@@ -917,6 +1061,7 @@ def taylor(
         raise ValueError("no comparisons to plot")
     if groups and not color_by and not marker_by:
         color_by = "group"
+    labels = _fallback_grid_without_both_channels(labels, color_by, marker_by)
     style_field = color_by or marker_by or "label"
     arrows_field = _resolve_arrows(arrows)
     chains = _arrow_chains(recs, arrows_field) if arrows_field else []
@@ -1056,6 +1201,11 @@ def taylor(
         _legend_below(
             fig, [*styles.handles, _reference_handle(star_scale)], scale["legend"]
         )
+    elif labels == "grid":
+        handles, ncols = _grid_handles(
+            recs, color_by, marker_by, colors, marker_scale, alpha, star_scale
+        )
+        _grid_legend_below(fig, handles, ncols, scale["legend"])
     elif labels == "annotate":
         # The aux axes are polar: a sample sits at (arccos(corr), stddev), which is
         # exactly where add_sample put it.
@@ -1123,10 +1273,11 @@ def target(
 
     ``color_by``/``marker_by``/``groups`` mean exactly what they do in :func:`taylor`.
 
-    ``labels`` chooses how points are identified — ``"legend"`` below the axes or
-    ``"annotate"`` beside each marker — exactly as for :func:`taylor`, so the two can be
-    made to match. It defaults to ``"annotate"`` here because target points cluster near
-    the origin when a model is good, and a label beside the marker stays readable there.
+    ``labels`` chooses how points are identified — ``"legend"`` below the axes,
+    ``"annotate"`` beside each marker, or ``"grid"`` (a color_by x marker_by matrix
+    key) — exactly as for :func:`taylor`, so the two can be made to match. It defaults
+    to ``"annotate"`` here because target points cluster near the origin when a model
+    is good, and a label beside the marker stays readable there.
 
     ``font_scale``/``scale`` size the text from the figure, as in :func:`taylor`.
     ``marker_scale``/``alpha`` mean exactly what they do in :func:`taylor`, including
@@ -1158,6 +1309,7 @@ def target(
         raise ValueError("no comparisons to plot")
     if groups and not color_by and not marker_by:
         color_by = "group"
+    labels_mode = _fallback_grid_without_both_channels(labels_mode, color_by, marker_by)
     style_field = color_by or marker_by or "label"
     if not normalize:
         _warn_mixed_variables(recs, "target")
@@ -1294,6 +1446,11 @@ def target(
         _legend_below(
             fig, [*styles.handles, _reference_handle(star_scale)], scale["legend"]
         )
+    elif labels_mode == "grid":
+        handles, ncols = _grid_handles(
+            recs, color_by, marker_by, colors, marker_scale, alpha, star_scale
+        )
+        _grid_legend_below(fig, handles, ncols, scale["legend"])
 
     if owns_figure:
         # That x label is longer than the axes it belongs to at any generous type level,
@@ -1330,7 +1487,8 @@ def paired(
 
     ``labels`` applies to **both** panels, since the diagrams show the same points and
     identifying them two different ways in one figure reads as two unrelated plots. With
-    ``"legend"`` the key is drawn once beneath both panels rather than twice.
+    ``"legend"`` or ``"grid"`` the key is drawn once beneath both panels rather than
+    twice.
 
     One type scale is computed here for the two-column figure and handed to both panels,
     rather than each sizing itself: called alone they are square and near page width, so
@@ -1343,11 +1501,16 @@ def paired(
     import matplotlib.pyplot as plt
 
     labels = _resolve_labels(labels)
+    color_by = kwargs.get("color_by")
+    marker_by = kwargs.get("marker_by")
+    if kwargs.get("groups") and not color_by and not marker_by:
+        color_by = "group"
+    labels = _fallback_grid_without_both_channels(labels, color_by, marker_by)
     figsize = figsize or _diagram_figsize(PAIRED_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, ncols=2, font_scale=font_scale, override=scale)
     fig = plt.figure(figsize=figsize)
-    # Panels never draw their own key: with "legend" it is shared (below), and with
-    # "annotate" each panel labels its own markers.
+    # Panels never draw their own key: with "legend"/"grid" it is shared (below), and
+    # with "annotate" each panel labels its own markers.
     panel_labels = "annotate" if labels == "annotate" else None
     taylor(
         comparisons,
@@ -1373,27 +1536,35 @@ def paired(
     # Both of these move the axes, so they come before the key, which is placed by
     # measuring where the axes and their labels actually ended up.
     fig.subplots_adjust(wspace=0.35)
-    if labels == "legend":
+    if labels in ("legend", "grid"):
         # One shared key beneath both panels, so it cannot collide with either title
         recs = _records(comparisons, kwargs.get("groups"))
-        color_by = kwargs.get("color_by")
-        marker_by = kwargs.get("marker_by")
-        if kwargs.get("groups") and not color_by and not marker_by:
-            color_by = "group"
         panel_marker_scale = kwargs.get("marker_scale", 1.0)
-        styles = _group_styles(
-            recs,
-            color_by,
-            marker_by,
-            kwargs.get("colors"),
-            panel_marker_scale,
-            kwargs.get("alpha"),
-        )
-        _legend_below(
-            fig,
-            [*styles.handles, _reference_handle(_scalar_scale(panel_marker_scale))],
-            scale["legend"],
-        )
+        if labels == "grid":
+            handles, ncols = _grid_handles(
+                recs,
+                color_by,
+                marker_by,
+                kwargs.get("colors"),
+                panel_marker_scale,
+                kwargs.get("alpha"),
+                _scalar_scale(panel_marker_scale),
+            )
+            _grid_legend_below(fig, handles, ncols, scale["legend"])
+        else:
+            styles = _group_styles(
+                recs,
+                color_by,
+                marker_by,
+                kwargs.get("colors"),
+                panel_marker_scale,
+                kwargs.get("alpha"),
+            )
+            _legend_below(
+                fig,
+                [*styles.handles, _reference_handle(_scalar_scale(panel_marker_scale))],
+                scale["legend"],
+            )
     _fit_text(fig)
     if save:
         save = Path(save).expanduser()

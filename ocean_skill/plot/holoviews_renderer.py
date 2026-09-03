@@ -2518,6 +2518,13 @@ def _target(
     sized from the frame by the shared type scale, so the point labels here and on the
     static target are the same size relative to the diagram.
 
+    ``labels="grid"`` is the one deliberate divergence: bokeh legends are flat, so
+    there is no matrix layout to draw here (the static target, and interactive
+    ``taylor``/``paired`` since they delegate to it, draw the real grid). This warns
+    and falls back to the combined ``"colour · marker"`` entries ``"legend"`` already
+    draws — each present (colour, marker) pair with its true glyph — so no information
+    is lost, only the tabular arrangement.
+
     ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` also mean
     exactly what they do statically — see :func:`ocean_skill.plot.summary.taylor`'s
     docstring for the full explanation. A centroid's marker is drawn as a bokeh
@@ -2567,6 +2574,18 @@ def _target(
     sizes = bokeh_scale(frame_size, font_scale=font_scale)
     fontsize = bokeh_fontsize(frame_size, font_scale=font_scale)
     labels_mode = _resolve_labels(labels)
+    if labels_mode == "grid":
+        # Bokeh legends are flat — there is no matrix layout to draw here, unlike the
+        # static renderer (and interactive taylor/paired, which delegate to it). The
+        # combined "colour · marker" entries built below already spell out each
+        # present (colour, marker) pair with its true glyph, so the fallback loses
+        # only the tabular arrangement, not the information.
+        warnings.warn(
+            'labels="grid" has no interactive form (bokeh legends are flat); '
+            'showing combined "colour · marker" entries instead.',
+            stacklevel=2,
+        )
+        labels_mode = "legend"
     recs = [
         dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
         for i in items
