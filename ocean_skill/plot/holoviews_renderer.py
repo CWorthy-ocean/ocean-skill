@@ -1890,7 +1890,6 @@ def _save_interactive(obj, save) -> None:
 _BOKEH_MARKERS = (
     "circle",
     "triangle",
-    "star",
     "square",
     "diamond",
     "inverted_triangle",
@@ -2514,7 +2513,7 @@ def _target(
     ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` also mean
     exactly what they do statically — see :func:`ocean_skill.plot.summary.taylor`'s
     docstring for the full explanation. A centroid's marker is drawn as a bokeh
-    ``"star"`` here (the static family's ``"*"`` translated to this renderer's own
+    ``"hex"`` here (the static family's ``"h"`` translated to this renderer's own
     marker vocabulary); everything else about the overlay layer is unchanged.
 
     ``normalize``/``circles`` mean exactly what they do in
@@ -2801,7 +2800,7 @@ def _target(
             overlay_styles.scales,
             strict=True,
         ):
-            marker = "star" if mk_override == "*" else mk
+            marker = "hex" if mk_override == "h" else mk
             alpha_opts = {} if al is None else {"fill_alpha": al, "line_alpha": al}
             overlay_elements.append(
                 hv.Scatter([(xi, yi)]).opts(
