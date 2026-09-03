@@ -107,6 +107,9 @@ def run_suite(suite_path: str | Path):
         # _require_reduced.
         aggregate=suite.get("aggregate"),
         select=suite.get("select"),
+        # Forwarded explicitly, like every other compare() knob a suite might name --
+        # see the aggregate comment above for what happens when one is forgotten here.
+        subtract_mean=suite.get("subtract_mean", False),
     )
     if not len(results):
         print("no comparisons produced; check the suite's sources and variables")

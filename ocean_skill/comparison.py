@@ -671,6 +671,50 @@ def _normalize_pair(
     return normalize_side(spec)
 
 
+def _normalize_subtract_mean(spec: Any) -> dict[str, bool]:
+    """Validate and normalize a ``subtract_mean=`` request into a per-lane dict.
+
+    ``None``/``False`` demeans neither lane, ``True`` both; the string ``"test"``/
+    ``"reference"`` is one-lane sugar for the common case of just naming a side; and
+    a dict names either or both lanes explicitly, the side left out defaulting to
+    ``False``. Unlike :func:`_normalize_pair` (which :func:`_require_pair_spec`
+    refuses one-sided, since a missing variable/select/aggregate side is a likely
+    typo), a one-sided ``{"test": True}`` here is unambiguous — a bool has no partial
+    form a typo could produce — so it is accepted rather than refused.
+    """
+    if spec is None or spec is False:
+        return {"test": False, "reference": False}
+    if spec is True:
+        return {"test": True, "reference": True}
+    if isinstance(spec, str):
+        if spec not in ("test", "reference"):
+            raise ValueError(
+                "subtract_mean= as a string takes 'test' or 'reference'; got "
+                f"{spec!r}. Use a dict ({{'test': True, 'reference': True}}) to "
+                "demean both."
+            )
+        return {"test": spec == "test", "reference": spec == "reference"}
+    if isinstance(spec, dict):
+        extra = spec.keys() - {"test", "reference"}
+        if extra:
+            raise ValueError(
+                f"subtract_mean= takes only 'test' and 'reference' keys, got extra "
+                f"key(s) {sorted(extra)}. {spec!r}"
+            )
+        out = {role: spec.get(role, False) for role in ("test", "reference")}
+        for role, value in out.items():
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"subtract_mean={{...}}'s {role!r} side must be a bool; got "
+                    f"{value!r}"
+                )
+        return out
+    raise TypeError(
+        "subtract_mean= takes True, False, 'test', 'reference', or a "
+        f"{{'test': bool, 'reference': bool}} dict; got {spec!r}"
+    )
+
+
 def _expand_derived(spec: Any) -> Any:
     """Follow a :data:`ocean_skill.operators.DERIVED` string to what it names.
 
@@ -1845,6 +1889,7 @@ class Comparison:
         label: str | None = None,
         cache: bool | None = None,
         qc: Any = None,
+        subtract_mean: Any = False,
     ):
         from ocean_skill.vocabulary import resolve_and_report
 
@@ -1932,6 +1977,10 @@ class Comparison:
         # gives each its own policy. No normalize_side: unlike select there is no
         # sugar to expand, just the pair-spec shape to validate.
         self.qc = _normalize_pair(qc, "qc")
+        # Per-lane scalar demeaning, applied once the pair is aligned (see
+        # _subtract_scalar_means) -- one bool per side, unlike qc's pair-spec, since
+        # a one-sided request here is unambiguous (see _normalize_subtract_mean).
+        self.subtract_mean = _normalize_subtract_mean(subtract_mean)
         self._aligned = None
         self._metrics = None
         self._pointwise_metrics = None
@@ -2330,6 +2379,15 @@ class Comparison:
             # apart, and each lane's own prepared-field cache entry (which this
             # aligned result is built from) already keys on the resolved policy.
             extra["_qc"] = self.qc
+        # Gated on truthiness, unlike `_min_coverage` above: the default (neither
+        # lane demeaned) changes nothing about the aligned pair, so an entry cached
+        # before this option existed must keep matching a request that doesn't ask
+        # for it. Demeaning is applied last, after `align.align` returns (see
+        # _subtract_scalar_means), so two otherwise-identical requests that differ
+        # only here would silently share a cache entry without this.
+        demeaned = sorted(role for role, on in self.subtract_mean.items() if on)
+        if demeaned:
+            extra["_subtract_mean"] = demeaned
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -2808,9 +2866,57 @@ class Comparison:
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
+        self._subtract_scalar_means()
         if use_cache:
             _cache.save(self._cache_key, self._aligned)
         return self._aligned
+
+    def _subtract_scalar_means(self) -> None:
+        """Remove each requested lane's own scalar mean from the just-aligned pair.
+
+        One number per lane — the same weighted mean :meth:`metrics` would report as
+        ``mean_test``/``mean_reference`` (the same common finite mask, the same
+        weighting) — subtracted from every value of that lane, so an offset (a sea
+        level datum, a model's drift) does not show up as skill. ``difference`` is
+        then recomputed rather than shifted by hand, so a caller reading it directly
+        never has to reason about which lane changed; ``coverage`` and any
+        ``*_spread`` variable ride on the lane's value and need no touching of their
+        own. Runs after alignment (not per-lane, before it), so a common sample backs
+        the removed number on both sides, and before the result is cached, so a warm
+        cache already holds the demeaned pair.
+        """
+        lanes = [role for role, on in self.subtract_mean.items() if on]
+        if not lanes:
+            return
+        import warnings
+
+        from ocean_skill import metrics as _metrics
+
+        aligned = self._aligned
+        # A station/profile/section has one latitude (or none), so cos(lat) is a
+        # constant -- mirrors how Comparison.metrics() itself decides weighted=.
+        weighted = not (self.is_series or self.is_profile or self.is_section)
+        means = _metrics.evaluate(
+            aligned, [f"mean_{role}" for role in lanes], dim=None, weighted=weighted
+        )
+        for role in lanes:
+            mean = float(np.asarray(means[f"mean_{role}"]))
+            if not np.isfinite(mean):
+                warnings.warn(
+                    f"subtract_mean: the {role!r} lane has no finite mean over the "
+                    "aligned sample (no overlap survived); nothing was subtracted "
+                    "from it.",
+                    stacklevel=2,
+                )
+                continue
+            attrs = aligned[role].attrs
+            aligned[role] = aligned[role] - mean
+            aligned[role].attrs = attrs
+            aligned.attrs[f"subtracted_mean_{role}"] = mean
+        if "difference" in aligned:
+            attrs = aligned["difference"].attrs
+            aligned["difference"] = aligned["test"] - aligned["reference"]
+            aligned["difference"].attrs = attrs
 
     @property
     def aligned(self):
@@ -3130,6 +3236,21 @@ class Comparison:
                     if self.over
                     else {}
                 ),
+                # Always present (unlike the two below) so color_by="demeaned" can
+                # split a pool of raw and demeaned twins the same way any other
+                # label dimension can -- see _demean_label, shared with the pooled
+                # auto-label rule.
+                demeaned=_demean_label(self.subtract_mean),
+                # Read off the aligned pair's own attrs (written once, in
+                # _subtract_scalar_means) rather than recomputed here, so a cached
+                # result read back in a fresh process reports the exact number that
+                # was actually subtracted. Present only for a lane actually
+                # demeaned -- an untouched lane has nothing to report.
+                **{
+                    k: self.aligned.attrs[k]
+                    for k in ("subtracted_mean_test", "subtracted_mean_reference")
+                    if k in self.aligned.attrs
+                },
                 **extra,
             )
         return self._metrics
@@ -3306,6 +3427,17 @@ def _identity(c) -> tuple:
         getattr(c, "time_method", None),
         getattr(c, "tolerance", None),
         getattr(c, "bin_anchor", None),
+        # A demeaned comparison and its raw twin must pool as two distinct points,
+        # not dedup into one -- _flatten (below) drops anything with a repeated
+        # identity, which is exactly wrong for the "raw + demeaned side by side"
+        # workflow this option exists for.
+        tuple(
+            sorted(
+                r
+                for r, on in (getattr(c, "subtract_mean", None) or {}).items()
+                if on
+            )
+        ),
     )
 
 
@@ -3358,8 +3490,27 @@ def _flatten(objs: Any) -> list[Comparison]:
     return out
 
 
+def _demean_label(spec: dict[str, bool] | None) -> str:
+    """Spell a comparison's ``subtract_mean`` state as one short word or two.
+
+    Shared by :data:`_LABEL_DIMS` (pooled auto-labels) and
+    :meth:`Comparison.metrics` (the ``demeaned`` column, so ``color_by="demeaned"``
+    can split a pool of raw and demeaned twins the same way any other label
+    dimension can).
+    """
+    spec = spec or {}
+    test, reference = spec.get("test", False), spec.get("reference", False)
+    if test and reference:
+        return "demeaned"
+    if test:
+        return "test demeaned"
+    if reference:
+        return "reference demeaned"
+    return "raw"
+
+
 #: Dimensions a pooled label can be built from, in the order they are spelled, paired
-#: with how to read each one off a comparison. The same five a metrics record
+#: with how to read each one off a comparison. The same six a metrics record
 #: carries, so ``color_by``/``marker_by`` can group by anything a label can name.
 _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("variable", lambda c: _short_variable_label(c.variable)),
@@ -3374,6 +3525,7 @@ _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ),
     ("test", lambda c: c.test_name),
     ("reference", lambda c: c.reference_name),
+    ("demeaned", lambda c: _demean_label(getattr(c, "subtract_mean", None))),
 )
 
 
@@ -4546,6 +4698,7 @@ def compare(
     cache: bool | None = None,
     refresh: bool = False,
     qc: Any = None,
+    subtract_mean: Any = False,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -4627,6 +4780,37 @@ def compare(
 
     A source with no ``qc`` contract at all (most sources) ignores this entirely,
     whichever side of a comparison it is on.
+
+    ``subtract_mean`` removes a scalar offset from one or both lanes before
+    scoring — a sea-level datum, a model's drift — so it stops showing up as skill.
+    The number removed is one per lane, the (area-)weighted mean over the *whole*
+    aligned sample (the same value :meth:`Comparison.metrics`'s own ``mean_test``/
+    ``mean_reference`` would report), not a per-point climatology. ``True`` demeans
+    both lanes; the string ``"test"``/``"reference"`` demeans just that one; a dict
+    (``{"test": True}``) names either or both, the side left out defaulting to
+    ``False`` — unlike ``select``/``aggregate``/``qc``, a one-sided dict here is not
+    refused, since a bare bool has no missing-value ambiguity for a typo to hide
+    behind. What was removed is recorded, never drawn on the figure: it rides on the
+    aligned pair's attrs (``subtracted_mean_test``/``subtracted_mean_reference``)
+    and lands in the metrics table the same way, alongside an always-present
+    ``demeaned`` column (``"raw"``, ``"test demeaned"``, ``"reference demeaned"``,
+    or ``"demeaned"``) that ``color_by``/``marker_by`` can split a pool on::
+
+        raw = osk.compare(reference="tide_gauge", test="his", variables=["zeta"])
+        demeaned = osk.compare(reference="tide_gauge", test="his",
+                                variables=["zeta"], subtract_mean=True)
+        (raw + demeaned).target()   # the demeaned point drops toward zero bias
+
+    Demeaning both lanes takes ``bias`` to (near) zero and ``rmse`` to ``crmsd``;
+    ``corr``/``std_test``/``std_reference``/``sigma_ratio``/``crmsd`` are centred
+    moments and do not move at all — which is why a raw point and its demeaned twin
+    land on the *same spot* on a Taylor diagram (bias-blind by construction) but
+    land apart on a target diagram, whose axis is bias itself. Under ``over=``,
+    demeaning still runs once over the whole aligned sample before the
+    ``min_pairs`` mask is applied, so the scalar ``bias`` in :meth:`~Comparison.
+    metrics` lands only *near* zero, not exactly, even though every pointwise map
+    is shifted by the same removed constant. Under ``times=``, each fanned
+    comparison demeans over its own slice.
 
     ``over`` is the third answer to "what happens to the time axis", and the one for a
     reference that varies in time as well as space. ``over="time"`` keeps the axis,
@@ -5292,6 +5476,7 @@ def compare(
                             label=label,
                             cache=cache,
                             qc=qc,
+                            subtract_mean=subtract_mean,
                         )
                         try:
                             c.align(refresh=refresh)
