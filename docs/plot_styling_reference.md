@@ -710,6 +710,7 @@ two share the same depth axis.
 |---|---|
 | `"legend"` | a key beneath the axes, one entry per point (or per group, with `color_by`/`marker_by`) |
 | `"annotate"` | each label written beside its own marker |
+| `"grid"` | a matrix key beneath the axes: one row per `color_by` level (in that row's colour), one column per `marker_by` level (that column's marker shape), each cell the exact glyph its points are drawn with |
 | `None` | neither |
 
 **Defaults:** `"legend"` for `taylor` and `paired`, `"annotate"` for `target` — each
@@ -718,22 +719,33 @@ starting point.
 
 Pick by how many points there are. Annotation is more direct — no eye-travel between
 key and marker — but matplotlib has no label-repel, so labels collide once points
-cluster. A legend always stays legible and costs the lookup.
+cluster. A legend always stays legible and costs the lookup. `"grid"` is worth
+reaching for once both `color_by` and `marker_by` are set: the flat `"legend"` draws a
+colour block and a marker block side by side and leaves the reader to cross them, while
+the grid lays out the cross-product directly — a cell with no data stays blank, so the
+grid doubles as a coverage matrix. It needs both `color_by` and `marker_by`; given only
+one (or neither) it warns and falls back to `"legend"`, since a one-channel matrix is
+just the flat legend.
 
 ```python
 suite.paired(labels="annotate")   # both panels annotated
 suite.paired(labels="legend")     # one shared key below both panels
 suite.target(labels="legend")     # target keyed like a Taylor
+suite.paired(color_by="variable", marker_by="test", labels="grid")  # matrix key
 ```
 
 `paired` applies **one** choice to both panels, since they show the same points and
 labelling them two different ways in one figure reads as two unrelated plots. With
-`"legend"` the key is drawn once beneath both panels rather than once per panel.
+`"legend"` or `"grid"` the key is drawn once beneath both panels rather than once per
+panel.
 
 Honored by **both renderers** for `target`. (`taylor` and `paired` delegate to
 matplotlib interactively — bokeh has no floating polar axis — so they label the same
 way either way.) Colours are pinned to tab10 by level index in both, so a diagram keeps
-its colours when you switch renderer.
+its colours when you switch renderer. `"grid"` is the one exception: bokeh legends are
+flat, so the interactive `target` warns and falls back to the combined
+`"colour · marker"` entries described below — the static diagram (and interactive
+`taylor`/`paired`, since they delegate to it) draws the real matrix.
 
 ### `color_by` / `marker_by`
 
@@ -748,6 +760,9 @@ suite.taylor(color_by="variable", marker_by="test")   # 3 models × 6 variables
 Naming only `marker_by` colours by the *same* groups, so the legend's swatches match
 the points rather than varying with nothing to explain them.
 
+With both set, [`labels="grid"`](#labels-summary-diagrams) draws their cross-product
+as an explicit matrix instead of the flat legend's two separate blocks.
+
 A third *grouping* channel (size, or filled vs hollow) is possible but deliberately
 absent: three encodings on one point tend to be slower to decode than two diagrams
 side by side. If you need a third dimension, split it across figures.
@@ -757,7 +772,8 @@ tell points apart.
 
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
-a colour block and a marker block. Same groups, one legend instead of two.
+a colour block and a marker block. Same groups, one legend instead of two. (This is
+also what interactive `target` falls back to when asked for `labels="grid"`.)
 
 ### `groups` (summary diagrams)
 

@@ -285,6 +285,30 @@ def test_marker_by_only_swatches_match_the_points_they_key(comparisons):
         assert swatch_colors[pretty_level("variable", level)] == pt_color
 
 
+def test_grid_swatches_honor_explicit_colors_and_marker_scale(comparisons):
+    """``labels="grid"``'s cells key on the same ``colors``/``marker_scale`` dicts."""
+    for c, method in zip(comparisons, ("depth_interp", "mld_interp", "esper"), strict=True):
+        c._metrics["method"] = method
+
+    fig = target(
+        comparisons,
+        color_by="variable",
+        marker_by="method",
+        colors={"sea_water_temperature": "r"},
+        marker_scale={"sea_water_temperature": 2.0},
+        labels="grid",
+    )
+    handles = fig.legends[0].legend_handles
+    rows = ["sea_water_temperature", "sea_water_salinity", "nitrate"]
+    n_rows = len(rows)
+    # column 0 (depth_interp) starts at (1+0)*(n_rows+1); the temp cell sits one past
+    # its header — see test_summary_labels._grid_cell_index for the general formula.
+    temp_cell = (n_rows + 1) + 1
+
+    assert mcolors.to_hex(handles[temp_cell].get_mfc()) == mcolors.to_hex("r")
+    assert handles[temp_cell].get_markersize() == pytest.approx(14.0)
+
+
 # --------------------------------------------------------- the interactive renderer
 
 
