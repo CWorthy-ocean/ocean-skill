@@ -877,6 +877,35 @@ point keeps its group's own marker.
 Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
 `marker_scale`/`alpha` are above).
 
+### `arrows` (summary diagrams)
+
+**Default:** `None` (off)
+
+Draws a run's drift over time: an arrow from each comparison to the next comparison
+that shares everything else (variable, depth, test and reference source) but differs
+in the field `arrows` names. `True` is shorthand for `"time"`, the field a
+`compare(..., times=...)` fan-out varies, so the common case reads as:
+
+```python
+runs = osk.compare(test, obs, "temp", times={"resample": "1YS", "reduce": "mean"})
+runs.target(color_by="test", arrows=True)   # one drift trail per test source
+```
+
+Each chain's first point (chronologically earliest, or — when the field's values
+aren't orderable — first in input order) is drawn hollow; every later point is filled
+as usual, and consecutive points are joined by an arrow in the group's colour. A
+"chain" of one point (nothing else shares its identity) draws unchanged; if *no*
+comparison shares its identity with another, there's nothing to connect at all, which
+warns rather than silently doing nothing.
+
+Composes with `color_by`/`colors`: an arrow takes its colour from its *end* point, so
+this works even when `arrows` and `color_by` name the same field (a colour-graded
+trail). It does not introduce a new legend entry — the chain's points already have one
+from the base cloud.
+
+Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
+`normalize` is above).
+
 ### `circles` (target only)
 
 **Default:** `None` (adaptive — see below)

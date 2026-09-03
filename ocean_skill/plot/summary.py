@@ -19,6 +19,7 @@ Inside the unit circle the model beats the observed mean as a predictor.
 from __future__ import annotations
 
 import warnings
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -549,6 +550,134 @@ def _resolve_overlay_style(
     )
 
 
+#: The identity of a comparison, for :func:`_arrow_chains`: two records belong to the
+#: same run's trajectory when they agree on every one of these *except* the field
+#: ``arrows`` names. Mirrors :data:`ocean_skill.comparison._LABEL_DIMS`'s field names
+#: (not imported — ``comparison`` imports this module, so the reverse would be
+#: circular), deliberately the comparison's own identity rather than the style
+#: grouping: ``color_by="test"`` over two variables must not fuse both variables'
+#: drift into one bogus chain, and a diagram with no grouping at all (one legend entry
+#: per point) must still connect a run's time series.
+_ARROW_ID_FIELDS = ("variable", "depth", "time", "test", "reference")
+
+#: A chain's sort key falls back to input order for the *whole chain* the moment any
+#: one value fails to parse — a half-sorted arrow trail (some segments chronological,
+#: one reversed because its value didn't match) is worse than a trail left in
+#: whatever order the caller built it in.
+_SEASON_ORDER = {"DJF": 0, "MAM": 1, "JJA": 2, "SON": 3}
+
+
+def _arrow_sort_key(value):
+    """Best-effort chronological key for one record's ``arrows`` field value.
+
+    Handles the shapes :func:`ocean_skill.comparison._display_time` actually
+    produces: a ``{"min", "max"}`` window (keyed by its start), a ``slice`` (keyed by
+    ``.start``), a season name (calendar order), or anything else parseable as a
+    timestamp. Raises on anything else, which is exactly what tells the caller to
+    give up sorting this chain and keep input order instead.
+    """
+    if isinstance(value, dict) and "min" in value:
+        value = value["min"]
+    elif isinstance(value, slice):
+        value = value.start
+    if isinstance(value, str) and value in _SEASON_ORDER:
+        return _SEASON_ORDER[value]
+    import pandas as pd
+
+    return pd.Timestamp(str(value))
+
+
+def _resolve_arrows(arrows: bool | str | None) -> str | None:
+    """Normalize ``arrows`` to the field name it names, or ``None`` when off.
+
+    ``True`` is sugar for ``"time"`` — the canonical use is a ``compare(...,
+    times=...)`` fan-out, so ``arrows=True`` reads as "connect the time steps"
+    without spelling out the field name every call.
+    """
+    if not arrows:
+        return None
+    return "time" if arrows is True else arrows
+
+
+def _hashable(value):
+    """Turn an identity-tuple element into something hashable.
+
+    A ``{"min", "max"}`` time window is the one shape a metric record carries that
+    plain ``dict`` grouping chokes on.
+    """
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    return value
+
+
+def _arrow_chains(recs, field: str) -> list[list[int]]:
+    """Group ``recs`` into per-run trajectories and order each chronologically.
+
+    A chain is every record sharing all of :data:`_ARROW_ID_FIELDS` except ``field``
+    itself (missing fields compare as ``None``, so hand-built records lacking
+    ``test``/``reference`` still chain on whatever identity they do carry). Chains of
+    fewer than two points carry no story to draw and are dropped; if *every* chain
+    drops, that's the whole diagram having nothing to connect, which is worth a
+    warning rather than a silent no-op.
+    """
+    if field not in {k for r in recs for k in r}:
+        available = ", ".join(sorted({k for r in recs for k in r}))
+        raise ValueError(
+            f"arrows={field!r} names no field of the metric records — "
+            f"fields present: {available}"
+        )
+    groups: dict[tuple, list[int]] = {}
+    for i, r in enumerate(recs):
+        key = tuple(_hashable(r.get(f)) for f in _ARROW_ID_FIELDS if f != field)
+        groups.setdefault(key, []).append(i)
+    chains = []
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        try:
+            idxs = sorted(idxs, key=lambda i: _arrow_sort_key(recs[i].get(field)))
+        except (ValueError, TypeError):
+            pass  # unsortable values: keep input order rather than guess
+        chains.append(idxs)
+    if not chains:
+        warnings.warn(
+            f"arrows={field!r}: no two comparisons share every other identity "
+            f"({', '.join(f for f in _ARROW_ID_FIELDS if f != field)}) while "
+            "differing only in this field — nothing to connect.",
+            stacklevel=3,
+        )
+    return chains
+
+
+def _draw_arrows(ax, chains, points, colors, *, zorder: float) -> None:
+    """Draw one arrow per consecutive pair in each chain, on ``ax``.
+
+    ``points`` is one ``(x, y)`` per record, in the *same* coordinate space
+    ``ax`` already draws its base cloud in — Target's cartesian ``(x, y)`` or
+    Taylor's polar ``(arccos(corr), std)`` on its aux axes; ``ax.annotate`` draws a
+    straight display-space arrow either way, so one implementation serves both.
+    Arrow colour is the *end* point's resolved colour (well-defined even when
+    ``arrows`` and ``color_by`` name the same field, i.e. a colour-graded chain).
+    """
+    for idxs in chains:
+        for i, j in pairwise(idxs):
+            ax.annotate(
+                "",
+                xy=points[j],
+                xytext=points[i],
+                arrowprops=dict(
+                    arrowstyle="-|>",
+                    color=colors[j],
+                    lw=1.6,
+                    alpha=0.85,
+                    shrinkA=3,
+                    shrinkB=5,
+                ),
+                zorder=zorder,
+                annotation_clip=False,
+            )
+
+
 #: How a diagram identifies its points. ``"legend"`` puts a key below the axes,
 #: ``"annotate"`` writes each label beside its marker, ``None`` does neither.
 LABEL_MODES = ("legend", "annotate")
@@ -703,6 +832,7 @@ def taylor(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    arrows: bool | str | None = None,
 ):
     """Taylor diagram with one point per comparison.
 
@@ -768,6 +898,12 @@ def taylor(
     ``overlay_marker_scale``/``overlay_alpha`` size and fade the overlay layer
     specifically (defaults 1.8x and fully opaque), independent of the base layer's own
     ``marker_scale``/``alpha`` — and accept the same ``{level: value}`` dict form.
+
+    ``arrows`` means exactly what it does in :func:`target` — connecting comparisons
+    that agree on everything but the named field (``True``/``"time"`` for a
+    ``compare(..., times=...)`` fan-out) with an arrow per consecutive pair, each
+    chain's first sample drawn hollow. Static only: the interactive renderer
+    delegates Taylor diagrams to matplotlib entirely, so this rides along with it.
     """
     import matplotlib.pyplot as plt
 
@@ -780,6 +916,9 @@ def taylor(
     if groups and not color_by and not marker_by:
         color_by = "group"
     style_field = color_by or marker_by or "label"
+    arrows_field = _resolve_arrows(arrows)
+    chains = _arrow_chains(recs, arrows_field) if arrows_field else []
+    chain_starts = {idxs[0] for idxs in chains}
 
     if not normalize:
         _warn_mixed_variables(recs, "taylor")
@@ -820,7 +959,7 @@ def taylor(
         dia.samplePoints[0].set_markersize(10 * star_scale)
     styles = _group_styles(recs, color_by, marker_by, colors, marker_scale, alpha)
 
-    for rec, sd, col, mk, al, scl in zip(
+    per_rec = zip(
         recs,
         stds,
         styles.colors,
@@ -828,17 +967,28 @@ def taylor(
         styles.alphas,
         styles.scales,
         strict=True,
-    ):
+    )
+    for i, (rec, sd, col, mk, al, scl) in enumerate(per_rec):
+        hollow = i in chain_starts
         dia.add_sample(
             sd,
             rec["corr"],
             marker=mk,
             ms=9 * scl,
             ls="",
-            mfc=col,
+            mfc="none" if hollow else col,
             mec=col,
+            mew=1.2 if hollow else 1.0,
             alpha=al,
             label=rec["label"],
+        )
+    if chains:
+        _draw_arrows(
+            dia.ax,
+            chains,
+            list(zip((np.arccos(r["corr"]) for r in recs), stds, strict=True)),
+            styles.colors,
+            zorder=1.9,
         )
 
     overlay_specs = []
@@ -948,6 +1098,7 @@ def target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    arrows: bool | str | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
 
@@ -984,6 +1135,18 @@ def target(
     subset, a per-group ★ centroid, or both) drawn on top of the base cloud, styled to
     match its own group's colour rather than re-cycled independently. See its
     docstring for the full explanation.
+
+    ``arrows`` draws a run's drift over time: pass ``True`` (shorthand for
+    ``"time"``) or the name of whichever metric-record field varies along a
+    trajectory, and every pair of comparisons that agree on everything else (their
+    variable, depth, test and reference source) but that field gets connected —
+    typically the output of ``compare(..., times=...)``, so
+    ``runs.target(color_by="test", arrows=True)`` draws one arrow per run per
+    consecutive time step. Each chain's first point is drawn hollow (its later
+    points filled, as usual) so a lone glance shows both where a run ends up and
+    which way it got there; a chain of one point (nothing to connect) draws
+    unchanged. Arrow colour follows the *end* point's colour, so this composes with
+    ``color_by``/``colors`` rather than needing its own.
     """
     import matplotlib.pyplot as plt
 
@@ -996,6 +1159,9 @@ def target(
     style_field = color_by or marker_by or "label"
     if not normalize:
         _warn_mixed_variables(recs, "target")
+    arrows_field = _resolve_arrows(arrows)
+    chains = _arrow_chains(recs, arrows_field) if arrows_field else []
+    chain_starts = {idxs[0] for idxs in chains}
 
     xy = np.array([_target_xy(r, normalize) for r in recs])
     x, y = xy[:, 0], xy[:, 1]
@@ -1042,20 +1208,29 @@ def target(
     )
 
     styles = _group_styles(recs, color_by, marker_by, colors, marker_scale, alpha)
-    for xi, yi, ci, mi, al, scl in zip(
+    per_point = zip(
         x, y, styles.colors, styles.markers, styles.alphas, styles.scales, strict=True
-    ):
+    )
+    for i, (xi, yi, ci, mi, al, scl) in enumerate(per_point):
+        # A chain's first point is hollow — "this is where the run started" — drawn
+        # with the same marker and colour as any other point of its group, just
+        # unfilled; every other point (including a chain's own later ones) is filled
+        # exactly as without arrows.
+        hollow = i in chain_starts
         ax.scatter(
             xi,
             yi,
             s=70 * scl**2,
-            color=ci,
+            color="none" if hollow else ci,
             marker=mi,
             zorder=4,
-            edgecolor="white",
-            linewidth=0.6,
+            edgecolor=ci if hollow else "white",
+            linewidth=1.2 if hollow else 0.6,
             alpha=al,
         )
+    if chains:
+        points = list(zip(x, y, strict=True))
+        _draw_arrows(ax, chains, points, styles.colors, zorder=3.5)
 
     overlay_specs = []
     if overlay is not None:
@@ -1147,9 +1322,9 @@ def paired(
 
     Pure composition: :func:`taylor` draws into the left half of the figure and
     :func:`target` into the right, both accepting the same
-    ``color_by``/``marker_by``/``groups``/``colors``/``marker_scale``/``alpha`` style
-    arguments, so the two panels stay visually consistent. Neither function knows about
-    the other.
+    ``color_by``/``marker_by``/``groups``/``colors``/``marker_scale``/``alpha``/
+    ``arrows`` style arguments, so the two panels stay visually consistent. Neither
+    function knows about the other.
 
     ``labels`` applies to **both** panels, since the diagrams show the same points and
     identifying them two different ways in one figure reads as two unrelated plots. With
