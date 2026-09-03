@@ -2379,15 +2379,14 @@ class Comparison:
             # apart, and each lane's own prepared-field cache entry (which this
             # aligned result is built from) already keys on the resolved policy.
             extra["_qc"] = self.qc
-        # Gated on truthiness, unlike `_min_coverage` above: the default (neither
-        # lane demeaned) changes nothing about the aligned pair, so an entry cached
-        # before this option existed must keep matching a request that doesn't ask
-        # for it. Demeaning is applied last, after `align.align` returns (see
-        # _subtract_scalar_means), so two otherwise-identical requests that differ
-        # only here would silently share a cache entry without this.
-        demeaned = sorted(role for role, on in self.subtract_mean.items() if on)
-        if demeaned:
-            extra["_subtract_mean"] = demeaned
+        # `subtract_mean` is deliberately NOT part of the key: demeaning is a scalar
+        # subtraction applied to the *already-aligned* pair (see
+        # _subtract_scalar_means), so the expensive thing this entry holds -- the
+        # regridded, aligned pair itself -- is byte-identical whether or not a mean
+        # is later removed. What is cached is the raw pair, and a raw run and a
+        # demeaned run of the same comparison share this one entry, each deriving its
+        # own view from it on load. Pooling still tells the two apart -- that is
+        # `_identity`'s job, not the cache key's (see the note there).
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
@@ -2639,6 +2638,11 @@ class Comparison:
                 self._warn_on_pair_spec_mismatch(
                     hit["test"], hit["reference"], trust_name_fallback=False
                 )
+                # The cache holds the *raw* pair (see the save below and _cache_key's
+                # note): a demeaning request derives its own view here, off the shared
+                # entry, without recomputing the regrid. A no-op when nothing is
+                # demeaned, so a plain comparison hitting the cache is unaffected.
+                self._subtract_scalar_means()
                 return self._aligned
 
         # A vertical score (over="Z"/"vertical") needs a depth axis left standing to
@@ -2866,9 +2870,13 @@ class Comparison:
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
-        self._subtract_scalar_means()
+        # Cache the *raw* pair, then demean the in-memory copy -- so this entry is
+        # the one a raw run of the same comparison would also write and read, and the
+        # two share it (see _cache_key). Demeaning is cheap enough to redo per load
+        # that caching it separately would only fragment the cache for no saving.
         if use_cache:
             _cache.save(self._cache_key, self._aligned)
+        self._subtract_scalar_means()
         return self._aligned
 
     def _subtract_scalar_means(self) -> None:
@@ -2882,8 +2890,11 @@ class Comparison:
         never has to reason about which lane changed; ``coverage`` and any
         ``*_spread`` variable ride on the lane's value and need no touching of their
         own. Runs after alignment (not per-lane, before it), so a common sample backs
-        the removed number on both sides, and before the result is cached, so a warm
-        cache already holds the demeaned pair.
+        the removed number on both sides, and *after* the raw pair is cached (see
+        :meth:`align`), so this is a cheap derivation off a shared entry rather than a
+        second full regrid -- a raw run and a demeaned run of the same comparison read
+        the same cached pair. Idempotent per align: called once, on the pair each
+        :meth:`align` produces or loads.
         """
         lanes = [role for role, on in self.subtract_mean.items() if on]
         if not lanes:

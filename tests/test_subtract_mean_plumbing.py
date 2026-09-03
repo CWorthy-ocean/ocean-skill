@@ -107,41 +107,34 @@ def test_subtract_mean_is_a_keyword_of_compare_and_defaults_to_the_same_value():
     init_default = inspect.signature(Comparison.__init__).parameters[
         "subtract_mean"
     ].default
-    assert compare_default == init_default == False
+    assert compare_default is False and init_default is False
     # And both normalize to "neither lane", the same as an explicit Comparison().
     assert _normalize_subtract_mean(compare_default) == _bare().subtract_mean
 
 
-# -- cache keys: distinct requests must not share an entry -----------------------------
+# -- cache keys: demeaning shares the raw pair's entry, never forks a new one ----------
+# Demeaning is a scalar subtraction on the already-aligned pair, so the raw and the
+# demeaned run of one comparison read the *same* cached regrid -- the key must not
+# depend on subtract_mean at all (contrast pooling identity, below, which must).
 
 
-def test_on_and_off_produce_different_cache_keys():
-    off = _bare()
-    on = _bare(subtract_mean=True)
-    assert off._cache_key != on._cache_key
+def test_demeaning_does_not_change_the_cache_key():
+    raw = _bare()
+    for spec in (True, "test", "reference", {"test": True, "reference": False}):
+        assert _bare(subtract_mean=spec)._cache_key == raw._cache_key
 
 
-def test_the_default_matches_an_explicit_false_or_unset_dict():
-    bare = _bare()
-    explicit = _bare(subtract_mean=False)
-    both_false = _bare(subtract_mean={"test": False, "reference": False})
-    assert bare._cache_key == explicit._cache_key == both_false._cache_key
-
-
-def test_true_matches_the_equivalent_full_dict():
-    as_bool = _bare(subtract_mean=True)
-    as_dict = _bare(subtract_mean={"test": True, "reference": True})
-    assert as_bool._cache_key == as_dict._cache_key
-
-
-def test_one_sided_requests_produce_different_cache_keys_from_each_other():
-    test_only = _bare(subtract_mean="test")
-    reference_only = _bare(subtract_mean="reference")
-    both = _bare(subtract_mean=True)
-    assert len({test_only._cache_key, reference_only._cache_key, both._cache_key}) == 3
+def test_every_subtract_mean_shape_shares_one_cache_key():
+    keys = {
+        _bare(subtract_mean=spec)._cache_key
+        for spec in (False, True, "test", "reference", {"reference": True})
+    }
+    assert len(keys) == 1
 
 
 # -- pooling identity: a demeaned comparison and its raw twin must stay distinct -------
+# The counterpart to the cache-key sharing above: one shared entry on disk, but two
+# distinct points on a pooled diagram (see _flatten's dedup).
 
 
 def test_identity_distinguishes_demeaned_from_raw():
