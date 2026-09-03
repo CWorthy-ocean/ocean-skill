@@ -62,6 +62,23 @@ def fresh_regridder_memo():
 
 
 @pytest.fixture(autouse=True)
+def fresh_availability_memo():
+    """Give every test its own empty reference-availability memo.
+
+    :func:`ocean_skill.comparison._variable_available` keys on generic source and
+    variable names ("obs", "model", "temperature", ...) that recur across many
+    test modules, so a positive result left standing by one test would silently
+    short-circuit the read another test means to exercise. Mirrors
+    ``fresh_regridder_memo`` above.
+    """
+    from ocean_skill import comparison
+
+    comparison.clear_availability_memo()
+    yield
+    comparison.clear_availability_memo()
+
+
+@pytest.fixture(autouse=True)
 def _close_figures():
     """Close every figure after each test.
 

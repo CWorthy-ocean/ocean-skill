@@ -163,6 +163,87 @@ def test_missing_variable_returns_none():
     assert find_variable(_tiny("something_else"), "oxygen") is None
 
 
+# -- the short key itself must be dataset-matchable, not just resolver-known --
+
+
+def _standard_name_and_aliases(key: str) -> set[str]:
+    """Every literal spelling the shipped vocabulary itself recognizes for ``key``.
+
+    ``key`` plus everything :func:`~ocean_skill.vocabulary.equivalent_names` reports
+    for it -- the same literal set :func:`ocean_skill.comparison.compare`'s catalog
+    pre-filter (``_offers``) accepts as "the same variable" a declared column
+    resolves to, so this is the set the next test uses to check that anything
+    accepted there is also something ``find_variable`` can actually find.
+    """
+    return {key} | vocabulary.equivalent_names(key)
+
+
+def test_raw_ctd_column_named_like_the_key_is_found():
+    """Regression for the real failure: a raw tabular column named just "Temperature".
+
+    A tabular source's ``standard_name`` attribute is the raw column name itself
+    (see :func:`ocean_skill.tabular.to_dataset`), so an attribute-based lookup
+    can't rescue this either -- the fix has to be name-based. Before it,
+    ``describe()`` reported this column matched (``temperature <- Temperature``)
+    while ``find_variable`` returned ``None``.
+    """
+    ds = _tiny("Temperature")
+    ds["Temperature"].attrs.update(standard_name="Temperature", units="degree_C")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the "resolved to ..." notice; see above
+        da = find_variable(ds, "temperature")
+    assert da is not None
+    assert da.name == "Temperature"
+
+
+@pytest.mark.parametrize("key", sorted(vocabulary.VOCABULARY))
+def test_every_short_key_is_findable_as_a_dataset_variable(key):
+    """The resolver and cf-xarray must agree on every key, not just temperature's.
+
+    ``_build_index`` (what ``resolve_name``/``describe()`` use) and
+    ``_register_custom_criteria`` (what ``find_variable`` uses) used to be built
+    from two different lists -- the index included each entry's short key, the
+    cf-xarray registration didn't -- so a raw column spelled like the key alone
+    (``Oxygen``, ``Pressure``, ...) resolved but could not actually be found.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert find_variable(_tiny(key), key) is not None
+        assert find_variable(_tiny(key.capitalize()), key) is not None
+
+
+@pytest.mark.parametrize("key", sorted(vocabulary.VOCABULARY))
+def test_declared_name_acceptance_implies_dataset_side_match(key):
+    """Every spelling compare()'s catalog pre-filter accepts must be findable too.
+
+    Closes the whole class, not just the key: a spelling that ``_offers`` would
+    call available for a declared column but ``find_variable`` cannot find is
+    exactly the "catalog says yes, data says no" bug this fix targets.
+    """
+    for spelling in _standard_name_and_aliases(key):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert find_variable(_tiny(spelling), key) is not None, spelling
+
+
+@pytest.mark.parametrize("key", sorted(vocabulary.VOCABULARY))
+def test_a_key_named_qc_companion_is_still_ignored(key):
+    """Registering the bare key must not loosen the QC-flag exclusion (see above)."""
+    assert find_variable(_tiny(f"{key}_qc_agg"), key) is None
+
+
+def test_register_makes_the_new_key_findable_dataset_side(pristine_vocabulary):
+    """A live-registered concept's own key is dataset-matchable immediately too.
+
+    Pins the ``register`` -> ``_refresh`` -> ``_register_custom_criteria`` path,
+    the same one the shipped vocabulary now goes through for every key.
+    """
+    vocabulary.register("my_conc", "standard_x")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert find_variable(_tiny("my_conc"), "my_conc") is not None
+
+
 def test_near_identical_quantities_resolve_as_plain_aliases():
     """In-situ temperature reaches the "temperature" concept like any other alias.
 
