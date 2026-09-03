@@ -1345,7 +1345,7 @@ and the legend is the key to it. The same family also draws where a plotted
 | `extent` | frames every item | `(lon_min, lat_min, lon_max, lat_max)`, the same bbox shape `find(bbox=...)` takes |
 | `legend` | `True` | draw the featureType key at all |
 | `marker_size` | `80` static / `9` interactive | station marker size (matplotlib points² / bokeh pixels) |
-| `tiles` | `"CartoLight"` (interactive only) | any `geoviews.tile_sources` name; `None` for the offline coastline basemap. The static renderer accepts-and-warns so `renderer="both"` can share one set of options |
+| `tiles` | `"EsriOceanBase"` (interactive only) | any `geoviews.tile_sources` name; `None` for the offline coastline basemap. The static renderer accepts-and-warns so `renderer="both"` can share one set of options. Carto sources (`"CartoLight"`, etc.) now require an API key geoviews can't supply and render watermarked — avoid them |
 
 Of the styling dicts, `title_kwargs`, `gridline_kwargs`, `tick_label_kwargs` and
 `legend_kwargs` apply (static renderer only, as ever); the rest describe things this

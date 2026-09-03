@@ -265,9 +265,11 @@ for one long enough that thinning isn't enough.
 
 `tiles=True` (the default) puts a basemap under the field — a notebook watching a movie
 is already on the web, so there's nothing offline about fetching a few map tiles too.
-Pass a source name — `tiles="EsriTerrain"`, `"CartoLight"`, or any [geoviews tile
+Pass a source name — `tiles="EsriTerrain"`, `"EsriOceanBase"`, or any [geoviews tile
 source](https://geoviews.org/user_guide/Working_with_Bokeh.html) — for a different map,
-or `tiles=False` for a notebook that genuinely has to work offline. The view opens framed
+or `tiles=False` for a notebook that genuinely has to work offline. Avoid the Carto
+sources (`"CartoLight"`, etc.): they now require an API key geoviews has no way to
+supply, and render watermarked with "API KEY REQUIRED" without one. The view opens framed
 on the field's own domain, with the basemap filling in around it and under anywhere the
 field is masked. With tiles on there is no separate coastline outline — the basemap *is*
 the coastline; `tiles=False` brings back a 50 m outline, clipped to the domain.

@@ -1102,6 +1102,13 @@ def _check_tiles(tiles: str | bool | None) -> str | bool | None:
         raise ValueError(
             f"unknown tile source {tiles!r}. geoviews offers: {', '.join(known)}"
         )
+    if tiles.startswith("Carto"):
+        warnings.warn(
+            f"{tiles!r} now requires a Carto API key that geoviews has no way to "
+            "supply, so its tiles render watermarked with 'API KEY REQUIRED'. Use "
+            "tiles='EsriOceanBase' or tiles='OSM' instead.",
+            stacklevel=2,
+        )
     return tiles
 
 
@@ -1476,9 +1483,10 @@ def _facet_movie(
     * ``tiles=True`` — a basemap under the field (OpenStreetMap by default), on by
       default since a notebook watching a movie is on the web already. Pass a
       :mod:`geoviews.tile_sources` name (e.g. ``tiles="EsriTerrain"`` or
-      ``"CartoLight"``) for a different one, or ``tiles=False`` for a notebook that has
-      to work offline — which swaps the basemap for a static 50m coastline outline
-      (see :func:`_movie_coastline` for why a movie never uses hvplot's own).
+      ``"EsriOceanBase"``) for a different one, or ``tiles=False`` for a
+      notebook that has to work offline — which swaps the basemap for a
+      static 50m coastline outline (see :func:`_movie_coastline` for why a
+      movie never uses hvplot's own).
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
@@ -2851,7 +2859,7 @@ def _locations(
     *,
     title: str | None = None,
     extent: tuple[float, float, float, float] | None = None,
-    tiles: str | bool | None = "CartoLight",
+    tiles: str | bool | None = "EsriOceanBase",
     legend: bool = True,
     marker_size: float = 9.0,
     size=None,
@@ -2866,7 +2874,7 @@ def _locations(
     the :data:`~ocean_skill.plot.locations.HOVER_FIELDS` record, pre-formatted by
     the builder so both renderers agree on it.
 
-    Web tiles are on by default (``"CartoLight"``): a locations map exists to be
+    Web tiles are on by default (``"EsriOceanBase"``): a locations map exists to be
     panned and zoomed into, which bare 50m coastlines serve poorly. Pass
     ``tiles=None`` for the offline coastline basemap the other map families
     default to. Extent boxes are plain ``hv.Rectangles`` deliberately —
@@ -2886,7 +2894,7 @@ def _locations(
 
     hv = _extension()
     if tiles is True:
-        tiles = "CartoLight"
+        tiles = "EsriOceanBase"
     tiles = _check_tiles(tiles or None)
 
     def hover_tool():
