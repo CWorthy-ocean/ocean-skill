@@ -1483,6 +1483,93 @@ def _warn_if_chunk_is_large(obj: Any, source: str) -> None:
 #: axis nobody meant to keep is worth catching before the memory is spent, not after.
 LOAD_WARN_BYTES = 2 * 1024**3
 
+#: Sources already probed by :func:`_variable_available` and found to carry the
+#: variable asked of them, this process. Positive results only, for the same reason
+#: ``prepare_source`` never caches a miss (see its "A miss is cached" comment): a
+#: miss is cheap to rediscover, and caching one would let it outlive a catalog fixed
+#: mid-process. Cleared by :func:`clear_availability_memo`.
+_AVAILABILITY_MEMO: set[str] = set()
+
+
+def clear_availability_memo() -> None:
+    """Empty the per-process memo :func:`_variable_available` keeps of past hits."""
+    _AVAILABILITY_MEMO.clear()
+
+
+def _variable_available(
+    source: str,
+    variable: Any,
+    *,
+    select: dict[str, Any] | None = None,
+    qc: Any = None,
+    refresh: bool = False,
+) -> bool:
+    """Report whether ``source`` actually carries ``variable``, cheaply.
+
+    Exists so :meth:`Comparison.align` can fail (or, under ``skip_missing``, skip)
+    on a reference that never carried the requested variable *before* the test
+    lane's own prepare runs -- a ROMS vertical transform over a full run can take
+    tens of minutes, and paying it just to discover the reference was always
+    unusable is the bug this closes. A missing *test*-lane variable is already
+    cheap to discover (:func:`_prepare` resolves it on the lazy read, before the
+    transform), so only the reference side needs this.
+
+    Mirrors :func:`prepare_source`'s read closely enough to answer the same
+    question it eventually would (down to converting a tabular frame the same way
+    ``_prepare`` does), but stops the instant the variable either resolves or
+    doesn't -- no crop, no vertical transform, no ``.load()``. A ``calculate``-spec
+    (see :func:`_expand_derived`) is exempted and reported available unconditionally:
+    a calculator runs real work inside :func:`ocean_skill.operators.resolve_variable`
+    and raises its own errors, so the only honest way to probe one is the full
+    prepare this function exists to avoid running twice.
+
+    Deliberately **fails open**: this may only turn a failure the real prepare would
+    raise anyway into an earlier, identically-worded one. Any other problem (a
+    flaky reader, a malformed table) is left for the real prepare to raise from its
+    own call site, with today's type and traceback -- so a probe that itself
+    errors reports the variable available and lets the normal path fail normally.
+
+    A hit is memoized (by source and resolved variable) for the rest of the
+    process; a miss is not, matching ``prepare_source``'s own cache policy above.
+    Pass ``refresh=True`` to bypass the memo, mirroring ``align(refresh=True)``.
+    """
+    import json
+    import warnings
+
+    key = json.dumps(
+        {"source": source, "variable": variable}, sort_keys=True, default=str
+    )
+    if not refresh and key in _AVAILABILITY_MEMO:
+        return True
+    if _is_calculated(variable):
+        return True
+
+    try:
+        import ocean_skill as osk
+        from ocean_skill import operators, tabular
+        from ocean_skill.catalog import resolve
+        from ocean_skill.sources import erddap_constraints
+
+        meta = resolve(source).metadata
+        constraints = erddap_constraints(meta, select, None)
+        read_kwargs = {"qc": qc} if qc is not None else {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            obj = (
+                osk.read(source, constraints=constraints, **read_kwargs)
+                if constraints
+                else osk.read(source, **read_kwargs)
+            )
+            if tabular.is_frame(obj):
+                obj = tabular.to_dataset(obj, meta)
+            available = operators.resolve_variable(obj, variable) is not None
+    except Exception:
+        return True
+
+    if available:
+        _AVAILABILITY_MEMO.add(key)
+    return available
+
 
 def prepare_source(
     source: str,
@@ -2518,6 +2605,25 @@ class Comparison:
                 "75, 100]}, or depths=[...] through osk.compare(). Against a profile "
                 "reference, osk.compare() fills in the reference's own levels "
                 "automatically when you name none."
+            )
+
+        # A reference that never carried this variable is worth discovering now,
+        # before the test lane below -- which for a model run can mean a vertical
+        # transform over the whole thing -- rather than after it. The check below
+        # needs none of the test-derived bbox/window the real reference prepare
+        # wants (see _reference_narrowing further down): just a read and a resolve.
+        # Raises the same KeyError the full prepare would hit at the bottom of this
+        # method, so skip_missing sees an identical message either way, only sooner.
+        ref_variable = variable_for(self.variable, "reference")
+        if not _variable_available(
+            self.reference_name,
+            ref_variable,
+            select=select_for(self.select, "reference"),
+            qc=qc_for(self.qc, "reference"),
+            refresh=refresh,
+        ):
+            raise KeyError(
+                f"{ref_variable!r} not available in {self.reference_name!r}"
             )
 
         # The test lane goes first when an axis is being kept, so the reference can be

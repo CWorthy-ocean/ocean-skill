@@ -365,6 +365,20 @@ def _all_names(entry: dict[str, object]) -> list[str]:
     return [entry["standard_name"], *entry.get("aliases", [])]  # type: ignore[misc]
 
 
+def _matchable_names(key: str, entry: dict[str, object]) -> list[str]:
+    """Every literal spelling one entry recognizes, its short key included.
+
+    The single source both :func:`_build_index` (resolver side) and
+    :func:`_register_custom_criteria` (dataset side) derive from, so a name that
+    resolves is guaranteed findable in an actual dataset -- the two used to be built
+    from different lists (the index included the key, the criteria didn't), which let
+    ``resolve_name("temperature")`` and a real variable literally named
+    ``"Temperature"`` disagree about whether it existed. Deduped: a few entries'
+    keys equal their own standard_name.
+    """
+    return list(dict.fromkeys([key, *_all_names(entry)]))
+
+
 def _build_index() -> dict[str, str]:
     """Map every short key and spelling, **lowercased**, -> its canonical standard_name.
 
@@ -382,7 +396,7 @@ def _build_index() -> dict[str, str]:
     claimed_by: dict[str, str] = {}  # spelling -> the key that claimed it first
     for key, entry in VOCABULARY.items():
         sn = entry["standard_name"]
-        for name in [key, *_all_names(entry)]:
+        for name in _matchable_names(key, entry):
             lowered = name.lower()
             previous = index.get(lowered)
             if previous is not None and previous != sn:
@@ -866,10 +880,11 @@ def coord_report(names: Iterable[str]) -> CoordReport:
 def _register_custom_criteria() -> None:
     """Register every :data:`VOCABULARY` entry's spellings with cf-xarray.
 
-    One ``{"name": pattern}`` entry per spelling (all of an entry's standard_name +
-    aliases, registered under each so asking for any one finds the
-    others), matched against the variable's own *name* only, deliberately not its
-    ``standard_name`` attribute. Data is renamed to the standard_name directly (e.g.
+    One ``{"name": pattern}`` entry per spelling (all of an entry's short key,
+    standard_name, and aliases -- see :func:`_matchable_names` -- registered under
+    each so asking for any one finds the others), matched against the variable's own
+    *name* only, deliberately not its ``standard_name`` attribute. Data is renamed to
+    the standard_name directly (e.g.
     by :func:`ocean_skill.roms.standardize`, or the generic rename in
     :func:`ocean_skill.sources.read`) far more often than it carries that as a
     separate attribute, so name-matching already covers the real case — and
@@ -895,8 +910,8 @@ def _register_custom_criteria() -> None:
     import cf_xarray
 
     criteria: dict[str, dict[str, str]] = {}
-    for entry in VOCABULARY.values():
-        names = _all_names(entry)
+    for key, entry in VOCABULARY.items():
+        names = _matchable_names(key, entry)
         parts = [re.escape(n) for n in names]
         parts += [f"(?:{p})" for p in entry.get("patterns", [])]  # type: ignore[union-attr]
         pattern = "(?i)(?:" + "|".join(parts) + ")$"
