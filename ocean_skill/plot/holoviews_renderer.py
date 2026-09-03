@@ -22,6 +22,7 @@ delegates.
 from __future__ import annotations
 
 import warnings
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -1975,6 +1976,36 @@ def _axis_label_color_hook(panel):
     return hook
 
 
+def _target_arrows_hook(segments):
+    """Bokeh finalize hook: draw one ``Arrow`` annotation per drift segment.
+
+    Bokeh has no arrow glyph an ``hv.Points``/``hv.Segments`` element can render, only
+    the ``Arrow`` *annotation* added straight onto a figure -- hence a hook, the same
+    escape hatch :func:`_axis_label_color_hook` uses for a bokeh feature holoviews has
+    no element-level option for. Being an annotation rather than a glyph, it does not
+    interfere with point hover. ``segments`` is ``(x0, y0, x1, y1, color)`` per arrow,
+    in the same data coordinates the target diagram's points are drawn in.
+    """
+    from bokeh.models import Arrow, VeeHead
+
+    def hook(plot, element):
+        for x0, y0, x1, y1, color in segments:
+            plot.state.add_layout(
+                Arrow(
+                    end=VeeHead(size=8, fill_color=color, line_color=color),
+                    x_start=x0,
+                    y_start=y0,
+                    x_end=x1,
+                    y_end=y1,
+                    line_color=color,
+                    line_width=1.6,
+                    line_alpha=0.85,
+                )
+            )
+
+    return hook
+
+
 def _series(
     items,
     title=None,
@@ -2468,6 +2499,7 @@ def _target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    arrows: bool | str | None = None,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
@@ -2489,12 +2521,20 @@ def _target(
     :func:`ocean_skill.plot.summary.target` — including the mixed-variable and
     mixed-reference warnings, and axis labels named with the shared units when
     ``normalize=False``.
+
+    ``arrows`` means exactly what it does statically — see
+    :func:`ocean_skill.plot.summary.target`'s docstring. Bokeh has no arrow glyph, so
+    each segment is a separate ``Arrow`` annotation added via a finalize hook (the
+    same mechanism the series renderer uses for twin-axis label colour); a chain's
+    first point is drawn hollow the same way the static renderer does.
     """
     import pandas as pd
 
     from ocean_skill.plot.summary import (
         TARGET_FIGSIZE,
+        _arrow_chains,
         _overlay_point_specs,
+        _resolve_arrows,
         _resolve_colors,
         _resolve_labels,
         _resolve_overlay_style,
@@ -2538,6 +2578,9 @@ def _target(
         _warn_mixed_variables(recs, "target")
     xy = np.array([_target_xy(r, normalize) for r in recs])
     df["x"], df["y"] = xy[:, 0], xy[:, 1]
+    arrows_field = _resolve_arrows(arrows)
+    chains = _arrow_chains(recs, arrows_field) if arrows_field else []
+    df["_arrow_start"] = df.index.isin({idxs[0] for idxs in chains})
 
     # Mirrors summary._group_styles: colour follows marker groups when no colour
     # dimension was named, so the legend has one entry per group rather than a
@@ -2603,26 +2646,60 @@ def _target(
                 if level_alpha is None
                 else {"fill_alpha": level_alpha, "line_alpha": level_alpha}
             )
-            elements.append(
-                hv.Points(
-                    frame,
-                    kdims=["x", "y"],
-                    vdims=cols,
-                    label=_label(color_level, marker_level),
-                ).opts(
-                    size=11 * level_scales[color_level],
-                    color=level_colors[color_level],
-                    marker=_BOKEH_MARKERS[mi % len(_BOKEH_MARKERS)],
-                    tools=["hover"],
-                    # Below, matching the static diagrams: target points scatter around
-                    # the origin, so a legend inside the frame collides with the data.
-                    legend_position="bottom",
-                    show_legend=labels_mode == "legend",
-                    line_color="white",
-                    line_width=1,
-                    **alpha_opts,
+            marker = _BOKEH_MARKERS[mi % len(_BOKEH_MARKERS)]
+            label = _label(color_level, marker_level)
+            # A chain's first point is hollow, exactly like the static renderer --
+            # split into two elements (bokeh has no per-point fill toggle) so the
+            # legend still gets one filled swatch per group. If a group is *all*
+            # chain starts (arrows on a set with no later point to fill), the hollow
+            # element carries the legend instead of dropping the group from it.
+            rest = frame[~frame["_arrow_start"]] if arrows_field else frame
+            starts = frame[frame["_arrow_start"]] if arrows_field else frame.iloc[0:0]
+            if not rest.empty:
+                elements.append(
+                    hv.Points(
+                        rest,
+                        kdims=["x", "y"],
+                        vdims=cols,
+                        label=label,
+                    ).opts(
+                        size=11 * level_scales[color_level],
+                        color=level_colors[color_level],
+                        marker=marker,
+                        tools=["hover"],
+                        # Below, matching the static diagrams: target points scatter
+                        # around the origin, so a legend inside the frame collides
+                        # with the data.
+                        legend_position="bottom",
+                        show_legend=labels_mode == "legend",
+                        line_color="white",
+                        line_width=1,
+                        **alpha_opts,
+                    )
                 )
-            )
+            if not starts.empty:
+                elements.append(
+                    hv.Points(
+                        starts,
+                        kdims=["x", "y"],
+                        vdims=cols,
+                        label=label,
+                    ).opts(
+                        size=11 * level_scales[color_level],
+                        marker=marker,
+                        tools=["hover"],
+                        legend_position="bottom",
+                        show_legend=(labels_mode == "legend") and rest.empty,
+                        fill_alpha=0,
+                        line_color=level_colors[color_level],
+                        line_width=1.5,
+                        **(
+                            {"line_alpha": level_alpha}
+                            if level_alpha is not None
+                            else {}
+                        ),
+                    )
+                )
     points = hv.Overlay(elements)
 
     if labels_mode == "annotate":
@@ -2742,7 +2819,7 @@ def _target(
     if overlay_layer is not None:
         result = result * overlay_layer
     xlabel, ylabel = _target_labels(normalize, recs, tex=False)
-    return result.opts(
+    opts = dict(
         # equal frame dims + data_aspect keeps the guide circles circular; fixed
         # width/height would fight the aspect and squash them into ellipses
         frame_width=round(frame_size[0]),
@@ -2755,6 +2832,19 @@ def _target(
         ylim=(-lim, lim),
         title=title or "Target diagram",
     )
+    if chains:
+        # Colour follows the *end* point of each segment, same as the static
+        # renderer — well-defined even when `arrows` and color_dim name the same
+        # field (a colour-graded chain).
+        point_colors = [level_colors[v] for v in df[color_dim]]
+        xs, ys = df["x"].to_numpy(), df["y"].to_numpy()
+        segments = [
+            (xs[i], ys[i], xs[j], ys[j], point_colors[j])
+            for idxs in chains
+            for i, j in pairwise(idxs)
+        ]
+        opts["hooks"] = [_target_arrows_hook(segments)]
+    return result.opts(**opts)
 
 
 def _locations(
