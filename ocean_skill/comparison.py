@@ -106,6 +106,19 @@ def _feature_type(source: str) -> str | None:
         return None
 
 
+def _is_climatology(source: str) -> bool:
+    """Whether a source's catalog entry marks it a climatology.
+
+    ``False`` if the source is unresolvable.
+    """
+    from ocean_skill.catalog import resolve
+
+    try:
+        return bool(resolve(source).metadata.get("climatology"))
+    except KeyError:
+        return False
+
+
 def _collapses_vertical(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
     """Whether select/agg narrows depth to one value rather than keeping an axis.
 
@@ -382,6 +395,33 @@ def _time_coverage_of(source: str) -> tuple[Any, Any] | None:
         return None
     pad = pd.Timedelta(days=_TIME_COVERAGE_PAD_DAYS)
     return start - pad, stop + pad
+
+
+def _provably_disjoint_axes(test: str, reference: str) -> list[str]:
+    """The axes ("space", "time") on which two sources' declared extents never meet.
+
+    Read-free -- :func:`ocean_skill.catalog.overlap` over both entries' catalog
+    metadata -- and conservative the same way: an axis either side leaves
+    undeclared is *unknown*, never disjoint (:class:`~ocean_skill.catalog.Overlap`'s
+    own "unknown, not a no" contract). One exemption on top: a source whose entry
+    is marked ``climatology`` is never disjoint *in time*, whatever span its entry
+    declares -- a climatology's calendar is a labelling convention, not a record
+    (WOA's ``"months since 1965-01-01"``; :func:`ocean_skill.align.subset_to_time`
+    refuses to crop one away for the same reason), so a declared-span mismatch
+    against one is a false alarm, not a provable miss. Space still disqualifies
+    either way.
+
+    Shared by :meth:`Comparison._warn_if_no_overlap` (a warning, for a directly
+    built :class:`Comparison`) and :func:`compare`'s fan-out (a read-free skip,
+    before the pair costs a model read).
+    """
+    from ocean_skill.catalog import overlap
+
+    ov = overlap(test, reference)
+    bad = [axis for axis, ok in (("space", ov.space), ("time", ov.time)) if ok is False]
+    if "time" in bad and (_is_climatology(test) or _is_climatology(reference)):
+        bad.remove("time")
+    return bad
 
 
 def as_select(select: Any) -> dict[str, Any]:
@@ -2081,21 +2121,24 @@ class Comparison:
         legitimately shares no span with anything), so without this a caller's
         first sign of the mismatch is a multi-GB read that changes nothing,
         followed by an empty or refused alignment once both lanes are finally in
-        memory. Checked with :func:`ocean_skill.catalog.overlap`, which a caller
-        can also run by hand *before* calling :func:`compare` at all.
+        memory. Checked with :func:`_provably_disjoint_axes`, whose climatology
+        exemption keeps a climatology reference from a false-alarm warning here
+        too, and which a caller can also run by hand -- via
+        :func:`ocean_skill.catalog.overlap` -- *before* calling :func:`compare` at
+        all.
 
         Silent when either side has nothing declared to check (``None`` on an
         axis, not ``False``) -- exactly :class:`ocean_skill.catalog.Overlap`'s own
         "unknown, not a no" contract, so a source this package can't yet read
-        metadata for is never mistaken for a confirmed mismatch.
+        metadata for is never mistaken for a confirmed mismatch. A directly built
+        :class:`Comparison` only ever gets this warning -- :func:`compare`'s own
+        fan-out skips such a pair outright, read-free, before it costs anything.
         """
         import warnings
 
         from ocean_skill import _stacklevel
-        from ocean_skill.catalog import overlap
 
-        ov = overlap(self.test_name, self.reference_name)
-        bad = [axis for axis, ok in (("space", ov.space), ("time", ov.time)) if ok is False]
+        bad = _provably_disjoint_axes(self.test_name, self.reference_name)
         if not bad:
             return
         warnings.warn(
@@ -2105,7 +2148,8 @@ class Comparison:
             "lanes are read. Check osk.catalog.overlap"
             f"({self.test_name!r}, {self.reference_name!r}) for the declared "
             "bounds, or point select=/aggregate= at a period or region the two "
-            "sources actually share.",
+            "sources actually share. (osk.compare() skips such pairs up front "
+            "for the same reason.)",
             stacklevel=_stacklevel.find(),
         )
 
@@ -4405,7 +4449,15 @@ def compare(
     resolved to its canonical standard_name once here (warning once per variable if
     the name given wasn't already the canonical form, so it's never unclear which
     variable was actually used). Pairs where the variable is absent are skipped with a
-    message rather than failing the whole run, unless ``skip_missing=False``.
+    message rather than failing the whole run, unless ``skip_missing=False``. A pair
+    whose catalog-declared extents provably never overlap (see
+    :func:`ocean_skill.catalog.overlap`) is skipped the same way, read-free, before
+    either lane is opened -- so a reference list of hundreds of casts with a few
+    outside the test's record doesn't cost a full read of the test lane per stray
+    cast. A source marked ``climatology`` is exempt from the time half of that check
+    (its declared calendar span is a labelling convention, not a record); only space
+    can disqualify one. Progress prints one line per pair considered, plus a final
+    count of comparisons formed and skipped.
 
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
@@ -4932,6 +4984,7 @@ def compare(
         return _time_bins_cache[tst]
 
     out: list[Comparison] = []
+    n_skipped = 0
     for var in variables:
         # Pair each variable with the sources that actually carry it, rather than
         # forming a blind cross-product. Observational catalogs are usually one
@@ -4990,7 +5043,42 @@ def compare(
                 )
         label_fn = _sigma_label if fan_key == "sigma0" else _depth_label
         many_vars = len(variables) > 1
+        n_pairs = len(matching) * len(matching_tests)
+        pair_num = 0
         for ref in matching:
+            # A pair whose catalog-declared extents provably never meet can only
+            # end empty -- but align() would learn that only after reading the
+            # test lane in full (an empty derived time crop deliberately falls
+            # back to uncropped; see Comparison._reference_narrowing and
+            # ocean_skill.align.subset_to_time), which against an hourly model
+            # run is a multi-GB read per reference. overlap() is read-free, so
+            # settle it here, before even the reference's own levels are read
+            # (_profile_depth_plan below opens the reference source).
+            # _provably_disjoint_axes carries the climatology exemption: a
+            # climatology's declared calendar span disqualifies nothing here --
+            # only its space can.
+            viable_tests = []
+            for tst in matching_tests:
+                bad = _provably_disjoint_axes(tst, ref)
+                if not bad:
+                    viable_tests.append(tst)
+                    continue
+                pair_num += 1
+                if not skip_missing:
+                    raise ValueError(
+                        f"{tst!r} and {ref!r} do not overlap in "
+                        f"{' or '.join(bad)}, per their catalog-declared extents "
+                        "-- no read could produce a matched pair. Check "
+                        f"osk.catalog.overlap({tst!r}, {ref!r}) for the declared "
+                        "bounds, or pass skip_missing=True to skip such pairs."
+                    )
+                n_skipped += 1
+                print(
+                    f"  skipped {tst!r} vs {ref!r}: no declared overlap in "
+                    f"{' or '.join(bad)} (osk.catalog.overlap shows the bounds)"
+                )
+            if not viable_tests:
+                continue
             # A profile reference keeps the depth axis standing (over="Z"), so its
             # whole depth list is one comparison's y-axis, not a fan of one-per-depth
             # maps -- exactly as a section's depth list is (see _validate_section_
@@ -5020,14 +5108,20 @@ def compare(
                 # failure: skip with a message unless the caller asked not to.
                 if not skip_missing:
                     raise
+                pair_num += len(viable_tests)
+                n_skipped += 1
                 print(f"  skipped {ref!r}: {exc}")
                 continue
-            for tst in matching_tests:
+            for tst in viable_tests:
+                pair_num += 1
+                prefix = f"{_short_variable_label(var)} " if many_vars else ""
+                print(f"  comparing {prefix}{tst!r} vs {ref!r} [{pair_num}/{n_pairs}]")
                 try:
                     these_times = _times_for(tst)
                 except ValueError as exc:
                     if not skip_missing:
                         raise
+                    n_skipped += 1
                     print(f"  skipped {tst!r}: {exc}")
                     continue
                 many_times = times_fan is not None and len(these_times) > 1
@@ -5098,7 +5192,9 @@ def compare(
                         except KeyError as exc:
                             if not skip_missing:
                                 raise
+                            n_skipped += 1
                             print(f"  skipped {label}: {exc}")
                             continue
                         out.append(c)
+    print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
     return ComparisonSet(out)

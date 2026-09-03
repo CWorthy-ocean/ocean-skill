@@ -762,6 +762,33 @@ def test_unknown_extents_are_not_treated_as_a_mismatch(monkeypatch, recwarn):
     assert not [w for w in recwarn.list if "overlap" in str(w.message)]
 
 
+def test_a_climatology_time_mismatch_is_not_a_false_alarm(monkeypatch, recwarn):
+    """A climatology's declared calendar span is a label, not a record (see
+    ocean_skill.align.subset_to_time) -- a mismatch against one must not warn.
+    """
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(
+        comparison_module, "_domain_of", lambda name: (-22.5, 64.0, -21.0, 64.6)
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_time_coverage_of",
+        lambda name: {
+            "reference": (pd.Timestamp("1965-01-01"), pd.Timestamp("1965-01-31")),
+            "test": (pd.Timestamp("2024-01-01"), pd.Timestamp("2024-12-31")),
+        }[name],
+    )
+    monkeypatch.setattr(
+        comparison_module, "_is_climatology", lambda name: name == "reference"
+    )
+
+    c = Comparison(reference="reference", test="test", variable=MODEL_VAR)
+    c._warn_if_no_overlap()
+    assert not [w for w in recwarn.list if "overlap" in str(w.message)]
+
+
 # -- model-vs-model point series: over= inference and sample_at routing ---------------
 
 #: Canonical name throughout this section so vocabulary resolution has nothing to

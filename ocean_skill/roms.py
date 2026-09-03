@@ -372,32 +372,47 @@ def to_depth(
     # A target shallower than the topmost cell centre (or deeper than the bottom one)
     # interpolates to nothing and silently yields an all-NaN level — most often when
     # asking for exactly 0 m. Say so, and point at surface() for the surface case.
-    # Reduced over every non-z dim in one pass per variable, then computed once: the
-    # transform is lazy dask, so a per-level `.any()` used to force a full recompute
-    # of it for every target depth (dozens, against a profile's own levels).
-    # One warning per variable, not one per level: a profile's own depths can drive
-    # dozens of below-the-bottom targets (a CTD cast reaching past the model's
-    # deepest cell centre is routine), and one line each buries the signal. Collapse
-    # the run of NaN depths for a variable into a single line naming their span.
-    for var in result.data_vars:
-        other = [dim for dim in result[var].dims if dim != "z"]
-        finite = np.isfinite(result[var])
-        finite = finite.any(dim=other) if other else finite
-        finite = np.asarray(finite)
-        nan_depths = [float(d) for i, d in enumerate(depths) if not bool(finite[i])]
-        if not nan_depths:
-            continue
+    #
+    # Reachability is a property of the grid alone — whether *any* column, at any
+    # time, brackets the target between its bottom and top cell centres — not of any
+    # particular variable's data, so it is checked once against z_rho directly
+    # rather than once per variable against the (lazy) transformed result. Checking
+    # the latter used to force the whole transform eagerly here, only to compute it
+    # again for real once the caller loads the result — doubling the cost of every
+    # interpolation just to phrase this warning. `z_rho.min`/`.max` reduce a single
+    # small (zeta-sized) coordinate, not the data, so this keeps the promise this
+    # function's docstring already makes: the result stays lazy.
+    #
+    # The trade-off: a variable that is NaN everywhere *within* a reachable depth
+    # (masked out for a reason other than geometry) no longer warns here — only a
+    # target the grid itself cannot reach does. A land column is the only routine
+    # case that used to trigger the old check outside of unreachable geometry, and a
+    # land column's cell centres are themselves NaN, so it still counts as
+    # unreachable below.
+    #
+    # One warning for the whole call, not one per variable: a profile's own depths
+    # can drive dozens of below-the-bottom targets (a CTD cast reaching past the
+    # model's deepest cell centre is routine), and one line each buries the signal.
+    # Collapse the run of NaN depths into a single line naming their span.
+    col_min = z_rho.min(s_dim)
+    col_max = z_rho.max(s_dim)
+    other = [dim for dim in col_min.dims if dim != "z"]
+    reachable = (col_min <= targets) & (targets <= col_max)
+    reachable = reachable.any(dim=other) if other else reachable
+    reachable = np.asarray(reachable)
+    nan_depths = [float(d) for i, d in enumerate(depths) if not bool(reachable[i])]
+    if nan_depths:
         hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
         if len(nan_depths) == 1:
-            where = f"at {nan_depths[0]:g} m is"
+            where = f"target depth {nan_depths[0]:g} m is"
         else:
             where = (
-                f"at {len(nan_depths)} target depths "
+                f"{len(nan_depths)} target depths "
                 f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
             )
         warnings.warn(
-            f"{var!r} {where} entirely NaN: the target lies outside the "
-            f"model's cell-centre range, so nothing can be interpolated;{hint}",
+            f"{where} entirely NaN: the target lies outside the model's "
+            f"cell-centre range, so nothing can be interpolated;{hint}",
             stacklevel=2,
         )
     return result
