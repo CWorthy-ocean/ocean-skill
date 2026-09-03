@@ -170,23 +170,37 @@ def test_an_all_nan_lane_warns_and_subtracts_nothing():
     assert "subtracted_mean_reference" not in c._aligned.attrs
 
 
-# -- cache round-trip: the recorded means survive a save/load cycle --------------------
+# -- cache sharing: a demeaned run reuses the raw run's cached pair, no recompute ------
 
 
-def test_the_removed_means_survive_a_cache_round_trip():
+def test_a_demeaned_run_reuses_the_raw_runs_cached_pair_without_recomputing():
+    """The whole point of caching the raw pair: no second regrid for the demeaned run.
+
+    A raw run's aligned pair is put in the cache under its key. A demeaning run of the
+    *same* comparison shares that key (``subtract_mean`` is not part of it), so
+    :meth:`Comparison.align` takes the cache-hit branch -- loading the raw pair and
+    only subtracting the scalar. The fake source names prove no regrid or source read
+    happened: reading either would raise, since neither name is a real source.
+    """
     from ocean_skill import cache as _cache
 
-    demeaned = _comparison(True)
-    demeaned._subtract_scalar_means()
-    key = demeaned._cache_key
-    _cache.save(key, demeaned._aligned)
-    loaded = _cache.load(key)
-    assert loaded.attrs["subtracted_mean_test"] == pytest.approx(
-        demeaned._aligned.attrs["subtracted_mean_test"]
-    )
-    assert loaded.attrs["subtracted_mean_reference"] == pytest.approx(
-        demeaned._aligned.attrs["subtracted_mean_reference"]
-    )
+    grid = _grid(2.0, 0)
+    with pytest.warns(UserWarning, match="resolved to standard_name"):
+        raw = Comparison(
+            reference="glodap", test="some_model", variable="temperature", cache=True
+        )
+    _cache.save(raw._cache_key, grid)
+
+    with pytest.warns(UserWarning, match="resolved to standard_name"):
+        demeaned = Comparison(
+            reference="glodap", test="some_model", variable="temperature",
+            cache=True, subtract_mean=True,
+        )
+    assert demeaned._cache_key == raw._cache_key  # the shared entry
+
+    aligned = demeaned.align()  # loads from cache; never touches the fake sources
+    assert "subtracted_mean_test" in aligned.attrs
+    assert demeaned.metrics()["bias"] == pytest.approx(0, abs=1e-9)
 
 
 # -- pooling raw + demeaned onto one diagram: the workflow this option is for ----------
