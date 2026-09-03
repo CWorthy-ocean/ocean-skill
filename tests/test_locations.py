@@ -418,7 +418,7 @@ def test_matplotlib_locations_extent_and_tiles_warning(index):
     items, _ = _items(index)
     extent = (-150.0, 40.0, -130.0, 60.0)
     with pytest.warns(UserWarning, match="tiles"):
-        fig = locations(items, extent=extent, tiles="CartoLight")
+        fig = locations(items, extent=extent, tiles="EsriOceanBase")
     lon0, lon1, lat0, lat1 = fig.axes[0].get_extent()
     assert (lon0, lat0, lon1, lat1) == pytest.approx(extent)
 
@@ -462,6 +462,31 @@ def test_holoviews_locations_tiles(index):
     # tiled (the default) projects the limits: Mercator metres, not degrees
     fig = hv.render(_locations(items, extent=extent), backend="bokeh")
     assert abs(fig.x_range.start) > 1000.0
+
+
+def test_holoviews_locations_default_tiles_avoid_carto(index):
+    """Carto's unkeyed tile endpoints now render 'API KEY REQUIRED' watermarks —
+    the default source must not silently regress back to one.
+    """
+    import geoviews as gv
+
+    from ocean_skill.plot.holoviews_renderer import _locations
+
+    items, extent = _items(index)
+    overlay = _locations(items, extent=extent)
+    wmts = [
+        el for el in overlay.traverse(lambda x: x) if isinstance(el, gv.element.WMTS)
+    ]
+    assert wmts
+    assert "carto" not in wmts[0].data.lower()
+
+
+def test_holoviews_locations_carto_tiles_warn(index):
+    from ocean_skill.plot.holoviews_renderer import _locations
+
+    items, extent = _items(index)
+    with pytest.warns(UserWarning, match="API key"):
+        _locations(items, extent=extent, tiles="CartoLight")
 
 
 def _selection_map_items():
