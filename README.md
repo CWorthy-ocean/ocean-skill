@@ -159,6 +159,24 @@ field: a metrics record is a handful of scalars either way, and both diagrams no
 by the reference's standard deviation, so points are comparable across variables and
 units.
 
+`subtract_mean` removes a scalar offset (a sea-level datum, a model's drift) from
+either lane, or both, before scoring — pool a comparison alongside its demeaned twin
+to see the effect directly:
+
+```python
+raw = osk.compare(reference="tide_gauge", test="his", variables=["zeta"])
+demeaned = osk.compare(reference="tide_gauge", test="his", variables=["zeta"],
+                        subtract_mean=True)
+(raw + demeaned).target()              # the demeaned point drops toward zero bias
+```
+
+The two land on the *same spot* on a Taylor diagram (its statistics are centred
+moments, blind to a constant offset by construction) but apart on a target diagram,
+whose whole axis is bias. What was removed is never drawn on the figure — it's in
+`.metrics()`'s `subtracted_mean_test`/`subtracted_mean_reference` columns instead,
+alongside an always-present `demeaned` column (`color_by="demeaned"` splits a mixed
+pool the same way any other label dimension does).
+
 One source alone just plots — `osk.field` is the same pipeline without a reference,
 most useful when the reduction leaves a time axis standing, which becomes the panels:
 
@@ -530,6 +548,12 @@ once.
 False`) has nothing for it to fan against. Reach for `times=` when both sides genuinely
 share a calendar (two model runs, a model against a satellite record), and the
 `aggregate`/`select` pair-spec above when they don't.
+
+`subtract_mean` takes the same `{"test": ..., "reference": ...}` shape, but — unlike
+`select`/`aggregate`, where a one-sided dict is refused as a likely typo — naming just
+one side (`subtract_mean={"test": True}`) is accepted outright: a bare `True`/`False`
+has no partial form a typo could produce, so there's nothing here for that check to
+protect against. The side left unnamed defaults to `False`.
 
 ## Catalogs
 
