@@ -170,6 +170,22 @@ reference over its own depth axis automatically, so each cast reduces to one ful
 column number per metric, no `over=` needed. `map_metrics` treats a mooring and a cast
 as the same shape (a single-position station); a set can even mix the two.
 
+**Combining stations into one series is a different operation** — `map_metrics`
+interpolates each station's already-scored *metrics* onto a spatial surface; it never
+touches the raw aligned series. To average several stations' `test`/`reference` series
+together into one composite comparison (a fjord-wide series from several CTD casts,
+say), use `ComparisonSet.average(by="variable")` instead:
+
+```python
+pooled = osk.compare(reference=["ctd_station_HV1", "ctd_station_HV5"], test="his",
+                      variables=["temperature", "salinity"])
+averaged = pooled.average(by="variable")   # one composite series per variable
+averaged.plot()                            # usable like any other ComparisonSet
+```
+
+`test` and `reference` are averaged separately (never mixed), and `difference` is
+recomputed afterward — see the method's docstring for grouping options and edge cases.
+
 `osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
 surface through the scattered values** — a cross-validated spline
 ([verde](https://www.fatiando.org/verde/)) in a local projection centred on the

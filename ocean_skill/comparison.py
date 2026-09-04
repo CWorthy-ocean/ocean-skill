@@ -3205,6 +3205,36 @@ class Comparison:
 
     data = aligned  # alias: prepared arrays for bespoke plotting
 
+    @classmethod
+    def _averaged(
+        cls,
+        template: Comparison,
+        aligned: Any,
+        *,
+        test_name: str,
+        reference_name: str,
+        label: str,
+    ) -> Comparison:
+        """Build a synthetic comparison around an already-averaged aligned pair.
+
+        Used by :meth:`ComparisonSet.average` to turn a station-averaged dataset back
+        into a real ``Comparison`` — sharing ``template``'s resolved ``variable``,
+        ``select``, ``method`` and the like (no catalog hit, nothing re-aligned) but
+        with its own aligned pair and identity, so :meth:`metrics`/:meth:`plot` and
+        friends see it as an ordinary comparison rather than a special case.
+        """
+        import copy
+
+        c = copy.copy(template)
+        c._aligned = aligned
+        c._metrics = None
+        c._pointwise_metrics = None
+        c._actual_depth = None
+        c.test_name = test_name
+        c.reference_name = reference_name
+        c.label = label
+        return c
+
     def _reference_metadata(self) -> dict[str, Any] | None:
         """Return the reference's catalog metadata, or ``None`` if it will not resolve.
 
@@ -3880,6 +3910,61 @@ def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]
     return comparisons, labels
 
 
+def _average_aligned(comps: list[Comparison]) -> Any:
+    """Average a group of comparisons' aligned pairs into one composite dataset.
+
+    Each ``aligned`` is an ``xr.Dataset`` whose data variables are always literally
+    named ``test``/``reference``/``difference`` (see :meth:`Comparison.align`), so
+    stacking them along a new axis and reducing keeps the lanes apart: ``test``
+    averages only with ``test``, ``reference`` only with ``reference`` — the
+    model/observation distinction is never mixed, only the group's members are
+    pooled together. ``difference`` is recomputed afterward rather than averaged
+    directly, mirroring the idiom in :meth:`Comparison._subtract_scalar_means`.
+
+    ``join="outer"`` unions mismatched time/depth axes rather than requiring the
+    group's members to share one exactly — a station sampled on different dates
+    than its groupmate still contributes wherever it has data, via
+    ``skipna=True``. A future xarray release changes ``concat``'s default join, so
+    it is passed explicitly here rather than relied upon.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill.align import point_of
+
+    stacked = xr.concat(
+        [c.aligned for c in comps],
+        dim="_average",
+        join="outer",
+        combine_attrs="drop_conflicts",
+    )
+    avg = stacked.mean("_average", skipna=True, keep_attrs=True)
+    if {"test", "reference"} <= set(avg.data_vars):
+        attrs = avg["difference"].attrs if "difference" in avg else {}
+        avg["difference"] = avg["test"] - avg["reference"]
+        avg["difference"].attrs = attrs
+
+    # Composite station position, when every member is itself a single-position
+    # station (:func:`~ocean_skill.align.point_of`, the same test
+    # :attr:`Comparison.is_series`/:attr:`Comparison.is_profile` use). Concatenating
+    # datasets whose scalar lon/lat coords differ makes them vary along
+    # ``_average``, and reducing a data variable's dimension does not touch its
+    # coordinates, so plain ``.mean()`` drops them — reattached here as the mean
+    # position, or an averaged station would misclassify as a field, having lost
+    # the one position that told :func:`point_of` it was a point at all. The
+    # ``station_lon``/``station_lat`` attrs are set alongside for
+    # :meth:`Comparison.metrics`/``map_metrics``, which read the position from
+    # there rather than from the coordinate itself.
+    points = [point_of(c.aligned["reference"]) for c in comps]
+    if all(p is not None for p in points):
+        lon = float(np.mean([p[0] for p in points]))
+        lat = float(np.mean([p[1] for p in points]))
+        avg = avg.assign_coords(lon=lon, lat=lat)
+        avg.attrs["station_lon"] = lon
+        avg.attrs["station_lat"] = lat
+    return avg
+
+
 class ComparisonSet:
     """A set of comparisons: stacked rows in one figure, one tidy metrics table.
 
@@ -4261,6 +4346,78 @@ class ComparisonSet:
         from ocean_skill.plot.map_metrics import map_metrics as _map_metrics
 
         return _map_metrics(self, renderer=renderer, **kwargs)
+
+    def average(self, by: str | list[str] = "variable") -> ComparisonSet:
+        """Average comparisons across whatever ``by`` does not hold fixed.
+
+        ``compare(reference=["HV1", "HV5"], variables=[...])`` fans out one
+        comparison per station per variable, kept independent so each station's own
+        skill is visible. This pools stations back together — the opposite move —
+        grouping by ``by`` (default ``"variable"``, so every station sampling the
+        same variable becomes one composite series) and averaging each group's
+        aligned pair into a single synthetic comparison, returned in a new
+        :class:`ComparisonSet` usable exactly like any other (``.plot()``,
+        ``.taylor()``, ``.metrics()``, ``.save()``, ...).
+
+        ``test`` and ``reference`` are averaged separately, never together — each
+        aligned pair's ``test``/``reference`` data variables are reduced
+        independently, so the model and the observations stay apart; only
+        ``difference`` is recomputed afterward (see :func:`_average_aligned`).
+        Mismatched time/depth axes across a group's members are unioned
+        (``join="outer"``) and reduced with ``skipna=True``, so members need not
+        share exactly the same sample times.
+
+        ``by`` accepts any dimension a pooled label can be built from —
+        ``"variable"`` (default), ``"depth"``, ``"time"``, ``"test"``,
+        ``"reference"``, ``"demeaned"`` — or a list of them for a finer grouping,
+        e.g. ``by=["variable", "test"]`` to keep multiple models distinct while
+        still averaging their stations together.
+
+        This is generic over comparison shape: gridded fields and sections are
+        averaged the same way as stations, provided their grids/axes line up
+        (mismatched ones union to partly-NaN results rather than raising). A group
+        spanning more than one ``test`` source is averaged as asked but warned
+        about, since that is rarely what was intended.
+        """
+        import warnings
+        from collections import OrderedDict
+
+        readers = dict(_LABEL_DIMS)
+        dims = [by] if isinstance(by, str) else list(by)
+        unknown = [d for d in dims if d not in readers]
+        if unknown:
+            raise ValueError(
+                f"average(by=...) unknown dimension(s) {unknown}; "
+                f"choose from {list(readers)}"
+            )
+
+        groups: OrderedDict[tuple, list[Comparison]] = OrderedDict()
+        for c in self.comparisons:
+            key = tuple(readers[d](c) for d in dims)
+            groups.setdefault(key, []).append(c)
+
+        out = []
+        for key, comps in groups.items():
+            if len({c.test_name for c in comps}) > 1:
+                warnings.warn(
+                    "average(): a group spans multiple test sources; their "
+                    "fields were averaged together. Pass by=[..., \"test\"] to "
+                    "keep them distinct if that wasn't intended.",
+                    stacklevel=2,
+                )
+            label = " ".join(str(k) for k in key)
+            out.append(
+                Comparison._averaged(
+                    comps[0],
+                    _average_aligned(comps),
+                    test_name="+".join(dict.fromkeys(c.test_name for c in comps)),
+                    reference_name="+".join(
+                        dict.fromkeys(c.reference_name for c in comps)
+                    ),
+                    label=label,
+                )
+            )
+        return ComparisonSet(out)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this set's comparisons look: each one's selection, deduped.
