@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import warnings
+from pathlib import Path
+
 import pytest
 
 from ocean_skill import catalog
@@ -140,6 +144,227 @@ def test_discover_does_not_instantiate_readers(isolated_catalogs):
 
     idx = catalog.discover()
     assert idx["foo"].metadata["featureType"] == "grid"
+
+
+# -- search-path tiers ---------------------------------------------------------
+
+
+def _write_catalog(directory, *, title, name, featureType="grid", filename=None):
+    """Write a one-entry intake v2 catalog into ``directory``; returns its path."""
+    import intake
+    from intake.readers import datatypes, readers
+
+    directory.mkdir(parents=True, exist_ok=True)
+    data = datatypes.HDF5(url=str(directory / f"{name}.nc"))  # never actually read
+    reader = readers.XArrayDatasetReader(data)
+    reader.metadata.update(
+        {"featureType": featureType, "variables": ["sea_water_temperature"]}
+    )
+    cat = intake.entry.Catalog(metadata={"title": title})
+    cat[name] = reader
+    cat.aliases[name] = name
+    path = directory / (filename or f"{name}.catalog.yaml")
+    cat.to_yaml_file(str(path))
+    return path
+
+
+def test_search_paths_tier_order(tmp_path, monkeypatch):
+    shared_a, shared_b = tmp_path / "shared_a", tmp_path / "shared_b"
+    added_c = tmp_path / "added_c"
+    legacy, user = tmp_path / "legacy", tmp_path / "user"
+    project = tmp_path / "project"
+    for d in (shared_a, shared_b, added_c, legacy, user):
+        d.mkdir()
+    (project / "catalogs").mkdir(parents=True)
+    (project / "pyproject.toml").touch()
+
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setenv(
+        "OCEAN_SKILL_CATALOGS", os.pathsep.join([str(shared_a), str(shared_b)])
+    )
+    catalog.add_search_path(added_c)
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: legacy)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: user)
+    monkeypatch.chdir(project)
+
+    packaged = Path(catalog.__file__).parent / "catalogs"
+    assert catalog.search_paths() == [
+        packaged,
+        shared_a,
+        shared_b,
+        added_c,
+        legacy,
+        user,
+        project / "catalogs",
+    ]
+
+
+def test_env_var_entries_are_expanded(monkeypatch, tmp_path):
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: None)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: tmp_path / "user")
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", "~/team-catalogs")
+    monkeypatch.chdir(tmp_path)
+
+    paths = catalog.search_paths()
+    assert Path.home() / "team-catalogs" in paths
+    assert all("~" not in str(p) for p in paths)
+
+
+def test_env_var_splits_on_os_pathsep_and_skips_empties(monkeypatch, tmp_path):
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: None)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: tmp_path / "user")
+    a, b = tmp_path / "a", tmp_path / "b"
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", f"{a}{os.pathsep}{os.pathsep}{b}")
+    monkeypatch.chdir(tmp_path)
+
+    paths = catalog.search_paths()
+    assert a in paths and b in paths
+    assert paths.index(a) < paths.index(b)
+
+
+def test_add_search_path_expands_and_appends_in_call_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: None)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: tmp_path / "user")
+    env_dir = tmp_path / "env"
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(env_dir))
+    monkeypatch.chdir(tmp_path)
+
+    catalog.add_search_path("~/first")
+    catalog.add_search_path(tmp_path / "second")
+
+    paths = catalog.search_paths()
+    first = Path.home() / "first"
+    second = tmp_path / "second"
+    user_dir = tmp_path / "user"
+    assert paths.index(env_dir) < paths.index(first) < paths.index(second)
+    assert paths.index(second) < paths.index(user_dir)
+    assert all("~" not in str(p) for p in paths)
+
+
+def test_add_search_path_takes_effect_without_cache_reset(isolated_catalogs, tmp_path):
+    catalog.discover()  # warm the cache
+
+    extra = tmp_path / "extra"
+    _write_catalog(extra, title="extra catalog", name="bar")
+    catalog.add_search_path(extra)
+
+    assert "bar" in catalog.discover()
+
+
+def test_user_dotdir_shadows_shared_env_dir(isolated_catalogs, tmp_path):
+    user_dir = tmp_path / "user-catalogs"  # isolated_catalogs redirects _user_dir here
+    _write_catalog(user_dir, title="user catalog", name="foo", featureType="timeSeries")
+
+    idx = catalog.discover()
+    assert idx["foo"].metadata["featureType"] == "timeSeries"
+
+    with pytest.warns(UserWarning, match="shadows"):
+        catalog.resolve("foo")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        catalog.resolve("user catalog:foo")  # qualified lookup never warns
+
+
+def test_project_local_shadows_user_dir(isolated_catalogs, tmp_path):
+    user_dir = tmp_path / "user-catalogs"
+    _write_catalog(user_dir, title="user catalog", name="foo", featureType="timeSeries")
+
+    (tmp_path / "pyproject.toml").touch()  # bound the project-local walk-up
+    project_path = _write_catalog(
+        tmp_path / "catalogs",
+        title="project catalog",
+        name="foo",
+        featureType="profile",
+    )
+
+    idx = catalog.discover()
+    assert idx["foo"].metadata["featureType"] == "profile"
+    assert idx["foo"].path == project_path
+
+
+def test_legacy_platformdirs_dir_is_scanned(isolated_catalogs, tmp_path):
+    legacy_dir = tmp_path / "legacy-catalogs"
+    _write_catalog(legacy_dir, title="legacy catalog", name="legacy_only")
+
+    assert "legacy_only" in catalog.discover()
+
+
+def test_legacy_ranks_below_dotdir(isolated_catalogs, tmp_path):
+    legacy_dir = tmp_path / "legacy-catalogs"
+    user_dir = tmp_path / "user-catalogs"
+    _write_catalog(
+        legacy_dir, title="legacy catalog", name="foo", featureType="profile"
+    )
+    _write_catalog(user_dir, title="user catalog", name="foo", featureType="timeSeries")
+
+    idx = catalog.discover()
+    assert idx["foo"].metadata["featureType"] == "timeSeries"
+
+
+def test_legacy_dir_skipped_when_same_as_dotdir(monkeypatch, tmp_path):
+    same = tmp_path / "same"
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.delenv("OCEAN_SKILL_CATALOGS", raising=False)
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: same)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: same)
+    monkeypatch.chdir(tmp_path)
+
+    assert catalog.search_paths().count(same) == 1
+
+
+def test_duplicate_env_entries_appear_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setattr(catalog, "_legacy_user_dir", lambda: None)
+    monkeypatch.setattr(catalog, "_user_dir", lambda: tmp_path / "user")
+    d = tmp_path / "shared"
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", os.pathsep.join([str(d), str(d)]))
+    monkeypatch.chdir(tmp_path)
+
+    assert catalog.search_paths().count(d) == 1
+
+
+def test_missing_tier_dirs_are_skipped_silently(isolated_catalogs):
+    # isolated_catalogs redirects the user/legacy tiers to tmp_path dirs that are
+    # never created on disk; discovery must not choke on them.
+    assert "foo" in catalog.discover()
+
+
+def test_full_tier_precedence_end_to_end(isolated_catalogs, tmp_path):
+    # shared (env) tier already has "foo"/grid, written by isolated_catalogs.
+    legacy_path = _write_catalog(
+        tmp_path / "legacy-catalogs",
+        title="legacy catalog",
+        name="foo",
+        featureType="profile",
+    )
+    user_path = _write_catalog(
+        tmp_path / "user-catalogs",
+        title="user catalog",
+        name="foo",
+        featureType="timeSeries",
+    )
+    (tmp_path / "pyproject.toml").touch()  # bound the project-local walk-up
+    project_path = _write_catalog(
+        tmp_path / "catalogs",
+        title="project catalog",
+        name="foo",
+        featureType="trajectory",
+    )
+
+    assert catalog.discover()["foo"].metadata["featureType"] == "trajectory"
+
+    project_path.unlink()
+    assert catalog.discover()["foo"].metadata["featureType"] == "timeSeries"
+
+    user_path.unlink()
+    assert catalog.discover()["foo"].metadata["featureType"] == "profile"
+
+    legacy_path.unlink()
+    assert catalog.discover()["foo"].metadata["featureType"] == "grid"
 
 
 # -- find() filters -----------------------------------------------------------

@@ -35,9 +35,12 @@ The public API is intentionally small:
 
     osk.cache.info()             # processed intermediates are cached; where, how big
     osk.outputs.info()           # where figures + metrics get written
+
+    osk.catalog.search_paths()              # where catalogs are discovered, in order
+    osk.catalog.add_search_path("/shared")  # register a shared/team catalog dir in code
 """
 
-from ocean_skill import cache, outputs, qc
+from ocean_skill import cache, catalog, outputs, qc
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill.catalog import (
     Overlap,
@@ -67,6 +70,7 @@ __all__ = [
     "Overlap",
     "__version__",
     "cache",
+    "catalog",
     "catalogs",
     "compare",
     "coord_report",

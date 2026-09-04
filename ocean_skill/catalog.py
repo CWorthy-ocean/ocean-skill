@@ -10,9 +10,11 @@ and merges into a single namespace. Discovery loads each catalog with
 Any ``*.yaml`` in a catalog *directory* is picked up. Search precedence (later shadows
 earlier, with a collision warning):
     1. packaged reference catalogs    (``ocean_skill/catalogs/``)
-    2. user dir                       (``platformdirs`` / ``~/.ocean-skill/catalogs``)
-    3. ``$OCEAN_SKILL_CATALOGS``      (os.pathsep-separated dirs)
-    4. project-local                  (``./catalogs``)
+    2. shared/team                    (``$OCEAN_SKILL_CATALOGS``, os.pathsep-separated;
+                                        or :func:`add_search_path` in code)
+    3. legacy user dir                (``platformdirs`` config dir -- back-compat)
+    4. user dir                       (``~/.ocean-skill/catalogs``)
+    5. project-local                  (``./catalogs``)
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ __all__ = [
     "Overlap",
     "SourceNames",
     "SourceRef",
+    "add_search_path",
     "catalog_metadata",
     "catalog_names",
     "catalogs",
@@ -74,20 +77,60 @@ class SourceRef:
         return f"{self.catalog}:{self.name}"
 
 
+#: Shared catalog directories registered at runtime via :func:`add_search_path`.
+#: Same tier as ``$OCEAN_SKILL_CATALOGS``, appended after it.
+_added_dirs: list[Path] = []
+
+
+def add_search_path(directory: str | Path) -> None:
+    """Register a shared catalog directory for this process.
+
+    Joins the same tier as ``$OCEAN_SKILL_CATALOGS`` -- above the packaged reference
+    catalogs, below ``~/.ocean-skill/catalogs`` and any project-local ``./catalogs`` --
+    so a site or team catalog registered in code can't silently outrank a user's own
+    overrides. Repeated calls append; within the tier, later calls shadow earlier ones.
+
+    Takes effect on the very next :func:`discover` call: the index is cached against
+    the files the search path currently yields, not against the path list itself.
+    """
+    _added_dirs.append(Path(directory).expanduser())
+
+
+def _user_dir() -> Path:
+    """Return the per-user catalog directory: ``~/.ocean-skill/catalogs``."""
+    return Path.home() / ".ocean-skill" / "catalogs"
+
+
+def _legacy_user_dir() -> Path | None:
+    """Return the pre-dotdir user location, kept as a fallback for existing setups.
+
+    ``platformdirs`` puts this somewhere OS-conventional but easy to lose track of
+    (``~/Library/Application Support/ocean-skill/catalogs`` on macOS), which is why
+    the user tier moved to a fixed, visible ``~/.ocean-skill/catalogs``. Anyone who
+    already has catalogs at the old location keeps being found here, just at lower
+    precedence than the new one.
+    """
+    try:
+        import platformdirs
+    except Exception:  # platformdirs optional at import time
+        return None
+    return Path(platformdirs.user_config_dir("ocean-skill")) / "catalogs"
+
+
 def search_paths() -> list[Path]:
     """Return the ordered catalog search path (lowest to highest precedence)."""
     paths: list[Path] = [Path(__file__).parent / "catalogs"]  # packaged reference catalogs
 
-    try:
-        import platformdirs
-
-        paths.append(Path(platformdirs.user_config_dir("ocean-skill")) / "catalogs")
-    except Exception:  # platformdirs optional at import time
-        paths.append(Path.home() / ".ocean-skill" / "catalogs")
-
+    # Shared/team tier: $OCEAN_SKILL_CATALOGS, then any add_search_path() registrations.
     env = os.environ.get("OCEAN_SKILL_CATALOGS")
     if env:
-        paths.extend(Path(p) for p in env.split(os.pathsep) if p)
+        paths.extend(Path(p).expanduser() for p in env.split(os.pathsep) if p)
+    paths.extend(_added_dirs)
+
+    legacy = _legacy_user_dir()  # back-compat, ranked just below the dotdir
+    if legacy is not None:
+        paths.append(legacy)
+    paths.append(_user_dir())
 
     # Project-local: the cwd, then walk up looking for a catalogs/ directory (as git
     # finds .git). Lets a notebook in docs/ or a script in examples/ see the project's
@@ -101,7 +144,17 @@ def search_paths() -> list[Path]:
         if (d / "pyproject.toml").exists() or (d / ".git").exists():
             break  # don't wander above the project root
     paths.extend(reversed(found))  # nearest last => highest precedence
-    return paths
+
+    # Dedup, keeping each directory's highest-precedence occurrence (the legacy dir
+    # aliasing the dotdir when platformdirs and $HOME/.ocean-skill coincide, an env
+    # entry repeating another tier's directory, etc).
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for p in reversed(paths):
+        if p not in seen:
+            seen.add(p)
+            deduped.append(p)
+    return list(reversed(deduped))
 
 
 def _iter_catalog_files() -> list[Path]:
@@ -132,8 +185,8 @@ def _catalog_fingerprint() -> tuple[tuple[str, int, int], ...]:
     """Cache key for :func:`discover`: each catalog file with (mtime_ns, size).
 
     Rebuilding a catalog, adding or removing one, or changing the search path
-    (cwd, ``$OCEAN_SKILL_CATALOGS``, user dir) all change this, so the cache
-    can never serve a stale index.
+    (cwd, ``$OCEAN_SKILL_CATALOGS``, :func:`add_search_path`, user dir) all change
+    this, so the cache can never serve a stale index.
     """
     out: list[tuple[str, int, int]] = []
     for path in _iter_catalog_files():
