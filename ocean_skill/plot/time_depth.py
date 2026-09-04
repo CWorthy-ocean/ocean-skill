@@ -85,7 +85,9 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
     :meth:`~ocean_skill.field.Field._series_items` applies to a fanned line.
 
     The vertical coordinate is read the same way
-    :func:`ocean_skill.plot.profile.vertical_values` does: whichever of the axis's own
+    :func:`ocean_skill.plot.profile.vertical_values` does
+    (:func:`ocean_skill.operators.vertical_coord_on`, tolerant of a coordinate riding
+    under a different name than its dimension): whichever of the axis's own
     coordinate or a same-dim ``z_rho`` is present, taken as ``abs()`` -- a no-op for an
     already positive-down observational ``depth``, and what turns ROMS's negative-down
     ``z_rho`` into the positive-down metres every other depth label in this package
@@ -121,9 +123,13 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
         )
     zdim = extra[0]
 
-    z_rho = da.coords.get("z_rho")
-    native_z_rho = z_rho is not None and zdim in z_rho.dims and zdim not in da.coords
-    depth_source = z_rho if native_z_rho else da[zdim]
+    from ocean_skill.operators import vertical_coord_on
+
+    depth_source = vertical_coord_on(da, zdim)
+    if depth_source is None:
+        z_rho = da.coords.get("z_rho")
+        if z_rho is not None and zdim in z_rho.dims:
+            depth_source = z_rho
 
     depth = np.abs(depth_source).rename("depth")
     depth.attrs["units"] = depth_source.attrs.get("units", "m")

@@ -93,6 +93,7 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     needs to know which kind of vertical axis it got.
     """
     from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
+    from ocean_skill.cf import find_coord
 
     if ALONG_DIM not in da.dims:
         raise ValueError(
@@ -107,8 +108,21 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
         )
     vertical = extra[0]
 
-    native_s = vertical != "z" and "z_rho" in da.coords
-    depth_source = da["z_rho"] if native_s else da[vertical]
+    # The native-s aux depth (z_rho, or its w-level counterpart z_w) located via
+    # find_coord rather than a hardcoded "z_rho" literal, so a differently-cased
+    # spelling or z_w itself is recognized the same way every other vertical lookup
+    # in this package is (see ocean_skill.vocabulary.COORD_VOCABULARY["Z"]). Scoped to
+    # a coordinate that actually varies along `vertical` (not merely one that ranks
+    # earlier in the fallback list) -- a dataset carrying both z_rho and z_w, with
+    # only one of them riding on this field's own vertical dimension, must not pick
+    # the wrong one.
+    aux_depth = None if vertical == "z" else find_coord(da, "vertical")
+    native_s = (
+        aux_depth is not None
+        and vertical in aux_depth.dims
+        and str(aux_depth.name) != vertical
+    )
+    depth_source = aux_depth if native_s else da[vertical]
     if not native_s and float(np.nanmax(np.asarray(depth_source))) > 0:
         # Fixed-z only: this coordinate is about to be negated below, on the
         # assumption that it already reads negative-down (the model's own

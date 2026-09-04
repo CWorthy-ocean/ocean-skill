@@ -722,6 +722,8 @@ COORD_VOCABULARY: dict[str, dict[str, object]] = {
             "lev",
             "s_rho",
             "z_rho",
+            "s_w",
+            "z_w",
             "depth_surface",
             "sigma0",
         ),

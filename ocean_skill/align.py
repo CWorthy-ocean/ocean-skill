@@ -61,7 +61,18 @@ _CONVENTION_TOL = 1e-6
 
 
 def _lon_name(obj) -> str | None:
-    """Name of the longitude coordinate, preferring canonical then ROMS names."""
+    """Name of the longitude coordinate, via cf-xarray/vocab with a plain-name fallback.
+
+    Routes through :func:`ocean_skill.cf.find_coord` -- the same vocab-backed lookup
+    :func:`_time_name` already uses below -- so a source spelled ``LONGITUDE``
+    (uppercase), ``nav_lon``, or a staggered ``lon_u``/``lon_v`` resolves the same way
+    :func:`ocean_skill.operators.resolve_dim` and every catalog probe already see it.
+    The literal tuple is a last-resort fallback for whatever ``find_coord`` cannot
+    place (a DataArray whose ``.cf`` accessor sees only its own coords).
+    """
+    found = find_coord(obj, "longitude")
+    if found is not None:
+        return str(found.name)
     for nm in ("lon", "longitude", "lon_rho"):
         if nm in obj.coords or nm in getattr(obj, "variables", {}):
             return nm
@@ -77,7 +88,10 @@ def _time_name(obj) -> str | None:
 
 
 def _lat_name(obj) -> str | None:
-    """Name of the latitude coordinate, preferring canonical then ROMS names."""
+    """Name of the latitude coordinate -- :func:`_lon_name`'s mirror image."""
+    found = find_coord(obj, "latitude")
+    if found is not None:
+        return str(found.name)
     for nm in ("lat", "latitude", "lat_rho"):
         if nm in obj.coords or nm in getattr(obj, "variables", {}):
             return nm
@@ -2592,8 +2606,10 @@ def _align_along_path(
             "along-path axis -- collapse it with aggregate= or narrow it with "
             "select= (most often a surviving time axis)."
         )
-    ref_vdim = next((d for d in SECTION_VERTICAL_DIMS if d in reference.dims), None)
-    if ref_vdim is None:
+    from ocean_skill.operators import resolve_dim
+
+    ref_vdim = resolve_dim(reference, "Z")
+    if ref_vdim is None or ref_vdim not in reference.dims:
         raise ValueError(
             "the reference has no vertical axis along this section -- a "
             "surface-only product cannot be compared against a section, which "
