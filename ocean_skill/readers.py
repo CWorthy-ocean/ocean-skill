@@ -23,6 +23,14 @@ class PoochTarNetCDF(BaseReader):
     downloaded source), keeps the members matching ``member_glob``, and opens + merges
     them with ``xarray.open_mfdataset``. Used for GLODAP (a NOAA .tar.gz of per-variable
     NetCDFs) but generic to any tarball-of-NetCDFs source.
+
+    Pass ``local_dir`` instead of ``url`` when the tarball's contents are already
+    sitting on disk (a cluster with the data pre-staged on a shared filesystem, say)
+    -- the download/untar step is skipped and ``member_glob`` is matched straight
+    against that directory. Everything downstream (the ``var_from_filename`` merge
+    below) is identical either way, so a catalog built with ``local_dir`` and one
+    built with ``url`` over the same files read out the same Dataset -- only the byte
+    source differs.
     """
 
     output_instance = "xarray:Dataset"
@@ -30,41 +38,58 @@ class PoochTarNetCDF(BaseReader):
 
     def _read(
         self,
-        url,
+        url=None,
         known_hash=None,
         member_glob="*.nc",
         cache_dir=None,
         combine="by_coords",
         var_from_filename=False,
         keep_vars=(),
+        local_dir=None,
         **kwargs,
     ):
         import fnmatch
+        import glob
         import os
 
-        import pooch
         import xarray as xr
 
-        # Default to the same directory fsspec downloads into, resolved per call rather
-        # than written into the catalog: a catalog that named an absolute path pinned
-        # every install to one machine's home directory and ignored both
-        # ``$OCEAN_SKILL_DIR`` and ``cache.enable()``.
-        if cache_dir:
-            cache_dir = os.path.expanduser(cache_dir)
-        else:
-            from ocean_skill import cache
+        if (url is None) == (local_dir is None):
+            raise ValueError(
+                "Pass exactly one of url (a remote tarball) or local_dir (a directory "
+                "of already-extracted files)."
+            )
 
-            cache_dir = str(cache.obs_dir())
-        paths = pooch.retrieve(
-            url, known_hash=known_hash, processor=pooch.Untar(), path=cache_dir
-        )
-        if member_glob:
-            paths = [
-                p for p in paths if fnmatch.fnmatch(os.path.basename(p), member_glob)
-            ]
-        if not paths:
-            raise FileNotFoundError(f"No members matched {member_glob!r} in {url}")
-        paths = sorted(paths)
+        if local_dir is not None:
+            base = os.path.expanduser(local_dir)
+            paths = sorted(glob.glob(os.path.join(base, member_glob or "*")))
+            if not paths:
+                raise FileNotFoundError(f"No files matched {member_glob!r} in {base}")
+        else:
+            import pooch
+
+            # Default to the same directory fsspec downloads into, resolved per call
+            # rather than written into the catalog: a catalog that named an absolute
+            # path pinned every install to one machine's home directory and ignored
+            # both ``$OCEAN_SKILL_DIR`` and ``cache.enable()``.
+            if cache_dir:
+                cache_dir = os.path.expanduser(cache_dir)
+            else:
+                from ocean_skill import cache
+
+                cache_dir = str(cache.obs_dir())
+            paths = pooch.retrieve(
+                url, known_hash=known_hash, processor=pooch.Untar(), path=cache_dir
+            )
+            if member_glob:
+                paths = [
+                    p
+                    for p in paths
+                    if fnmatch.fnmatch(os.path.basename(p), member_glob)
+                ]
+            if not paths:
+                raise FileNotFoundError(f"No members matched {member_glob!r} in {url}")
+            paths = sorted(paths)
 
         if not var_from_filename:
             return xr.open_mfdataset(paths, combine=combine, **kwargs)
