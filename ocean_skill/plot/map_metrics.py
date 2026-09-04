@@ -602,6 +602,7 @@ def map_metrics(
         osk.map_metrics(mooring_set)                  # bias, crmsd, corr, sigma_ratio
         osk.map_metrics(mooring_set, metrics=("corr", "n"))
         osk.map_metrics(mooring_set, grid="regular")        # skip the model's own grid
+        osk.map_metrics(mooring_set, extent="tight")        # crop to the drawn surface
         osk.map_metrics(metrics_df, test="ciofs3")          # a plain CIOFS report table
         osk.map_metrics(rows={"DJF": winter_set, "JJA": summer_set})  # seasonal facet
         osk.map_metrics(mooring_set, method="nearest")      # Voronoi tiles, no smoothing
@@ -673,6 +674,14 @@ def map_metrics(
         seasonal or per-era facet. Pool each period's comparisons (or table) apart
         first, one entry per period. May be passed alone, with ``data=None``, when
         every row supplies its own data.
+    extent
+        Crops the view without touching the interpolation. ``None`` (default) frames
+        the whole grid — the model domain for ``grid="model"``, the padded station
+        box for ``grid="regular"`` — which for a small station cluster leaves a lot of
+        empty ocean. ``"tight"`` frames just the drawn surface (the ``maxdist`` blob
+        around the stations) with a small margin. A ``(lon_min, lon_max, lat_min,
+        lat_max)`` tuple sets an exact window. Forwarded to ``skill_map`` (both
+        renderers).
     renderer
         ``"matplotlib"`` (default, static) or ``"holoviews"`` (interactive).
     mark

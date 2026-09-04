@@ -931,6 +931,7 @@ def _skill_map(
     size=None,
     zoom: float = 1.0,
     domain=None,
+    extent=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
     shared_limits: bool = False,
@@ -961,6 +962,13 @@ def _skill_map(
     curvilinear mesh too, and hits the same per-cell loop past
     :data:`RASTERIZE_ABOVE_CELLS`.
 
+    ``extent`` crops the view the same way its static twin does — ``"tight"`` frames
+    the drawn skill surface (the non-``NaN`` cells) with a small margin, a
+    ``(lon_min, lon_max, lat_min, lat_max)`` tuple sets an exact window, and ``None``
+    (the default) leaves each panel framing its whole grid. Resolved through the same
+    :func:`~ocean_skill.plot.matplotlib_renderer.resolve_extent` both backends share,
+    then applied as each panel's ``xlim``/``ylim``.
+
     ``shared_limits=True`` pools each metric's values over every row before choosing
     its colour limits, the same as the static family — every panel of one metric then
     carries the same scale, comparable by colour. Each panel still shows its own
@@ -977,6 +985,7 @@ def _skill_map(
         metric_arrays,
         metric_panel_titles,
         metric_panels,
+        resolve_extent,
     )
     from ocean_skill.plot.typography import facet_layout
 
@@ -1033,6 +1042,13 @@ def _skill_map(
         else [(row, name) for row in range(len(items)) for name in names]
     )
 
+    # The view window every panel shares (None = each panel frames its whole grid).
+    # Resolved from the same option, the same way, as the static family's set_extent.
+    box = resolve_extent(extent, items, names)
+    view_opts = (
+        {"xlim": (box[0], box[1]), "ylim": (box[2], box[3])} if box else {}
+    )
+
     panels = []
     for row, name in order:
         item = items[row]
@@ -1068,6 +1084,8 @@ def _skill_map(
         for extra in (outline, points):
             if extra is not None:
                 mesh = mesh * extra
+        if view_opts:
+            mesh = mesh.opts(**view_opts)
         panels.append(mesh)
 
     result = panels[0]

@@ -3051,6 +3051,78 @@ def section_row(
     return fig
 
 
+def _tight_extent(
+    items: list[dict[str, Any]], names: tuple[str, ...], *, margin: float = 0.08
+) -> tuple[float, float, float, float] | None:
+    """Return a ``(lon0, lon1, lat0, lat1)`` box hugging the drawn skill surface.
+
+    The union, over every item and every drawn metric, of the lon/lat of the cells
+    that carry a value (``NaN`` cells — masked land, or an interpolated surface's
+    ``maxdist`` blob edge — do not count), grown by ``margin`` of its own span so the
+    surface is not flush against the frame. ``None`` when nothing is finite (an
+    empty surface), which leaves the caller on the default whole-grid autoscale.
+    """
+    lons: list[float] = []
+    lats: list[float] = []
+    for item in items:
+        skill = item["skill"]
+        lon = np.asarray(skill["lon"].values, dtype="float64")
+        lat = np.asarray(skill["lat"].values, dtype="float64")
+        finite = np.zeros(lon.shape, dtype=bool)
+        for name in names:
+            if name in skill:
+                finite |= np.isfinite(np.asarray(skill[name].values))
+        if finite.any():
+            lons += [float(lon[finite].min()), float(lon[finite].max())]
+            lats += [float(lat[finite].min()), float(lat[finite].max())]
+    if not lons:
+        return None
+    lon0, lon1, lat0, lat1 = min(lons), max(lons), min(lats), max(lats)
+    dlon = (lon1 - lon0) or 1.0
+    dlat = (lat1 - lat0) or 1.0
+    return (lon0 - margin * dlon, lon1 + margin * dlon,
+            lat0 - margin * dlat, lat1 + margin * dlat)
+
+
+def resolve_extent(
+    extent, items, names
+) -> tuple[float, float, float, float] | None:
+    """Turn the ``extent`` plot option into a ``(lon0, lon1, lat0, lat1)`` box.
+
+    ``None`` stays ``None`` (leave the caller's default whole-grid framing);
+    ``"tight"`` becomes the drawn surface's own box (:func:`_tight_extent`, itself
+    ``None`` when nothing is finite); a 4-tuple is validated and passed through.
+    Shared with :mod:`ocean_skill.plot.holoviews_renderer` so both backends read the
+    option the same way.
+    """
+    if extent is None:
+        return None
+    if isinstance(extent, str):
+        if extent != "tight":
+            raise ValueError(
+                f"extent={extent!r} — expected 'tight', a (lon_min, lon_max, "
+                "lat_min, lat_max) tuple, or None."
+            )
+        return _tight_extent(items, names)
+    box = tuple(float(v) for v in extent)
+    if len(box) != 4:
+        raise ValueError(
+            f"extent={extent!r} — a bbox must be (lon_min, lon_max, lat_min, lat_max)."
+        )
+    return box
+
+
+def _apply_extent(axes, extent, items, names) -> None:
+    """Set the view extent on every map panel from the ``extent`` plot option."""
+    import cartopy.crs as ccrs
+
+    box = resolve_extent(extent, items, names)
+    if box is None:
+        return
+    for ax in axes:
+        ax.set_extent(box, crs=ccrs.PlateCarree())
+
+
 def skill_map(
     items: list[dict[str, Any]],
     *,
@@ -3059,6 +3131,7 @@ def skill_map(
     mark: str = "pcolormesh",
     save: str | Path | None = None,
     domain: tuple[float, float, float, float] | np.ndarray | None = None,
+    extent: str | tuple[float, float, float, float] | None = None,
     ncols: int | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -3123,6 +3196,16 @@ def skill_map(
     ``metric_names`` picks and orders the panels from what the item carries; a name it
     does not carry raises (see :func:`metric_panels`). Every other parameter means
     what it means in :func:`field_facet`.
+
+    ``extent`` crops the *view* every panel shows, without touching the data or its
+    interpolation. ``None`` (the default) frames the whole grid each panel was drawn
+    on — the model's domain for ``grid="model"``, the padded station box for
+    ``grid="regular"`` — which for a small cluster of stations leaves a lot of empty
+    ocean. ``"tight"`` instead frames just the drawn skill surface (the non-``NaN``
+    cells, which for an interpolated map is the ``maxdist`` blob around the stations)
+    with a small margin, so the figure is filled by what it actually has a value for.
+    A ``(lon_min, lon_max, lat_min, lat_max)`` tuple sets an exact window. Every panel
+    gets the same extent, so a grid of them stays aligned.
 
     An item carrying ``stations`` (see :func:`ocean_skill.plot.map_metrics.build_items`
     — an interpolated surface fit through scattered per-station values, rather than a
@@ -3382,6 +3465,10 @@ def skill_map(
     # than deleted, which keeps the drawn panels on the grid they were sized for.
     for ax in flat[len(panels) :]:
         ax.set_visible(False)
+
+    # Crop the view after every panel is drawn (so "tight" can read the drawn
+    # surface's own extent), on the visible map panels only.
+    _apply_extent(flat[: len(panels)], extent, items, names)
 
     if title:
         sup = fig.suptitle(
