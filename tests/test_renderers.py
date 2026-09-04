@@ -1076,6 +1076,24 @@ def _section_field() -> xr.DataArray:
     )
 
 
+def _time_depth_field() -> xr.DataArray:
+    """Build a small, dense (time, depth) point field -- the payload the
+    time_depth family takes; dense enough that default_mark picks "pcolormesh",
+    the mesh path shared with every other geographic family via _quadmesh."""
+    time = xr.date_range("2020-01-01", periods=5, freq="MS")
+    depth = np.array([0.0, 10.0, 25.0])
+    values = 5.0 + np.linspace(0, 1, time.size * depth.size).reshape(
+        time.size, depth.size
+    )
+    return xr.DataArray(
+        values,
+        dims=("time", "depth"),
+        coords={"time": time, "depth": depth, "lon": -144.0, "lat": 50.0},
+        name="nitrate",
+        attrs={"units": "mmol m-3"},
+    )
+
+
 def _section_row_item() -> dict:
     """One section_row spec item: what a section comparison's ``as_item()`` builds.
 
@@ -1142,6 +1160,14 @@ _INTERACTIVE_FAMILIES = {
             "frame_label": "Feb 2012",
         },
     ],
+    "time_depth": lambda: [
+        {
+            "field": _time_depth_field(),
+            "units": "mmol m-3",
+            "standard_name": "mole_concentration_of_nitrate_in_sea_water",
+            "label": "GOM_bgc",
+        }
+    ],
 }
 
 
@@ -1196,7 +1222,7 @@ _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 #: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
 #: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
 #: covers instead: warned and dropped, same as any other unusable option.
-_NO_DOMAIN_FAMILIES = {"section", "section_row"}
+_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth"}
 
 
 def _hv_paths(obj) -> list:

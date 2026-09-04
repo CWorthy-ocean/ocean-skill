@@ -183,12 +183,15 @@ def test_a_point_with_neither_time_nor_depth_refuses_to_plot(stub):
 
 
 def test_a_point_with_depth_fans_into_one_item_per_level(stub):
+    """An explicit list of levels keeps the per-level lines (see
+    ``Field.is_time_depth``): a bare or banded select at this same point instead
+    draws the new ``time_depth`` panel (tests/test_field_time_depth.py)."""
     stub(_point_with_depth(depths=(0.0, 50.0, 100.0)))
     f = _make()
     items = f._series_items()
     assert len(items) == 3
     assert [item["aligned"].attrs["actual_depth"] for item in items] == [0.0, 50.0, 100.0]
-    fig = f.plot()
+    fig = _make(select={"depth": [0.0, 50.0, 100.0]}).plot()
     assert len(fig.axes[0].lines) == 3
 
 
@@ -320,8 +323,11 @@ def test_three_variables_become_three_rows(stub):
 
 
 def test_depth_fanout_multiplies_items_per_variable(stub):
+    """An explicit list of levels keeps every member drawing as ``series`` -- a
+    bare or banded select instead makes every member ``time_depth``, which
+    ``FieldSet.plot`` refuses (see ``test_a_time_depth_set_refuses_to_plot``)."""
     stub(_point_with_depth(depths=(0.0, 50.0, 100.0)))
-    fs = _make_set([NITRATE, SILICATE])
+    fs = _make_set([NITRATE, SILICATE], select={"depth": [0.0, 50.0, 100.0]})
     assert len(fs._items()) == 6
     fig = fs.plot()
     assert sum(len(ax.get_lines()) for ax in fig.axes) == 6

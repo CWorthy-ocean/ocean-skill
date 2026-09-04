@@ -100,6 +100,91 @@ def _labelless_vertical(da) -> str | None:
     return zdim
 
 
+def _facet_dims_of(da) -> tuple[str | None, str | None]:
+    """``(row_dim, col_dim)`` for an arbitrary field.
+
+    :attr:`Field.facet_dims`'s own logic, extracted so it can be read off a field
+    other than ``self.data`` (a reduced top-level slice, most often -- see
+    :meth:`Field._facet_field_and_depth`/:meth:`Field._facet_item`).
+    """
+    from ocean_skill.align import _lat_name, _lon_name
+
+    lon, lat = _lon_name(da), _lat_name(da)
+    spatial: set[str] = set()
+    for name in (lon, lat):
+        if name is not None:
+            spatial |= {str(d) for d in da[name].dims}
+    return _facet_dims(da, spatial)
+
+
+def _grid_has_vertical_axis(meta: dict[str, Any]) -> bool:
+    """Whether a catalog entry's own metadata declares a vertical axis at all.
+
+    Read-free -- three ways :func:`ocean_skill.build`'s probes record one:
+    ``vertical`` (a ROMS entry's s-coordinate parameters, written by
+    ``_roms_metadata``), ``axes["Z"]`` (any entry's declared vertical column/
+    dimension), or ``vertical_levels`` (an observational grid's own level count).
+    Used by :meth:`Field._grid_metadata_if_eligible`'s caller to decide whether a
+    bare vertical select is worth redirecting to the surface before anything is
+    read -- a source with none of these has nothing to default *away from*.
+    """
+    return bool(
+        meta.get("vertical")
+        or (meta.get("axes") or {}).get("Z")
+        or meta.get("vertical_levels")
+    )
+
+
+def _top_level(da, zdim: str, *, source: str):
+    """Reduce ``da``'s vertical axis ``zdim`` to its shallowest level.
+
+    The fallback half of the grid surface default (see
+    :meth:`Field._facet_field_and_depth`), reached only when the read-free half
+    (:meth:`Field._grid_metadata_if_eligible`) could not settle it first --
+    an uncatalogued source, or the hand-built stubs tests construct directly.
+
+    A coordinate-bearing axis (an observational product's own reported levels)
+    picks the level nearest 0. A coordinate-less native ``s_rho``/``s_w`` axis
+    with a same-dim ``z_rho`` (see :func:`_labelless_vertical`) picks the index
+    whose ``z_rho`` reads shallowest -- averaged over any other dimension
+    ``z_rho`` might carry (a curvilinear grid's own eta/xi), so one index names
+    the top level everywhere a facet panel might be drawn, not just at a single
+    column. Anything else -- coordinate-less with no ``z_rho`` either -- has no
+    way to tell top from bottom and is refused, the same message
+    :meth:`Field._series_items`/:meth:`Field._refuse_labelless_facet` give the
+    same shape elsewhere.
+
+    Returns ``(field, "surface")`` -- the depth label a caller attaches to the
+    item it builds, matching what an explicit ``select={"depth": "surface"}``
+    would report via :func:`ocean_skill.comparison._depth_label`.
+    """
+    import numpy as np
+
+    if zdim in da.coords:
+        levels = np.asarray(da[zdim].values, dtype="float64")
+        k = int(np.argmin(np.abs(levels)))
+        top = da.isel({zdim: k})
+        top.attrs["actual_depth"] = float(abs(levels[k]))
+        return top, "surface"
+
+    z_rho = da.coords.get("z_rho")
+    if z_rho is not None and zdim in z_rho.dims:
+        reduce_dims = [d for d in z_rho.dims if d != zdim]
+        shallowest = z_rho.mean(dim=reduce_dims) if reduce_dims else z_rho
+        k = int(np.asarray(shallowest).argmax())
+        top = da.isel({zdim: k})
+        top.attrs["actual_depth"] = float(np.abs(np.asarray(top["z_rho"])).mean())
+        return top.drop_vars([zdim, "z_rho"], errors="ignore"), "surface"
+
+    raise ValueError(
+        f"{source!r}'s native vertical axis ({zdim!r}) carries no coordinate to "
+        "pick a surface level from, and no z_rho either. Narrow it with "
+        "select= (e.g. {'depth': 'surface'}, a number, a list, or 'column' at "
+        'a point) or {\'sigma0\': ...}, or collapse it with aggregate= (e.g. '
+        '{"Z": "mean"}).'
+    )
+
+
 class Field:
     """One source reduced to a map, a series of maps over one axis, or a line.
 
@@ -220,17 +305,9 @@ class Field:
         """``(row_dim, col_dim)`` — the axes whose values become panels.
 
         ``(None, None)`` is a single map, ``(None, "time")`` a series of them,
-        ``("z", "time")`` a grid of levels by periods. See :func:`_facet_dims`.
+        ``("z", "time")`` a grid of levels by periods. See :func:`_facet_dims_of`.
         """
-        from ocean_skill.align import _lat_name, _lon_name
-
-        da = self.data
-        lon, lat = _lon_name(da), _lat_name(da)
-        spatial: set[str] = set()
-        for name in (lon, lat):
-            if name is not None:
-                spatial |= {str(d) for d in da[name].dims}
-        return _facet_dims(da, spatial)
+        return _facet_dims_of(self.data)
 
     @property
     def facet_dim(self) -> str | None:
@@ -259,10 +336,8 @@ class Field:
 
         Mirrors :attr:`is_series` one axis over: a select that narrows both
         horizontal axes to one position leaves a surviving vertical axis standing
-        with no time axis to draw a line through instead (see :attr:`is_series`,
-        checked first in :attr:`family` -- a select that keeps *both* time and
-        depth standing still draws as a series, one line per level, exactly as
-        before). The water column a station is, at one instant.
+        with no time axis to draw a line through instead. The water column a
+        station is, at one instant.
         """
         from ocean_skill.align import point_of
         from ocean_skill.operators import resolve_dim
@@ -275,6 +350,34 @@ class Field:
         return (tdim is None or tdim not in da.dims) and (
             zdim is not None and zdim in da.dims
         )
+
+    @property
+    def is_time_depth(self) -> bool:
+        """Whether this field's prepared data is a place through both time and depth.
+
+        Checked *before* :attr:`is_series` in :attr:`family`: a select that keeps
+        both time and depth standing at one place used to draw as a series, one
+        line per level -- now it draws as one ``time_depth`` panel (colour =
+        value, x = time, y = depth) instead, the default shape for a bare
+        ``timeSeriesProfile`` station. An *explicit* list of levels
+        (``select={"depth": [0, 50, 100]}``) is excluded and keeps the old
+        per-level lines: naming discrete levels is asking to tell them apart, not
+        to see the whole record, and a list too long to draw as separate lines
+        should be narrowed or aggregated, not silently redirected here.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.comparison import _selected_depth
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        if point_of(da) is None:
+            return False
+        tdim = resolve_dim(da, "T")
+        zdim = resolve_dim(da, "Z")
+        if tdim is None or tdim not in da.dims or zdim is None or zdim not in da.dims:
+            return False
+        requested = _selected_depth(self.select, default=None)
+        return not isinstance(requested, list | tuple)
 
     @property
     def is_section(self) -> bool:
@@ -300,12 +403,18 @@ class Field:
     def family(self) -> str:
         """The plot family this field's own shape admits.
 
+        ``time_depth`` (colour = value against time and depth at one place),
         ``series`` (a line over time at one place), ``profile`` (a line down
         depth at one place, one instant), ``section`` (a cut through depth and
         along-path distance), or ``field_facet`` (map panels) — no argument
         selects it, the same as :attr:`ocean_skill.comparison.Comparison.family`
-        — the prepared data's shape decides.
+        — the prepared data's shape decides. :attr:`is_time_depth` is checked
+        *before* :attr:`is_series`, since both hold for a point where time and
+        depth both survive; only an explicit list of depths falls through to
+        ``series`` instead (see :attr:`is_time_depth`).
         """
+        if self.is_time_depth:
+            return "time_depth"
         if self.is_series:
             return "series"
         if self.is_profile:
@@ -317,6 +426,11 @@ class Field:
     @property
     def family_reason(self) -> str:
         """Why :attr:`family` came out the way it did, for tracing a surprise."""
+        if self.is_time_depth:
+            return (
+                "drawn as depth against time: the selection leaves one place "
+                "with both time and depth standing"
+            )
         if self.is_series:
             return "drawn as a line: the selection leaves one place, so the surviving time axis is the x"
         if self.is_profile:
@@ -424,6 +538,48 @@ class Field:
             items.append(item)
         return items
 
+    def _time_depth_item(self) -> dict[str, Any]:
+        """Return this field's data as one ``time_depth`` spec item.
+
+        The single-source counterpart of :meth:`_series_items`/:meth:`_profile_items`
+        for the shape :attr:`is_time_depth` recognizes: a point with both time and
+        depth standing, drawn as one panel rather than fanned into several lines.
+        Anything else left standing beyond time and depth is refused, the same
+        wording :meth:`_series_items` uses for a line's own third axis.
+
+        A bare native ``s_rho``/``s_w`` axis with no coordinate of its own (see
+        :func:`_labelless_vertical`) is refused here too, for the same reason
+        :meth:`_series_items` refuses it for a fanned line: an unlabeled index
+        position says nothing about which depth a marker or mesh cell is at.
+        """
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        tdim = resolve_dim(da, "T")
+        zdim = resolve_dim(da, "Z")
+        extra = [str(d) for d in da.dims if d not in (tdim, zdim)]
+        if extra:
+            raise ValueError(
+                f"this time_depth panel still has {extra} beyond time and depth, "
+                "and it has only those two axes to give away. Collapse it with "
+                f'aggregate= (e.g. {{"{extra[0]}": "mean"}}) or narrow it with '
+                "select=."
+            )
+        if _labelless_vertical(da) is not None:
+            raise ValueError(
+                f"{self.source!r}'s native vertical axis ({zdim!r}) carries no "
+                "coordinate to say which depth each reading is at, and no z_rho "
+                "either. Narrow it with select= (e.g. {'depth': [0, 50, 100]}, "
+                "'surface', or {'sigma0': ...}) or collapse it with aggregate= "
+                '(e.g. {"Z": "mean"}).'
+            )
+        return {
+            "field": da,
+            "units": da.attrs.get("units"),
+            "standard_name": self.standard_name,
+            "label": self.label or self.source,
+        }
+
     def _profile_items(self) -> list[dict[str, Any]]:
         """Return this field's data as one or more single-source profile items.
 
@@ -524,8 +680,15 @@ class Field:
             "time-animated sections are a follow-up."
         )
 
-    def _refuse_labelless_facet(self) -> None:
+    def _refuse_labelless_facet(self, field: Any = None) -> None:
         """Raise if a facet axis is a vertical dim with no coordinate to label it.
+
+        ``field`` defaults to ``self.data``, but a caller that already ran
+        :meth:`_facet_field_and_depth` passes its *result* instead -- that field
+        has already had a bare vertical axis reduced away wherever it could be
+        (see :func:`_top_level`), so this must not re-examine the unreduced
+        ``self.data`` and raise for an axis that no longer stands in what is
+        actually about to be drawn.
 
         A bare native ``s_rho``/``s_w`` axis -- a model field with nothing narrowed
         vertically (see :func:`_labelless_vertical`, the default a bare :func:`field`
@@ -537,8 +700,9 @@ class Field:
         labeled obs gridded product's own ``depth`` axis is never caught by this,
         whatever facet size it draws as -- see :func:`_labelless_vertical`.
         """
-        zdim = _labelless_vertical(self.data)
-        if zdim is not None and zdim in self.facet_dims:
+        field = self.data if field is None else field
+        zdim = _labelless_vertical(field)
+        if zdim is not None and zdim in _facet_dims_of(field):
             raise ValueError(
                 f"{self.source!r}'s native vertical axis ({zdim!r}) carries no "
                 "coordinate to label its levels with, so drawing it as panels or "
@@ -548,19 +712,218 @@ class Field:
                 'aggregate= (e.g. {"Z": "mean"}).'
             )
 
-    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw this field: as map panels, a vertical section, a profile, or a line.
+    def _catalog_metadata(self) -> dict[str, Any]:
+        """Return this field's catalog entry metadata, or ``{}`` if unresolvable.
 
-        Which of the four is decided by the prepared data's own shape, never an
-        argument — see :attr:`family`. Goes through the renderer registry, so
-        ``renderer="holoviews"`` gives the interactive version of the same plot
-        with no other change.
+        Read-free -- an uncatalogued or hand-built ``source`` (a test stub, most
+        often) is not an error here the way it would be at read time; it just
+        means none of the catalog-driven defaults below
+        (:meth:`_grid_metadata_if_eligible`) apply.
+        """
+        from ocean_skill.catalog import resolve
+
+        try:
+            return resolve(self.source).metadata
+        except KeyError:
+            return {}
+
+    def _grid_metadata_if_eligible(self) -> dict[str, Any] | None:
+        """Return this field's catalog metadata, when the grid defaults apply to it.
+
+        The grid defaults (:meth:`_surfaced`, the bare-multi-step-time refusal in
+        :meth:`plot`) are read-free shortcuts for the common case -- a catalogued
+        ``featureType: grid`` source, narrowed to neither a horizontal point nor a
+        transect (either of those draws as a line/section/profile instead, see
+        :attr:`family`, where the catalog's own vertical/time metadata says
+        nothing about what the *reduced* shape needs). ``None`` here means one of
+        those does not hold, or the source is not catalogued at all -- the
+        fallback half of the surface default (:func:`_top_level`, called from
+        :meth:`_facet_field_and_depth`) and the ordinary time-based refusal still
+        apply once the data is actually loaded.
+        """
+        from ocean_skill.operators import point_in_spec
+
+        if point_in_spec(self.select) is not None or "transect" in self.select:
+            return None
+        meta = self._catalog_metadata()
+        if meta.get("featureType") != "grid":
+            return None
+        return meta
+
+    def _bare_vertical(self) -> bool:
+        """Whether nothing -- select or aggregate -- named a vertical request."""
+        from ocean_skill.comparison import _names_vertical, _vertical_only
+
+        return not _names_vertical(self.select) and not _vertical_only(
+            self.aggregate
+        )
+
+    def _bare_time(self) -> bool:
+        """Whether nothing -- select or aggregate -- narrowed the time axis.
+
+        Checked against every accepted spelling: ``time``/``T``/``t`` (see
+        :data:`ocean_skill.sources._TIME_KEYS`) plus this source's own declared
+        axis name (``axes["T"]``, e.g. an ERDDAP entry's ``"time (UTC)"``), the
+        same union :func:`ocean_skill.sources.erddap_constraints` reads. An
+        aggregate naming time (a ``resample``/``groupby``) counts as narrowing it
+        just as much as a ``select`` does -- either one says the caller has
+        already decided what the panels are.
+        """
+        from ocean_skill.sources import _TIME_KEYS
+
+        meta = self._catalog_metadata()
+        time_keys = set(_TIME_KEYS)
+        axis_t = (meta.get("axes") or {}).get("T")
+        if axis_t:
+            time_keys.add(axis_t)
+        agg = self.aggregate or {}
+        return not any(k in self.select for k in time_keys) and not any(
+            k in agg for k in time_keys
+        )
+
+    def _surfaced(self) -> Field:
+        """Return a new, otherwise identical :class:`Field` selecting the surface.
+
+        The read-free half of the grid surface default: a catalogued
+        ``featureType: grid`` source with nothing named vertically defaults to
+        ``select={"depth": "surface"}`` -- the same explicit key
+        :meth:`ocean_skill.comparison.Comparison._prepare_lane` injects for its
+        own unset default, so this shares that lane's cache entry rather than
+        opening a new one, and :meth:`as_item` reports the level from the select
+        exactly as an explicit request would.
+        """
+        return Field(
+            self.source,
+            self.variable,
+            select={**self.select, "depth": "surface"},
+            aggregate=self.aggregate,
+            label=self.label,
+            cache=self.cache,
+            qc=self.qc,
+        )
+
+    def _refuse_bare_multistep_time(self) -> None:
+        """Raise the "no default instant" message :meth:`plot` gives a bare grid.
+
+        Named once so the read-free pre-check (against catalog-declared time
+        coverage) and the definitive post-load check (against the surviving time
+        dim's own size) raise identically -- a caller should not be able to tell
+        which of the two caught it.
+        """
+        raise ValueError(
+            f"{self.source!r} has a whole time record standing with nothing "
+            "narrowing it, and .plot() draws one instant, not a movie -- there "
+            "is no single default to pick. Name one with select={'time': "
+            "'2024-06-15'} (or a slice), reduce it with aggregate= (e.g. "
+            "{'time': {'resample': '1MS', 'reduce': 'mean'}} for one panel per "
+            "month), or call .movie() to play every step instead."
+        )
+
+    def _refuse_bare_multistep_time_precheck(self, meta: dict[str, Any]) -> None:
+        """Read-free half of the bare-time refusal, against catalog time coverage.
+
+        ``meta`` is what :meth:`_grid_metadata_if_eligible` already resolved --
+        not re-resolved here, so a caller that already paid for it (:meth:`plot`)
+        never pays twice. A source with no declared coverage, or one no more
+        than a couple of days wide (same-day multi-step output, most often),
+        slips through to the definitive check in :meth:`plot`, once the data
+        actually says how many steps survived.
+        """
+        import pandas as pd
+
+        from ocean_skill.comparison import _TIME_COVERAGE_PAD_DAYS, _time_coverage_of
+
+        if not self._bare_time():
+            return
+        coverage = _time_coverage_of(self.source)
+        if coverage is None:
+            return
+        start, stop = coverage
+        if stop - start > pd.Timedelta(days=2 * _TIME_COVERAGE_PAD_DAYS):
+            self._refuse_bare_multistep_time()
+
+    def _facet_field_and_depth(self) -> tuple[Any, str | None]:
+        """``(field, depth_label)`` for a ``field_facet``/``facet_movie`` item.
+
+        ``self.data`` unchanged, or its bare vertical axis reduced to the
+        shallowest level first (:func:`_top_level`) -- the fallback half of the
+        grid surface default, for whatever :meth:`_grid_metadata_if_eligible`'s
+        read-free half could not settle before the data was ever read: an
+        uncatalogued source, or a hand-built ``prepare_source`` stub. A field
+        the read-free half already redirected (:meth:`_surfaced`) reaches here
+        with nothing left to reduce -- its own select already named the
+        surface, so :attr:`_bare_vertical` is false and this is a no-op.
+        """
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        zdim = resolve_dim(da, "Z")
+        if zdim is None or zdim not in da.dims or not self._bare_vertical():
+            return da, None
+        return _top_level(da, zdim, source=self.source)
+
+    def _facet_item(self, field: Any, depth_override: str | None) -> dict[str, Any]:
+        """Build a ``field_facet``/``facet_movie`` item from ``field``.
+
+        The single-source counterpart of :meth:`as_item` for whichever field
+        :meth:`_facet_field_and_depth` decided to draw -- ordinarily
+        ``self.data`` itself, or its top-level slice. ``facet_dim``/``row_dim``
+        are read off ``field``'s own shape (:func:`_facet_dims_of`), not
+        ``self.data``'s, so a level already reduced away here does not also
+        count as a facet axis.
+        """
+        from ocean_skill.comparison import _depth_label, _selected_depth
+
+        if depth_override is not None:
+            depth = depth_override
+        else:
+            requested = _selected_depth(self.select, default=None)
+            depth = _depth_label(requested) if requested is not None else None
+        item = {
+            "field": field,
+            "units": field.attrs.get("units"),
+            "standard_name": self.standard_name,
+            "depth": depth,
+            "label": self.label or self.source,
+        }
+        row_dim, facet_dim = _facet_dims_of(field)
+        return {**item, "facet_dim": facet_dim, "row_dim": row_dim}
+
+    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Draw this field: map panels, a section, a profile, a line, or depth vs time.
+
+        Which of the five is decided by the prepared data's own shape, never an
+        argument — see :attr:`family`. The one exception is a catalogued
+        ``featureType: grid`` source with a bare vertical select, which is
+        narrowed to the surface before :attr:`family` is even consulted (see
+        :func:`field`'s own docstring) -- a map has no vertical axis to draw at
+        all, so this is the drawing-time default that keeps the data itself,
+        read through :attr:`data`, whole either way. Goes through the renderer
+        registry, so ``renderer="holoviews"`` gives the interactive version of
+        the same plot with no other change.
         """
         from ocean_skill.align import point_of
+        from ocean_skill.operators import resolve_dim
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        if self.family == "series":
+        # The two grid defaults, read-free where a catalog can settle them before
+        # anything is read: a bare vertical select on a catalogued grid draws the
+        # surface (recurse on the surfaced field, which then runs this same method
+        # start to finish -- including the time check right below, now that the
+        # vertical question is settled); a bare, genuinely multi-step time axis has
+        # no single default instant, and says so rather than guessing one.
+        grid_meta = self._grid_metadata_if_eligible()
+        if grid_meta is not None:
+            if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
+                return self._surfaced().plot(renderer=renderer, **kwargs)
+            self._refuse_bare_multistep_time_precheck(grid_meta)
+
+        if self.family == "time_depth":
+            spec = PlotSpec(
+                family="time_depth", items=[self._time_depth_item()], options=kwargs
+            )
+        elif self.family == "series":
             spec = PlotSpec(
                 family="series", items=self._series_items(), options=kwargs
             )
@@ -588,9 +951,26 @@ class Field:
                     "collapses it), or widen select= to keep a horizontal extent "
                     "for a map."
                 )
-            self._refuse_labelless_facet()
+            # The fallback half of the surface default -- whatever the read-free
+            # check above could not settle (an uncatalogued source, a test stub)
+            # -- runs first: it raises its own labelless-axis message when the
+            # bare vertical axis it finds cannot be reduced at all, before the
+            # bare-time check below gets a chance to raise a less specific one for
+            # the same field.
+            field, depth_override = self._facet_field_and_depth()
+            tdim = resolve_dim(field, "T")
+            if (
+                tdim is not None
+                and tdim in field.dims
+                and field.sizes[tdim] > 1
+                and self._bare_time()
+            ):
+                self._refuse_bare_multistep_time()
+            self._refuse_labelless_facet(field)
             spec = PlotSpec(
-                family="field_facet", items=[self.as_item()], options=kwargs
+                family="field_facet",
+                items=[self._facet_item(field, depth_override)],
+                options=kwargs,
             )
         return render(spec, renderer=renderer)
 
@@ -629,6 +1009,24 @@ class Field:
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
+        # Only the surface half of the grid defaults applies to a movie -- a bare,
+        # multi-step time axis is exactly what .movie() is for, so there is no
+        # time refusal here the way there is in .plot() (see
+        # _grid_metadata_if_eligible).
+        grid_meta = self._grid_metadata_if_eligible()
+        if (
+            grid_meta is not None
+            and self._bare_vertical()
+            and _grid_has_vertical_axis(grid_meta)
+        ):
+            return self._surfaced().movie(renderer=renderer, **kwargs)
+
+        if self.is_time_depth:
+            raise ValueError(
+                f"{self.source!r} draws as depth against time (see .family), not "
+                "a map -- the whole record is already on one panel. Use .plot() "
+                "instead; it already shows the whole record."
+            )
         if self.is_series:
             raise ValueError(
                 f"{self.source!r} has been reduced to a point and draws as a line "
@@ -649,8 +1047,13 @@ class Field:
                 "Time-animated sections are a follow-up. Use .plot() instead; it "
                 "already shows the whole section."
             )
-        self._refuse_labelless_facet()
-        spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
+        field, depth_override = self._facet_field_and_depth()
+        self._refuse_labelless_facet(field)
+        spec = PlotSpec(
+            family="facet_movie",
+            items=[self._facet_item(field, depth_override)],
+            options=kwargs,
+        )
         return render(spec, renderer=renderer)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -754,6 +1157,17 @@ class FieldSet:
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
+        time_depth = [f for f in self.fields if f.family == "time_depth"]
+        if time_depth:
+            names = ", ".join(
+                _short_variable_label(f.variable) for f in time_depth
+            )
+            raise ValueError(
+                f"{names} draw as depth against time (see .family), which has no "
+                "overlay or facet composition of its own yet -- plot one variable "
+                "at a time with osk.field(source, variable).plot() instead. "
+                "Stacked time_depth panels for several variables are a follow-up."
+            )
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
         mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1
         if not_lines or mixed:
@@ -856,6 +1270,18 @@ def field(
     same behavior. A full model domain with nothing narrowed can be large; see the
     memory-use warning this prints if it is.
 
+    **The one exception**: :meth:`Field.plot`/:meth:`Field.movie` on a catalogued
+    ``featureType: grid`` source narrow a bare vertical axis to the surface
+    themselves, right before drawing — a map has no vertical axis to put on the
+    page at all, so the whole-column default above would otherwise mean "facet
+    over depth too", almost never what a bare call meant. ``.data`` itself is
+    never touched by this; it is a drawing-time default only, and an explicit
+    ``select={"depth": ...}``/``aggregate={"Z": ...}`` always wins. A bare,
+    genuinely multi-step time axis has no equivalent single default instant, and
+    ``.plot()`` says so rather than guessing one — narrow it with ``select=
+    {"time": ...}``, reduce it with ``aggregate=``, or call ``.movie()`` to play
+    every step instead.
+
     A ``select`` that narrows both horizontal axes to one position draws as a line
     over whatever axis survives instead of map panels — never a separate call, the
     same ``.plot()``::
@@ -865,9 +1291,16 @@ def field(
             select={"lon": -144.25, "lat": 49.98, "time": slice("2012-01", "2012-12")},
         ).plot()
 
-    One solid line, no reference to compare against (see
-    :attr:`Field.family`/``family_reason`` for why a given call drew what it drew).
-    ``renderer="holoviews"`` gives the interactive version with no other change.
+    One solid line, no reference to compare against. Keeping *both* time and depth
+    standing at that same point instead — a bare ``timeSeriesProfile`` station's
+    own shape — draws a third way, one ``time_depth`` panel (colour = value, x =
+    time, y = depth)::
+
+        osk.field("ctd_station_HV5", "sea_water_temperature").plot()
+
+    See :attr:`Field.family`/``family_reason`` for why a given call drew what it
+    drew. ``renderer="holoviews"`` gives the interactive version with no other
+    change.
 
     ``variable`` also accepts a list, fanning like :func:`ocean_skill.comparison
     .compare`'s ``variables=`` — one :class:`Field` per entry, sharing this same

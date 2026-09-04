@@ -62,6 +62,7 @@ __all__ = [
     "section_row",
     "series",
     "skill_map",
+    "time_depth",
 ]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
@@ -2924,6 +2925,142 @@ def section(
     return fig
 
 
+def time_depth(
+    field,
+    *,
+    title: str | None = None,
+    units: str | None = None,
+    standard_name: str | None = None,
+    label: str | None = None,
+    mark: str | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+):
+    """Draw one ``time_depth`` panel: depth against time, at one place.
+
+    The default figure for a bare :class:`~ocean_skill.field.Field` whose select
+    leaves both a time axis and a vertical axis standing at one point -- a
+    ``timeSeriesProfile`` station's own shape, most often. See
+    :func:`ocean_skill.plot.time_depth.prepare_time_depth` for the axis
+    conventions this draws against -- positive-down depth with the y-axis
+    inverted, so 0 m sits at the top and the deepest reading at the bottom; time
+    on x, labelled concisely without the 45-degree tilt (see :func:`_date_axis`).
+
+    ``mark`` defaults to :func:`ocean_skill.plot.time_depth.default_mark`'s own
+    call: ``"scatter"`` for a ragged repeat-visit record (most of a bottle
+    station's (time, depth) rectangle is holes no cast actually sampled), or
+    ``"pcolormesh"`` for a dense one (a mooring's fixed levels, a model column).
+    Pass it explicitly to override either way. A scatter marker's colour reads
+    the value at that (time, depth) cell; a mesh cell with no reading at all
+    (below where a shorter cast reached, say) draws as the same grey a map draws
+    for land (``ax.set_facecolor``).
+
+    ``tick_label_kwargs`` styles the date ticks, unlike :func:`section` (whose
+    plain Cartesian ticks have no gridliner styling to carry) -- a date axis's
+    ticks are exactly the labels worth styling here. There is no ``domain``: a
+    ``time_depth`` panel has no map to outline.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
+    option set to each renderer (see :func:`_warn_if_interactive_only`) — a
+    ``time_depth`` panel's own mesh or scatter is small enough that neither
+    changes anything here.
+    """
+    import matplotlib.pyplot as plt
+    import xarray as xr
+
+    from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+    values, geometry = prepare_time_depth(field)
+    if mark is None:
+        mark = default_mark(values)
+    if title is None:
+        title = suptitle_text(
+            standard_name, (geometry.place_note, geometry.period_note), label=label
+        )
+
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=True,  # one panel: a bar below leaves it the full width
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=1,
+        ncols=1,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize, ncols=1, nrows=1, font_scale=font_scale, figure_ncols=REFERENCE_GRID[0]
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+
+    cmap, _ = cmaps_for(standard_name)
+    vmin, vmax = _limits(values)
+    norm = norm_for(standard_name, vmin, vmax)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+    ax.set_facecolor("0.85")  # the section family's absent-cell grey, doing the
+    # same job here: a mesh cell with no reading at all is genuinely absent data.
+    x = values[geometry.x_name]
+    y = values[geometry.y_name]
+    if mark == "scatter":
+        # x/y are always broadcast to the value grid's own shape already (see
+        # prepare_time_depth), so this is one scatter call over finite cells,
+        # no reshaping needed here.
+        xb, yb, vb = xr.broadcast(x, y, values)
+        finite = np.asarray(vb.notnull())
+        im = ax.scatter(
+            np.asarray(xb)[finite],
+            np.asarray(yb)[finite],
+            c=np.asarray(vb)[finite],
+            cmap=cmap,
+            norm=norm,
+            s=26,
+            edgecolor="white",
+            linewidth=0.4,
+        )
+    else:
+        im = ax.pcolormesh(x, y, values, cmap=cmap, norm=norm)
+    ax.invert_yaxis()
+    ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+    ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+    _date_axis(ax, scale, tick_label_kwargs)
+
+    lab = units or ""
+    _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=[ax])
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def section_row(
     aligned,
     *,
@@ -4317,6 +4454,7 @@ def _top_level_options() -> frozenset[str]:
             profile,
             skill_map,
             locations,
+            time_depth,
         )
         for name in inspect.signature(fn).parameters
     )
@@ -4392,6 +4530,8 @@ def render(spec, **kwargs: Any):
         _check_options(section, opts)
     elif family == "section_row":
         _check_options(section_row, opts)
+    elif family == "time_depth":
+        _check_options(time_depth, opts)
     elif family == "profile":
         _check_options(profile, opts)
     elif family == "skill_map":
@@ -4468,6 +4608,15 @@ def render(spec, **kwargs: Any):
             depth=item.get("depth"),
             time=item.get("time"),
             metrics=item.get("metrics"),
+            **opts,
+        )
+    if family == "time_depth":
+        item = spec.single
+        return time_depth(
+            item["field"],
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            label=item.get("label"),
             **opts,
         )
     if family in ("taylor", "target", "paired", "portrait"):

@@ -206,6 +206,31 @@ Which of the two — map panels or a line — `.plot()` draws is read off the da
 shape (`Field.family`/`family_reason`), the same rule `compare()` follows between a
 score map and a line comparison; there is no argument that picks one over the other.
 
+A select that leaves **both time and depth** standing at one place — the default shape
+of a `timeSeriesProfile` station (`ctd_station_HV5`, say) — draws a third way: one
+panel, colour = value, x = time, y = depth (inverted, surface at top), scattered points
+for a ragged repeat-visit record or a mesh for a dense one:
+
+```python
+osk.field("ctd_station_HV5", "sea_water_temperature").plot()
+# one time_depth panel, colour = temperature, no aggregate= or select= needed
+```
+
+Naming an explicit list of levels (`select={"depth": [0, 50, 100]}`) still draws the
+old way instead — one line per level — since asking for discrete levels is asking to
+tell them apart, not to see the whole record. There is no separate call for any of
+this: `.plot()` reads it all off `Field.family`.
+
+**A bare grid defaults to its surface.** `osk.field(source, variable)` with nothing
+selected keeps the whole vertical axis standing for a catalogued `featureType: grid`
+source (see "Nothing is reduced unless you ask", below) — but its own map panels have
+no vertical axis to draw at all, so `.plot()`/`.movie()` narrow to `select={"depth":
+"surface"}` first, the same default `compare()` already has. Pass `select={"depth":
+...}` (or `{"sigma0": ...}`) explicitly for anything else. A bare, genuinely
+multi-step time axis has no equivalent single default instant, and `.plot()` says so
+rather than guessing one — narrow it with `select={"time": ...}`, reduce it with
+`aggregate=`, or call `.movie()` to play every step instead.
+
 **More than one variable on the same line plot** — pass a list instead of a name, and
 `osk.field` fans it into a `FieldSet` (one `Field` per variable, sharing this same
 `select`/`aggregate`), drawn on one figure:
@@ -227,8 +252,13 @@ secondary axis by default, three or more each get their own row (see
 `docs/plot_styling_reference.md`). There is no separate multi-variable option to
 learn — the same `.plot()` keyword arguments (`rows=`, `cols=`, `secondary_y=`) apply.
 
-**Nothing is reduced unless you ask.** There is no default aggregation anywhere: omit
-`aggregate` and every step of the selection survives as its own panel or frame. A
+**Nothing is reduced unless you ask** — for an `osk.field()` call itself: an unset
+`select`/`aggregate` leaves every native level and every native step standing, unlike
+`compare()`'s own unset vertical default (the surface). The one exception is `.plot()`/
+`.movie()` on a catalogued grid source, which narrows a bare vertical axis to the
+surface right before drawing (see above) since a map has nowhere to put it; `.data`
+itself is never touched by that narrowing. There is no default *aggregation* anywhere:
+omit `aggregate` and every step of the selection survives as its own panel or frame. A
 `compare()` needs a single map, so it will tell you to choose rather than average an axis
 behind your back:
 
@@ -356,7 +386,9 @@ logging instrument) reads this way once its table is catalogued
 `featureType: timeSeriesProfile`: bare `compare()` draws it as a mooring-style
 series at its shallowest level, `select={"time": <one visit>}` draws one cast,
 and `times=[<visit>, <visit>, ...]` overlays several casts in one panel, same as
-a real profile source's own multi-cast overlay above.
+a real profile source's own multi-cast overlay above. A bare `osk.field()` on the
+same station has no such default and keeps the whole record instead, which draws
+as a `time_depth` panel — see above.
 
 **A vertical slice through the model** — `select={"transect": {"<dim>": <index>}}`
 cuts along a named grid dimension instead of narrowing to one place, and draws as
