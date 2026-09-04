@@ -464,11 +464,15 @@ def _field_items(
     if geo is not None:
         _warn_if_outside_domain(geo, f.source)
         label = f.label or _short_variable_label(f.variable)
+        # A Field does nothing vertically unless asked (unlike a Comparison, whose
+        # own default is the surface) -- default=None so an unselected field's
+        # hover says nothing about depth rather than claiming "surface".
+        requested_depth = _display_depth(f.variable, f.select, default=None)
         hover = _hover(
             label,
             featureType="selection",
             variables=_variable_label(f.variable),
-            depth=_depth_label(_display_depth(f.variable, f.select)),
+            depth=_depth_label(requested_depth) if requested_depth is not None else "",
             time_coverage=_time_label(_display_time(f.select)),
             title=_selection_title(geo),
         )

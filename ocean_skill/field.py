@@ -21,7 +21,11 @@ whose reference is a station.
 The reduction, the caching and the vocabulary handling are all the comparison lane's,
 reached through :func:`ocean_skill.comparison.prepare_source` — a model field prepared
 for a comparison and the same field prepared on its own are the same field, and they
-share one cache entry.
+share one cache entry *whenever the select names the same thing*. Vertically they
+often do not: a :class:`~ocean_skill.comparison.Comparison` with no vertical select
+still means the surface, its own default; a bare :class:`Field` means "leave the
+vertical axis alone" — an unset select is not a shared cache entry between the two,
+though an explicit one (``select={"depth": ...}``) always is.
 """
 
 from __future__ import annotations
@@ -69,6 +73,31 @@ def _facet_dims(da, spatial_dims: set[str]) -> tuple[str | None, str | None]:
     if vertical in extra:
         return vertical, next(d for d in extra if d != vertical)
     return extra[0], extra[1]
+
+
+def _labelless_vertical(da) -> str | None:
+    """Return the vertical dim name if it stands with no coordinate to label it.
+
+    A bare native ``s_rho``/``s_w`` dimension -- ROMS ships no coordinate of its own
+    for it -- reaches a figure at all only when nothing was named vertically (see
+    :func:`ocean_skill.comparison._prepare`'s ``surface`` flag, the default a bare
+    :func:`field` leaves in force): unlabeled index positions in a legend or a facet
+    row title would say nothing about depth and actively mislead about what varies
+    from one to the next. A 1-D ``z_rho`` coordinate on that same dimension is a real
+    label instead — the same fallback :func:`ocean_skill.plot.profile._vertical_coord`
+    already uses for a profile down native levels — and is not "labelless" here.
+    Anything else (an observational product's own reported ``depth``, say) already
+    carries a coordinate and never triggers this, whatever facet size it draws as.
+    """
+    from ocean_skill.operators import resolve_dim
+
+    zdim = resolve_dim(da, "Z")
+    if zdim is None or zdim not in da.dims or zdim in da.coords:
+        return None
+    z_rho = da.coords.get("z_rho")
+    if z_rho is not None and z_rho.ndim == 1 and zdim in z_rho.dims:
+        return None
+    return zdim
 
 
 class Field:
@@ -337,6 +366,14 @@ class Field:
         Anything else left standing beyond time and depth is refused, the same as
         :func:`_facet_dims` refuses a third map axis — a line has only one axis to
         give away.
+
+        A bare native ``s_rho``/``s_w`` axis (a model point with nothing narrowed
+        vertically — see :func:`_labelless_vertical`) has no coordinate of its own
+        to fan into distinct legend entries; a 1-D ``z_rho`` on the same dimension
+        supplies one instead, the same fallback a profile line uses. Neither one
+        present is refused outright, the same recipe :meth:`Field.plot` gives a
+        label-less map facet -- an unlabeled legend that cannot tell its own
+        entries apart is worse than no legend at all.
         """
         import xarray as xr
 
@@ -362,15 +399,28 @@ class Field:
         if zdim is None or zdim not in da.dims:
             return [{"aligned": xr.Dataset({"value": da}), "metrics": None, **base}]
 
+        if _labelless_vertical(da) is not None:
+            raise ValueError(
+                f"{self.source!r}'s native vertical axis ({zdim!r}) carries no "
+                "coordinate to tell its levels apart in a legend, and no z_rho "
+                "either. Narrow it with select= (e.g. {'depth': [0, 50, 100]}, "
+                "'surface', or {'sigma0': ...}) or collapse it with aggregate= "
+                '(e.g. {"Z": "mean"}).'
+            )
+
         items = []
         for k in range(da.sizes[zdim]):
             level = da.isel({zdim: k})
             item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
             # actual_depth lives on the *item's* Dataset, not the DataArray, since
             # that is what _depth_of (plot/series.py) reads -- the same convention
-            # Comparison.align() uses for its own aligned pair.
+            # Comparison.align() uses for its own aligned pair. z_rho is negative-down
+            # (see plot/profile.py:vertical_values); abs() matches every other depth
+            # label in the package, which is positive-down.
             if zdim in level.coords:
                 item["aligned"].attrs["actual_depth"] = float(level[zdim])
+            elif "z_rho" in level.coords and level["z_rho"].ndim == 0:
+                item["aligned"].attrs["actual_depth"] = abs(float(level["z_rho"]))
             items.append(item)
         return items
 
@@ -420,13 +470,16 @@ class Field:
         # the vertical selection, spelled for a label ("surface", "50 m", "σ₀ = 26.5
         # kg/m³"). A renderer cannot recover it from the field once the transform has
         # collapsed the axis, and a plot of one level that does not say which level is
-        # a plot of nothing in particular -- see the interactive movie's title.
-        requested = _selected_depth(self.select)
+        # a plot of nothing in particular -- see the interactive movie's title. Unlike
+        # a Comparison (whose own default is the surface), a bare Field does nothing
+        # vertically unless asked -- default=None here, so an unset select reports no
+        # depth at all rather than claiming a "surface" reduction that never happened.
+        requested = _selected_depth(self.select, default=None)
         item = {
             "field": self.data,
             "units": self.data.attrs.get("units"),
             "standard_name": self.standard_name,
-            "depth": _depth_label(requested),
+            "depth": _depth_label(requested) if requested is not None else None,
             "label": self.label or self.source,
         }
         if self.family == "section":
@@ -471,6 +524,30 @@ class Field:
             "time-animated sections are a follow-up."
         )
 
+    def _refuse_labelless_facet(self) -> None:
+        """Raise if a facet axis is a vertical dim with no coordinate to label it.
+
+        A bare native ``s_rho``/``s_w`` axis -- a model field with nothing narrowed
+        vertically (see :func:`_labelless_vertical`, the default a bare :func:`field`
+        call now leaves in force) -- would otherwise draw or play as an unlabeled row,
+        column, or frame count: N panels or frames saying nothing about which level
+        each one is, once a facet dim happens to be it. Refused with the same recipe
+        :meth:`_series_items` gives a labelless *point* -- data access (``.data``)
+        stays whole either way; only drawing it as panels/frames is refused. A
+        labeled obs gridded product's own ``depth`` axis is never caught by this,
+        whatever facet size it draws as -- see :func:`_labelless_vertical`.
+        """
+        zdim = _labelless_vertical(self.data)
+        if zdim is not None and zdim in self.facet_dims:
+            raise ValueError(
+                f"{self.source!r}'s native vertical axis ({zdim!r}) carries no "
+                "coordinate to label its levels with, so drawing it as panels or "
+                "frames would say nothing about which level is which. Narrow it "
+                "with select= (e.g. {'depth': 'surface'}, a number, a list, or "
+                "'column' at a point) or {'sigma0': ...}, or collapse it with "
+                'aggregate= (e.g. {"Z": "mean"}).'
+            )
+
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw this field: as map panels, a vertical section, a profile, or a line.
 
@@ -511,6 +588,7 @@ class Field:
                     "collapses it), or widen select= to keep a horizontal extent "
                     "for a map."
                 )
+            self._refuse_labelless_facet()
             spec = PlotSpec(
                 family="field_facet", items=[self.as_item()], options=kwargs
             )
@@ -571,6 +649,7 @@ class Field:
                 "Time-animated sections are a follow-up. Use .plot() instead; it "
                 "already shows the whole section."
             )
+        self._refuse_labelless_facet()
         spec = PlotSpec(family="facet_movie", items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
@@ -768,7 +847,14 @@ def field(
 
     ``select={"depth": ...}`` is a surface of constant depth; ``select={"sigma0":
     ...}`` asks for an isopycnal instead (ROMS sources only) — see
-    :func:`ocean_skill.roms.to_sigma0`.
+    :func:`ocean_skill.roms.to_sigma0`. Leaving depth out of ``select`` entirely
+    keeps the vertical axis standing, whole — every native s-level for a model
+    source (with real depths and thickness weights attached, the same shape
+    ``select={"depth": "column"}`` gives a comparison), every reported level for
+    an observational one. This differs from :func:`ocean_skill.comparison.compare`,
+    whose own unset default is ``"surface"`` — pass that explicitly here for the
+    same behavior. A full model domain with nothing narrowed can be large; see the
+    memory-use warning this prints if it is.
 
     A ``select`` that narrows both horizontal axes to one position draws as a line
     over whatever axis survives instead of map panels — never a separate call, the

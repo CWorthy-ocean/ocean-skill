@@ -41,10 +41,12 @@ SURFACE = "surface"
 #: Sentinel meaning "every native level" -- the whole water column, as distinct from
 #: an explicit depth list (which invents fixed levels via
 #: :func:`ocean_skill.roms.to_depth`) or a band (which needs its own ``min``/``max``).
-#: With no vertical select at all, ``select={"depth": ...}`` unset means
-#: :data:`SURFACE`, so a whole column is otherwise unreachable without first knowing
-#: the local water depth to hand :data:`is_depth_band` an upper bound — see
-#: :func:`_prepare`, which routes this to an unbounded
+#: An unset vertical select already means this in :func:`_prepare` (nothing is
+#: reduced unless asked for), so this sentinel matters only for the *compare* lane,
+#: whose own default is :data:`SURFACE` — writing ``select={"depth": "column"}``
+#: explicitly is how a comparison reaches the whole column instead, without first
+#: knowing the local water depth to hand :data:`is_depth_band` an upper bound. See
+#: :func:`_prepare`, which routes both spellings to an unbounded
 #: :func:`~ocean_skill.roms.depth_band`, keeping every native s-level standing.
 COLUMN = "column"
 
@@ -472,9 +474,11 @@ def is_surface_request(depth: Any) -> bool:
 def is_column_request(depth: Any) -> bool:
     """Report whether ``depth`` asks for the whole water column, native levels standing.
 
-    ``select={"depth": "column"}`` — the one way to reach every native s-level: no
-    vertical select at all defaults to :data:`SURFACE`, and a band needs its own
-    ``min``/``max`` (which asks the caller to already know the local water depth).
+    ``select={"depth": "column"}`` — for the compare lane, the one way to reach
+    every native s-level explicitly: its own unset default is :data:`SURFACE`, and
+    a band needs its own ``min``/``max`` (which asks the caller to already know the
+    local water depth). A bare :class:`~ocean_skill.field.Field` never needs this
+    spelling — an unset vertical select already keeps every level standing there.
     Model-only, like every native-level request — an observational product reports
     at its own standard levels regardless, so this sentinel means nothing to it.
     """
@@ -833,6 +837,11 @@ _ISOPYCNAL_KEYS = frozenset({"sigma0"})
 _ANY_VERTICAL_KEYS = _VERTICAL_KEYS | _ISOPYCNAL_KEYS
 
 
+def _names_vertical(select: dict[str, Any]) -> bool:
+    """Report whether ``select`` names a vertical request, any spelling."""
+    return any(k in select for k in _ANY_VERTICAL_KEYS)
+
+
 def _vertical_only(agg: dict[str, Any] | None) -> dict[str, Any]:
     """Return the part of an aggregation spec addressing the vertical axis."""
     return {k: v for k, v in (agg or {}).items() if k in _ANY_VERTICAL_KEYS}
@@ -870,7 +879,7 @@ def _without_horizontal_mean(agg: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in (agg or {}).items() if k not in part}
 
 
-def _selected_depth(select: dict[str, Any]) -> Any:
+def _selected_depth(select: dict[str, Any], *, default: Any = SURFACE) -> Any:
     """Return what a ``select`` asks for vertically, whichever spelling it used.
 
     ``compare`` writes ``"depth"``, but a ``Comparison`` built directly keeps the
@@ -882,30 +891,44 @@ def _selected_depth(select: dict[str, Any]) -> Any:
     rather than as the bare value, so :func:`_depth_label` can tell "26.5" the depth
     apart from "26.5" the density anomaly — the two mean wildly different things and
     a caller reading only the number back would not be able to tell which this was.
+
+    ``default`` is what to report when nothing was named at all. :data:`SURFACE` is
+    right for :func:`_display_depth` — a compare lane's own unset default — but wrong
+    for :class:`~ocean_skill.field.Field`, which does nothing vertically unless asked;
+    :meth:`~ocean_skill.field.Field.as_item` passes ``default=None`` so its label says
+    nothing rather than claiming a reduction that never happened.
     """
     for key in ("depth", "Z", "z", "vertical"):
         if key in select:
             return select[key]
     if "sigma0" in select:
         return {"sigma0": select["sigma0"]}
-    return SURFACE
+    return default
 
 
-def _display_depth(variable: Any, select: dict[str, Any]) -> Any:
-    """The depth a comparison should report in labels/repr/metrics.
+def _display_depth(
+    variable: Any, select: dict[str, Any], *, default: Any = SURFACE
+) -> Any:
+    """The depth a comparison (or a bare field) should report in labels/repr/metrics.
 
     A calculated diagnostic (mixed layer depth, ...) has no vertical axis at all --
-    see :data:`NO_VERTICAL_AXIS` -- so :func:`_selected_depth`'s own default
-    (:data:`SURFACE`, meant for an ordinary field nothing narrowed vertically) would
-    misreport where in the column the number actually came from.
+    see :data:`NO_VERTICAL_AXIS` -- so :func:`_selected_depth`'s own default would
+    misreport where in the column the number actually came from, regardless of
+    ``default``.
 
     A pair-spec select reports the **test** side's depth -- an arbitrary but
     necessary choice, matching :attr:`Comparison.standard_name`'s own precedent of
     letting the test side name the figure when the two lanes could disagree.
+
+    ``default`` passes straight through to :func:`_selected_depth`: :data:`SURFACE`
+    for a ``Comparison`` (whose own unset default is the surface), ``None`` for a
+    bare :class:`~ocean_skill.field.Field` (see
+    :func:`ocean_skill.plot.map_locations._field_items`, the one caller that wants
+    the latter).
     """
     if _is_calculated(variable):
         return NO_VERTICAL_AXIS
-    return _selected_depth(select_for(select, "test"))
+    return _selected_depth(select_for(select, "test"), default=default)
 
 
 def _surface_and_levels(sub, meta, name: str, depths) -> Any:
@@ -1187,7 +1210,16 @@ def _prepare(
             f"select cannot ask for both a depth ({depth!r}) and a density surface "
             f"(sigma0={sigma!r}) -- pick one vertical request."
         )
-    surface = is_surface_request(depth)
+    # is_surface_request alone treats an absent depth the same as an explicit
+    # "surface" -- exactly right for a label (see _selected_depth/_display_depth,
+    # where the compare lane's own default is still surface) but wrong for the
+    # reduction below, which must do nothing unless something was actually asked
+    # for (see NO_AGGREGATION's rule for time, mirrored here for depth). So the
+    # local flag requires an explicit request; the compare lane's own surface
+    # default is injected into the select by Comparison._prepare_lane before this
+    # function ever runs, so `depth` is already "surface" by the time a compare
+    # lane with nothing named reaches here.
+    surface = depth is not None and is_surface_request(depth)
     band = is_depth_band(depth)
     column = is_column_request(depth)
     agg = NO_AGGREGATION if aggregate is None else aggregate
@@ -1213,17 +1245,11 @@ def _prepare(
     # for the ladder to throw all but the top one away; the isel there becomes a
     # no-op once it has already happened here. Hoisted only for the plain scalar
     # case -- a band, a level list, or an isopycnal slice all still need the full
-    # column, so they are left for the ladder. A section with no depth key at all
-    # (`surface` is True for that too -- see is_surface_request) is *not* hoisted:
-    # its default is the model's own levels standing, not the top one, so the ladder
-    # further down has to see `depth is None` still meaning that, unmolested.
-    if (
-        not calculated
-        and sigma is None
-        and surface
-        and not (is_section and depth is None)
-        and meta.get("model") == "roms"
-    ):
+    # column, so they are left for the ladder. `surface` is only ever True for an
+    # *explicit* "surface" (or a compare lane's injected default) now -- an absent
+    # depth key means "leave the vertical axis alone", which the column branch
+    # further down the ladder handles, sections included.
+    if not calculated and sigma is None and surface and meta.get("model") == "roms":
         name = da.name or "field"
         da = roms.surface(da.to_dataset(name=name), meta)[name]
 
@@ -1356,13 +1382,17 @@ def _prepare(
             # A *selection*: keeps the cells and their thickness weights, so the
             # vertical aggregation below decides how to collapse them.
             sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
-        elif column:
+        elif column or depth is None:
             # The whole water column, native levels standing: an unbounded band --
             # every cell overlaps a 0..inf m range, so nothing is excluded, but the
             # cells still come back with real depth_band()/depth_average() weights
             # attached (unlike the plain add_depth_coord the is_section branch
             # above uses), so {"Z": "mean"} on a column request is the same
-            # thickness-weighted mean a band gives, not an unweighted one.
+            # thickness-weighted mean a band gives, not an unweighted one. An absent
+            # depth key reaches here too now (a bare field() call, never a compare
+            # lane -- see `surface`'s definition above) and gets the identical
+            # treatment: nothing reduced, nothing assumed, just the coordinates a
+            # profile/section/{"Z": ...} consumer needs attached.
             sub = roms.depth_band(sub, meta, 0.0, float("inf"))
         elif isinstance(depth, list | tuple) and any(
             is_surface_request(d) for d in depth
@@ -1410,9 +1440,18 @@ def _prepare(
                 f"select={{'depth': {COLUMN!r}}} names the model's own native "
                 "levels, which an observational product has none of -- it "
                 f"already reports at its own standard levels{f' ({zname!r})' if zname else ''}. "
-                "Leave depth unset for those, or name one/several explicitly."
+                "A bare osk.field() call already keeps every one of them standing "
+                "with no depth key at all; a Comparison needs them named "
+                "explicitly (one, several, or a {'min', 'max'} band), since its "
+                "own unset default is the surface."
             )
-        if zname is not None:
+        if zname is not None and depth is not None:
+            # An absent depth key leaves the whole reported column standing --
+            # no isel, no actual_depth, no ragged-station warning below -- the
+            # same "nothing reduced unless named" rule the model side's column
+            # branch just took. A bare field() call is the only way to reach
+            # here with `depth is None`; the compare lane's own default is
+            # injected as an explicit "surface" before this function ever runs.
             levels = (
                 np.asarray(obj["Depth"])
                 if "Depth" in obj.variables
@@ -2515,6 +2554,15 @@ class Comparison:
             select = {k: v for k, v in select.items() if k not in drop_keys}
         if extra_select:
             select = {**select, **extra_select}
+        # A Comparison's own default is the surface, unlike a bare Field (see
+        # `surface`'s definition in _prepare) -- injected here, once, as an
+        # explicit "depth" key, so it flows into prepare_source's ordinary
+        # select and cache-key hashing with no separate plumbing (the same
+        # idiom _transect_route's extra_select already relies on, just above).
+        # A section keeps its native levels standing instead, matching what an
+        # unset depth already means for a transect in _prepare.
+        if not _names_vertical(select) and "transect" not in select:
+            select = {**select, "depth": SURFACE}
         return prepare_source(
             source,
             variable_for(self.variable, role),
