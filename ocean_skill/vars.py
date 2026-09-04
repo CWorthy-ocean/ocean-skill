@@ -58,6 +58,16 @@ REGISTRY: dict[str, VarInfo] = {
         "mass_concentration_of_chlorophyll_a_in_sea_water", units="mg m-3"
     ),
     "ocean_mixed_layer_thickness": VarInfo("ocean_mixed_layer_thickness", units="m"),
+    "mole_concentration_of_nitrate_and_nitrite_in_sea_water": VarInfo(
+        "mole_concentration_of_nitrate_and_nitrite_in_sea_water", units="mmol m-3"
+    ),
+    "mass_concentration_of_phaeopigments_in_sea_water": VarInfo(
+        "mass_concentration_of_phaeopigments_in_sea_water", units="mg m-3"
+    ),
+    "downwelling_photosynthetic_photon_flux_in_sea_water": VarInfo(
+        "downwelling_photosynthetic_photon_flux_in_sea_water",
+        units="umol m-2 s-1",
+    ),
 }
 
 
@@ -98,6 +108,8 @@ _LABEL_OVERRIDES = {
     "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water": "DIC",
     "sea_water_alkalinity_expressed_as_mole_equivalent": "alkalinity",
     "surface_downward_mole_flux_of_carbon_dioxide": "CO2 flux",
+    "mole_concentration_of_nitrate_and_nitrite_in_sea_water": "nitrate+nitrite",
+    "downwelling_photosynthetic_photon_flux_in_sea_water": "PAR",
 }
 
 

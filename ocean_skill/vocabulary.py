@@ -95,6 +95,18 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "NO3",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
         ],
     },
+    "nitrate_and_nitrite": {
+        # A different quantity from "nitrate" above -- the combined NO3+NO2
+        # concentration a discrete-sample lab often reports as one column when the
+        # two species aren't separated, so deliberately its own key/standard_name
+        # rather than an alias (the same reason "oxygen_saturation" stays separate
+        # from "oxygen").
+        "standard_name": "mole_concentration_of_nitrate_and_nitrite_in_sea_water",
+        "aliases": [
+            "moles_of_nitrate_and_nitrite_per_unit_mass_in_sea_water",
+            "Nitrate_and_Nitrite",  # Iceland discrete-sample column spelling
+        ],
+    },
     "phosphate": {
         "standard_name": "mole_concentration_of_phosphate_in_sea_water",
         "aliases": [
@@ -146,6 +158,10 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # appears in it).
             "doxy",
             "dissolved_oxygen",
+            # SEANOE's CTD-export column style, the same `_ctd` decoration as
+            # "temperature"/"salinity" below (e.g. Iceland CTD profiles' `Oxygen_CTD`).
+            r"oxygen_ctd",
+            r"ctd_oxygen",
         ],
     },
     "oxygen_saturation": {
@@ -182,6 +198,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
             # dropped OceanSODA, and compare() would not pair them.
             "total_alkalinity_in_sea_water",
             "ALK",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+            "TA",  # common discrete-sample shorthand for *total* alkalinity
         ],
     },
     "temperature": {
@@ -299,6 +316,34 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # depth_of() treats this standard_name as the pressure-to-depth conversion
         # rung, so this key resolving correctly matters beyond just find(variable=).
         "standard_name": "sea_water_pressure",
+        "patterns": [
+            # SEANOE/Iceland CTD-export column style (`CTDPRES`, `CTD_Pressure`,
+            # `pressure_ctd`), the same `_ctd` decoration family as
+            # "temperature"/"salinity" below. Must not claim a `_qc`/`_flag`
+            # companion (no such token appears in it).
+            r"ctd_?pres(?:sure)?",
+            r"pres(?:sure)?_ctd",
+        ],
+    },
+    "par": {
+        # Photosynthetically active radiation measured by a CTD-mounted sensor
+        # (distinct from the *surface* PAR a satellite or met station reports --
+        # this is light attenuated through the water column, hence "in_sea_water").
+        "standard_name": "downwelling_photosynthetic_photon_flux_in_sea_water",
+        "aliases": ["PAR"],
+        "patterns": [
+            # The SEANOE/Iceland CTD-export `_ctd` decoration family, as for
+            # "temperature"/"pressure" above.
+            r"par_ctd",
+            r"ctd_par",
+        ],
+    },
+    "turbidity": {
+        "standard_name": "sea_water_turbidity",
+        "patterns": [
+            r"turbidity_ctd",
+            r"ctd_turbidity",
+        ],
     },
     "sigma_theta": {
         # ROMS' own diagnostic (ocean_skill.mld computes it the same way offline; see
@@ -311,7 +356,13 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # time rename drops the provider's own (wrong -- pH is unitless) units label
         # ``pH_qc[mL/L]`` down to the plain ``pH`` column this key/alias resolves.
         "standard_name": "sea_water_ph_reported_on_total_scale",
-        "aliases": ["pH", "ph_total"],
+        "aliases": [
+            "pH",
+            "ph_total",
+            # Discrete-sample column style (e.g. Iceland's bottle-data sheet):
+            # pH on the total scale, measured (as opposed to calculated).
+            "pH_T_measured",
+        ],
     },
     "co2_flux": {
         "standard_name": "surface_downward_mole_flux_of_carbon_dioxide",
@@ -345,6 +396,49 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "chl_a",
             "chlorophyll_a",
         ],
+    },
+    "fluorescence": {
+        # A CTD-mounted fluorometer's *raw* signal -- a proxy for chlorophyll, not
+        # the same quantity (it isn't calibrated/extracted the way a discrete
+        # chlorophyll sample is), so deliberately its own key/standard_name rather
+        # than an alias of "chlorophyll" above (the same reason "temperature" and
+        # "oxygen_saturation" stay separate from their near-neighbors). CF has no
+        # standard_name for this quantity, so this is a descriptive name, not CF's.
+        "standard_name": "sea_water_chlorophyll_fluorescence",
+        "patterns": [
+            # The SEANOE/Iceland CTD-export `_ctd` decoration family, as for
+            # "temperature"/"oxygen" above.
+            r"fluor(?:escence)?_ctd",
+            r"ctd_fluor(?:escence)?",
+        ],
+    },
+    "phaeopigment": {
+        # The chlorophyll degradation product a discrete-sample lab reports
+        # alongside chlorophyll-a -- a different pigment, not an alias of
+        # "chlorophyll" above.
+        "standard_name": "mass_concentration_of_phaeopigments_in_sea_water",
+        "aliases": [
+            "phaeo",  # Iceland discrete-sample column spelling
+            "phaeopigment",
+            "phaeopigments",
+        ],
+    },
+    "ciliate": {
+        # Organism abundance/count, not a concentration -- CF has no standard_name
+        # for this quantity, so this is a descriptive name, not CF's.
+        "standard_name": "number_concentration_of_ciliates_in_sea_water",
+        "aliases": ["Ciliate"],
+    },
+    "diatom": {
+        # Matched whole (the `Fe` note above), so `Diatom`/`diatom` resolves but
+        # ROMS/MARBL's per-PFT tracer `diatChl` (a different quantity -- see
+        # "chlorophyll" above) does not.
+        "standard_name": "number_concentration_of_diatoms_in_sea_water",
+        "aliases": ["Diatom"],
+    },
+    "dinoflagellate": {
+        "standard_name": "number_concentration_of_dinoflagellates_in_sea_water",
+        "aliases": ["Dinoflagellate"],
     },
     "mld": {
         "standard_name": "ocean_mixed_layer_thickness",
