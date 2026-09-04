@@ -219,6 +219,79 @@ def _target_labels(normalize: bool, recs, *, tex: bool) -> tuple[str, str]:
     return f"signed centred RMSD{suffix}  (← under | over →)", f"bias{suffix}"
 
 
+def _resolve_robust(robust: bool | float, lim: float | None = None) -> float | None:
+    """Resolve ``robust`` to the quantile it asks for (``True`` → 0.95), or ``None``.
+
+    ``lim`` is an exact override — there is no quantile left to take once the caller
+    has already named the axes' reach — so the two together are rejected loudly
+    rather than one silently winning.
+    """
+    if lim is not None and robust:
+        raise ValueError(
+            "pass robust= or lim=, not both — lim= is already the exact axes reach, "
+            "so there is no quantile left to take."
+        )
+    if robust is False or robust is None:
+        return None
+    if robust is True:
+        return 0.95
+    q = float(robust)
+    if not 0.0 < q < 1.0:
+        raise ValueError(
+            f"robust={robust!r} is not True/False or a quantile in (0, 1) — pass the "
+            "quantile itself (robust=0.95 for the 95th percentile), True for 0.95, or "
+            "False for the plain maximum."
+        )
+    return q
+
+
+def _robust_reach(radii, q: float | None) -> float:
+    """Return the data's contribution to an axis limit: a max, or a robust quantile.
+
+    The max of the finite radii, or their ``q``-quantile when ``robust`` asked for
+    one. Non-finite radii (a comparison with a NaN metric) are dropped rather than
+    poisoning the limit; with none left, the floors alone frame the axes. A
+    handful of points, or points that are all equal, make the quantile land at or
+    near the max — robust gracefully degrades to today's behavior rather than
+    needing special-casing.
+    """
+    radii = np.asarray(radii, dtype=float)
+    finite = radii[np.isfinite(radii)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.max(finite) if q is None else np.quantile(finite, q))
+
+
+def _target_lim(x, y, rings, *, normalize: bool, robust: bool | float = False,
+                 lim: float | None = None) -> float:
+    """Target's symmetric half-width — one source so both renderers agree.
+
+    Defaults to the farthest point's radius (as before). ``robust`` frames the axes
+    from a quantile of the point radii instead, so one outlier can no longer crush
+    the rest against the origin; points that fall outside are simply not shown —
+    clipped, never annotated on the figure — and a warning says how many. ``lim``
+    overrides the whole computation, floors included, with no warning: an explicit
+    crop is the caller's own choice.
+    """
+    if lim is not None:
+        _resolve_robust(robust, lim)
+        return float(lim)
+    q = _resolve_robust(robust)
+    radii = np.hypot(x, y)
+    ring_floor = max(rings) * 1.25 if rings else 0.0
+    out = max(1.15 * _robust_reach(radii, q), ring_floor, 1.2 if normalize else 0.0)
+    if q is not None:
+        n = int(np.count_nonzero(radii > out))
+        if n:
+            warnings.warn(
+                f"target(robust={q:g}): {n} of {len(radii)} points fall outside the "
+                f"axes (radius beyond {out:.3g}); pass robust=False, or a higher "
+                "quantile, to bring them back into frame.",
+                stacklevel=3,
+            )
+    return out
+
+
 #: Label offsets (display points) cycled by index so consecutive labels point in
 #: different directions. Matplotlib has no label-repel, and target points cluster near
 #: the origin precisely when a model is good — when labels most need to stay legible.
@@ -719,7 +792,7 @@ def _arrow_chains(recs, field: str) -> list[list[int]]:
     return chains
 
 
-def _draw_arrows(ax, chains, points, colors, *, zorder: float) -> None:
+def _draw_arrows(ax, chains, points, colors, *, zorder: float, clip_patch=None) -> None:
     """Draw one arrow per consecutive pair in each chain, on ``ax``.
 
     ``points`` is one ``(x, y)`` per record, in the *same* coordinate space
@@ -728,10 +801,15 @@ def _draw_arrows(ax, chains, points, colors, *, zorder: float) -> None:
     straight display-space arrow either way, so one implementation serves both.
     Arrow colour is the *end* point's resolved colour (well-defined even when
     ``arrows`` and ``color_by`` name the same field, i.e. a colour-graded chain).
+
+    ``annotation_clip=False`` always — an arrow into a robust-clipped outlier should
+    still show which way it left. ``clip_patch`` (the frame, or Taylor's wedge) is
+    given only when that clipping is active, so it stops the arrow at the boundary
+    instead of letting it run off past the axes.
     """
     for idxs in chains:
         for i, j in pairwise(idxs):
-            ax.annotate(
+            a = ax.annotate(
                 "",
                 xy=points[j],
                 xytext=points[i],
@@ -746,6 +824,8 @@ def _draw_arrows(ax, chains, points, colors, *, zorder: float) -> None:
                 zorder=zorder,
                 annotation_clip=False,
             )
+            if clip_patch is not None:
+                a.arrow_patch.set_clip_path(clip_patch)
 
 
 #: How a diagram identifies its points. ``"legend"`` puts a key below the axes,
@@ -951,6 +1031,8 @@ def taylor(
     *,
     title: str | None = None,
     normalize: bool = True,
+    robust: bool | float = False,
+    lim: float | None = None,
     save: str | Path | None = None,
     colors=None,
     color_by: str | None = None,
@@ -987,6 +1069,19 @@ def taylor(
     standard deviation that differs across comparisons (or comparisons that span more
     than one variable) draws the same diagram but warns, since the star, dashed arc,
     and RMS contours describe only the first comparison's reference.
+
+    The radial axis is sized from the single farthest point's standard deviation, so
+    one badly-dispersed comparison can crush the rest against the reference arc.
+    ``robust=True`` frames it from the 95th percentile of the points' standard
+    deviations instead (xarray's ``robust=`` convention); a float in ``(0, 1)`` picks
+    the quantile itself. Points beyond it fall outside the radial axis — clipped,
+    never annotated on the figure — and a warning names how many were left out;
+    pass ``robust=False`` (the default) or a higher quantile to bring them back. The
+    usual floor (``1.6`` × the reference) still applies, so robust never zooms in past
+    it, and with only a handful of points the quantile sits at the max, excluding
+    nothing. ``lim`` skips the data entirely and sets the radial axis's exact maximum
+    (in the same units as the standard deviation), overriding the floor with no
+    warning — passing both ``robust`` and ``lim`` raises.
 
     ``color_by``/``marker_by`` name a field of the metric records (``variable``,
     ``depth``, ``test``, ...) so several groups can share one diagram — colour for one
@@ -1086,16 +1181,33 @@ def taylor(
         (r["std_test"] / r["std_reference"]) if normalize else r["std_test"]
         for r in recs
     ]
+    q = _resolve_robust(robust, lim)
+    if lim is not None:
+        srange_max = lim / refstd
+    else:
+        # `srange` is multiples of `refstd` (see TaylorDiagram.__init__), but `stds`
+        # is in raw units when `normalize=False` — dividing back by `refstd` keeps
+        # this a no-op when normalized (refstd == 1) and correct otherwise.
+        srange_max = max(1.6, 1.15 * _robust_reach(stds, q) / refstd)
     dia = TaylorDiagram(
         refstd,
         fig=fig,
         rect=rect,
         label="reference",
-        # `srange` is multiples of `refstd` (see TaylorDiagram.__init__), but `stds`
-        # is in raw units when `normalize=False` — dividing back by `refstd` keeps
-        # this a no-op when normalized (refstd == 1) and correct otherwise.
-        srange=(0, max(1.6, 1.15 * max(stds) / refstd)),
+        srange=(0, srange_max),
     )
+    smax = refstd * srange_max
+    clipping = q is not None or lim is not None
+    shown = [sd <= smax for sd in stds]
+    if q is not None:
+        n = len(shown) - sum(shown)
+        if n:
+            warnings.warn(
+                f"taylor(robust={q:g}): {n} of {len(shown)} points have standard "
+                f"deviation beyond the radial axis (past {smax:.3g}); pass "
+                "robust=False, or a higher quantile, to bring them back into frame.",
+                stacklevel=2,
+            )
     star_scale = _scalar_scale(marker_scale)
     if star_scale != 1.0:
         # The vendored diagram draws its own reference star at a fixed size; scaling it
@@ -1136,6 +1248,7 @@ def taylor(
             list(zip((np.arccos(r["corr"]) for r in recs), stds, strict=True)),
             styles.colors,
             zorder=1.9,
+            clip_patch=dia._ax.patch if clipping else None,
         )
 
     overlay_specs = []
@@ -1182,6 +1295,17 @@ def taylor(
                 label=rec.get("label"),
             )
 
+    if clipping:
+        # The floating axes clip samples to their bounding *rectangle*, not the polar
+        # wedge — a mid-correlation outlier past `smax` would otherwise float in the
+        # corner between the arc and the frame instead of disappearing. `dia._ax.patch`
+        # is that wedge; clipping every line on the aux axes to it covers base samples,
+        # overlay samples, and the reference star/arc alike (matters when a manual
+        # `lim` crops below `refstd`). Contours are unaffected — they're built to span
+        # exactly `(smin, smax)` already.
+        for line in dia.ax.lines:
+            line.set_clip_path(dia._ax.patch)
+
     contours = dia.add_contours(levels=5, colors="0.6", linewidths=0.7)
     plt.clabel(contours, inline=1, fontsize=scale["contour_label"], fmt="%.2f")
     dia.add_grid(color="0.85", linewidth=0.5)
@@ -1208,14 +1332,27 @@ def taylor(
         _grid_legend_below(fig, handles, ncols, scale["legend"])
     elif labels == "annotate":
         # The aux axes are polar: a sample sits at (arccos(corr), stddev), which is
-        # exactly where add_sample put it.
+        # exactly where add_sample put it. A robust-clipped point's marker disappears
+        # via its clip path, but ``ax.annotate``'s own clipping only hides an anchor
+        # outside the axes' bounding *rectangle* — the same wedge-vs-rectangle gap the
+        # samples themselves needed fixing above — so its label has to be filtered by
+        # hand rather than left to clip on its own.
+        thetas = [np.arccos(r["corr"]) for r in recs]
+        label_text = [r["label"] for r in recs]
+        if clipping:
+            thetas, kept_stds, label_text, label_colors = (
+                [v for v, keep in zip(seq, shown, strict=True) if keep]
+                for seq in (thetas, stds, label_text, styles.colors)
+            )
+        else:
+            kept_stds, label_colors = stds, styles.colors
         _offset_labels(
             dia.ax,
-            [np.arccos(r["corr"]) for r in recs],
-            stds,
-            [r["label"] for r in recs],
+            thetas,
+            kept_stds,
+            label_text,
             scale["annotation"],
-            colors=styles.colors,
+            colors=label_colors,
         )
     if title:
         dia._ax.set_title(title, fontsize=scale["title"], pad=18)
@@ -1231,6 +1368,8 @@ def target(
     *,
     title: str | None = None,
     normalize: bool = True,
+    robust: bool | float = False,
+    lim: float | None = None,
     save: str | Path | None = None,
     colors=None,
     color_by: str | None = None,
@@ -1263,6 +1402,11 @@ def target(
     — the axis labels then name them for a single-variable diagram, but stay unlabelled
     once the comparisons span more than one variable (which also warns), even if those
     variables happen to share a unit string, since the two natural scales still differ.
+
+    ``robust``/``lim`` mean exactly what they do in :func:`taylor` — a quantile of the
+    points' distance from the origin (instead of the farthest point) to frame the axes,
+    or an exact override — with the same clipped-not-annotated handling of whatever
+    falls outside. See its docstring for the full explanation.
 
     ``circles`` sets the guide-ring radii, always in the axes' own units — left at its
     default (``None``) that is ``(0.5, 1.0)`` normalized, or ``(0.5, 1.0)`` scaled by
@@ -1322,8 +1466,8 @@ def target(
     point_labels = [r["label"] for r in recs]
 
     rings, boundary = _target_rings(circles, normalize, recs)
-    ring_floor = max(rings) * 1.25 if rings else 0.0
-    lim = max(1.15 * float(np.max(np.hypot(x, y))), ring_floor, 1.2 if normalize else 0.0)
+    clipping = bool(robust) or lim is not None
+    lim = _target_lim(x, y, rings, normalize=normalize, robust=robust, lim=lim)
     figsize = figsize or _diagram_figsize(TARGET_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, font_scale=font_scale, override=scale)
     owns_figure = ax is None
@@ -1384,7 +1528,10 @@ def target(
         )
     if chains:
         points = list(zip(x, y, strict=True))
-        _draw_arrows(ax, chains, points, styles.colors, zorder=3.5)
+        _draw_arrows(
+            ax, chains, points, styles.colors, zorder=3.5,
+            clip_patch=ax.patch if clipping else None,
+        )
 
     overlay_specs = []
     if overlay is not None:
