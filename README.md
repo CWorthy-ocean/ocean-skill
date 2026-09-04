@@ -581,6 +581,12 @@ already at the old `platformdirs` user-config location, e.g.
 scanned just below `~/.ocean-skill/catalogs/`.) Check what's actually on your search
 path any time with `osk.catalog.search_paths()`.
 
+On a cluster with data already staged on a shared filesystem, build a catalog that
+points straight at it and save it into a `$OCEAN_SKILL_CATALOGS` directory so it
+shadows the packaged, internet-backed entry of the same name — see the GLODAP-on-Anvil
+recipe in `docs/catalogs.ipynb` (`ocean_skill.readers.PoochTarNetCDF` takes `local_dir=`
+as well as `url=`, so the same reader and merge logic runs either way).
+
 Remote files are cached under ocean-skill's cache directory; set `$OCEAN_SKILL_DIR`
 to move it, or fsspec's own `FSSPEC_SIMPLECACHE_CACHE_STORAGE` to override it
 outright.
