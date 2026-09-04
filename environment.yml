@@ -16,6 +16,7 @@ dependencies:
   - xarray
   - dask
   - netcdf4
+  - openpyxl
   - pydantic>=2
   - pyyaml>=6.0
   - platformdirs
@@ -23,6 +24,7 @@ dependencies:
   - pint
   - pint-xarray
   - pint-pandas
+  - verde
   # --- CF / grids / regridding ---
   - cf_xarray
   - xgcm
