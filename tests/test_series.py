@@ -656,8 +656,12 @@ def _read_must_not_be_called(name, **kw):
     raise AssertionError("the reference must not be read for this comparison")
 
 
-def test_time_targets_is_none_when_depth_not_time_is_kept(monkeypatch):
-    """over='Z' keeps depth standing -- there is no time axis left to prune."""
+def test_time_targets_is_none_when_depth_is_kept_and_nothing_collapses_time(
+    monkeypatch,
+):
+    """over='Z' keeps depth standing, and no aggregate touches time either -- there
+    is no time axis a nearest-step prune would even apply to.
+    """
     import ocean_skill as osk
     from ocean_skill.comparison import Comparison
 
@@ -666,6 +670,140 @@ def test_time_targets_is_none_when_depth_not_time_is_kept(monkeypatch):
 
     c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="Z")
     assert c._reference_time_targets() is None
+
+
+def test_time_targets_also_fires_when_a_time_aggregate_collapses_it_under_over_z(
+    monkeypatch,
+):
+    """over='Z' keeps *depth* standing, but a plain time reducer (mean/std, no
+    groupby or resample) still collapses time to one number per depth level --
+    every in-between model step feeds that number directly (nothing downstream
+    discards them the way over='time' nearest-matching does), so matching the
+    model to the reference's own cast times is not just faster here, it is the
+    intended comparison: the model averaged over the times actually sampled,
+    not over a full window mostly never visited.
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    casts = pd.to_datetime(["2024-05-01", "2024-04-04", "2024-04-04"])  # dup, unsorted
+    ds = xr.Dataset(coords={"time": ("time", casts.values)})
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"reduce": "mean", "spread": "std"}},
+    )
+    targets = c._reference_time_targets()
+    assert targets is not None
+    assert list(targets) == sorted(pd.to_datetime(casts.unique()))
+
+
+def test_time_targets_stays_none_for_a_climatology_under_over_z(monkeypatch):
+    """A groupby/resample aggregate *keeps* a time axis (a climatology, or
+    consecutive periods) rather than collapsing it -- it legitimately needs
+    every step in the window, not just the ones nearest a cast -- so pruning
+    must not fire here even though depth is kept and time is being aggregated.
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+    )
+    assert c._reference_time_targets() is None
+
+
+def test_time_targets_is_memoized_across_repeated_calls(monkeypatch):
+    """Both _cache_key and align() call this -- and it reads the reference to
+    answer -- so a second call must not read it again.
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    casts = pd.to_datetime(["2024-05-01", "2024-04-04"])
+    ds = xr.Dataset(coords={"time": ("time", casts.values)})
+    calls = []
+
+    def counted_read(name, **kw):
+        calls.append(name)
+        return ds
+
+    monkeypatch.setattr(osk, "read", counted_read)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"reduce": "mean", "spread": "std"}},
+    )
+    first = c._reference_time_targets()
+    second = c._reference_time_targets()
+    assert len(calls) == 1
+    assert list(first) == list(second)
+
+
+def test_time_targets_none_is_itself_memoized(monkeypatch):
+    """A None answer (no pruning applies here) is just as worth caching as an
+    array -- a comparison whose over/aggregate settles the question up front
+    must never read the reference at all, on any call.
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="Z")
+    assert c._reference_time_targets() is None
+    assert c._reference_time_targets() is None  # a second call must not read either
+
+
+def test_ref_time_targets_join_the_cache_key_when_present(monkeypatch):
+    """A comparison whose test lane gets pruned to cast-nearest steps must not
+    share a cache key with an otherwise-identical one that isn't pruned -- the
+    pruned run's mean/spread is computed over a different (smaller) set of
+    model steps, so the two are different results, not different routes to the
+    same one. Isolated from _reference_time_targets' own gating logic by
+    monkeypatching it directly on two instances built with identical
+    reference/test/variable/over/aggregate, so the only thing that differs is
+    the value _cache_key folds in.
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+    kwargs = dict(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"reduce": "mean", "spread": "std"}},
+    )
+
+    unpruned = Comparison(**kwargs)
+    unpruned._reference_time_targets = lambda: None
+
+    pruned = Comparison(**kwargs)
+    pruned._reference_time_targets = lambda: pd.to_datetime(
+        ["2024-04-04", "2024-05-01"]
+    ).values
+
+    assert unpruned._cache_key != pruned._cache_key
 
 
 def test_time_targets_is_none_for_a_trajectory(monkeypatch):

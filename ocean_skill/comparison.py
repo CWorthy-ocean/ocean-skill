@@ -38,6 +38,12 @@ __all__ = [
 #: for the field interpolated to literal 0 m — see :func:`_prepare`.
 SURFACE = "surface"
 
+#: Sentinel meaning "not computed yet", distinct from a memoized ``None`` result --
+#: see :meth:`Comparison._reference_time_targets`, whose ``None`` is itself a
+#: meaningful, worth-caching answer ("no pruning applies" or "the reference read
+#: failed"), not an absence of one.
+_UNSET = object()
+
 #: Sentinel meaning "every native level" -- the whole water column, as distinct from
 #: an explicit depth list (which invents fixed levels via
 #: :func:`ocean_skill.roms.to_depth`) or a band (which needs its own ``min``/``max``).
@@ -2148,6 +2154,12 @@ class Comparison:
         self._metrics = None
         self._pointwise_metrics = None
         self._actual_depth = None
+        # Sentinel rather than None: _reference_time_targets legitimately returns
+        # None (no pruning applies, or the reference read failed), and that
+        # answer is just as worth memoizing as an array -- both _cache_key and
+        # align() call it, and it reads the reference to get it. _UNSET marks
+        # "not computed yet" without colliding with a genuine None result.
+        self._time_targets_cache = _UNSET
         self._validate_section_request()
 
     def _validate_section_request(self) -> None:
@@ -2432,12 +2444,29 @@ class Comparison:
         return bbox, _time_coverage_of(self.reference_name)
 
     def _reference_time_targets(self) -> np.ndarray | None:
+        """Memoized :meth:`_reference_time_targets_uncached`.
+
+        Called from both :meth:`_cache_key` and :meth:`align`, and it reads the
+        reference to answer (unlike the read-free :meth:`_reference_narrowing`),
+        so the result -- ``None`` included, itself a meaningful answer -- is
+        computed once per instance and reused, the same way :data:`_ref_depths_cache`
+        avoids re-reading a profile reference for its own levels.
+        """
+        if self._time_targets_cache is _UNSET:
+            self._time_targets_cache = self._reference_time_targets_uncached()
+        return self._time_targets_cache
+
+    def _reference_time_targets_uncached(self) -> np.ndarray | None:
         """The reference's own cast times, worth pre-selecting the test lane near.
 
-        ``None`` unless this comparison keeps the reference's *time* axis
-        standing (``over`` resolves to the "time" CF axis) against a
-        fixed-position or repeat-visit reference -- :data:`POINT_FEATURE_TYPES`
-        plus ``timeSeriesProfile``, the same population :meth:`_reference_narrowing`
+        ``None`` unless this comparison either keeps the reference's *time*
+        axis standing (``over`` resolves to the "time" CF axis) or collapses
+        it with a plain reducer (:func:`_collapses_time` on the *test* lane's
+        own aggregate spec -- a ``groupby``/``resample`` climatology is
+        excluded, since that legitimately needs every step in the window, not
+        just the ones nearest a cast) -- against a fixed-position or
+        repeat-visit reference -- :data:`POINT_FEATURE_TYPES` plus
+        ``timeSeriesProfile``, the same population :meth:`_reference_narrowing`
         collapses to a point, minus ``profile`` (already a single instant, with
         nothing to prune between) and ``trajectory``/``trajectoryProfile`` (a
         moving position pairs on space *and* time together, which a time-only
@@ -2448,26 +2477,37 @@ class Comparison:
         ``_reference_narrowing`` only ever narrows the test lane to the
         reference's declared *coverage* -- ``(start, stop)``, a contiguous span
         (:func:`ocean_skill.align.subset_to_time`). A repeat-visit station's
-        actual casts are a sparse handful of instants inside that span, and
-        alignment (:func:`ocean_skill.align.match_axis` /
-        ``_match_by_nearest``) only ever pairs each cast with the *one* test
+        actual casts are a sparse handful of instants inside that span. When
+        ``over`` keeps time standing, alignment (:func:`ocean_skill.align.match_axis`
+        / ``_match_by_nearest``) only ever pairs each cast with the *one* test
         step nearest it -- every step the contiguous crop kept in between two
         casts is read, and for a ROMS lane run through the vertical transform,
-        for nothing. This reads the reference itself (unlike
-        ``_reference_narrowing``, not read-free) to return its own cast times,
-        so :func:`prepare_source`'s ``time_targets=`` can prune the test lane to
-        that same nearest-step set before the read/transform rather than after.
+        for nothing -- so pruning to cast-nearest steps here is lossless, a pure
+        optimization. When a time aggregate collapses the axis instead (an
+        ``over="Z"`` profile-family comparison averaged over time, say), those
+        in-between steps are not discarded downstream -- they feed the
+        mean/spread directly -- so pruning here *changes the result*, on
+        purpose: matching the model to the times the reference actually
+        sampled, rather than to a full window mostly not sampled at all is the
+        intended comparison, not just the fast one. This reads the reference
+        itself (unlike ``_reference_narrowing``, not read-free) to return its
+        own cast times, so :func:`prepare_source`'s ``time_targets=`` can prune
+        the test lane to that same nearest-step set before the read/transform
+        rather than after.
 
         The read is of the *reference* -- a sparse tabular record, not the
         model -- so it costs little next to what it saves; still, this fails
         open (returns ``None``) on any problem reading it, malformed time
-        values included, since this is a savings only, never something the
-        comparison's correctness depends on -- :meth:`align` falls back to the
-        ordinary contiguous crop exactly as if this didn't exist.
+        values included, since a read failure here should never be what breaks
+        the comparison -- :meth:`align` falls back to the ordinary contiguous
+        crop (and, for a time aggregate, the full-window mean/spread) exactly
+        as if this didn't exist.
         """
         from ocean_skill.operators import _CF_AXES
 
-        if _CF_AXES.get(self.over) != "time":
+        over_is_time = _CF_AXES.get(self.over) == "time"
+        collapses_time = _collapses_time(aggregate_for(self.aggregate, "test"))
+        if not over_is_time and not collapses_time:
             return None
         if is_pair_spec(self.select):
             return None
@@ -2630,6 +2670,21 @@ class Comparison:
             extra["_ref_bbox"] = [round(float(b), 4) for b in ref_bbox]
         if ref_window is not None:
             extra["_ref_window"] = [str(w) for w in ref_window]
+        # Same reasoning as _ref_window just above, one level more specific: a
+        # time aggregate that collapses time now prunes the test lane to the
+        # reference's own cast-nearest steps (see _reference_time_targets), which
+        # changes the mean/spread it feeds into, not merely how it's read. A run
+        # cached before that pruning existed held the full-window statistic --
+        # without this in the key, it would keep being served forever as if
+        # nothing changed. Digested rather than listed in full, the same way
+        # prepare_source's own per-lane `_time_targets` key is (see there).
+        ref_targets = self._reference_time_targets()
+        if ref_targets is not None and len(ref_targets) > 0:
+            import hashlib
+
+            extra["_ref_time_targets"] = hashlib.sha1(
+                ",".join(sorted(str(t) for t in ref_targets)).encode()
+            ).hexdigest()
         if self.qc is not None:
             # Not resolved against either lane's own contract here (unlike
             # prepare_source's per-lane `_qc`, which folds in the *effective*
