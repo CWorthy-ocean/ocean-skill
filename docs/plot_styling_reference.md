@@ -1367,6 +1367,54 @@ interactive one warns and drops. `mark="pcolormesh"` (default) or `"contourf"`,
 the same two the map families accept; bokeh always draws a mesh regardless (`mark`
 has no interactive effect, same as every map family).
 
+## The `time_depth` family (depth against time)
+
+The default figure for a bare `osk.field()` call whose select leaves **both time and
+depth** standing at one place — a `timeSeriesProfile` station's own shape (a
+repeat-visit CTD cast, or a mooring), or any point a model field's select narrowed no
+further than that:
+
+```python
+osk.field("ctd_station_HV5", "sea_water_temperature").plot()
+```
+
+One panel, colour = value, x = time, y = depth. Naming an explicit list of levels
+(`select={"depth": [0, 50, 100]}`) draws the `series` family instead — one line per
+level — since a named list is asking to tell the levels apart, not to see the whole
+record; a depth band or a bare select both draw `time_depth`.
+
+### Which mark it draws
+
+`mark` defaults from how ragged the record is
+(`ocean_skill.plot.time_depth.default_mark`): once every all-NaN row and column is
+trimmed away, a rectangle that is still mostly holes — a bottle station whose casts
+each reach a different subset of the record's own union of levels — draws as
+`mark="scatter"`, one coloured, white-edged marker per real reading. A rectangle with
+few or no holes — a continuously logging mooring at a fixed set of levels, or a model
+column — draws as `mark="pcolormesh"` instead. Pass `mark=` explicitly to override
+either way.
+
+### Axis conventions
+
+* **y is depth, positive down, inverted** — 0 m draws at the top — matching every
+  other depth label in this package, and the same convention `section`/`profile`
+  use.
+* **x is time**, labelled concisely without a 45° tilt (`_date_axis`).
+* Title names the place (`64.3°N 21.8°W`) and the period covered (`2024-04 to
+  2025-04`), the same shape `series`'s own single-source title takes.
+
+Both conventions are decided once, in `ocean_skill.plot.time_depth.prepare_time_depth`,
+and read by both renderers — a `time_depth` panel cannot look different statically
+than interactively.
+
+### Static versus interactive
+
+Both draw the same mark, colour scale and axis conventions — a mesh through
+`pcolormesh`/`hvplot.quadmesh`, or scattered points through `ax.scatter`/`hv.Points`
+coloured by value. A `time_depth` panel has no map to outline, so `domain` is not an
+option of it — the static renderer raises naming the reason, the interactive one
+warns and drops.
+
 ## The `section_row` family (a section matched against a dataset)
 
 A comparison whose `select` cuts a transect draws `test | reference | difference`

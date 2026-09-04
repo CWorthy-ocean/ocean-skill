@@ -768,9 +768,17 @@ def test_a_missing_variable_is_reported_against_its_source(monkeypatch):
 
 
 def test_field_plot_draws_the_facet_family(prepared, monkeypatch):
+    """``aggregate`` names the panels explicitly -- a genuinely *bare* select on a
+    multi-step time axis is refused instead (see
+    tests/test_field_grid_defaults.py)."""
     from ocean_skill.field import field as make_field
 
-    fig = make_field("stub", "nitrate", label="run A").plot()
+    fig = make_field(
+        "stub",
+        "nitrate",
+        label="run A",
+        aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+    ).plot()
     assert len(_mpl_titles(fig)) == 6
 
 

@@ -786,6 +786,113 @@ def _section(
     )
 
 
+def _time_depth(
+    item: dict[str, Any],
+    title: str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    mark: str | None = None,
+    **_,
+):
+    """One interactive ``time_depth`` panel: depth against time, at one place.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.time_depth`. Draws through the same
+    :func:`~ocean_skill.plot.time_depth.prepare_time_depth` the static renderer
+    calls, so the two cannot disagree about which axis is depth, which sign it
+    reads positive, or what the title says about place and period.
+
+    ``mark`` defaults the same way the static renderer does (see
+    :func:`ocean_skill.plot.time_depth.default_mark`): ``"pcolormesh"`` draws
+    through the same :func:`_quadmesh` every geographic family draws through
+    (``geo=False``, no tiles/coastline/projection, its non-geographic options
+    instead); ``"scatter"`` draws through the same ``hv.Points`` idiom
+    :func:`_station_overlay` uses for a skill map's station dots, coloured by
+    value here instead of a fixed colour.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _extension()
+    factor = _canvas_factor(size, zoom)
+    field, geometry = prepare_time_depth(item["field"])
+    if mark is None:
+        mark = default_mark(field)
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    if title is None:
+        title = suptitle_text(
+            standard_name,
+            (geometry.place_note, geometry.period_note),
+            label=item.get("label"),
+        )
+    seq, _div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+    vmin, vmax = _limits(field)
+    if log:
+        vmin = max(vmin, 1e-6)
+
+    if mark == "scatter":
+        import holoviews as hv
+
+        frame = (
+            field.to_dataframe(name="value")
+            .reset_index()[[geometry.x_name, geometry.y_name, "value"]]
+            .dropna()
+        )
+        w, h, fontsize = _series_geometry(
+            font_scale=font_scale, canvas_factor=factor, aspect=SECTION_ASPECT
+        )
+        return hv.Points(
+            frame, kdims=[geometry.x_name, geometry.y_name], vdims=["value"]
+        ).opts(
+            title=title,
+            xlabel=geometry.x_label,
+            ylabel=geometry.y_label,
+            color="value",
+            cmap=seq,
+            clim=(vmin, vmax),
+            logz=log,
+            colorbar=True,
+            clabel=units,
+            size=6,
+            line_color="white",
+            line_width=0.5,
+            tools=["hover"] if hover else [],
+            invert_yaxis=True,
+            frame_width=w,
+            frame_height=h,
+            fontsize=fontsize,
+        )
+
+    raster = _should_rasterize(field, rasterize)
+    return _quadmesh(
+        field,
+        title=title,
+        cmap=seq,
+        clim=(vmin, vmax),
+        units=units,
+        geo=False,
+        log=log,
+        font_scale=font_scale,
+        canvas_factor=factor,
+        width_px=SOLO_PANEL_WIDTH_PX,
+        axis_labels=(geometry.x_label, geometry.y_label),
+        hover=hover,
+        rasterize=raster,
+        x=geometry.x_name,
+        y=geometry.y_name,
+        aspect=SECTION_ASPECT,
+        invert_y=True,
+        bgcolor="#d9d9d9",
+    )
+
+
 def _section_row(
     item: dict[str, Any],
     labels=("test", "reference"),
@@ -3333,6 +3440,11 @@ def render(spec, **kwargs: Any):
         # A line panel has no colormap, no map and no fixed axes, so the map-only drops
         # do not apply to it -- and `mark` and `metrics_kwargs` do.
         drops = [d for d in drops if d not in ("mark", "metrics")]
+    if family == "time_depth":
+        # time_depth's own mark ("scatter"/"pcolormesh") is load-bearing here too --
+        # unlike a map family, it genuinely changes which of two drawing calls this
+        # renderer makes, not just a matplotlib-only mark keyword.
+        drops = [d for d in drops if d != "mark"]
     if family not in _MOVIES:
         # a movie is the only family with something to write here (a standalone HTML
         # page, the interactive counterpart of an mp4) and the only one that plays at a
@@ -3395,6 +3507,15 @@ def render(spec, **kwargs: Any):
             )
             opts.pop("domain", None)
         return _section_row(spec.single, **opts)
+    if family == "time_depth":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of time_depth -- a time_depth panel "
+                "has no map to outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _time_depth(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
     if family == "locations":
