@@ -485,6 +485,44 @@ def subset_to_time(obj, window):
     return obj if out.sizes.get(name, 0) == 0 else out
 
 
+def subset_to_time_targets(obj, targets):
+    """Crop ``obj`` to the step nearest each of ``targets``, along its time axis.
+
+    The discrete counterpart of :func:`subset_to_time`'s contiguous window: a
+    repeat-visit reference (a mooring, a CTD station visited every so often) is
+    eventually paired one cast at a time with whichever test step lands nearest
+    it (:func:`_match_by_nearest`'s own ``method="nearest"`` index lookup, the
+    same one used here) -- every step a contiguous window keeps *between* two
+    casts is read (and, for a ROMS lane, vertically transformed by ``_prepare``)
+    only to be discarded once alignment picks its nearest neighbours. This
+    prunes to that same nearest-step set first.
+
+    A superset by construction, never a stricter cut than alignment's own: no
+    ``tolerance`` is applied here (unlike :func:`_match_by_nearest`, which drops
+    a target with no step close enough), so a target far from every step still
+    keeps its single nearest one, and alignment's own tolerance -- with its own
+    "N steps unmatched" warning -- decides afterward whether that step actually
+    counts as a match. Silently returns ``obj`` unchanged if it has no time
+    *dimension* (already scalar, or none at all), or if ``targets`` is empty --
+    there is nothing to prune with.
+    """
+    name = _time_name(obj)
+    if name is None or name not in obj.dims:
+        return obj
+    if targets is None or len(targets) == 0:
+        return obj
+    values = np.asarray(obj[name].values)
+    if values.size <= 1:
+        return obj
+    import pandas as pd
+
+    pos = pd.Index(values).get_indexer(np.asarray(targets), method="nearest")
+    pos = np.unique(pos[pos >= 0])
+    if pos.size == 0 or pos.size == values.size:
+        return obj
+    return obj.isel({name: pos})
+
+
 def bbox_of(obj) -> tuple[float, float, float, float]:
     """Return ``(lon_min, lat_min, lon_max, lat_max)`` of ``obj``."""
     lon, lat = _lon_name(obj), _lat_name(obj)
