@@ -81,6 +81,32 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
     if rename:
         obj = obj.rename(columns=rename) if is_frame else obj.rename(rename)
 
+    # A moored/fixed station read directly as xarray (rather than built through
+    # ocean_skill.tabular.to_dataset, which already collapses this for a table) can
+    # carry its position as size-1 X/Y *dimension* coordinates on their own separate
+    # dims (SEANOE's ADCP moorings, e.g. LATITUDE/LONGITUDE each on their own length-1
+    # dim) rather than the scalar lon/lat every station-shaped consumer expects
+    # (ocean_skill.align.point_of, and tabular's own convention). A coordinate on a
+    # dim the data variable doesn't share is silently dropped when the variable is
+    # extracted (ds[var]), so the fixed position never reaches it -- point_of then
+    # sees no position at all and the field is mistaken for a bare grid facet.
+    # Squeezed here (kept as a scalar, not dropped) so every variable in the Dataset
+    # carries it, the same shape ocean_skill.tabular.to_dataset already produces for
+    # a point read as a table. A real grid is left alone -- a size-1 horizontal axis
+    # there is a genuine (if degenerate) grid cell, not a station's fixed position --
+    # and resolve_dim already returns None for a 2-D (curvilinear) lon/lat, so those
+    # are never touched either way.
+    if not is_frame and str(meta.get("featureType") or "").lower() != "grid":
+        from ocean_skill.operators import resolve_dim
+
+        singleton_horizontal = [
+            d
+            for d in (resolve_dim(obj, "X"), resolve_dim(obj, "Y"))
+            if d is not None and d in obj.dims and obj.sizes[d] == 1
+        ]
+        if singleton_horizontal:
+            obj = obj.squeeze(singleton_horizontal, drop=False)
+
     # Sources are opened with decode_times=False (ocean time units are often non-CF and
     # make xarray refuse the whole file), so decode here instead — otherwise time comes
     # back as raw integers (Dataset) or ISO8601 strings (DataFrame, e.g. ERDDAP's
