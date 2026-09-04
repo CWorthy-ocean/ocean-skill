@@ -4271,6 +4271,7 @@ def render(spec, **kwargs: Any):
     Dispatches on ``spec.family``; ``spec.options`` are merged with any keyword
     arguments, with the explicit keywords winning.
     """
+    from ocean_skill.plot.portrait import portrait
     from ocean_skill.plot.summary import paired, target, taylor
 
     opts = {**spec.options, **kwargs}
@@ -4298,6 +4299,8 @@ def render(spec, **kwargs: Any):
         _check_options(skill_map, opts)
     elif family == "locations":
         _check_options(locations, opts)
+    elif family == "portrait":
+        _check_options(portrait, opts)
 
     if family == "field_facet":
         item = spec.single
@@ -4368,10 +4371,15 @@ def render(spec, **kwargs: Any):
             metrics=item.get("metrics"),
             **opts,
         )
-    if family in ("taylor", "target", "paired"):
+    if family in ("taylor", "target", "paired", "portrait"):
         # summary families work from metric records, which the spec carries per item
-        fn = {"taylor": taylor, "target": target, "paired": paired}[family]
-        return fn([_Record(i) for i in spec.items], **opts)
+        summary_fns = {
+            "taylor": taylor,
+            "target": target,
+            "paired": paired,
+            "portrait": portrait,
+        }
+        return summary_fns[family]([_Record(i) for i in spec.items], **opts)
     raise NotImplementedError(f"matplotlib renderer: family {family!r} not implemented")
 
 

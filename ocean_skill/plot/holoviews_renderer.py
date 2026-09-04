@@ -75,6 +75,10 @@ _STATIC_ONLY_KWARGS = {
     # here; only the raw keyword pass-through is not.
     "legend_kwargs",
     "line_kwargs",
+    # portrait's cell-value annotation: a matplotlib Axes.text call signature. The
+    # interactive grid's hv.Labels styling (size, colour) is fixed, not exposed as an
+    # override -- the policy (annotate on/off) is honored here; the raw kwargs are not.
+    "annot_kwargs",
 }
 
 
@@ -1073,6 +1077,168 @@ def _skill_map(
         result = result.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         result = result.opts(title=str(title))
+    return result
+
+
+def _portrait(
+    items,
+    row_by: str = "variable",
+    col_by: str = "test",
+    metric_names=None,
+    annotate: bool = False,
+    missing_color: str = "#e6e6e6",
+    groups: dict[str, Any] | None = None,
+    title: str | None = None,
+    ncols: int | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    **_,
+):
+    """Interactive portrait plot: hover a cell for its full metric record.
+
+    ``row_by``/``col_by``/``metric_names``/``annotate``/``missing_color``/``groups``
+    mean exactly what they do in :func:`ocean_skill.plot.portrait.portrait`, including
+    the shared colour policy (:func:`ocean_skill.colormaps.metric_colors`, so a bias
+    grid is symmetric about zero and a correlation grid spans (-1, 1) in either
+    backend) and the raise on a metric none of the records carry, or on two
+    comparisons naming the same ``(row_by, col_by)`` cell — see
+    :func:`ocean_skill.plot.portrait._grid`, reused here directly so the two renderers
+    cannot disagree on cell values, level order, or which cells are missing.
+
+    Hovering a cell shows its full metric record, not just the one value its colour
+    encodes — the interactive advantage over the static grid's fixed annotation. A
+    ``(row_by, col_by)`` pair no comparison names, or whose metric came back
+    non-finite, draws in ``missing_color`` (bokeh's own ``bgcolor``), exactly as the
+    static grid draws it. The one cosmetic divergence: bokeh has no rotated top axis
+    to match the static grid's column labels above the panel, so they sit at the
+    bottom here instead — the cells, colours, and order are unaffected.
+    """
+    import pandas as pd
+
+    from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot.matplotlib_renderer import metric_panel_titles
+    from ocean_skill.plot.portrait import (
+        DEFAULT_MAP_METRICS,
+        _fmt_value,
+        _grid,
+        _resolve_metric_names,
+        _shared_standard_name,
+    )
+    from ocean_skill.plot.summary import pretty_level
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    # Mirrors ocean_skill.plot.summary._records's groups logic. Built inline, as
+    # _target's own recs are, rather than shared: these are raw spec-item dicts, not
+    # the comparison-like objects _records (and portrait(), its static twin) expects.
+    recs = [
+        dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
+        for i in items
+    ]
+    if not recs:
+        raise ValueError("portrait needs at least one comparison, got none")
+    if groups:
+        for rec in recs:
+            rec["group"] = groups.get(
+                rec.get("reference"), groups.get(rec["label"], "other")
+            )
+    names = _resolve_metric_names(
+        recs, metric_names if metric_names is not None else DEFAULT_MAP_METRICS
+    )
+    standard_name = _shared_standard_name(recs) if row_by == "variable" else None
+    titles = metric_panel_titles(names)
+
+    # every grid shares one (row_by, col_by) pair, built from the same records, so one
+    # cell aspect -- and therefore one panel size -- serves every metric
+    grids = {name: _grid(recs, row_by, col_by, name) for name in names}
+    row_levels, col_levels, _ = grids[names[0]]
+    aspect = len(col_levels) / max(len(row_levels), 1)
+    base_width = SOLO_PANEL_WIDTH_PX if len(names) == 1 else PANEL_WIDTH_PX
+    px = frame_px(aspect, width_px=base_width * _canvas_factor(size, zoom))
+    fontsize = bokeh_fontsize(px, font_scale=font_scale)
+    annotation_size = bokeh_scale(px, font_scale=font_scale)["annotation"]
+
+    # the axis categories are the *pretty* spelling (short variable names, "12 m"
+    # depths, ...) everywhere the static grid's tick labels are -- pretty_level is
+    # what field_levels' raw values feed into there too, so building the category
+    # from the same function keeps the two renderers reading identically even though
+    # bokeh's categorical axis has no separate "tick label" step to hook instead.
+    pretty_row = [pretty_level(row_by, v) for v in row_levels]
+    pretty_col = [pretty_level(col_by, v) for v in col_levels]
+    row_dim = hv.Dimension(row_by, values=pretty_row)
+    col_dim = hv.Dimension(col_by, values=pretty_col)
+    hover_cols = [c for c in recs[0] if c not in (row_by, col_by)]
+
+    panels = []
+    for name, panel_title in zip(names, titles, strict=False):
+        finite = [r for r in recs if np.isfinite(r.get(name, np.nan))]
+        df = pd.DataFrame(
+            [
+                {
+                    **r,
+                    row_by: pretty_level(row_by, r[row_by]),
+                    col_by: pretty_level(col_by, r[col_by]),
+                    "value": float(r[name]),
+                }
+                for r in finite
+            ],
+            columns=[row_by, col_by, "value", *hover_cols],
+        )
+        # HeatMap's gridding step reshapes every vdim's values; pandas' own default
+        # text dtype is Arrow-backed and refuses reshape (`ArrowStringArray... does
+        # not support reshape`), so any text hover column has to be plain numpy
+        # object dtype before it reaches hv.HeatMap.
+        for col in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].astype(object)
+        colors = metric_colors(
+            name, df["value"].to_numpy(), standard_name=standard_name
+        )
+        heat = hv.HeatMap(
+            df, kdims=[col_dim, row_dim], vdims=["value", *hover_cols]
+        ).opts(
+            cmap=colors.cmap,
+            clim=colors.clim(),
+            colorbar=True,
+            clabel=panel_title,
+            bgcolor=missing_color,
+            # a (row_by, col_by) pair absent from df and one present with a
+            # non-finite value both grid to NaN once HeatMap bins the categories
+            # (categorical_aggregate2d) -- clipping_colors is the bokeh-level knob
+            # for that cell colour; bgcolor above only reaches the margin outside
+            # the plotted grid, not a NaN cell inside it.
+            clipping_colors={"NaN": missing_color},
+            xrotation=45,
+            title=panel_title,
+            frame_width=px[0],
+            frame_height=px[1],
+            fontsize=fontsize,
+            tools=["hover"] if hover else [],
+        )
+        if annotate:
+            label_df = df.assign(text=[_fmt_value(name, v) for v in df["value"]])
+            heat = heat * hv.Labels(
+                label_df, kdims=[col_dim, row_dim], vdims=["text"]
+            ).opts(text_font_size=annotation_size, text_color="black")
+        panels.append(heat)
+
+    result = panels[0]
+    for extra in panels[1:]:
+        result = result + extra
+    if len(panels) > 1:
+        if ncols is None:
+            ncols, _nrows = facet_layout(
+                len(names), aspect, canvas=resolve_canvas(size, zoom)
+            )
+        result = result.cols(max(int(ncols), 1)).opts(
+            hv.opts.Layout(shared_axes=False)
+        )
+    if title:
+        result = result.opts(hv.opts.Layout(title=str(title))) if len(
+            panels
+        ) > 1 else result.opts(title=str(title))
     return result
 
 
@@ -3209,6 +3375,8 @@ def render(spec, **kwargs: Any):
         return _locations(spec.items, **opts)
     if family == "target":
         return _target(spec.items, **opts)
+    if family == "portrait":
+        return _portrait(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")
 
 
