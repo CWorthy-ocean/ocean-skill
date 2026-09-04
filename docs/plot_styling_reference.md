@@ -7,7 +7,8 @@ each a dict that merges onto a
 built-in default and is unpacked straight into one specific matplotlib/cartopy call —
 so any keyword that call accepts works, not just a hand-picked subset. An eighth,
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
-no per-frame label on a still. A few more parameters aren't styling dicts at all
+no per-frame label on a still, and a ninth, [`annot_kwargs`](#the-portrait-family-metrics-scoreboard),
+belongs to `portrait` alone, styling its cell-value text. A few more parameters aren't styling dicts at all
 (`title`, `metric_keys`, `metric_names`, `shared_limits`, `shared_axis_labels`,
 `shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
 of this doc.
@@ -45,6 +46,7 @@ want everything bigger or smaller.
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
 | [`legend_kwargs`](#legend_kwargs) | a `series` panel's key, or the `locations` map's | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
+| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -997,6 +999,60 @@ Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, a
 `normalize` is above).
 
 ---
+
+## The `portrait` family (metrics scoreboard)
+
+`osk.summary(kind="portrait")` / `ComparisonSet.portrait()` draw a heatmap
+scoreboard rather than a diagram of points: rows and columns named by two metric-
+record fields (`variable` down, `test` — which run — across, by default), each cell
+one metric's value, coloured. It reads the same `{metrics, label, units}` records
+as `taylor`/`target`/`paired`, so it pools comparisons the same way, but scales
+where a point diagram cannot — dozens of variable × run combinations stay legible
+as coloured cells, and row/column banding ("this run is off everywhere below 200
+m") reads at a glance. It is the scoreboard counterpart to `skill_map`'s map
+panels: a portrait cell is that panel's single reduced number rather than the map
+it was reduced from.
+
+```python
+suite.portrait()                                    # the four canonical statistics,
+                                                     # small multiples
+suite.portrait(metric_names="bias", annotate=True)  # one grid, values written in
+suite.portrait(row_by="depth", col_by="test")        # any record field, either axis
+```
+
+### `portrait`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `row_by` | `"variable"` | metric-record field naming the rows |
+| `col_by` | `"test"` | metric-record field naming the columns |
+| `metric_names` | `("bias", "crmsd", "corr", "sigma_ratio")` | a single metric name draws one grid; several draw small multiples, `skill_map`'s own layout. A name no record carries raises, naming what they do carry |
+| `annotate` | `False` | write each cell's own value on top of its colour (`_fmt_value`: two decimal places for a dimensionless metric, a plain integer for a count, three significant figures otherwise — one rule, so a number reads the same in either renderer) |
+| `missing_color` | `"#e6e6e6"` | colour for a `(row_by, col_by)` pair no comparison names, or whose metric came back non-finite — "no data", never a plotted zero |
+| `ncols` | auto (`facet_layout`) | columns of the small-multiples grid, when `metric_names` names more than one |
+| `groups` | `None` | a `{reference_name: label}` remap, exactly as the other summary diagrams — for splitting on a field not already in the record |
+
+Colour comes from the same `ocean_skill.colormaps.metric_colors` every metric panel
+in the package calls, pooled over every cell of one metric's grid: diverging about
+zero for `bias`, fixed to `(-1, 1)` for `corr`, centred on `1` for `sigma_ratio`,
+sequential from zero for a magnitude — one colorbar per metric, since they are
+different quantities with no scale to share.
+
+Of the styling dicts, `title_kwargs`, `colorbar_kwargs`, `tick_label_kwargs`,
+`suptitle_kwargs` and `annot_kwargs` (the cell-value text) apply, static renderer
+only, as ever. `size`/`zoom`/`font_scale`/`save` work as everywhere else.
+
+### Static versus interactive
+
+Both renderers read `row_by`/`col_by`/`metric_names` through the same shared
+helpers (`ocean_skill.plot.portrait._grid`, `_shared_standard_name`, `_fmt_value`),
+so cell values, level order (first appearance, like every other summary diagram's
+grouping) and which cells are missing cannot disagree between them. Interactively,
+hovering a cell shows its full metric record, not just the one value its colour
+encodes — column labels sit at the plot's bottom (bokeh's own default for a
+categorical axis) rather than above the grid as the static renderer draws them;
+that is the one cosmetic divergence, and it does not touch cell values, colour, or
+level order.
 
 ## The `series` family (time series)
 

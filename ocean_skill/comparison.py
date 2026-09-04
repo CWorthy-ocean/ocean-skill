@@ -3935,6 +3935,24 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    def portrait(self, *, renderer: str = "matplotlib", **kwargs: Any):
+        """Heatmap scoreboard of the set's metrics.
+
+        See :func:`ocean_skill.plot.portrait.portrait`. The scoreboard counterpart to
+        :meth:`taylor`/:meth:`target`: rows and columns named by two metric-record
+        fields (``variable``/``test`` by default), each cell one metric's value.
+        Reads the same records as :meth:`taylor`/:meth:`target`/:meth:`summary`, so it
+        pools the same way and shares their colour policy
+        (:func:`ocean_skill.colormaps.metric_colors`).
+        """
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        return render(
+            PlotSpec(family="portrait", items=self._metric_items(), options=kwargs),
+            renderer=renderer,
+        )
+
     def map_metrics(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Interpolate this set's per-station metrics onto a map, one panel each.
 
@@ -3968,7 +3986,12 @@ class ComparisonSet:
 
 
 #: What ``summary(kind=...)`` names, and the set method each one is.
-_SUMMARY_KINDS = {"both": "summary", "taylor": "taylor", "target": "target"}
+_SUMMARY_KINDS = {
+    "both": "summary",
+    "taylor": "taylor",
+    "target": "target",
+    "portrait": "portrait",
+}
 
 
 def summary(
@@ -3978,39 +4001,45 @@ def summary(
     renderer: str = "matplotlib",
     **kwargs: Any,
 ):
-    """Summarize comparisons you already have on one diagram.
+    """Summarize comparisons you already have, on one whole-set skill overview.
 
     The counterpart to :func:`compare`, for the case where the comparisons exist: a
-    nutrients fan-out, a depth fan-out, a one-off pair, pooled onto a single Taylor
-    and/or target diagram without re-expressing them as one ``compare()`` call — which
-    is often impossible anyway, since a pool may mix references, aggregations, or a
-    station with a grid::
+    nutrients fan-out, a depth fan-out, a one-off pair, pooled onto a single overview
+    without re-expressing them as one ``compare()`` call — which is often impossible
+    anyway, since a pool may mix references, aggregations, or a station with a grid::
 
         osk.summary([nutrients, depths, c])
         osk.summary({"hindcast": nutrients, "forecast": other}, kind="taylor")
+        osk.summary(comparisons, kind="portrait", metric_names="corr")
 
     Pooling is safe here in a way it is not for :meth:`ComparisonSet.plot`, which
     refuses a set mixing plot families: a metrics record is a handful of scalars whether
-    the comparison was a map, a scored map or a station series, and both diagrams
-    normalize by the reference's standard deviation, so unlike a figure of fields these
-    points are comparable across variables and units.
+    the comparison was a map, a scored map or a station series, so unlike a figure of
+    fields these records are comparable across variables and units regardless of which
+    overview reads them.
 
-    ``kind`` picks the diagram — ``"both"`` (Taylor and target side by side),
-    ``"taylor"`` or ``"target"``. It is not ``renderer``, which sits beside it and picks
-    static, interactive, or ``"both"`` of *those*; the two words mean different things
-    and both take that value.
+    ``kind`` picks the overview — ``"both"`` (Taylor and target side by side),
+    ``"taylor"`` or ``"target"`` alone, or ``"portrait"`` (the metrics scoreboard
+    heatmap, :meth:`ComparisonSet.portrait`) — the four whole-set summaries the metric
+    records support, one function so pooling is written once rather than once per
+    overview. It is not ``renderer``, which sits beside it and picks static,
+    interactive, or ``"both"`` of *those*; the two words mean different things and
+    both take that value.
 
     Points are named by what varies across the pool, or by your own names if
     ``comparisons`` is a ``{name: comparisons}`` dict. Either way the comparisons
     themselves are untouched — see :meth:`ComparisonSet._label_for`. Remaining keyword
-    arguments go to the diagram (``color_by``, ``marker_by``, ``labels``, ``title``,
-    ``save``, ...); see :mod:`ocean_skill.plot.summary`.
+    arguments go to the chosen overview (``color_by``, ``marker_by``, ``labels``,
+    ``title``, ``save``, ... for Taylor/target/both; ``row_by``, ``col_by``,
+    ``metric_names``, ``annotate``, ... for portrait); see
+    :mod:`ocean_skill.plot.summary` and :mod:`ocean_skill.plot.portrait`.
     """
     if kind not in _SUMMARY_KINDS:
         raise ValueError(
             f"kind={kind!r} is not one of {tuple(_SUMMARY_KINDS)} — 'both' draws "
-            "Taylor and target side by side, 'taylor' or 'target' just the one. "
-            "(To choose static vs interactive, use renderer=.)"
+            "Taylor and target side by side, 'taylor' or 'target' just the one, and "
+            "'portrait' the metrics scoreboard heatmap. (To choose static vs "
+            "interactive, use renderer=.)"
         )
     if isinstance(comparisons, dict):
         pooled = ComparisonSet(comparisons)  # keys are the labels

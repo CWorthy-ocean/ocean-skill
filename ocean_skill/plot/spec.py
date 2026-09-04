@@ -45,6 +45,7 @@ FAMILIES = (
     "taylor",
     "target",
     "paired",
+    "portrait",
     "locations",
 )
 
@@ -71,15 +72,20 @@ class PlotSpec:
         than the comparison's own fields — the ``metrics`` record is still there, as the
         overall value each panel is annotated with.
 
-        The summary families (``taylor``, ``target``, ``paired``) are the smallest
-        items of all: ``metrics`` and ``label``, plus an optional ``units`` (the
-        reference's units, read for the absolute-axes ``normalize=False`` labels; a
-        pooled comparison with nothing to read it from carries ``None``), with no
-        field payload at all. That is not a subset of the others but the whole of what
-        a diagram of points reads, and it is what lets those families pool comparisons
-        the map families could not share a figure with — a scored map, an unscored one
-        and a station series are all one record of scalars here. See
-        :meth:`ocean_skill.comparison.ComparisonSet._metric_items`.
+        The summary families (``taylor``, ``target``, ``paired``, ``portrait``) are
+        the smallest items of all: ``metrics`` and ``label``, plus an optional
+        ``units`` (the reference's units, read for the absolute-axes
+        ``normalize=False`` labels; a pooled comparison with nothing to read it from
+        carries ``None``), with no field payload at all. That is not a subset of the
+        others but the whole of what a diagram of points reads, and it is what lets
+        those families pool comparisons the map families could not share a figure
+        with — a scored map, an unscored one and a station series are all one record
+        of scalars here. See :meth:`ocean_skill.comparison.ComparisonSet._metric_items`.
+        ``portrait`` reads the same item but draws it differently from the other
+        three: rather than a diagram of points, it pivots the records into a heatmap —
+        rows and columns named by two record fields (``variable``/``test`` by
+        default), each cell one metric's value, colour and all. It is the scoreboard
+        counterpart to ``skill_map``'s map panels, not a fourth point diagram.
 
         ``skill_map`` items carry one further *optional* key, ``stations``: a dict of
         ``lon``, ``lat``, ``names`` and ``values`` (one array per metric), drawn as
