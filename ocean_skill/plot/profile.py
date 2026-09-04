@@ -41,14 +41,36 @@ _CORNER_W, _CORNER_H = _series_layout._CORNER_W, _series_layout._CORNER_H
 #: leaves behind (:func:`ocean_skill.plot.series.season_of`) agree on it.
 SEASON_DIM = "season"
 
+#: The dimension name a month groupby produces
+#: (``aggregate={"time": {"groupby": "month", ...}}``). Unlike :data:`SEASON_DIM`
+#: this name alone does not mean "fan me" -- an ordinary ``month`` dim a caller
+#: built some other way is refused like any other extra axis (see
+#: :meth:`ocean_skill.field.Field._profile_items`) -- so :func:`fan_season` only
+#: fans a ``month`` dim whose coordinate also carries
+#: :data:`ocean_skill.operators.TIME_GROUPBY_ATTR`, the same marker
+#: :func:`ocean_skill.operators.time_axis_dim` reads to route this shape here in
+#: the first place (an explicit ``select={"month": [...]}`` list, see
+#: :meth:`~ocean_skill.field.Field._time_axis_dim`).
+MONTH_DIM = "month"
+
+
+def _is_time_groupby_dim(aligned, dim: str) -> bool:
+    from ocean_skill.operators import TIME_GROUPBY_ATTR
+
+    coord = aligned.coords.get(dim)
+    return coord is not None and TIME_GROUPBY_ATTR in coord.attrs
+
 
 def fan_season(items: list[dict]) -> list[dict]:
-    """Split a surviving season dim into one item per season, chronologically.
+    """Split a surviving season or (marked) month dim into one item per value.
 
     The codebase's standing idiom for "several lines in one profile panel" is
     several *items*, not one item with a surviving axis (see
     ``Field._series_items`` fanning depth levels) -- a surviving season axis
-    fans the same way. ``.isel`` leaves ``season`` as a scalar coordinate on
+    fans the same way, chronologically; a surviving ``month`` axis (only when
+    an explicit ``select={"month": [...]}`` turned off its "this is time"
+    reading -- see :data:`MONTH_DIM`) fans the same way too, in the order the
+    caller named the months. ``.isel`` leaves the dim as a scalar coordinate on
     each slice (the convention a profile's own ``time`` already follows -- see
     :func:`_time_of`), and slices a same-dims ``spread`` coordinate along with
     it for free. Idempotent: a fanned item carries a scalar coordinate, not a
@@ -57,11 +79,16 @@ def fan_season(items: list[dict]) -> list[dict]:
     fanned = []
     for item in items:
         aligned = item["aligned"]
-        if SEASON_DIM not in aligned.dims:
+        dim = None
+        if SEASON_DIM in aligned.dims:
+            dim = SEASON_DIM
+        elif MONTH_DIM in aligned.dims and _is_time_groupby_dim(aligned, MONTH_DIM):
+            dim = MONTH_DIM
+        if dim is None:
             fanned.append(item)
             continue
-        for k in range(aligned.sizes[SEASON_DIM]):
-            fanned.append({**item, "aligned": aligned.isel({SEASON_DIM: k})})
+        for k in range(aligned.sizes[dim]):
+            fanned.append({**item, "aligned": aligned.isel({dim: k})})
     return fanned
 
 
@@ -140,15 +167,17 @@ def _time_of(aligned) -> str | None:
 def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     """Return the line(s) one item draws -- :func:`ocean_skill.plot.series.line_specs`
     with ``time`` (this cast's own instant) in place of ``depth`` (always ``None``
-    here; see the module docstring). ``season`` -- a fanned season, if this item's
-    aligned data was narrowed to one -- and ``spread`` -- a mean±spread envelope,
-    if the aggregate computed one -- are the same fields series carries, read the
-    same way (:func:`ocean_skill.plot.series.season_of`/``spread_of``).
+    here; see the module docstring). ``season``/``month`` -- a fanned season or
+    narrowed month, if this item's aligned data was reduced to one -- and
+    ``spread`` -- a mean±spread envelope, if the aggregate computed one -- are the
+    same fields series carries, read the same way
+    (:func:`ocean_skill.plot.series.season_of`/``month_of``/``spread_of``).
     """
     aligned = item["aligned"]
     variable = item.get("standard_name") or item.get("label")
     time = _time_of(aligned)
     season = _series_layout.season_of(aligned)
+    month = _series_layout.month_of(aligned)
     if _series_layout.item_roles(item) == ("value",):
         source = str((item.get("labels") or (item.get("label") or "value",))[0])
         units = item.get("units") or aligned["value"].attrs.get("units")
@@ -159,6 +188,7 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
                 variable=variable,
                 time=time,
                 season=season,
+                month=month,
                 spread=_style.spread_of(aligned, "value", aligned["value"]),
                 units=units,
                 values=aligned["value"],
@@ -171,6 +201,7 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
         "variable": variable,
         "time": time,
         "season": season,
+        "month": month,
         "units": units,
         "item": index,
     }
@@ -218,17 +249,20 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
         return _time_of(item["aligned"])
     if by == "season":
         return _series_layout.season_of(item["aligned"])
+    if by == "month":
+        return _series_layout.month_of(item["aligned"])
     if by == "depth":
         raise ValueError(
             "cannot facet a profile by 'depth': depth is the axis every panel "
             "already draws against, not a fact to split panels on. Facet on "
-            "variable, source, reference, time, season or comparison instead."
+            "variable, source, reference, time, season, month or comparison "
+            "instead."
         )
     if by == "comparison":
         return index
     raise ValueError(
         f"cannot facet a profile by {by!r}; expected one of variable, source, "
-        "reference, time, season, comparison."
+        "reference, time, season, month, comparison."
     )
 
 
@@ -237,7 +271,7 @@ def _refuse_depth_encode(encode: dict[str, str | None] | None) -> None:
         raise ValueError(
             "cannot encode a profile channel by 'depth': depth is the axis every "
             "panel already draws against, not a fact to style a line by. Encode "
-            "by variable, source, role, time or season instead."
+            "by variable, source, role, time, season or month instead."
         )
 
 
@@ -249,9 +283,10 @@ def panel_title(specs, *, varying) -> str:
     than :func:`~ocean_skill.plot.series._period_of` -- and shown only when every
     line in the panel shares one, so a multi-cast overlay (whose lines already
     carry their own times in the legend) does not claim a single "when" for all of
-    them.
+    them. ``month`` follows the identical rule, one level up: a
+    ``cols="month"``-faceted panel titles each with its own month.
     """
-    from ocean_skill.plot.series import _place_of
+    from ocean_skill.plot.series import _place_of, month_label
     from ocean_skill.plot.summary import pretty_level
 
     parts = []
@@ -262,12 +297,16 @@ def panel_title(specs, *, varying) -> str:
     place = _place_of(reference.values)
     if place:
         parts.append(place)
-    # Shown only when every line in the panel shares one season -- a cols="season"
-    # facet titles each panel with its season; an overlay of several seasons
-    # already tells them apart by colour/legend, so no single "when" is claimed.
+    # Shown only when every line in the panel shares one season/month -- a
+    # cols="season" (or "month") facet titles each panel with its own value; an
+    # overlay of several already tells them apart by colour/legend, so no single
+    # "when" is claimed.
     seasons = {s.season for s in specs if s.season}
     if len(seasons) == 1:
         parts.append(next(iter(seasons)))
+    months = {s.month for s in specs if s.month is not None}
+    if len(months) == 1:
+        parts.append(month_label(next(iter(months))))
     times = {s.time for s in specs if s.time}
     if len(times) == 1:
         parts.append(next(iter(times)))
@@ -364,15 +403,24 @@ def compose(
     # marker <- time replaces series' marker <- depth: every profile spec's own
     # depth is None (depth is the axis, not a style channel here), so time takes
     # its place as the default marker key, overridable like any other channel.
-    # color <- season only when a season actually varies across the figure (an
-    # overlay of several fanned seasons, the default reading of a seasonal
-    # profile) AND there is no twin axis -- on a merged panel the two variables
-    # need their own colours (CHANNELS' own color <- variable) so each axis label
-    # can honestly say whose lines are whose; an explicit encode= still wins.
+    # color <- season (or, one level up, month) only when one actually varies
+    # across the figure (an overlay of several fanned seasons/months, the
+    # default reading of a seasonal or monthly profile) AND there is no twin
+    # axis -- on a merged panel the two variables need their own colours
+    # (CHANNELS' own color <- variable) so each axis label can honestly say
+    # whose lines are whose; an explicit encode= still wins. The two never both
+    # apply -- fan_season fans one dim per item -- so either is a safe default.
     seasons_vary = len({s.season for s in all_specs if s.season is not None}) > 1
+    months_vary = len({s.month for s in all_specs if s.month is not None}) > 1
     defaults = {
         "marker": "time",
-        **({"color": "season"} if seasons_vary and not use_secondary else {}),
+        **(
+            {"color": "season"}
+            if seasons_vary and not use_secondary
+            else {"color": "month"}
+            if months_vary and not use_secondary
+            else {}
+        ),
     }
     styled = {
         (line.spec.item, line.spec.role): line

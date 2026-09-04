@@ -816,18 +816,46 @@ _CORNER_XY = {
 }
 
 
-def _date_axis(ax, scale: dict[str, float], tick_label_kwargs) -> None:
-    """Label a time axis concisely, without rotating it.
+def _x_axis(
+    ax,
+    scale: dict[str, float],
+    tick_label_kwargs,
+    *,
+    date: bool = True,
+    ticks: tuple[tuple[float, str], ...] | None = None,
+) -> None:
+    """Label a series/``time_depth`` panel's x axis: date, fixed groupby ticks, or plain.
 
-    ``ConciseDateFormatter`` exists so a date axis does not need the 45-degree tilt, and
-    ``fig.autofmt_xdate()`` — the usual reflex — both rotates *and* hides all but the
-    bottom axes in a way that fights an explicit ``sharex``.
+    ``date=True`` (a real time axis, the ordinary case) installs
+    ``ConciseDateFormatter`` so a date axis does not need the 45-degree tilt --
+    ``fig.autofmt_xdate()``, the usual reflex, both rotates *and* hides all but
+    the bottom axes in a way that fights an explicit ``sharex``.
+
+    ``date=False`` is a time groupby's surviving axis instead (see
+    :func:`ocean_skill.operators.time_axis_dim`) -- a bare integer index, not a
+    date, so ``AutoDateLocator`` would read a month ``3`` as days since 1970.
+    ``ticks`` -- ``((position, label), ...)`` from
+    :func:`ocean_skill.plot.series.groupby_ticks` -- installs those exact
+    labels (a ``month`` axis's ``Jan``..``Dec``) via a fixed locator/formatter
+    pair; with no ``ticks`` (``year``, ``hour``, ...), a plain integer locator
+    with no thousands-style offset keeps a year reading as ``2012`` rather
+    than an axis-wide ``+2.012e3`` label.
     """
     import matplotlib.dates as mdates
+    import matplotlib.ticker as mticker
 
-    locator = mdates.AutoDateLocator()
-    ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    if date:
+        locator = mdates.AutoDateLocator()
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    elif ticks:
+        ax.xaxis.set_major_locator(mticker.FixedLocator([pos for pos, _ in ticks]))
+        ax.xaxis.set_major_formatter(
+            mticker.FixedFormatter([label for _, label in ticks])
+        )
+    else:
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        ax.ticklabel_format(axis="x", useOffset=False, style="plain")
     ax.tick_params(axis="both", labelsize=scale["tick_label"])
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         if tick_label_kwargs:
@@ -1059,7 +1087,7 @@ def series(
                 twin.yaxis.label.set_color(panel.secondary_ylabel_color)
                 twin.tick_params(axis="y", labelcolor=panel.secondary_ylabel_color)
         _metrics_box(ax, panel, metrics_kwargs)
-        _date_axis(ax, scale, tick_label_kwargs)
+        _x_axis(ax, scale, tick_label_kwargs, date=layout.date_axis, ticks=layout.xticks)
         if panel.residual:
             strip = flat[index * 2 + 1]
             _draw_series_lines(strip, panel.residual, line_kwargs, mark=mark)
@@ -1073,7 +1101,9 @@ def series(
                 "test − reference" + (f"\n[{units}]" if units else ""),
                 fontsize=scale["axes_label"],
             )
-            _date_axis(strip, scale, tick_label_kwargs)
+            _x_axis(
+                strip, scale, tick_label_kwargs, date=layout.date_axis, ticks=layout.xticks
+            )
 
     bottom = flat[-1]
     bottom.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
@@ -2252,8 +2282,6 @@ def facet_labels(coord) -> list[str]:
     :func:`ocean_skill.comparison._surface_and_levels`). Honoured only at full
     length: a subset of the axis no longer knows which label belongs to which level.
     """
-    import calendar
-
     name = str(coord.name)
     values = list(np.atleast_1d(coord.values))
     labels = coord.attrs.get("level_labels")
@@ -2269,8 +2297,10 @@ def facet_labels(coord) -> list[str]:
     if month_labels is not None:
         return _distinct(coord, month_labels)
     if name == "month":
+        from ocean_skill.plot.series import month_label
+
         try:
-            return [calendar.month_abbr[int(v)] for v in values]
+            return [month_label(v) for v in values]
         except (ValueError, TypeError, IndexError):  # pragma: no cover - odd coord
             pass
     if name == "sigma0":
@@ -2954,7 +2984,10 @@ def time_depth(
     :func:`ocean_skill.plot.time_depth.prepare_time_depth` for the axis
     conventions this draws against -- positive-down depth with the y-axis
     inverted, so 0 m sits at the top and the deepest reading at the bottom; time
-    on x, labelled concisely without the 45-degree tilt (see :func:`_date_axis`).
+    on x, labelled concisely without the 45-degree tilt -- or, for a time
+    groupby's surviving axis (``month``, ``year``, ...; see
+    :func:`ocean_skill.operators.time_axis_dim`), its own integer values instead,
+    ``month`` spelled ``Jan``..``Dec`` (see :func:`_x_axis`).
 
     ``mark`` defaults to :func:`ocean_skill.plot.time_depth.default_mark`'s own
     call: ``"scatter"`` for a ragged repeat-visit record (most of a bottle
@@ -3041,7 +3074,9 @@ def time_depth(
     ax.invert_yaxis()
     ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
     ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
-    _date_axis(ax, scale, tick_label_kwargs)
+    _x_axis(
+        ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
+    )
 
     lab = units or ""
     _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])

@@ -91,13 +91,14 @@ CHANNELS: dict[str, str | None] = {
 #: ``time`` is a profile's own field -- a station's several casts, one line each --
 #: and stays ``None`` on every series line, so ``CHANNELS``'s default marker channel
 #: (``depth`` there, ``time`` here -- see :mod:`ocean_skill.plot.profile`) never
-#: mistakes one family's lines for the other's. ``season`` is the same idea one
-#: level up: a surviving ``{"groupby": "season"}`` axis fans into one line per
-#: season (:func:`ocean_skill.plot.profile.fan_season`), and this is what lets a
-#: profile's default colour switch to season when one is present (decided at
-#: compose time, not in :data:`CHANNELS`, since a series line has no use for it
-#: yet).
-FIELDS = ("variable", "source", "depth", "time", "role", "season")
+#: mistakes one family's lines for the other's. ``season``/``month`` are the same
+#: idea one level up: a surviving ``{"groupby": "season"}`` axis, or an explicit
+#: ``select={"month": [...]}`` narrowing a ``{"groupby": "month"}`` axis, fans
+#: into one line per value (:func:`ocean_skill.plot.profile.fan_season`), and
+#: this is what lets a profile's default colour switch to season/month when one
+#: is present (decided at compose time, not in :data:`CHANNELS`, since a series
+#: line has no use for either yet).
+FIELDS = ("variable", "source", "depth", "time", "role", "season", "month")
 
 #: About how many markers a line should carry, however many samples it has. A marker per
 #: sample on a 3000-point mooring series is a filled band, not a line.
@@ -116,12 +117,13 @@ class LineSpec:
     be keyed on. Frozen because a resolved style is a function of these — two lines with
     the same facts must get the same style, whoever asks.
 
-    ``season``/``spread`` are not independent facts to add: ``season`` is what a
-    surviving season axis fans into (see :data:`FIELDS`), and ``spread`` (a
-    same-length half-width array, or ``None``) is the envelope :func:`spread_of`
-    reads off the same aligned data ``values`` came from -- carried here so a
-    renderer draws the band from the same object it draws the line from, never a
-    second lookup that could disagree.
+    ``season``/``month``/``spread`` are not independent facts to add: ``season``
+    and ``month`` are what a surviving season axis, or an explicitly-narrowed
+    month axis, fan into (see :data:`FIELDS`), and ``spread`` (a same-length
+    half-width array, or ``None``) is the envelope :func:`spread_of` reads off
+    the same aligned data ``values`` came from -- carried here so a renderer
+    draws the band from the same object it draws the line from, never a second
+    lookup that could disagree.
     """
 
     role: str
@@ -133,6 +135,7 @@ class LineSpec:
     values: Any = None
     item: int = 0
     season: str | None = None
+    month: int | None = None
     spread: Any = None
 
     def get(self, field: str):
@@ -220,7 +223,7 @@ def series_label(spec: LineSpec, *, varying, ambiguous_sources=()) -> str:
     from ocean_skill.plot.summary import pretty_level
 
     parts = []
-    for field in ("source", "variable", "depth", "time", "season"):
+    for field in ("source", "variable", "depth", "time", "season", "month"):
         if field in varying or (field == "source" and not varying):
             value = spec.get(field)
             if value is not None:

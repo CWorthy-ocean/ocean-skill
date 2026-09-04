@@ -205,6 +205,7 @@ def _quadmesh(
     aspect: float | None = None,
     invert_y: bool = False,
     bgcolor: str | None = None,
+    xticks: tuple[tuple[float, str], ...] | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -264,6 +265,12 @@ def _quadmesh(
         opts["dynamic"] = False
     if axis_labels is not None:
         opts["xlabel"], opts["ylabel"] = axis_labels
+    if xticks is not None:
+        # A time_depth panel's month axis (see
+        # ocean_skill.plot.time_depth.TimeDepthGeometry.x_ticks) -- fixed
+        # (position, label) pairs, the same Jan..Dec spelling the static
+        # renderer's mesh draws.
+        opts["xticks"] = list(xticks)
     if geo:
         projection = _output_projection(da)
         opts |= {"geo": True, "projection": projection}
@@ -848,7 +855,7 @@ def _time_depth(
         w, h, fontsize = _series_geometry(
             font_scale=font_scale, canvas_factor=factor, aspect=SECTION_ASPECT
         )
-        return hv.Points(
+        points = hv.Points(
             frame, kdims=[geometry.x_name, geometry.y_name], vdims=["value"]
         ).opts(
             title=title,
@@ -869,6 +876,9 @@ def _time_depth(
             frame_height=h,
             fontsize=fontsize,
         )
+        if geometry.x_ticks:
+            points = points.opts(xticks=list(geometry.x_ticks))
+        return points
 
     raster = _should_rasterize(field, rasterize)
     return _quadmesh(
@@ -890,6 +900,7 @@ def _time_depth(
         aspect=SECTION_ASPECT,
         invert_y=True,
         bgcolor="#d9d9d9",
+        xticks=geometry.x_ticks,
     )
 
 
@@ -2379,9 +2390,17 @@ def _series(
         canvas_factor=_canvas_factor(size, zoom),
         aspect=panel_aspect or SERIES_ASPECT,
     )
+    # One axis, so one x dimension for every panel -- "time" for a real date axis,
+    # or the groupby dim's own name ("month", "year", ...) otherwise, so a
+    # renderer's axis label/hover cannot disagree with the static one (see
+    # ocean_skill.plot.series.compose, which decides `xlabel` once for both).
+    x_dim = hv.Dimension(layout.xlabel, label=layout.xlabel)
+    # ``(position, label)`` pairs for a month axis's Jan..Dec spelling; None for a
+    # date axis or a plain-numeric groupby dim (bokeh's own linear axis is fine
+    # there) -- see ocean_skill.plot.series.groupby_ticks.
+    xticks = list(layout.xticks) if layout.xticks else None
     plots = []
     for panel in layout.panels:
-        x_dim = hv.Dimension("time", label="time")
         # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
         # "name [unit]", and the two renderers must print one axis label, not two.
         y_dim = hv.Dimension("value", label=panel.ylabel)
@@ -2398,13 +2417,14 @@ def _series(
             )
         if panel.metrics_text:
             overlay = overlay * _series_metrics_text(hv, panel)
-        plot = overlay.opts(
+        opt_specs = [
             hv.opts.Curve(
                 frame_width=width,
                 frame_height=height,
                 fontsize=fontsize,
                 show_grid=True,
                 tools=["hover"],
+                **({"xticks": xticks} if xticks else {}),
             ),
             hv.opts.Overlay(
                 title=panel.title,
@@ -2416,7 +2436,13 @@ def _series(
                 fontsize=fontsize,
                 hooks=[_axis_label_color_hook(panel)],
             ),
-        )
+        ]
+        if xticks:
+            # mark="marker" draws hv.Scatter rather than hv.Curve (see
+            # _series_curve) -- its own opts spec so a month axis's ticks land
+            # whichever element type actually drew the line.
+            opt_specs.append(hv.opts.Scatter(xticks=xticks))
+        plot = overlay.opts(*opt_specs)
         if ylim is not None:
             plot = plot.opts(hv.opts.Curve(ylim=tuple(ylim)))
         plots.append(plot)
@@ -2432,16 +2458,18 @@ def _series(
                     for line in panel.residual
                 ]
             ) * hv.HLine(0.0).opts(color="0.7", line_width=1)
-            plots.append(
-                strip.opts(
-                    hv.opts.Curve(
-                        frame_width=width,
-                        frame_height=int(height * 0.35),
-                        fontsize=fontsize,
-                    ),
-                    hv.opts.Overlay(show_legend=False, fontsize=fontsize),
-                )
-            )
+            strip_specs = [
+                hv.opts.Curve(
+                    frame_width=width,
+                    frame_height=int(height * 0.35),
+                    fontsize=fontsize,
+                    **({"xticks": xticks} if xticks else {}),
+                ),
+                hv.opts.Overlay(show_legend=False, fontsize=fontsize),
+            ]
+            if xticks:
+                strip_specs.append(hv.opts.Scatter(xticks=xticks))
+            plots.append(strip.opts(*strip_specs))
 
     out = hv.Layout(plots).cols(layout.ncols)
     return out.opts(title=title or "")

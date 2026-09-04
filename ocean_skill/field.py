@@ -314,6 +314,26 @@ class Field:
         """The axis across the columns, or ``None`` for a single map."""
         return self.facet_dims[1]
 
+    def _time_axis_dim(self, da) -> str | None:
+        """:func:`ocean_skill.operators.time_axis_dim`, with one field-level exception.
+
+        A time groupby's surviving dimension (``month``, ``year``, ...) plays
+        time's role by default -- see :func:`~ocean_skill.operators.time_axis_dim`
+        -- *unless* the caller also named an explicit list of months,
+        ``select={"month": [1, 4, 7]}``. That mirrors :attr:`is_time_depth`'s own
+        depth-list exception: naming discrete values is asking to tell them apart
+        as separate lines, not to fold them into one axis, so "month" stops being
+        read as time and the shape falls through to the profile family's fan
+        (:func:`ocean_skill.plot.profile.fan_season`) instead -- the same idiom a
+        surviving season axis already draws through.
+        """
+        from ocean_skill.operators import time_axis_dim
+
+        dim = time_axis_dim(da)
+        if dim == "month" and isinstance(self.select.get("month"), list | tuple):
+            return None
+        return dim
+
     @property
     def is_series(self) -> bool:
         """Whether this field's prepared data is a place through time, not a map.
@@ -322,13 +342,13 @@ class Field:
         narrows both horizontal axes to one position
         (:func:`ocean_skill.align.point_of`) leaves nothing for :attr:`facet_dims`
         to lay out as columns, and a surviving time axis is exactly what a line
-        needs for its x. Read off the data's own shape, never an argument.
+        needs for its x. Read off the data's own shape, never an argument. "Time"
+        includes a time groupby's surviving dimension (see :meth:`_time_axis_dim`).
         """
         from ocean_skill.align import point_of
-        from ocean_skill.operators import resolve_dim
 
         da = self.data
-        return point_of(da) is not None and resolve_dim(da, "T") in da.dims
+        return point_of(da) is not None and self._time_axis_dim(da) in da.dims
 
     @property
     def is_profile(self) -> bool:
@@ -345,7 +365,7 @@ class Field:
         da = self.data
         if point_of(da) is None:
             return False
-        tdim = resolve_dim(da, "T")
+        tdim = self._time_axis_dim(da)
         zdim = resolve_dim(da, "Z")
         return (tdim is None or tdim not in da.dims) and (
             zdim is not None and zdim in da.dims
@@ -363,7 +383,9 @@ class Field:
         (``select={"depth": [0, 50, 100]}``) is excluded and keeps the old
         per-level lines: naming discrete levels is asking to tell them apart, not
         to see the whole record, and a list too long to draw as separate lines
-        should be narrowed or aggregated, not silently redirected here.
+        should be narrowed or aggregated, not silently redirected here. "Time"
+        includes a time groupby's surviving dimension, with the matching
+        exception for an explicit month list (see :meth:`_time_axis_dim`).
         """
         from ocean_skill.align import point_of
         from ocean_skill.comparison import _selected_depth
@@ -372,7 +394,7 @@ class Field:
         da = self.data
         if point_of(da) is None:
             return False
-        tdim = resolve_dim(da, "T")
+        tdim = self._time_axis_dim(da)
         zdim = resolve_dim(da, "Z")
         if tdim is None or tdim not in da.dims or zdim is None or zdim not in da.dims:
             return False
@@ -494,7 +516,7 @@ class Field:
         from ocean_skill.operators import resolve_dim
 
         da = self.data
-        tdim = resolve_dim(da, "T")
+        tdim = self._time_axis_dim(da)
         zdim = resolve_dim(da, "Z")
         extra = [str(d) for d in da.dims if d not in (tdim, zdim)]
         if extra:
@@ -555,7 +577,7 @@ class Field:
         from ocean_skill.operators import resolve_dim
 
         da = self.data
-        tdim = resolve_dim(da, "T")
+        tdim = self._time_axis_dim(da)
         zdim = resolve_dim(da, "Z")
         extra = [str(d) for d in da.dims if d not in (tdim, zdim)]
         if extra:
@@ -587,23 +609,33 @@ class Field:
         depth axis survives *whole*, one line down the water column, rather than
         being fanned into one item per level -- depth is the axis a profile line
         draws against, not a fact several series lines are told apart by (see
-        :mod:`ocean_skill.plot.profile`). A surviving season axis is the one
+        :mod:`ocean_skill.plot.profile`). A surviving season axis is one
         exception, fanned into one item per season
         (:func:`ocean_skill.plot.profile.fan_season`) exactly the way
         :meth:`_series_items` fans depth levels -- several seasons in one panel
-        are several lines, which is several items, the same idiom either way.
-        Any other axis beyond depth left standing is refused, the same as
-        :meth:`_series_items` refuses a third axis a line has no room for.
+        are several lines, which is several items, the same idiom either way. A
+        surviving *marked* month axis -- a ``{"groupby": "month"}`` result
+        narrowed by an explicit ``select={"month": [...]}`` list, see
+        :meth:`_time_axis_dim` -- is the other, fanned the identical way. An
+        ordinary ``month`` dim built some other way carries no such mark and is
+        refused like any other extra axis, the same as :meth:`_series_items`
+        refuses a third axis a line has no room for.
         """
         import xarray as xr
 
-        from ocean_skill.operators import resolve_dim
-        from ocean_skill.plot.profile import SEASON_DIM, fan_season
+        from ocean_skill.operators import TIME_GROUPBY_ATTR, resolve_dim
+        from ocean_skill.plot.profile import MONTH_DIM, SEASON_DIM, fan_season
 
         da = self.data
         zdim = resolve_dim(da, "Z")
         extra = [str(d) for d in da.dims if d != zdim]
-        if extra and extra != [SEASON_DIM]:
+        month_coord = da.coords.get(MONTH_DIM)
+        fannable = extra == [SEASON_DIM] or (
+            extra == [MONTH_DIM]
+            and month_coord is not None
+            and TIME_GROUPBY_ATTR in month_coord.attrs
+        )
+        if extra and not fannable:
             raise ValueError(
                 f"this profile still has {extra} beyond depth, and a profile "
                 f"line has only one axis to give away. Collapse it with "

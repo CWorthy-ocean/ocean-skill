@@ -83,7 +83,18 @@ __all__ = [
 #: here. A pre-change entry filed under a depth-less key held surface-reduced
 #: data; a :class:`~ocean_skill.field.Field`'s bare call now asks that same key
 #: for the whole column instead, and must not be handed the old answer.
-_FORMAT_VERSION = 5
+#:
+#: **6** — a time ``groupby`` result's new dimension now carries a deliberate
+#: marker (:data:`ocean_skill.operators.TIME_GROUPBY_ATTR`) so
+#: :meth:`ocean_skill.field.Field.plot` can still find "time" once
+#: ``aggregate={"time": {"groupby": "month", ...}}`` has renamed it (see
+#: :func:`ocean_skill.operators.time_axis_dim`); a season groupby's coordinate
+#: attrs are now stripped for the same reason (:mod:`ocean_skill.operators`'s
+#: ``_reduce_dim``). Neither changes the *value* a lane holds, only the attrs
+#: on its groupby coordinate -- but a pre-change entry lacks the marker
+#: entirely, so a stale hit would silently keep the old refuses-to-plot
+#: behaviour rather than the new one.
+_FORMAT_VERSION = 6
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline
