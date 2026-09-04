@@ -1734,6 +1734,7 @@ def prepare_source(
     require_reduced_keep: tuple[str, ...] = (),
     bbox: tuple[float, float, float, float] | None = None,
     time_window: tuple[Any, Any] | None = None,
+    time_targets: Any = None,
     qc: Any = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
@@ -1797,6 +1798,25 @@ def prepare_source(
     table as a server-side constraint rather than as a crop applied to a record
     already downloaded.
 
+    ``time_targets`` narrows time further still, past ``time_window``: a sorted
+    array of instants worth reading a step *near*, rather than every step between
+    the first and the last. A repeat-visit reference (a mooring, a CTD station
+    revisited over months) is compared at each of its own cast times
+    (:func:`ocean_skill.align._match_by_nearest`'s nearest-match, one model step
+    per cast) — every step ``time_window`` keeps in between two casts is read,
+    and for a ROMS lane vertically transformed, only to be discarded once
+    alignment picks its nearest neighbours and drops the rest. Passing the
+    reference's own cast times here (see
+    :meth:`Comparison._reference_time_targets`) prunes to that same nearest-step
+    set *before* the read/transform, via
+    :func:`ocean_skill.align.subset_to_time_targets`, applied everywhere
+    ``time_window`` is (both crop sites below, and as part of the cache key).
+    Distinct from ``time_window`` in the key (:func:`ocean_skill.cache.key_for_prepared`
+    hashes the whole ``select`` dict already) so a discretely-narrowed lane
+    never collides with the contiguously-cropped entry from before this
+    existed. ``None`` (the default) leaves ``time_window``'s ordinary
+    contiguous crop as the only one applied.
+
     ``qc`` overrides the source's own saved provider-QC policy (see
     :mod:`ocean_skill.qc`) at read time -- a dict (typically ``{"keep": [...]}``/
     ``{"keep_provider": [...]}``), the string ``"off"``, or ``None`` to use the
@@ -1839,6 +1859,18 @@ def prepare_source(
         # region but different years share a `_bbox`. Without this they would share an
         # entry as well, and the second would be served the first one's window.
         key_select["_time_window"] = [str(w) for w in time_window]
+    if time_targets is not None and len(time_targets) > 0:
+        # A discretely-narrowed lane (see the time_targets= docstring paragraph
+        # above) is not the contiguously-cropped one sharing the same
+        # `_time_window` -- hashed rather than listed out in full, since a
+        # repeat-visit station's cast times can number in the hundreds and this
+        # only has to distinguish one target set from another, not record it.
+        import hashlib
+
+        digest = hashlib.sha256(
+            ",".join(sorted(str(t) for t in time_targets)).encode()
+        ).hexdigest()[:16]
+        key_select["_time_targets"] = digest
     if effective_qc is not None:
         key_select["_qc"] = {
             "keep": sorted(str(v) for v in (effective_qc.get("keep") or [])),
@@ -1910,6 +1942,10 @@ def prepare_source(
         from ocean_skill.align import subset_to_time
 
         obj = subset_to_time(obj, time_window)
+    if pre_crop and time_targets is not None:
+        from ocean_skill.align import subset_to_time_targets
+
+        obj = subset_to_time_targets(obj, time_targets)
     da, depth = _prepare(
         obj, meta, variable, dict(select or {}), aggregate, source=source
     )
@@ -1927,6 +1963,10 @@ def prepare_source(
         from ocean_skill.align import subset_to_time
 
         da = subset_to_time(da, time_window)
+    if da is not None and not pre_crop and time_targets is not None:
+        from ocean_skill.align import subset_to_time_targets
+
+        da = subset_to_time_targets(da, time_targets)
     if da is not None and da.nbytes > LOAD_WARN_BYTES:
         import warnings
 
@@ -2347,12 +2387,107 @@ class Comparison:
         *can* miss the test lane's grid entirely and raise -- :meth:`align` retries
         unnarrowed rather than failing the comparison outright, same as before this
         crop existed.
+
+        A fixed-position entry's own ``geospatial_*_min``/``_max`` are not always
+        already equal, though -- a repeat-visit station (a CTD cast returned to
+        every so often) logs a slightly different GPS fix on each visit, a few
+        hundred metres of noise around the one place it names. Collapsed to its
+        centre here, before the bbox is even returned, so that noise still takes
+        the point crop above rather than silently falling through to the padded
+        one: unlike a bare ``float ==`` check downstream
+        (:func:`ocean_skill.align._is_point_bbox`, deliberately exact, since a
+        tolerance there would risk misreading a real, if small, region as a
+        point), this is the one place that already knows the *feature type*
+        settled the question -- so it can afford to treat "basically one place"
+        as one place. A degree-scale pad sized for a region can otherwise keep
+        nearly the whole grid on a small regional model, which is the failure
+        this closes.
         """
         if is_pair_spec(self.select):
             return None, None
-        if _feature_type(self.reference_name) not in NARROWING_FEATURE_TYPES:
+        feature = _feature_type(self.reference_name)
+        if feature not in NARROWING_FEATURE_TYPES:
             return None, None
-        return _domain_of(self.reference_name), _time_coverage_of(self.reference_name)
+        bbox = _domain_of(self.reference_name)
+        if bbox is not None and feature != "trajectory":
+            lon = 0.5 * (bbox[0] + bbox[2])
+            lat = 0.5 * (bbox[1] + bbox[3])
+            bbox = (lon, lat, lon, lat)
+        return bbox, _time_coverage_of(self.reference_name)
+
+    def _reference_time_targets(self) -> np.ndarray | None:
+        """The reference's own cast times, worth pre-selecting the test lane near.
+
+        ``None`` unless this comparison keeps the reference's *time* axis
+        standing (``over`` resolves to the "time" CF axis) against a
+        fixed-position or repeat-visit reference -- :data:`POINT_FEATURE_TYPES`
+        plus ``timeSeriesProfile``, the same population :meth:`_reference_narrowing`
+        collapses to a point, minus ``profile`` (already a single instant, with
+        nothing to prune between) and ``trajectory``/``trajectoryProfile`` (a
+        moving position pairs on space *and* time together, which a time-only
+        prune here could get wrong). A pair-spec select stays unrouted for the
+        same reason :meth:`_reference_narrowing` leaves it alone: two
+        independently-named recipes, not one this can second-guess.
+
+        ``_reference_narrowing`` only ever narrows the test lane to the
+        reference's declared *coverage* -- ``(start, stop)``, a contiguous span
+        (:func:`ocean_skill.align.subset_to_time`). A repeat-visit station's
+        actual casts are a sparse handful of instants inside that span, and
+        alignment (:func:`ocean_skill.align.match_axis` /
+        ``_match_by_nearest``) only ever pairs each cast with the *one* test
+        step nearest it -- every step the contiguous crop kept in between two
+        casts is read, and for a ROMS lane run through the vertical transform,
+        for nothing. This reads the reference itself (unlike
+        ``_reference_narrowing``, not read-free) to return its own cast times,
+        so :func:`prepare_source`'s ``time_targets=`` can prune the test lane to
+        that same nearest-step set before the read/transform rather than after.
+
+        The read is of the *reference* -- a sparse tabular record, not the
+        model -- so it costs little next to what it saves; still, this fails
+        open (returns ``None``) on any problem reading it, malformed time
+        values included, since this is a savings only, never something the
+        comparison's correctness depends on -- :meth:`align` falls back to the
+        ordinary contiguous crop exactly as if this didn't exist.
+        """
+        from ocean_skill.operators import _CF_AXES
+
+        if _CF_AXES.get(self.over) != "time":
+            return None
+        if is_pair_spec(self.select):
+            return None
+        feature = _feature_type(self.reference_name)
+        if feature not in POINT_FEATURE_TYPES and feature != "timeSeriesProfile":
+            return None
+        try:
+            import ocean_skill as osk
+            from ocean_skill import tabular
+            from ocean_skill.catalog import resolve
+            from ocean_skill.cf import find_coord
+            from ocean_skill.sources import erddap_constraints
+
+            meta = resolve(self.reference_name).metadata
+            ref_select = select_for(self.select, "reference")
+            constraints = erddap_constraints(meta, ref_select, None)
+            ref_qc = qc_for(self.qc, "reference")
+            read_kwargs = {"qc": ref_qc} if ref_qc is not None else {}
+            obj = (
+                osk.read(self.reference_name, constraints=constraints, **read_kwargs)
+                if constraints
+                else osk.read(self.reference_name, **read_kwargs)
+            )
+            if tabular.is_frame(obj):
+                obj = tabular.to_dataset(obj, meta)
+            coord = find_coord(obj, "time")
+            if coord is None:
+                return None
+            values = np.asarray(coord.values).ravel()
+        except Exception:
+            return None
+        if values.dtype.kind == "M":
+            values = values[~np.isnat(values)]
+        if values.size == 0:
+            return None
+        return np.unique(values)
 
     def _warn_if_no_overlap(self) -> None:
         """Warn, before either lane is read, when the two sources provably never meet.
@@ -2516,6 +2651,7 @@ class Comparison:
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
         time_window: tuple[Any, Any] | None = None,
+        time_targets: Any = None,
         drop_keys: tuple[str, ...] = (),
         extra_select: dict[str, Any] | None = None,
         keep: tuple[str, ...] = (),
@@ -2529,7 +2665,9 @@ class Comparison:
         :func:`ocean_skill.align.align` still refuses any further one.
 
         ``bbox`` crops the lane before it is read into memory; see
-        :func:`prepare_source`.
+        :func:`prepare_source`. ``time_targets`` is that same module's own
+        further, discrete time crop -- see its docstring and
+        :meth:`_reference_time_targets`.
 
         ``drop_keys`` removes keys from this lane's own select before it is prepared
         — used by :meth:`align` to keep the test lane gridded when a shared point
@@ -2574,6 +2712,7 @@ class Comparison:
             require_reduced_keep=keep,
             bbox=bbox,
             time_window=time_window,
+            time_targets=time_targets,
             qc=qc_for(self.qc, role),
         )
 
@@ -2645,6 +2784,7 @@ class Comparison:
         drop_keys: tuple[str, ...],
         keep: tuple[str, ...],
         derived_window: tuple[Any, Any] | None,
+        time_targets: Any = None,
     ):
         """Re-read the test lane if it was windowed around the wrong point.
 
@@ -2717,6 +2857,7 @@ class Comparison:
             role="test",
             bbox=(target[0], target[1], target[0], target[1]),
             time_window=derived_window,
+            time_targets=time_targets,
             drop_keys=drop_keys,
             keep=keep,
         )
@@ -2841,6 +2982,12 @@ class Comparison:
             if route is not None
             else derived_bbox
         )
+        # A further, discrete narrowing past derived_window's contiguous span --
+        # see _reference_time_targets and prepare_source's time_targets= docstring.
+        # None for anything but a repeat-visit/fixed-position reference whose time
+        # axis this comparison keeps, so every other lane reads exactly the
+        # contiguous window it always has.
+        time_targets = self._reference_time_targets()
         # A vertical section is the same "route around the ordinary select" idea as
         # a point, one level down: the reference is not narrowed independently, it is
         # sampled at wherever the *test* lane's own transect actually snapped to (see
@@ -2859,6 +3006,7 @@ class Comparison:
                 role="test",
                 bbox=test_bbox,
                 time_window=derived_window,
+                time_targets=time_targets,
                 drop_keys=drop_keys,
                 keep=keep,
             )
@@ -2893,6 +3041,7 @@ class Comparison:
                 refresh,
                 role="test",
                 time_window=derived_window,
+                time_targets=time_targets,
                 drop_keys=drop_keys,
                 keep=keep,
             )
@@ -2963,6 +3112,7 @@ class Comparison:
             drop_keys=drop_keys,
             keep=keep,
             derived_window=derived_window,
+            time_targets=time_targets,
         )
         self._warn_on_pair_spec_mismatch(t, r)
         self._actual_depth = r_depth

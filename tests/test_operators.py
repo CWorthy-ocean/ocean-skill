@@ -1232,3 +1232,76 @@ def test_a_reference_sharing_no_span_is_kept_not_emptied():
     clim = _daily_maps("1990-01-01", 10)
     window = time_span_of(_daily_maps("2013-06-15", 3, freq="MS"))
     assert subset_to_time(clim, window).sizes["time"] == 10
+
+
+# -- pruning to the nearest step per cast, not the whole span in between ---------
+
+
+def test_targets_prune_to_one_step_per_cast_not_the_whole_span():
+    """A sparse, gap-y set of casts keeps only their nearest steps.
+
+    The whole point of :func:`subset_to_time_targets`: a contiguous crop
+    (:func:`subset_to_time`) over the same casts would keep all 1096 days; this
+    keeps only the handful actually paired.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 1096)  # ~3 years, daily
+    casts = pd.to_datetime(["2012-03-01", "2012-06-15", "2013-01-10", "2014-11-30"])
+    out = subset_to_time_targets(test, casts)
+    assert out.sizes["time"] == len(casts)
+    for cast, kept in zip(sorted(casts), sorted(pd.to_datetime(out.time.values))):
+        assert abs((kept - cast).total_seconds()) <= 12 * 3600  # within half a day
+
+
+def test_targets_deduplicate_when_two_casts_share_a_nearest_step():
+    """Two casts landing on the same step keep it once, not twice."""
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 30)
+    casts = pd.to_datetime(["2012-01-15T01:00", "2012-01-15T03:00"])
+    out = subset_to_time_targets(test, casts)
+    assert out.sizes["time"] == 1
+
+
+def test_targets_is_a_superset_never_stricter_than_a_tolerance_match():
+    """No tolerance is applied here -- a far-off cast still keeps its one nearest
+    step; :func:`ocean_skill.align.match_axis`'s own tolerance decides afterward
+    whether that step counts as a real match (with its own warning), not this.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 5)
+    far_off_cast = pd.to_datetime(["1990-01-01"])
+    out = subset_to_time_targets(test, far_off_cast)
+    assert out.sizes["time"] == 1
+
+
+def test_no_targets_or_no_time_axis_leaves_the_object_alone():
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 30)
+    assert subset_to_time_targets(test, []).sizes["time"] == 30
+    assert subset_to_time_targets(test, None).sizes["time"] == 30
+
+    static = xr.DataArray(
+        np.zeros((4, 5)),
+        dims=("latitude", "longitude"),
+        coords={"latitude": np.arange(4.0), "longitude": np.arange(5.0)},
+    )
+    out = subset_to_time_targets(static, pd.to_datetime(["2012-01-01"]))
+    assert out.shape == static.shape
+
+
+def test_targets_covering_every_step_returns_the_object_unpruned():
+    """A target per step (a dense reference) selects everything -- no narrowing,
+    same as if this feature did not exist.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 5)
+    out = subset_to_time_targets(test, pd.to_datetime(test.time.values))
+    assert out.sizes["time"] == 5

@@ -490,6 +490,48 @@ def test_a_trajectory_reference_narrows_to_its_extent_box(monkeypatch):
     assert c._reference_narrowing() == (bbox, None)
 
 
+def test_a_repeat_visit_stations_gps_scatter_collapses_to_its_centre(monkeypatch):
+    """A station's geospatial_*_min/_max need not already be equal.
+
+    A repeat-visit CTD station logs a slightly different GPS fix on each cast --
+    real, un-degenerate min/max a few hundred metres apart -- and without the
+    collapse below that bbox falls through to the *padded* region crop
+    (:func:`ocean_skill.align.subset_to_bbox`) rather than the tight point one,
+    which on a small regional model can keep nearly the whole grid. Only
+    ``trajectory`` (a genuinely moving position) is exempt --
+    :func:`test_a_trajectory_reference_narrows_to_its_extent_box` covers that.
+    """
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    scattered = (-21.9895, 64.2615, -21.9867, 64.2648)  # ~137 m x 370 m of GPS noise
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: scattered)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+    monkeypatch.setattr(
+        comparison_module, "_feature_type", lambda name: "timeSeriesProfile"
+    )
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
+    bbox, _ = c._reference_narrowing()
+    lon = 0.5 * (scattered[0] + scattered[2])
+    lat = 0.5 * (scattered[1] + scattered[3])
+    assert bbox == (lon, lat, lon, lat)
+
+
+def test_an_already_degenerate_bbox_is_unaffected_by_the_collapse(monkeypatch):
+    """A genuinely fixed station is byte-identical to before this existed."""
+    import ocean_skill.comparison as comparison_module
+    from ocean_skill.comparison import Comparison
+
+    point = (-144.3, 49.9, -144.3, 49.9)
+    monkeypatch.setattr(comparison_module, "_domain_of", lambda name: point)
+    monkeypatch.setattr(comparison_module, "_time_coverage_of", lambda name: None)
+    monkeypatch.setattr(comparison_module, "_feature_type", lambda name: "station")
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR)
+    assert c._reference_narrowing() == (point, None)
+
+
 def test_a_gridded_reference_is_never_narrowed(monkeypatch):
     """The policy table's other half: featureType outside NARROWING_FEATURE_TYPES."""
     import ocean_skill.comparison as comparison_module
@@ -582,6 +624,95 @@ def test_time_coverage_is_none_on_garbage_rather_than_raising(monkeypatch):
 
     _resolved(monkeypatch, {"minTime": "not a date", "maxTime": "also not one"})
     assert _time_coverage_of("mooring") is None
+
+
+# -- pre-selecting the test lane at the reference's own cast times --------------
+#
+# _reference_narrowing crops the test lane to the reference's declared *coverage*
+# -- a contiguous (start, stop) span. A repeat-visit reference's actual casts are a
+# sparse handful of instants inside that span, and alignment only ever pairs each
+# one with its single nearest test step (ocean_skill.align._match_by_nearest) --
+# so _reference_time_targets exists to prune the test lane to that same nearest-
+# step set *before* the read/vertical-transform, not after.
+
+
+def test_time_targets_reads_the_references_own_cast_times(monkeypatch):
+    """The happy path: sorted, deduplicated cast times, for a kept time axis."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    casts = pd.to_datetime(["2024-05-01", "2024-04-04", "2024-04-04"])  # dup, unsorted
+    ds = xr.Dataset(coords={"time": ("time", casts.values)})
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="time")
+    targets = c._reference_time_targets()
+    assert targets is not None
+    assert list(targets) == sorted(pd.to_datetime(casts.unique()))
+
+
+def _read_must_not_be_called(name, **kw):
+    raise AssertionError("the reference must not be read for this comparison")
+
+
+def test_time_targets_is_none_when_depth_not_time_is_kept(monkeypatch):
+    """over='Z' keeps depth standing -- there is no time axis left to prune."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="Z")
+    assert c._reference_time_targets() is None
+
+
+def test_time_targets_is_none_for_a_trajectory(monkeypatch):
+    """A moving position pairs on space and time together; skip the prune (mirrors
+    _reference_narrowing's own trajectory exception, one level over).
+    """
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "trajectoryProfile"})
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="time")
+    assert c._reference_time_targets() is None
+
+
+def test_time_targets_is_none_for_a_pair_spec(monkeypatch):
+    """A deliberate {"test":..., "reference":...} names two recipes on purpose."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="time",
+        select={"test": {}, "reference": {}},
+    )
+    assert c._reference_time_targets() is None
+
+
+def test_time_targets_fails_open_on_a_broken_reference_read(monkeypatch):
+    """A savings only -- an unreadable reference must not break the comparison."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    def broken_read(name, **kw):
+        raise OSError("boom")
+
+    monkeypatch.setattr(osk, "read", broken_read)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(reference="papa", test="product", variable=MODEL_VAR, over="time")
+    assert c._reference_time_targets() is None
 
 
 def test_the_overall_metrics_of_a_station_are_not_area_weighted(station_lanes):
