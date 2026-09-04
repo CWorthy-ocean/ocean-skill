@@ -177,6 +177,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "aliases": [
             "moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water",
             "DIC",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
+            "TCO2",  # GLODAP's total CO2 spelling for the same quantity
         ],
     },
     "alkalinity": {
@@ -199,6 +200,7 @@ VOCABULARY: dict[str, dict[str, object]] = {
             "total_alkalinity_in_sea_water",
             "ALK",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
             "TA",  # common discrete-sample shorthand for *total* alkalinity
+            "TAlk",  # GLODAP's own spelling of the same quantity
         ],
     },
     "temperature": {

@@ -79,7 +79,12 @@ __all__ = [
 ]
 
 #: Fallback variable → CF standard_name map for ROMS/MARBL output, which mostly lacks
-#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win.
+#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win, and
+#: after this map ``_probe`` also tries :func:`ocean_skill.vocabulary.resolve_name` --
+#: this map exists for names the shared vocabulary deliberately doesn't carry (``zeta``,
+#: ``u``, ``v``, ``hbls``, ``FG_CO2`` are too short/generic to be global aliases); most
+#: of the tracer names below (``NO3``, ``PO4``, ...) are already in the vocabulary too,
+#: kept here so this map alone still fully describes ROMS/MARBL output on its own.
 #: Component chlorophylls (spChl/diatChl/…) are unmapped: CF's name means the total.
 ROMS_STANDARD_NAMES: dict[str, str] = {
     "temp": "sea_water_potential_temperature",
@@ -1488,27 +1493,33 @@ def _probe(
             if value:
                 md[key] = str(value)[:10]  # ISO date; the time of day adds nothing here
 
-    # --- variable -> standard_name (declared attrs win, then the fallback map) ---
+    # --- variable -> standard_name (declared attrs win, then name_map, then the
+    # shared vocabulary for anything neither of those two covers) ---
+    from ocean_skill.vocabulary import is_known, resolve_name
+
     std: dict[str, str] = {}
     auxiliary: dict[str, str] = {}
     duplicates: dict[str, str] = {}
     claimed: set[str] = set()
     for var in ds.data_vars:
-        sn = ds[var].attrs.get("standard_name") or (
-            name_map.get(str(var)) if name_map else None
+        varname = str(var)
+        sn = (
+            ds[var].attrs.get("standard_name")
+            or (name_map.get(varname) if name_map else None)
+            or (resolve_name(varname) if is_known(varname) else None)
         )
         if not sn:
             continue
         _base, _, modifier = str(sn).partition(" ")
         if modifier and modifier in _SN_MODIFIERS:
-            auxiliary[str(var)] = str(sn)  # uncertainty/count/flag field
+            auxiliary[varname] = str(sn)  # uncertainty/count/flag field
         elif sn in claimed:
             # Several variables can claim one standard_name (WOA's n_an
             # objectively-analyzed vs n_mn statistical mean). First wins; the rest are
             # recorded but not renamed, so the mapping stays one-to-one.
-            duplicates[str(var)] = str(sn)
+            duplicates[varname] = str(sn)
         else:
-            std[str(var)] = str(sn)
+            std[varname] = str(sn)
             claimed.add(str(sn))
     if std:
         md["standard_names"] = std
@@ -1900,7 +1911,11 @@ def add_source(
         catalog through this one function, rather than each needing its own.
     name_map
         Fallback variable→standard_name map for data lacking ``standard_name`` attrs;
-        defaults to :data:`ROMS_STANDARD_NAMES`. Pass ``None`` to rely on attrs only.
+        defaults to :data:`ROMS_STANDARD_NAMES`. Checked after attrs and before the
+        shared :mod:`ocean_skill.vocabulary` (which most datasets need no map for at
+        all -- this one exists for the few ROMS/MARBL names too short/generic to be
+        global vocabulary aliases: ``zeta``, ``u``, ``v``, ``hbls``, ``FG_CO2``).
+        Pass ``None`` to skip straight to the vocabulary, not to attrs-only.
     probe
         Open the source once to derive extents/axes/variables/featureType. Opening is
         cheap locally; for remote sources it costs one round-trip per entry at build
