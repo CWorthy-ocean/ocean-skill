@@ -95,17 +95,22 @@ def fan_season(items: list[dict]) -> list[dict]:
 def _vertical_coord(da):
     """Return the coordinate ``da``'s vertical dimension actually carries its values on.
 
-    Usually the dimension's own coordinate (``z``, ``depth``, ``sigma0``, ...). A
-    native s-level profile (``select={"depth": "column"}``) is the one exception:
-    its dimension is a bare sigma index (ROMS ships no coordinate for ``s_rho``
-    itself) with the real depth riding on the auxiliary ``z_rho`` coordinate
-    instead -- exactly the same distinction
-    :func:`ocean_skill.plot.section.prepare_section` makes for a section's native-s
-    axis, and for the identical reason.
+    Usually the dimension's own coordinate (``z``, ``depth``, ``sigma0``, ...), found
+    tolerant of a coordinate riding under a different name than its dimension (see
+    :func:`ocean_skill.operators.vertical_coord_on` -- a catalog recipe's ``depth`` on
+    a dimension still spelled ``DEPTH``, say). A native s-level profile
+    (``select={"depth": "column"}``) is the one exception past that: its dimension is
+    a bare sigma index (ROMS ships no coordinate for ``s_rho`` itself) with the real
+    depth riding on the auxiliary ``z_rho`` coordinate instead -- exactly the same
+    distinction :func:`ocean_skill.plot.section.prepare_section` makes for a section's
+    native-s axis, and for the identical reason.
     """
+    from ocean_skill.operators import vertical_coord_on
+
     dim = str(da.dims[0])
-    if dim in da.coords:
-        return da.coords[dim]
+    coord = vertical_coord_on(da, dim)
+    if coord is not None:
+        return coord
     if "z_rho" in da.coords:
         return da.coords["z_rho"]
     raise ValueError(

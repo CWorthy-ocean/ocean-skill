@@ -86,13 +86,17 @@ def _labelless_vertical(da) -> str | None:
     from one to the next. A 1-D ``z_rho`` coordinate on that same dimension is a real
     label instead — the same fallback :func:`ocean_skill.plot.profile._vertical_coord`
     already uses for a profile down native levels — and is not "labelless" here.
-    Anything else (an observational product's own reported ``depth``, say) already
-    carries a coordinate and never triggers this, whatever facet size it draws as.
+    Anything else (an observational product's own reported ``depth``, say -- even one
+    riding under a different name than its dimension, see
+    :func:`ocean_skill.operators.vertical_coord_on`) already carries a coordinate and
+    never triggers this, whatever facet size it draws as.
     """
-    from ocean_skill.operators import resolve_dim
+    from ocean_skill.operators import resolve_dim, vertical_coord_on
 
     zdim = resolve_dim(da, "Z")
-    if zdim is None or zdim not in da.dims or zdim in da.coords:
+    if zdim is None or zdim not in da.dims:
+        return None
+    if vertical_coord_on(da, zdim) is not None:
         return None
     z_rho = da.coords.get("z_rho")
     if z_rho is not None and z_rho.ndim == 1 and zdim in z_rho.dims:
@@ -160,8 +164,11 @@ def _top_level(da, zdim: str, *, source: str):
     """
     import numpy as np
 
-    if zdim in da.coords:
-        levels = np.asarray(da[zdim].values, dtype="float64")
+    from ocean_skill.operators import vertical_coord_on
+
+    coord = vertical_coord_on(da, zdim)
+    if coord is not None:
+        levels = np.asarray(coord.values, dtype="float64")
         k = int(np.argmin(np.abs(levels)))
         top = da.isel({zdim: k})
         top.attrs["actual_depth"] = float(abs(levels[k]))
@@ -513,7 +520,7 @@ class Field:
         """
         import xarray as xr
 
-        from ocean_skill.operators import resolve_dim
+        from ocean_skill.operators import resolve_dim, vertical_coord_on
 
         da = self.data
         tdim = self._time_axis_dim(da)
@@ -544,17 +551,31 @@ class Field:
                 '(e.g. {"Z": "mean"}).'
             )
 
+        # The coordinate that carries each level's real value -- ordinarily zdim
+        # itself, but see vertical_coord_on for a coordinate riding under a
+        # different name (a catalog recipe's `depth` on a dimension still spelled
+        # `DEPTH`, say). Read once, outside the loop: isel below slices whatever
+        # coordinate shares zdim along with the data, whatever it is named.
+        zcoord = vertical_coord_on(da, zdim)
+        zcoord_name = str(zcoord.name) if zcoord is not None else None
+
         items = []
         for k in range(da.sizes[zdim]):
             level = da.isel({zdim: k})
             item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
             # actual_depth lives on the *item's* Dataset, not the DataArray, since
             # that is what _depth_of (plot/series.py) reads -- the same convention
-            # Comparison.align() uses for its own aligned pair. z_rho is negative-down
-            # (see plot/profile.py:vertical_values); abs() matches every other depth
-            # label in the package, which is positive-down.
-            if zdim in level.coords:
-                item["aligned"].attrs["actual_depth"] = float(level[zdim])
+            # Comparison.align() uses for its own aligned pair. abs() unconditionally
+            # (matching plot/profile.vertical_values and
+            # plot/time_depth.prepare_time_depth) -- a no-op for an already
+            # positive-down observational coordinate, and what turns z_rho's
+            # negative-down convention into the positive-down metres every other
+            # depth label in this package uses. zcoord may itself resolve to z_rho
+            # (see vertical_coord_on): a bare native axis with a 1-D z_rho counts as
+            # carrying a real coordinate the same way a differently-named observational
+            # one does, so both are read the same way here.
+            if zcoord_name is not None and zcoord_name in level.coords:
+                item["aligned"].attrs["actual_depth"] = abs(float(level[zcoord_name]))
             elif "z_rho" in level.coords and level["z_rho"].ndim == 0:
                 item["aligned"].attrs["actual_depth"] = abs(float(level["z_rho"]))
             items.append(item)

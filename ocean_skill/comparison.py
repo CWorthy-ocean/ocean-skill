@@ -1180,6 +1180,7 @@ def _prepare(
     import warnings
 
     from ocean_skill import _stacklevel, operators, roms, tabular, units
+    from ocean_skill.cf import find_coord
 
     # A point source arrives as a DataFrame (osk.read's contract for a station), and
     # everything from resolve_variable down speaks xarray. Converting here rather than
@@ -1274,24 +1275,29 @@ def _prepare(
     horizontal_mean = _horizontal_mean_part(_without_vertical(agg))
     da = _select_horizontal_then_aggregate(da, horizontal, early_agg, source)
 
+    _tsp_tdim = operators.resolve_dim(da, "T")
     if (
         str(meta.get("featureType") or "") == "timeSeriesProfile"
-        and "time" in da.dims
-        and da.sizes["time"] == 1
+        and _tsp_tdim is not None
+        and _tsp_tdim in da.dims
+        and da.sizes[_tsp_tdim] == 1
     ):
         # A period string (e.g. "2024-06-11", one visit's day) narrows time by
         # *slicing*, not by an exact-instant match -- xarray's own partial-date
-        # indexing leaves "time" standing as a length-1 dimension even when only
-        # one step falls inside it, rather than collapsing it to a scalar
-        # coordinate the way an exact-timestamp select already does. Left alone,
+        # indexing leaves the time dim standing at length 1 even when only one
+        # step falls inside it, rather than collapsing it to a scalar coordinate
+        # the way an exact-timestamp select already does. Left alone,
         # _require_reduced (in prepare_source, below this function) would squeeze
         # that dimension away with drop=True once the lane is checked/returned --
         # discarding the very timestamp ocean_skill.align._sample_test_at_instant
         # needs to pick the model's nearest snapshot to this cast. Squeezed here
         # instead, coordinate kept, exactly as a genuine "profile" source's own
         # single-instant time coordinate already looks by construction
-        # (see ocean_skill.tabular._profile_dataset).
-        da = da.squeeze("time", drop=False)
+        # (see ocean_skill.tabular._profile_dataset). resolve_dim (rather than a
+        # literal "time" dim name) so a source whose time dim is spelled
+        # differently -- SEANOE's ADCP moorings ship a `TIME` dim, say -- still
+        # gets this treatment.
+        da = da.squeeze(_tsp_tdim, drop=False)
 
     if calculated:
         bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
@@ -1452,9 +1458,16 @@ def _prepare(
             # branch just took. A bare field() call is the only way to reach
             # here with `depth is None`; the compare lane's own default is
             # injected as an explicit "surface" before this function ever runs.
+            # A separate real-metres variable alongside the index (WOA/GLODAP-style
+            # "Depth", say) wins over the axis's own values when one is present --
+            # found the same vocab-backed way as every other incoming coordinate in
+            # this package (case-insensitive, not just the one capitalization),
+            # rather than only "Depth" exactly. Excluded when it resolves back to
+            # the axis's own coordinate (zname): that case is already `da[zname]`.
+            _depth_var = find_coord(obj, "vertical")
             levels = (
-                np.asarray(obj["Depth"])
-                if "Depth" in obj.variables
+                np.asarray(_depth_var)
+                if _depth_var is not None and str(_depth_var.name) != zname
                 else np.asarray(da[zname])
             )
             if band:
@@ -1497,10 +1510,12 @@ def _prepare(
                 k = int(np.abs(levels - target).argmin())
                 da = da.isel({zname: k})
                 da.attrs["actual_depth"] = float(levels[k])
+                _ragged_tdim = operators.resolve_dim(da, "T")
                 if (
                     str(meta.get("featureType") or "") == "timeSeriesProfile"
-                    and "time" in da.dims
-                    and da.sizes["time"] > 0
+                    and _ragged_tdim is not None
+                    and _ragged_tdim in da.dims
+                    and da.sizes[_ragged_tdim] > 0
                 ):
                     # A ragged station's nearest level to `target` is real for some
                     # visits and simply never sampled on others (see
@@ -1531,7 +1546,7 @@ def _prepare(
         and str(meta.get("featureType") or "") == "timeSeriesProfile"
         and zname is not None
         and zname in da.dims
-        and "time" not in da.dims
+        and operators.resolve_dim(da, "T") not in da.dims
     ):
         # A ragged station's own union of levels (every visit's distinct depths
         # pooled together, written by _profile_depth_plan's timeSeriesProfile
@@ -1561,8 +1576,9 @@ def _prepare(
     # is read off the lane itself. Reported the same way as an observational level's:
     # through prepare_source, the lane cache, and the metrics row's `obs_depth`.
     if "actual_depth" not in da.attrs:
-        if "depth" in da.coords and not da["depth"].dims:
-            da.attrs["actual_depth"] = float(da["depth"])
+        _station_depth = find_coord(da, "vertical")
+        if _station_depth is not None and not _station_depth.dims:
+            da.attrs["actual_depth"] = float(_station_depth)
         elif da.attrs.get("depth_m") is not None:
             # A station's depth also rides on the variable's attrs, which is what is
             # left once a reduction has dropped a coordinate along time -- so the

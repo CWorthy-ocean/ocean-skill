@@ -2251,7 +2251,14 @@ def field_grid(
 
 #: Facet coordinates that name a vertical level rather than a time. ``z`` is what
 #: :func:`ocean_skill.roms.to_depth` produces; the rest are what observational products
-#: call the same axis, matching :data:`ocean_skill.cf._COORD_FALLBACKS`.
+#: call the same axis, matching :data:`ocean_skill.cf._COORD_FALLBACKS`. Deliberately
+#: excludes ``pressure``/``pres`` (a different unit -- dbar, not metres) and the
+#: model-native ``s_rho``/``z_rho`` spellings (handled before this in
+#: :func:`facet_labels`), so this can't reuse :func:`ocean_skill.vocabulary.matches_axis`
+#: outright -- neither its full ``Z`` token set (adds pressure) nor its ``direct_only``
+#: one (drops ``depth_surface``/``lev``) is quite this list. Matched
+#: case-insensitively (:func:`facet_labels` lowercases first) so a source's own
+#: capitalization (WHOTS' ``DEPTH``, say) still gets its ``" m"`` label.
 _DEPTH_COORDS = ("z", "depth", "depth_surface", "lev")
 
 
@@ -2313,7 +2320,7 @@ def facet_labels(coord) -> list[str]:
             return [_sigma_label(float(v)) for v in values]
         except (ValueError, TypeError):  # pragma: no cover - odd coord
             pass
-    if name in _DEPTH_COORDS:
+    if name.lower() in _DEPTH_COORDS:
         try:
             return [f"{abs(float(v)):g} m" for v in values]
         except (ValueError, TypeError):  # pragma: no cover - odd coord

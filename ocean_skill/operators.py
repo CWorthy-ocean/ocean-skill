@@ -65,6 +65,7 @@ __all__ = [
     "spatial_mean_in_spec",
     "spec_names",
     "time_axis_dim",
+    "vertical_coord_on",
 ]
 
 #: How a list of variables becomes one field. Straight from the stdlib — a new
@@ -328,6 +329,37 @@ def resolve_dim(obj, name: str) -> str | None:
     for candidate in COORD_FALLBACKS[kind]:
         if candidate in dims_by_lower:
             return dims_by_lower[candidate]
+    return None
+
+
+def vertical_coord_on(da, zdim: str):
+    """Return the coordinate that carries ``zdim``'s real values, or ``None``.
+
+    ``zdim`` (from :func:`resolve_dim`, axis ``"Z"``) ordinarily carries its own
+    same-named coordinate -- ``da.coords[zdim]`` -- and that is returned first, so
+    nothing that already worked changes. Some catalog recipes leave a real vertical
+    coordinate under a *different* name than its dimension (a variable renamed to
+    ``depth`` and ``set_coords``'d, riding on a dimension a source still spells
+    ``DEPTH``): :func:`ocean_skill.cf.find_coord`'s ``"vertical"`` match, when it
+    rides on ``zdim`` alone (``found.dims == (zdim,)``), covers exactly that case the
+    same way every other axis lookup in this package tolerates a spelling/case
+    mismatch.
+
+    Returns ``None`` for anything else -- including a *multi-dimensional* auxiliary
+    coordinate (a curvilinear ``z_rho``, say). A caller that means to average across
+    such a coordinate's other dimensions (see
+    :func:`ocean_skill.field._top_level`'s grid reduction) locates and reduces it
+    itself rather than through this single-coordinate lookup; a caller that only
+    wants a same-dim ``z_rho`` (a native-s-level column) checks that on its own too,
+    the same as before this helper existed.
+    """
+    if zdim in da.coords:
+        return da.coords[zdim]
+    from ocean_skill.cf import find_coord
+
+    found = find_coord(da, "vertical")
+    if found is not None and found.dims == (zdim,):
+        return found
     return None
 
 

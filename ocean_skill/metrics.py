@@ -250,11 +250,18 @@ def area_weights(da) -> xr.DataArray | None:
 
     A degree of longitude shrinks toward the poles, so unweighted means over-count high
     latitudes. Weights are broadcast against ``da`` and zeroed where ``da`` is missing.
+    Latitude is located via :func:`ocean_skill.cf.find_coord` -- the same lookup
+    :func:`ocean_skill.operators._area_weights_for` already uses for its own
+    cos(latitude) approximation -- rather than a hardcoded name list, so a grid
+    spelled ``nav_lat``/``lat_u``/uppercase ``LATITUDE`` still gets weighted instead of
+    silently falling back to an unweighted mean.
     """
-    lat_name = next((n for n in ("lat", "latitude", "lat_rho") if n in da.coords), None)
-    if lat_name is None:
+    from ocean_skill.cf import find_coord
+
+    lat_coord = find_coord(da, "latitude")
+    if lat_coord is None:
         return None
-    w = np.cos(np.deg2rad(da[lat_name]))
+    w = np.cos(np.deg2rad(lat_coord))
     return w.where(np.isfinite(da), 0.0).fillna(0.0)
 
 
