@@ -116,12 +116,15 @@ def isolated_catalogs(tmp_path, monkeypatch):
 
     Discovery's search path also always includes the packaged reference catalogs
     (``ocean_skill/catalogs/``, unconditionally, so they resolve regardless of
-    cwd) -- not something env/cwd can steer away from, unlike the other three
-    tiers. A test asserting exact discovery contents or exact parse-call counts
-    would otherwise also see the real shipped catalogs, so ``search_paths`` is
-    wrapped to drop just that one packaged entry, leaving env/cwd behavior (and
-    the real user-config-dir tier, deliberately not isolated here either) as
-    ``search_paths`` would actually compute them.
+    cwd) -- not something env/cwd can steer away from, unlike the other tiers. A
+    test asserting exact discovery contents or exact parse-call counts would
+    otherwise also see the real shipped catalogs, so ``search_paths`` is wrapped
+    to drop just that one packaged entry. The user and legacy-user tiers are
+    redirected into ``tmp_path`` (empty, uncreated -- a test that wants one
+    populated just ``mkdir``s it) so a developer's real ``~/.ocean-skill/catalogs``
+    can never leak into a test; ``add_search_path`` registrations are reset to
+    empty for the same reason. What's left as ``search_paths`` would actually
+    compute it: env var splitting/expanding, cwd walk-up, and tier ordering.
     """
     import intake
     from intake.readers import datatypes, readers
@@ -143,6 +146,12 @@ def isolated_catalogs(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(cats))
     monkeypatch.chdir(tmp_path)
+
+    monkeypatch.setattr(catalog, "_added_dirs", [])
+    monkeypatch.setattr(catalog, "_user_dir", lambda: tmp_path / "user-catalogs")
+    monkeypatch.setattr(
+        catalog, "_legacy_user_dir", lambda: tmp_path / "legacy-catalogs"
+    )
 
     packaged = catalog.Path(catalog.__file__).parent / "catalogs"
     real_search_paths = catalog.search_paths

@@ -562,16 +562,28 @@ automatically along a search path where **later shadows earlier**:
 
 ```
 1. ocean_skill/catalogs/     shipped defaults
-2. ~/.ocean-skill/catalogs/  your machine
-3. $OCEAN_SKILL_CATALOGS     a site or shared-cluster directory
+2. $OCEAN_SKILL_CATALOGS     a team / shared-cluster directory (os.pathsep-separated);
+                             or register one in code: osk.catalog.add_search_path(...)
+3. ~/.ocean-skill/catalogs/  your machine
 4. ./catalogs/               this project
 ```
 
-That ordering is what lets the same source name resolve to a colleague's shared
-filesystem path on a cluster and to your own download on a laptop, without either of
-you editing a tracked file. Remote files are cached under ocean-skill's cache
-directory; set `$OCEAN_SKILL_DIR` to move it, or fsspec's own
-`FSSPEC_SIMPLECACHE_CACHE_STORAGE` to override it outright.
+Setup is meant to be obvious and take no config file: drop a YAML in
+`~/.ocean-skill/catalogs/` for catalogs that are just yours, point
+`$OCEAN_SKILL_CATALOGS` at a team directory (a cluster module file or shared
+`.bashrc` is the usual place) for catalogs your whole group should see, and build
+project catalogs straight into `./catalogs/` — it's auto-discovered and gitignored.
+The narrower the scope, the higher the priority, so a catalog you build for one
+project always wins there, your own catalogs win over your team's, and the team's
+win over the shipped defaults — without anyone editing a tracked file. (A catalog
+already at the old `platformdirs` user-config location, e.g.
+`~/Library/Application Support/ocean-skill/catalogs` on macOS, still works — it's
+scanned just below `~/.ocean-skill/catalogs/`.) Check what's actually on your search
+path any time with `osk.catalog.search_paths()`.
+
+Remote files are cached under ocean-skill's cache directory; set `$OCEAN_SKILL_DIR`
+to move it, or fsspec's own `FSSPEC_SIMPLECACHE_CACHE_STORAGE` to override it
+outright.
 
 ## Layout
 
