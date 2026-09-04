@@ -741,6 +741,26 @@ def test_every_total_alkalinity_spelling_is_one_variable():
         "sea_water_alkalinity_per_unit_mass_expressed_as_mole_equivalent",
         "seawater_alkalinity_per_unit_mass_expressed_as_mole_equivalent",
         "TOTAL_ALKALINITY_IN_SEA_WATER",  # matching ignores case
+        "TAlk",  # GLODAP's own raw variable name
+        "talk",  # ... any case
+    ):
+        assert vocabulary.is_known(spelling), spelling
+        assert vocabulary.resolve_name(spelling) == canonical, spelling
+
+
+def test_every_dissolved_inorganic_carbon_spelling_is_one_variable():
+    """GLODAP's `TCO2` and ROMS/MARBL's `DIC` are the same quantity, by CF name.
+
+    Before this, build-time probing needed a per-dataset name_map to recognize
+    GLODAP's `TCO2` at all -- the vocabulary alone now covers it, the way it already
+    covers ROMS/MARBL's `DIC`.
+    """
+    canonical = "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water"
+    for spelling in (
+        "DIC",  # ROMS/MARBL tracer name
+        "TCO2",  # GLODAP's own raw variable name
+        "tco2",  # ... any case
+        "moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water",
     ):
         assert vocabulary.is_known(spelling), spelling
         assert vocabulary.resolve_name(spelling) == canonical, spelling

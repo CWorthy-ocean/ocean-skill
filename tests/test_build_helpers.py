@@ -556,6 +556,90 @@ def test_a_real_time_axis_still_wins_over_global_attributes(tmp_path):
     assert md["time_coverage_start"] == "2015-06-01"
 
 
+# --------------------------------------------- variable -> standard_name resolution
+
+
+def _glodap_like_dataset():
+    """Return a GLODAP-shaped Dataset: raw per-variable names, no standard_name attrs.
+
+    ``Cant``/``OmegaA`` stand in for GLODAP's genuinely un-nameable diagnostics
+    (anthropogenic carbon, aragonite saturation state) -- CF has no single
+    standard_name for either, so they must stay unmapped either way.
+    """
+    coord = ("x",)
+    data = {
+        name: (coord, np.ones(2))
+        for name in (
+            "NO3",
+            "PO4",
+            "TAlk",
+            "TCO2",
+            "oxygen",
+            "salinity",
+            "silicate",
+            "temperature",
+            "Cant",
+            "OmegaA",
+        )
+    }
+    return xr.Dataset(data, coords={"x": [0, 1]})
+
+
+def test_probe_falls_back_to_the_vocabulary_when_name_map_misses():
+    """GLODAP's raw names resolve via the shared vocabulary with no bespoke name_map.
+
+    Regression guard for the silent partial-mapping bug: building GLODAP with the
+    *default* ``ROMS_STANDARD_NAMES`` name_map used to capture only NO3/PO4 (the only
+    two names that map coincidentally overlaps), since GLODAP's files carry no
+    standard_name attrs and nothing else recognized the rest.
+    """
+    from ocean_skill.build import ROMS_STANDARD_NAMES, _probe
+
+    md = _probe(_glodap_like_dataset(), ROMS_STANDARD_NAMES)
+
+    assert md["standard_names"] == {
+        "NO3": "mole_concentration_of_nitrate_in_sea_water",
+        "PO4": "mole_concentration_of_phosphate_in_sea_water",
+        "TAlk": "sea_water_alkalinity_expressed_as_mole_equivalent",
+        "TCO2": "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water",
+        "oxygen": "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water",
+        "salinity": "sea_water_practical_salinity",
+        "silicate": "mole_concentration_of_silicate_in_sea_water",
+        "temperature": "sea_water_potential_temperature",
+    }
+    assert "Cant" not in md["standard_names"]
+    assert "OmegaA" not in md["standard_names"]
+
+
+def test_probe_falls_back_to_the_vocabulary_with_no_name_map_at_all():
+    """``name_map=None`` skips straight to the vocabulary, not to attrs-only."""
+    from ocean_skill.build import _probe
+
+    md = _probe(_glodap_like_dataset(), None)
+    assert md["standard_names"]["temperature"] == "sea_water_potential_temperature"
+
+
+def test_name_map_still_wins_over_the_vocabulary_on_conflict():
+    """The caller's name_map is checked before the shared vocabulary, not after."""
+    from ocean_skill.build import _probe
+
+    ds = xr.Dataset({"NO3": (("x",), np.ones(2))}, coords={"x": [0, 1]})
+    md = _probe(ds, {"NO3": "a_custom_standard_name"})
+    assert md["standard_names"]["NO3"] == "a_custom_standard_name"
+
+
+def test_declared_attr_still_wins_over_the_vocabulary():
+    """A file's own standard_name attr is authoritative over any fallback tier."""
+    from ocean_skill.build import _probe
+
+    ds = xr.Dataset(
+        {"NO3": ("x", np.ones(2), {"standard_name": "a_declared_standard_name"})},
+        coords={"x": [0, 1]},
+    )
+    md = _probe(ds, {"NO3": "would_be_from_name_map"})
+    assert md["standard_names"]["NO3"] == "a_declared_standard_name"
+
+
 # ----------------------------------------------------------- domain_outline (perimeter)
 
 
