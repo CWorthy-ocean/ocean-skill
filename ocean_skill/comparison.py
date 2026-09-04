@@ -3962,6 +3962,9 @@ class ComparisonSet:
           stations' convex hull) — the interpolator.
         * ``block_spacing=<metres>`` — pool a dense station cluster to its median
           before fitting, so it cannot dominate a sparser region by outnumbering it.
+        * ``extent="tight"`` — crop the view to the drawn surface (or pass a
+          ``(lon_min, lon_max, lat_min, lat_max)`` window); default frames the whole
+          grid, which for a small cluster leaves a lot of empty ocean.
         * ``rows={"DJF": winter_set, ...}`` — one row per entry instead of one
           figure, e.g. a seasonal facet.
         * ``renderer="matplotlib"`` (default) or ``"holoviews"``.

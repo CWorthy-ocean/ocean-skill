@@ -320,6 +320,89 @@ def test_the_overlay_draws_one_dot_per_station_in_both_renderers():
     assert all(len(p.data) == 9 for p in points)
 
 
+def _map_axes(fig):
+    """Every drawn (visible) cartopy map panel in a skill_map figure."""
+    return [ax for ax in fig.axes if hasattr(ax, "projection") and ax.get_visible()]
+
+
+def _cluster(n: int = 9, seed: int = 0) -> pd.DataFrame:
+    """Stations packed into a small area, so a grid='regular' frame has real slack."""
+    rng = np.random.default_rng(seed)
+    lon = rng.uniform(-152.05, -151.95, n)
+    lat = rng.uniform(59.95, 60.05, n)
+    return pd.DataFrame({"lon": lon, "lat": lat, "bias": rng.normal(0, 1, n)})
+
+
+def test_extent_tight_crops_closer_than_the_default_whole_grid():
+    """extent='tight' frames the drawn surface, so the view is smaller than default."""
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    items = build_items(_cluster(), metrics=("bias",), grid="regular")
+
+    default = render(PlotSpec(family="skill_map", items=items, options={}))
+    tight = render(
+        PlotSpec(family="skill_map", items=items, options={"extent": "tight"})
+    )
+
+    d0, d1, d2, d3 = _map_axes(default)[0].get_extent()
+    t0, t1, t2, t3 = _map_axes(tight)[0].get_extent()
+    assert (t1 - t0) < (d1 - d0) and (t3 - t2) < (d3 - d2), (
+        "the tight view should span less lon and lat than the whole-grid default"
+    )
+
+
+def test_extent_tight_still_contains_every_station():
+    """Cropping to the surface must not cut off a station dot.
+
+    Each station sits in its own maxdist disk, so the surface (and thus the tight
+    box) covers them all.
+    """
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    df = _cluster()
+    items = build_items(df, metrics=("bias",), grid="regular")
+    fig = render(PlotSpec(family="skill_map", items=items, options={"extent": "tight"}))
+    x0, x1, y0, y1 = _map_axes(fig)[0].get_extent()
+    assert x0 <= df["lon"].min() and df["lon"].max() <= x1
+    assert y0 <= df["lat"].min() and df["lat"].max() <= y1
+
+
+def test_extent_bbox_is_used_verbatim_in_both_renderers():
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    box = (-152.3, -151.7, 59.7, 60.3)  # a window around the cluster
+    items = build_items(_cluster(), metrics=("bias",), grid="regular")
+    spec = PlotSpec(family="skill_map", items=items, options={"extent": box})
+
+    # matplotlib: set_extent stores the box verbatim (aspect is applied only at draw).
+    fig = render(spec)
+    x0, x1, y0, y1 = _map_axes(fig)[0].get_extent()
+    assert (x0, x1, y0, y1) == pytest.approx(box)
+
+    # holoviews/geoviews: the bokeh figure keeps a geographic aspect ratio, so one
+    # range is padded to match the other -- symmetrically, so the *centre* is exactly
+    # the box's and both ranges are finite (cropped, not left on auto).
+    import holoviews as hv
+
+    bokeh = hv.render(render(spec, renderer="holoviews"))
+    xc = (bokeh.x_range.start + bokeh.x_range.end) / 2
+    yc = (bokeh.y_range.start + bokeh.y_range.end) / 2
+    assert xc == pytest.approx((box[0] + box[1]) / 2)
+    assert yc == pytest.approx((box[2] + box[3]) / 2)
+
+
+def test_an_unknown_extent_string_raises():
+    items = build_items(_cluster(), metrics=("bias",), grid="regular")
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    with pytest.raises(ValueError, match="extent='snug'"):
+        render(PlotSpec(family="skill_map", items=items, options={"extent": "snug"}))
+
+
 def test_an_item_without_stations_draws_exactly_as_before():
     """The overlay is additive: a plain skill_map item is unaffected."""
     from ocean_skill.plot.registry import render
