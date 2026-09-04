@@ -992,6 +992,33 @@ def _legend_below(fig, handles, size):
     return legend
 
 
+def _legend_right(fig, handles, size):
+    """Draw one key to the right of the axes, outside them.
+
+    Simpler than :func:`_legend_below`: entries stack in a single column rather than
+    wrapping into rows, so there is no column count -- or width -- to search for.
+
+    Like :func:`_legend_below`, this lands outside the axes constrained layout already
+    fit to the figure, which does not reserve room for a legend placed by
+    ``bbox_to_anchor`` after the fact -- so, undrawn, it would sit half off the canvas.
+    What actually pulls it into frame is ``bbox_inches="tight"`` at save time (this
+    family's own ``save=`` always passes it, and so does Jupyter's inline display by
+    default), which re-measures every artist and grows the saved canvas to fit. A raw
+    ``fig.savefig(...)`` without it -- or an interactive window, whose size cannot
+    grow after the fact -- will still clip the key; that is a cost of both placements,
+    not one this function introduces.
+    """
+    return fig.legend(
+        handles=handles,
+        labels=[h.get_label() for h in handles],
+        loc="center left",
+        bbox_to_anchor=(1.0, 0.5),
+        fontsize=size,
+        frameon=False,
+        numpoints=1,
+    )
+
+
 def _grid_legend_below(fig, handles, ncols, size):
     """Draw the :func:`_grid_handles` matrix beneath the axes, clear of them.
 

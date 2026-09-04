@@ -2285,6 +2285,31 @@ def _series_curve(hv, line, dimensions, *, mark: str):
     return element
 
 
+def _outside_legend_hook(side: str):
+    """Bokeh finalize hook: move a panel's own key out of the frame onto ``side``.
+
+    ``legend_position=`` only moves the key *inside* the plot, still layered over the
+    data -- the side regions bokeh reserves for axes are the only place actually
+    outside it, and reaching one takes this hook, not an opt. Still one key per panel
+    (this family's stated divergence: bokeh has no legend shared across the separate
+    figures an ``hv.Layout`` draws), just pushed to the edge like the static renderer's
+    ``legend="below"``/``legend="right"`` -- see :func:`_series`.
+    """
+    region = "below" if side == "below" else "right"
+
+    def hook(plot, element):
+        legend = plot.state.legend
+        if not legend:
+            return
+        entry = legend[0]
+        plot.state.legend[0] = None
+        if side == "below":
+            entry.orientation = "horizontal"
+        plot.state.add_layout(entry, region)
+
+    return hook
+
+
 def _axis_label_color_hook(panel):
     """Bokeh finalize hook: colour each y axis's label like the lines it scales.
 
@@ -2350,6 +2375,7 @@ def _series(
     metrics_loc="auto",
     metric_keys=DEFAULT_METRIC_KEYS,
     legend=True,
+    line_labels=None,
     ylim=None,
     panel_aspect=None,
     labels=None,
@@ -2363,12 +2389,19 @@ def _series(
 
     Composition, styling, labels, titles and the statistics text all come from
     :mod:`ocean_skill.plot.series` and :mod:`ocean_skill.plot.style`, the same as the
-    static renderer, so the two cannot disagree about anything but the drawing call.
+    static renderer, so the two cannot disagree about anything but the drawing call
+    (including ``line_labels=``, which overrides the legend text itself the same way in
+    both — see :func:`ocean_skill.plot.series.compose`).
 
-    Two things differ, both stated rather than silent: the key is drawn inside each
-    panel (bokeh has no figure-level legend, so a shared key below the figure is not
-    available), and the statistics box is an ``hv.Text`` in data coordinates, so it pans
-    and zooms with the data instead of staying pinned to the axes.
+    Two things differ, both stated rather than silent. First, the statistics box is an
+    ``hv.Text`` in data coordinates, so it pans and zooms with the data instead of
+    staying pinned to the axes. Second, ``legend=`` placement: bokeh has no legend
+    shared across the separate figures an ``hv.Layout`` draws, so there is no combined
+    key here the way the static renderer's ``legend="below"``/``"right"`` draws one.
+    Those two values (and ``True``'s own "auto" default, once every panel's labels
+    happen to agree) instead push each panel's *own* key outside its frame, on that
+    side; a corner name (``"upper left"``, ...) still forces every panel's key into
+    that corner, exactly as the static renderer does.
     """
     hv = _extension()
 
@@ -2384,6 +2417,8 @@ def _series(
         residual=residual,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        legend=legend,
+        line_labels=line_labels,
     )
     width, height, fontsize = _series_geometry(
         font_scale=font_scale,
@@ -2417,6 +2452,9 @@ def _series(
             )
         if panel.metrics_text:
             overlay = overlay * _series_metrics_text(hv, panel)
+        hooks = [_axis_label_color_hook(panel)]
+        if layout.legend_placement in ("below", "right"):
+            hooks.append(_outside_legend_hook(layout.legend_placement))
         opt_specs = [
             hv.opts.Curve(
                 frame_width=width,
@@ -2428,13 +2466,13 @@ def _series(
             ),
             hv.opts.Overlay(
                 title=panel.title,
-                show_legend=bool(legend),
+                show_legend=layout.legend_placement != "off",
                 legend_position=_BOKEH_LEGEND_POSITION.get(
                     panel.legend_corner, "top_right"
                 ),
                 multi_y=bool(panel.secondary),
                 fontsize=fontsize,
-                hooks=[_axis_label_color_hook(panel)],
+                hooks=hooks,
             ),
         ]
         if xticks:
