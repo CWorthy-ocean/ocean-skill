@@ -3938,11 +3938,13 @@ class ComparisonSet:
     def map_metrics(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Interpolate this set's per-station metrics onto a map, one panel each.
 
-        Every comparison in the set should be a station (a place through time) —
-        anything else is skipped with a warning, since it has no single position to
-        plot. See :func:`ocean_skill.plot.map_metrics.map_metrics`, which this
-        delegates to, for what gets interpolated and how, and what it cannot do
-        (route an interpolated surface around land).
+        Every comparison in the set should be a single-position station — a place
+        through time (a mooring, :attr:`Comparison.is_series`) or through depth (a
+        CTD cast, :attr:`Comparison.is_profile`, scored full-column to one number
+        per metric) — anything else is skipped with a warning, since it has no
+        single position to plot. See :func:`ocean_skill.plot.map_metrics.map_metrics`,
+        which this delegates to, for what gets interpolated and how, and what it
+        cannot do (route an interpolated surface around land).
         """
         from ocean_skill.plot.map_metrics import map_metrics as _map_metrics
 

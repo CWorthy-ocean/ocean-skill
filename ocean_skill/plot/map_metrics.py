@@ -93,9 +93,11 @@ def _position_columns(columns) -> tuple[str, str]:
 def _records_from(data):
     """Return one metric record (row) per station, from any accepted input shape.
 
-    Accepts a :class:`~ocean_skill.comparison.ComparisonSet` (only its *station*
-    comparisons — a place through time — contribute; anything else is skipped with
-    one warning naming how many), a :class:`pandas.DataFrame`, or a plain iterable
+    Accepts a :class:`~ocean_skill.comparison.ComparisonSet` (only its *single-position*
+    comparisons contribute — a place through time (:attr:`~ocean_skill.comparison.
+    Comparison.is_series`) or a place through depth, i.e. a CTD cast
+    (:attr:`~ocean_skill.comparison.Comparison.is_profile`); anything else is skipped
+    with one warning naming how many), a :class:`pandas.DataFrame`, or a plain iterable
     of dicts.
     """
     import pandas as pd
@@ -103,18 +105,18 @@ def _records_from(data):
     from ocean_skill.comparison import ComparisonSet
 
     if isinstance(data, ComparisonSet):
-        series = [c for c in data.comparisons if c.is_series]
-        skipped = len(data.comparisons) - len(series)
+        stations = [c for c in data.comparisons if c.is_series or c.is_profile]
+        skipped = len(data.comparisons) - len(stations)
         if skipped:
             warnings.warn(
-                f"{skipped} of {len(data.comparisons)} comparisons are not a place "
-                "through time (no single position) and were skipped — map_metrics "
-                "only maps stations.",
+                f"{skipped} of {len(data.comparisons)} comparisons are not a "
+                "single-position station (a place through time or through depth) "
+                "and were skipped — map_metrics only maps stations.",
                 stacklevel=_stacklevel.find(),
             )
-        if not series:
+        if not stations:
             raise ValueError("no station comparisons to map: every one was skipped")
-        return pd.DataFrame([c.metrics() for c in series])
+        return pd.DataFrame([c.metrics() for c in stations])
     if isinstance(data, pd.DataFrame):
         return data.copy()
     return pd.DataFrame([dict(r) for r in data])
@@ -482,8 +484,10 @@ def build_items(
     """Build the ``skill_map`` family's items: one interpolated row per entry.
 
     ``data`` is a :class:`~ocean_skill.comparison.ComparisonSet` of station
-    comparisons (positions come from each comparison automatically — see
-    :meth:`~ocean_skill.comparison.Comparison.metrics`) or a plain table: a
+    comparisons — each a place through time (a mooring) or through depth (a CTD
+    cast, scored full-column to one number per metric) — with positions coming
+    from each comparison automatically (see
+    :meth:`~ocean_skill.comparison.Comparison.metrics`), or a plain table: a
     :class:`~pandas.DataFrame` or list of dicts carrying a position and metric
     columns, such as an existing CIOFS report's metrics CSV.
 

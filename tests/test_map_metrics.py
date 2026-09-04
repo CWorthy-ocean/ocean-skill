@@ -210,7 +210,8 @@ def test_linear_and_cubic_are_nan_outside_the_convex_hull(method):
 
 def test_block_spacing_pools_a_dense_cluster_before_fitting():
     """A tight sub-cluster added on top of the normal spread shouldn't error or
-    dominate — block_spacing should collapse it to one representative point."""
+    dominate — block_spacing should collapse it to one representative point.
+    """
     df = _records(n=12)
     dense = df.iloc[[0]].copy()
     extra = pd.concat(
@@ -267,7 +268,8 @@ def test_method_and_block_spacing_are_forwarded_through_build_items():
     """A different ``method`` through ``build_items`` must reach the interpolator —
     checked by comparing against the same call made directly against
     ``interpolate_records`` with an identical (regular) grid, rather than by
-    re-deriving the grid ourselves (which risks a spacing mismatch)."""
+    re-deriving the grid ourselves (which risks a spacing mismatch).
+    """
     df = _records(n=12)
     (spline_items,) = build_items(df, metrics=("bias",), grid="regular")
     (nearest_items,) = build_items(df, metrics=("bias",), grid="regular", method="nearest")
@@ -500,7 +502,7 @@ def test_comparisonset_map_metrics_skips_non_station_comparisons(
     assert not grid_comparison.is_series, "the fixture must actually be gridded"
 
     mixed = comparison_module.ComparisonSet([*mooring_set.comparisons, grid_comparison])
-    with pytest.warns(UserWarning, match="not a place through time"):
+    with pytest.warns(UserWarning, match="not a single-position station"):
         fig = mixed.map_metrics(grid="regular", metrics=("bias",))
 
     scatters = [c for ax in fig.axes for c in _scatter_collections(ax)]
@@ -522,3 +524,88 @@ def test_rows_from_different_test_sources_falls_back_with_a_warning(mooring_set)
         items = build_items(rows=rows, metrics=("bias",))
 
     assert len(items) == 2
+
+
+# --- profile (CTD cast) stations -----------------------------------------------------
+#
+# A cast is a place through *depth*, not through time -- built by hand and injected as
+# ``Comparison._aligned``, mirroring ``tests/test_profile_comparison.py``, rather than
+# through the full ``mooring_set`` monkeypatch machinery.
+
+
+def _profile_pair(lon: float, lat: float, offset: float, n: int = 5) -> xr.Dataset:
+    depth = np.linspace(5.0, 100.0, n)
+    reference = xr.DataArray(
+        20.0 - 0.1 * depth, dims=("DEPTH",), coords={"DEPTH": depth}
+    ).assign_coords(lon=lon, lat=lat)
+    reference.attrs["units"] = "degC"
+    test = reference + offset
+    return xr.Dataset(
+        {
+            "test": test.rename("test"),
+            "reference": reference.rename("reference"),
+            "difference": (test - reference).rename("difference"),
+        },
+        attrs={
+            "scored_over": "DEPTH",
+            "match_method": "interp",
+            "station_lon": lon,
+            "station_lat": lat,
+        },
+    )
+
+
+#: name, lon, lat, model bias offset -- distinct positions from _STATIONS above, so a
+#: mixed set (see test_mixed_moorings_and_casts_all_map) has six genuinely separate
+#: stations rather than coincidentally colocated ones.
+_CASTS = (
+    ("cast_a", -153.4, 59.2, 0.2),
+    ("cast_b", -152.4, 59.7, -0.3),
+    ("cast_c", -151.9, 60.0, 0.05),
+)
+
+
+@pytest.fixture
+def profile_set():
+    """Build a :class:`ComparisonSet` of three single-cast (``is_profile``) casts."""
+    from ocean_skill.comparison import Comparison, ComparisonSet
+
+    comparisons = []
+    for name, lon, lat, offset in _CASTS:
+        c = Comparison(
+            reference=name,
+            test=f"{name}_model",
+            variable="sea_water_temperature",
+            over="Z",
+            cache=False,
+        )
+        c._aligned = _profile_pair(lon, lat, offset)
+        comparisons.append(c)
+    return ComparisonSet(comparisons)
+
+
+def test_profile_casts_are_recognized_as_stations(profile_set):
+    for c in profile_set.comparisons:
+        assert c.is_profile
+        assert not c.is_series
+
+
+def test_comparisonset_map_metrics_draws_every_cast(profile_set):
+    """CTD casts (a place through depth) map exactly like moorings (through time)."""
+    fig = profile_set.map_metrics(grid="regular", metrics=("bias",))
+
+    scatters = [c for ax in fig.axes for c in _scatter_collections(ax)]
+    assert scatters and all(c.get_offsets().shape == (3, 2) for c in scatters)
+
+
+def test_mixed_moorings_and_casts_all_map(mooring_set, profile_set):
+    """A set mixing time-series moorings and depth-profile casts maps every one."""
+    from ocean_skill.comparison import ComparisonSet
+
+    mixed = ComparisonSet([*mooring_set.comparisons, *profile_set.comparisons])
+    fig = mixed.map_metrics(grid="regular", metrics=("bias",))
+
+    scatters = [c for ax in fig.axes for c in _scatter_collections(ax)]
+    assert scatters and all(c.get_offsets().shape == (6, 2) for c in scatters), (
+        "all three moorings and all three casts should reach the surface"
+    )
