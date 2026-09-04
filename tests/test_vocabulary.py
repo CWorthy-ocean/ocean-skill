@@ -469,6 +469,53 @@ def test_ambiguous_pattern_match_refuses_to_guess_and_warns(pristine_vocabulary)
         assert not vocabulary.is_known("shared_1")
 
 
+# -- Iceland CTD-profiles / discrete-sample spellings --------------------------
+
+
+@pytest.mark.parametrize(
+    "spelling,expected",
+    [
+        ("CTDPRES", "sea_water_pressure"),
+        ("Oxygen_CTD", OXYGEN),
+        ("TA", "sea_water_alkalinity_expressed_as_mole_equivalent"),
+        ("pH_T_measured", "sea_water_ph_reported_on_total_scale"),
+        ("PAR_CTD", "downwelling_photosynthetic_photon_flux_in_sea_water"),
+        ("PAR", "downwelling_photosynthetic_photon_flux_in_sea_water"),
+        ("Turbidity_CTD", "sea_water_turbidity"),
+        ("Fluor_CTD", "sea_water_chlorophyll_fluorescence"),
+        (
+            "Nitrate_and_Nitrite",
+            "mole_concentration_of_nitrate_and_nitrite_in_sea_water",
+        ),
+        ("phaeo", "mass_concentration_of_phaeopigments_in_sea_water"),
+        ("Ciliate", "number_concentration_of_ciliates_in_sea_water"),
+        ("Diatom", "number_concentration_of_diatoms_in_sea_water"),
+        ("Dinoflagellate", "number_concentration_of_dinoflagellates_in_sea_water"),
+    ],
+)
+def test_iceland_spelling_resolves_to_the_canonical_name(spelling, expected):
+    assert vocabulary.resolve_name(spelling) == expected
+    assert vocabulary.is_known(spelling)
+
+
+@pytest.mark.parametrize("unmatched", ["TEMP_PH", "Total"])
+def test_iceland_ambiguous_column_is_deliberately_left_unmatched(unmatched):
+    """TEMP_PH (a measurement-condition temperature) and Total (too ambiguous to
+    map safely) are deliberately not given a vocabulary entry -- they should pass
+    through unresolved rather than being silently folded into an unrelated concept.
+    """
+    assert vocabulary.resolve_name(unmatched) == unmatched
+    assert not vocabulary.is_known(unmatched)
+
+
+def test_diatom_alias_does_not_grab_the_romsmarbl_per_pft_tracer():
+    """`Diatom` resolves, but ROMS/MARBL's per-PFT `diatChl` tracer -- a different,
+    un-summed quantity (see the "chlorophyll" entry) -- must not.
+    """
+    assert vocabulary.resolve_name("diatChl") == "diatChl"
+    assert not vocabulary.is_known("diatChl")
+
+
 def test_chlor_a_is_still_the_live_extension_example(pristine_vocabulary):
     """`chlor_a` is deliberately not a shipped pattern.
 
