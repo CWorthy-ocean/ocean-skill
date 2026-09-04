@@ -221,6 +221,34 @@ old way instead — one line per level — since asking for discrete levels is a
 tell them apart, not to see the whole record. There is no separate call for any of
 this: `.plot()` reads it all off `Field.family`.
 
+**A time `groupby` stays plottable, too.** `aggregate={"time": {"groupby": "month",
+"reduce": "mean"}}` renames the time axis to `month` (twelve climatological means, one
+per calendar month) rather than removing it, and `.plot()` draws that the same way it
+would a real time axis — `month` plays time's role, spelled `Jan`..`Dec` on the axis:
+
+```python
+osk.field(
+    "ctd_station_HV5", "sea_water_temperature",
+    aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+).plot()
+# the same time_depth panel, x = month (Jan..Dec) instead of a real date
+
+osk.field(
+    "ctd_station_HV5", "sea_water_temperature",
+    select={"Z": {"min": 0, "max": 5}},
+    aggregate={"time": {"groupby": "month", "reduce": "mean"}, "Z": "mean"},
+).plot()
+# depth is gone too, so this draws as a series instead: one line, month on x
+```
+
+Every other `.dt`-accessor groupby (`year`, `hour`, `dayofyear`, ...) works the same
+way — only `month` gets the calendar spelling; the rest draw their own integer values
+on a plain numeric axis. `groupby: "season"` is the one exception: it keeps drawing as
+the profile family's one-line-per-season fan it always has, in calendar order. Naming
+an explicit list of months (`select={"month": [1, 4, 7]}`) is the `month` climatology's
+own version of the depth-list rule above: it turns off "month is time" and fans into
+one profile line per named month instead, coloured and legended by month.
+
 **A bare grid defaults to its surface.** `osk.field(source, variable)` with nothing
 selected keeps the whole vertical axis standing for a catalogued `featureType: grid`
 source (see "Nothing is reduced unless you ask", below) — but its own map panels have

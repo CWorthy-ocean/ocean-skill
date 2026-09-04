@@ -50,6 +50,7 @@ __all__ = [
     "COMBINERS",
     "DERIVED",
     "REDUCERS",
+    "TIME_GROUPBY_ATTR",
     "aggregate",
     "box_in_spec",
     "combine",
@@ -63,6 +64,7 @@ __all__ = [
     "select",
     "spatial_mean_in_spec",
     "spec_names",
+    "time_axis_dim",
 ]
 
 #: How a list of variables becomes one field. Straight from the stdlib — a new
@@ -326,6 +328,41 @@ def resolve_dim(obj, name: str) -> str | None:
     for candidate in COORD_FALLBACKS[kind]:
         if candidate in dims_by_lower:
             return dims_by_lower[candidate]
+    return None
+
+
+def time_axis_dim(obj) -> str | None:
+    """Return the dimension that plays time's role, including a time groupby's.
+
+    :func:`resolve_dim(obj, "T") <resolve_dim>` widened one step: a
+    ``{"time": {"groupby": "month", "reduce": "mean"}}`` climatology renames the
+    time dimension to ``month`` (or ``year``, ``hour``, ...), a bare integer index
+    with no coordinate attributes of its own -- nothing cf-xarray or a name
+    fallback can recognize as time. :func:`~ocean_skill.operators._reduce_dim`
+    marks exactly that case with :data:`TIME_GROUPBY_ATTR` on the new coordinate,
+    and this is where the mark is read back, so a plot can keep treating "time
+    standing" as one shape rather than two.
+
+    Deliberately scoped to the plot path (:mod:`ocean_skill.field`,
+    :mod:`ocean_skill.plot.time_depth`) rather than folded into :func:`resolve_dim`
+    itself: :func:`aggregate` and a deferred post-aggregate :func:`select` both
+    resolve ``"time"``/``"T"`` against the *original* axis on purpose (a second
+    ``"T"`` key in the same spec must not silently collapse a climatology this
+    function would otherwise make it match), and neither a comparison's own time
+    bookkeeping nor :func:`~ocean_skill.extrema` need or want an integer groupby
+    dim answering to "time".
+
+    A season groupby is deliberately never marked -- see
+    :mod:`ocean_skill.plot.profile`'s season fan -- so this never returns a
+    ``"season"`` dim.
+    """
+    dim = resolve_dim(obj, "T")
+    if dim is not None and dim in obj.dims:
+        return dim
+    for d in obj.dims:
+        coord = obj.coords.get(d)
+        if coord is not None and TIME_GROUPBY_ATTR in coord.attrs:
+            return str(d)
     return None
 
 
@@ -1098,6 +1135,11 @@ def aggregate(da, spec: dict[str, Any] | None):
     coordinate on the result, riding alongside the value through any later
     ``select``/``sel`` or vertical interpolation.
 
+    A time ``groupby`` result stays plottable: :meth:`ocean_skill.field.Field.plot`
+    draws the surviving ``month``/``year``/... dimension as the x (or time_depth)
+    axis in place of time, with ``month`` spelled ``Jan``..``Dec``; ``season``
+    keeps drawing as the profile family's one-line-per-season fan instead.
+
     **Both horizontal axes reduced by a plain "mean" together** is one joint
     area-weighted spatial mean rather than two sequential unweighted ones — see
     :func:`spatial_mean_in_spec` and :func:`_horizontal_mean`. This is the plural
@@ -1239,6 +1281,18 @@ DEFAULT_SEASONS: tuple[str, ...] = ("DJF", "MAM", "JJA", "SON")
 #: spread survive ``.sel(season=...)`` and vertical interpolation onto a
 #: reference's own levels with no extra code anywhere downstream.
 SPREAD_COORD = "spread"
+
+#: Attribute name marking a groupby-renamed dimension as time's stand-in, stamped
+#: on the new coordinate by :func:`_reduce_dim` -- the value is the *original*
+#: time dimension's name. An attribute, not a name convention, because the new
+#: dimension is named by the caller's own groupby key (``month``, ``year``,
+#: ``hour``, ...) with no fixed spelling to test for, and it has to survive
+#: exactly the same ``.sel``/``.isel``/zarr round trip :data:`SPREAD_COORD` does
+#: -- read back by :func:`time_axis_dim`, so a plot can still find "time" once a
+#: climatology has renamed it. Never stamped for a ``groupby: "season"`` result:
+#: that dimension is a string, not an integer index, and stays the profile
+#: family's fan (see :mod:`ocean_skill.plot.profile`), not a plottable x axis.
+TIME_GROUPBY_ATTR = "time_groupby"
 
 #: The twelve months' initials, in calendar order. Used to validate a season
 #: string as a genuine run of consecutive months (doubled below so a wraparound
@@ -1392,6 +1446,10 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
 
     attrs = dict(da.attrs)
     target = dim
+    # Read before any grouping renames or replaces `da`: whether `dim` was time's
+    # own axis decides how the new groupby dimension's coordinate gets marked,
+    # below.
+    is_time_dim = dim == resolve_dim(da, "T")
     # Read weights before any grouping: a GroupBy object exposes no coordinates, and
     # a grouped reduction is along the grouping axis anyway, which vertical cell
     # weights never describe.
@@ -1460,6 +1518,29 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
         if "units" in attrs:
             spread_arr.attrs["units"] = attrs["units"]
         out = out.assign_coords({SPREAD_COORD: spread_arr})
+
+    if group is not None:
+        # A groupby renames the dim to the grouping label (``month``, ``year``,
+        # ``season``, ...) with a coordinate whose attrs are either empty (the
+        # `.dt`-accessor route) or, for season, copied verbatim from whatever the
+        # *source* time coordinate happened to carry -- an accident of
+        # `SeasonGrouper`, not a decision, that would otherwise make a
+        # CF-tagged source's season climatology resolve as a time axis while an
+        # untagged source's does not. Normalize deliberately instead: a time
+        # `.dt` groupby is marked so the plot path can still find "time" (see
+        # `time_axis_dim`); a season groupby -- always the profile family's fan,
+        # never a plottable axis -- gets no attrs at all, regardless of source.
+        new_dim = "season" if group == "season" else str(group)
+        coord = out.coords.get(new_dim)
+        if coord is not None:
+            fresh_attrs = (
+                {TIME_GROUPBY_ATTR: str(dim)}
+                if is_time_dim and group != "season"
+                else {}
+            )
+            var = coord.variable.copy(deep=False)
+            var.attrs = fresh_attrs
+            out = out.assign_coords({new_dim: var})
 
     out.attrs = {**attrs, **out.attrs}  # reductions drop attrs; units must survive
     return out

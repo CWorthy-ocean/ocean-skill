@@ -348,6 +348,10 @@ def pretty_level(field, value) -> str:
         return short_name(str(value))
     if field == "depth":
         return f"{value:g} m" if isinstance(value, int | float) else str(value)
+    if field == "month":
+        from ocean_skill.plot.series import month_label
+
+        return month_label(value)
     return str(value)
 
 

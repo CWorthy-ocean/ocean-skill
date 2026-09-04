@@ -59,15 +59,27 @@ class TimeDepthGeometry:
     y_label: str
     place_note: str
     period_note: str
+    #: Whether ``x_name`` carries real dates (``True``) or a groupby index --
+    #: ``month``/``year``/... left standing by ``aggregate={"time": {"groupby":
+    #: ...}}`` (``False``). Mirrors :attr:`ocean_skill.plot.series.Layout
+    #: .date_axis`; a renderer reads this instead of assuming dates.
+    date_axis: bool = True
+    #: ``((position, label), ...)`` fixed x ticks for a ``month`` groupby axis
+    #: (``Jan``..``Dec``), ``None`` otherwise. Mirrors
+    #: :attr:`ocean_skill.plot.series.Layout.xticks`; see
+    #: :func:`ocean_skill.plot.series.groupby_ticks`.
+    x_ticks: tuple[tuple[float, str], ...] | None = None
 
 
 def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometry]:
     """Return ``(field, geometry)``: ``da``, reordered and carrying ``depth``.
 
-    ``da`` must be exactly two-dimensional: a time axis (see
-    :func:`ocean_skill.operators.resolve_dim`, axis ``"T"``) and one vertical axis,
-    already carrying a real coordinate to label it with -- a bare, coordinate-less
-    native ``s_rho``/``s_w`` axis is refused before reaching here (see
+    ``da`` must be exactly two-dimensional: a time axis -- a real time axis (see
+    :func:`ocean_skill.operators.resolve_dim`, axis ``"T"``), or a time groupby's
+    surviving dimension (``month``, ``year``, ...; see
+    :func:`ocean_skill.operators.time_axis_dim`) -- and one vertical axis, already
+    carrying a real coordinate to label it with -- a bare, coordinate-less native
+    ``s_rho``/``s_w`` axis is refused before reaching here (see
     :func:`ocean_skill.field._labelless_vertical`,
     :meth:`ocean_skill.field.Field._time_depth_item`), the same guard
     :meth:`~ocean_skill.field.Field._series_items` applies to a fanned line.
@@ -87,10 +99,16 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
     == (len(y), len(x))``), so a renderer draws ``x=geometry.x_name,
     y=geometry.y_name`` against it with no further reshaping.
     """
-    from ocean_skill.operators import resolve_dim
-    from ocean_skill.plot.series import _period_of, _place_of, time_values
+    from ocean_skill.operators import time_axis_dim
+    from ocean_skill.plot.series import (
+        _period_of,
+        _place_of,
+        date_axis_of,
+        groupby_ticks,
+        time_values,
+    )
 
-    tdim = resolve_dim(da, "T")
+    tdim = time_axis_dim(da)
     if tdim is None or tdim not in da.dims:
         raise ValueError(
             f"prepare_time_depth expects a time axis -- got dims {sorted(da.dims)}."
@@ -110,17 +128,25 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
     depth = np.abs(depth_source).rename("depth")
     depth.attrs["units"] = depth_source.attrs.get("units", "m")
 
-    result = da.assign_coords(
-        depth=(zdim, np.asarray(depth)), time=(tdim, time_values(da[tdim]))
-    ).transpose(zdim, tdim)
+    date_axis = date_axis_of(da[tdim])
+    result = da.assign_coords(depth=(zdim, np.asarray(depth)))
+    if date_axis:
+        # A real time axis is renamed to the shared "time" coordinate name every
+        # renderer already expects; a groupby axis keeps its own name (`month`,
+        # `year`, ...) instead, so a renderer reads it off `geometry.x_name`
+        # rather than assuming "time" -- see the ``else`` branch below.
+        result = result.assign_coords(time=(tdim, time_values(da[tdim])))
+    result = result.transpose(zdim, tdim)
 
     geometry = TimeDepthGeometry(
-        x_name="time",
+        x_name="time" if date_axis else tdim,
         y_name="depth",
-        x_label="time",
+        x_label="time" if date_axis else tdim,
         y_label=f"Depth [{depth.attrs.get('units') or 'm'}]",
         place_note=_place_of(da),
         period_note=_period_of(da[tdim]),
+        date_axis=date_axis,
+        x_ticks=None if date_axis else groupby_ticks(tdim, da[tdim].values),
     )
     return result, geometry
 

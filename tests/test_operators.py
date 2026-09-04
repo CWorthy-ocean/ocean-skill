@@ -22,12 +22,14 @@ from ocean_skill.operators import (
     DEFAULT_SEASONS,
     DERIVED,
     SPREAD_COORD,
+    TIME_GROUPBY_ATTR,
     aggregate,
     combine,
     point_in_spec,
     register_reducer,
     resolve_variable,
     select,
+    time_axis_dim,
 )
 
 CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
@@ -135,6 +137,77 @@ def test_groupby_gives_a_climatology(marbl, group, size):
     out = aggregate(marbl["spChl"], {"time": {"groupby": group, "reduce": "mean"}})
     assert out.sizes[group] == size
     assert "time" not in out.dims
+
+
+# -- the time-groupby marker (feeds Field.plot's family routing) --------------
+
+
+def test_a_time_dt_groupby_marks_its_new_dim(marbl):
+    """A ``month``/``year`` groupby's surviving dim is marked as time's stand-in
+    (see :func:`~ocean_skill.field.Field._time_axis_dim`), so :func:`plot()
+    <ocean_skill.field.Field.plot>` can still find "time" once the aggregate has
+    renamed it.
+    """
+    out = aggregate(marbl["spChl"], {"time": {"groupby": "month", "reduce": "mean"}})
+    assert out["month"].attrs[TIME_GROUPBY_ATTR] == "time"
+    assert time_axis_dim(out) == "month"
+
+
+def test_a_season_groupby_is_never_marked(marbl):
+    """Season stays the profile family's own fan, never a plottable axis (see
+    :mod:`ocean_skill.plot.profile`), whatever attrs the source time coordinate
+    carried -- see :func:`test_season_groupby_attrs_do_not_leak_a_time_axis`.
+    """
+    out = aggregate(marbl["spChl"], {"time": {"groupby": "season", "reduce": "mean"}})
+    assert out["season"].attrs == {}
+    assert time_axis_dim(out) is None
+
+
+def test_season_groupby_attrs_do_not_leak_a_time_axis(marbl):
+    """A CF-tagged time coordinate must not make ``season`` resolve as a time
+    axis by accident.
+
+    Before this normalization, ``xarray.groupers.SeasonGrouper`` copied the
+    *source* time coordinate's attrs onto ``season`` verbatim -- so a
+    CF-tagged source's seasonal climatology would route to the ``time_depth``
+    family (see :attr:`ocean_skill.field.Field.is_time_depth`) while an
+    otherwise-identical, untagged source's routed to the tested ``profile``
+    fan instead. Same input shape, same spec, different family, for a reason
+    the caller never asked for.
+    """
+    tagged = marbl.copy()
+    tagged["time"].attrs = {"axis": "T", "standard_name": "time"}
+    out = aggregate(tagged["spChl"], {"time": {"groupby": "season", "reduce": "mean"}})
+    assert out["season"].attrs == {}
+    assert time_axis_dim(out) is None
+
+
+def test_the_marker_survives_a_scalar_select_and_a_spread_ride_along(marbl):
+    out = aggregate(
+        marbl["spChl"],
+        {"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert SPREAD_COORD in out.coords
+    narrowed = out.sel(month=3)
+    assert narrowed["month"].attrs[TIME_GROUPBY_ATTR] == "time"
+    assert SPREAD_COORD in narrowed.coords
+
+
+def test_a_renamed_time_axis_is_still_marked():
+    """A ROMS-style ``ocean_time`` axis resolves to "time" through
+    :func:`~ocean_skill.operators.resolve_dim`'s name fallback just as well as a
+    literal ``time`` dim does, so its own month groupby is marked the same way.
+    """
+    time = xr.date_range("2012-01-01", periods=12, freq="MS")
+    da = xr.DataArray(
+        np.arange(12, dtype="float64"),
+        dims="ocean_time",
+        coords={"ocean_time": time},
+        attrs={"units": "mg/m^3"},
+    )
+    out = aggregate(da, {"ocean_time": {"groupby": "month", "reduce": "mean"}})
+    assert out["month"].attrs[TIME_GROUPBY_ATTR] == "ocean_time"
+    assert time_axis_dim(out) == "month"
 
 
 # -- season groupby and spread -------------------------------------------------

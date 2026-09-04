@@ -144,6 +144,58 @@ def test_a_point_series_draws_one_line_in_both_renderers(stub):
     assert len(obj.traverse(lambda x: x, [hv.Curve])) == 1
 
 
+# -- a time-groupby's surviving dim, with no depth left, is a plain series --------------
+
+
+def _point_month_climatology_no_depth(n_years: int = 2):
+    """A station's month climatology with the vertical axis collapsed too --
+    the shape ``aggregate={"time": {"groupby": "month", "reduce": "mean"},
+    "depth": "mean"}`` leaves standing: one line, month on x. Built through
+    the real reduction (:func:`ocean_skill.operators.aggregate`) so ``month``
+    carries the marker :func:`~ocean_skill.operators.time_axis_dim` reads.
+    """
+    from ocean_skill.operators import aggregate
+
+    n = 12 * n_years
+    time = pd.date_range("2015-01-01", periods=n, freq="MS")
+    values = 8.0 + np.sin(np.arange(n) / 3.0)
+    da = xr.DataArray(
+        values, dims="time", coords={"time": time}, name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    ).assign_coords(lon=-21.8, lat=64.3)
+    return aggregate(da, {"time": {"groupby": "month", "reduce": "mean"}})
+
+
+def test_a_month_climatology_with_no_depth_is_a_series(stub):
+    stub(_point_month_climatology_no_depth())
+    f = _make(aggregate={"time": {"groupby": "month", "reduce": "mean"}})
+    assert f.is_series
+    assert f.family == "series"
+    fig = f.plot()
+    ax = fig.axes[0]
+    assert len(ax.lines) == 1
+    assert ax.get_xlabel() == "month"
+    assert list(ax.lines[0].get_xdata()) == list(range(1, 13))
+    assert [t.get_text() for t in ax.get_xticklabels()] == [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+
+    import holoviews as hv
+
+    obj = f.plot(renderer="holoviews")
+    curves = obj.traverse(lambda x: x, [hv.Curve])
+    assert len(curves) == 1
+    assert curves[0].kdims[0].name == "month"
+
+
+def test_a_plain_datetime_series_still_gets_the_date_axis(stub):
+    """No-regression pin: an ordinary time series is untouched by any of this."""
+    stub(_point_series())
+    fig = _make().plot()
+    assert fig.axes[0].get_xlabel() == "time"
+
+
 # -- undrawable shapes: neither a map nor a line ----------------------------------------
 
 
@@ -228,10 +280,98 @@ def test_a_seasonal_point_column_is_a_profile_fanned_per_season(stub):
 
 
 def test_a_non_season_extra_axis_on_a_profile_is_still_refused(stub):
-    """Fanning is season-specific -- any other extra axis keeps today's error."""
+    """Fanning stays season- (or marked-month-) specific: an ordinary axis
+    just named ``month`` -- one that never went through a real
+    ``aggregate={"time": {"groupby": "month", ...}}`` reduction, so its
+    coordinate carries none of :data:`~ocean_skill.operators.TIME_GROUPBY_ATTR`
+    -- keeps today's error. See
+    ``test_a_month_climatology_fans_into_one_item_per_selected_month`` for the
+    marked case, name-only magic being deliberately excluded here.
+    """
     stub(_point_with_season().rename(season="month"))
     with pytest.raises(ValueError, match=r"\['month'\]"):
         _make()._profile_items()
+
+
+# -- an explicit month list turns a marked month axis into a profile fan too -----------
+
+
+def _point_month_climatology_for_fan(n_years: int = 2, depths=(0.0, 50.0, 100.0)):
+    """The same month climatology :mod:`tests.test_field_time_depth` builds,
+    reused here for the escape hatch that routes it to the profile family
+    instead: an explicit ``select={"month": [...]}`` list.
+    """
+    from ocean_skill.operators import aggregate
+
+    n = 12 * n_years
+    time = pd.date_range("2015-01-01", periods=n, freq="MS")
+    depth = np.array(depths)
+    values = 8.0 + np.sin(np.arange(n) / 3.0)[:, None] + 0.01 * depth[None, :]
+    da = xr.DataArray(
+        values,
+        dims=("time", "depth"),
+        coords={"time": time, "depth": depth},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    ).assign_coords(lon=-21.8, lat=64.3)
+    return aggregate(da, {"time": {"groupby": "month", "reduce": "mean"}})
+
+
+def test_a_month_climatology_fans_into_one_item_per_selected_month(stub):
+    """A marked month axis, narrowed by an explicit ``select={"month": [...]}``
+    list, fans into one profile item per month -- the same idiom
+    ``fan_season`` already gives a season axis (see
+    :func:`ocean_skill.plot.profile.fan_season`), and mirrors the depth-list
+    exception :attr:`~ocean_skill.field.Field.is_time_depth` already makes.
+    """
+    climatology = _point_month_climatology_for_fan()
+    stub(climatology.sel(month=[1, 4, 7]))
+    f = _make(
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+        select={"month": [1, 4, 7]},
+    )
+    assert not f.is_time_depth
+    assert f.is_profile
+    assert f.family == "profile"
+    items = f._profile_items()
+    assert len(items) == 3
+    assert [item["aligned"]["month"].item() for item in items] == [1, 4, 7]
+    for item in items:
+        assert "month" not in item["aligned"].dims  # scalar, not a surviving axis
+
+
+def test_a_scalar_month_select_labels_a_single_profile(stub):
+    climatology = _point_month_climatology_for_fan()
+    stub(climatology.sel(month=4))
+    f = _make(
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+        select={"month": 4},
+    )
+    assert f.family == "profile"
+    fig = f.plot()
+    assert "Apr" in fig.axes[0].get_title()
+
+
+def test_a_month_fan_colours_and_legends_by_month_in_both_renderers(stub):
+    climatology = _point_month_climatology_for_fan()
+    stub(climatology.sel(month=[1, 4, 7]))
+    f = _make(
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+        select={"month": [1, 4, 7]},
+    )
+    fig = f.plot()
+    ax = fig.axes[0]
+    legend = ax.get_legend()
+    labels = [t.get_text() for t in legend.get_texts()]
+    assert labels == ["Jan", "Apr", "Jul"]
+    # An overlay of several months claims no single "when" in the title --
+    # they are told apart by the legend instead (mirrors the season rule).
+    assert "Jan" not in ax.get_title()
+
+    import holoviews as hv
+
+    obj = f.plot(renderer="holoviews")
+    assert obj.traverse(lambda x: x, [hv.Curve])
 
 
 # -- .movie() has nothing to play for a point series ------------------------------------

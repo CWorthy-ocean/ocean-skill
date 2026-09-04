@@ -1104,6 +1104,13 @@ Colour still comes from `variable`; there is no statistics box (nothing to score
 against) and `residual=True` is refused with a clear error rather than silently
 drawing nothing, for the same reason.
 
+**A time `groupby` axis draws the same line, with its own dim on x.** Reducing depth
+away too (`aggregate={"time": {"groupby": "month", "reduce": "mean"}, "Z": "mean"}`)
+leaves one line with `month` (spelled `Jan`..`Dec`) or another `.dt`-accessor groupby
+dim (`year`, `hour`, ...; plain integer axis) standing in place of a real date — see
+the `time_depth` family's own note on this, below, for the mechanism
+(`ocean_skill.operators.time_axis_dim`) and the `groupby: "season"` exception.
+
 Pass a list instead of one name and `osk.field` fans it into a `FieldSet` — one
 single-source item per variable, pooled into this same figure and following the
 Composition table below exactly as a multi-variable comparison set would:
@@ -1226,6 +1233,19 @@ already draws against.
 classic CTD layout — sharing the one depth axis. `rows=`/`cols=` (one, not both)
 facet on `variable`, `source`, `reference`, `time` or `comparison`, and a facet
 wins over `secondary_x` when both apply.
+
+**A surviving `season`, or an explicitly month-listed `month`, axis fans into one
+line per value instead of a panel of its own.** `aggregate={"time": {"groupby":
+"season", "reduce": "mean"}}` leaves `season` standing at a point with depth still
+surviving; `{"groupby": "month", ...}` does the same for `month`, but only once an
+explicit `select={"month": [...]}` (or a single `select={"month": 4}`, no fan
+needed) turns off "month is time" — see the `time_depth`/`series` families' own
+notes on that, above. Either way `ocean_skill.plot.profile.fan_season` splits the
+surviving axis into one item per value, in order (calendar order for a season,
+the order the caller named for a month list); colour switches to `season`/`month`
+by default (whichever is present) when more than one value is on the panel and
+there is no `secondary_x` twin, and `rows="season"`/`"month"` (or `cols=`) facets
+on it explicitly instead of overlaying.
 
 `secondary_x` is the profile counterpart of `series`' `secondary_y`, transposed:
 a profile's value axis is x (depth is y), so its twin grows a *top* x axis rather
@@ -1399,13 +1419,24 @@ either way.
 * **y is depth, positive down, inverted** — 0 m draws at the top — matching every
   other depth label in this package, and the same convention `section`/`profile`
   use.
-* **x is time**, labelled concisely without a 45° tilt (`_date_axis`).
+* **x is time**, labelled concisely without a 45° tilt (`_x_axis`).
 * Title names the place (`64.3°N 21.8°W`) and the period covered (`2024-04 to
   2025-04`), the same shape `series`'s own single-source title takes.
 
 Both conventions are decided once, in `ocean_skill.plot.time_depth.prepare_time_depth`,
 and read by both renderers — a `time_depth` panel cannot look different statically
 than interactively.
+
+**A time `groupby` axis draws the same panel with its own dim on x.**
+`aggregate={"time": {"groupby": "month", "reduce": "mean"}}` renames time to `month`
+rather than removing it (`ocean_skill.operators.time_axis_dim`), and `prepare_time_depth`
+still recognizes it as the time axis — x reads `month`, spelled `Jan`..`Dec`
+(`ocean_skill.plot.series.groupby_ticks`, the same spelling `facet_labels` gives a month
+facet), and the title reads "by month" instead of a date span. Every other `.dt`-accessor
+groupby (`year`, `hour`, `dayofyear`, ...) draws the same way with its own integer values
+on a plain numeric axis — no calendar spelling, just its own dim name as the label.
+`groupby: "season"` never takes this path: it stays the `profile` family's
+one-line-per-season fan (below), whatever attrs the source time coordinate carried.
 
 ### Static versus interactive
 

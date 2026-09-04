@@ -65,6 +65,56 @@ def _ragged_station(n_time: int = 8, n_depth: int = 20):
     return da.assign_coords(lon=-21.8, lat=64.3)
 
 
+def _point_month_climatology(n_years: int = 2, depths=(0.0, 50.0, 100.0)):
+    """A station's month climatology -- the shape
+    ``aggregate={"time": {"groupby": "month", "reduce": "mean"}}`` leaves
+    standing with depth still surviving. Built through the real reduction
+    (:func:`ocean_skill.operators.aggregate`), not hand-assembled, so the
+    ``month`` dimension carries the marker
+    :func:`~ocean_skill.operators.time_axis_dim` reads (see
+    :func:`ocean_skill.operators._reduce_dim`) -- the same thing a stub built
+    by hand (e.g. ``rename(season="month")``, see
+    ``tests/test_field_series.py::test_a_non_season_extra_axis_on_a_profile_is_still_refused``)
+    would not carry.
+    """
+    from ocean_skill.operators import aggregate
+
+    n = 12 * n_years
+    time = pd.date_range("2015-01-01", periods=n, freq="MS")
+    depth = np.array(depths)
+    values = 8.0 + np.sin(np.arange(n) / 3.0)[:, None] + 0.01 * depth[None, :]
+    da = xr.DataArray(
+        values,
+        dims=("time", "depth"),
+        coords={"time": time, "depth": depth},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    ).assign_coords(lon=-21.8, lat=64.3)
+    return aggregate(da, {"time": {"groupby": "month", "reduce": "mean"}})
+
+
+def _point_year_climatology(n_years: int = 4, depths=(0.0, 50.0, 100.0)):
+    """The same shape one groupby key over: every year of the record averaged
+    into one field, depth still standing. A plain integer axis -- unlike
+    ``month`` it gets no spelled-out tick labels (see
+    :func:`ocean_skill.plot.series.groupby_ticks`).
+    """
+    from ocean_skill.operators import aggregate
+
+    n = 12 * n_years
+    time = pd.date_range("2015-01-01", periods=n, freq="MS")
+    depth = np.array(depths)
+    values = 8.0 + np.arange(n)[:, None] * 0.05 + 0.01 * depth[None, :]
+    da = xr.DataArray(
+        values,
+        dims=("time", "depth"),
+        coords={"time": time, "depth": depth},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    ).assign_coords(lon=-21.8, lat=64.3)
+    return aggregate(da, {"time": {"groupby": "year", "reduce": "mean"}})
+
+
 def _native_s_rho_point(nt: int = 4, ns: int = 5, with_z_rho: bool = False):
     """A ROMS point with a bare native ``s_rho`` axis, mirroring
     ``tests/test_field_unreduced_vertical.py``'s own fixture for the fanned-line
@@ -156,6 +206,51 @@ def test_a_third_axis_is_refused_with_its_name(stub):
     stub(_point_time_depth().expand_dims(member=[1, 2]))
     with pytest.raises(ValueError, match=r"\['member'\]"):
         _make().plot()
+
+
+# -- a time-groupby's surviving dim still reads as "time" ------------------------------
+
+
+def test_a_month_climatology_with_depth_is_time_depth(stub):
+    """``aggregate={"time": {"groupby": "month", "reduce": "mean"}}`` leaves
+    ``(month, depth)`` standing at a station -- the same ``time_depth`` shape a
+    real time axis leaves, with ``month`` playing time's role (see
+    :func:`ocean_skill.operators.time_axis_dim`).
+    """
+    stub(_point_month_climatology())
+    f = _make(aggregate={"time": {"groupby": "month", "reduce": "mean"}})
+    assert f.is_time_depth
+    assert f.family == "time_depth"
+
+
+def test_a_month_climatology_draws_jan_dec_ticks_in_both_renderers(stub):
+    stub(_point_month_climatology())
+    f = _make(aggregate={"time": {"groupby": "month", "reduce": "mean"}})
+    fig = f.plot()
+    ax = fig.axes[0]
+    assert ax.get_xlabel() == "month"
+    assert [t.get_text() for t in ax.get_xticklabels()] == [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    assert "by month" in fig._suptitle.get_text()
+
+    obj = f.plot(renderer="holoviews")
+    assert obj.kdims[0].name == "month"
+
+
+def test_a_year_climatology_gets_a_plain_integer_axis(stub):
+    """Only ``month`` gets spelled-out ticks -- every other groupby key draws
+    its own integer values on a plain numeric axis (see
+    :func:`ocean_skill.plot.series.groupby_ticks`).
+    """
+    stub(_point_year_climatology())
+    f = _make(aggregate={"time": {"groupby": "year", "reduce": "mean"}})
+    fig = f.plot()
+    ax = fig.axes[0]
+    assert ax.get_xlabel() == "year"
+    labels = [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+    assert labels == [str(v) for v in sorted(int(lb) for lb in labels)]
 
 
 # -- default_mark: ragged vs dense -------------------------------------------------------

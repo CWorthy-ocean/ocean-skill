@@ -97,6 +97,20 @@ class Layout:
     shared_legend: bool = True
     residual: bool = False
     xlabel: str = "time"
+    #: Whether the x axis is real dates (``True``) or a bare integer groupby index
+    #: -- ``month``/``year``/... left standing by ``aggregate={"time":
+    #: {"groupby": ...}}`` (``False``). A renderer reads this instead of assuming
+    #: dates: a date locator/formatter applied to integer months would read them
+    #: as days since 1970. See :func:`date_axis_of`.
+    date_axis: bool = True
+    #: ``((position, label), ...)`` a renderer installs as fixed x ticks instead
+    #: of its own locator -- set only for a ``month`` groupby axis (``Jan``..
+    #: ``Dec``, the same spelling
+    #: :func:`ocean_skill.plot.matplotlib_renderer.facet_labels` gives a month
+    #: facet), ``None`` for every other axis (a date axis, or a plain groupby
+    #: like ``year`` left to the renderer's own numeric locator). See
+    #: :func:`groupby_ticks`.
+    xticks: tuple[tuple[float, str], ...] | None = None
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -125,6 +139,44 @@ def time_values(da):
     return np.asarray(index)
 
 
+def date_axis_of(da) -> bool:
+    """Whether ``da``'s line dimension is real dates rather than a groupby index.
+
+    True for a ``cftime``/``datetime64`` time axis (a plain reduction, a
+    ``resample``, or no time aggregate at all -- resampling keeps the dim's own
+    name and dtype, see :func:`ocean_skill.operators._reduce_dim`). False for the
+    bare integer index a ``groupby`` leaves behind (``month``, ``year``, ...) --
+    see :func:`ocean_skill.operators.time_axis_dim` for how that dimension still
+    gets read as "time" upstream, in :attr:`ocean_skill.field.Field.family`, even
+    though it draws on a different kind of axis than a real date does.
+    """
+    dim = str(da.dims[0])
+    index = da.indexes.get(dim)
+    if index is not None and type(index).__name__ == "CFTimeIndex":
+        return True
+    coord = da.coords.get(dim)
+    return coord is None or np.issubdtype(coord.dtype, np.datetime64)
+
+
+def groupby_ticks(dim: str, values) -> tuple[tuple[float, str], ...] | None:
+    """Fixed ``(position, label)`` ticks for a groupby axis, or ``None`` for the
+    plain-numeric case.
+
+    Only ``month`` gets a spelled-out label (``Jan``..``Dec``) -- the same
+    precedent :func:`ocean_skill.plot.matplotlib_renderer.facet_labels` sets for
+    a month facet or movie frame. Every other groupby dim (``year``, ``hour``,
+    ``dayofyear``, ...) draws its own integer values on a plain numeric axis
+    instead, so this returns ``None`` and a renderer leaves it to its own
+    locator. The single place both renderers read this decision from, so a
+    month axis cannot read ``Jan``..``Dec`` in one and ``1``..``12`` in the
+    other.
+    """
+    if dim != "month":
+        return None
+    uniq = sorted({int(v) for v in np.asarray(values).ravel().tolist()})
+    return tuple((float(v), month_label(v)) for v in uniq)
+
+
 def _depth_of(aligned) -> float | None:
     """Return the depth a comparison was made at, if it is a single one."""
     value = aligned.attrs.get("actual_depth")
@@ -149,6 +201,34 @@ def season_of(aligned) -> str | None:
     if season is None or season.dims:
         return None
     return str(season.values)
+
+
+def month_of(aligned) -> int | None:
+    """Return the month (1-12) an item's aligned data was narrowed to, if scalar.
+
+    Mirrors :func:`season_of`: a surviving ``month`` *dimension* -- when it is
+    the one :func:`ocean_skill.plot.profile.fan_season` fans, an explicit
+    ``select={"month": [...]}`` list -- is fanned into one item per month
+    before composition ever sees it, leaving each item's own ``month`` a
+    scalar coordinate. A scalar ``select={"month": 4}`` reaches here directly,
+    with no fan needed at all.
+    """
+    month = aligned.coords.get("month")
+    if month is None or month.dims:
+        return None
+    return int(month.values)
+
+
+def month_label(value: int) -> str:
+    """``"Apr"`` for month ``4`` -- the one spelling every reader of a month
+    value agrees on: :func:`groupby_ticks`'s axis ticks, a profile fan's legend
+    entry and panel title (:mod:`ocean_skill.plot.profile`), and
+    :func:`ocean_skill.plot.matplotlib_renderer.facet_labels`' month facet/frame
+    labels all call this rather than spelling ``calendar.month_abbr`` out again.
+    """
+    import calendar
+
+    return calendar.month_abbr[int(value)]
 
 
 def item_roles(item: dict[str, Any]) -> tuple[str, ...]:
@@ -335,7 +415,15 @@ def _place_of(da) -> str:
 
 
 def _period_of(da) -> str:
-    """``"2015-01 to 2015-07"`` — the span the panel covers."""
+    """``"2015-01 to 2015-07"`` — the span the panel covers.
+
+    ``"by month"`` (or ``"by year"``, ...) for a groupby axis instead: its
+    values are bare integers, and ``"1 to 12"`` would read as a real date span
+    rather than what it is, every January-through-December average in one
+    field.
+    """
+    if da.dims and not date_axis_of(da):
+        return f"by {da.dims[0]}"
     try:
         values = time_values(da)
     except ValueError:
@@ -450,6 +538,20 @@ def compose(
         for line in _style.resolve(all_specs, encode=encode)
     }
     varying = _style.varying_fields(all_specs)
+
+    # One axis, so one x-axis convention for the whole figure -- read off the
+    # first line's own values, the same "one axis, so one name" rule _ylabel
+    # applies to the value axis.
+    axis_values = all_specs[0].values
+    date_axis = date_axis_of(axis_values)
+    axis_dim = str(axis_values.dims[0])
+    xlabel = "time" if date_axis else axis_dim
+    axis_coord = axis_values.coords.get(axis_dim)
+    xticks = (
+        None
+        if date_axis or axis_coord is None
+        else groupby_ticks(axis_dim, axis_coord.values)
+    )
 
     # Items are carried with their index throughout: the styled lines are keyed on it,
     # and two items can be equal dicts (the same comparison drawn twice), so identity
@@ -580,4 +682,7 @@ def compose(
         legend_labels=tuple(labels),
         shared_legend=shared,
         residual=residual,
+        xlabel=xlabel,
+        date_axis=date_axis,
+        xticks=xticks,
     )
