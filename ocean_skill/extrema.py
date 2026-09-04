@@ -216,6 +216,24 @@ class Extremum:
                 sel[vkey] = self.coords[zdim]
         elif zdim is not None and zdim in self.coords:
             sel[zdim] = self.coords[zdim]
+        elif zdim is not None and "z_rho" in self.coords:
+            # A native s-level axis (a bare parent select=, or {"depth": "column"})
+            # carries no coordinate of its own named zdim to read the extremum's
+            # own level back off of -- the actual depth rode on z_rho instead
+            # (negative-down, see plot/profile.py:vertical_values), which the
+            # extremum's own isel already reduced to a scalar. Pin the child field
+            # to that one depth explicitly, or an empty sel here would leave the
+            # whole column standing again rather than following the extremum at
+            # the one level it was actually found on.
+            sel["depth"] = abs(float(self.coords["z_rho"]))
+        elif zdim is not None:
+            raise ValueError(
+                f"{parent.source!r}'s vertical axis ({zdim!r}) carries no "
+                "coordinate and no z_rho either, so this extremum's own depth "
+                "cannot be read back to pin the follow-up series to it. Narrow "
+                "the parent field's own select= to a coordinate-bearing depth "
+                "request first."
+            )
 
         if time is not None:
             sel["time"] = time

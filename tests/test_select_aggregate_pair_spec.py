@@ -150,11 +150,14 @@ def test_prepare_lane_resolves_each_sides_own_select_and_aggregate():
         c._prepare_lane("model", True, False, role="test")
         c._prepare_lane("woa23_nitrate_month01", True, False, role="reference")
 
+    # "depth": "surface" on both sides is the compare lane's own default, injected
+    # by _prepare_lane now that an absent depth key no longer means that on its own
+    # (see ocean_skill.comparison._prepare's `surface` flag).
     assert calls["test"] == (
-        {"month": 1},
+        {"month": 1, "depth": "surface"},
         {"time": {"groupby": "month", "reduce": "mean"}},
     )
-    assert calls["reference"] == ({}, {"time": "mean"})
+    assert calls["reference"] == ({"depth": "surface"}, {"time": "mean"})
 
 
 # -- the deferred select: a key naming an axis the aggregate creates -----------
@@ -257,11 +260,14 @@ def test_seasonal_test_lane_against_a_time_meaned_reference():
         c._prepare_lane("model", True, False, role="test")
         c._prepare_lane("woa23_nitrate_month01", True, False, role="reference")
 
+    # "depth": "surface" on both sides is the compare lane's own default, injected
+    # by _prepare_lane now that an absent depth key no longer means that on its own
+    # (see ocean_skill.comparison._prepare's `surface` flag).
     assert calls["test"] == (
-        {"season": "JJA"},
+        {"season": "JJA", "depth": "surface"},
         {"time": {"groupby": "season", "reduce": "mean"}},
     )
-    assert calls["reference"] == ({}, {"time": "mean"})
+    assert calls["reference"] == ({"depth": "surface"}, {"time": "mean"})
 
 
 def test_a_key_matching_neither_pass_warns_but_does_not_raise(monthly):

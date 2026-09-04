@@ -73,7 +73,17 @@ __all__ = [
 #: :func:`ocean_skill.operators.spatial_mean_in_spec`). Either key means the
 #: same thing it always did on a rectilinear select with no box and no spatial
 #: mean, but a stale entry filed under either new shape held the old answer.
-_FORMAT_VERSION = 4
+#:
+#: **5** — a ``select`` naming no vertical key at all used to mean "surface" for
+#: every caller of :func:`ocean_skill.comparison.prepare_source`; now it means
+#: "leave the vertical axis alone" (see
+#: :func:`ocean_skill.comparison._prepare`'s ``surface`` flag), and it is the
+#: *compare* lane (:meth:`ocean_skill.comparison.Comparison._prepare_lane`) that
+#: writes an explicit ``"surface"`` into its own select before ever reaching
+#: here. A pre-change entry filed under a depth-less key held surface-reduced
+#: data; a :class:`~ocean_skill.field.Field`'s bare call now asks that same key
+#: for the whole column instead, and must not be handed the old answer.
+_FORMAT_VERSION = 5
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline

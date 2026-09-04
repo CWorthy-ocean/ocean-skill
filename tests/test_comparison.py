@@ -48,6 +48,8 @@ def gom_bgc():
     mask = np.ones((ny, nx))
     sigma_r = np.linspace(-1 + 1 / (2 * ns), -1 / (2 * ns), ns)  # cell centres
     cs_r = sigma_r.copy()  # Vtransform 2, theta_s=theta_b=0 => Cs_r == sigma_r
+    sigma_w = np.linspace(-1.0, 0.0, ns + 1)  # cell interfaces, for the column path
+    cs_w = sigma_w.copy()
     o2 = 200 + 5 * rng.standard_normal((nt, ns, ny, nx))
 
     ds = xr.Dataset(
@@ -60,6 +62,8 @@ def gom_bgc():
             "lat_rho": (("eta_rho", "xi_rho"), lat),
             "Cs_r": (("s_rho",), cs_r),
             "sigma_r": (("s_rho",), sigma_r),
+            "Cs_w": (("s_w",), cs_w),
+            "sigma_w": (("s_w",), sigma_w),
             "ocean_time": (("time",), np.arange(nt) * 86400.0),
             "spherical": np.bytes_(b"T"),  # the field that broke a whole-dataset mean
         }
@@ -102,10 +106,15 @@ def test_prepare_fails_closed_on_missing_variable(gom_bgc):
 
 
 def test_surface_and_depth_zero_are_distinct(gom_bgc):
-    """Unset/``"surface"`` uses the model's own top level, with no warning.
+    """``"surface"`` is the model's own top level; ``0`` interpolates for real.
 
-    An explicit ``depth=0`` is a real interpolation request and may legitimately warn
-    all-NaN.
+    ``is_surface_request(None)`` is still True -- that is what the *compare* lane's
+    own default means, and what a label reads an absent depth as -- but ``_prepare``
+    no longer treats an absent depth that way on its own: only
+    :meth:`~ocean_skill.comparison.Comparison._prepare_lane` writes an explicit
+    ``"surface"`` in when the caller named nothing. A bare select reaching
+    ``_prepare`` directly (what a bare :func:`~ocean_skill.field.field` call sends)
+    keeps every native level standing instead.
     """
     ds, meta = gom_bgc
     assert is_surface_request(None)
@@ -113,9 +122,15 @@ def test_surface_and_depth_zero_are_distinct(gom_bgc):
     assert not is_surface_request(0)
     assert not is_surface_request(0.0)
 
+    unreduced, depth = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    assert "s_rho" in unreduced.dims, "an absent depth key leaves every level standing"
+    assert unreduced.sizes["s_rho"] == ds.sizes["s_rho"]
+    assert depth is None
+
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        da_surface, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+        da_surface, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": "surface"})
+    assert "s_rho" not in da_surface.dims, "an explicit surface request collapses it"
     assert not any("entirely NaN" in str(w.message) for w in caught)
     assert np.isfinite(da_surface.values).all()
 
@@ -158,7 +173,11 @@ def test_a_comparison_refuses_an_unreduced_lane(gom_bgc):
 
 def test_a_reduced_lane_passes_the_check(gom_bgc):
     ds, meta = gom_bgc
-    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {}, {"time": "mean"})
+    # depth named explicitly: a bare select would leave s_rho standing too now, and
+    # this test wants a lane that is genuinely already a single map.
+    da, _ = _prepare(
+        ds, meta, OXYGEN_PER_MASS, {"depth": "surface"}, {"time": "mean"}
+    )
     out = _require_reduced(da, "test", "GOM_bgc")  # must not raise
     xr.testing.assert_identical(out, da)  # an already-reduced lane comes back unchanged
 
@@ -171,7 +190,9 @@ def test_a_singleton_axis_is_squeezed_not_refused(gom_bgc):
     say how, the same way it would refuse a genuinely ambiguous axis.
     """
     ds, meta = gom_bgc
-    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    # depth named explicitly, so time is the only axis this test means to leave
+    # ambiguous -- a bare select would leave s_rho standing too and refuse instead.
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": "surface"})
     one = da.isel(time=slice(0, 1))
     out = _require_reduced(one, "test", "GOM_bgc")  # must not raise
     assert "time" not in out.dims
@@ -181,7 +202,9 @@ def test_a_singleton_axis_is_squeezed_not_refused(gom_bgc):
 def test_a_singleton_does_not_excuse_a_real_axis(gom_bgc):
     """A size-1 axis is squeezed away quietly; a genuinely ambiguous one still isn't."""
     ds, meta = gom_bgc
-    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {})
+    # depth named explicitly, so the only "real axis" below is the one this test
+    # adds by hand -- a bare select would leave s_rho standing as a second one.
+    da, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": "surface"})
     one = da.isel(time=slice(0, 1)).expand_dims(depth=[0.0, 10.0])
     with pytest.raises(ValueError) as excinfo:
         _require_reduced(one, "test", "GOM_bgc")
@@ -235,15 +258,18 @@ def test_a_cached_singleton_lane_is_squeezed_on_the_way_out(monkeypatch, gom_bgc
     monkeypatch.setattr(osk, "read", lambda name: one_step)
     monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
 
-    kept, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, None, None)
+    # depth named explicitly, so time is the only axis this test means to leave
+    # ambiguous -- a bare select would leave s_rho standing too and refuse instead.
+    surface = {"depth": "surface"}
+    kept, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, surface, None)
     assert kept.sizes["time"] == 1, "the tolerant caller fills the cache unsqueezed"
 
     hit, _ = prepare_source(
-        "GOM_bgc_1", OXYGEN_PER_MASS, None, None, require_reduced="test"
+        "GOM_bgc_1", OXYGEN_PER_MASS, surface, None, require_reduced="test"
     )
     assert "time" not in hit.dims, "a stricter caller gets the cache hit squeezed"
 
-    again, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, None, None)
+    again, _ = prepare_source("GOM_bgc_1", OXYGEN_PER_MASS, surface, None)
     assert again.sizes["time"] == 1, "the stored entry itself was never squeezed"
 
 

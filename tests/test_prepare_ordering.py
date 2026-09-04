@@ -64,10 +64,19 @@ def test_surface_isel_runs_before_the_time_mean():
     )
 
 
-def test_surface_isel_runs_before_the_time_mean_with_depth_unset():
-    """Unset depth means surface too (see is_surface_request) -- same hoist applies."""
+def test_an_unset_depth_is_not_hoisted_and_keeps_the_column_through_the_time_mean():
+    """Unset depth is no longer surface (see ``_prepare``'s own ``surface`` flag).
+
+    A bare :func:`~ocean_skill.field.field` call is the one production caller that
+    ever reaches ``_prepare`` with no vertical key at all -- the compare lane's own
+    default now writes an explicit ``"surface"`` in before this ever runs (see
+    :meth:`~ocean_skill.comparison.Comparison._prepare_lane`). So this is no longer
+    the cheap top-level isel :func:`test_surface_isel_runs_before_the_time_mean`
+    covers; it takes the same COLUMN path :func:`test_a_depth_band_is_not_hoisted`
+    does, and the aggregate (naming only time) leaves the whole column standing.
+    """
     pytest.importorskip("dask")
-    ds = _roms_like()
+    ds, meta = _roms_column_with_time()
     captured: dict[str, tuple[str, ...]] = {}
     real_aggregate = operators.aggregate
 
@@ -76,9 +85,11 @@ def test_surface_isel_runs_before_the_time_mean_with_depth_unset():
         return real_aggregate(da, spec)
 
     with mock.patch("ocean_skill.operators.aggregate", side_effect=spy):
-        _prepare(ds, META, "temp", {}, {"time": "mean"})
+        _prepare(ds, meta, "temp", {}, {"time": "mean"})
 
-    assert "s_rho" not in captured["dims"]
+    assert "s_rho" in captured["dims"], (
+        "an absent depth key keeps every level standing, not just the top one"
+    )
 
 
 def test_the_hoist_does_not_change_the_result():
