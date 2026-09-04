@@ -3960,9 +3960,33 @@ class ComparisonSet:
         through time (a mooring, :attr:`Comparison.is_series`) or through depth (a
         CTD cast, :attr:`Comparison.is_profile`, scored full-column to one number
         per metric) — anything else is skipped with a warning, since it has no
-        single position to plot. See :func:`ocean_skill.plot.map_metrics.map_metrics`,
-        which this delegates to, for what gets interpolated and how, and what it
-        cannot do (route an interpolated surface around land).
+        single position to plot.
+
+        ``renderer`` and ``**kwargs`` are forwarded to
+        :func:`ocean_skill.plot.map_metrics.map_metrics`, which this delegates to
+        and whose docstring is the full reference for each:
+
+        * ``metrics=("bias", "corr", ...)`` — which registered metrics to draw, one
+          panel each. Default: ``bias``, ``crmsd``, ``corr``, ``sigma_ratio`` (the
+          same quantities a Taylor/target diagram plots).
+        * ``test="<model_name>"`` — the source whose grid to interpolate onto;
+          read automatically off this set (with a warning if it mixes test
+          sources), so rarely needed here.
+        * ``grid="model"`` (default, a real ocean mask from ``test``'s own grid) or
+          ``"regular"`` (a plain lon/lat grid, no model file needed).
+        * ``method="spline"`` (default, smooth, can invent a gradient across a
+          barrier), ``"nearest"`` (Voronoi tiles, hard-edged), ``"knn"`` (mean of
+          ``knn_k`` neighbours), ``"linear"``/``"cubic"`` (faceted, NaN outside the
+          stations' convex hull) — the interpolator.
+        * ``block_spacing=<metres>`` — pool a dense station cluster to its median
+          before fitting, so it cannot dominate a sparser region by outnumbering it.
+        * ``rows={"DJF": winter_set, ...}`` — one row per entry instead of one
+          figure, e.g. a seasonal facet.
+        * ``renderer="matplotlib"`` (default) or ``"holoviews"``.
+        * any other ``skill_map`` styling option (``docs/plot_styling_reference.md``).
+
+        See the module docstring there for what this cannot do (route an
+        interpolated surface around land).
         """
         from ocean_skill.plot.map_metrics import map_metrics as _map_metrics
 
