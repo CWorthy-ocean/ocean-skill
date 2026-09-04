@@ -1560,8 +1560,11 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
     *and*, unmasked, the trajectory-vs-timeSeries featureType guess below, via a
     lon/lat value that only ever differs because of the fill).
     """
+    import numpy as np
+
     from ocean_skill import qc as _qc
     from ocean_skill.tabular import (
+        FIXED_POSITION_TOLERANCE,
         coord_column,
         decode_time_column,
         is_coordinate_column,
@@ -1670,6 +1673,15 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
         series = numeric_in_range(work[col], axis) if numeric else decode_time_column(
             work[col], col
         )
+        if axis in ("X", "Y"):
+            # A position axis asks "does this station actually move", not "does it
+            # carry more than one distinct value" -- ordinary GPS/re-anchoring noise
+            # between visits (float precision alone can do it) would otherwise fail
+            # a fixed station as a trajectory. Same tolerance tabular._scalar_position
+            # uses at read time, so the probe's guess and the reader's own "fixed vs.
+            # moving" call cannot disagree.
+            finite = series.dropna().to_numpy()
+            return finite.size > 0 and float(np.ptp(finite)) > FIXED_POSITION_TOLERANCE
         return series.nunique(dropna=True) > 1
 
     position_varies = _spread("X") or _spread("Y")
@@ -1811,6 +1823,16 @@ def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] 
                 stacklevel=3,
             )
     reader.metadata.update(metadata)
+    if "featureType" in metadata:
+        # A caller-supplied featureType overrides the probe's guess (the update
+        # above), but was never run through the same canonicalization the probe's
+        # own declared-attribute path gets (see _canonical_feature_type) -- so
+        # add_source(..., featureType="timeseriesprofile") would otherwise save
+        # that exact casing rather than "timeSeriesProfile", and the entry would
+        # keep featureType_source: "inferred" despite the caller having said so
+        # explicitly. Both are fixed here, once, for every caller.
+        reader.metadata["featureType"] = _canonical_feature_type(metadata["featureType"])
+        reader.metadata["featureType_source"] = "declared"
     # A ROMS entry with its grid still a separate file (not merged into the store by
     # make_kerchunk's grid= at build time) never sees lon_rho/lat_rho in the probed
     # `data` above — self_contained_grid was already False by then, so :func:`_probe`

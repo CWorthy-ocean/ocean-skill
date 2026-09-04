@@ -516,6 +516,106 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
     return float(np.median(finite)), source, approximate
 
 
+def _convert_data_column(
+    frame,
+    column,
+    *,
+    is_flag: bool,
+    units: dict[str, str],
+    flag_pairs: dict[str, str],
+    flag_definitions: dict,
+    flag_to_qartod: dict,
+    data_to_flags: dict[str, list[str]],
+    qc_policy_json: str | None,
+):
+    """Convert one raw table column to ``(base_name, values, attrs)``.
+
+    Shared by :func:`to_dataset`'s time build and :func:`_timeseriesprofile_dataset`
+    -- everything about a column's *meaning* (is it a QC flag? what unit? what CF
+    attrs?) is the same in both; only what dimension(s) the caller assigns the
+    result differs, so this stops at a plain :class:`pandas.Series` rather than
+    building the ``xr.DataArray`` itself.
+
+    Returns ``(None, None, placeholder_attrs)`` for an all-NaN column that should
+    become dataset-level provenance instead of a variable — see the callers.
+    """
+    import pandas as pd
+
+    from ocean_skill.qc import QARTOD_FLAGS, _normalize_flag_value
+
+    base, _ = split_units(column)
+    if is_flag:
+        raw = frame[column]
+
+        def _flag_value(v):
+            # A real numeric provider code (an int, or a digit stored as a string
+            # like SeaDataNet's mostly-numeric column) keeps its own value --
+            # flag_values below is meant to hold the *provider's* codes, not a
+            # QARTOD translation of them. Only a value that cannot be read as a
+            # number at all -- a letter code -- is encoded through the contract's
+            # flag_to_qartod into QARTOD's own integer codes instead of being lost
+            # to a blind pd.to_numeric coercion (which would otherwise make the
+            # whole column look all-NaN and be dropped below like any other
+            # placeholder).
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return float(
+                    QARTOD_FLAGS.get(
+                        flag_to_qartod.get(_normalize_flag_value(v)), np.nan
+                    )
+                )
+
+        values = raw.map(lambda v: np.nan if pd.isna(v) else _flag_value(v))
+        observed = sorted(
+            (
+                n
+                for v in raw.dropna().unique()
+                if (n := _normalize_flag_value(v)) is not None
+            ),
+            key=str,
+        )
+        attrs: dict[str, Any] = {
+            "flag_values": [
+                v if isinstance(v, int) else QARTOD_FLAGS.get(flag_to_qartod.get(v), -1)
+                for v in observed
+            ],
+            "standard_name": "status_flag",
+            "source_column": str(column),
+            "flags_for": split_units(flag_pairs[str(column)])[0],
+        }
+        if flag_definitions:
+            attrs["flag_meanings"] = " ".join(
+                str(flag_definitions.get(v, v)).strip().replace(" ", "_")
+                for v in observed
+            )
+        if flag_to_qartod:
+            attrs["flag_qartod"] = " ".join(
+                str(flag_to_qartod.get(v, "UNKNOWN")) for v in observed
+            )
+        return base, values, attrs
+
+    values = pd.to_numeric(frame[column], errors="coerce")
+    if values.isna().all():
+        # All-NaN columns are placeholders (OOI's `depth_reading`, `station`), and a
+        # non-numeric column would break a bare .mean() the way ROMS' `spherical`
+        # flag does -- so a single-valued one is recorded as provenance and the rest
+        # are dropped rather than carried as unusable variables.
+        original = frame[column].dropna().unique()
+        return None, None, ({base: original[0]} if original.size == 1 else {})
+
+    attrs = {"standard_name": base, "source_column": str(column)}
+    if unit := (units.get(str(column)) or units.get(base)):
+        attrs["units"] = unit
+    if str(column) in data_to_flags:
+        attrs["ancillary_variables"] = " ".join(
+            split_units(f)[0] for f in data_to_flags[str(column)]
+        )
+        if qc_policy_json is not None:
+            attrs["qc_policy"] = qc_policy_json
+    return base, values, attrs
+
+
 def to_dataset(df, meta: dict[str, Any]):
     """Return a station table as a 1-D :class:`xarray.Dataset`.
 
@@ -529,6 +629,11 @@ def to_dataset(df, meta: dict[str, Any]):
     An entry declared ``featureType: "profile"`` is a different shape entirely -- one
     instant, many depths -- and is built by :func:`_profile_dataset` instead: indexed
     on ``depth``, with ``time``/``lon``/``lat`` as the scalar coordinates.
+
+    An entry declared ``featureType: "timeSeriesProfile"`` is the combination of the
+    two -- a station visited repeatedly, several depths per visit -- and is built by
+    :func:`_timeseriesprofile_dataset`: indexed on **both** ``time`` and ``depth``, a
+    rectangle with a NaN wherever a visit did not sample a given level.
 
     QARTOD/flag companion columns are **kept** rather than dropped: they are real
     information, and what :func:`ocean_skill.qc.apply` reads (called by
@@ -557,12 +662,14 @@ def to_dataset(df, meta: dict[str, Any]):
     import pandas as pd
     import xarray as xr
 
-    from ocean_skill.qc import QARTOD_FLAGS, _normalize_flag_value
-
     subject = meta.get("datasetID") or meta.get("title") or "this source"
-    if str(meta.get("featureType") or "").strip().casefold() == "profile":
+    feature_type = str(meta.get("featureType") or "").strip().casefold()
+    if feature_type == "profile":
         # A CTD-style cast is indexed on depth, not time -- a different build entirely.
         return _profile_dataset(df, meta, subject=subject)
+    if feature_type == "timeseriesprofile":
+        # A repeat-visit station is indexed on both -- yet another build.
+        return _timeseriesprofile_dataset(df, meta, subject=subject)
     time_col = _axis_column(df, meta, "T")
     if time_col is None:
         raise ValueError(
@@ -590,7 +697,9 @@ def to_dataset(df, meta: dict[str, Any]):
         # sight, so collapse them here and say how many.
         warnings.warn(
             f"{subject}: {int(duplicated.sum())} duplicate timestamps "
-            f"(of {len(frame)}) — keeping the first of each.",
+            f"(of {len(frame)}) — keeping the first of each. If several depths share "
+            "a timestamp because this is a repeat-visit station with a cast per "
+            "visit, label the entry featureType: timeSeriesProfile instead.",
             stacklevel=_stacklevel.find(),
         )
         frame = frame.loc[~duplicated]
@@ -634,7 +743,6 @@ def to_dataset(df, meta: dict[str, Any]):
     for column in frame.columns:
         if column in (time_col, lon_col, lat_col):
             continue
-        base, _ = split_units(column)
         is_flag = str(column) in flag_pairs
         if is_coordinate_column(column) and not is_flag:
             # Coordinate columns (time/lon/lat/depth/pressure/altitude, by name or
@@ -645,77 +753,22 @@ def to_dataset(df, meta: dict[str, Any]):
             # A contract flag column is exempted even if its own name loosely matches
             # a coordinate token -- see the qc contract note above.
             continue
-        if is_flag:
-            raw = frame[column]
-
-            def _flag_value(v):
-                # A real numeric provider code (an int, or a digit stored as a
-                # string like SeaDataNet's mostly-numeric column) keeps its own
-                # value -- flag_values below is meant to hold the *provider's*
-                # codes, not a QARTOD translation of them. Only a value that
-                # cannot be read as a number at all -- a letter code -- is
-                # encoded through the contract's flag_to_qartod into QARTOD's own
-                # integer codes instead of being lost to a blind pd.to_numeric
-                # coercion (which would otherwise make the whole column look
-                # all-NaN and be dropped below like any other placeholder).
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    return float(
-                        QARTOD_FLAGS.get(
-                            flag_to_qartod.get(_normalize_flag_value(v)), np.nan
-                        )
-                    )
-
-            values = raw.map(lambda v: np.nan if pd.isna(v) else _flag_value(v))
-            variable = xr.DataArray(values.to_numpy(), dims=("time",), name=base)
-            observed = sorted(
-                (
-                    n
-                    for v in raw.dropna().unique()
-                    if (n := _normalize_flag_value(v)) is not None
-                ),
-                key=str,
-            )
-            variable.attrs["flag_values"] = [
-                v if isinstance(v, int) else QARTOD_FLAGS.get(flag_to_qartod.get(v), -1)
-                for v in observed
-            ]
-            if flag_definitions:
-                variable.attrs["flag_meanings"] = " ".join(
-                    str(flag_definitions.get(v, v)).strip().replace(" ", "_")
-                    for v in observed
-                )
-            if flag_to_qartod:
-                variable.attrs["flag_qartod"] = " ".join(
-                    str(flag_to_qartod.get(v, "UNKNOWN")) for v in observed
-                )
-            variable.attrs["standard_name"] = "status_flag"
-            variable.attrs["source_column"] = str(column)
-            variable.attrs["flags_for"] = split_units(flag_pairs[str(column)])[0]
-            data[base] = variable
-            continue
-        values = pd.to_numeric(frame[column], errors="coerce")
-        if values.isna().all():
-            # All-NaN columns are placeholders (OOI's `depth_reading`, `station`), and
-            # a non-numeric column would break a bare .mean() the way ROMS' `spherical`
-            # flag does -- so a single-valued one is recorded as provenance and the
-            # rest are dropped rather than carried as unusable variables.
-            original = frame[column].dropna().unique()
-            if original.size == 1:
-                attrs[base] = original[0]
+        base, values, col_attrs = _convert_data_column(
+            frame,
+            column,
+            is_flag=is_flag,
+            units=units,
+            flag_pairs=flag_pairs,
+            flag_definitions=flag_definitions,
+            flag_to_qartod=flag_to_qartod,
+            data_to_flags=data_to_flags,
+            qc_policy_json=qc_policy_json,
+        )
+        if base is None:
+            attrs.update(col_attrs)
             continue
         variable = xr.DataArray(values.to_numpy(), dims=("time",), name=base)
-        if unit := (units.get(str(column)) or units.get(base)):
-            variable.attrs["units"] = unit
-        variable.attrs["standard_name"] = base
-        variable.attrs["source_column"] = str(column)
-        if str(column) in data_to_flags:
-            variable.attrs["ancillary_variables"] = " ".join(
-                split_units(f)[0] for f in data_to_flags[str(column)]
-            )
-            if qc_policy_json is not None:
-                variable.attrs["qc_policy"] = qc_policy_json
+        variable.attrs.update(col_attrs)
         # The depth also goes on each variable's own attrs, not only on a coordinate.
         # A coordinate along time does not survive a reduction -- resampling a mooring
         # to monthly means drops it -- and the depth is then invisible exactly where it
@@ -868,6 +921,170 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
     if time is not None:
         ds = ds.assign_coords(time=time)
         ds["time"].attrs["time_zone"] = "UTC"
+    ds.attrs.update(attrs)
+    for key in ("featureType", "title", "institution", "datasetID"):
+        if value := meta.get(key):
+            ds.attrs[key] = str(value)
+    return ds
+
+
+def _station_position(
+    frame, lon_col: str | None, lat_col: str | None, *, subject: str
+) -> tuple[float | None, float | None]:
+    """Return ``(lon, lat)`` for a *declared* fixed station, tolerating GPS wobble.
+
+    Unlike :func:`_scalar_position` (used by the plain time/profile builds, where a
+    spread beyond :data:`FIXED_POSITION_TOLERANCE` means "this is actually a
+    trajectory, not a fixed station"), a ``timeSeriesProfile`` entry has already
+    declared itself a fixed station repeat-visited over time. Ordinary GPS noise or
+    re-anchoring between separate visits (seen: 100-400 m across a season of CTD
+    casts at one named station) should not silently relabel it a trajectory or
+    throw the position away -- the median position is used instead, with a warning
+    naming the spread, whenever :func:`_scalar_position` finds it exceeds tolerance.
+    """
+    lon = _scalar_position(frame, lon_col, "X")
+    lat = _scalar_position(frame, lat_col, "Y")
+    if lon is not None or lon_col is None:
+        return lon, lat
+
+    lon_values = numeric_in_range(frame[lon_col], "X").to_numpy()
+    lon_finite = lon_values[np.isfinite(lon_values)]
+    if lon_finite.size == 0:
+        return None, None
+    lat_finite = np.array([])
+    if lat_col is not None:
+        lat_values = numeric_in_range(frame[lat_col], "Y").to_numpy()
+        lat_finite = lat_values[np.isfinite(lat_values)]
+
+    spread_deg = float(np.ptp(lon_finite))
+    if lat_finite.size:
+        spread_deg = max(spread_deg, float(np.ptp(lat_finite)))
+    warnings.warn(
+        f"{subject}: longitude/latitude vary by up to ~{spread_deg:.4f}\N{DEGREE SIGN} "
+        f"(~{spread_deg * 111_000:.0f} m) across visits — ordinary GPS/positioning "
+        "wobble for a declared fixed station, not a trajectory. Using the median "
+        "position for the whole record.",
+        stacklevel=_stacklevel.find(),
+    )
+    return float(np.median(lon_finite)), (
+        float(np.median(lat_finite)) if lat_finite.size else None
+    )
+
+
+def _timeseriesprofile_dataset(df, meta: dict[str, Any], *, subject: str):
+    """Return a repeat-visit station as a 2-D :class:`xarray.Dataset` on ``(time, depth)``.
+
+    The combined case :func:`to_dataset`'s other two builders each take a slice of:
+    time varies across visits (unlike :func:`_profile_dataset`'s single instant),
+    and depth varies within a visit (unlike the plain time build's one row per
+    timestamp). Called from :func:`to_dataset`, not directly.
+
+    Every ``(time, depth)`` pair read is a real sample -- a bottle at a given
+    station on a given cast. A station sampled unevenly (different depths on
+    different visits, as discrete bottle sampling usually is) is not "ragged" here
+    so much as a rectangle with holes: unsampled (visit, depth) combinations are
+    left NaN rather than interpolated or dropped, exactly the shape a WHOTS
+    mooring's own ``(TIME, DEPTH)`` NetCDF already has, so every consumer downstream
+    of this (:mod:`ocean_skill.comparison`, :mod:`ocean_skill.align`, both plot
+    renderers) already knows what to do with it.
+    """
+    import json
+
+    import pandas as pd
+
+    time_col = _axis_column(df, meta, "T")
+    if time_col is None:
+        raise ValueError(
+            f"{subject}: no time column, so this table cannot become a "
+            "timeSeriesProfile. Give the catalog entry an axes mapping such as "
+            '`axes={"T": "time (UTC)"}`, or name the column "time".'
+        )
+    depth_col = _axis_column(df, meta, "Z")
+    if depth_col is None:
+        raise ValueError(
+            f"{subject}: no depth column, so this table cannot become a "
+            "timeSeriesProfile. Give the catalog entry an axes mapping such as "
+            '`axes={"Z": "depth (m)"}`, or name the column "depth".'
+        )
+
+    time = decode_time_column(df[time_col], time_col)
+    depth = numeric_in_range(df[depth_col], "Z")
+    keep = time.notna() & depth.notna()
+    frame = df.loc[keep].copy()
+    frame[time_col] = time[keep].dt.tz_convert("UTC").dt.tz_localize(None)
+    frame[depth_col] = depth[keep]
+    frame = frame.sort_values([time_col, depth_col])
+
+    duplicated = frame.duplicated(subset=[time_col, depth_col])
+    if bool(duplicated.any()):
+        # Bottle samples from one cast normally SHARE a timestamp -- that is the
+        # whole point of this featureType, not a duplicate. Only a repeated
+        # (time, depth) *pair* is: two rows claiming the same bottle.
+        warnings.warn(
+            f"{subject}: {int(duplicated.sum())} duplicate (time, depth) pairs "
+            f"(of {len(frame)}) — keeping the first of each.",
+            stacklevel=_stacklevel.find(),
+        )
+        frame = frame.loc[~duplicated]
+
+    units = _units_map(frame, meta)
+    lon_col = _axis_column(frame, meta, "X")
+    lat_col = _axis_column(frame, meta, "Y")
+    lon, lat = _station_position(frame, lon_col, lat_col, subject=subject)
+
+    qc_meta = meta.get("qc") or {}
+    flag_pairs = {str(k): str(v) for k, v in (qc_meta.get("flags") or {}).items()}
+    flag_definitions = qc_meta.get("flag_definitions") or {}
+    flag_to_qartod = qc_meta.get("flag_to_qartod") or {}
+    data_to_flags: dict[str, list[str]] = {}
+    for fcol, dcol in flag_pairs.items():
+        data_to_flags.setdefault(dcol, []).append(fcol)
+    qc_applied = frame.attrs.get("qc_applied")
+    qc_policy_json = json.dumps(qc_applied, default=str) if qc_applied else None
+
+    # One long (time, depth, value...) frame, pivoted in a single shot via a
+    # MultiIndex -> to_xarray() -- pandas fills every (visit, level) combination no
+    # row supplied with NaN and sorts each axis, which is exactly the rectangle
+    # with holes this builder promises (verified: to_xarray sorts and NaN-fills
+    # unlisted combinations, it does not average or drop them the way pivot_table
+    # would silently do for a repeated pair -- already ruled out above).
+    long = pd.DataFrame(
+        {"time": frame[time_col].to_numpy(), "depth": frame[depth_col].to_numpy()}
+    )
+    variable_attrs: dict[str, dict[str, Any]] = {}
+    attrs: dict[str, Any] = {}
+    for column in frame.columns:
+        if column in (time_col, depth_col, lon_col, lat_col):
+            continue
+        is_flag = str(column) in flag_pairs
+        if is_coordinate_column(column) and not is_flag:
+            continue
+        base, values, col_attrs = _convert_data_column(
+            frame,
+            column,
+            is_flag=is_flag,
+            units=units,
+            flag_pairs=flag_pairs,
+            flag_definitions=flag_definitions,
+            flag_to_qartod=flag_to_qartod,
+            data_to_flags=data_to_flags,
+            qc_policy_json=qc_policy_json,
+        )
+        if base is None:
+            attrs.update(col_attrs)
+            continue
+        long[base] = values.to_numpy()
+        variable_attrs[base] = col_attrs
+
+    ds = long.set_index(["time", "depth"]).to_xarray()
+    ds["time"].attrs["time_zone"] = "UTC"
+    ds["depth"].attrs.update(units="m", positive="down", long_name="depth")
+    for base, col_attrs in variable_attrs.items():
+        ds[base].attrs.update(col_attrs)
+    if lon is not None:
+        ds = ds.assign_coords(lon=lon, lat=lat)
+        ds["lon"].attrs.update(units="degrees_east", standard_name="longitude")
+        ds["lat"].attrs.update(units="degrees_north", standard_name="latitude")
     ds.attrs.update(attrs)
     for key in ("featureType", "title", "institution", "datasetID"):
         if value := meta.get(key):

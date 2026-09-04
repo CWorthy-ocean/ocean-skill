@@ -64,7 +64,7 @@ POINT_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
 #: CF featureTypes whose data is a *place through depth*: one position, a vertical
 #: axis, and (for ``timeSeriesProfile``) a time axis too. A comparison against
 #: ``profile`` unambiguously keeps depth -- the featureType's own definition
-#: (:func:`ocean_skill.build.infer_feature_type`) is "fixed point, Z, no T". A
+#: (:func:`ocean_skill.build.guess_feature_type`) is "fixed point, Z, no T". A
 #: ``timeSeriesProfile`` reference carries *both* axes, so which one a comparison
 #: keeps is read off the caller's own select/aggregate instead (see
 #: :func:`_implied_over`) rather than guessed from the featureType alone.
@@ -1154,7 +1154,9 @@ def _prepare(
     a bare ``.mean("time")`` chokes on whatever non-numeric fields ride along (ROMS'
     ``spherical`` flag), so "variable not found" must fail closed.
     """
-    from ocean_skill import operators, roms, tabular, units
+    import warnings
+
+    from ocean_skill import _stacklevel, operators, roms, tabular, units
 
     # A point source arrives as a DataFrame (osk.read's contract for a station), and
     # everything from resolve_variable down speaks xarray. Converting here rather than
@@ -1245,6 +1247,25 @@ def _prepare(
     early_agg = _without_horizontal_mean(_without_vertical(agg))
     horizontal_mean = _horizontal_mean_part(_without_vertical(agg))
     da = _select_horizontal_then_aggregate(da, horizontal, early_agg, source)
+
+    if (
+        str(meta.get("featureType") or "") == "timeSeriesProfile"
+        and "time" in da.dims
+        and da.sizes["time"] == 1
+    ):
+        # A period string (e.g. "2024-06-11", one visit's day) narrows time by
+        # *slicing*, not by an exact-instant match -- xarray's own partial-date
+        # indexing leaves "time" standing as a length-1 dimension even when only
+        # one step falls inside it, rather than collapsing it to a scalar
+        # coordinate the way an exact-timestamp select already does. Left alone,
+        # _require_reduced (in prepare_source, below this function) would squeeze
+        # that dimension away with drop=True once the lane is checked/returned --
+        # discarding the very timestamp ocean_skill.align._sample_test_at_instant
+        # needs to pick the model's nearest snapshot to this cast. Squeezed here
+        # instead, coordinate kept, exactly as a genuine "profile" source's own
+        # single-instant time coordinate already looks by construction
+        # (see ocean_skill.tabular._profile_dataset).
+        da = da.squeeze("time", drop=False)
 
     if calculated:
         bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
@@ -1437,6 +1458,53 @@ def _prepare(
                 k = int(np.abs(levels - target).argmin())
                 da = da.isel({zname: k})
                 da.attrs["actual_depth"] = float(levels[k])
+                if (
+                    str(meta.get("featureType") or "") == "timeSeriesProfile"
+                    and "time" in da.dims
+                    and da.sizes["time"] > 0
+                ):
+                    # A ragged station's nearest level to `target` is real for some
+                    # visits and simply never sampled on others (see
+                    # ocean_skill.tabular._timeseriesprofile_dataset's NaN holes) --
+                    # unlike a mooring's own fixed instrument depth, where every
+                    # step at that level is a real reading. A mostly-empty series
+                    # here usually means the wrong level was picked for how this
+                    # station was actually sampled, not that the model has nothing
+                    # to compare against.
+                    finite_frac = float(np.isfinite(da).mean())
+                    if finite_frac < 0.5:
+                        warnings.warn(
+                            f"{source!r}: {levels[k]:g} m (nearest to "
+                            f"{target:g} m) has data on only "
+                            f"{finite_frac:.0%} of this station's visits -- a "
+                            "ragged timeSeriesProfile station samples different "
+                            "depths on different visits, so one fixed level can "
+                            "be sparse. Pass depths=[...] for a level this "
+                            'station actually visits often, select={"depth": '
+                            '{"min": ..., "max": ...}} for a band, or select='
+                            '{"time": <one visit>} to compare a single cast '
+                            "over its own depths instead.",
+                            stacklevel=_stacklevel.find(),
+                        )
+
+    if (
+        da is not None
+        and str(meta.get("featureType") or "") == "timeSeriesProfile"
+        and zname is not None
+        and zname in da.dims
+        and "time" not in da.dims
+    ):
+        # A ragged station's own union of levels (every visit's distinct depths
+        # pooled together, written by _profile_depth_plan's timeSeriesProfile
+        # branch) is what "keep the whole depth axis standing" means here -- but
+        # any one visit only ever sampled a handful of them. Once time has
+        # narrowed to this one cast (no "time" dimension left -- see the
+        # singleton-time squeeze above), every level this cast did not sample is
+        # NaN by construction, and is dropped here rather than handed to
+        # align()'s vertical interpolation (_match_vertical) as if it were a
+        # real gap the model should be interpolated onto too -- the cast is
+        # compared on exactly the depths it actually has.
+        da = da.dropna(zname, how="all")
 
     if da is None:
         return None, None
@@ -2665,7 +2733,8 @@ class Comparison:
                 "there is no vertical axis left to score against. Pass a depth "
                 '*list* to keep the column standing -- select={"depth": [5, 25, 50, '
                 "75, 100]}, or depths=[...] through osk.compare(). Against a profile "
-                "reference, osk.compare() fills in the reference's own levels "
+                "reference, or a timeSeriesProfile one whose time this call narrows "
+                "to one instant, osk.compare() fills in the reference's own levels "
                 "automatically when you name none."
             )
 
@@ -4153,22 +4222,30 @@ def _fanned_select(
     return sel
 
 
-def _is_profile_reference(source: str, over: str | None) -> bool:
+def _is_profile_reference(
+    source: str, over: str | None, *, time_collapsed: bool = False
+) -> bool:
     """Whether ``source`` is a single-cast profile whose own levels drive the compare.
 
-    Scope is deliberately just ``featureType == "profile"`` -- a single fixed point
-    with a depth axis and no time (:func:`ocean_skill.build.infer_feature_type`), so
-    there is exactly one, unambiguous depth axis to compare on. A
-    ``timeSeriesProfile``/``trajectoryProfile`` carries more than one candidate axis
-    and is left to an explicit ``depths=``/``select=`` for now (see the ``compare()``
-    docstring). An explicit ``over=`` that is *not* vertical -- a caller scoring, say,
-    time against a profile -- opts out: they have named the axis themselves.
+    Scope is ``featureType == "profile"`` -- a single fixed point with a depth axis
+    and no time (:func:`ocean_skill.build.guess_feature_type`), so there is exactly
+    one, unambiguous depth axis to compare on -- **or** ``featureType ==
+    "timeSeriesProfile"`` with ``time_collapsed=True``: a repeat-visit station whose
+    time has been narrowed to one instant (a ``select={"time": <visit>}``, or one
+    entry of a ``times=[...]`` fan -- see the ``compare()`` fan loop, which computes
+    this per reference) is, for that one comparison, exactly a cast: one instant,
+    depth the only axis left to keep. A ``trajectoryProfile`` still carries more than
+    one candidate axis even then (position varies too) and is left to an explicit
+    ``depths=``/``select=``. An explicit ``over=`` that is *not* vertical -- a caller
+    scoring, say, time against a profile -- opts out: they have named the axis
+    themselves.
     """
     from ocean_skill.operators import _CF_AXES
 
     if over is not None and _CF_AXES.get(over) != "vertical":
         return False
-    return _feature_type(source) == "profile"
+    feature = _feature_type(source)
+    return feature == "profile" or (feature == "timeSeriesProfile" and time_collapsed)
 
 
 def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> list[float]:
@@ -4284,6 +4361,8 @@ def _profile_depth_plan(
     fan_values: tuple[Any, ...],
     explicit_depths: Any | None,
     cache: dict[str, list[float]],
+    *,
+    ref_time_collapsed: bool = False,
 ) -> tuple[tuple[Any, ...], bool]:
     """Per-reference ``(values, many_values)`` for compare()'s depth fan.
 
@@ -4291,10 +4370,13 @@ def _profile_depth_plan(
 
     * a calculated diagnostic has no vertical axis at all -- one comparison, no depth
       (``(None,)``);
-    * a **profile** reference keeps its depth axis standing, so its whole depth list
-      is *one* comparison's y-axis, never a scalar-per-depth fan (which would collapse
-      the very axis the profile exists to keep). The levels are the caller's
-      ``depths=`` when given, else -- the case this feature adds -- the reference's own
+    * a **profile** reference (or a **timeSeriesProfile** one whose time this
+      comparison has narrowed to a single instant -- ``ref_time_collapsed=True``,
+      computed by the caller per :func:`_is_profile_reference`'s extended scope)
+      keeps its depth axis standing, so its whole depth list is *one* comparison's
+      y-axis, never a scalar-per-depth fan (which would collapse the very axis the
+      profile exists to keep). The levels are the caller's ``depths=`` when given,
+      else -- the case this feature adds -- the reference's own
       (:func:`_profile_reference_depths`). An explicit ``select={"depth": [...]}`` is
       left to the ordinary path, which already carries a whole list as one comparison
       (``fan_values`` is then a 1-tuple holding that list);
@@ -4309,7 +4391,9 @@ def _profile_depth_plan(
     """
     if calculated:
         return (None,), False
-    if fan_key == "depth" and _is_profile_reference(ref, over):
+    if fan_key == "depth" and _is_profile_reference(
+        ref, over, time_collapsed=ref_time_collapsed
+    ):
         ref_sel = select_for(select, "reference")
         has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
         if not has_vertical_select:
@@ -4946,10 +5030,21 @@ def compare(
     straight off it and interpolated onto by the test lane
     (:func:`ocean_skill.align.match_axis`). Passing ``depths=[...]`` overrides those
     levels; either way the whole list is the profile's y-axis, not fanned into one map
-    per depth. Only ``featureType == "profile"`` is auto-derived this way — a
-    ``timeSeriesProfile``/``trajectoryProfile`` carries more than one candidate axis,
-    so it still needs an explicit ``depths=``/``select={"depth": [...]}``, and a
-    vertical ``over=`` with no depth axis left standing is refused rather than compared
+    per depth.
+
+    A ``timeSeriesProfile`` reference gets the same auto-derivation for exactly the
+    comparisons whose *time* this call has narrowed to one instant — a
+    ``select={"time": <one visit>}``, or one entry of a ``times=[...]`` fan (each
+    checked before its own per-entry ``select`` is written in, so the whole fan
+    qualifies together): that one comparison is, for that one instant, exactly a
+    cast, and the reference's own levels for it are read the same way a plain
+    ``profile``'s are — a discrete-bottle-sample station visited unevenly (different
+    depths on different visits) gets that one visit's own depths, not the record's
+    whole ragged union. Left with neither axis narrowed (or both), it is still the
+    ordinary ``timeSeriesProfile`` ambiguity, needing an explicit ``over=``. A
+    ``trajectoryProfile`` carries more than one candidate axis regardless, so it
+    still needs an explicit ``depths=``/``select={"depth": [...]}``, and a vertical
+    ``over=`` with no depth axis left standing is refused rather than compared
     against a single collapsed level.
 
     A **fixed-station** reference (``featureType`` ``timeSeries``/``point``/``station``
@@ -5323,6 +5418,20 @@ def compare(
     # appears under -- see _profile_reference_depths / _profile_depth_plan.
     _ref_depths_cache: dict[str, list[float]] = {}
 
+    # Whether *this* compare() call is going to hand a timeSeriesProfile reference
+    # one instant per comparison -- either the base select already narrows time to
+    # one value, or times=[...] (the "list" fan, one comparison per named visit) is
+    # about to write one in per iteration below, via _fanned_time_select, *after*
+    # _profile_depth_plan has already run on the unfanned `select`. Computed once,
+    # not per (ref, var) pair: it depends only on select/aggregate/times=, none of
+    # which vary by reference. A "bins"/"seasons" fan is deliberately left alone --
+    # a resample bin or season name is a period, not a cast instant, so a
+    # timeSeriesProfile reference under one of those keeps today's "ambiguous,
+    # pass over=" behaviour unless the caller's own select/aggregate narrows time.
+    _ref_time_collapsed = _time_collapsed(
+        select_for(select, "reference"), aggregate_for(aggregate, "reference")
+    ) or (times_fan is not None and times_fan[0] == "list")
+
     def _times_for(tst: str) -> tuple[Any, ...]:
         if times_fan is None:
             return (None,)
@@ -5457,6 +5566,7 @@ def compare(
                     fan_values,
                     depths if depths_was_explicit else None,
                     _ref_depths_cache,
+                    ref_time_collapsed=_ref_time_collapsed,
                 )
             except ValueError as exc:
                 # Reading a profile reference's own levels can fail (no vertical axis

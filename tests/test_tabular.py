@@ -755,3 +755,152 @@ def test_a_profile_with_time_varying_across_the_cast_is_reported():
     with pytest.warns(UserWarning, match="time varies across the cast"):
         ds = tabular.to_dataset(profile_frame(time=time), {"featureType": "profile"})
     assert pd.Timestamp(ds["time"].values) == pd.Timestamp("2024-04-04T12:00:00")
+
+
+# -- timeSeriesProfile: a repeat-visit station, ragged depths per visit ----------------
+
+
+def timeseriesprofile_frame() -> pd.DataFrame:
+    """A Hvalfjörður-shaped station: 4 visits, ragged depths, one duplicate pair.
+
+    Visit 1 (2024-01-01): depths 1, 10, 30 -- plus a duplicate (time, depth) row at
+    (2024-01-01, 1) that must be dropped, not averaged in. Visit 2 (2024-02-01): a
+    single-depth cast (5 m) -- the common "one bottle" case. Visit 3 (2024-03-01):
+    depths 2, 15, 31, 35 -- mostly disjoint from visit 1's, the ragged-hole case a
+    rectangular pivot has to leave NaN. Visit 4 (2024-04-01) carries two distinct
+    start times for its own three depths, the "two timestamps in one cast" case
+    real Start_time_UTC data has. Position wobbles ~0.003° (~300 m) across visits,
+    within real GPS/re-anchoring noise but well past FIXED_POSITION_TOLERANCE.
+    """
+    return pd.DataFrame(
+        {
+            # Full timestamps throughout -- mixing bare dates with one
+            # full-precision string in the same column trips pandas' own format
+            # inference (it infers a format from the first value and silently
+            # NaTs whatever does not match), which has nothing to do with the
+            # builder this fixture is testing.
+            "time": [
+                "2024-01-01T00:00:00", "2024-01-01T00:00:00",
+                "2024-01-01T00:00:00", "2024-01-01T00:00:00",  # dup pair
+                "2024-02-01T00:00:00",
+                "2024-03-01T00:00:00", "2024-03-01T00:00:00",
+                "2024-03-01T00:00:00", "2024-03-01T00:00:00",
+                "2024-04-01T00:00:00", "2024-04-01T00:00:00",
+                "2024-04-01T01:00:00",
+            ],
+            "depth (m)": [1, 10, 30, 1, 5, 2, 15, 31, 35, 1, 10, 30],
+            "lon": [
+                -21.987, -21.988, -21.986, -21.987,
+                -21.9895,
+                -21.9877, -21.987, -21.986, -21.988,
+                -21.9865, -21.9865, -21.984,
+            ],
+            "lat": [64.2638] * 12,
+            "Temperature (degC)": [
+                8.1, 7.9, 7.5, 999.0,
+                8.3,
+                6.0, 5.9, 5.8, 5.5,
+                7.2, 7.0, 6.8,
+            ],
+            "Temperature_flag": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+        }
+    )
+
+
+TSP_META = {
+    "featureType": "timeSeriesProfile",
+    "datasetID": "hvalfjordur_station",
+    "qc": {
+        "flags": {"Temperature_flag": "Temperature (degC)"},
+        "flag_definitions": {2: "good"},
+    },
+}
+
+
+def test_timeseriesprofile_is_two_dimensional_with_nan_holes():
+    with pytest.warns(UserWarning, match="duplicate \\(time, depth\\)"):
+        ds = tabular.to_dataset(timeseriesprofile_frame(), TSP_META)
+    assert set(ds.dims) == {"time", "depth"}
+    # 4 visit days, but the 4th visit spans two distinct start times -- 5 steps
+    assert ds.sizes["time"] == 5
+    # the union of every visit's own depths, deduped and sorted
+    assert list(ds["depth"].values) == [1, 2, 5, 10, 15, 30, 31, 35]
+    assert ds.indexes["depth"].is_monotonic_increasing
+    assert ds.indexes["time"].is_monotonic_increasing
+    # visit 2 (2024-02-01) sampled only 5 m -- every other depth is a real hole
+    temp = ds["Temperature"].sel(time="2024-02-01").squeeze()
+    assert np.isfinite(temp.sel(depth=5))
+    assert np.isnan(temp.sel(depth=1))
+    assert np.isnan(temp.sel(depth=30))
+
+
+def test_timeseriesprofile_duplicate_time_depth_pair_keeps_the_first():
+    with pytest.warns(UserWarning, match="1 duplicate \\(time, depth\\) pairs"):
+        ds = tabular.to_dataset(timeseriesprofile_frame(), TSP_META)
+    first_visit = ds["Temperature"].sel(time="2024-01-01").squeeze()
+    assert float(first_visit.sel(depth=1)) == pytest.approx(8.1)  # not 999.0
+
+
+def test_timeseriesprofile_position_wobble_is_median_not_trajectory():
+    """GPS/re-anchoring noise across visits to a declared station takes the
+    median position with its own warning -- not the plain time build's "this is
+    a trajectory rather than a fixed station" warning, which never fires here.
+    """
+    with pytest.warns(UserWarning, match="GPS/positioning wobble") as record:
+        ds = tabular.to_dataset(timeseriesprofile_frame(), TSP_META)
+    assert not any("rather than a fixed station" in str(w.message) for w in record)
+    assert ds["lon"].shape == () and ds["lat"].shape == ()
+    assert float(ds["lon"]) == pytest.approx(np.median(timeseriesprofile_frame()["lon"]))
+
+
+def test_timeseriesprofile_two_start_times_become_two_time_entries():
+    with pytest.warns(UserWarning):
+        ds = tabular.to_dataset(timeseriesprofile_frame(), TSP_META)
+    times = pd.DatetimeIndex(ds["time"].values)
+    assert pd.Timestamp("2024-04-01T00:00:00") in times
+    assert pd.Timestamp("2024-04-01T01:00:00") in times
+
+
+def test_timeseriesprofile_flag_column_survives_as_a_2d_variable():
+    with pytest.warns(UserWarning):
+        ds = tabular.to_dataset(timeseriesprofile_frame(), TSP_META)
+    assert "Temperature_flag" in ds
+    assert ds["Temperature_flag"].dims == ("time", "depth")
+    assert ds["Temperature_flag"].attrs["flag_values"] == [2]
+    assert ds["Temperature_flag"].attrs["flags_for"] == "Temperature"
+    assert ds["Temperature"].attrs["ancillary_variables"] == "Temperature_flag"
+
+
+def test_timeseriesprofile_with_no_time_column_says_so():
+    frame = timeseriesprofile_frame().drop(columns=["time"])
+    with pytest.raises(ValueError, match="no time column"):
+        tabular.to_dataset(frame, TSP_META)
+
+
+def test_timeseriesprofile_with_no_depth_column_says_so():
+    frame = timeseriesprofile_frame().drop(columns=["depth (m)"])
+    with pytest.raises(ValueError, match="no depth column"):
+        tabular.to_dataset(frame, TSP_META)
+
+
+def test_probe_infers_timeseriesprofile_despite_sub_tolerance_position_noise():
+    """The probe's own X/Y "varies" check reads as a tolerance, not a bare
+    nunique() > 1 -- float-precision-level GPS noise (well under
+    FIXED_POSITION_TOLERANCE) must not probe a fixed station as trajectoryProfile.
+
+    The fixture's own ~300 m visit-to-visit wobble is realistic GPS/re-anchoring
+    noise, but it is well past that tolerance and legitimately still probes as
+    trajectoryProfile -- a catalog for real data like it declares featureType=
+    "timeSeriesProfile" explicitly (see build._attach's declared-override fix)
+    rather than relying on the probe's guess. This is the narrower case the
+    tolerance itself is meant to catch: noise too small to be a real station move.
+    """
+    from ocean_skill import build
+
+    frame = timeseriesprofile_frame()
+    tiny_jitter = np.array([1e-6, -1e-6, 1e-6, -1e-6, 0.0, 1e-6, -1e-6, 1e-6, 0.0, 1e-6, -1e-6, 1e-6])
+    frame["lon"] = -21.987 + tiny_jitter
+    frame["lat"] = 64.2638 + tiny_jitter
+
+    md = build._probe_dataframe(frame)
+    assert md["featureType"] == "timeSeriesProfile"
