@@ -164,6 +164,12 @@ station has one cell, so there is nothing to score pointwise). Plotting those as
 discrete markers on a map answers one metric at a time and reads poorly once two
 stations sit close together.
 
+A single CTD cast maps the same way: it is a place through *depth* rather than through
+*time*, but it is still one place — `compare()` scores a `profile`-featureType
+reference over its own depth axis automatically, so each cast reduces to one full-water-
+column number per metric, no `over=` needed. `map_metrics` treats a mooring and a cast
+as the same shape (a single-position station); a set can even mix the two.
+
 `osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
 surface through the scattered values** — a cross-validated spline
 ([verde](https://www.fatiando.org/verde/)) in a local projection centred on the
