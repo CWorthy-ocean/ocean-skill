@@ -1133,7 +1133,19 @@ def _draw_profile_lines(
         values = line.spec.values
         depth = vertical_values(values)
         kwargs: dict[str, Any] = {}
-        wants_marker = mark in ("line+marker", "marker") or line.marker is not None
+        finite = np.isfinite(np.asarray(values.values, dtype="float64")) & np.isfinite(
+            depth
+        )
+        wants_marker = (
+            mark in ("line+marker", "marker")
+            or line.marker is not None
+            # A single-depth cast (a ragged timeSeriesProfile station's own
+            # single-bottle visit, or an already-collapsed profile) has nothing
+            # for a *line* to connect -- one point under the default mark="line"
+            # draws a zero-length segment, invisible. Marked regardless of `mark`
+            # so the cast is not silently dropped from the panel.
+            or int(np.count_nonzero(finite)) < 2
+        )
         if wants_marker:
             kwargs = {
                 "marker": line.marker or "o",

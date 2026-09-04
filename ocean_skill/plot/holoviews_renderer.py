@@ -2374,7 +2374,15 @@ def _profile_curve(hv, line, dimensions, *, mark: str):
         element = hv.Scatter((x, y), *dimensions, label=line.label).opts(
             color=line.color, marker=line.bokeh_marker or "circle", size=5
         )
-    elif line.marker is not None or mark == "line+marker":
+    elif (
+        line.marker is not None
+        or mark == "line+marker"
+        # A single-depth cast (a ragged timeSeriesProfile station's own
+        # single-bottle visit, or an already-collapsed profile) has nothing for
+        # a bare Curve to draw -- one point renders invisibly under the default
+        # mark="line", matching the static renderer's own fix for the same case.
+        or int(np.count_nonzero(np.isfinite(x) & np.isfinite(y))) < 2
+    ):
         keep = markevery_indices(len(x))
         element = element * hv.Scatter((x[keep], y[keep]), *dimensions).opts(
             color=line.color, marker=line.bokeh_marker or "circle", size=5

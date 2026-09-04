@@ -345,7 +345,18 @@ all: a `profile` reference implies it outright (no time axis to draw instead), a
 a `timeSeriesProfile` reference — which carries both axes — reads whichever one
 your own `select`/`aggregate` narrows to a single value (a `depth=` pinned to one
 number keeps the familiar mooring-at-a-depth series; a `time=` pinned to one
-instant keeps the cast).
+instant, or one entry of `times=[...]`, keeps the cast).
+
+`depths=` needs no spelling out either, for either of those two vertical-axis
+cases: left unset, `compare()` reads the reference's own levels straight off the
+source — for a `timeSeriesProfile` station, the levels *that visit itself
+actually sampled*, not the whole record's ragged union of every visit's depths.
+A discrete-sample station visited repeatedly (bottle casts, not a continuously
+logging instrument) reads this way once its table is catalogued
+`featureType: timeSeriesProfile`: bare `compare()` draws it as a mooring-style
+series at its shallowest level, `select={"time": <one visit>}` draws one cast,
+and `times=[<visit>, <visit>, ...]` overlays several casts in one panel, same as
+a real profile source's own multi-cast overlay above.
 
 **A vertical slice through the model** — `select={"transect": {"<dim>": <index>}}`
 cuts along a named grid dimension instead of narrowing to one place, and draws as

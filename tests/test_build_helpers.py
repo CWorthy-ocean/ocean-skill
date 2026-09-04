@@ -1311,3 +1311,36 @@ def test_discover_hyrax_still_joins_directory_with_name(fake_thredds):
 
     urls = discover_opendap_files(base, pattern="*.chlor_a.9km.nc")
     assert urls == [base + "AQUA_MODIS.20030101.L3m.DAY.CHL.chlor_a.9km.nc"]
+
+
+# -- add_source: a caller-declared featureType is canonicalized and marked "declared" -
+
+
+def test_add_source_featuretype_override_is_canonicalized_and_declared(tmp_path):
+    """A repeat-visit station has ragged, position-varying rows -- the probe's own
+    guess would land on trajectoryProfile. add_source(featureType=...) overrides
+    that, and the override should read like any other declared featureType: the
+    package's own canonical spelling, and featureType_source: "declared" rather
+    than the stale "inferred" the probe's guess left behind.
+    """
+    from intake.readers import datatypes, readers
+
+    csv = tmp_path / "station.csv"
+    csv.write_text(
+        "time,depth (m),lon,lat,Temperature (degC)\n"
+        "2024-01-01,1,-21.987,64.2638,8.1\n"
+        "2024-01-01,10,-21.988,64.2638,7.9\n"
+        "2024-02-01,5,-21.9895,64.2638,8.3\n"
+    )
+    reader = readers.PandasCSV(datatypes.CSV(url=str(csv)))
+    cat = new_catalog(title="t")
+    add_source(
+        cat,
+        "hvalfjordur",
+        reader=reader,
+        name_map=None,
+        featureType="timeseriesprofile",
+    )
+    md = cat["hvalfjordur"].metadata
+    assert md["featureType"] == "timeSeriesProfile"
+    assert md["featureType_source"] == "declared"

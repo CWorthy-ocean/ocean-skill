@@ -762,6 +762,25 @@ def test_mark_reaches_both_renderers_rather_than_being_dropped():
     assert obj.traverse(lambda x: x, [hv.Scatter])
 
 
+def test_a_single_depth_cast_draws_a_marker_in_both_renderers():
+    """A single-bottle visit (a ragged timeSeriesProfile station's own
+    single-depth cast, or an already-collapsed profile) has nothing for a bare
+    *line* to connect -- under the default mark="line" a one-point line is a
+    zero-length segment, invisible. Both renderers force a marker regardless of
+    `mark` or whether time varies (the ordinary marker-earning condition) when a
+    line has fewer than two finite points.
+    """
+    import holoviews as hv
+
+    item = _single_item(n=1)
+    fig = render(_spec([item]), renderer="matplotlib")
+    (line,) = fig.axes[0].get_lines()
+    assert line.get_marker() not in ("", "None", None)
+
+    obj = render(_spec([item]), renderer="holoviews")
+    assert obj.traverse(lambda x: x, [hv.Scatter])
+
+
 # -- a surviving season axis fans into one line per season, in both renderers --------------
 
 
