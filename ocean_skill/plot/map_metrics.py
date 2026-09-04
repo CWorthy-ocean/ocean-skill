@@ -621,6 +621,65 @@ def map_metrics(
     option forwarded to the renderer, exactly as for any other family
     (``docs/plot_styling_reference.md``). ``method``/``knn_k``/``block_spacing``
     choose the interpolator (see :func:`interpolate_records`).
+
+    Options
+    -------
+    data
+        A :class:`~ocean_skill.comparison.ComparisonSet` of single-position station
+        comparisons — moorings (``is_series``) and/or CTD casts (``is_profile``),
+        which may be mixed — or a plain table (:class:`~pandas.DataFrame` or list of
+        dicts) carrying a position and metric columns, such as an existing report's
+        metrics CSV. ``None`` is only valid alongside ``rows=``.
+    metrics
+        Which registered metrics to draw, one panel each. Default
+        :data:`DEFAULT_MAP_METRICS` — ``("bias", "crmsd", "corr", "sigma_ratio")``,
+        the same quantities a Taylor/target diagram plots. Any name in
+        :data:`ocean_skill.metrics.REGISTRY` that the data actually carries works,
+        e.g. ``metrics=("rmse", "n")``.
+    test
+        The model source whose grid to interpolate onto (see ``grid``). Required
+        when ``data`` is a plain table (it has no test source of its own); read
+        automatically off a :class:`ComparisonSet` otherwise, with a warning if the
+        set mixes test sources.
+    grid
+        ``"model"`` (default) interpolates onto ``test``'s own grid, which gives
+        the surface a real ocean mask for free (falls back to ``"regular"`` with a
+        warning if that source has no readable grid). ``"regular"`` always uses a
+        plain lon/lat grid over the padded station extent instead — no model file
+        needed.
+    spacing
+        Grid spacing in degrees for the ``"regular"`` fallback. Default: a
+        fortieth of the station extent's larger span.
+    maxdist
+        The distance-mask radius, in metres — how far past the stations' own
+        spacing the interpolated surface is still trusted. Default: derived from
+        the stations' own median spacing (see :func:`_default_maxdist`).
+    method
+        The interpolator, trading smoothness for honesty about gaps:
+        ``"spline"`` (default, a cross-validated verde spline — can invent a
+        gradient across water two stations say nothing about), ``"nearest"``
+        (Voronoi tiles — hard-edged, invents nothing), ``"knn"`` (mean of the
+        ``knn_k`` nearest stations — softer than nearest), ``"linear"``/``"cubic"``
+        (faceted, ``NaN`` outside the stations' convex hull). See
+        :func:`interpolate_records` for the full trade-off.
+    knn_k
+        Neighbours averaged for ``method="knn"`` (default 5).
+    block_spacing
+        Pool stations within this many metres to their median position before
+        fitting, for any ``method`` — keeps a dense cluster (a repeat survey, say)
+        from dominating a sparser region purely by outnumbering it.
+    rows
+        ``{label: data, ...}`` draws one row per entry instead of one figure — a
+        seasonal or per-era facet. Pool each period's comparisons (or table) apart
+        first, one entry per period. May be passed alone, with ``data=None``, when
+        every row supplies its own data.
+    renderer
+        ``"matplotlib"`` (default, static) or ``"holoviews"`` (interactive).
+    mark
+        The map mark; default ``"contourf"``.
+    **plot_kwargs
+        Any other ``skill_map`` styling option, forwarded straight through — see
+        ``docs/plot_styling_reference.md``.
     """
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
