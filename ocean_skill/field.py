@@ -216,8 +216,14 @@ class Field:
         label: str | None = None,
         cache: bool | None = None,
         qc: Any = None,
+        detide: Any = False,
     ):
-        from ocean_skill.comparison import _require_pair_spec, as_select, is_pair_spec
+        from ocean_skill.comparison import (
+            _normalize_detide_side,
+            _require_pair_spec,
+            as_select,
+            is_pair_spec,
+        )
         from ocean_skill.vocabulary import resolve_and_report
 
         if isinstance(variable, (list, tuple)):
@@ -263,6 +269,10 @@ class Field:
         self.label = label
         self.cache = cache
         self.qc = qc
+        # A single lane, unlike Comparison's per-lane {"test": ..., "reference": ...}
+        # -- {"T": hours} to detide, or None -- see _normalize_detide_side and
+        # ocean_skill.comparison._prepare's detide= paragraph.
+        self.detide = _normalize_detide_side(detide)
         self._data = None
         self._actual_depth = None
 
@@ -293,6 +303,7 @@ class Field:
             use_cache=self._use_cache(),
             refresh=refresh,
             qc=self.qc,
+            detide=self.detide,
         )
         if da is None:
             raise KeyError(f"{self.variable!r} not available in {self.source!r}")
@@ -853,6 +864,7 @@ class Field:
             label=self.label,
             cache=self.cache,
             qc=self.qc,
+            detide=self.detide,
         )
 
     def _refuse_bare_multistep_time(self) -> None:
@@ -1293,6 +1305,7 @@ def field(
     label: str | None = None,
     cache: bool | None = None,
     qc: Any = None,
+    detide: Any = False,
 ) -> Field | FieldSet:
     """Build a :class:`Field`: one model source, no reference.
 
@@ -1394,6 +1407,7 @@ def field(
                 label=label,
                 cache=cache,
                 qc=qc,
+                detide=detide,
             )
             for v in variable
         ]
@@ -1418,4 +1432,5 @@ def field(
         label=label,
         cache=cache,
         qc=qc,
+        detide=detide,
     )

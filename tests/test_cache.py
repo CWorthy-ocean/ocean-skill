@@ -196,7 +196,9 @@ def counted_pipeline(aligned):
     calls = {"n": 0}
     test, reference = aligned["test"], aligned["reference"]
 
-    def fake_prepare(obj, meta, variable, select, aggregate=None, *, source=None):
+    def fake_prepare(
+        obj, meta, variable, select, aggregate=None, *, source=None, detide=None
+    ):
         calls["n"] += 1
         return (test, None) if meta.get("model") == "roms" else (reference, 100.0)
 
