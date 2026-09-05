@@ -318,6 +318,36 @@ def _z_grid(ds: xr.Dataset, s_dim: str):
         return xgcm.Grid(ds, coords={"Z": {"center": s_dim}}, periodic=False)
 
 
+def _transform_spread(grid, ds: xr.Dataset, s_dim: str, targets, target_data, h_dims):
+    """Interpolate a riding ``spread`` coordinate onto the transform's target levels.
+
+    Both :func:`to_depth` and :func:`to_sigma0` rebuild their result with a fixed
+    coordinate whitelist (lon/lat/z or sigma0/cell_area); left alone, that silently
+    drops ``operators.aggregate``'s ``spread`` coordinate (a mean+std envelope) on a
+    model lane, while an observational lane -- which never goes through this transform
+    -- keeps its own. Transformed the same way each data variable is (same grid, same
+    target_data, same linear method), so the band lands on the requested
+    depths/isopycnals instead of disappearing. Returns ``None`` when there is no spread
+    to carry, or its dims do not match this transform (nothing to interpolate against).
+    """
+    from ocean_skill.operators import SPREAD_COORD
+
+    if SPREAD_COORD not in ds.coords:
+        return None
+    spread = ds[SPREAD_COORD]
+    if s_dim not in spread.dims or not (h_dims <= set(spread.dims)):
+        return None
+    transformed = grid.transform(
+        _contiguous_column(spread, s_dim),
+        "Z",
+        targets,
+        target_data=target_data,
+        method="linear",
+    )
+    transformed.attrs = dict(spread.attrs)
+    return transformed
+
+
 def to_depth(
     ds: xr.Dataset, meta: dict[str, Any], d: float | list[float]
 ) -> xr.Dataset:
@@ -366,6 +396,11 @@ def to_depth(
     coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
     if AREA_COORD in ds.coords:
         coords[AREA_COORD] = ds[AREA_COORD]
+    spread = _transform_spread(grid, ds, s_dim, targets, z_rho, h_dims)
+    if spread is not None:
+        from ocean_skill.operators import SPREAD_COORD
+
+        coords[SPREAD_COORD] = spread
     result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
 
@@ -530,6 +565,11 @@ def to_sigma0(
     coords = {"lon": ds["lon"], "lat": ds["lat"], "sigma0": values}
     if AREA_COORD in ds.coords:
         coords[AREA_COORD] = ds[AREA_COORD]
+    spread = _transform_spread(grid, ds, s_dim, targets, sigma0, h_dims)
+    if spread is not None:
+        from ocean_skill.operators import SPREAD_COORD
+
+        coords[SPREAD_COORD] = spread
     result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
     result["sigma0"].attrs = {
