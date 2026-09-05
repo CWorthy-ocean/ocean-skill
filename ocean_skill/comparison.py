@@ -651,6 +651,17 @@ def qc_for(spec: Any, role: str) -> Any:
     return spec[role] if is_pair_spec(spec) else spec
 
 
+def detide_for(spec: dict[str, Any] | None, role: str) -> dict[str, Any] | None:
+    """Return one lane's own already-normalized ``detide`` request, or ``None``.
+
+    ``spec`` is :func:`_normalize_detide`'s output -- a plain ``{"test": ...,
+    "reference": ...}`` dict (never a pair-spec by :func:`is_pair_spec`'s
+    definition, since ``_normalize_detide`` always returns both keys), so this is
+    a lookup, not a :func:`select_for`-style branch.
+    """
+    return (spec or {}).get(role)
+
+
 def _normalize_pair(
     spec: Any, kind: str, *, normalize_side=lambda x: x
 ) -> Any:
@@ -722,6 +733,90 @@ def _normalize_subtract_mean(spec: Any) -> dict[str, bool]:
     raise TypeError(
         "subtract_mean= takes True, False, 'test', 'reference', or a "
         f"{{'test': bool, 'reference': bool}} dict; got {spec!r}"
+    )
+
+
+#: PL33's own default half-amplitude period (hours) -- see ocean_skill.detide.
+_DEFAULT_DETIDE_T = 33.0
+
+
+def _normalize_detide_side(value: Any) -> dict[str, Any] | None:
+    """Normalize one lane's (or one :class:`~ocean_skill.field.Field`'s) ``detide=``.
+
+    ``None``/``False`` -> ``None`` (not detided); ``True`` -> PL33's own 33-hour
+    default; a ``{"T": hours}`` dict -> that cutoff. Shared by
+    :func:`_normalize_detide` (one call per lane) and :class:`~ocean_skill.field.Field`
+    (which has only the one lane to normalize).
+    """
+    if value is None or value is False:
+        return None
+    if value is True:
+        return {"T": _DEFAULT_DETIDE_T}
+    if isinstance(value, dict):
+        extra = value.keys() - {"T"}
+        if extra:
+            raise ValueError(
+                "detide=...'s spec takes only 'T'; got extra key(s) "
+                f"{sorted(extra)}. {value!r}"
+            )
+        return {"T": float(value.get("T", _DEFAULT_DETIDE_T))}
+    raise TypeError(
+        f"detide= must be True, False, or a {{'T': hours}} dict; got {value!r}"
+    )
+
+
+def _normalize_detide(spec: Any) -> dict[str, dict[str, Any] | None]:
+    """Validate and normalize a :class:`Comparison`/:func:`compare` ``detide=``.
+
+    Returned as ``{"test": {"T": <hours>} | None, "reference": {"T": <hours>} |
+    None}`` -- ``None`` for a lane not asked to be detided, a ``{"T": ...}`` dict
+    (:func:`ocean_skill.detide.detide`'s own cutoff kwarg) for one that is, so
+    :func:`_prepare` (which actually runs the filter) has nothing left to interpret.
+
+    Mirrors :func:`_normalize_subtract_mean`'s shape of acceptable input --
+    ``None``/``False`` detides neither lane, ``True`` both (PL33's own 33-hour
+    default), the string ``"test"``/``"reference"`` just that one lane -- but adds
+    two dict forms :func:`_normalize_subtract_mean` has no equivalent of, since a
+    bool has nothing left to parameterize and a tidal cutoff does: a bare
+    ``{"T": 72}`` (no ``"test"``/``"reference"`` key) sets one cutoff for *both*
+    lanes, while ``{"test": {"T": 72}, "reference": True}`` gives each lane its own
+    (or none at all, or PL33's own default).
+    """
+    if spec is None or spec is False:
+        return {"test": None, "reference": None}
+    if spec is True:
+        both = _normalize_detide_side(True)
+        return {"test": both, "reference": both}
+    if isinstance(spec, str):
+        if spec not in ("test", "reference"):
+            raise ValueError(
+                f"detide= as a string takes 'test' or 'reference'; got {spec!r}. "
+                "Use a dict ({'test': True, 'reference': True}) to detide both."
+            )
+        return {
+            "test": _normalize_detide_side(True) if spec == "test" else None,
+            "reference": _normalize_detide_side(True) if spec == "reference" else None,
+        }
+    if isinstance(spec, dict):
+        if spec.keys() & {"test", "reference"}:
+            extra = spec.keys() - {"test", "reference"}
+            if extra:
+                raise ValueError(
+                    "detide={'test': ..., 'reference': ...} takes only those two "
+                    f"keys, got extra key(s) {sorted(extra)}. {spec!r}"
+                )
+            return {
+                role: _normalize_detide_side(spec.get(role, False))
+                for role in ("test", "reference")
+            }
+        # No "test"/"reference" key -- a bare {"T": ...} sets one cutoff for both
+        # lanes, the dict counterpart of the plain `True` case just above.
+        both = _normalize_detide_side(spec)
+        return {"test": both, "reference": both}
+    raise TypeError(
+        "detide= takes True, False, 'test', 'reference', a {'T': hours} dict "
+        "(both lanes), or a {'test': ..., 'reference': ...} pair-spec; got "
+        f"{spec!r}"
     )
 
 
@@ -1169,6 +1264,7 @@ def _prepare(
     aggregate: dict[str, Any] | None = None,
     *,
     source: str = "<unnamed>",
+    detide: dict[str, Any] | None = None,
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -1177,6 +1273,18 @@ def _prepare(
     ``aggregate`` is a :func:`ocean_skill.operators.aggregate` spec; ``None`` reduces
     **nothing** (see :data:`NO_AGGREGATION`), leaving whatever ``select`` left standing
     for the caller's consumer to draw or refuse.
+
+    ``detide`` (``{"T": <hours>}``, or ``None`` to skip) runs the PL33 tidal low-pass
+    filter (:func:`ocean_skill.detide.detide`) on the just-resolved field, *before*
+    ``select``/``aggregate`` get anywhere near the time axis -- unlike
+    :meth:`Comparison._subtract_scalar_means`, which runs after alignment on an
+    already-reduced pair, a tidal signal has to be filtered at its native sample rate,
+    while every step still stands, or a select that narrows to one instant (or an
+    aggregate that reduces time entirely) would leave nothing to filter along. A lane
+    with no time dimension at this point (a plain ``profile`` cast's scalar time) has
+    nothing detiding can do; that is warned about and left alone rather than raised,
+    the same way :meth:`Comparison._subtract_scalar_means` warns rather than raises on
+    a lane with no finite mean.
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -1243,6 +1351,20 @@ def _prepare(
     da = operators.resolve_variable(obj, variable)
     if da is None:
         return None, None
+
+    if detide is not None:
+        from ocean_skill.detide import detide as _run_detide
+
+        time_coord = find_coord(da, "time")
+        if time_coord is None or time_coord.name not in da.dims:
+            warnings.warn(
+                f"detide={{'T': {detide['T']!r}}} was asked for {source!r}, but this "
+                "lane has no time dimension to filter along (a profile's scalar cast "
+                "time, most likely) -- nothing was detided.",
+                stacklevel=_stacklevel.find(),
+            )
+        else:
+            da = _run_detide(da, T=detide["T"], component="subtidal")
 
     # A plain surface request is a free isel -- unlike to_depth/depth_band/to_sigma0,
     # it needs no grid attached and no water column, just the top s-level -- so it is
@@ -1758,6 +1880,7 @@ def prepare_source(
     time_window: tuple[Any, Any] | None = None,
     time_targets: Any = None,
     qc: Any = None,
+    detide: dict[str, Any] | None = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -1851,6 +1974,13 @@ def prepare_source(
     ``_qc`` entries and so land in different cache entries, the same way ``_bbox``
     and ``_time_window`` already do above.
 
+    ``detide`` (``{"T": <hours>}``, or ``None`` to skip -- see
+    :func:`_normalize_detide`) runs the PL33 tidal low-pass filter on this lane
+    before ``select``/``aggregate`` touch the time axis (see :func:`_prepare`, which
+    actually applies it). Unlike ``subtract_mean`` (a post-align, scalar transform
+    that never changes what gets cached), this changes the field itself, so it joins
+    the cache key below -- a raw lane and its detided twin must never collide.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -1901,6 +2031,8 @@ def prepare_source(
             ),
             "off": bool(effective_qc.get("off")),
         }
+    if detide is not None:
+        key_select["_detide"] = {"filter": "PL33", "T": detide["T"]}
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -1969,7 +2101,7 @@ def prepare_source(
 
         obj = subset_to_time_targets(obj, time_targets)
     da, depth = _prepare(
-        obj, meta, variable, dict(select or {}), aggregate, source=source
+        obj, meta, variable, dict(select or {}), aggregate, source=source, detide=detide
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
@@ -2059,6 +2191,7 @@ class Comparison:
         cache: bool | None = None,
         qc: Any = None,
         subtract_mean: Any = False,
+        detide: Any = False,
     ):
         from ocean_skill.vocabulary import resolve_and_report
 
@@ -2150,6 +2283,11 @@ class Comparison:
         # _subtract_scalar_means) -- one bool per side, unlike qc's pair-spec, since
         # a one-sided request here is unambiguous (see _normalize_subtract_mean).
         self.subtract_mean = _normalize_subtract_mean(subtract_mean)
+        # Per-lane tidal filtering, applied *before* alignment -- unlike
+        # subtract_mean, at each lane's own native sample rate (see _prepare's
+        # detide= paragraph). {"test": {"T": ...} | None, "reference": ...}; see
+        # _normalize_detide.
+        self.detide = _normalize_detide(detide)
         self._aligned = None
         self._metrics = None
         self._pointwise_metrics = None
@@ -2692,6 +2830,13 @@ class Comparison:
             # apart, and each lane's own prepared-field cache entry (which this
             # aligned result is built from) already keys on the resolved policy.
             extra["_qc"] = self.qc
+        if any(self.detide.values()):
+            # Same reasoning as qc just above, not subtract_mean below: detide is a
+            # per-lane transform applied *before* alignment (see _prepare's detide=
+            # paragraph), so it changes the very field this entry caches -- a raw
+            # run and a detided run of the same comparison must never collide on
+            # one aligned-pair entry the way a raw/demeaned pair deliberately does.
+            extra["_detide"] = self.detide
         # `subtract_mean` is deliberately NOT part of the key: demeaning is a scalar
         # subtraction applied to the *already-aligned* pair (see
         # _subtract_scalar_means), so the expensive thing this entry holds -- the
@@ -2785,6 +2930,7 @@ class Comparison:
             time_window=time_window,
             time_targets=time_targets,
             qc=qc_for(self.qc, role),
+            detide=detide_for(self.detide, role),
         )
 
     def _warn_on_pair_spec_mismatch(
@@ -3620,6 +3766,8 @@ class Comparison:
                 # label dimension can -- see _demean_label, shared with the pooled
                 # auto-label rule.
                 demeaned=_demean_label(self.subtract_mean),
+                # Mirrors demeaned exactly, for detide= -- see _detide_label.
+                detided=_detide_label(self.detide),
                 # Read off the aligned pair's own attrs (written once, in
                 # _subtract_scalar_means) rather than recomputed here, so a cached
                 # result read back in a fresh process reports the exact number that
@@ -3817,6 +3965,17 @@ def _identity(c) -> tuple:
                 if on
             )
         ),
+        # Same reasoning as subtract_mean just above, for detide= -- a detided
+        # comparison and its raw twin pool as two distinct points. Each lane's
+        # cutoff (T) rides along too: two different detide={"T": ...} requests on
+        # the same lane are two different comparisons, not the same one twice.
+        tuple(
+            sorted(
+                (r, spec["T"])
+                for r, spec in (getattr(c, "detide", None) or {}).items()
+                if spec is not None
+            )
+        ),
     )
 
 
@@ -3888,8 +4047,27 @@ def _demean_label(spec: dict[str, bool] | None) -> str:
     return "raw"
 
 
+def _detide_label(spec: dict[str, dict[str, Any] | None] | None) -> str:
+    """Spell a comparison's ``detide`` state as one short word or two.
+
+    Mirrors :func:`_demean_label` exactly (same four spellings, same "test"-then-
+    "reference" precedence) -- shared by :data:`_LABEL_DIMS` and
+    :meth:`Comparison.metrics`'s ``detided`` column, so ``color_by="detided"`` can
+    split a pool of raw and detided twins the same way ``demeaned`` already can.
+    """
+    spec = spec or {}
+    test, reference = spec.get("test"), spec.get("reference")
+    if test and reference:
+        return "detided"
+    if test:
+        return "test detided"
+    if reference:
+        return "reference detided"
+    return "raw"
+
+
 #: Dimensions a pooled label can be built from, in the order they are spelled, paired
-#: with how to read each one off a comparison. The same six a metrics record
+#: with how to read each one off a comparison. The same seven a metrics record
 #: carries, so ``color_by``/``marker_by`` can group by anything a label can name.
 _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("variable", lambda c: _short_variable_label(c.variable)),
@@ -3905,6 +4083,7 @@ _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("test", lambda c: c.test_name),
     ("reference", lambda c: c.reference_name),
     ("demeaned", lambda c: _demean_label(getattr(c, "subtract_mean", None))),
+    ("detided", lambda c: _detide_label(getattr(c, "detide", None))),
 )
 
 
@@ -5278,6 +5457,7 @@ def compare(
     refresh: bool = False,
     qc: Any = None,
     subtract_mean: Any = False,
+    detide: Any = False,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -5390,6 +5570,33 @@ def compare(
     metrics` lands only *near* zero, not exactly, even though every pointwise map
     is shifted by the same removed constant. Under ``times=``, each fanned
     comparison demeans over its own slice.
+
+    ``detide`` runs the PL33 tidal low-pass filter (:func:`ocean_skill.detide.detide`)
+    on one or both lanes *before* alignment -- unlike ``subtract_mean``, which removes
+    one number from an already-aligned pair, this filters each lane at its own native
+    sample rate, so the tidal band is gone before ``select``/``aggregate`` ever touch
+    the time axis. Takes the same shapes ``subtract_mean`` does (``True``/``False``,
+    ``"test"``/``"reference"``, or a ``{"test": ..., "reference": ...}`` pair-spec)
+    plus one ``subtract_mean`` has no equivalent of -- a cutoff, in hours -- via a
+    ``{"T": ...}`` dict in place of a bare ``True`` (PL33's own 33-hour half-amplitude
+    period is the default): ``detide={"T": 72}`` applies a 3-day low-pass to both
+    lanes, ``detide={"test": {"T": 72}, "reference": True}`` gives each lane its own
+    cutoff (or PL33's default, or none at all)::
+
+        raw = osk.compare(reference="tide_gauge", test="his", variables=["zeta"])
+        detided = osk.compare(reference="tide_gauge", test="his",
+                               variables=["zeta"], detide=True)
+        (raw + detided).target()   # the detided point moves off the raw one --
+                                    # the tide itself was part of what "raw" scored
+
+    Unlike ``subtract_mean`` (a scalar shift that never changes what gets cached),
+    this changes the data itself, so it is part of the lane cache key -- a raw lane
+    and its detided twin are cached, and pool, as two distinct entries -- and lands in
+    the metrics table as an always-present ``detided`` column
+    (``"raw"``/``"test detided"``/``"reference detided"``/``"detided"``, the same
+    four spellings ``demeaned`` uses) that ``color_by``/``marker_by`` can split a pool
+    on. A lane with no time dimension left to filter along (a plain ``profile``
+    cast's scalar time) is warned about and left alone rather than raised.
 
     ``over`` is the third answer to "what happens to the time axis", and the one for a
     reference that varies in time as well as space. ``over="time"`` keeps the axis,
@@ -6082,6 +6289,7 @@ def compare(
                             cache=cache,
                             qc=qc,
                             subtract_mean=subtract_mean,
+                            detide=detide,
                         )
                         try:
                             c.align(refresh=refresh)

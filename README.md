@@ -177,6 +177,39 @@ whose whole axis is bias. What was removed is never drawn on the figure — it's
 alongside an always-present `demeaned` column (`color_by="demeaned"` splits a mixed
 pool the same way any other label dimension does).
 
+`detide` removes the tide instead of a scalar offset — the PL33 tidal low-pass filter
+(`oceans.filters.pl33tn`, a 33-hour half-amplitude FIR filter), run on each lane at its
+own native sample rate *before* alignment, so the tidal band is gone before `select`/
+`aggregate` ever touch the time axis:
+
+```python
+raw = osk.compare(reference="tide_gauge", test="his", variables=["zeta"])
+detided = osk.compare(reference="tide_gauge", test="his", variables=["zeta"],
+                       detide=True)
+(raw + detided).target()               # the detided point moves off the raw one --
+                                        # the tide itself was part of what "raw" scored
+```
+
+Takes the same shapes `subtract_mean` does (`True`/`"test"`/`"reference"`/a
+`{"test": ..., "reference": ...}` pair-spec) plus a cutoff of its own: `detide={"T":
+72}` swaps PL33's 33-hour default for a 3-day low-pass, on one or both lanes. Unlike
+`subtract_mean` (a post-align scalar shift that shares its raw twin's cache entry),
+detiding changes the data itself, so it joins the cache key — a raw run and a detided
+run of the same comparison are cached, and pool, as two distinct entries — and lands
+in `.metrics()` as an always-present `detided` column, the same four spellings
+`demeaned` uses.
+
+The same filter is available standalone, on a time series or `timeSeriesProfile`
+(time × depth), whether it arrives as a DataFrame or a Dataset:
+
+```python
+subtidal = osk.detide(osk.read("tide_gauge"))          # DataFrame in, DataFrame out
+tidal = osk.detide(ds["zeta"], component="tidal")       # the removed tide itself
+```
+
+Edges are NaN — PL33's centered window has no full window within about `T` hours of
+either end of the record, wider still as `T` grows.
+
 One source alone just plots — `osk.field` is the same pipeline without a reference,
 most useful when the reduction leaves a time axis standing, which becomes the panels:
 

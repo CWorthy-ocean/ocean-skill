@@ -19,6 +19,7 @@ The public API is intentionally small:
     osk.coord_report("glodap")   # ... and which of T/X/Y/Z it recognizes, as what
     osk.overlap("his", "glodap") # do these two sources even share space/time? (read-free)
     osk.read("glodap")           # -> standardized xr.Dataset / pandas.DataFrame
+    osk.detide(osk.read("tide_gauge"))  # PL33 low-pass -- subtidal by default
     osk.compare(reference=..., test=..., variables=[...],
                 aggregate={"time": "mean"}).plot()   # no default reduction: say so
     osk.compare(..., over="time").plot()             # score against time, cell by cell
@@ -52,6 +53,7 @@ from ocean_skill.catalog import (
     overlap,
 )
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
+from ocean_skill.detide import detide
 from ocean_skill.extrema import Extremum
 from ocean_skill.field import Field, FieldSet, field
 from ocean_skill.pick import pick_path
@@ -75,6 +77,7 @@ __all__ = [
     "compare",
     "coord_report",
     "describe",
+    "detide",
     "field",
     "find",
     "map_locations",
