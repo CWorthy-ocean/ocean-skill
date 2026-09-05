@@ -2720,6 +2720,18 @@ def _rename_position(da, prefix: str):
     reference's cast stamp and would collide under one ``time`` name. A shared time
     *dimension* (the mooring recipe, both lanes on one matched axis) is left untouched:
     renaming it would split the very axis the pair was matched onto.
+
+    A ROMS lane carries *two* longitude coordinates -- the native ``lon_rho`` and a
+    plain ``lon`` alias (:func:`ocean_skill.roms.standardize` assigns the plain names
+    on top of the rho ones) -- and :func:`_lon_name`/:func:`_lat_name` resolve only
+    one of each pair (CF-first, so the rho name). The rename below therefore moves
+    ``lon_rho``/``lat_rho`` to ``{prefix}_lon``/``{prefix}_lat`` but leaves the plain
+    ``lon``/``lat`` behind, and that bare name is exactly what a station reference owns
+    -- so it collides at :func:`_align_at_point`'s ``xr.Dataset`` merge. Every one of
+    these coordinates is the same scalar cell position after point sampling, so any
+    redundant position coordinate the rename leaves is dropped: the reported
+    ``{prefix}_lon``/``{prefix}_lat`` (never a fallback spelling itself) already carries
+    the offset the metrics need.
     """
     renames = {
         name: f"{prefix}_{axis}"
@@ -2729,7 +2741,15 @@ def _rename_position(da, prefix: str):
     tname = _time_name(da)
     if tname is not None and tname in da.coords and tname not in da.dims:
         renames[tname] = f"{prefix}_time"
-    return da.rename(renames) if renames else da
+    da = da.rename(renames) if renames else da
+    from ocean_skill.vocabulary import COORD_FALLBACKS
+
+    leftover = [
+        name
+        for name in (*COORD_FALLBACKS["longitude"], *COORD_FALLBACKS["latitude"])
+        if name in da.coords
+    ]
+    return da.drop_vars(leftover) if leftover else da
 
 
 def _warn_if_depths_differ(test, reference) -> None:

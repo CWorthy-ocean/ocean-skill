@@ -320,6 +320,59 @@ def test_a_conservative_method_becomes_nearest_at_a_point():
     assert out.attrs["point_method"] == "nearest"
 
 
+def curvilinear_with_lon_alias(nx: int = 11, ny: int = 10):
+    """A ROMS-shaped field carrying *both* a plain ``lon``/``lat`` alias and the
+    native ``lon_rho``/``lat_rho`` -- see :func:`ocean_skill.roms.standardize`, which
+    assigns the plain names on top of the rho ones without dropping either. The
+    ``curvilinear`` fixture above carries only ``lon_rho``/``lat_rho`` and so misses
+    the case this exercises.
+    """
+    da = curvilinear(nx=nx, ny=ny)
+    return da.assign_coords(lon=da["lon_rho"], lat=da["lat_rho"])
+
+
+def test_rename_position_drops_the_leftover_alias_a_dual_lon_lane_carries():
+    """``_lon_name``/``_lat_name`` are CF-first (see their docstrings) and so resolve
+    ``lon_rho``/``lat_rho`` on a ROMS-shaped lane, renaming only those -- leaving the
+    plain ``lon``/``lat`` alias behind unless ``_rename_position`` also drops it. Left
+    behind, that bare ``lon`` collides with a station reference's own ``lon`` at
+    :func:`ocean_skill.align._align_at_point`'s ``xr.Dataset`` merge (the bug this
+    guards against).
+    """
+    da = curvilinear_with_lon_alias().isel(eta_rho=0, xi_rho=0)  # a single sampled cell
+    out = align._rename_position(da, "test")
+    assert "test_lon" in out.coords and "test_lat" in out.coords
+    for leftover in ("lon", "lat", "lon_rho", "lat_rho"):
+        assert leftover not in out.coords, f"{leftover!r} should have been dropped"
+
+
+def test_rename_position_still_renames_a_single_lon_lane_cleanly():
+    """The ordinary (single-``lon``) case must not be over-dropped: with only one
+    longitude/latitude coordinate to begin with, the rename itself already clears
+    the bare name -- there is nothing left for the leftover-drop to do.
+    """
+    grid = monthly_grid().isel(time=0, lat=0, lon=0)
+    out = align._rename_position(grid, "test")
+    assert set(out.coords) & {"test_lon", "test_lat"} == {"test_lon", "test_lat"}
+    assert "lon" not in out.coords and "lat" not in out.coords
+
+
+def test_a_dual_lon_test_lane_does_not_collide_with_the_stations_own_lon():
+    """The end-to-end regression: a ROMS-shaped test lane (plain ``lon`` *and*
+    ``lon_rho``) aligned against a station reference at a different position used to
+    raise ``MergeError: conflicting values for variable 'lon'`` at the point-align
+    Dataset construction -- the station's own median position colliding with the
+    test's leftover, un-renamed plain ``lon``.
+    """
+    test = curvilinear_with_lon_alias()  # no time axis: a plain single-map compare
+    reference = monthly_station().isel(time=0)  # STATION's position, one instant
+    out = align.align(test, reference, method="nearest")
+    assert set(out.data_vars) == {"test", "reference", "difference"}
+    assert float(out["lon"]) == pytest.approx(STATION[0])
+    assert "test_lon" in out.coords and "test_lat" in out.coords
+    assert "lon_rho" not in out.coords and "lat_rho" not in out.coords
+
+
 # -- the Comparison surface: featureType chooses, and says so --------------------------
 
 
