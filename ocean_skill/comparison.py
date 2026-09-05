@@ -3649,7 +3649,8 @@ class Comparison:
         # what a single field_row has no row label to say. Uses the same test-side
         # precedent as standard_name (a calculated diagnostic reports NO_VERTICAL_AXIS,
         # which is not a depth to name, so it is dropped rather than shown as "n/a").
-        depth = _depth_label(_display_depth(self.variable, self.select))
+        raw_depth = _display_depth(self.variable, self.select)
+        depth = _depth_label(raw_depth)
         selected_time = _display_time(self.select)
         region = _display_region(self.select)
         common = {
@@ -3657,6 +3658,18 @@ class Comparison:
             "units": self.aligned["reference"].attrs.get("units"),
             "standard_name": self.standard_name,
             "depth": None if depth == NO_VERTICAL_AXIS else depth,
+            # A band's *range* ("0-5 m") -- distinct from "depth" above, which a
+            # bare numeric/surface request already spells the same way, but which
+            # a series line does not use for its own depth channel (see
+            # ocean_skill.plot.series._depth_channel): that reads the realized
+            # depth (roms.to_depth's exact target, or an observational product's
+            # own nearest standard level) off the aligned data instead, since a
+            # scalar/list request's *label* and its *realization* can genuinely
+            # differ. A band has no such realized single depth to fall back on --
+            # roms.depth_band keeps every touched cell standing, thickness-weighted
+            # -- so its label is the one true answer, threaded through here rather
+            # than reconstructed from the aligned data downstream.
+            "depth_band": depth if is_depth_band(raw_depth) else None,
             "time": None if selected_time is None else _time_label(selected_time),
             "region": None if region is None else _region_label(region),
             "label": self.label,

@@ -36,15 +36,24 @@ def _item(
     units: str = "degC",
     offset: float = 0.6,
     depth: float | None = 8.0,
+    depth_band: str | None = None,
     n: int = 36,
 ) -> dict:
-    """One comparison item, shaped exactly as ``Comparison.as_item()`` builds it."""
+    """One comparison item, shaped exactly as ``Comparison.as_item()`` builds it.
+
+    ``depth_band`` mirrors ``as_item()``'s own ``item["depth_band"]`` -- a band's
+    range label ("0-5 m"), set instead of (not alongside) ``depth``: a real band
+    request has no realized single depth for ``depth``/``actual_depth`` to carry
+    (see ``ocean_skill.plot.series._depth_channel``), and a pooled ``.average()``
+    of several stations' bands drops ``actual_depth`` entirely, which is exactly
+    what a bare aligned pair with neither set reproduces here.
+    """
     time = pd.date_range("2015-01-01", periods=n, freq="MS")
     values = 8.0 + 4.0 * np.sin(np.arange(n) / 1.9)
     reference_da = xr.DataArray(
         values, coords={"time": time}, dims="time", attrs={"units": units}
     ).assign_coords(lon=-144.245, lat=49.978)
-    if depth is not None:
+    if depth is not None and depth_band is None:
         reference_da = reference_da.assign_coords(depth=depth)
     aligned = xr.Dataset(
         {
@@ -71,6 +80,7 @@ def _item(
         "standard_name": variable,
         "label": None,
         "labels": (test, reference),
+        "depth_band": depth_band,
     }
 
 
@@ -318,6 +328,59 @@ def test_legend_entries_spell_levels_through_pretty_level():
     }
     assert any(label.endswith("temperature") for label in labels)
     assert not any("sea_water_temperature" in label for label in labels)
+
+
+# -- depth bands -------------------------------------------------------------------------
+
+
+def _band_item(band: str, *, offset: float = 0.6) -> dict:
+    """A band item as ``.average()`` pooling leaves it: no realized ``actual_depth``."""
+    return _item(depth=None, depth_band=band, offset=offset)
+
+
+def test_a_band_has_no_realized_depth_to_fall_back_on():
+    """The exact gap this closes: ``_depth_of`` alone would lose every band's identity
+    (a pooled ``.average()`` drops ``actual_depth``, and a band never had one for two
+    of three bands to begin with) -- ``_depth_channel`` reads the range instead."""
+    item = _band_item("0-5 m")
+    assert _series._depth_of(item["aligned"]) is None
+    assert _series._depth_channel(item) == "0-5 m"
+
+
+def test_a_scalar_depth_keeps_its_realized_numeric_channel():
+    """The fix is band-only -- a plain level still reports its realized number, not
+    a label, since the two can genuinely differ (nearest standard level vs. asked-for
+    depth)."""
+    item = _item(depth=48.0)
+    assert item.get("depth_band") is None
+    assert _series._depth_channel(item) == 48.0
+
+
+def test_depth_group_key_reads_the_band_range():
+    items = [_band_item("0-5 m"), _band_item("10-15 m")]
+    assert [_series._group_key(item, "depth", i) for i, item in enumerate(items)] == [
+        "0-5 m",
+        "10-15 m",
+    ]
+
+
+def test_three_depth_bands_share_colour_within_a_band_and_differ_across_bands():
+    """Mirrors ``compare(depths=[...bands]).average(by=["variable", "depth"]).plot(
+    encode={"color": "depth"})``: three bands, each pooled across stations, none
+    carrying a realized ``actual_depth`` any more."""
+    bands = ["0-5 m", "10-15 m", "30-40 m"]
+    items = [_band_item(b, offset=0.3 * (i + 1)) for i, b in enumerate(bands)]
+    lines = _matplotlib_lines(
+        render(_spec(items, encode={"color": "depth"}), renderer="matplotlib")
+    )
+    labels = {label for label, _, _, _ in lines}
+    assert all(any(band in label for label in labels) for band in bands)
+    colours_by_band = {}
+    for band in bands:
+        band_colours = {colour for label, colour, _, _ in lines if band in label}
+        assert len(band_colours) == 1  # reference and test share one colour
+        colours_by_band[band] = next(iter(band_colours))
+    assert len(set(colours_by_band.values())) == 3  # three bands, three colours
 
 
 # -- composition -----------------------------------------------------------------------
