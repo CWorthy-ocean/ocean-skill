@@ -21,7 +21,8 @@ three or more        one row per variable, sources overlaid within each
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,32 @@ CORNERS = ("upper left", "upper right", "lower left", "lower right")
 
 #: Fraction of the axes a corner box occupies, for deciding which corner is emptiest.
 _CORNER_W, _CORNER_H = 0.28, 0.34
+
+#: Non-corner placements ``legend=`` accepts, on top of a bare bool.
+_LEGEND_PLACEMENTS = ("off", "auto", "below", "right")
+
+
+def _normalize_legend(legend: bool | str) -> str:
+    """Return the placement ``legend=`` asked for: ``_LEGEND_PLACEMENTS`` or a corner.
+
+    ``True``/``False`` keep their familiar meaning (``"auto"``/``"off"``). A string
+    picks something more specific: ``"below"``/``"right"`` force one combined key
+    outside the axes regardless of whether the panels' labels agree, and a corner
+    name (:data:`CORNERS`) forces every panel's own key into that corner instead of
+    wherever :func:`free_corners` would otherwise put it.
+    """
+    if legend is False:
+        return "off"
+    if legend is True:
+        return "auto"
+    if isinstance(legend, str):
+        normalized = legend.strip().lower()
+        if normalized in _LEGEND_PLACEMENTS or normalized in CORNERS:
+            return normalized
+    raise ValueError(
+        f"legend={legend!r} is not a placement this family knows; expected True, "
+        f"False, 'below', 'right', or a corner ({', '.join(CORNERS)})."
+    )
 
 
 @dataclass(frozen=True)
@@ -95,6 +122,14 @@ class Layout:
     ncols: int = 1
     legend_labels: tuple[str, ...] = ()
     shared_legend: bool = True
+    #: One of ``"auto"`` (today's rule: combined below when every panel shares its
+    #: labels, else one key per panel), ``"off"``, ``"below"`` or ``"right"`` (a
+    #: combined key forced regardless of :attr:`shared_legend`), or ``"corner"`` -- a
+    #: corner was forced, already baked into every :attr:`Panel.legend_corner`, so a
+    #: renderer draws it exactly like the ``"auto"`` per-panel path *without* also
+    #: running "auto"'s own shared-labels check, which could otherwise combine the
+    #: panels anyway and override the very corner the caller asked for.
+    legend_placement: str = "auto"
     residual: bool = False
     xlabel: str = "time"
     #: Whether the x axis is real dates (``True``) or a bare integer groupby index
@@ -513,8 +548,19 @@ def compose(
     residual: bool = False,
     metric_keys=(),
     metrics_loc: str = "auto",
+    legend: bool | str = True,
+    line_labels: Sequence[str] | None = None,
 ) -> Layout:
-    """Group ``items`` into panels and resolve every line's style and labelling."""
+    """Group ``items`` into panels and resolve every line's style and labelling.
+
+    ``legend=`` picks where the key goes -- ``True``/``False`` for the familiar
+    auto/off, or ``"below"``/``"right"``/a corner name to force a placement; see
+    :func:`_normalize_legend`. ``line_labels=`` overrides the auto-derived legend
+    text itself: one string per *unique* line the figure would otherwise label,
+    in the order those labels first appear (reference before test within an
+    item, items in their given order) -- get that order from the ``ValueError``
+    a wrong-length list raises, which lists the current labels for copying.
+    """
     items = list(items)
     if not items:
         raise ValueError("a series needs at least one comparison to draw")
@@ -532,12 +578,56 @@ def compose(
             "or drop residual=True."
         )
 
+    facet = rows or cols
     all_specs = [s for i, item in enumerate(items) for s in line_specs(item, i)]
     styled = {
         (line.spec.item, line.spec.role): line
         for line in _style.resolve(all_specs, encode=encode)
     }
     varying = _style.varying_fields(all_specs)
+
+    # A row/col facet on "variable" already says which variable a panel is in the
+    # title (see panel_title, below) -- naming it again in every legend entry is the
+    # one thing that made the user's own two-panel figure never agree on a label set
+    # (variable still "varied" figure-wide) and so never qualify for the combined
+    # legend below. Other facets (source, depth, season, ...) get no such reprieve:
+    # nothing else on the figure names *their* value, so dropping it from the legend
+    # would make a panel unidentifiable rather than merely less repetitive.
+    if facet in ("variable", "standard_name"):
+        label_varying = varying - {"variable"}
+        ambiguous = _style.ambiguous_sources(all_specs)
+        styled = {
+            key: replace(
+                line,
+                label=_style.series_label(
+                    line.spec, varying=label_varying, ambiguous_sources=ambiguous
+                ),
+            )
+            for key, line in styled.items()
+        }
+
+    if line_labels is not None:
+        # First appearance across the figure, in draw order: items in the order
+        # given, and within an item reference before test (line_specs's own
+        # order) -- the same order a reader meets the entries in, panel by panel.
+        seen: dict[str, None] = {}
+        for spec in all_specs:
+            seen.setdefault(styled[(spec.item, spec.role)].label, None)
+        current = list(seen)
+        line_labels = list(line_labels)
+        if len(line_labels) != len(current):
+            listing = "\n".join(
+                f"  {i + 1}. {label!r}" for i, label in enumerate(current)
+            )
+            raise ValueError(
+                f"line_labels needs one label per legend entry -- this figure draws "
+                f"{len(current)}:\n{listing}\ngot {len(line_labels)}. Copy the list "
+                "above, edit the text, and pass it back in the same order."
+            )
+        remap = dict(zip(current, line_labels, strict=True))
+        styled = {
+            key: replace(line, label=remap[line.label]) for key, line in styled.items()
+        }
 
     # One axis, so one x-axis convention for the whole figure -- read off the
     # first line's own values, the same "one axis, so one name" rule _ylabel
@@ -557,7 +647,6 @@ def compose(
     # and two items can be equal dicts (the same comparison drawn twice), so identity
     # has to be positional rather than by value.
     indexed = list(enumerate(items))
-    facet = rows or cols
     variables = []
     for _, item in indexed:
         key = _group_key(item, "variable", 0)
@@ -578,6 +667,11 @@ def compose(
             for v in variables
         ]
 
+    # A forced corner is handed straight to every Panel below (drawing it is then no
+    # different from the "auto" per-panel case); "below"/"right"/"off" have nothing to
+    # do per panel and are carried on the Layout instead, for the renderer to act on
+    # once, for the whole figure.
+    legend_placement = _normalize_legend(legend)
     panels = []
     for group in grouped:
         primary_items, secondary_items = group, []
@@ -617,10 +711,16 @@ def compose(
             )
             box = ""
         # The box takes the emptiest corner and the legend the next emptiest, so the two
-        # cannot land on top of each other however the data happens to run.
+        # cannot land on top of each other however the data happens to run -- a forced
+        # corner (legend="upper right", say) still gets this treatment: the box simply
+        # is not offered that corner, so the two still cannot collide.
         ranked = free_corners(primary + second)
-        free = ranked[0] if metrics_loc == "auto" else metrics_loc
-        legend_at = next((c for c in ranked if c != free), CORNERS[1])
+        forced_corner = legend_placement if legend_placement in CORNERS else None
+        if metrics_loc == "auto":
+            free = next((c for c in ranked if c != forced_corner), ranked[0])
+        else:
+            free = metrics_loc
+        legend_at = forced_corner or next((c for c in ranked if c != free), CORNERS[1])
         residual_lines = ()
         if residual:
             residual_lines = tuple(
@@ -681,6 +781,12 @@ def compose(
         ncols=ncols,
         legend_labels=tuple(labels),
         shared_legend=shared,
+        # A corner is already baked into every Panel above, so a renderer draws it no
+        # differently from "auto" -- *except* it must not then also fall into "auto"'s
+        # own shared-labels detection and combine anyway, overriding the very corner
+        # the caller forced. "corner" says so explicitly; "auto" is left for when
+        # nothing was forced and the renderer is free to decide for itself.
+        legend_placement="corner" if legend_placement in CORNERS else legend_placement,
         residual=residual,
         xlabel=xlabel,
         date_axis=date_axis,

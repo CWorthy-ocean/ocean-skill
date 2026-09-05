@@ -41,6 +41,7 @@ __all__ = [
     "LINESTYLES",
     "LineSpec",
     "StyledLine",
+    "ambiguous_sources",
     "band_runs",
     "linestyle_for",
     "markevery_indices",
@@ -210,6 +211,23 @@ def varying_fields(specs) -> set[str]:
     return {field for field in FIELDS if len(_levels(specs, field)) > 1}
 
 
+def ambiguous_sources(specs) -> set[str]:
+    """Return the source names that appear on both sides of a comparison.
+
+    That is the one case where a source name alone does not say which line is
+    which -- :func:`series_label` appends the role for those. Its own function
+    so a caller that relabels lines *after* :func:`resolve` (dropping a facet's
+    field from the legend, or applying ``line_labels=``) can recompute the same
+    labels the same way, rather than re-deriving this set inline and risking a
+    different answer.
+    """
+    return {
+        s.source
+        for s in specs
+        if any(o.source == s.source and o.role != s.role for o in specs)
+    }
+
+
 def series_label(spec: LineSpec, *, varying, ambiguous_sources=()) -> str:
     """Return one line's legend entry: the facts that distinguish it, and no others.
 
@@ -281,11 +299,7 @@ def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[Style
     )
     marker_field = channels["marker"]
     marker_levels = _levels(specs, marker_field) if marker_field in varying else []
-    ambiguous = {
-        s.source
-        for s in specs
-        if any(o.source == s.source and o.role != s.role for o in specs)
-    }
+    ambiguous = ambiguous_sources(specs)
 
     out = []
     for spec in specs:

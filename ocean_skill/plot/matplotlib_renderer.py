@@ -16,6 +16,7 @@ have been.
 from __future__ import annotations
 
 import functools
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -948,7 +949,8 @@ def series(
     metrics_loc: str = "auto",
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     mark: str = "line",
-    legend: bool = True,
+    legend: bool | str = True,
+    line_labels: Sequence[str] | None = None,
     ylim: tuple[float, float] | None = None,
     panel_aspect: float | None = None,
     labels: tuple[str, str] | None = None,
@@ -979,7 +981,18 @@ def series(
     variable overlays in a single panel, two put the second on a right-hand y axis
     (``secondary_y=False`` to stack them instead), three or more become one row each.
     ``rows=``/``cols=`` facet on ``variable``/``source``/``depth``/``comparison``
-    instead; one or the other, not both.
+    instead; one or the other, not both. Faceting on ``variable`` also drops it from
+    every legend entry -- the panel title already says it.
+
+    ``legend=`` is ``True``/``False`` for the usual auto/off, or a string for something
+    more specific: ``"below"``/``"right"`` force one combined key outside the axes
+    (deduplicated across every panel, whether or not they agree), and a corner name
+    (``"upper left"``, ...) forces every panel's own key into that corner. ``"auto"``
+    (the ``True`` default) draws the combined key below only when every panel's labels
+    already agree, and otherwise one key per panel in whichever corner the data leaves
+    emptiest. ``line_labels=`` overrides the legend text itself, one string per unique
+    line in first-appearance order -- pass the wrong count and the ``ValueError`` lists
+    the current labels, ready to copy and edit.
 
     ``residual=True`` adds a short ``test − reference`` strip under each panel, sharing
     its time axis. It is off by default: a difference *map* needs a panel of its own
@@ -1016,6 +1029,8 @@ def series(
         residual=residual,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        legend=legend,
+        line_labels=line_labels,
     )
     canvas = resolve_canvas(size, zoom)
     _warn_if_overplotted(layout, canvas)
@@ -1109,7 +1124,7 @@ def series(
     bottom.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
     if title:
         fig.suptitle(title, **suptitle_kwargs)
-    if legend:
+    if layout.legend_placement != "off":
         _series_legend(fig, per_panel, layout, scale, legend_kwargs)
     _warn_if_cramped(
         fig,
@@ -1416,24 +1431,35 @@ def _without_font(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
-    """Draw one key below the figure when every panel shares it, else one per panel.
+    """Draw the key(s) ``layout.legend_placement`` asks for.
 
-    A shared key below is what a report wants, and it is also the one thing bokeh cannot
-    do (it has no figure-level legend) — the stated divergence for this family. The
-    *entries* are identical in both renderers either way; only their placement is not.
+    ``"below"``/``"right"`` (forced, or "auto" once every panel's labels happen to
+    agree) draw one combined key outside the axes; a shared key is also the one thing
+    bokeh cannot do (it has no figure-level legend) — the stated divergence for this
+    family. The *entries* are identical in both renderers either way; only their
+    placement is not.
 
-    Per-panel keys carry that panel's own lines, not the figure's: with one variable per
-    panel, a shared key would list every variable under each of them.
+    Anything else draws one key per panel, in ``panel.legend_corner`` — a forced
+    corner is already baked in there by :func:`ocean_skill.plot.series.compose`, so
+    this function does not need to know the difference. Per-panel keys carry that
+    panel's own lines, not the figure's: with one variable per panel, a shared key
+    would list every variable under each of them.
     """
-    from ocean_skill.plot.summary import _legend_below
+    from ocean_skill.plot.summary import _legend_below, _legend_right
 
-    if layout.shared_legend and len(layout.panels) > 1:
+    auto_shared = layout.shared_legend and len(layout.panels) > 1
+    combined = layout.legend_placement == "below" or (
+        layout.legend_placement == "auto" and auto_shared
+    )
+    if combined or layout.legend_placement == "right":
         seen: dict[str, Any] = {}
         for _, handles in per_panel:
             for handle in handles:
                 seen.setdefault(handle.get_label(), handle)
         if seen:
-            _legend_below(fig, list(seen.values()), scale["legend"])
+            right = layout.legend_placement == "right"
+            draw = _legend_right if right else _legend_below
+            draw(fig, list(seen.values()), scale["legend"])
         return
     for (ax, handles), panel in zip(per_panel, layout.panels, strict=True):
         if not handles:

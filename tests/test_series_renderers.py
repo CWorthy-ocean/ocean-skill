@@ -479,6 +479,117 @@ def test_no_sample_counts_are_drawn_on_the_figure():
     assert not [t for t in drawn if "n=" in t]
 
 
+# -- legend placement and custom labels --------------------------------------------
+
+
+def test_faceting_on_variable_drops_it_from_the_legend_and_shares_it():
+    """The one thing that made a real figure never qualify for the combined key."""
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    layout = _series.compose(items, rows="variable")
+    labels = {line.label for panel in layout.panels for line in panel.lines}
+    assert not any("temperature" in label or "salinity" in label for label in labels)
+    assert layout.shared_legend
+    fig = render(_spec(items, rows="variable"), renderer="matplotlib")
+    assert len(fig.legends) == 1
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_faceting_on_something_else_leaves_the_legend_alone():
+    """Only ``variable`` is named anywhere else (the panel title) -- nothing else is."""
+    items = [_item(test="modelA", depth=3.0), _item(test="modelB", depth=3.0)]
+    unfaceted = {
+        line.label
+        for panel in _series.compose(items).panels
+        for line in panel.lines
+    }
+    faceted = {
+        line.label
+        for panel in _series.compose(items, rows="source").panels
+        for line in panel.lines
+    }
+    assert faceted == unfaceted  # nothing dropped, unlike the "variable" facet
+
+
+def test_line_labels_overrides_the_text_in_both_renderers():
+    items = [_item(depth=3.0), _item(depth=12.5)]
+    layout = _series.compose(items, rows="variable")
+    current = [line.label for panel in layout.panels for line in panel.lines]
+    custom = [f"custom {i}" for i in range(len(current))]
+
+    static = _matplotlib_lines(
+        render(_spec(items, rows="variable", line_labels=custom), renderer="matplotlib")
+    )
+    interactive = _holoviews_lines(
+        render(_spec(items, rows="variable", line_labels=custom), renderer="holoviews")
+    )
+    assert {label for label, *_ in static} == set(custom)
+    assert {label for label, *_ in interactive} == set(custom)
+
+
+def test_line_labels_wrong_length_lists_the_current_labels_to_copy():
+    items = [_item(depth=3.0), _item(depth=12.5)]
+    with pytest.raises(ValueError, match="needs one label per legend entry") as exc:
+        render(
+            _spec(items, rows="variable", line_labels=["only one"]),
+            renderer="matplotlib",
+        )
+    # Every current auto label is quoted in the message, ready to copy and edit.
+    layout = _series.compose(items, rows="variable")
+    for panel in layout.panels:
+        for line in panel.lines:
+            assert repr(line.label) in str(exc.value)
+
+
+def test_legend_below_combines_even_when_the_panels_disagree():
+    items = [_item(test="modelA"), _item(test="modelB")]
+    fig = render(_spec(items, rows="source", legend="below"), renderer="matplotlib")
+    assert len(fig.legends) == 1
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_legend_right_combines_outside_the_axes():
+    items = [_item(test="modelA"), _item(test="modelB")]
+    fig = render(_spec(items, rows="source", legend="right"), renderer="matplotlib")
+    assert len(fig.legends) == 1
+    assert fig.legends[0].get_bbox_to_anchor()._bbox.x0 == pytest.approx(1.0)
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_legend_off_draws_nothing():
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, rows="variable", legend=False), renderer="matplotlib")
+    assert not fig.legends
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_legend_corner_forces_every_panel_even_when_labels_are_shared():
+    """A forced corner must not fall into "auto"'s own combine-when-shared rule."""
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    fig = render(
+        _spec(items, rows="variable", legend="upper right"), renderer="matplotlib"
+    )
+    assert not fig.legends
+    assert all(ax.get_legend() is not None for ax in fig.axes)
+    assert all(ax.get_legend()._get_loc() == 1 for ax in fig.axes)  # 1 = "upper right"
+
+
+def test_an_unknown_legend_placement_names_the_valid_ones():
+    with pytest.raises(ValueError, match="'below', 'right', or a corner"):
+        render(_spec([_item()], legend="sideways"), renderer="matplotlib")
+
+
+def test_legend_below_and_right_still_move_bokehs_key_outside_the_frame():
+    """Bokeh's per-panel divergence: pushed to the edge, not truly combined."""
+    import holoviews as hv
+    from bokeh.models import Legend
+
+    for side in ("below", "right"):
+        obj = render(_spec([_item()], legend=side), renderer="holoviews")
+        overlay = obj.traverse(lambda x: x, [hv.Overlay])[0]
+        bokeh_fig = hv.render(overlay, backend="bokeh")
+        assert any(isinstance(r, Legend) for r in getattr(bokeh_fig, side))
+
+
 # -- a single source, no comparison ------------------------------------------------
 
 
@@ -664,7 +775,8 @@ def test_series_specs_carry_spread_and_season_fields_but_draw_unchanged():
     readers :mod:`ocean_skill.plot.profile` uses), but neither a season facet
     nor an envelope is drawn for a series yet -- that plumbing landed once,
     for both families, ahead of the series-specific drawing work it is there
-    to support later."""
+    to support later.
+    """
     item = _item()
     item["aligned"]["reference"] = item["aligned"]["reference"].assign_coords(
         season="JJA"
