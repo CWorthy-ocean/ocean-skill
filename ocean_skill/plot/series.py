@@ -223,6 +223,29 @@ def _depth_of(aligned) -> float | None:
     return None if value is None else float(value)
 
 
+def _depth_channel(item: dict[str, Any]) -> float | str | None:
+    """Return the depth value a series line's colour/legend/facet should key on.
+
+    A band (``select={"Z": {"min": 0, "max": 5}}``) has no single realized depth to
+    read off the aligned data the way :func:`_depth_of` does for a scalar/list
+    request -- ``roms.depth_band`` keeps every touched cell standing, thickness-
+    weighted, and ``ComparisonSet.average`` pooling several stations' bands together
+    drops ``actual_depth`` entirely (see :meth:`ocean_skill.comparison.Comparison.
+    _averaged`). Falling back to :func:`_depth_of` for a band therefore reads as a
+    stray mean depth for two bands and ``None`` -- an unlabelled, uncoloured line --
+    for a third whose stations happened to average to no single number at all.
+
+    ``item["depth_band"]`` (set by :meth:`~ocean_skill.comparison.Comparison.
+    as_item`, ``None`` for every non-band request) is the band's *range* label
+    ("0-5 m"), stable across lanes and across averaging, so a band is grouped and
+    coloured by that instead. A scalar/list depth keeps :func:`_depth_of`'s realized
+    number -- the nearest real level an observational product actually reports at
+    can differ from what was asked for, which the label alone would hide.
+    """
+    band = item.get("depth_band")
+    return band if band is not None else _depth_of(item["aligned"])
+
+
 def season_of(aligned) -> str | None:
     """Return the season an item's aligned data was narrowed to, if it is scalar.
 
@@ -290,7 +313,7 @@ def line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     """
     aligned = item["aligned"]
     variable = item.get("standard_name") or item.get("label")
-    depth = _depth_of(aligned)
+    depth = _depth_channel(item)
     season = season_of(aligned)
     if item_roles(item) == ("value",):
         source = str((item.get("labels") or (item.get("label") or "value",))[0])
@@ -353,7 +376,7 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
             )
         return labels[1]
     if by == "depth":
-        return _depth_of(item["aligned"])
+        return _depth_channel(item)
     if by == "season":
         return season_of(item["aligned"])
     if by == "comparison":

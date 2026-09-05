@@ -130,7 +130,10 @@ class LineSpec:
     role: str
     source: str
     variable: str | None = None
-    depth: float | None = None
+    #: A realized numeric depth for a scalar/list request; a band's range label
+    #: ("0-5 m") instead, which has no single realized depth to report (see
+    #: ocean_skill.plot.series._depth_channel).
+    depth: float | str | None = None
     time: str | None = None
     units: str | None = None
     values: Any = None

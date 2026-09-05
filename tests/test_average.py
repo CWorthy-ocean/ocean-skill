@@ -44,9 +44,16 @@ def _series_pair(
 
 
 def _station_comparison(
-    *, reference: str, test: str, variable: str, aligned: xr.Dataset
+    *,
+    reference: str,
+    test: str,
+    variable: str,
+    aligned: xr.Dataset,
+    select: dict | None = None,
 ) -> Comparison:
-    c = Comparison(reference=reference, test=test, variable=variable, cache=False)
+    c = Comparison(
+        reference=reference, test=test, variable=variable, select=select, cache=False
+    )
     c._aligned = aligned.copy(deep=True)
     return c
 
@@ -169,6 +176,44 @@ def test_average_of_a_single_member_group_is_a_no_op():
         averaged.comparisons[0].aligned["reference"].values, c.aligned["reference"].values
     )
     assert averaged.comparisons[0].reference_name == "HV1"
+
+
+# -- depth bands, pooled -------------------------------------------------------------
+
+
+def test_pooled_depth_bands_keep_their_range_label_after_averaging():
+    """The exact end-to-end shape ``compare(depths=[bands]).average(by=["variable",
+    "depth"])`` produces: three bands, two stations each, pooled per band -- and each
+    pooled comparison's ``as_item()`` must still say *which* band it is, even though
+    ``.average()`` (:meth:`Comparison._averaged`) sets ``_actual_depth`` to ``None``.
+    """
+    bands = [{"min": 0, "max": 5}, {"min": 10, "max": 15}, {"min": 30, "max": 40}]
+    comparisons = []
+    for i, band in enumerate(bands):
+        for station, lon, lat in (("HV1", -150.0, 20.0), ("HV5", -152.0, 22.0)):
+            values = [10 + i, 11 + i, 12 + i, 13 + i]
+            aligned = _series_pair(
+                TIMES, values, [v + 0.5 for v in values], lon=lon, lat=lat
+            )
+            comparisons.append(
+                _station_comparison(
+                    reference=station,
+                    test="his",
+                    variable=TEMPERATURE,
+                    aligned=aligned,
+                    select={"Z": band},
+                )
+            )
+    pooled = ComparisonSet(comparisons)
+    averaged = pooled.average(by=["variable", "depth"])
+
+    assert len(averaged) == 3  # bands stay distinct rather than averaging together
+    labels = {c.as_item()["depth_band"] for c in averaged}
+    assert labels == {"0-5 m", "10-15 m", "30-40 m"}
+    # actual_depth is gone (a real consequence of pooling), yet the band survives.
+    for c in averaged:
+        assert c.aligned.attrs.get("actual_depth") is None
+        assert c.as_item()["depth_band"] is not None
 
 
 # -- downstream behavior --------------------------------------------------------------
