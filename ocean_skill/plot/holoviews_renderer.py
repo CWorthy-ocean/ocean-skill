@@ -1031,7 +1031,10 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool):
         cmap=colors.cmap,
         clim=colors.clim(),
         size=8,
-        line_color="white",
+        # A dark edge (not white), matching the static renderer: a station coloured
+        # near a white-centred metric colormap's "good" end must still show as a
+        # dot, not disappear into the surface beneath it.
+        line_color="#262626",
         line_width=1,
         tools=["hover"],
         apply_ranges=False,
@@ -1054,6 +1057,7 @@ def _skill_map(
     rasterize: bool | str = "auto",
     shared_limits: bool = False,
     layout: str = "rows",
+    station_markers: bool = True,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -1067,7 +1071,8 @@ def _skill_map(
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange the
     same panels the same way. An item carrying ``stations`` (see
     :func:`ocean_skill.plot.map_metrics.build_items`) overlays each station's true value
-    as a hoverable dot in the same colour scale (:func:`_station_overlay`).
+    as a hoverable dot in the same colour scale (:func:`_station_overlay`);
+    ``station_markers=False`` suppresses that overlay, as in the static family.
 
     Each metric's **overall** value — reduced over space and the scored axis together —
     joins its panel's title, which is the same substitution :func:`_field_row` makes
@@ -1196,8 +1201,12 @@ def _skill_map(
             hover=hover,
             rasterize=raster,
         )
-        points = _station_overlay(
-            item.get("stations"), name, colors, item["skill"][name], geo=geo
+        points = (
+            _station_overlay(
+                item.get("stations"), name, colors, item["skill"][name], geo=geo
+            )
+            if station_markers
+            else None
         )
         for extra in (outline, points):
             if extra is not None:
@@ -2897,6 +2906,8 @@ def _target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    summary_weights: str | None = None,
+    summary_split_markers: bool = False,
     arrows: bool | str | None = None,
     **_,
 ):
@@ -2916,11 +2927,13 @@ def _target(
     draws — each present (colour, marker) pair with its true glyph — so no information
     is lost, only the tabular arrangement.
 
-    ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` also mean
-    exactly what they do statically — see :func:`ocean_skill.plot.summary.taylor`'s
-    docstring for the full explanation. A centroid's marker is drawn as a bokeh
-    ``"hex"`` here (the static family's ``"h"`` translated to this renderer's own
-    marker vocabulary); everything else about the overlay layer is unchanged.
+    ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points``/
+    ``summary_weights``/``summary_split_markers`` also mean exactly what they do
+    statically — see :func:`ocean_skill.plot.summary.taylor`'s docstring for the
+    full explanation. A centroid's marker is drawn as a bokeh ``"hex"`` here (the
+    static family's ``"h"`` translated to this renderer's own marker vocabulary),
+    unless ``summary_split_markers=True`` gives it its own group's marker instead;
+    everything else about the overlay layer is unchanged.
 
     ``normalize``/``circles``/``robust``/``lim`` mean exactly what they do in
     :func:`ocean_skill.plot.summary.target` — including the mixed-variable and
@@ -3176,7 +3189,13 @@ def _target(
         )
     if summary_points:
         overlay_specs += _summary_point_specs(
-            recs, df["x"].to_numpy(), df["y"].to_numpy(), color_dim, summary_points
+            recs,
+            df["x"].to_numpy(),
+            df["y"].to_numpy(),
+            color_dim,
+            summary_points,
+            weights_field=summary_weights,
+            marker_field=marker_by if summary_split_markers else None,
         )
     overlay_layer = None
     if overlay_specs:

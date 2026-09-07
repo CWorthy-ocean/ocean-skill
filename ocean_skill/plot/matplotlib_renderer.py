@@ -3356,6 +3356,7 @@ def skill_map(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    station_markers: bool = True,
 ):
     """Draw one map per skill metric: where the model agrees, metric by metric.
 
@@ -3418,7 +3419,10 @@ def skill_map(
     value as a dot, in the same colour scale as the surface underneath it. That is the
     one thing distinguishing an interpolated metric map from a scored one here: where
     the surface has actual support, and where it is only filling a gap between
-    stations.
+    stations. ``station_markers=False`` suppresses that dot overlay, leaving only the
+    surface — its distance-masked extent already shows where the data is, and with
+    thousands of near-coincident stations the dots smear into a mask that hides the
+    very surface they annotate.
 
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
@@ -3599,7 +3603,7 @@ def skill_map(
             bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
         )
         stations = item.get("stations")
-        if stations is not None and name in stations["values"]:
+        if station_markers and stations is not None and name in stations["values"]:
             # Same cmap/norm as the surface beneath: a dot and the patch of surface
             # under it are the same statistic, so they read as one colour scale, not
             # two. zorder above the domain outline (4) and below nothing else drawn
@@ -3612,7 +3616,10 @@ def skill_map(
                 norm=colors.norm(),
                 s=26,
                 transform=ccrs.PlateCarree(),
-                edgecolor="white",
+                # A dark edge (not white) so a station coloured near the fill's own
+                # "good" end — e.g. a white-centred metric colormap — still shows as
+                # a dot rather than disappearing into the surface beneath it.
+                edgecolor="0.15",
                 linewidth=0.6,
                 zorder=5,
             )

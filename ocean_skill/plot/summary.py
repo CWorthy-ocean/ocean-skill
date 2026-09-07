@@ -601,34 +601,146 @@ def _grid_handles(
     return handles, len(cols) + 2
 
 
-#: A ``summary_points`` reduction accepts these spellings; ``True`` means the first.
-_SUMMARY_REDUCERS = {"median": np.median, "mean": np.mean}
+def _weighted_median(values, weights=None):
+    """``np.median`` when unweighted; otherwise the value at cumulative weight
+    1/2, averaging the two straddling values on an exact split — the standard
+    weighted-median definition, and exactly ``np.median`` when every weight is
+    equal.
+    """
+    v = np.asarray(values, dtype="float64")
+    if weights is None:
+        return float(np.median(v))
+    w = np.asarray(weights, dtype="float64")
+    order = np.argsort(v)
+    v, w = v[order], w[order]
+    cw = np.cumsum(w)
+    cutoff = 0.5 * cw[-1]
+    i = min(int(np.searchsorted(cw, cutoff)), len(v) - 1)
+    if np.isclose(cw[i], cutoff) and i + 1 < len(v):
+        return float((v[i] + v[i + 1]) / 2)
+    return float(v[i])
 
 
-def _summary_point_specs(recs, coord1, coord2, style_field, summary_points):
+def _weighted_mean(values, weights=None):
+    return float(np.average(np.asarray(values, dtype="float64"), weights=weights))
+
+
+def _signed_medabs(values, weights=None):
+    """Magnitude and sign resolved separately: ``sign · median(|values|)``.
+
+    A plain median of *signed* values can cancel — a group split between +2 and
+    -2 lands at 0, which reads as agreement neither point shows. This keeps the
+    magnitude honest (the typical |value|, so it never shrinks just because the
+    group disagrees on direction) while still voting on a direction: the sign of
+    the plain median, falling back to the sign of the mean, then positive, on an
+    exact tie (``np.sign`` returns ``0.0``, which is falsy, so the ``or`` chain
+    below *is* the tie-break).
+    """
+    v = np.asarray(values, dtype="float64")
+    sign = (
+        np.sign(_weighted_median(v, weights))
+        or np.sign(_weighted_mean(v, weights))
+        or 1.0
+    )
+    return float(sign * _weighted_median(np.abs(v), weights))
+
+
+#: A ``summary_points`` reduction accepts these spellings; ``True`` means the
+#: first. Each reducer is ``(values, weights=None) -> float``; with
+#: ``weights=None`` every entry reduces exactly as an unweighted median/mean.
+_SUMMARY_REDUCERS = {
+    "median": _weighted_median,
+    "mean": _weighted_mean,
+    "signed_medabs": _signed_medabs,
+}
+
+
+def _summary_point_specs(
+    recs, coord1, coord2, style_field, summary_points, weights_field=None,
+    marker_field=None,
+):
     """One ``(coord1, coord2, rec, marker)`` tuple per group in ``recs`` — the
     per-group centroid overlay convenience. ``coord1``/``coord2`` are the same
     per-record coordinates the base cloud plots (Taylor's normalized std/corr, or
-    Target's signed x/y), reduced (median by default, or ``summary_points="mean"``)
-    across each group named by ``style_field``. ``marker`` is always ``"h"`` (hexagon),
-    so a centroid never reads as just another individual point -- and never as the
-    reference, which owns the star.
+    Target's signed x/y), reduced across each group named by ``style_field``:
+
+    * ``"median"`` (default) / ``"mean"`` — the plain component-wise reduction.
+    * ``"signed_medabs"`` — see :func:`_signed_medabs`; use this on Target when a
+      group's points span both signs and a plain median would cancel toward the
+      origin.
+
+    ``weights_field``, if given, names a field each record carries (e.g.
+    ``"n_eff"``) used as that record's weight in the reduction, so a station
+    backed by more independent evidence pulls the summary point harder. A
+    record missing the field is weighted 1 (warns once, naming how many); if
+    *no* record carries it at all, that is almost always a typo, so it raises
+    instead of silently producing an unweighted star.
+
+    ``marker_field`` (a second grouping field, usually the cloud's ``marker_by``)
+    splits the summary into one centroid per ``(style_field, marker_field)``
+    combination instead of one per ``style_field``, and each centroid then keeps
+    the marker its group draws in the cloud rather than the forced ``"h"`` — so a
+    diagram coloured by variable and marker-shaped by signal gets a centroid per
+    (variable, signal), each matching both its colour and its shape. Its spec
+    carries both fields so :func:`_resolve_overlay_style` resolves that colour and
+    marker; the returned ``marker`` slot is ``None`` (defer to the group marker).
+    When ``marker_field`` is None (or the same as ``style_field``) the centroid is
+    one per ``style_field`` with the forced ``"h"`` (hexagon — never the reference's
+    own ``"*"``), so it never reads as just another individual point — the default.
     """
     key = "median" if summary_points is True else summary_points
     if key not in _SUMMARY_REDUCERS:
         raise ValueError(
-            f"summary_points={summary_points!r} — expected True, 'median', or 'mean'"
+            f"summary_points={summary_points!r} — expected True or one of "
+            f"{tuple(_SUMMARY_REDUCERS)}"
         )
     reduce = _SUMMARY_REDUCERS[key]
+    split = marker_field is not None and marker_field != style_field
     groups: dict[Any, list[int]] = {}
     for i, r in enumerate(recs):
-        groups.setdefault(r.get(style_field), []).append(i)
+        key_i = (r.get(style_field), r.get(marker_field)) if split else r.get(style_field)
+        groups.setdefault(key_i, []).append(i)
+
+    weights = None
+    if weights_field is not None:
+        n_missing = sum(1 for r in recs if weights_field not in r)
+        if n_missing == len(recs):
+            available = sorted({k for r in recs for k in r})
+            raise ValueError(
+                f"summary_weights={weights_field!r} — no record carries this "
+                f"field; these records carry {available}"
+            )
+        if n_missing:
+            warnings.warn(
+                f"summary_weights={weights_field!r}: {n_missing} of {len(recs)} "
+                "records don't carry it and are weighted 1.0.",
+                stacklevel=2,
+            )
+        weights = [float(r.get(weights_field, 1.0)) for r in recs]
+        bad = [w for w in weights if not np.isfinite(w) or w <= 0]
+        if bad:
+            raise ValueError(
+                f"summary_weights={weights_field!r}: weights must be finite "
+                f"and positive, got {bad[:3]}{'…' if len(bad) > 3 else ''}"
+            )
+
     specs = []
     for level, idxs in groups.items():
-        c1 = float(reduce([coord1[i] for i in idxs]))
-        c2 = float(reduce([coord2[i] for i in idxs]))
-        label = pretty_level(style_field, level) if style_field != "label" else str(level)
-        specs.append((c1, c2, {style_field: level, "label": label}, "h"))
+        w = [weights[i] for i in idxs] if weights is not None else None
+        c1 = float(reduce([coord1[i] for i in idxs], w))
+        c2 = float(reduce([coord2[i] for i in idxs], w))
+        if split:
+            style_val, marker_val = level
+            label = f"{pretty_level(style_field, style_val)} / {pretty_level(marker_field, marker_val)}"
+            rec = {style_field: style_val, marker_field: marker_val, "label": label}
+            # marker=None: _resolve_overlay_style looks marker_field up in the
+            # base cloud's own marker_by resolution, same as an individual point.
+            specs.append((c1, c2, rec, None))
+        else:
+            label = pretty_level(style_field, level) if style_field != "label" else str(level)
+            # "h" (hexagon), never "*" -- the reference point owns the star, and
+            # _MARKERS itself no longer contains "*" so no group can collide with it.
+            specs.append((c1, c2, {style_field: level, "label": label}, "h"))
     return specs
 
 
@@ -1083,6 +1195,8 @@ def taylor(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    summary_weights: str | None = None,
+    summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):
     """Taylor diagram with one point per comparison.
@@ -1163,13 +1277,29 @@ def taylor(
     against the fainter cloud beneath: fade the base with ``alpha=`` to make the
     contrast starker. This is the general mechanism for two related things —
     highlighting specific points (pass the subset you want to point out) and
-    ``summary_points=True`` (or ``"median"``/``"mean"``), which instead builds one
-    hexagon-marked centroid per group internally, the reduced (median by default) position
-    of that group's own cloud. Both can be given at once. Neither introduces a new
-    legend entry — an overlay point's group already has one from the base cloud.
+    ``summary_points=True`` (or ``"median"``/``"mean"``/``"signed_medabs"``), which
+    instead builds one hexagon-marked centroid per group internally, the reduced
+    (median by default) position of that group's own cloud — see
+    :func:`_summary_point_specs` for what each reduction spelling does. Both can be
+    given at once. Neither introduces a new legend entry — an overlay point's group
+    already has one from the base cloud.
     ``overlay_marker_scale``/``overlay_alpha`` size and fade the overlay layer
     specifically (defaults 1.8x and fully opaque), independent of the base layer's own
     ``marker_scale``/``alpha`` — and accept the same ``{level: value}`` dict form.
+    ``summary_weights`` names a field each comparison's record carries (e.g. an
+    ``"n_eff"`` you attached yourself) to weight ``summary_points``' reduction — a
+    comparison backed by more independent evidence pulls its group's star harder.
+    It affects only the star; the base cloud and any ``overlay=`` points are
+    unweighted regardless.
+
+    ``summary_split_markers=True`` (needs both ``color_by`` and ``marker_by``)
+    gives one centroid per ``(color_by, marker_by)`` combination instead of one
+    per ``color_by`` group — e.g. a cloud coloured by variable and marker-shaped
+    by signal gets a star per (variable, signal) pair — and each centroid takes
+    on its group's own marker instead of the forced ``★``, so it reads as "the
+    typical point of this exact colour+shape group," matched to the cloud
+    beneath it. Ignored (with the usual single ``★``-per-``color_by``-group
+    behaviour) when ``marker_by`` is not also given.
 
     ``arrows`` means exactly what it does in :func:`target` — connecting comparisons
     that agree on everything but the named field (``True``/``"time"`` for a
@@ -1292,7 +1422,13 @@ def taylor(
         )
     if summary_points:
         overlay_specs += _summary_point_specs(
-            recs, stds, [r["corr"] for r in recs], style_field, summary_points
+            recs,
+            stds,
+            [r["corr"] for r in recs],
+            style_field,
+            summary_points,
+            weights_field=summary_weights,
+            marker_field=marker_by if summary_split_markers else None,
         )
     if overlay_specs:
         overlay_recs = [spec[2] for spec in overlay_specs]
@@ -1420,6 +1556,8 @@ def target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
+    summary_weights: str | None = None,
+    summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
@@ -1458,11 +1596,12 @@ def target(
     ``marker_scale``/``alpha`` mean exactly what they do in :func:`taylor`, including
     the ``{level: value}`` dict form for styling particular groups — see its docstring.
 
-    ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points`` mean
-    exactly what they do in :func:`taylor` — a second, emphasized layer (a highlighted
-    subset, a per-group hexagon centroid, or both) drawn on top of the base cloud, styled to
-    match its own group's colour rather than re-cycled independently. See its
-    docstring for the full explanation.
+    ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points``/
+    ``summary_weights``/``summary_split_markers`` mean exactly what they do in
+    :func:`taylor` — a second, emphasized layer (a highlighted subset, a per-group
+    hexagon centroid, or both) drawn on top of the base cloud, styled to match its
+    own group's colour rather than re-cycled independently. See its docstring for
+    the full explanation.
 
     ``arrows`` draws a run's drift over time: pass ``True`` (shorthand for
     ``"time"``) or the name of whichever metric-record field varies along a
@@ -1573,7 +1712,10 @@ def target(
             lambda r: _target_xy(r, normalize)[1],
         )
     if summary_points:
-        overlay_specs += _summary_point_specs(recs, x, y, style_field, summary_points)
+        overlay_specs += _summary_point_specs(
+            recs, x, y, style_field, summary_points, weights_field=summary_weights,
+            marker_field=marker_by if summary_split_markers else None,
+        )
     if overlay_specs:
         overlay_recs = [spec[2] for spec in overlay_specs]
         overlay_styles = _resolve_overlay_style(

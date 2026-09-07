@@ -145,13 +145,20 @@ def _test_name_of(data) -> str | None:
     return data.comparisons[0].test_name
 
 
-def _reduce_duplicates(df, lon_key: str, lat_key: str, metric_names: Sequence[str]):
+def _reduce_duplicates(
+    df, lon_key: str, lat_key: str, metric_names: Sequence[str], weights: str | None = None
+):
     """Collapse records at (near-)identical positions to their median, with a warning.
 
     Two references occasionally land within meters of each other — the same physical
     mooring reported under two catalog entries, most often. Interpolation wants one
     value per position; pooling to the median (rather than, say, keeping the first)
     means one mis-scoped duplicate cannot swing the surface on its own.
+
+    ``weights``, if given, names a column that instead **sums** across a merged
+    group — a plain ``groupby(...).agg("median")`` would otherwise pick one
+    duplicate's weight arbitrarily and quietly drop the rest of the evidence it
+    represented.
     """
     key = df[lon_key].round(3).astype(str) + "," + df[lat_key].round(3).astype(str)
     if key.nunique() == len(df):
@@ -160,6 +167,8 @@ def _reduce_duplicates(df, lon_key: str, lat_key: str, metric_names: Sequence[st
     agg.update({name: "median" for name in metric_names if name in df.columns})
     if "reference" in df.columns:
         agg["reference"] = "first"
+    if weights is not None and weights in df.columns:
+        agg[weights] = "sum"
     reduced = df.groupby(key, sort=False).agg(agg).reset_index(drop=True)
     warnings.warn(
         f"{len(df) - len(reduced)} record(s) shared a position (within "
@@ -237,7 +246,7 @@ def _default_maxdist(easting: np.ndarray, northing: np.ndarray) -> float:
     return float(np.median(nearest)) * _DEFAULT_MAXDIST_FACTOR
 
 
-def _fit_spline(easting, northing, values, *, name: str):
+def _fit_spline(easting, northing, values, *, name: str, weights=None):
     """Fit a verde spline to one metric's scattered values.
 
     Cross-validated (:class:`verde.SplineCV`) when there are enough stations to
@@ -245,6 +254,10 @@ def _fit_spline(easting, northing, values, *, name: str):
     :data:`_MIN_STATIONS_FOR_CV`); fewer falls back to a single fixed-damping
     :class:`verde.Spline`, with a warning, rather than raising or silently
     guessing at an untested damping.
+
+    ``weights``, if given, are passed straight through to verde's own
+    least-squares fit (larger weight, more say over the fitted surface) — see
+    ``weights=`` on :func:`interpolate_records`.
     """
     import verde as vd
 
@@ -259,8 +272,40 @@ def _fit_spline(easting, northing, values, *, name: str):
         spline = vd.Spline()
     else:
         spline = vd.SplineCV(dampings=(1e-10, 1e-5, 1e-3, 1e-1, 1e0))
-    spline.fit((easting, northing), np.asarray(values, dtype="float64"))
+    spline.fit(
+        (easting, northing), np.asarray(values, dtype="float64"), weights=weights
+    )
     return spline
+
+
+def _block_pool(easting, northing, values, weights, block_spacing: float):
+    """Pool stations within ``block_spacing`` to one (weighted) mean per block.
+
+    Returns ``(easting, northing, values, weights)`` — ``weights`` is the per-block
+    **sum** of the input weights, not verde's own re-derived per-block weight.
+    :class:`verde.BlockMean` always rescales its returned weight to reflect
+    within-block *spread* (so a lone station in its own block gets weight ``1.0``
+    regardless of how large its input weight was), which would silently erase the
+    exact distinction ``weights=`` exists to draw — a long mooring record alone in
+    its own block must keep outweighing a single CTD cast alone in its own block.
+    Summing the raw weights ourselves, via :func:`verde.block_split`'s point-to-block
+    labels (verified to enumerate blocks in the same order
+    :class:`verde.BlockMean` does, for identical inputs), preserves that.
+    """
+    import pandas as pd
+    import verde as vd
+
+    if weights is None:
+        (e, n), v, _ = vd.BlockMean(spacing=block_spacing).filter(
+            (easting, northing), values
+        )
+        return e, n, v, None
+    (e, n), v, _ = vd.BlockMean(spacing=block_spacing).filter(
+        (easting, northing), values, weights=weights
+    )
+    _, labels = vd.block_split((easting, northing), spacing=block_spacing)
+    w = pd.Series(weights).groupby(labels).sum().sort_index().to_numpy()
+    return e, n, v, w
 
 
 def _make_gridder(method: str, knn_k: int):
@@ -331,6 +376,7 @@ def interpolate_records(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
+    weights: str | None = None,
 ) -> xr.Dataset:
     """Interpolate scattered per-station metric values onto a map.
 
@@ -355,7 +401,10 @@ def interpolate_records(
     plain table with no named model — interpolates onto a regular grid over the
     padded station extent instead, at ``spacing`` degrees (default: a fortieth of
     the extent's larger span). ``maxdist`` is the distance-mask radius in metres;
-    ``None`` derives it from the stations' own spacing (:func:`_default_maxdist`).
+    ``None`` derives it from the stations' own spacing (:func:`_default_maxdist`),
+    floored at ``block_spacing`` when that is set — so the coloured area matches
+    the scale the surface was pooled to rather than the raw points' (possibly
+    near-zero) spacing (see the mask step below).
 
     Duplicate (near-identical) positions are pooled to their median first, and
     stations with widely different record lengths raise a warning — see
@@ -379,12 +428,24 @@ def interpolate_records(
       convex hull (``NaN`` elsewhere — no extrapolation into empty water).
 
     ``block_spacing``, if given, is a distance in the same units as the
-    projection (metres) over which stations are pooled to their median
-    (:class:`verde.BlockMean`) before fitting — for any ``method``. This keeps a
-    dense cluster of stations (a repeat CTD survey, say) from dominating a
-    sparser region purely by outnumbering it, independent of the interpolator's
-    own duplicate-position handling (:func:`_reduce_duplicates`, which only
-    merges near-*identical* positions).
+    projection (metres) over which stations are pooled to their (weighted) mean
+    (:class:`verde.BlockMean`) before fitting — for any ``method``, including
+    ``"spline"``. This keeps a dense cluster of stations (a repeat CTD survey,
+    say) from dominating a sparser region purely by outnumbering it, independent
+    of the interpolator's own duplicate-position handling
+    (:func:`_reduce_duplicates`, which only merges near-*identical* positions).
+
+    ``weights``, if given, names a column (e.g. an effective-sample-size ``"n_eff"``
+    you attached yourself) used as each station's evidence weight: with
+    ``block_spacing``, stations merge into a block by their **weighted** mean
+    rather than a plain one, and a block's own weight is the **sum** of its
+    stations' weights (see :func:`_block_pool` for why not verde's own
+    per-block weight); on ``method="spline"``, weights are also passed straight
+    into the least-squares fit (:func:`_fit_spline`). ``"nearest"``/``"knn"``/
+    ``"linear"``/``"cubic"`` cannot use weights in the fit itself (verde's
+    neighbor/triangulation gridders ignore them) — pairing ``weights=`` with one
+    of those and no ``block_spacing`` warns, since the weights would then do
+    nothing at all.
     """
     import pandas as pd
     import verde as vd
@@ -410,7 +471,28 @@ def interpolate_records(
             f"no {missing_metrics} column(s) in these records; this set carries "
             f"{available}. Pass metrics=(...) naming what was actually computed."
         )
-    df = _reduce_duplicates(df, lon_key, lat_key, metric_names)
+    if weights is not None and weights not in df.columns:
+        raise ValueError(
+            f"weights={weights!r} — no such column; these records carry "
+            f"{list(df.columns)}."
+        )
+    if weights is not None:
+        w_check = df[weights].to_numpy(dtype="float64")
+        bad = w_check[~np.isfinite(w_check) | (w_check <= 0)]
+        if bad.size:
+            raise ValueError(
+                f"weights={weights!r}: every weight must be finite and positive, "
+                f"got {bad[:3].tolist()}{'…' if bad.size > 3 else ''}"
+            )
+    if weights is not None and method != "spline" and not block_spacing:
+        warnings.warn(
+            f"weights={weights!r} with method={method!r} and no block_spacing — "
+            "verde's nearest/knn/linear/cubic gridders ignore fit weights, so "
+            "they would have no effect here. Pass block_spacing= (weights act in "
+            "the pre-pooling step) or method='spline'.",
+            stacklevel=_stacklevel.find(),
+        )
+    df = _reduce_duplicates(df, lon_key, lat_key, metric_names, weights=weights)
     _warn_uneven_records(df)
 
     lon = df[lon_key].to_numpy(dtype="float64")
@@ -435,23 +517,56 @@ def interpolate_records(
         geast, gnorth = proj(glon, glat)
         ocean = np.ones_like(glon, dtype=bool)
 
-    maxdist = maxdist if maxdist is not None else _default_maxdist(easting, northing)
+    if maxdist is not None:
+        pass
+    else:
+        maxdist = _default_maxdist(easting, northing)
+        if block_spacing:
+            # The surface is fitted on block-pooled centres (spacing
+            # ~block_spacing), but _default_maxdist is measured on the raw
+            # points — and near-coincident points (a transect line's CTD casts
+            # metres apart) drive its median nearest-neighbour distance, and
+            # hence the trust radius, to ~0, masking the surface down to
+            # hairline strings even though it carries block-scale information
+            # everywhere a block sits. Floor the radius at the pooling scale:
+            # never paint tighter than the scale you chose to pool to. Sparse
+            # data (stations already far apart, so block pooling merges little)
+            # keeps its larger natural radius, unchanged.
+            maxdist = max(maxdist, float(block_spacing))
     trusted = vd.distance_mask(
         (easting, northing), maxdist, coordinates=(geast, gnorth)
     )
 
+    weights_all = df[weights].to_numpy(dtype="float64") if weights is not None else None
+
     data_vars = {}
     for name in metric_names:
+        values = df[name].to_numpy(dtype="float64")
+        good = np.isfinite(values)  # applied on every path now — spline used to skip this
+        e, n, v = easting[good], northing[good], values[good]
+        w = weights_all[good] if weights_all is not None else None
+        if block_spacing:
+            e, n, v, w = _block_pool(e, n, v, w, block_spacing)
         if method == "spline":
-            fitter = _fit_spline(easting, northing, df[name].to_numpy(), name=name)
+            fitter = _fit_spline(e, n, v, name=name, weights=w)
         else:
-            values = df[name].to_numpy(dtype="float64")
-            good = np.isfinite(values)
-            e, n, v = easting[good], northing[good], values[good]
-            if block_spacing:
-                (e, n), v, _ = vd.BlockMean(spacing=block_spacing).filter((e, n), v)
-            fitter = _make_gridder(method, knn_k)
-            fitter.fit((e, n), v)
+            effective_knn_k = knn_k
+            if method == "knn" and knn_k > len(v):
+                # verde's KNeighbors doesn't validate k against the point
+                # count itself: asking for more neighbours than exist raises
+                # a raw IndexError deep in its KDTree query (out of bounds
+                # into its own data array) rather than a clear message —
+                # most likely after block_spacing has pooled a small facet
+                # (a short seasonal split, say) down below k stations.
+                warnings.warn(
+                    f"knn_k={knn_k} exceeds the {len(v)} station(s) available "
+                    f"for {name!r} (after any block pooling) — using "
+                    f"knn_k={len(v)} instead.",
+                    stacklevel=_stacklevel.find(),
+                )
+                effective_knn_k = len(v)
+            fitter = _make_gridder(method, effective_knn_k)
+            fitter.fit((e, n), v)  # verde's KNeighbors/Linear/Cubic ignore weights
         predicted = fitter.predict((geast, gnorth))
         predicted = np.where(ocean & trusted, predicted, np.nan)
         metric = REGISTRY.get(name)
@@ -479,6 +594,7 @@ def build_items(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
+    weights: str | None = None,
     rows: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ``skill_map`` family's items: one interpolated row per entry.
@@ -504,10 +620,10 @@ def build_items(
     lon/lat grid, with a warning, when no grid is available; ``grid="regular"``
     always uses the fallback.
 
-    ``method``/``knn_k``/``block_spacing`` are forwarded to
+    ``method``/``knn_k``/``block_spacing``/``weights`` are forwarded to
     :func:`interpolate_records` — see its docstring for what each interpolation
-    method trades off (smooth vs. honest-about-gaps) and what ``block_spacing``
-    fixes for uneven station density.
+    method trades off (smooth vs. honest-about-gaps), what ``block_spacing``
+    fixes for uneven station density, and what ``weights`` weighs stations by.
     """
     metric_names = tuple(metrics) if metrics else DEFAULT_MAP_METRICS
     if rows is None:
@@ -557,7 +673,7 @@ def build_items(
         lon_key, lat_key = _position_columns(df.columns)
         skill = interpolate_records(
             df, metric_names, grid=model_grid, spacing=spacing, maxdist=maxdist,
-            method=method, knn_k=knn_k, block_spacing=block_spacing,
+            method=method, knn_k=knn_k, block_spacing=block_spacing, weights=weights,
         )
         item: dict[str, Any] = {
             "skill": skill,
@@ -590,6 +706,7 @@ def map_metrics(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
+    weights: str | None = None,
     rows: Mapping[str, Any] | None = None,
     renderer: str = "matplotlib",
     mark: str = "contourf",
@@ -607,6 +724,7 @@ def map_metrics(
         osk.map_metrics(rows={"DJF": winter_set, "JJA": summer_set})  # seasonal facet
         osk.map_metrics(mooring_set, method="nearest")      # Voronoi tiles, no smoothing
         osk.map_metrics(dense_ctd_set, block_spacing=15_000)  # pool a dense cluster first
+        osk.map_metrics(mooring_set, weights="n")           # weigh by comparison count
 
     Each panel is one metric's per-station values (see
     :meth:`~ocean_skill.comparison.Comparison.metrics`) fit to a smooth surface
@@ -620,8 +738,8 @@ def map_metrics(
     Every argument through ``rows`` builds the figure's data (see
     :func:`build_items`, which this delegates to); everything else is a plot
     option forwarded to the renderer, exactly as for any other family
-    (``docs/plot_styling_reference.md``). ``method``/``knn_k``/``block_spacing``
-    choose the interpolator (see :func:`interpolate_records`).
+    (``docs/plot_styling_reference.md``). ``method``/``knn_k``/``block_spacing``/
+    ``weights`` choose the interpolator (see :func:`interpolate_records`).
 
     Options
     -------
@@ -666,9 +784,19 @@ def map_metrics(
     knn_k
         Neighbours averaged for ``method="knn"`` (default 5).
     block_spacing
-        Pool stations within this many metres to their median position before
-        fitting, for any ``method`` — keeps a dense cluster (a repeat survey, say)
-        from dominating a sparser region purely by outnumbering it.
+        Pool stations within this many metres to their median (or, with
+        ``weights``, weighted-mean) position before fitting, for any ``method`` —
+        keeps a dense cluster (a repeat survey, say) from dominating a sparser
+        region purely by outnumbering it.
+    weights
+        Name a column (e.g. an effective-sample-size ``"n_eff"`` you attached
+        yourself) used as each station's evidence weight: with ``block_spacing``,
+        stations merge into a block by their weighted mean rather than a plain
+        one; on ``method="spline"``, weights are also passed straight into the
+        least-squares fit. ``"nearest"``/``"knn"``/``"linear"``/``"cubic"`` cannot
+        use weights in the fit itself (verde's neighbour/triangulation gridders
+        ignore them) — pairing ``weights=`` with one of those and no
+        ``block_spacing`` warns, since the weights would then do nothing.
     rows
         ``{label: data, ...}`` draws one row per entry instead of one figure — a
         seasonal or per-era facet. Pool each period's comparisons (or table) apart
@@ -703,6 +831,7 @@ def map_metrics(
         method=method,
         knn_k=knn_k,
         block_spacing=block_spacing,
+        weights=weights,
         rows=rows,
     )
     plot_kwargs.setdefault("mark", mark)
