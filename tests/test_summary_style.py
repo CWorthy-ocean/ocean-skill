@@ -666,7 +666,7 @@ def test_interactive_target_summary_weights_matches_static_star_position():
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") == "star"
+        and e.opts.get(group="style").kwargs.get("marker") == "hex"
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
     interactive_xy = tuple(star.data.iloc[0][["x", "y"]])
@@ -678,7 +678,8 @@ def test_interactive_target_summary_weights_matches_static_star_position():
 # A cloud coloured by one field and marker-shaped by a second gets, with
 # summary_split_markers=True, one centroid per (colour, marker) combination instead of
 # one per colour group -- each keeping its own group's marker instead of the forced
-# "*"/"star", so it reads as "the typical point of this exact colour+shape group."
+# "h"/"hex" (the reference point alone owns "*"/"star"), so it reads as "the typical
+# point of this exact colour+shape group."
 
 
 def _split_recs():
@@ -703,14 +704,14 @@ def test_summary_point_specs_splits_by_colour_and_marker_when_asked():
 
     unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
     assert len(unsplit) == 2, "one centroid per variable, the pre-existing behaviour"
-    assert {mk for *_, mk in unsplit} == {"*"}
+    assert {mk for *_, mk in unsplit} == {"h"}
 
     split = _summary_point_specs(
         recs, coord1, coord2, "variable", True, marker_field="signal"
     )
     assert len(split) == 4, "one centroid per (variable, signal) combination"
     assert {mk for *_, mk in split} == {None}, (
-        "a split centroid defers to its group's own marker, never the forced '*'"
+        "a split centroid defers to its group's own marker, never the forced 'h'"
     )
     groups = {(rec["variable"], rec["signal"]) for _, _, rec, _ in split}
     assert groups == {("temp", "raw"), ("temp", "subtidal"), ("salt", "raw"), ("salt", "subtidal")}
@@ -726,7 +727,7 @@ def test_summary_point_specs_marker_field_same_as_style_field_is_a_no_op():
     )
     unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
     assert len(same_field) == len(unsplit) == 2
-    assert {mk for *_, mk in same_field} == {"*"}
+    assert {mk for *_, mk in same_field} == {"h"}
 
 
 def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
@@ -748,7 +749,10 @@ def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
     assert len(centroids) == 4, "one centroid per (variable, signal) combination"
     base_pairs = {(ln.get_markerfacecolor(), ln.get_marker()) for ln in base}
     for c in centroids:
-        assert c.get_marker() != "*", "a split centroid keeps its group's own shape"
+        assert c.get_marker() not in ("*", "h"), (
+            "a split centroid keeps its group's own shape, never the reference's "
+            "'*' or the unsplit default's 'h'"
+        )
         assert (c.get_markerfacecolor(), c.get_marker()) in base_pairs, (
             "each centroid's colour+shape must match a real base-cloud group"
         )
@@ -819,13 +823,15 @@ def test_interactive_target_summary_split_markers_matches_static_colours():
         items, color_by="variable", marker_by="signal",
         summary_points=True, summary_split_markers=True,
     )
-    # a split centroid never uses bokeh's "star" marker (that's the un-split default);
-    # excluding the black reference dot leaves exactly the 4 split centroids.
+    # every overlay/centroid layer draws as hv.Scatter (the base cloud is hv.Points),
+    # so isinstance + excluding the black reference dot already isolates exactly the
+    # 4 split centroids; the marker check also excludes "hex", the un-split default,
+    # for a check that still means something once bokeh's marker vocabulary changes.
     centroids = [
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") != "star"
+        and e.opts.get(group="style").kwargs.get("marker") not in ("star", "hex")
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
     assert len(centroids) == 4
