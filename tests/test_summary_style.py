@@ -18,13 +18,20 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import pytest
 
-from ocean_skill.plot.summary import _group_styles, paired, target, taylor
+from ocean_skill.plot.summary import (
+    _group_styles,
+    _signed_medabs,
+    _summary_point_specs,
+    paired,
+    target,
+    taylor,
+)
 
 
 class _FakeComparison:
     """Minimal stand-in: the diagrams only call ``metrics()`` and read ``label``."""
 
-    def __init__(self, label, corr, std_test, bias, crmsd, variable):
+    def __init__(self, label, corr, std_test, bias, crmsd, variable, **extra):
         self.label = label
         self._metrics = {
             "corr": corr,
@@ -34,6 +41,7 @@ class _FakeComparison:
             "crmsd": crmsd,
             "variable": variable,
             "depth": 0,
+            **extra,
         }
 
     def metrics(self):
@@ -553,3 +561,279 @@ def test_interactive_target_summary_points_matches_static_colour(comparisons, it
     ]
     interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in centroids}
     assert interactive_colors == static_hex
+
+
+# ------------------------------------------------ signed_medabs + summary_weights
+
+
+def _star(fig):
+    """The one non-reference star drawn on a target figure with one group."""
+    ax = fig.axes[0]
+    centroid = next(c for c in ax.collections if c.get_zorder() == 10)
+    return tuple(centroid.get_offsets()[0])
+
+
+def test_target_signed_medabs_keeps_magnitude_where_median_would_cancel():
+    """Same pair as the median test, but signed_medabs must NOT land near zero."""
+    pair = [
+        _FakeComparison("a", 0.9, 1.2, 0.10, 0.20, "sea_water_temperature"),  # x=+0.20
+        _FakeComparison("b", 0.8, 0.8, -0.30, 0.40, "sea_water_temperature"),  # x=-0.40
+    ]
+    fig = target(pair, color_by="variable", summary_points="signed_medabs", labels=None)
+    cx, cy = _star(fig)
+    # magnitude = median(|+0.20|, |-0.40|) = 0.30; sign = sign(median(+0.20, -0.40)) = -1
+    assert cx == pytest.approx(-0.30)
+    # magnitude = median(|+0.10|, |-0.30|) = 0.20; sign = sign(median(+0.10, -0.30)) = -1
+    assert cy == pytest.approx(-0.20)
+
+
+def test_signed_medabs_ties_fall_back_to_the_mean_then_positive():
+    # median([-1, 1]) == 0 (falsy) and mean([-1, 1]) == 0 (falsy) too -> +1 fallback.
+    assert _signed_medabs([-1, 1]) == pytest.approx(1.0)
+    # median([-1, -0.5, 0.5, 100]) == 0 (falsy) but mean == 24.75 (sign +) breaks the tie.
+    assert _signed_medabs([-1, -0.5, 0.5, 100]) == pytest.approx(0.75)
+
+
+def test_target_summary_weights_puts_the_star_on_the_heavier_point():
+    """Weight ratio 3:1 -> the weighted median lands exactly on the heavy point."""
+    pair = [
+        _FakeComparison(
+            "a", 0.9, 1.2, 0.10, 0.20, "sea_water_temperature", n_eff=1
+        ),  # x=+0.20, y=+0.10
+        _FakeComparison(
+            "b", 0.8, 0.8, -0.30, 0.40, "sea_water_temperature", n_eff=3
+        ),  # x=-0.40, y=-0.30
+    ]
+    fig = target(
+        pair,
+        color_by="variable",
+        summary_points="median",
+        summary_weights="n_eff",
+        labels=None,
+    )
+    cx, cy = _star(fig)
+    assert cx == pytest.approx(-0.40)
+    assert cy == pytest.approx(-0.30)
+
+
+def test_target_summary_weights_missing_on_some_records_warns_and_defaults_to_one(
+    comparisons,
+):
+    comparisons[0]._metrics["n_eff"] = 5.0  # the other two comparisons carry none
+    with pytest.warns(UserWarning, match="n_eff"):
+        target(comparisons, summary_points=True, summary_weights="n_eff", labels=None)
+
+
+def test_target_summary_weights_missing_on_every_record_raises(comparisons):
+    with pytest.raises(ValueError, match="no record carries"):
+        target(comparisons, summary_points=True, summary_weights="bogus_field", labels=None)
+
+
+def test_target_summary_weights_rejects_nonpositive_weights(comparisons):
+    comparisons[0]._metrics["n_eff"] = -1.0
+    comparisons[1]._metrics["n_eff"] = 1.0
+    comparisons[2]._metrics["n_eff"] = 1.0
+    with pytest.raises(ValueError, match="finite"):
+        target(comparisons, summary_points=True, summary_weights="n_eff", labels=None)
+
+
+def test_interactive_target_summary_weights_matches_static_star_position():
+    """Both renderers must place the weighted centroid at the same coordinates."""
+    import holoviews as hv
+
+    from ocean_skill.plot.holoviews_renderer import _target as interactive_target
+
+    pair = [
+        _FakeComparison(
+            "a", 0.9, 1.2, 0.10, 0.20, "sea_water_temperature", n_eff=1
+        ),  # x=+0.20, y=+0.10
+        _FakeComparison(
+            "b", 0.8, 0.8, -0.30, 0.40, "sea_water_temperature", n_eff=3
+        ),  # x=-0.40, y=-0.30
+    ]
+    items = [{"label": c.label, "metrics": c.metrics()} for c in pair]
+
+    static_fig = target(
+        pair, color_by="variable", summary_points=True, summary_weights="n_eff",
+        labels=None,
+    )
+    static_xy = _star(static_fig)
+
+    obj = interactive_target(
+        items, color_by="variable", summary_points=True, summary_weights="n_eff"
+    )
+    (star,) = [
+        e
+        for e in obj.traverse(lambda x: x)
+        if isinstance(e, hv.Scatter)
+        and e.opts.get(group="style").kwargs.get("marker") == "hex"
+        and e.opts.get(group="style").kwargs.get("color") != "black"
+    ]
+    interactive_xy = tuple(star.data.iloc[0][["x", "y"]])
+    assert interactive_xy == pytest.approx(static_xy)
+
+
+# ------------------------------------------------------------- summary_split_markers
+#
+# A cloud coloured by one field and marker-shaped by a second gets, with
+# summary_split_markers=True, one centroid per (colour, marker) combination instead of
+# one per colour group -- each keeping its own group's marker instead of the forced
+# "h"/"hex" (the reference point alone owns "*"/"star"), so it reads as "the typical
+# point of this exact colour+shape group."
+
+
+def _split_recs():
+    """8 records crossing 2 variables x 2 signals -- 4 (colour, marker) groups."""
+    return [
+        _FakeComparison("t-raw-1", 0.95, 1.10, 0.10, 0.20, "temp", signal="raw"),
+        _FakeComparison("t-raw-2", 0.90, 1.20, 0.15, 0.22, "temp", signal="raw"),
+        _FakeComparison("t-sub-1", 0.80, 0.90, -0.10, 0.25, "temp", signal="subtidal"),
+        _FakeComparison("t-sub-2", 0.75, 0.95, -0.05, 0.28, "temp", signal="subtidal"),
+        _FakeComparison("s-raw-1", 0.85, 1.05, 0.05, 0.18, "salt", signal="raw"),
+        _FakeComparison("s-raw-2", 0.88, 1.02, 0.08, 0.19, "salt", signal="raw"),
+        _FakeComparison("s-sub-1", 0.70, 0.85, -0.15, 0.30, "salt", signal="subtidal"),
+        _FakeComparison("s-sub-2", 0.65, 0.88, -0.12, 0.31, "salt", signal="subtidal"),
+    ]
+
+
+def test_summary_point_specs_splits_by_colour_and_marker_when_asked():
+    """Unit-level: the shared spec builder both renderers call, in isolation."""
+    recs = [dict(c.metrics(), label=c.label) for c in _split_recs()]
+    coord1 = [r["std_test"] for r in recs]
+    coord2 = [r["corr"] for r in recs]
+
+    unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
+    assert len(unsplit) == 2, "one centroid per variable, the pre-existing behaviour"
+    assert {mk for *_, mk in unsplit} == {"h"}
+
+    split = _summary_point_specs(
+        recs, coord1, coord2, "variable", True, marker_field="signal"
+    )
+    assert len(split) == 4, "one centroid per (variable, signal) combination"
+    assert {mk for *_, mk in split} == {None}, (
+        "a split centroid defers to its group's own marker, never the forced 'h'"
+    )
+    groups = {(rec["variable"], rec["signal"]) for _, _, rec, _ in split}
+    assert groups == {("temp", "raw"), ("temp", "subtidal"), ("salt", "raw"), ("salt", "subtidal")}
+
+
+def test_summary_point_specs_marker_field_same_as_style_field_is_a_no_op():
+    """Docstring contract: naming the same field twice doesn't double-split."""
+    recs = [dict(c.metrics(), label=c.label) for c in _split_recs()]
+    coord1, coord2 = [r["std_test"] for r in recs], [r["corr"] for r in recs]
+
+    same_field = _summary_point_specs(
+        recs, coord1, coord2, "variable", True, marker_field="variable"
+    )
+    unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
+    assert len(same_field) == len(unsplit) == 2
+    assert {mk for *_, mk in same_field} == {"h"}
+
+
+def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
+    fig = taylor(
+        _split_recs(),
+        color_by="variable",
+        marker_by="signal",
+        summary_points=True,
+        summary_split_markers=True,
+        labels=None,
+    )
+    lines = _taylor_lines(fig)
+    # base sample points draw at Line2D's default zorder (2); the reference star is
+    # 3 and every overlay/centroid is 10 -- so zorder==2 isolates the base cloud.
+    base = [ln for ln in lines if ln.get_zorder() == 2]
+    centroids = [ln for ln in lines if ln.get_zorder() == 10]
+
+    assert base, "expected the base cloud to be found at Line2D's default zorder"
+    assert len(centroids) == 4, "one centroid per (variable, signal) combination"
+    base_pairs = {(ln.get_markerfacecolor(), ln.get_marker()) for ln in base}
+    for c in centroids:
+        assert c.get_marker() not in ("*", "h"), (
+            "a split centroid keeps its group's own shape, never the reference's "
+            "'*' or the unsplit default's 'h'"
+        )
+        assert (c.get_markerfacecolor(), c.get_marker()) in base_pairs, (
+            "each centroid's colour+shape must match a real base-cloud group"
+        )
+
+
+def test_target_summary_split_markers_matches_colour_and_marker_shape():
+    fig = target(
+        _split_recs(),
+        color_by="variable",
+        marker_by="signal",
+        summary_points=True,
+        summary_split_markers=True,
+        labels=None,
+    )
+    ax = fig.axes[0]
+    base = [c for c in ax.collections if c.get_zorder() == 4]
+    centroids = [c for c in ax.collections if c.get_zorder() == 10]
+
+    assert len(centroids) == 4, "one centroid per (variable, signal) combination"
+    base_pairs = {
+        (mcolors.to_hex(c.get_facecolor()[0]), tuple(c.get_paths()[0].vertices.flat))
+        for c in base
+    }
+    for c in centroids:
+        pair = (
+            mcolors.to_hex(c.get_facecolor()[0]),
+            tuple(c.get_paths()[0].vertices.flat),
+        )
+        assert pair in base_pairs, (
+            "each centroid's colour+marker-path must match a real base-cloud group "
+            "(comparing raw marker path vertices, since a PathCollection has no "
+            "single 'marker string' the way a Line2D does)"
+        )
+
+
+def test_summary_split_markers_ignored_without_marker_by(comparisons):
+    """Docstring contract: no marker_by means the usual one-star-per-group."""
+    with_flag = target(
+        comparisons, color_by="variable", summary_points=True,
+        summary_split_markers=True, labels=None,
+    )
+    without_flag = target(
+        comparisons, color_by="variable", summary_points=True, labels=None,
+    )
+    n_with = sum(1 for c in with_flag.axes[0].collections if c.get_zorder() == 10)
+    n_without = sum(1 for c in without_flag.axes[0].collections if c.get_zorder() == 10)
+    assert n_with == n_without == 3, "one star per variable either way"
+
+
+def test_interactive_target_summary_split_markers_matches_static_colours():
+    """Both renderers must agree on which colour goes with which split centroid."""
+    import holoviews as hv
+
+    recs = _split_recs()
+    items = [{"label": c.label, "metrics": c.metrics()} for c in recs]
+
+    static_fig = target(
+        recs, color_by="variable", marker_by="signal",
+        summary_points=True, summary_split_markers=True,
+    )
+    static_colors = {
+        mcolors.to_hex(c.get_facecolor()[0])
+        for c in static_fig.axes[0].collections
+        if c.get_zorder() == 10
+    }
+
+    obj = _interactive_target(
+        items, color_by="variable", marker_by="signal",
+        summary_points=True, summary_split_markers=True,
+    )
+    # every overlay/centroid layer draws as hv.Scatter (the base cloud is hv.Points),
+    # so isinstance + excluding the black reference dot already isolates exactly the
+    # 4 split centroids; the marker check also excludes "hex", the un-split default,
+    # for a check that still means something once bokeh's marker vocabulary changes.
+    centroids = [
+        e
+        for e in obj.traverse(lambda x: x)
+        if isinstance(e, hv.Scatter)
+        and e.opts.get(group="style").kwargs.get("marker") not in ("star", "hex")
+        and e.opts.get(group="style").kwargs.get("color") != "black"
+    ]
+    assert len(centroids) == 4
+    interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in centroids}
+    assert interactive_colors == static_colors

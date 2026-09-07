@@ -19,7 +19,9 @@ pytest.importorskip("verde")
 pytest.importorskip("pyproj")
 
 from ocean_skill.plot.map_metrics import (
+    _block_pool,
     _central_longitude,
+    _reduce_duplicates,
     build_items,
     interpolate_records,
 )
@@ -76,6 +78,37 @@ def test_cells_far_from_every_station_are_masked():
         "should be far enough to mask"
     )
     assert np.isfinite(skill["bias"].to_numpy()).any()
+
+
+def test_block_spacing_floors_the_trust_radius_so_pooled_maps_are_not_hairlines():
+    """Near-coincident stations (a transect line's casts metres apart) drive
+    ``_default_maxdist`` to ~0, which would mask the surface down to hairline
+    strings. With ``block_spacing`` set, the trust radius is floored at the
+    pooling scale, so the coloured area covers the block footprint instead.
+    """
+    rng = np.random.default_rng(0)
+    # two tight clusters ~30 km apart, each cluster's points ~50 m apart so the
+    # raw median nearest-neighbour distance (and hence _default_maxdist) is tiny
+    lon = np.concatenate([
+        -152.0 + rng.normal(0, 5e-4, 40),
+        -151.5 + rng.normal(0, 5e-4, 40),
+    ])
+    lat = np.concatenate([
+        59.5 + rng.normal(0, 5e-4, 40),
+        59.5 + rng.normal(0, 5e-4, 40),
+    ])
+    df = pd.DataFrame({"lon": lon, "lat": lat, "bias": lon - lon.mean(),
+                       "reference": [f"c{i}" for i in range(len(lon))]})
+
+    hairline = interpolate_records(df, ("bias",))  # no block_spacing
+    filled = interpolate_records(df, ("bias",), block_spacing=15_000)
+
+    n_hairline = int(np.isfinite(hairline["bias"].to_numpy()).sum())
+    n_filled = int(np.isfinite(filled["bias"].to_numpy()).sum())
+    assert n_filled > 5 * n_hairline, (
+        f"block_spacing should broaden the coloured area from the near-zero raw "
+        f"radius; got {n_hairline} -> {n_filled} finite cells"
+    )
 
 
 def test_a_caller_supplied_grid_is_used_and_masked_by_its_ocean_mask():
@@ -227,6 +260,117 @@ def test_block_spacing_pools_a_dense_cluster_before_fitting():
 def test_an_unknown_method_raises():
     with pytest.raises(ValueError, match="method="):
         interpolate_records(_records(), ("bias",), method="bogus")
+
+
+def test_a_nan_metric_value_no_longer_poisons_the_spline_fit():
+    """Bug fix: the spline path used to skip the NaN filter the other methods get."""
+    df = _records(n=8)
+    df.loc[0, "bias"] = np.nan
+    skill = interpolate_records(df, ("bias",))  # method="spline" is the default
+    assert np.isfinite(skill["bias"].to_numpy()).any()
+
+
+# --- weights= ------------------------------------------------------------------------
+
+
+def test_block_pool_weighted_mean_and_summed_weight():
+    """A lone station's weight must survive block-pooling untouched, not collapse
+    to verde's own re-derived (always-1.0-for-singletons) per-block weight."""
+    e = np.array([0.0, 1.0, 500.0])
+    n = np.array([0.0, 0.0, 0.0])
+    v = np.array([10.0, 20.0, 99.0])
+    w = np.array([3.0, 1.0, 7.0])
+    eb, nb, vb, wb = _block_pool(e, n, v, w, block_spacing=10.0)
+    order = np.argsort(eb)
+    vb, wb = vb[order], wb[order]
+    assert vb[0] == pytest.approx((10 * 3 + 20 * 1) / 4)
+    assert wb[0] == pytest.approx(4.0)
+    assert vb[1] == pytest.approx(99.0)
+    assert wb[1] == pytest.approx(7.0), "a lone station's weight must not become 1.0"
+
+
+def test_block_pool_without_weights_matches_the_unweighted_default():
+    e = np.array([0.0, 1.0])
+    n = np.array([0.0, 0.0])
+    v = np.array([10.0, 20.0])
+    _, _, vb, wb = _block_pool(e, n, v, None, block_spacing=10.0)
+    assert wb is None
+    assert vb[0] == pytest.approx(15.0)
+
+
+def test_weights_column_missing_raises():
+    with pytest.raises(ValueError, match="weights="):
+        interpolate_records(_records(), ("bias",), weights="no_such_column")
+
+
+def test_weights_must_be_finite_and_positive():
+    df = _records(n=5)
+    df["w"] = [1.0, -1.0, 1.0, 1.0, 1.0]
+    with pytest.raises(ValueError, match="finite and positive"):
+        interpolate_records(df, ("bias",), weights="w")
+
+
+@pytest.mark.parametrize("method", ["nearest", "knn", "linear", "cubic"])
+def test_weights_with_a_non_spline_method_and_no_block_spacing_warns(method):
+    df = _records()
+    df["w"] = df["n"]
+    with pytest.warns(UserWarning, match="ignore fit weights"):
+        interpolate_records(df, ("bias",), method=method, weights="w")
+
+
+def test_weights_with_block_spacing_silences_the_non_spline_warning():
+    df = _records()
+    df["w"] = df["n"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        interpolate_records(
+            df, ("bias",), method="nearest", block_spacing=50_000, weights="w"
+        )
+    assert not any("ignore fit weights" in str(w.message) for w in caught)
+
+
+def test_weights_with_spline_and_no_block_spacing_does_not_warn():
+    df = _records()
+    df["w"] = df["n"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        interpolate_records(df, ("bias",), method="spline", weights="w")
+    assert not any("ignore fit weights" in str(w.message) for w in caught)
+
+
+def test_knn_k_larger_than_available_points_is_clamped_not_a_crash():
+    """Regression: verde's KNeighbors doesn't itself validate k against the
+    point count, and used to raise a raw IndexError out of its KDTree query
+    when block_spacing pooled a small facet below knn_k stations."""
+    df = _records(n=4)  # fewer than the default knn_k=5
+    with pytest.warns(UserWarning, match="knn_k=5 exceeds"):
+        skill = interpolate_records(df, ("bias",), method="knn")
+    assert np.isfinite(skill["bias"].to_numpy()).any()
+
+
+def test_knn_k_within_available_points_does_not_warn():
+    df = _records(n=8)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        interpolate_records(df, ("bias",), method="knn", knn_k=5)
+    assert not any("exceeds" in str(w.message) for w in caught)
+
+
+def test_reduce_duplicates_sums_a_weights_column():
+    df = pd.DataFrame(
+        {
+            "lon": [1.0, 1.0, 5.0],
+            "lat": [2.0, 2.0, 6.0],
+            "bias": [1.0, 3.0, 9.0],
+            "w": [4.0, 6.0, 1.0],
+        }
+    )
+    with pytest.warns(UserWarning, match="shared a position"):
+        reduced = _reduce_duplicates(df, "lon", "lat", ("bias",), weights="w")
+    assert len(reduced) == 2
+    dup_row = reduced.loc[reduced["lon"] == 1.0].iloc[0]
+    assert dup_row["w"] == pytest.approx(10.0)
+    assert dup_row["bias"] == pytest.approx(2.0)  # median of 1.0, 3.0
 
 
 # --- build_items -------------------------------------------------------------------
@@ -401,6 +545,29 @@ def test_an_unknown_extent_string_raises():
 
     with pytest.raises(ValueError, match="extent='snug'"):
         render(PlotSpec(family="skill_map", items=items, options={"extent": "snug"}))
+
+
+def test_station_markers_false_suppresses_the_overlay_in_both_renderers():
+    """station_markers=False draws the surface without the station dots, in
+    both renderers -- the escape hatch for a dense map where thousands of
+    near-coincident dots would bury the surface they annotate.
+    """
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    df = _records(n=9)
+    items = build_items(df, metrics=("bias", "corr"), grid="regular")
+    spec = PlotSpec(family="skill_map", items=items, options={"station_markers": False})
+
+    fig = render(spec)
+    for ax in fig.axes:
+        assert not _scatter_collections(ax)
+
+    import holoviews as hv
+
+    obj = render(spec, renderer="holoviews")
+    points = [e for e in obj.traverse() if isinstance(e, hv.Points)]
+    assert not points
 
 
 def test_an_item_without_stations_draws_exactly_as_before():

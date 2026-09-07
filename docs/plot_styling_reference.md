@@ -588,7 +588,7 @@ and where it is only filling a gap between stations. There is no parameter for t
 it rides on the item, not on `skill_map`'s own signature — so it is not something you
 pass, only something a `map_metrics` figure always shows.
 
-### `method`, `knn_k`, `block_spacing` (`map_metrics`)
+### `method`, `knn_k`, `block_spacing`, `weights` (`map_metrics`)
 
 Which interpolator fits the scattered per-station values before `map_metrics` draws
 them — see [`docs/skill_maps.md`](skill_maps.md#interpolated-maps-for-scattered-stations)
@@ -597,15 +597,27 @@ cross-validated fit; `"nearest"` tiles the map by whichever station is closest (
 edges, no invented gradients, density-adaptive for free); `"knn"` softens that with the
 mean of the `knn_k` nearest stations (default 5); `"linear"`/`"cubic"` triangulate
 instead (faceted, and only defined inside the stations' convex hull). `block_spacing`
-(metres) pools stations within each block to their median before fitting, for any
-method — the fix for a dense cluster otherwise outvoting a sparser region.
+(metres) pools stations within each block to their (weighted) mean before fitting, for
+any method including `"spline"` — the fix for a dense cluster otherwise outvoting a
+sparser region.
 
-**Default:** `method="spline"`, `knn_k=5`, `block_spacing=None` (no pre-pooling)
+`weights` names a column (e.g. an effective-sample-size `"n"`/`"n_eff"` you attached
+yourself) giving each station's evidence weight. With `block_spacing`, a block's value
+is the weighted mean of its stations and its own weight is their **sum** — so a lone
+long mooring record in one block still outweighs a lone short cast in another. On
+`method="spline"` weights also feed the least-squares fit directly. `"nearest"`/
+`"knn"`/`"linear"`/`"cubic"` cannot use weights in the fit itself (verde ignores them
+there) — pairing `weights=` with one of those and no `block_spacing` warns, since the
+weights would then do nothing.
+
+**Default:** `method="spline"`, `knn_k=5`, `block_spacing=None` (no pre-pooling),
+`weights=None` (every station counts equally)
 
 ```python
 mooring_set.map_metrics(method="nearest")
 mooring_set.map_metrics(method="knn", knn_k=8)
 mooring_set.map_metrics(method="nearest", block_spacing=15_000)
+mooring_set.map_metrics(method="knn", block_spacing=15_000, weights="n")
 ```
 
 ### `shared_limits`, `layout` (`skill_map`)
@@ -889,8 +901,27 @@ group already has one from the base cloud.
 centroid's marker is always `"*"` (a bokeh `"star"` interactively); a highlighted
 point keeps its group's own marker.
 
+Grouping by two fields at once — colour by one, marker-shape by the other — normally
+still collapses to one ★ centroid per *colour* group, blind to which shapes went into
+it. `summary_split_markers=True` splits the centroids the rest of the way: one per
+`(color_by, marker_by)` combination, each keeping its own group's marker instead of
+the forced `"*"`, so it reads as "the typical point of exactly this colour+shape
+group," matched to the cloud beneath it:
+
+```python
+# colour = variable, shape = signal -> one centroid per (variable, signal) pair,
+# each star drawn in its variable's colour and its signal's marker shape
+suite.taylor(
+    color_by="variable", marker_by="signal",
+    summary_points=True, summary_split_markers=True,
+)
+```
+
+Needs both `color_by` and `marker_by`; with only one (or `summary_split_markers=False`,
+the default) you get the usual single ★ per `color_by` group.
+
 **Default:** `overlay=None`, `overlay_marker_scale=1.8`, `overlay_alpha=1.0`,
-`summary_points=False`
+`summary_points=False`, `summary_split_markers=False`
 
 Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
 `marker_scale`/`alpha` are above).
