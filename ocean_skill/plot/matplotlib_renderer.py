@@ -1519,6 +1519,13 @@ def profile(
     per_panel: list[tuple[Any, list]] = []
     for index, panel in enumerate(layout.panels):
         ax = flat[index]
+        if panel.blank:
+            # An empty cell in a two-axis rows=/cols= grid (see Panel.blank) --
+            # hidden exactly like a trailing cell past the panel count below,
+            # just interior rather than trailing.
+            ax.set_visible(False)
+            per_panel.append((ax, []))
+            continue
         handles = _draw_profile_lines(ax, panel.lines, line_kwargs, mark=mark)
         per_panel.append((ax, handles))
         panel_title_kwargs = _without_font(title_kwargs)

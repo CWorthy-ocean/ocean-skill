@@ -3064,6 +3064,13 @@ def _profile(
 
     plots = []
     for index, panel in enumerate(layout.panels):
+        if panel.blank:
+            # An empty cell in a two-axis rows=/cols= grid (see Panel.blank) --
+            # holoviews' own explicit "nothing here" placeholder for a Layout
+            # cell, matching the static renderer's hidden (but present, so
+            # the grid keeps its shape) axes for the same cell.
+            plots.append(hv.Empty())
+            continue
         y_range = shared_depth or depth_range(panel.lines + panel.secondary, ylim=ylim)
         # The label reads the same on every panel ("salinity", "Depth [m]") --
         # only the grid's outer edge needs to say so once, matching the static

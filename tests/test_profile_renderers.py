@@ -316,6 +316,64 @@ def _seasonal_profile_item(
     }
 
 
+def _month_profile_item(
+    variable: str = TEMPERATURE,
+    *,
+    test: str = "run_new",
+    reference: str = "whots",
+    units: str = "degC",
+    offset: float = 0.6,
+    months=(4, 5, 6, 7),
+    n: int = 8,
+    metrics: dict | None = "auto",
+) -> dict:
+    """A comparison item whose aligned trio has a marked groupby-month dim --
+    the shape a real ``aggregate={"time": {"groupby": "month", ...}}`` station
+    climatology leaves standing, mirroring ``_seasonal_profile_item`` for
+    the 2-D ``rows="month", cols="variable"`` facet tests below.
+    """
+    from ocean_skill.operators import TIME_GROUPBY_ATTR
+
+    depths = np.linspace(5.0, 150.0, n)
+    base = 20.0 - 0.08 * depths
+    values = base[None, :] + np.arange(len(months))[:, None]
+    reference_da = xr.DataArray(
+        values,
+        dims=("month", "z"),
+        coords={"month": list(months), "z": depths},
+        attrs={"units": units},
+    ).assign_coords(lon=-144.245, lat=49.978)
+    reference_da["month"].attrs[TIME_GROUPBY_ATTR] = "time"
+    aligned = xr.Dataset(
+        {
+            "reference": reference_da,
+            "test": reference_da + offset,
+            "difference": reference_da * 0 + offset,
+        }
+    )
+    aligned["reference"].attrs["units"] = units
+    if metrics == "auto":
+        metrics = {
+            "bias": offset,
+            "rmse": abs(offset) + 0.1,
+            "corr": 0.97,
+            "n": n * len(months),
+            "std_test": 2.8,
+            "std_reference": 2.8,
+            "crmsd": 0.1,
+            "sigma_ratio": 1.0,
+            "variable": variable,
+        }
+    return {
+        "aligned": aligned,
+        "metrics": metrics,
+        "units": units,
+        "standard_name": variable,
+        "label": None,
+        "labels": (test, reference),
+    }
+
+
 def _spec(items, **options) -> PlotSpec:
     return PlotSpec(
         family="profile",
@@ -560,12 +618,99 @@ def test_depth_facet_is_refused():
         render(_spec([_profile_item()], rows="depth"), renderer="matplotlib")
 
 
-def test_rows_and_cols_together_are_refused():
-    with pytest.raises(ValueError, match="one facet, not two"):
+def test_rows_and_cols_together_build_a_grid_instead_of_being_refused():
+    """Two facets together now build the row x col cross-product (see the
+    2-D facet tests below) rather than raising -- this only checks the old
+    refusal is gone; the 2-D tests check the grid itself is correct."""
+    fig = render(
+        _spec([_profile_item()], rows="variable", cols="source"),
+        renderer="matplotlib",
+    )
+    assert len(fig.axes) >= 1
+
+
+def test_ncols_with_a_two_axis_facet_is_still_refused():
+    """Unlike a single facet, rows=/cols= together already fix the grid's
+    shape -- ncols=/nrows= (the single-facet wrap) conflicts with that."""
+    with pytest.raises(ValueError, match="already fix the grid's shape"):
         render(
-            _spec([_profile_item()], rows="variable", cols="source"),
+            _spec([_profile_item()], rows="variable", cols="source", ncols=2),
             renderer="matplotlib",
         )
+
+
+# -- a genuine 2-D rows=x cols= grid: month x variable, model vs. obs per cell -----------
+
+
+def test_rows_month_cols_variable_builds_the_full_grid_in_both_renderers():
+    months = (4, 5, 6, 7)
+    items = [
+        _month_profile_item(TEMPERATURE, months=months),
+        _month_profile_item(SALINITY, units="1e-3", months=months),
+    ]
+    static = render(_spec(items, rows="month", cols="variable"), renderer="matplotlib")
+    interactive = render(_spec(items, rows="month", cols="variable"), renderer="holoviews")
+    assert len(static.axes) == len(months) * 2
+    assert all(ax.get_visible() for ax in static.axes)
+    titles = _matplotlib_titles(static)
+    assert titles == _holoviews_titles(interactive)
+    # Row-major: cell (r, c) at index r*ncols + c holds month r, variable c.
+    from ocean_skill.plot.series import month_label
+
+    ncols = 2
+    for r, month in enumerate(months):
+        for c in range(ncols):
+            title = titles[r * ncols + c]
+            assert month_label(month) in title
+
+
+def test_rows_time_is_an_alias_for_rows_month_on_a_groupby_climatology():
+    months = (4, 5, 6, 7)
+    items = [
+        _month_profile_item(TEMPERATURE, months=months),
+        _month_profile_item(SALINITY, units="1e-3", months=months),
+    ]
+    by_month = render(_spec(items, rows="month", cols="variable"), renderer="matplotlib")
+    by_time = render(_spec(items, rows="time", cols="variable"), renderer="matplotlib")
+    assert _matplotlib_titles(by_month) == _matplotlib_titles(by_time)
+
+
+def test_model_and_obs_get_distinct_colors_in_every_grid_cell():
+    """Colour follows what varies *within* a panel: month is a facet axis here
+    (constant per cell), so model/obs colour by role instead -- the same two
+    colours in every cell, not one shared colour split only by dash."""
+    months = (4, 5, 6, 7)
+    items = [_month_profile_item(TEMPERATURE, months=months)]
+    static = render(_spec(items, rows="month", cols="variable"), renderer="matplotlib")
+    seen_pairs = set()
+    for ax in static.axes:
+        lines = [line for line in ax.get_lines() if not line.get_label().startswith("_")]
+        assert len(lines) == 2
+        colors = {line.get_color() for line in lines}
+        assert len(colors) == 2  # distinct, not shared
+        seen_pairs.add(tuple(sorted(colors)))
+    assert len(seen_pairs) == 1  # the *same* two colours in every cell
+
+
+def test_a_ragged_grid_renders_a_hidden_blank_in_the_missing_cell():
+    """A variable missing one of the months another one has draws a hidden
+    blank panel in that cell, rather than shifting every later cell out of
+    place."""
+    items = [
+        _month_profile_item(TEMPERATURE, months=(4, 5, 6, 7)),
+        _month_profile_item(SALINITY, units="1e-3", months=(4, 5, 7)),  # no June
+    ]
+    static = render(_spec(items, rows="month", cols="variable"), renderer="matplotlib")
+    interactive = render(_spec(items, rows="month", cols="variable"), renderer="holoviews")
+    assert len(static.axes) == 4 * 2  # the full grid shape, blank cell included
+    ncols = 2
+    blank_index = 2 * ncols + 1  # row=June (index 2), col=salinity (index 1)
+    for i, ax in enumerate(static.axes):
+        assert ax.get_visible() == (i != blank_index)
+    import holoviews as hv
+
+    hv_elements = list(interactive)
+    assert isinstance(hv_elements[blank_index], hv.Empty)
 
 
 # -- composition: two variables merge onto one panel with a top axis by default ---------
