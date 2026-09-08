@@ -889,6 +889,80 @@ def test_leaving_ncols_and_nrows_unset_reproduces_todays_layout():
     assert _matplotlib_titles(with_none) == _matplotlib_titles(explicit_none)
 
 
+# -- sharex=/sharey= axis linking ------------------------------------------------------
+
+
+def _bokeh_ranges(obj):
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    figs = list(hv.render(obj, backend="bokeh").select({"type": figure}))
+    return [f.x_range for f in figs], [f.y_range for f in figs]
+
+
+def test_sharex_defaults_true_and_gives_every_panel_the_same_time_range():
+    items = [_item(test=f"run{i}", n=n) for i, n in enumerate([12, 36])]
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    xlims = {ax.get_xlim() for ax in fig.axes if ax.get_visible()}
+    assert len(xlims) == 1
+
+    interactive = render(_spec(items, cols="comparison"), renderer="holoviews")
+    x_ranges, _ = _bokeh_ranges(interactive)
+    assert len({(r.start, r.end) for r in x_ranges}) == 1
+
+
+def test_sharex_false_lets_each_panel_autoscale_its_own_time_range():
+    items = [_item(test=f"run{i}", n=n) for i, n in enumerate([12, 36])]
+    fig = render(_spec(items, cols="comparison", sharex=False), renderer="matplotlib")
+    xlims = {ax.get_xlim() for ax in fig.axes if ax.get_visible()}
+    assert len(xlims) == 2
+
+    interactive = render(
+        _spec(items, cols="comparison", sharex=False), renderer="holoviews"
+    )
+    x_ranges, _ = _bokeh_ranges(interactive)
+    assert len({id(r) for r in x_ranges}) == 2
+
+
+def test_sharey_defaults_false_and_leaves_the_value_axis_per_panel():
+    items = [_item(test=f"run{i}", offset=o) for i, o in enumerate([0.6, 100.0])]
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    ylims = {ax.get_ylim() for ax in fig.axes if ax.get_visible()}
+    assert len(ylims) == 2
+
+    interactive = render(_spec(items, cols="comparison"), renderer="holoviews")
+    _, y_ranges = _bokeh_ranges(interactive)
+    assert len({id(r) for r in y_ranges}) == 2
+
+
+def test_sharey_true_links_the_value_axis_across_panels():
+    items = [_item(test=f"run{i}", offset=o) for i, o in enumerate([0.6, 100.0])]
+    fig = render(_spec(items, cols="comparison", sharey=True), renderer="matplotlib")
+    ylims = {ax.get_ylim() for ax in fig.axes if ax.get_visible()}
+    assert len(ylims) == 1
+
+    interactive = render(
+        _spec(items, cols="comparison", sharey=True), renderer="holoviews"
+    )
+    _, y_ranges = _bokeh_ranges(interactive)
+    assert len({(r.start, r.end) for r in y_ranges}) == 1
+
+
+def test_residual_and_sharey_are_refused_in_both_renderers():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    with pytest.raises(ValueError, match="residual"):
+        render(_spec(items, residual=True, sharey=True), renderer="matplotlib")
+    with pytest.raises(ValueError, match="residual"):
+        render(_spec(items, residual=True, sharey=True), renderer="holoviews")
+
+
+def test_shared_axis_labels_is_no_longer_a_series_option():
+    """Replaced outright by sharex= -- no alias, since nothing used it yet."""
+    with pytest.raises(TypeError, match="series"):
+        render(
+            _spec([_item()], shared_axis_labels=False),
+            renderer="matplotlib",
+        )
 
 
 def test_a_gridded_only_option_raises_statically():
@@ -982,6 +1056,8 @@ def test_series_is_registered_everywhere_it_has_to_be():
         "encode",
         "ncols",
         "nrows",
+        "sharex",
+        "sharey",
     ):
         assert option in _top_level_options(), option
 

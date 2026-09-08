@@ -1020,6 +1020,114 @@ def test_leaving_ncols_and_nrows_unset_reproduces_todays_layout():
     assert _matplotlib_titles(with_none) == _matplotlib_titles(explicit_none)
 
 
+# -- sharex=/sharey= axis linking ------------------------------------------------------
+
+
+def _bokeh_ranges(obj):
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    figs = list(hv.render(obj, backend="bokeh").select({"type": figure}))
+    return [f.x_range for f in figs], [f.y_range for f in figs]
+
+
+def _depth_items():
+    return [
+        _profile_item(test=f"run{i}", max_depth=d) for i, d in enumerate([50.0, 150.0])
+    ]
+
+
+def test_sharey_defaults_true_and_gives_every_panel_the_same_depth_range():
+    """Profile's twin of series' sharex=True default.
+
+    Depth is the one axis every panel in a grid of casts is usually meant to
+    compare like-for-like.
+    """
+    items = _depth_items()
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    ylims = {ax.get_ylim() for ax in fig.axes if ax.get_visible()}
+    assert len(ylims) == 1
+
+    interactive = render(_spec(items, cols="comparison"), renderer="holoviews")
+    _, y_ranges = _bokeh_ranges(interactive)
+    assert len({(r.start, r.end) for r in y_ranges}) == 1
+
+
+def test_sharey_false_lets_each_panel_autoscale_its_own_depth():
+    items = _depth_items()
+    fig = render(_spec(items, cols="comparison", sharey=False), renderer="matplotlib")
+    ylims = {ax.get_ylim() for ax in fig.axes if ax.get_visible()}
+    assert len(ylims) == 2
+
+    interactive = render(
+        _spec(items, cols="comparison", sharey=False), renderer="holoviews"
+    )
+    _, y_ranges = _bokeh_ranges(interactive)
+    assert len({id(r) for r in y_ranges}) == 2
+
+
+def test_sharex_defaults_false_and_leaves_the_value_axis_per_panel():
+    items = _depth_items()
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    xlims = {ax.get_xlim() for ax in fig.axes if ax.get_visible()}
+    assert len(xlims) == 2
+
+    interactive = render(_spec(items, cols="comparison"), renderer="holoviews")
+    x_ranges, _ = _bokeh_ranges(interactive)
+    assert len({id(r) for r in x_ranges}) == 2
+
+
+def test_sharex_true_links_the_value_axis_across_panels():
+    items = _depth_items()
+    fig = render(_spec(items, cols="comparison", sharex=True), renderer="matplotlib")
+    xlims = {ax.get_xlim() for ax in fig.axes if ax.get_visible()}
+    assert len(xlims) == 1
+
+    interactive = render(
+        _spec(items, cols="comparison", sharex=True), renderer="holoviews"
+    )
+    x_ranges, _ = _bokeh_ranges(interactive)
+    assert len({(r.start, r.end) for r in x_ranges}) == 1
+
+
+def test_sharey_false_still_gives_the_twin_axis_the_right_depth_range():
+    """The twin no longer inherits sharey's shared axis.
+
+    So it needs its own explicit set_ylim -- this pins that fix rather than a
+    crash or a 0-1 axis.
+    """
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, sharey=False), renderer="matplotlib")
+    ax, twin = fig.axes
+    assert ax.get_ylim() == twin.get_ylim()
+
+
+# -- metrics_stacked= -----------------------------------------------------------------
+
+
+def test_metrics_stacked_keeps_the_per_metric_newlines():
+    layout = _profile.compose(
+        [_profile_item()], metric_keys=("bias", "rmse", "corr"), metrics_stacked=True
+    )
+    assert "\n" in layout.panels[0].metrics_text
+
+
+def test_metrics_default_is_a_single_line():
+    layout = _profile.compose([_profile_item()], metric_keys=("bias", "rmse", "corr"))
+    assert "\n" not in layout.panels[0].metrics_text
+
+
+def test_metrics_stacked_draws_in_both_renderers():
+    fig = render(_spec([_profile_item()], metrics_stacked=True), renderer="matplotlib")
+    assert "\n" in fig.axes[0]._osk_metrics_text.get_text()
+
+    obj = render(_spec([_profile_item()], metrics_stacked=True), renderer="holoviews")
+    import holoviews as hv
+
+    texts = obj.traverse(lambda x: x, [hv.Text])
+    assert texts and "\n" in texts[0].data[2]
+
+
 # -- option plumbing -----------------------------------------------------------------------
 
 

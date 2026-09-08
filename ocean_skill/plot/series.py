@@ -38,6 +38,7 @@ __all__ = [
     "line_specs",
     "panel_title",
     "time_values",
+    "value_span",
 ]
 
 #: Beyond this many panels a series figure is unreadable at page width, and beyond this
@@ -173,6 +174,38 @@ def grid_shape(
         ncols = -(-n // max(int(nrows), 1))
     ncols = max(int(ncols), 1)
     return -(-n // ncols), ncols
+
+
+def value_span(arrays, *, lim: tuple[float, float] | None = None) -> tuple:
+    """``(lo, hi)`` across every array in ``arrays``; ``lim`` overrides.
+
+    The plain (non-inverted) counterpart of
+    :func:`ocean_skill.plot.profile.depth_range`, used by the interactive renderer
+    only (matplotlib gets this for free from ``plt.subplots(sharex=, sharey=)``'s
+    own autoscale-together): a series' time or value axis, or a profile's value
+    axis. A real date axis (``datetime64``) compares and concatenates the same
+    way a plain numeric one does, so one implementation covers both; a
+    single-instant/single-value span is widened by one unit so the axis has a
+    real range to draw.
+    """
+    if lim is not None:
+        return float(lim[0]), float(lim[1])
+    arrays = [np.asarray(a) for a in arrays if len(a)]
+    if not arrays:
+        return 0.0, 1.0
+    combined = np.concatenate(arrays)
+    is_datetime = np.issubdtype(combined.dtype, np.datetime64)
+    finite = (
+        combined[~np.isnat(combined)]
+        if is_datetime
+        else combined[np.isfinite(combined)]
+    )
+    if not finite.size:
+        return 0.0, 1.0
+    lo, hi = finite.min(), finite.max()
+    if lo == hi:
+        hi = lo + (np.timedelta64(1, "D") if is_datetime else 1.0)
+    return lo, hi
 
 
 def time_values(da):
@@ -554,7 +587,7 @@ def free_corners(lines) -> list[str]:
     return sorted(CORNERS, key=lambda c: (counts[c], CORNERS.index(c)))
 
 
-def _metrics_text(items, metric_keys, *, prefix: bool) -> str:
+def _metrics_text(items, metric_keys, *, prefix: bool, stacked: bool = False) -> str:
     """Return the box's text: a line per distinct comparison, prefixed if several.
 
     Deduped by the *identity* of each item's ``metrics`` object, not by the
@@ -565,6 +598,13 @@ def _metrics_text(items, metric_keys, *, prefix: bool) -> str:
     row once, not once per item. Two genuinely different comparisons whose
     numbers happen to coincide are a different ``metrics`` object each and are
     never merged just because their rendered rows read the same.
+
+    ``stacked=False`` (the default) collapses one comparison's own metrics onto a
+    single wide line (``one_row``'s own newline per metric replaced with a space)
+    -- several *comparisons* can still stack, one row each. ``stacked=True`` keeps
+    ``one_row``'s newlines too, so a lone comparison's own metrics read
+    narrow-and-tall instead -- a profile panel's own shape, portrait rather than
+    the page-wide line a series panel affords.
     """
     from ocean_skill.plot.matplotlib_renderer import _metrics_text as one_row
     from ocean_skill.plot.summary import pretty_level
@@ -577,7 +617,9 @@ def _metrics_text(items, metric_keys, *, prefix: bool) -> str:
         if key in seen:
             continue
         seen.add(key)
-        text = one_row(metrics, metric_keys).replace("\n", " ")
+        text = one_row(metrics, metric_keys)
+        if not stacked:
+            text = text.replace("\n", " ")
         if not text:
             continue
         if prefix:

@@ -27,7 +27,7 @@ from ocean_skill import _stacklevel
 from ocean_skill.plot import series as _series_layout
 from ocean_skill.plot import style as _style
 
-__all__ = ["compose", "fan_season", "panel_title", "vertical_values"]
+__all__ = ["compose", "depth_range", "fan_season", "panel_title", "vertical_values"]
 
 #: Fraction of a panel's axes a corner box occupies -- the same measure
 #: :data:`ocean_skill.plot.series._CORNER_W`/``_CORNER_H`` use, imported rather than
@@ -137,6 +137,29 @@ def vertical_values(da) -> np.ndarray:
     too -- there is no third case to special-case.
     """
     return np.abs(np.asarray(_vertical_coord(da).values, dtype="float64"))
+
+
+def depth_range(
+    lines, *, ylim: tuple[float, float] | None = None
+) -> tuple[float, float]:
+    """``(y_bottom, y_top)`` -- deep at the bottom, shallow at top; ``ylim`` overrides.
+
+    One computation shared by both renderers and by every axis that draws this
+    range, whether that is every panel in the figure (``sharey=True``, the
+    default) or just one panel's own lines (``sharey=False``) -- so the two
+    modes agree on exactly how an empty or all-``NaN`` panel falls back
+    (``(1.0, 0.0)``, a full-figure axis with nothing plotted).
+    """
+    if ylim is not None:
+        return float(ylim[1]), float(ylim[0])
+    lines = list(lines)
+    if lines:
+        depths = np.concatenate([vertical_values(line.spec.values) for line in lines])
+        finite = depths[np.isfinite(depths)]
+        if finite.size:
+            lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
+            return (hi, lo) if hi > lo else (lo + 1.0, lo)
+    return 1.0, 0.0
 
 
 def _vertical_label(specs) -> str:
@@ -369,6 +392,7 @@ def compose(
     encode: dict[str, str | None] | None = None,
     metric_keys=(),
     metrics_loc: str = "auto",
+    metrics_stacked: bool = False,
     ncols: int | None = None,
     nrows: int | None = None,
 ) -> _series_layout.Layout:
@@ -376,6 +400,10 @@ def compose(
 
     ``ncols=``/``nrows=`` wrap the panels into a rectangular grid instead of
     today's single row/column default; see :func:`ocean_skill.plot.series.grid_shape`.
+    ``metrics_stacked=True`` keeps the statistics box narrow-and-tall (one metric
+    per line) instead of the default single wide line -- a box sized for a
+    portrait panel rather than a page-wide one; see
+    :func:`ocean_skill.plot.series._metrics_text`.
 
     Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does:
     at most one user facet (``rows=`` or ``cols=``), plus at most one
@@ -477,7 +505,10 @@ def compose(
         # ones run.
         specs = [line.spec for line in primary + second]
         box = _series_layout._metrics_text(
-            [i for _, i in group], metric_keys, prefix=len(group) > 1
+            [i for _, i in group],
+            metric_keys,
+            prefix=len(group) > 1,
+            stacked=metrics_stacked,
         )
         # Row count, not item count: a fanned season axis puts several items in
         # one group that all share one comparison's metrics, deduped to one row
