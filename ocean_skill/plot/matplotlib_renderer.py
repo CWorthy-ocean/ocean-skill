@@ -24,6 +24,11 @@ import numpy as np
 
 from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, norm_for
+from ocean_skill.plot.coastline import (
+    DEFAULT_COASTLINE_RESOLUTION,
+    is_gshhs,
+    normalize_coastline_resolution,
+)
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.typography import (
     FACET_PANEL_W_FRACTION,
@@ -449,17 +454,33 @@ def _basemap(
     tick_label_kwargs: dict[str, Any],
     left_labels: bool | None = None,
     bottom_labels: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Land fill, coastlines and labelled gridlines — what every map panel shares.
 
     Extracted from :func:`_draw_map` so a family with no field to draw (the
     ``locations`` map) still gets exactly this package's basemap rather than a
     near-copy that drifts. Returns the gridliner.
+
+    ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`) picks the
+    dataset: ``"auto"`` (the default) leaves cartopy's own ``AdaptiveScaler`` to pick
+    a Natural Earth scale from the panel's extent, a fixed ``"110m"``/``"50m"``/
+    ``"10m"`` pins one, and a GSHHS scale (``"coarse"``..``"full"``) draws from that
+    finer dataset instead — GSHHS ``levels=[1]`` is land, drawn twice (a filled
+    polygon, then its edge) since :class:`~cartopy.feature.GSHHSFeature` has no
+    separate coastline-only feature the way Natural Earth does.
     """
     import cartopy.feature as cfeature
 
-    ax.add_feature(cfeature.LAND, facecolor="0.85", zorder=2)
-    ax.coastlines(linewidth=0.4, zorder=3)
+    resolution = normalize_coastline_resolution(coastline_resolution)
+    if is_gshhs(resolution):
+        land = cfeature.GSHHSFeature(scale=resolution, levels=[1])
+        ax.add_feature(land, facecolor="0.85", edgecolor="none", zorder=2)
+        ax.add_feature(land, facecolor="none", edgecolor="black", linewidth=0.4, zorder=3)
+    else:
+        land = cfeature.LAND if resolution == "auto" else cfeature.LAND.with_scale(resolution)
+        ax.add_feature(land, facecolor="0.85", zorder=2)
+        ax.coastlines(resolution=resolution, linewidth=0.4, zorder=3)
     gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
     gl.top_labels = gl.right_labels = False
     if left_labels is not None:
@@ -544,6 +565,7 @@ def _draw_map(
     title_kwargs: dict[str, Any],
     left_labels: bool | None = None,
     bottom_labels: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Draw one map panel into ``ax`` and return its mappable.
 
@@ -556,6 +578,8 @@ def _draw_map(
     ``left_labels``/``bottom_labels`` of ``None`` leave cartopy's ``draw_labels=True``
     default standing, i.e. every panel labels its own axes; ``True``/``False`` set them
     explicitly, which is how a grid shows each axis once.
+
+    ``coastline_resolution`` is forwarded to :func:`_basemap` — see there.
     """
     import cartopy.crs as ccrs
 
@@ -569,6 +593,7 @@ def _draw_map(
         tick_label_kwargs=tick_label_kwargs,
         left_labels=left_labels,
         bottom_labels=bottom_labels,
+        coastline_resolution=coastline_resolution,
     )
     ring = domain_ring(domain)
     if ring is not None:
@@ -628,6 +653,7 @@ def _draw_row(
     shared_axis_labels: bool = True,
     is_bottom_row: bool = True,
     defaults: dict[str, dict[str, Any]] | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -691,6 +717,7 @@ def _draw_row(
                 title_kwargs=title_kwargs,
                 left_labels=(j == 0) if shared_axis_labels else None,
                 bottom_labels=is_bottom_row if shared_axis_labels else None,
+                coastline_resolution=coastline_resolution,
             )
         )
         ax.title._osk_size_pinned = title_pinned
@@ -1597,6 +1624,7 @@ def field_row(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -1659,6 +1687,12 @@ def field_row(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
+
+    ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`) picks the
+    coastline/land dataset — ``"auto"`` (the default) scales Natural Earth to each
+    panel's extent, ``"110m"``/``"50m"``/``"10m"`` pin a Natural Earth scale, and
+    ``"coarse"``..``"full"`` draw from GSHHS, finer than Natural Earth's own limit but
+    a one-time download the first time a given scale is used.
     """
     import matplotlib.pyplot as plt
 
@@ -1710,6 +1744,7 @@ def field_row(
         shared_axis_labels=shared_axis_labels,
         is_bottom_row=True,
         defaults=defaults,
+        coastline_resolution=coastline_resolution,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2147,6 +2182,7 @@ def field_grid(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -2207,6 +2243,9 @@ def field_grid(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
+
+    ``coastline_resolution`` picks the coastline/land dataset for every row — see
+    :func:`field_row`'s docstring.
     """
     import matplotlib.pyplot as plt
 
@@ -2287,6 +2326,7 @@ def field_grid(
             shared_axis_labels=shared_axis_labels,
             is_bottom_row=(i == n - 1),
             defaults=defaults,
+            coastline_resolution=coastline_resolution,
         )
         _draw_colorbar(
             fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2601,6 +2641,7 @@ def field_facet(
     zoom: float = 1.0,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -2647,6 +2688,9 @@ def field_facet(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
+
+    ``coastline_resolution`` picks the coastline/land dataset for every panel — see
+    :func:`field_row`'s docstring.
     """
     import matplotlib.pyplot as plt
 
@@ -2805,6 +2849,7 @@ def field_facet(
             # panel below me?" is the question, not "am I in the last row?".
             left_labels=(col == 0) if shared_axis_labels else None,
             bottom_labels=(i + ncols >= n_panels) if shared_axis_labels else None,
+            coastline_resolution=coastline_resolution,
         )
         used.append(ax)
         ims.append(im)
@@ -3405,6 +3450,7 @@ def skill_map(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     station_markers: bool = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Draw one map per skill metric: where the model agrees, metric by metric.
 
@@ -3475,6 +3521,9 @@ def skill_map(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
+
+    ``coastline_resolution`` picks the coastline/land dataset for every panel — see
+    :func:`field_row`'s docstring.
     """
     import warnings
 
@@ -3649,6 +3698,7 @@ def skill_map(
             # the bottom row is ragged when the metrics do not fill the grid, so the
             # question is "is there a panel below me?", not "am I in the last row?"
             bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
+            coastline_resolution=coastline_resolution,
         )
         stations = item.get("stations")
         if station_markers and stations is not None and name in stations["values"]:
@@ -3968,6 +4018,7 @@ def field_movie(
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
     progress: bool = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
 
@@ -4076,6 +4127,7 @@ def field_movie(
         shared_axis_labels=shared_axis_labels,
         is_bottom_row=True,
         defaults=defaults,
+        coastline_resolution=coastline_resolution,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -4192,6 +4244,7 @@ def facet_movie(
     size: str | Canvas | tuple[float, float | None] | float | None = None,
     zoom: float = 1.0,
     progress: bool = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
 
@@ -4286,6 +4339,7 @@ def facet_movie(
         gridline_kwargs=_merged(defaults["gridline_kwargs"], gridline_kwargs),
         tick_label_kwargs=_merged(defaults["tick_label_kwargs"], tick_label_kwargs),
         title_kwargs=_merged(defaults["title_kwargs"], title_kwargs),
+        coastline_resolution=coastline_resolution,
     )
     _draw_colorbar(
         fig,
@@ -4350,6 +4404,7 @@ def locations(
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     legend_kwargs: dict[str, Any] | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
 ):
     """Map where things sit: markers for points, dashed boxes for extents and
     domains, solid lines for selection slices.
@@ -4366,6 +4421,9 @@ def locations(
     :func:`~ocean_skill.plot.map_locations.map_locations`). ``tiles`` is accepted
     so ``renderer="both"`` can pass one set of options, but web tiles are the
     interactive renderer's; here it warns and draws the usual coastline basemap.
+
+    ``coastline_resolution`` picks that basemap's coastline/land dataset — see
+    :func:`field_row`'s docstring.
     """
     import warnings
 
@@ -4421,6 +4479,7 @@ def locations(
             {**DEFAULT_TICK_LABEL_KWARGS, "size": scale["tick_label"]},
             tick_label_kwargs,
         ),
+        coastline_resolution=coastline_resolution,
     )
 
     groups: dict[str, list[dict[str, Any]]] = {}
