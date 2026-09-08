@@ -2471,6 +2471,8 @@ def _series(
     size=None,
     zoom: float = 1.0,
     mark: str = "line",
+    sharex: bool = True,
+    sharey: bool = False,
     ncols=None,
     nrows=None,
     **_,
@@ -2492,11 +2494,28 @@ def _series(
     happen to agree) instead push each panel's *own* key outside its frame, on that
     side; a corner name (``"upper left"``, ...) still forces every panel's key into
     that corner, exactly as the static renderer does.
+
+    ``sharex``/``sharey`` (matching :func:`ocean_skill.plot.matplotlib_renderer.series`'
+    defaults, ``True``/``False``) read every panel against the same time or value
+    range instead of each panel's own -- computed once here exactly as the static
+    renderer's own ``plt.subplots(sharex=, sharey=)`` autoscale-together would, and
+    baked into every panel's own Curve rather than left to Bokeh's own same-label
+    linking (:func:`ocean_skill.plot.matplotlib_renderer.field_facet`'s
+    ``shared_axes`` — off here, since it links by label alone and would otherwise
+    couple every panel drawing a dimension it happens to call "value", regardless
+    of what this option asked for).
     """
     hv = _extension()
 
-    from ocean_skill.plot.series import compose
+    from ocean_skill.plot.series import compose, time_values, value_span
     from ocean_skill.plot.typography import SERIES_ASPECT
+
+    if residual and sharey:
+        raise ValueError(
+            "sharey=True would share one y-axis between each panel's own value "
+            "range and its residual strip's difference range below it -- not the "
+            "same quantity. Drop residual=True, or leave sharey at its default."
+        )
 
     layout = compose(
         items,
@@ -2517,17 +2536,38 @@ def _series(
         canvas_factor=_canvas_factor(size, zoom),
         aspect=panel_aspect or SERIES_ASPECT,
     )
-    # One axis, so one x dimension for every panel -- "time" for a real date axis,
-    # or the groupby dim's own name ("month", "year", ...) otherwise, so a
-    # renderer's axis label/hover cannot disagree with the static one (see
-    # ocean_skill.plot.series.compose, which decides `xlabel` once for both).
-    x_dim = hv.Dimension(layout.xlabel, label=layout.xlabel)
     # ``(position, label)`` pairs for a month axis's Jan..Dec spelling; None for a
     # date axis or a plain-numeric groupby dim (bokeh's own linear axis is fine
     # there) -- see ocean_skill.plot.series.groupby_ticks.
     xticks = list(layout.xticks) if layout.xticks else None
+
+    # A time range every panel (and residual strip, which shares its panel's time
+    # axis) draws to when sharex; a value range every panel draws to when sharey
+    # or an explicit ylim was given. None otherwise -- each panel keeps its own
+    # Bokeh-computed range, same as leaving the option off entirely.
+    shared_x = None
+    if sharex:
+        all_lines = [
+            line
+            for panel in layout.panels
+            for line in panel.lines + panel.secondary + panel.residual
+        ]
+        shared_x = value_span([time_values(line.spec.values) for line in all_lines])
+    shared_y = None
+    if ylim is not None:
+        shared_y = value_span([], lim=ylim)
+    elif sharey:
+        primary_lines = [line for panel in layout.panels for line in panel.lines]
+        shared_y = value_span(
+            [
+                np.asarray(line.spec.values.values, dtype="float64")
+                for line in primary_lines
+            ]
+        )
+
     plots = []
     for panel in layout.panels:
+        x_dim = hv.Dimension(layout.xlabel, label=layout.xlabel)
         # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
         # "name [unit]", and the two renderers must print one axis label, not two.
         y_dim = hv.Dimension("value", label=panel.ylabel)
@@ -2555,6 +2595,8 @@ def _series(
                 show_grid=True,
                 tools=["hover"],
                 **({"xticks": xticks} if xticks else {}),
+                **({"xlim": shared_x} if shared_x is not None else {}),
+                **({"ylim": shared_y} if shared_y is not None else {}),
             ),
             hv.opts.Overlay(
                 title=panel.title,
@@ -2573,8 +2615,6 @@ def _series(
             # whichever element type actually drew the line.
             opt_specs.append(hv.opts.Scatter(xticks=xticks))
         plot = overlay.opts(*opt_specs)
-        if ylim is not None:
-            plot = plot.opts(hv.opts.Curve(ylim=tuple(ylim)))
         plots.append(plot)
         if panel.residual:
             strip = hv.Overlay(
@@ -2594,6 +2634,7 @@ def _series(
                     frame_height=int(height * 0.35),
                     fontsize=fontsize,
                     **({"xticks": xticks} if xticks else {}),
+                    **({"xlim": shared_x} if shared_x is not None else {}),
                 ),
                 hv.opts.Overlay(show_legend=False, fontsize=fontsize),
             ]
@@ -2601,7 +2642,7 @@ def _series(
                 strip_specs.append(hv.opts.Scatter(xticks=xticks))
             plots.append(strip.opts(*strip_specs))
 
-    out = hv.Layout(plots).cols(layout.ncols)
+    out = hv.Layout(plots).cols(layout.ncols).opts(hv.opts.Layout(shared_axes=False))
     return out.opts(title=title or "")
 
 
@@ -2823,6 +2864,7 @@ def _profile(
     encode=None,
     metrics_loc="auto",
     metric_keys=DEFAULT_METRIC_KEYS,
+    metrics_stacked: bool = False,
     legend=True,
     xlim=None,
     ylim=None,
@@ -2832,6 +2874,8 @@ def _profile(
     size=None,
     zoom: float = 1.0,
     mark: str = "line",
+    sharex: bool = False,
+    sharey: bool = True,
     ncols=None,
     nrows=None,
     **_,
@@ -2845,10 +2889,19 @@ def _profile(
     the bottom, the same way the static renderer's ``ax.set_ylim(deep, shallow)``
     achieves it -- ``ylim=(deep, shallow)`` on the bokeh side, deliberately *not*
     also ``invert_yaxis=True``, which would flip an already-descending range back
-    to ascending. One shared depth range across every panel in the figure,
-    computed once here exactly as
-    :func:`ocean_skill.plot.matplotlib_renderer.profile` computes it, rather than
-    left to each panel's own data range.
+    to ascending.
+
+    ``sharey=True`` (the default) reads a shared depth range across every panel,
+    computed once exactly as
+    :func:`ocean_skill.plot.matplotlib_renderer.profile` computes it; ``sharey=False``
+    gives each panel its own range from its own lines instead -- a shallow station no
+    longer inherits a deep neighbour's mostly-empty axis. ``sharex=False`` (the
+    default) leaves the value axis per-panel, matching the static renderer;
+    ``sharex=True`` links it. Either way, "linked" means every linked panel's Curve
+    shares one dimension *identity*, not just a matching label -- the same live
+    pan/zoom Bokeh gives ``field_facet``'s ``shared_axes`` -- so an unlinked axis
+    gets its own dimension per panel instead of silently sharing one just because
+    two panels both happen to draw a dimension called "value".
 
     A ``secondary_x`` panel's top axis is drawn by :func:`_secondary_x_hook` --
     HoloViews' ``multi_y`` has no x-axis counterpart, and even ``invert_axes=True``
@@ -2858,7 +2911,8 @@ def _profile(
     """
     hv = _extension()
 
-    from ocean_skill.plot.profile import compose, vertical_values
+    from ocean_skill.plot.profile import compose, depth_range
+    from ocean_skill.plot.series import value_span
     from ocean_skill.plot.typography import PROFILE_ASPECT
 
     layout = compose(
@@ -2869,6 +2923,7 @@ def _profile(
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        metrics_stacked=metrics_stacked,
         ncols=ncols,
         nrows=nrows,
     )
@@ -2878,30 +2933,39 @@ def _profile(
         aspect=panel_aspect or PROFILE_ASPECT,
     )
 
-    all_lines = [
-        line for panel in layout.panels for line in panel.lines + panel.secondary
-    ]
-    if ylim is not None:
-        y_range = (float(ylim[1]), float(ylim[0]))
-    elif all_lines:
-        depths = np.concatenate(
-            [vertical_values(line.spec.values) for line in all_lines]
+    # A depth range every panel draws to when sharey (the default), each panel's
+    # own range otherwise; the whole-figure ``depths from every line`` computation
+    # matches the static renderer's exactly (see ocean_skill.plot.profile.depth_range).
+    # Bokeh links two panels' axes only when they share one dimension *label* --
+    # not merely a matching name -- so a plain "same label, unset range" figure
+    # would silently link every panel regardless of sharey/sharex; shared_axes=False
+    # on the whole Layout below turns that off, and this range (baked into every
+    # panel's own Curve opts) is what makes the "shared" case still read as one
+    # axis, just without holoviews' own live-linked pan/zoom.
+    shared_depth = None
+    if sharey:
+        all_lines = [
+            line for panel in layout.panels for line in panel.lines + panel.secondary
+        ]
+        shared_depth = depth_range(all_lines, ylim=ylim)
+    shared_value = None
+    if sharex:
+        primary_lines = [line for panel in layout.panels for line in panel.lines]
+        shared_value = value_span(
+            [
+                np.asarray(line.spec.values.values, dtype="float64")
+                for line in primary_lines
+            ],
+            lim=xlim,
         )
-        finite = depths[np.isfinite(depths)]
-        lo, hi = (
-            (float(np.nanmin(finite)), float(np.nanmax(finite)))
-            if finite.size
-            else (0.0, 1.0)
-        )
-        y_range = (hi, lo) if hi > lo else (lo + 1.0, lo)
-    else:
-        y_range = (1.0, 0.0)
 
     plots = []
     for panel in layout.panels:
-        x_dim = hv.Dimension("value", label=panel.xlabel or "")
-        y_dim = hv.Dimension("depth", label=panel.ylabel)
-        dims = (x_dim, y_dim)
+        y_range = shared_depth or depth_range(panel.lines + panel.secondary, ylim=ylim)
+        dims = (
+            hv.Dimension("value", label=panel.xlabel or ""),
+            hv.Dimension("depth", label=panel.ylabel),
+        )
         # Bands first, so every line's envelope sits beneath every line -- the
         # same two-pass order the static renderer's fill_betweenx-then-plot
         # draws in, and here it also matters for z-order within the Overlay.
@@ -2918,7 +2982,7 @@ def _profile(
             # exactly, on every element type a secondary line can produce.
             second_dims = (
                 hv.Dimension("secondary", label=panel.secondary_xlabel or ""),
-                y_dim,
+                dims[1],
             )
             bands += [
                 band
@@ -2941,11 +3005,17 @@ def _profile(
             tools=["hover"],
             ylim=y_range,
         )
-        if xlim is not None and not panel.secondary:
-            # With a twin, xlim reaches the primary axis through the hook's
+        if not panel.secondary:
+            # With a twin, x reaches the primary axis through the hook's own
             # pinned range instead -- applying it as a Curve opt here would
             # clamp the shared pre-hook range under the secondary curves too.
-            curve_opts["xlim"] = tuple(xlim)
+            x_range = None
+            if xlim is not None:
+                x_range = tuple(xlim)
+            elif shared_value is not None:
+                x_range = shared_value
+            if x_range is not None:
+                curve_opts["xlim"] = x_range
         overlay_opts = dict(
             title=panel.title,
             show_legend=bool(legend),
@@ -2968,7 +3038,7 @@ def _profile(
         )
         plots.append(plot)
 
-    out = hv.Layout(plots).cols(layout.ncols)
+    out = hv.Layout(plots).cols(layout.ncols).opts(hv.opts.Layout(shared_axes=False))
     return out.opts(title=title or "")
 
 

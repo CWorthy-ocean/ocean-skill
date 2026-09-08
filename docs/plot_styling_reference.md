@@ -776,6 +776,44 @@ non-geographic axis: with no lat/lon gridlines to draw, it decides whether the
 depth label repeats on all three panels or only the leftmost, since the other
 two share the same depth axis.
 
+### `sharex` / `sharey` (`series` and `profile`)
+
+Matplotlib's own names, for the matplotlib-native thing they already mean in a
+multi-panel grid: whether every panel reads the same range on that axis, or each
+autoscales to its own data. Neither line family auto-solves this from the data the
+way the map families' `shared_axes` links pan/zoom by domain — the two defaults
+instead match what each family already draws when the option is left off:
+
+| family | `sharex` | `sharey` | reading |
+|---|---|---|---|
+| `series` | `True` | `False` | every panel reads the same time axis; each keeps its own value range |
+| `profile` | `False` | `True` | every panel reads the same depth axis; each keeps its own value range |
+
+```python
+cs.plot(cols="comparison", ncols=4, sharey=False)   # profile: each station's own depth range
+run.plot(cols="variable", sharey=True)              # series: line every panel's value up too
+```
+
+A profile grid of stations at very different depths is the case `sharey=False`
+exists for: at the shared default, a 30 m station's panel is mostly empty axis below
+its last sample, stretched to match the deepest station in the grid. `series`' own
+axis to watch is the opposite one -- turning `sharey=True` on there only makes sense
+when every panel already draws the same quantity (`cols="comparison"`, say); a
+`series` grid faceted by *variable* has a different unit in each panel, and sharing
+that axis would draw one meaningless straight line for whichever panel's scale lost.
+
+Both renderers honour the toggle identically -- the value drawn is computed once
+(the same combined-or-per-panel range either way) and applied to both, rather than
+left to Bokeh's own same-*label* linking (which would otherwise link any two panels
+that happen to draw a dimension it labels the same, regardless of this option, since
+matplotlib's `sharex`/`sharey` has no such coincidental trigger). The one trade this
+makes on the interactive side: a Bokeh figure's live pan/zoom no longer follows its
+neighbours the way `field_facet`'s `shared_axes` keeps genuinely linked -- every panel
+still opens on the same range, but panning one does not move the others.
+
+`series`' `residual=True` strip is a difference, not the panel's own value -- pairing
+it with `sharey=True` is refused, the same way a `ncols`/facet conflict is.
+
 ### `labels` (summary diagrams)
 
 `taylor`, `target` and `paired` only. Chooses how each point is identified:
@@ -1249,6 +1287,8 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 | `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
+| `sharex` | `True` | every panel reads the same time range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
+| `sharey` | `False` | every panel keeps its own value range; refused with `residual=True` |
 
 ### `line_kwargs`
 
@@ -1381,6 +1421,14 @@ for example).
 | `panel_aspect` | `0.62` | width/height of a panel — portrait, since a water column reads top-to-bottom |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
+| `sharex` | `False` | every panel keeps its own value range |
+| `sharey` | `True` | every panel reads the same depth range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
+| `metrics_stacked` | `False` | draw the statistics box narrow-and-tall (one metric per line) instead of one wide line — a portrait panel's own shape, not a page-wide series panel's |
+
+Panel width is not the metrics box's doing either way — it comes from `panel_aspect`
+(or an explicit `figsize`) divided across `ncols`, the same as any other panel
+dimension. `metrics_stacked` only changes how the box's own text wraps within
+whatever width the panel already has.
 
 There is no `residual` option yet (a `test − reference` strip beside each depth
 panel is a follow-up) and no `profile_movie` (several casts over time played as

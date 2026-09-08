@@ -991,7 +991,8 @@ def series(
     zoom: float = 1.0,
     font_scale: float = 1.0,
     fit_text: bool = True,
-    shared_axis_labels: bool = True,
+    sharex: bool = True,
+    sharey: bool = False,
     ncols: int | None = None,
     nrows: int | None = None,
     title_kwargs: dict[str, Any] | None = None,
@@ -1035,6 +1036,13 @@ def series(
     because it needs its own colour scale, while a difference *series* is a note on the
     panel above it, and drawing it always would double the axes on every figure.
 
+    ``sharex=True`` (the default) links every panel's time axis, dropping inner tick
+    labels the way a grid's shared edge normally does; ``sharey=False`` (the default)
+    leaves each panel's value axis to its own data, since two panels are rarely the
+    same quantity on the same scale the way a shared time axis is. Pass ``sharey=True``
+    to line them up when they are (:func:`ocean_skill.plot.profile`'s twin, depth,
+    defaults the other way -- shared, since every panel there reads the same axis).
+
     Sized like every other family — ``size``/``zoom``/``figsize``, type from geometry
     (:mod:`ocean_skill.plot.typography`) — with the statistics box placed in whichever
     corner the data leaves emptiest, since a line panel, unlike a map, does not fill
@@ -1055,6 +1063,12 @@ def series(
             f"mark={mark!r} is not a series mark; expected one of {SERIES_MARKS}. "
             '(A map family\'s marks -- "pcolormesh", "contourf", "scatter" -- draw a '
             "field, not a line.)"
+        )
+    if residual and sharey:
+        raise ValueError(
+            "sharey=True would share one y-axis between each panel's own value "
+            "range and its residual strip's difference range below it -- not the "
+            "same quantity. Drop residual=True, or leave sharey at its default."
         )
     layout = _series_layout.compose(
         items,
@@ -1111,7 +1125,8 @@ def series(
             nrows=len(heights),
             ncols=1,
             figsize=figsize,
-            sharex=shared_axis_labels,
+            sharex=sharex,
+            sharey=sharey,
             squeeze=False,
             gridspec_kw={"height_ratios": heights},
             layout="constrained",
@@ -1121,7 +1136,8 @@ def series(
             nrows=layout.nrows,
             ncols=layout.ncols,
             figsize=figsize,
-            sharex=shared_axis_labels,
+            sharex=sharex,
+            sharey=sharey,
             squeeze=False,
             layout="constrained",
         )
@@ -1284,6 +1300,7 @@ def profile(
     encode: dict[str, str | None] | None = None,
     metrics_loc: str = "auto",
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    metrics_stacked: bool = False,
     mark: str = "line",
     legend: bool = True,
     xlim: tuple[float, float] | None = None,
@@ -1296,6 +1313,8 @@ def profile(
     zoom: float = 1.0,
     font_scale: float = 1.0,
     fit_text: bool = True,
+    sharex: bool = False,
+    sharey: bool = True,
     ncols: int | None = None,
     nrows: int | None = None,
     title_kwargs: dict[str, Any] | None = None,
@@ -1338,6 +1357,21 @@ def profile(
     ``(0, 200)`` — not axes order, since the axis is always inverted regardless
     of what is passed.
 
+    ``sharey=True`` (the default) reads every panel down the same depth range,
+    since a grid of casts is usually meant to compare like-for-like; pass
+    ``sharey=False`` to let each panel autoscale to its own deepest sample --
+    a shallow station no longer inherits a deep neighbour's mostly-empty axis.
+    ``sharex=False`` (the default) leaves the value axis per-panel, the same as
+    :func:`series`' value axis; pass ``sharex=True`` to line panels up on it
+    when they share the one quantity.
+
+    ``metrics_stacked=True`` draws the statistics box narrow-and-tall (one metric
+    per line) instead of the default single wide line -- fits a narrow, portrait
+    panel that a page-wide box would otherwise overrun into its neighbours; see
+    :func:`ocean_skill.plot.series._metrics_text`. Panel width itself is not the
+    box's doing either way -- it comes from ``panel_aspect``/``figsize`` divided
+    across ``ncols``, the same as any other panel dimension.
+
     Sized like every other line family — ``size``/``zoom``/``figsize``, type from
     geometry (:mod:`ocean_skill.plot.typography`) — with the statistics box placed
     in whichever corner the data leaves emptiest, since a profile panel, unlike a
@@ -1366,6 +1400,7 @@ def profile(
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        metrics_stacked=metrics_stacked,
         ncols=ncols,
         nrows=nrows,
     )
@@ -1400,33 +1435,24 @@ def profile(
         nrows=layout.nrows,
         ncols=layout.ncols,
         figsize=figsize,
-        sharey=True,
+        sharex=sharex,
+        sharey=sharey,
         squeeze=False,
         layout="constrained",
     )
     flat = list(axes.ravel())
 
-    # One depth range for the whole figure -- explicit set_ylim on every axis
-    # rather than relying on invert_yaxis()'s toggle state, which sharey=True
-    # would otherwise flip twice on every axis but the first.
-    all_lines = [
-        line for panel in layout.panels for line in panel.lines + panel.secondary
-    ]
-    if ylim is not None:
-        y_bottom, y_top = float(ylim[1]), float(ylim[0])
-    elif all_lines:
-        depths = np.concatenate(
-            [_profile_layout.vertical_values(line.spec.values) for line in all_lines]
-        )
-        finite = depths[np.isfinite(depths)]
-        lo, hi = (
-            (float(np.nanmin(finite)), float(np.nanmax(finite)))
-            if finite.size
-            else (0.0, 1.0)
-        )
-        y_bottom, y_top = (hi, lo) if hi > lo else (lo + 1.0, lo)
-    else:
-        y_bottom, y_top = 1.0, 0.0
+    # One depth range for the whole figure when sharey -- explicit set_ylim on
+    # every axis rather than relying on invert_yaxis()'s toggle state, which
+    # sharey=True would otherwise flip twice on every axis but the first. With
+    # sharey=False each panel instead gets its own range from its own lines,
+    # inside the loop below.
+    shared_depth = None
+    if sharey:
+        all_lines = [
+            line for panel in layout.panels for line in panel.lines + panel.secondary
+        ]
+        shared_depth = _profile_layout.depth_range(all_lines, ylim=ylim)
 
     per_panel: list[tuple[Any, list]] = []
     for index, panel in enumerate(layout.panels):
@@ -1449,10 +1475,16 @@ def profile(
         if panel.xlabel_color:
             ax.xaxis.label.set_color(panel.xlabel_color)
             ax.tick_params(axis="x", labelcolor=panel.xlabel_color)
-        if layout.ncols == 1 or index % layout.ncols == 0:
+        if not sharey or layout.ncols == 1 or index % layout.ncols == 0:
+            # A shared depth axis only needs its label on the left column --
+            # every other column repeats the same numbers. Without sharey each
+            # panel has its own scale, so its label belongs on every panel.
             ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
         if xlim is not None:
             ax.set_xlim(*xlim)
+        y_bottom, y_top = shared_depth or _profile_layout.depth_range(
+            panel.lines + panel.secondary, ylim=ylim
+        )
         ax.set_ylim(y_bottom, y_top)
         ax.tick_params(axis="both", labelsize=scale["tick_label"])
         for label in ax.get_xticklabels() + ax.get_yticklabels():
@@ -1461,12 +1493,14 @@ def profile(
         if panel.secondary:
             # A top x axis, not twinx()'s right-hand y: a profile's value axis is
             # x, so its twin grows the same way series' grows a twin y -- placed
-            # after set_ylim, whose explicit (y_bottom, y_top) the twin inherits
-            # by sharing the parent's y axis (sharey=True across the grid would
-            # otherwise leave the twin free to autoscale on its own).
+            # after set_ylim. With sharey=True the twin inherits (y_bottom, y_top)
+            # by sharing the parent's y axis; with sharey=False there is no shared
+            # axis to inherit from, so it is set explicitly instead.
             twin = ax.twiny()
             handles += _draw_profile_lines(twin, panel.secondary, line_kwargs, mark=mark)
             per_panel[-1] = (ax, handles)
+            if not sharey:
+                twin.set_ylim(y_bottom, y_top)
             twin.set_xlabel(panel.secondary_xlabel or "", fontsize=scale["axes_label"])
             twin.tick_params(labelsize=scale["tick_label"])
             if panel.secondary_xlabel_color:
