@@ -154,6 +154,41 @@ def test_a_vertical_select_alongside_a_pinned_time_is_left_ordinary(stubbed_tsp_
     assert select == {"time": "2024-01-01", "depth": 10}
 
 
+def test_month_climatology_reads_as_one_profile_per_bin(stubbed_tsp_fan):
+    """aggregate={"time": {"groupby": "month", ...}}, no select at all: time folds
+    into monthly bins rather than one instant, but each bin is still exactly a
+    cast -- depth is kept and filled with the reference's own levels, with no
+    over= or depths= needed.
+    """
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert len(stubbed_tsp_fan) == 1
+    over, select = stubbed_tsp_fan[0]
+    assert over == "Z"
+    assert select == {"depth": [1.0, 10.0, 30.0]}
+
+
+def test_month_climatology_pinned_to_one_depth_keeps_time(stubbed_tsp_fan):
+    """A climatology *and* an explicit scalar depth (a seasonal cycle at one
+    depth) is not the profile case -- the caller's own depth is honored, not
+    replaced by the reference's own levels, and time is kept instead."""
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        select={"depth": 10.0},
+        aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert len(stubbed_tsp_fan) == 1
+    over, select = stubbed_tsp_fan[0]
+    assert over == "time"
+    assert select == {"depth": 10.0}
+
+
 # -- _is_profile_reference: the extended scope ----------------------------------------
 
 
@@ -175,3 +210,24 @@ def test_is_profile_reference_still_ignores_trajectoryprofile():
         lambda n: SimpleNamespace(metadata={"featureType": "trajectoryProfile"}),
     ):
         assert not _is_profile_reference("traj", None, time_collapsed=True)
+
+
+def test_is_profile_reference_climatology_param_for_tsp():
+    with mock.patch(
+        "ocean_skill.catalog.resolve",
+        lambda n: SimpleNamespace(metadata={"featureType": "timeSeriesProfile"}),
+    ):
+        assert not _is_profile_reference("tsp", None, climatology=False)
+        assert _is_profile_reference("tsp", None, climatology=True)
+        assert _is_profile_reference("tsp", "Z", climatology=True)
+        assert not _is_profile_reference("tsp", "time", climatology=True)  # opts out
+        # A trajectoryProfile still carries more than one candidate axis --
+        # climatology alone does not resolve it either.
+
+
+def test_is_profile_reference_still_ignores_trajectoryprofile_for_climatology():
+    with mock.patch(
+        "ocean_skill.catalog.resolve",
+        lambda n: SimpleNamespace(metadata={"featureType": "trajectoryProfile"}),
+    ):
+        assert not _is_profile_reference("traj", None, climatology=True)

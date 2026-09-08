@@ -169,6 +169,22 @@ DEFAULT_PAD = 1.0
 #: is negligible next to a domain this exists to avoid reading whole.
 POINT_WINDOW_CELLS = 5
 
+#: The window used instead of :data:`POINT_WINDOW_CELLS` when the comparison's own
+#: regrid method is known in advance to resolve to a nearest-neighbour sample (see
+#: :meth:`ocean_skill.comparison.Comparison.align`, which threads this in as
+#: ``point_window_cells`` for the *test* lane only). A nearest sample keeps exactly
+#: one cell, so the full 5-cell margin -- sized to also cover an interpolating
+#: stencil -- reads ~(2*5+1)**2 = 121 columns through an expensive per-column
+#: reduction (a climatology mean+std, a vertical transform) for 1 that is ever kept.
+#: 1 cell (a 3x3 window) still leaves a one-cell margin so a small catalog/data
+#: position mismatch is absorbed without a re-read (see
+#: :meth:`~ocean_skill.comparison.Comparison._verify_point_window`, whose tolerance
+#: is coupled to whichever window was actually used) while cutting that read by
+#: ~13x; a caller chasing the full ~121x win can pass ``point_window_cells=0`` (a
+#: bare 1x1) through the same parameter, at the cost of a re-read whenever the
+#: catalog and data positions disagree.
+NEAREST_POINT_WINDOW_CELLS = 1
+
 
 def _is_point_bbox(bbox) -> bool:
     """Whether ``bbox`` names one position rather than a region.
@@ -376,7 +392,9 @@ def subset_to_box(obj, bbox, *, subject: str = "the source"):
     return out
 
 
-def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
+def subset_to_bbox(
+    obj, bbox, pad: float = DEFAULT_PAD, *, point_window_cells: int | None = None
+):
     """Subset ``obj`` to ``bbox`` (lon_min, lat_min, lon_max, lat_max) plus ``pad``.
 
     Honours each axis's stored direction (see
@@ -403,9 +421,11 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     different crop entirely (:func:`_point_window`): ``pad`` (a *region* margin, in
     degrees) is the wrong unit for a *point* eventually sampled at one cell, and on
     a small grid can keep nearly the whole domain for nothing. The window is
-    instead sized in cells around the true nearest one
-    (:data:`POINT_WINDOW_CELLS`), ``pad`` is ignored, and this never raises — an
-    out-of-domain point still has a nearest cell, so a small (if unhelpful) window
+    instead sized in cells around the true nearest one (:data:`POINT_WINDOW_CELLS`
+    by default, or ``point_window_cells`` when a caller who already knows the regrid
+    method resolves to nearest passes a tighter one -- see
+    :data:`NEAREST_POINT_WINDOW_CELLS`), ``pad`` is ignored, and this never raises —
+    an out-of-domain point still has a nearest cell, so a small (if unhelpful) window
     comes back rather than "no overlap"; the caller decides what the far-off nearest
     cell means (see :func:`sample_at`'s own offset warning).
     """
@@ -415,7 +435,8 @@ def subset_to_bbox(obj, bbox, pad: float = DEFAULT_PAD):
     if lon is None or lat is None:
         return obj
     if _is_point_bbox(bbox):
-        return _point_window(obj, lon, lat, float(bbox[0]), float(bbox[1]))
+        cells = POINT_WINDOW_CELLS if point_window_cells is None else point_window_cells
+        return _point_window(obj, lon, lat, float(bbox[0]), float(bbox[1]), cells=cells)
     lon_values = np.asarray(obj[lon])
     if lon not in obj.dims and lon_values.ndim == 2:
         out, inside = _curvilinear_window(obj, lon, lat, bbox, pad=pad)
@@ -982,6 +1003,21 @@ def _check_units(test, reference):
     return test
 
 
+def _extra_dims(da, keep: tuple[str, ...] = ()) -> set[str]:
+    """Dims on ``da`` beyond its horizontal axes and ``keep`` -- the same "extra"
+    set :func:`_require_2d` refuses, factored out so :func:`align` can *check*
+    what would be refused (to decide whether a climatology dim standing on both
+    lanes is safe to add to ``keep``) without duplicating the horizontal-axis
+    lookup. Empty when lon/lat cannot be found (nothing to measure against; the
+    regridder complains instead).
+    """
+    lon, lat = _lon_name(da), _lat_name(da)
+    if lon is None or lat is None:
+        return set()
+    spatial = set(da[lon].dims) | set(da[lat].dims) | set(keep)
+    return {str(d) for d in da.dims if d not in spatial}
+
+
 def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
     """Raise a useful error if ``da`` still carries a dimension beyond lat/lon.
 
@@ -996,14 +1032,7 @@ def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
     those is still refused: a pointwise metric reduces over the axes it was given, and
     there is nothing it could do with a further one.
     """
-    # The horizontal dims are whatever lon/lat are defined *on* — not necessarily
-    # named lat/lon: a curvilinear ROMS field is (eta_rho, xi_rho) with 2-D lon/lat
-    # coordinates riding on those dims.
-    lon, lat = _lon_name(da), _lat_name(da)
-    if lon is None or lat is None:
-        return  # nothing to measure against; let the regridder complain instead
-    spatial = set(da[lon].dims) | set(da[lat].dims) | set(keep)
-    extra = [str(d) for d in da.dims if d not in spatial]
+    extra = sorted(_extra_dims(da, keep))
     if not extra:
         return
     if keep:
@@ -2210,6 +2239,16 @@ def align(
             "not yet built. Drop over= for a section comparison."
         )
 
+    # Read before match_axis below resolves `over` to the literal dim name it
+    # actually matched on (e.g. "z" or "depth") -- _CF_AXES only recognizes the
+    # "Z"/"vertical" spellings, the same check :meth:`ocean_skill.comparison.
+    # Comparison._is_profile_reference`-style code already gates on, deliberately
+    # excluding the generic "z"/"depth" literal-axis spellings (see is_profile's
+    # own docstring).
+    from ocean_skill.operators import _CF_AXES
+
+    is_vertical_over = _CF_AXES.get(over) == "vertical"
+
     if over is not None:
         test, reference, report = match_axis(
             test,
@@ -2225,6 +2264,31 @@ def align(
         over = str(report.pop("axis", over))
 
     keep = () if over is None else (over,)
+    if is_vertical_over and not is_section:
+        # A climatology (aggregate={"time": {"groupby"/"resample": ...}}) folds
+        # the raw time axis into bins on *both* lanes alike -- a "month"/"season"
+        # dim standing on both test and reference, exactly the shape a profile
+        # comparison scored down depth (over="Z") is meant to draw one row per
+        # bin from (see ocean_skill.plot.profile's month/season fan). That is not
+        # the leftover, un-reduced axis _require_2d otherwise refuses: it is
+        # legitimate only when the *same* dim, marked as a genuine fold
+        # (operators.TIME_GROUPBY_ATTR), survives *both* lanes identically -- one
+        # lane alone carrying it (an ordinary field a caller forgot to reduce)
+        # is still refused below, unchanged.
+        from .operators import TIME_GROUPBY_ATTR
+
+        test_extra = _extra_dims(test, keep)
+        ref_extra = _extra_dims(reference, keep)
+        if test_extra and test_extra == ref_extra and len(test_extra) == 1:
+            (dim,) = test_extra
+            t_coord, r_coord = test.coords.get(dim), reference.coords.get(dim)
+            if (
+                t_coord is not None
+                and TIME_GROUPBY_ATTR in t_coord.attrs
+                and r_coord is not None
+                and TIME_GROUPBY_ATTR in r_coord.attrs
+            ):
+                keep = (*keep, dim)
     if not is_section:
         # A profile reference is one cast at one instant, so a time-varying test lane
         # is sampled at that instant before the dimensionality check -- otherwise its

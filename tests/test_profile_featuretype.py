@@ -128,6 +128,57 @@ def test_timeseriesprofile_with_a_scalar_season_select_implies_over_Z(monkeypatc
     assert "time is narrowed to one value" in c.over_reason
 
 
+# -- "timeSeriesProfile": a climatology fold (groupby/resample) keeps depth too --------
+
+
+def test_timeseriesprofile_with_month_climatology_implies_over_Z(monkeypatch):
+    """A groupby-month climatology folds time into bins rather than reducing it to
+    one instant -- each bin is still exactly a cast, so depth is kept and faceted
+    by the bins, with no over= or depths= needed."""
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(
+        aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert c.over == "Z"
+    assert "climatology" in c.over_reason
+
+
+def test_timeseriesprofile_climatology_pinned_to_one_depth_still_implies_over_time(
+    monkeypatch,
+):
+    """A climatology *and* an explicit scalar depth -- a seasonal cycle at one
+    depth -- still keeps time, exactly like the plain mooring-at-a-depth case."""
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(
+        select={"depth": 50.0},
+        aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert c.over == "time"
+    assert "depth is narrowed to one value" in c.over_reason
+
+
+def test_timeseriesprofile_climatology_with_explicit_depth_list_implies_over_Z(
+    monkeypatch,
+):
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(
+        select={"depth": [0.0, 25.0, 50.0]},
+        aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}},
+    )
+    assert c.over == "Z"
+    assert "climatology" in c.over_reason
+
+
+def test_timeseriesprofile_resample_climatology_implies_over_Z(monkeypatch):
+    """resample (consecutive periods) folds time the same way groupby does."""
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(
+        aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+    )
+    assert c.over == "Z"
+    assert "climatology" in c.over_reason
+
+
 # -- explicit over= always wins, whatever the featureType says --------------------------
 
 

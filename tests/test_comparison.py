@@ -488,3 +488,68 @@ def test_a_point_bbox_folds_a_marker_into_the_lane_key(monkeypatch):
         select={"_aggregate": None, "_bbox": [102.0, 12.0, 102.0, 12.0]},
     )
     assert pre_existing_key not in saved_keys
+
+
+def test_point_window_cells_shrinks_the_read_and_the_cache_key(monkeypatch):
+    """``point_window_cells=`` (threaded from ``Comparison.align`` for a nearest
+    sample at a profile/timeSeriesProfile station) keeps fewer columns than the
+    ordinary window, and folds the actual value used into the cache key -- so a
+    shrunk and a full window are never served in place of each other."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.align import NEAREST_POINT_WINDOW_CELLS, POINT_WINDOW_CELLS
+    from ocean_skill.cache import key_for_prepared
+    from ocean_skill.comparison import prepare_source
+
+    time = pd.date_range("2015-01-01", periods=3, freq="D")
+    lon = np.linspace(99.0, 101.0, 21)  # 0.1-degree spacing, station at (100, 20)
+    lat = np.linspace(19.0, 21.0, 21)
+    ds = xr.Dataset(
+        {"temp": (("time", "lat", "lon"), np.ones((3, 21, 21)))},
+        coords={"time": time, "lat": lat, "lon": lon},
+    )
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata={}))
+
+    full, _ = prepare_source(
+        "grid", "temp", None, None, use_cache=False, bbox=(100.0, 20.0, 100.0, 20.0)
+    )
+    shrunk, _ = prepare_source(
+        "grid",
+        "temp",
+        None,
+        None,
+        use_cache=False,
+        bbox=(100.0, 20.0, 100.0, 20.0),
+        point_window_cells=NEAREST_POINT_WINDOW_CELLS,
+    )
+    assert full.sizes["lon"] == full.sizes["lat"] == 2 * POINT_WINDOW_CELLS + 1
+    assert (
+        shrunk.sizes["lon"]
+        == shrunk.sizes["lat"]
+        == 2 * NEAREST_POINT_WINDOW_CELLS + 1
+    )
+
+    shrunk_key = key_for_prepared(
+        source="grid",
+        variable="temp",
+        select={
+            "_aggregate": None,
+            "_bbox": [100.0, 20.0, 100.0, 20.0],
+            "_point_window": NEAREST_POINT_WINDOW_CELLS,
+        },
+    )
+    full_key = key_for_prepared(
+        source="grid",
+        variable="temp",
+        select={
+            "_aggregate": None,
+            "_bbox": [100.0, 20.0, 100.0, 20.0],
+            "_point_window": POINT_WINDOW_CELLS,
+        },
+    )
+    assert shrunk_key != full_key
