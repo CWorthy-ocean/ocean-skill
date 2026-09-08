@@ -19,6 +19,7 @@ import warnings
 from unittest import mock
 
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -352,6 +353,45 @@ def test_lane_field_round_trips_with_its_name_and_depth(aligned):
     assert depth == 100.0
     assert np.allclose(back, field, equal_nan=True)
     assert back.attrs == field.attrs, "bookkeeping attrs must not leak onto the array"
+
+
+def test_lane_field_round_trip_preserves_an_adcp_moorings_position():
+    """A ``timeSeriesProfile`` mooring's scalar position must survive save/load.
+
+    Mirrors the real shape ``ocean_skill.sources.read`` produces for a native ADCP
+    NetCDF (see its size-1 X/Y squeeze): ``DEPTH`` is a dimension with no
+    same-named coordinate of its own (only the non-dimension ``depth`` coordinate
+    carries its values), and ``LATITUDE``/``LONGITUDE`` are scalar coordinates on
+    neither ``DEPTH`` nor ``TIME``. The bug this guards: a cache entry that drops
+    the scalar position would make :func:`ocean_skill.align.point_of` return
+    ``None`` on the way back out, which flips ``Field.family`` from
+    ``"time_depth"`` to ``"field_facet"`` and makes ``.plot()`` refuse a field
+    that plots fine straight off a fresh read (see ``cache._FORMAT_VERSION``'s
+    own **7** entry for the entry this once let slip through uncaught).
+    """
+    from ocean_skill.operators import resolve_dim
+
+    n_depth, n_time = 18, 12
+    da = xr.DataArray(
+        np.random.default_rng(4).normal(0.0, 0.2, (n_depth, n_time)),
+        dims=("DEPTH", "TIME"),
+        coords={
+            "depth": ("DEPTH", np.linspace(58.0, -10.0, n_depth)),
+            "TIME": pd.date_range("2024-04-04", periods=n_time, freq="h"),
+            "LATITUDE": 64.38,
+            "LONGITUDE": -21.52,
+        },
+        name="eastward_sea_water_velocity",
+    )
+    assert _align.point_of(da) == (-21.52, 64.38)
+
+    cache.save_field("adcp_mooring_probe", da, actual_depth=None)
+    back, depth = cache.load_field("adcp_mooring_probe")
+
+    assert depth is None
+    assert _align.point_of(back) == (-21.52, 64.38)
+    assert resolve_dim(back, "Z") == "DEPTH"
+    assert resolve_dim(back, "T") == "TIME"
 
 
 def test_clear_can_target_one_kind(aligned):

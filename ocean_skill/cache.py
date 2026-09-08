@@ -94,7 +94,19 @@ __all__ = [
 #: on its groupby coordinate -- but a pre-change entry lacks the marker
 #: entirely, so a stale hit would silently keep the old refuses-to-plot
 #: behaviour rather than the new one.
-_FORMAT_VERSION = 6
+#:
+#: **7** -- :func:`ocean_skill.sources.read` now squeezes a size-1 X/Y
+#: *dimension* (SEANOE's ADCP moorings carry ``LATITUDE``/``LONGITUDE`` each on
+#: their own length-1 dim) into a scalar position coordinate every variable in
+#: the Dataset carries, so :func:`ocean_skill.align.point_of` can see it. A
+#: prepared lane cached *before* that fix carries no such coordinate at all --
+#: :func:`~ocean_skill.align.point_of` then finds no position, so
+#: :meth:`ocean_skill.field.Field.family` mistakes the station for a bare grid
+#: facet and :meth:`~ocean_skill.field.Field.plot` refuses it, even though a
+#: fresh (uncached) read of the exact same source draws fine. Bumping this
+#: retires every pre-fix entry so a warm cache can never serve a positionless
+#: mooring again.
+_FORMAT_VERSION = 7
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline
