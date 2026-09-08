@@ -682,6 +682,36 @@ def test_the_box_and_the_legend_never_take_the_same_corner():
     assert panel.metrics_corner != panel.legend_corner
 
 
+def test_the_bands_envelope_can_move_the_box_off_a_corner_the_line_alone_left_empty():
+    """A corner the center line alone leaves ``empty`` can still be full band.
+
+    The box must dodge the shaded fill, not just the line, so the same values
+    with and without a wide spread pick different corners.
+    """
+    banded = _seasonal_single_item(seasons=("JJA",), n=2, spread=1.0)
+    banded["aligned"]["value"].values[0, :] = [0.0, 9.0]
+    banded["aligned"]["value"].coords["spread"].values[0, :] = [6.0, 0.0]
+    banded_corner = _profile.compose([banded]).panels[0].metrics_corner
+
+    bare = _seasonal_single_item(seasons=("JJA",), n=2)  # no spread=
+    bare["aligned"]["value"].values[0, :] = [0.0, 9.0]
+    bare_corner = _profile.compose([bare]).panels[0].metrics_corner
+
+    assert banded_corner != bare_corner
+    assert bare_corner == "upper right"  # the old fixed-order winner among ties
+    assert banded_corner == "lower left"  # the band fills the corners around it
+
+
+def test_no_spread_reproduces_todays_corner_exactly():
+    """Byte-identity guard for a band-less panel.
+
+    Only a real envelope should ever move the box -- this must rank corners
+    exactly as it did before this change.
+    """
+    item = _profile_item()
+    assert _profile.compose([item]).panels[0].metrics_corner == "upper left"
+
+
 def test_no_sample_counts_are_drawn_on_the_figure():
     fig = render(_spec([_profile_item()]), renderer="matplotlib")
     drawn = [t.get_text() for ax in fig.axes for t in ax.texts]
@@ -1190,6 +1220,64 @@ def test_sharey_false_still_labels_only_the_left_column():
     curves = obj.traverse(lambda x: x, [hv.Curve])
     assert curves[0].vdims[0].label == "Depth [m]"
     assert curves[-1].vdims[0].label == " "
+
+
+def _grouped_by_panel(curves, n_panels):
+    """Split a flat curve list back into one group per panel.
+
+    Each comparison item draws several curves per panel (reference and test), but
+    ``obj.traverse`` returns them flattened -- grouping restores which curve came
+    from which panel, in the same row-major order :mod:`ocean_skill.plot.profile`
+    built the panels in.
+    """
+    per_panel = len(curves) // n_panels
+    return [curves[i * per_panel : (i + 1) * per_panel] for i in range(n_panels)]
+
+
+def test_the_value_axis_label_is_bottom_row_only_in_both_renderers():
+    """The x-axis twin of the left-column-only depth label, for a real 2-row grid.
+
+    Tick numbers stay per-panel either way -- only the repeated *label* is redundant.
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(4)]
+    fig = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    value_label = _profile.compose(items, cols="comparison", ncols=2).panels[0].xlabel
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    top_row, bottom_row = visible[:2], visible[2:]
+    assert all(ax.get_xlabel() == "" for ax in top_row)
+    assert all(ax.get_xlabel() == value_label for ax in bottom_row)
+
+    obj = render(_spec(items, cols="comparison", ncols=2), renderer="holoviews")
+    import holoviews as hv
+
+    groups = _grouped_by_panel(obj.traverse(lambda x: x, [hv.Curve]), n_panels=4)
+    for group in groups[:2]:
+        assert all(c.kdims[0].label == " " for c in group)
+    for group in groups[2:]:
+        assert all(c.kdims[0].label == value_label for c in group)
+
+
+def test_the_value_axis_label_handles_a_ragged_last_row():
+    """3 panels wrapped 2-wide: the short last row still labels every column.
+
+    "Is there a panel below me?" is the question, not "am I in the last row?".
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(3)]
+    fig = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    value_label = _profile.compose(items, cols="comparison", ncols=2).panels[0].xlabel
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    # index 0 (top-left) has a panel below it (index 2); indices 1 and 2 do not.
+    assert visible[0].get_xlabel() == ""
+    assert visible[1].get_xlabel() == value_label
+    assert visible[2].get_xlabel() == value_label
+
+    obj = render(_spec(items, cols="comparison", ncols=2), renderer="holoviews")
+    import holoviews as hv
+
+    groups = _grouped_by_panel(obj.traverse(lambda x: x, [hv.Curve]), n_panels=3)
+    assert all(c.kdims[0].label == " " for c in groups[0])
+    assert all(c.kdims[0].label == value_label for c in groups[1])
+    assert all(c.kdims[0].label == value_label for c in groups[2])
 
 
 # -- wspace=/hspace= subplot spacing (static-only) -------------------------------------

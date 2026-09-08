@@ -531,6 +531,35 @@ def test_the_emptiest_corner_is_chosen_from_the_data():
     assert corner in ("upper left", "lower right")
 
 
+def test_a_total_tie_breaks_toward_the_corner_with_the_most_real_room():
+    """All four corners are technically ``empty`` by the coarse count.
+
+    But one sits right next to a point. The old fixed order (``upper left``
+    always wins a tie) would put the box exactly where that point is closest;
+    clearance correctly prefers whichever corner has the most real room instead.
+    """
+    x = np.array([0.3, 0.5])
+    y = np.array([0.95, 0.5])
+    ranked = _series._rank_corners(x, y)
+    assert ranked[0] == "lower left"
+    assert ranked[-1] == "upper left"  # nearest point of any corner, so the worst pick
+
+
+def test_spread_does_not_move_the_box_series_draws_no_band_for_it():
+    """A series ``LineSpec`` can carry a ``spread`` envelope, same as profile's.
+
+    (See ``test_series_specs_carry_spread_and_season_fields_but_draw_unchanged``.)
+    Nothing is drawn for it yet, though, so unlike profile the box must not
+    move to dodge something the reader never sees.
+    """
+    item = _item()
+    item["aligned"]["reference_spread"] = item["aligned"]["reference"] * 0 + 5.0
+    item["aligned"]["test_spread"] = item["aligned"]["test"] * 0 + 5.0
+    with_spread = _series.compose([item], metric_keys=("bias",)).panels[0]
+    without = _series.compose([_item()], metric_keys=("bias",)).panels[0]
+    assert with_spread.metrics_corner == without.metrics_corner
+
+
 def test_too_many_comparisons_in_one_panel_drop_the_box_with_a_warning():
     items = [_item(test=f"model{i}") for i in range(4)]
     with pytest.warns(UserWarning, match="metrics CSV"):

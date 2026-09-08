@@ -600,13 +600,67 @@ def _period_of(da) -> str:
     return f"{str(values.min())[:7]} to {str(values.max())[:7]}"
 
 
+def _scale_into_unit(v, low: float, span: float):
+    """Scale ``v`` into ``[0, 1]`` by ``low``/``span``, or ``0.5`` for a flat span.
+
+    A tiny free function rather than a closure over a ranking loop's ``low``/``span``
+    (a linter-flagged foot-gun even when, as here, every call happens before the next
+    iteration reassigns them) -- shared by :func:`free_corners` and
+    :mod:`ocean_skill.plot.profile`'s twin so both scale a value and its band the
+    same way.
+    """
+    return (v - low) / span if span else np.full_like(v, 0.5)
+
+
+def _rank_corners(x, y) -> list[str]:
+    """Rank the four corners emptiest-first from a scatter already in [0, 1].
+
+    Shared by :func:`free_corners` and :mod:`ocean_skill.plot.profile`'s twin
+    ``_free_corners`` (imported rather than copied, per this module's standing
+    rule) so the two families cannot rank a corner two different ways -- only
+    the caller's choice of what a "sample" is (a line's value, a profile's
+    depth, and, for profile only, its drawn band -- see each caller's own
+    docstring for why that one differs) changes what the scatter contains.
+
+    Two measures, most-discriminating first: the **count** of samples inside
+    each corner's fixed box (:data:`_CORNER_W` x :data:`_CORNER_H`), then,
+    when two corners tie on count -- frequent, since most corners are simply
+    empty -- each corner's **clearance**, the distance from its own axes-
+    fraction anchor (e.g. ``(0, 1)`` for "upper left") to the *nearest*
+    scattered point. A fixed tie-break (:data:`CORNERS` order) would always
+    prefer the same corner regardless of how much room the other actually
+    has; clearance instead sends the box to the corner with the most real
+    space, and only :data:`CORNERS` order breaks a clearance tie too (e.g.
+    perfectly symmetric data). No drawing required, so this stays testable
+    without a figure.
+    """
+    counts, clearance = {}, {}
+    for corner in CORNERS:
+        vertical, horizontal = corner.split()
+        in_x = x <= _CORNER_W if horizontal == "left" else x >= 1 - _CORNER_W
+        in_y = y >= 1 - _CORNER_H if vertical == "upper" else y <= _CORNER_H
+        counts[corner] = int(np.count_nonzero(in_x & in_y))
+        anchor_x = 0.0 if horizontal == "left" else 1.0
+        anchor_y = 1.0 if vertical == "upper" else 0.0
+        clearance[corner] = float(np.hypot(x - anchor_x, y - anchor_y).min())
+    return sorted(CORNERS, key=lambda c: (counts[c], -clearance[c], CORNERS.index(c)))
+
+
 def free_corners(lines) -> list[str]:
     """Return the panel's corners, emptiest first — measured rather than assumed.
 
     A map's data fills its axes, so ``field_row`` can put its box in a fixed corner. A
-    line panel's data can be anywhere, so corners are ranked by counting the samples
-    inside each one's box in axes coordinates. No drawing required, and deterministic
-    (ties break in :data:`CORNERS` order), so it is testable without a figure.
+    line panel's data can be anywhere, so corners are ranked by :func:`_rank_corners`
+    from where each line's own samples fall in axes coordinates. No drawing required,
+    and deterministic, so it is testable without a figure.
+
+    Center-line samples only -- a series ``LineSpec`` can carry a ``spread`` envelope
+    (the season/spread plumbing landed for both families ahead of the series-specific
+    drawing work it is there to support -- see
+    ``test_series_specs_carry_spread_and_season_fields_but_draw_unchanged``), but
+    nothing is drawn for it yet, so ranking a corner by an invisible envelope would
+    move the box to dodge something the reader never sees. :mod:`ocean_skill.plot.
+    profile`'s twin does read its band -- profile actually draws one.
 
     A list rather than one answer because a panel has *two* things to place — the
     statistics box and the legend — and they must not be given the same corner. Placing
@@ -621,20 +675,11 @@ def free_corners(lines) -> list[str]:
         position = np.linspace(0.0, 1.0, values.size)
         low, high = np.nanmin(values), np.nanmax(values)
         span = high - low
-        scaled = (values - low) / span if span else np.full(values.size, 0.5)
         xs.append(position[finite])
-        ys.append(scaled[finite])
+        ys.append(_scale_into_unit(values, low, span)[finite])
     if not xs:
         return list(CORNERS)
-    x = np.concatenate(xs)
-    y = np.concatenate(ys)
-    counts = {}
-    for corner in CORNERS:
-        vertical, horizontal = corner.split()
-        in_x = x <= _CORNER_W if horizontal == "left" else x >= 1 - _CORNER_W
-        in_y = y >= 1 - _CORNER_H if vertical == "upper" else y <= _CORNER_H
-        counts[corner] = int(np.count_nonzero(in_x & in_y))
-    return sorted(CORNERS, key=lambda c: (counts[c], CORNERS.index(c)))
+    return _rank_corners(np.concatenate(xs), np.concatenate(ys))
 
 
 def _metrics_text(items, metric_keys, *, prefix: bool, stacked: bool = False) -> str:

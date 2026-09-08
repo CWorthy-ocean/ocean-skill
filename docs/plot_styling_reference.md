@@ -752,6 +752,14 @@ how the resulting panels are arranged.
 column — asking for `residual=True` together with a grid wider than one column is
 refused, the same way a facet conflict is.
 
+A wrapped `profile` grid also stops repeating its axis **labels** on every panel —
+tick *numbers* stay per-panel regardless (see [`sharex`/`sharey`](#sharex--sharey-series-and-profile)).
+"Depth [m]" prints on the left column only, and the value label (`"salinity"`, say)
+on the bottom of each column only — "is there a panel below/left of me?" is the
+question, matching the map families' own `shared_axis_labels` rule, so a ragged
+last row still labels its own bottom-most panel rather than only the visually
+last row.
+
 ### `shared_axis_labels`
 
 Draws grid lines on every panel either way, but controls whether coordinate
@@ -1353,7 +1361,7 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 |---|---|---|
 | `residual` | `False` | adds a short `test − reference` strip under each panel, sharing its time axis |
 | `mark` | `"line"` | `"line+marker"`, `"marker"` or `"step"` |
-| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
+| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest by measuring where each line's own samples fall, breaking a tie by which corner has the most real clearance rather than a fixed reading order — the key takes the next emptiest |
 | `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
 | `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
 | `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
@@ -1490,7 +1498,7 @@ for example).
 |---|---|---|
 | `secondary_x` | `True` | merge two variables onto one panel with a top x axis; `False` gives each its own column |
 | `mark` | `"line"` | `"line+marker"` or `"marker"` — no `"step"` (a profile's levels are irregularly spaced, with nothing between them a step-hold represents honestly) |
-| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
+| `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest by measuring where each line — and its shaded band, where one is drawn — falls, breaking a tie by which corner has the most real clearance rather than a fixed reading order — the key takes the next emptiest |
 | `metrics_stacked` | `False` | draw the statistics box narrow-and-tall (one metric per line) instead of one wide line — a portrait panel's own shape, not a page-wide series panel's |
 | `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
 | `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
