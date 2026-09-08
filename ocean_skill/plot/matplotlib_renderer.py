@@ -927,7 +927,11 @@ def _warn_if_overplotted(layout, canvas: Canvas | None) -> None:
     height = getattr(canvas, "max_height", None)
     if height is None or len(layout.panels) <= 1:
         return
-    per_panel = (height - SUPTITLE_ALLOWANCE) / len(layout.panels)
+    # Rows, not panel count: a wrapped grid stacks its rows vertically, so that is
+    # what divides the canvas height. A single row falls back to the panel count,
+    # matching today's (admittedly loose) per-panel budget for that shape.
+    rows = layout.nrows if layout.nrows > 1 else len(layout.panels)
+    per_panel = (height - SUPTITLE_ALLOWANCE) / rows
     if per_panel < 1.0:
         warnings.warn(
             f"{len(layout.panels)} panels on a canvas capped at {height:.1f}in leaves "
@@ -961,6 +965,8 @@ def series(
     font_scale: float = 1.0,
     fit_text: bool = True,
     shared_axis_labels: bool = True,
+    ncols: int | None = None,
+    nrows: int | None = None,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
@@ -982,7 +988,10 @@ def series(
     (``secondary_y=False`` to stack them instead), three or more become one row each.
     ``rows=``/``cols=`` facet on ``variable``/``source``/``depth``/``comparison``
     instead; one or the other, not both. Faceting on ``variable`` also drops it from
-    every legend entry -- the panel title already says it.
+    every legend entry -- the panel title already says it. ``ncols=``/``nrows=`` wrap
+    the panels into a rectangular grid instead of the default single row/column --
+    orthogonal to the facet choice, and refused together with ``residual=True``,
+    whose strip only stacks in a single column.
 
     ``legend=`` is ``True``/``False`` for the usual auto/off, or a string for something
     more specific: ``"below"``/``"right"`` force one combined key outside the axes
@@ -1031,6 +1040,8 @@ def series(
         metrics_loc=metrics_loc,
         legend=legend,
         line_labels=line_labels,
+        ncols=ncols,
+        nrows=nrows,
     )
     canvas = resolve_canvas(size, zoom)
     _warn_if_overplotted(layout, canvas)
@@ -1062,20 +1073,31 @@ def series(
     legend_kwargs = _merged(defaults["legend_kwargs"], legend_kwargs)
     line_kwargs = _merged(defaults["line_kwargs"], line_kwargs)
 
-    heights = []
-    for _ in layout.panels:
-        heights.append(1.0)
-        if residual:
+    if residual:
+        # compose() refuses residual=True with more than one column, so this is
+        # always a single stacked column with a short strip under every panel.
+        heights = []
+        for _ in layout.panels:
+            heights.append(1.0)
             heights.append(RESIDUAL_FRACTION)
-    fig, axes = plt.subplots(
-        nrows=len(heights) if layout.ncols == 1 else 1,
-        ncols=layout.ncols,
-        figsize=figsize,
-        sharex=shared_axis_labels,
-        squeeze=False,
-        gridspec_kw={"height_ratios": heights} if layout.ncols == 1 else None,
-        layout="constrained",
-    )
+        fig, axes = plt.subplots(
+            nrows=len(heights),
+            ncols=1,
+            figsize=figsize,
+            sharex=shared_axis_labels,
+            squeeze=False,
+            gridspec_kw={"height_ratios": heights},
+            layout="constrained",
+        )
+    else:
+        fig, axes = plt.subplots(
+            nrows=layout.nrows,
+            ncols=layout.ncols,
+            figsize=figsize,
+            sharex=shared_axis_labels,
+            squeeze=False,
+            layout="constrained",
+        )
     flat = list(axes.ravel())
 
     per_panel: list[tuple[Any, list]] = []
@@ -1120,8 +1142,21 @@ def series(
                 strip, scale, tick_label_kwargs, date=layout.date_axis, ticks=layout.xticks
             )
 
-    bottom = flat[-1]
-    bottom.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+    n_panels = len(layout.panels)
+    if layout.ncols == 1 or (layout.nrows == 1 and layout.ncols == n_panels):
+        flat[-1].set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+    else:
+        # A wrapped grid's bottom row is ragged when n_panels does not fill it, so
+        # "is there a panel below me?" is the question, not "am I in the last
+        # row?" -- field_facet's own rule for the same situation. sharex=True
+        # otherwise hides tick labels on every row but the last, which would
+        # leave a panel sitting above a hidden blank cell with no dates at all.
+        for index, ax in enumerate(flat[:n_panels]):
+            if index + layout.ncols >= n_panels:
+                ax.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+                ax.xaxis.set_tick_params(labelbottom=True)
+        for ax in flat[n_panels:]:
+            ax.set_visible(False)
     if title:
         fig.suptitle(title, **suptitle_kwargs)
     if layout.legend_placement != "off":
@@ -1234,6 +1269,8 @@ def profile(
     zoom: float = 1.0,
     font_scale: float = 1.0,
     fit_text: bool = True,
+    ncols: int | None = None,
+    nrows: int | None = None,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
@@ -1263,6 +1300,9 @@ def profile(
     fall back to one column each. ``rows=``/``cols=`` facet on
     ``variable``/``source``/``reference``/``time``/``comparison`` instead of the
     default; one or the other, not both, and a facet wins over ``secondary_x``.
+    ``ncols=``/``nrows=`` wrap the resulting panels into a rectangular grid
+    instead of the default single row/column -- orthogonal to the facet choice,
+    which only decides what goes in each panel.
 
     ``xlim`` bounds the (primary) value axis; with ``secondary_x`` merging a
     second variable in, it bounds only the bottom axis, the same rule ``ylim``
@@ -1299,6 +1339,8 @@ def profile(
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        ncols=ncols,
+        nrows=nrows,
     )
     canvas = resolve_canvas(size, zoom)
     _warn_if_overplotted(layout, canvas)
@@ -1404,6 +1446,12 @@ def profile(
                 twin.xaxis.label.set_color(panel.secondary_xlabel_color)
                 twin.tick_params(axis="x", labelcolor=panel.secondary_xlabel_color)
         _metrics_box(ax, panel, metrics_kwargs)
+
+    # A grid wider or taller than there are panels leaves trailing cells blank --
+    # hidden rather than removed, so the rest of the grid keeps the shape it was
+    # sized for (field_facet's own rule for the same situation).
+    for ax in flat[len(layout.panels) :]:
+        ax.set_visible(False)
 
     if title:
         fig.suptitle(title, **suptitle_kwargs)

@@ -267,7 +267,8 @@ def _holoviews_titles(obj):
 
 def _matplotlib_bands(fig):
     """``[(facecolor_hex, alpha, x_min, x_max), ...]`` for every filled band, in
-    drawing order -- one per matched ``ax.fill_betweenx`` collection."""
+    drawing order -- one per matched ``ax.fill_betweenx`` collection.
+    """
     from matplotlib.colors import to_hex
 
     out = []
@@ -636,7 +637,8 @@ def test_depth_range_spans_both_variables():
 def test_the_title_clears_the_twin_axis_instead_of_overlapping_it():
     """A twin's own ticks and axis label are drawn above the shared top spine,
     exactly where the title's default pad would otherwise land it (matplotlib
-    does not know to stack them on its own)."""
+    does not know to stack them on its own).
+    """
     items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
     fig = render(_spec(items), renderer="matplotlib")
     ax, twin = fig.axes
@@ -793,9 +795,10 @@ def test_seasonal_overlay_draws_one_line_per_season_in_both_renderers():
 
 
 def test_season_colors_follow_coordinate_order_not_alphabetical():
-    """xarray's own groupby("time.season") sorts alphabetically (DJF, JJA, MAM,
+    """Xarray's own groupby("time.season") sorts alphabetically (DJF, JJA, MAM,
     SON); a coordinate that already reads in a custom given order must colour
-    in *that* order, not be re-sorted."""
+    in *that* order, not be re-sorted.
+    """
     item = _seasonal_single_item(seasons=("JFMA", "MJJA", "SOND"))
     static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
     labels = [label for label, *_ in static]
@@ -843,7 +846,8 @@ def test_depth_facet_still_refused_with_seasons_present():
 
 def test_a_single_season_changes_nothing():
     """One season is no more distinguishing than one variable or one source --
-    no season colouring, no season in the label."""
+    no season colouring, no season in the label.
+    """
     item = _seasonal_single_item(seasons=("JJA",))
     static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
     assert len(static) == 1
@@ -939,6 +943,83 @@ def test_a_nan_gap_splits_the_band_into_runs_in_both_renderers():
     assert len(interactive) == 2
 
 
+# -- ncols=/nrows= grid control --------------------------------------------------------
+
+
+def test_ncols_wraps_facet_panels_into_a_grid_in_both_renderers():
+    item = _seasonal_single_item()  # cols="season" -> 4 panels, normally one row
+    static = render(_spec([item], cols="season", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in static.axes if ax.get_visible()]
+    assert len(visible) == 4
+    rows = {round(ax.get_subplotspec().rowspan.start) for ax in visible}
+    cols = {round(ax.get_subplotspec().colspan.start) for ax in visible}
+    assert len(rows) == 2
+    assert len(cols) == 2
+    left_col = min(cols)
+    for ax in visible:
+        col = round(ax.get_subplotspec().colspan.start)
+        if col == left_col:
+            assert ax.get_ylabel() == "Depth [m]"
+        else:
+            assert ax.get_ylabel() == ""
+
+    interactive = render(_spec([item], cols="season", ncols=2), renderer="holoviews")
+    assert interactive._max_cols == 2
+
+
+def test_a_wrapped_grid_hides_its_blank_cells():
+    items = [_profile_item(test=f"run{i}") for i in range(3)]
+    fig = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    hidden = [ax for ax in fig.axes if not ax.get_visible()]
+    assert len(visible) == 3
+    assert len(hidden) == 1
+
+
+def test_nrows_alone_derives_ncols_from_the_panel_count():
+    items = [_profile_item(test=f"run{i}") for i in range(5)]
+    fig = render(_spec(items, cols="comparison", nrows=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 5
+    cols = {round(ax.get_subplotspec().colspan.start) for ax in visible}
+    assert len(cols) == 3  # ceil(5/2) columns needed, rows then recomputed to 2
+
+
+def test_ncols_is_orthogonal_to_the_facet_choice():
+    """``rows=`` alone would stack these 4 panels in a single column; ``ncols=``
+    still wraps them, because the facet only decides what goes in each panel.
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(4)]
+    fig = render(_spec(items, rows="comparison", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 4
+    rows = {round(ax.get_subplotspec().rowspan.start) for ax in visible}
+    assert len(rows) == 2
+
+
+def test_ncols_and_nrows_together_must_cover_every_panel():
+    items = [_profile_item(test=f"run{i}") for i in range(5)]
+    with pytest.raises(ValueError, match=r"ncols=2 x nrows=2 holds 4 panels"):
+        render(
+            _spec(items, cols="comparison", ncols=2, nrows=2), renderer="matplotlib"
+        )
+    with pytest.raises(ValueError, match=r"ncols=2 x nrows=2 holds 4 panels"):
+        render(
+            _spec(items, cols="comparison", ncols=2, nrows=2), renderer="holoviews"
+        )
+
+
+def test_leaving_ncols_and_nrows_unset_reproduces_todays_layout():
+    """The byte-identity guarantee: unset kwargs must not perturb the default."""
+    item = _seasonal_single_item()
+    with_none = render(_spec([item], cols="season"), renderer="matplotlib")
+    explicit_none = render(
+        _spec([item], cols="season", ncols=None, nrows=None), renderer="matplotlib"
+    )
+    assert len(with_none.axes) == len(explicit_none.axes) == 4
+    assert _matplotlib_titles(with_none) == _matplotlib_titles(explicit_none)
+
+
 # -- option plumbing -----------------------------------------------------------------------
 
 
@@ -981,6 +1062,8 @@ def test_profile_is_registered_everywhere_it_has_to_be():
         "encode",
         "mark",
         "secondary_x",
+        "ncols",
+        "nrows",
     ):
         assert option in _top_level_options(), option
 

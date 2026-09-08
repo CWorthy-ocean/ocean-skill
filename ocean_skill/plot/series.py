@@ -149,6 +149,32 @@ class Layout:
     options: dict[str, Any] = field(default_factory=dict)
 
 
+def grid_shape(
+    n: int, *, as_columns: bool, ncols: int | None = None, nrows: int | None = None
+) -> tuple[int, int]:
+    """Return ``(nrows, ncols)`` for ``n`` panels, shared by :mod:`series` and
+    :mod:`profile` so the two families cannot pick different wraps.
+
+    Leaving both ``ncols`` and ``nrows`` unset reproduces today's behaviour exactly: a
+    single row (``as_columns``) or a single column. Giving either wraps the panels
+    row-major into a rectangular grid, hiding any leftover cells; ``nrows`` is a bound,
+    not a fixed count -- the row count actually used is whatever ``ncols`` needs, so
+    giving both never charges for a fully blank row.
+    """
+    if ncols is None and nrows is None:
+        return (1, n) if as_columns else (n, 1)
+    if ncols is not None and nrows is not None and int(ncols) * int(nrows) < n:
+        raise ValueError(
+            f"ncols={ncols} x nrows={nrows} holds {int(ncols) * int(nrows)} panels "
+            f"but this figure has {n}; raise one of them, or drop the other so it is "
+            "derived automatically."
+        )
+    if ncols is None:
+        ncols = -(-n // max(int(nrows), 1))
+    ncols = max(int(ncols), 1)
+    return -(-n // ncols), ncols
+
+
 def time_values(da):
     """Return ``da``'s time coordinate as something both renderers can plot.
 
@@ -573,6 +599,8 @@ def compose(
     metrics_loc: str = "auto",
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
 ) -> Layout:
     """Group ``items`` into panels and resolve every line's style and labelling.
 
@@ -583,6 +611,11 @@ def compose(
     in the order those labels first appear (reference before test within an
     item, items in their given order) -- get that order from the ``ValueError``
     a wrong-length list raises, which lists the current labels for copying.
+
+    ``ncols=``/``nrows=`` wrap the panels into a rectangular grid instead of
+    today's single row (``cols=``) or single column (default/``rows=``); see
+    :func:`grid_shape`. ``residual=True`` only stacks (its strip runs under each
+    panel), so it refuses a grid wider than one column.
     """
     items = list(items)
     if not items:
@@ -771,10 +804,21 @@ def compose(
             )
         )
 
-    if len(panels) > PANEL_CAP:
+    eff_nrows, eff_ncols = grid_shape(
+        len(panels), as_columns=cols is not None, ncols=ncols, nrows=nrows
+    )
+    if residual and eff_ncols > 1:
+        raise ValueError(
+            "residual=True draws a test − reference strip under each panel, which "
+            f"only lays out in a single column; this figure would have {eff_ncols}. "
+            "Drop residual=True, or leave ncols/nrows unset (or ncols=1)."
+        )
+    wrapped = ncols is not None or nrows is not None
+    cap_count = eff_nrows if wrapped else len(panels)
+    if cap_count > PANEL_CAP:
         warnings.warn(
             f"{len(panels)} panels on one figure leaves each about "
-            f"{11 / len(panels):.1f}in of page — legible only at size='free' or on a "
+            f"{11 / cap_count:.1f}in of page — legible only at size='free' or on a "
             "taller canvas. Drawing it anyway; split the set, or facet on something "
             "coarser, if it comes out cramped.",
             stacklevel=_stacklevel.find(),
@@ -796,12 +840,10 @@ def compose(
     shared = (
         len({tuple(line.label for line in p.lines + p.secondary) for p in panels}) == 1
     )
-    ncols = len(panels) if cols else 1
-    nrows = 1 if cols else len(panels)
     return Layout(
         panels=tuple(panels),
-        nrows=nrows,
-        ncols=ncols,
+        nrows=eff_nrows,
+        ncols=eff_ncols,
         legend_labels=tuple(labels),
         shared_legend=shared,
         # A corner is already baked into every Panel above, so a renderer draws it no

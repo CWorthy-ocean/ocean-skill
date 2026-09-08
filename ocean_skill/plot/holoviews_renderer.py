@@ -2392,6 +2392,8 @@ def _series(
     size=None,
     zoom: float = 1.0,
     mark: str = "line",
+    ncols=None,
+    nrows=None,
     **_,
 ):
     """Draw the ``series`` family interactively — the same layout, drawn with bokeh.
@@ -2428,6 +2430,8 @@ def _series(
         metrics_loc=metrics_loc,
         legend=legend,
         line_labels=line_labels,
+        ncols=ncols,
+        nrows=nrows,
     )
     width, height, fontsize = _series_geometry(
         font_scale=font_scale,
@@ -2749,6 +2753,8 @@ def _profile(
     size=None,
     zoom: float = 1.0,
     mark: str = "line",
+    ncols=None,
+    nrows=None,
     **_,
 ):
     """Draw the ``profile`` family interactively — the same layout, drawn with bokeh.
@@ -2784,6 +2790,8 @@ def _profile(
         encode=encode,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        ncols=ncols,
+        nrows=nrows,
     )
     width, height, fontsize = _series_geometry(
         font_scale=font_scale,

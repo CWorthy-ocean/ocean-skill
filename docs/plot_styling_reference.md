@@ -643,7 +643,7 @@ mooring_set.map_metrics(rows={"CIOFS3": ciofs3_set, "Hindcast": hindcast_set},
                          shared_limits=True, layout="columns")
 ```
 
-### `ncols` (`field_facet` and `skill_map`)
+### `ncols` (`field_facet`, `skill_map`, `series` and `profile`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
 [`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
@@ -691,6 +691,31 @@ reference.
 would arrange is the one it plays instead. A field with *two* facet axes therefore can't
 be a movie — one of them would have to become panels, which is what `field_facet` is
 for — and is refused rather than quietly animated along one axis.
+
+#### `ncols`/`nrows` on `series` and `profile`
+
+Unlike the map families, a line family's default layout is never auto-solved from an
+aspect ratio — it is always a strict single row (`cols=`, or `profile`'s implicit
+columns-per-variable default) or single column (the default otherwise, or `rows=`).
+Leaving both `ncols` and `nrows` unset reproduces that exactly. Passing either wraps
+the panels into a rectangular grid instead, row-major, with any leftover cells left
+blank rather than stretched to fill the grid — the same shape `cs.plot(cols="comparison",
+ncols=4)` gives twelve station profiles instead of squeezing them into one row:
+
+```python
+cs.plot(encode={"color": "source"}, cols="comparison", ncols=4)   # a 3x4 grid
+```
+
+`nrows` is a bound, not a fixed row count — the grid actually drawn is however many
+rows `ncols` needs, so passing both never charges for a row left entirely blank
+(`ncols=4, nrows=3` for 10 panels draws 3 rows, not 4). Passing both together only
+raises when they can't hold every panel between them. `ncols`/`nrows` are orthogonal to
+`rows=`/`cols=`: the facet decides what goes in each panel, the grid kwargs only decide
+how the resulting panels are arranged.
+
+`series`' `residual=True` strip runs under each panel, so it only stacks in a single
+column — asking for `residual=True` together with a grid wider than one column is
+refused, the same way a facet conflict is.
 
 ### `shared_axis_labels`
 
@@ -1187,6 +1212,8 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 | `legend` | `True` | draw the key at all |
 | `ylim` | `None` | y limits for every panel |
 | `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
+| `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
+| `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
 
 ### `line_kwargs`
 
@@ -1317,6 +1344,8 @@ for example).
 | `xlim` | `None` | value-axis limits; bounds only the bottom (primary) axis when `secondary_x` merges a second variable in |
 | `ylim` | `None` | depth limits, `(shallow, deep)` in positive-down metres |
 | `panel_aspect` | `0.62` | width/height of a panel — portrait, since a water column reads top-to-bottom |
+| `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
+| `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
 
 There is no `residual` option yet (a `test − reference` strip beside each depth
 panel is a follow-up) and no `profile_movie` (several casts over time played as

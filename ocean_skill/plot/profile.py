@@ -369,8 +369,13 @@ def compose(
     encode: dict[str, str | None] | None = None,
     metric_keys=(),
     metrics_loc: str = "auto",
+    ncols: int | None = None,
+    nrows: int | None = None,
 ) -> _series_layout.Layout:
     """Group ``items`` into panels and resolve every line's style and labelling.
+
+    ``ncols=``/``nrows=`` wrap the panels into a rectangular grid instead of
+    today's single row/column default; see :func:`ocean_skill.plot.series.grid_shape`.
 
     Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does:
     at most one user facet (``rows=`` or ``cols=``), plus at most one
@@ -515,10 +520,22 @@ def compose(
             )
         )
 
-    if len(panels) > _series_layout.PANEL_CAP:
+    # No explicit facet, and more than one variable that did not merge onto a
+    # twin axis: the default columns-per-variable layout (see the docstring
+    # table) -- the one case ncols follows the panel count without the caller
+    # having asked for cols= itself.
+    as_columns = cols is not None or (
+        facet is None and len(variables) > 1 and not use_secondary
+    )
+    eff_nrows, eff_ncols = _series_layout.grid_shape(
+        len(panels), as_columns=as_columns, ncols=ncols, nrows=nrows
+    )
+    wrapped = ncols is not None or nrows is not None
+    cap_count = eff_nrows if wrapped else len(panels)
+    if cap_count > _series_layout.PANEL_CAP:
         warnings.warn(
             f"{len(panels)} panels on one figure leaves each about "
-            f"{11 / len(panels):.1f}in of page — legible only at size='free' or on "
+            f"{11 / cap_count:.1f}in of page — legible only at size='free' or on "
             "a taller canvas. Drawing it anyway; split the set, or facet on "
             "something coarser, if it comes out cramped.",
             stacklevel=_stacklevel.find(),
@@ -540,19 +557,10 @@ def compose(
     shared = (
         len({tuple(line.label for line in p.lines + p.secondary) for p in panels}) == 1
     )
-    # No explicit facet, and more than one variable that did not merge onto a
-    # twin axis: the default columns-per-variable layout (see the docstring
-    # table) -- the one case ncols follows the panel count without the caller
-    # having asked for cols= itself.
-    as_columns = cols is not None or (
-        facet is None and len(variables) > 1 and not use_secondary
-    )
-    ncols = len(panels) if as_columns else 1
-    nrows = 1 if as_columns else len(panels)
     return _series_layout.Layout(
         panels=tuple(panels),
-        nrows=nrows,
-        ncols=ncols,
+        nrows=eff_nrows,
+        ncols=eff_ncols,
         legend_labels=tuple(labels),
         shared_legend=shared,
         xlabel="",  # unused: every panel carries its own value label (Panel.xlabel)
