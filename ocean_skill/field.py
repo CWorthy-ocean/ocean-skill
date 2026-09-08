@@ -1456,9 +1456,20 @@ def field(
             detide=detide,
         )
     from ocean_skill.comparison import _canonical
+    from ocean_skill.vocabulary import resolve_and_report
 
     sources = list(source) if source_is_list else [source]
     variables = list(variable) if variable_is_list else [variable]
+    # Resolve each requested variable to its canonical standard_name once, up
+    # front -- so the one "name resolved to..." warning fires once per variable
+    # rather than once per (source, variable) pair a source-list fans out to
+    # (mirrors compare()'s identical up-front resolution, see
+    # ocean_skill.comparison.compare). Field.__init__ resolves again on the way
+    # in, but a name already canonical triggers no second warning.
+    variables = [
+        resolve_and_report(v, context="Field variable=") if isinstance(v, str) else v
+        for v in variables
+    ]
     members = [
         Field(
             s,

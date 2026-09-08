@@ -625,3 +625,14 @@ def test_duplicate_sources_are_dropped(stub, capsys):
     fs = _make_source_set(["stub_a", "stub_a"])
     assert len(fs) == 1
     assert "duplicate" in capsys.readouterr().out
+
+
+def test_the_vocabulary_warning_fires_once_across_many_sources(stub):
+    """The same alias resolves the same way for every source -- one warning for
+    the whole fan-out, not one per source (mirrors ``compare()``'s identical
+    up-front resolution)."""
+    stub(_point_series())
+    with pytest.warns(UserWarning, match="resolved to standard_name") as record:
+        _make_source_set(["stub_a", "stub_b", "stub_c"])
+    hits = [r for r in record if "resolved to standard_name" in str(r.message)]
+    assert len(hits) == 1
