@@ -63,6 +63,120 @@ def _decode_time(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     return ds.assign_coords(time=(tdim, times))
 
 
+def _average_to_rho(da: xr.DataArray, stagger_dim: str, rho_dim: str) -> xr.Variable:
+    """Average one ROMS velocity component from its staggered dim onto rho points.
+
+    ``da`` sits on ``stagger_dim`` (``xi_u`` or ``eta_v``): each of its N-1 values
+    lies between two neighbouring rho points, so the result on ``rho_dim``
+    (``xi_rho``/``eta_rho``) has N points -- an interior one is the plain 2-point
+    average of its two bracketing staggered values, and the two edges take the
+    nearest staggered value outright. That edge rule is exactly xgcm's own
+    ``boundary="extend"`` convention for an outer-to-center interpolation
+    (duplicating the edge value before averaging reduces to taking it directly);
+    reproduced here in plain xarray/dask rather than by standing up an xgcm X/Y
+    ``Grid`` for it, since roms-tools output does not reliably carry the
+    ``axis``/``c_grid_axis_shift`` metadata that grid needs. Lazy: ``.isel``,
+    arithmetic and ``concat`` only, so a dask-backed ``da`` stays dask-backed.
+
+    Returns a bare :class:`~xarray.Variable` (not a `DataArray`) on ``rho_dim`` --
+    the caller assigns it into a Dataset that already carries the rho-point
+    coordinates (``lon``/``lat``/``mask_rho``/``angle``/...), which pick it up by
+    dimension name; building a `DataArray` here would only have to carry no
+    coordinates of its own, since the staggered input's own index (if any) does
+    not describe rho positions.
+    """
+    var = da.variable
+    left = var.isel({stagger_dim: slice(None, -1)})
+    right = var.isel({stagger_dim: slice(1, None)})
+    interior = 0.5 * (left + right)
+    edge_lo = var.isel({stagger_dim: slice(0, 1)})
+    edge_hi = var.isel({stagger_dim: slice(-1, None)})
+    full = xr.Variable.concat([edge_lo, interior, edge_hi], dim=stagger_dim)
+    rho_dims = tuple(rho_dim if d == stagger_dim else d for d in full.dims)
+    return xr.Variable(rho_dims, full.data)
+
+
+def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
+    """Attach lazy true eastward/northward velocity, derived from staggered u/v.
+
+    ROMS' own ``u``/``v`` (renamed to ``sea_water_x_velocity``/``sea_water_y_velocity``
+    by the caller) are grid-relative and staggered -- on a rotated grid neither is
+    the same quantity as geographic east/north, and neither reaches rho points (see
+    :func:`to_depth`'s deferral of them). This averages each to rho points with
+    :func:`_average_to_rho` and rotates by the grid's own ``angle`` (radians,
+    ROMS/roms-tools convention: the angle from true east to the grid's local xi
+    direction, CCW positive)::
+
+        east  = u_rho*cos(angle) - v_rho*sin(angle)
+        north = u_rho*sin(angle) + v_rho*cos(angle)
+
+    so the result is directly comparable to an in-situ instrument's own eastward/
+    northward reading (an ADCP mooring, say) -- see the "east_velocity"/
+    "north_velocity" vocabulary entries. Lazy throughout (plain ``xr.Variable``
+    arithmetic on the dask-backed components), and lands on
+    ``sea_water_x_velocity``'s own non-staggered dims (typically
+    ``(time, s_rho, eta_rho, xi_rho)``), which is exactly what :func:`to_depth`'s
+    rho-dims guard needs to pick the result up -- unlike the staggered components
+    themselves, which it still skips.
+
+    A no-op (returning ``ds`` unchanged) when ``u``, ``v`` or ``angle`` is missing;
+    warns first if the grid has velocity but no ``angle`` to rotate it by, since that
+    silently leaves only the grid-relative components for a caller who asked for
+    geographic east/north.
+    """
+    u = ds.get("sea_water_x_velocity")
+    v = ds.get("sea_water_y_velocity")
+    have_angle = "angle" in ds.coords
+    if u is None or v is None or not have_angle:
+        if (u is not None or v is not None) and not have_angle:
+            warnings.warn(
+                "ROMS grid-relative velocity (sea_water_x/y_velocity) is present "
+                "but the grid `angle` is not, so true geographic eastward/"
+                "northward velocity cannot be derived (the rotation needs it) -- "
+                "only the grid-relative components are available.",
+                stacklevel=2,
+            )
+        return ds
+
+    # ROMS/roms-tools' own fixed staggered-dim names (as used throughout this module,
+    # e.g. to_depth's deferral comment) -- NOT "whichever dim isn't a rho dim", which
+    # would wrongly pick "s_rho"/"time" themselves when u/v still carry those.
+    u_rho = _average_to_rho(u, "xi_u", "xi_rho") if "xi_u" in u.dims else u.variable
+    v_rho = _average_to_rho(v, "eta_v", "eta_rho") if "eta_v" in v.dims else v.variable
+
+    angle = ds["angle"].variable
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    east = u_rho * cos_a - v_rho * sin_a
+    north = u_rho * sin_a + v_rho * cos_a
+
+    # Canonical dim order, matching add_depth_coord's own transpose below -- u_rho/
+    # v_rho's arithmetic can otherwise reorder dims depending on which operand's
+    # layout xarray's broadcasting happens to keep.
+    order = tuple(d for d in ("time", "s_rho", "eta_rho", "xi_rho") if d in east.dims)
+    east, north = east.transpose(*order), north.transpose(*order)
+
+    return ds.assign(
+        eastward_sea_water_velocity=(
+            east.dims,
+            east.data,
+            {
+                "standard_name": "eastward_sea_water_velocity",
+                "long_name": "eastward (true geographic) sea water velocity",
+                "units": u.attrs.get("units", "m s-1"),
+            },
+        ),
+        northward_sea_water_velocity=(
+            north.dims,
+            north.data,
+            {
+                "standard_name": "northward_sea_water_velocity",
+                "long_name": "northward (true geographic) sea water velocity",
+                "units": v.attrs.get("units", "m s-1"),
+            },
+        ),
+    )
+
+
 def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     """Return a CF-standardized ROMS Dataset (grid attached, renamed, masked, depth).
 
@@ -104,6 +218,12 @@ def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
         k: v for k, v in (meta.get("standard_names") or {}).items() if k in ds.variables
     }
     ds = ds.rename(rename)
+
+    # derive TRUE geographic east/north velocity from the staggered grid-relative
+    # components + the grid angle, before the mask loop below so the new rho-dim
+    # vars get land-masked with everything else. Lazy; a no-op when the source has
+    # no velocity (or no angle to rotate it by) -- see _add_geographic_velocity.
+    ds = _add_geographic_velocity(ds)
 
     # mask land on rho-point data variables (mask_rho: 1 ocean, 0 land)
     if "mask_rho" in ds.variables:

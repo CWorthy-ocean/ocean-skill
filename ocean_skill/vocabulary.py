@@ -251,30 +251,56 @@ VOCABULARY: dict[str, dict[str, object]] = {
         # ~1 m field against a ~0.1 m one and call it agreement.
         "standard_name": "sea_surface_height_above_sea_level",
     },
-    "eastward_velocity": {
-        "standard_name": "sea_water_x_velocity",
+    "east_velocity": {
+        # True geographic eastward velocity -- deliberately NOT the same concept as
+        # ROMS' own grid-relative x-velocity (see "x_velocity" below). The two used
+        # to share one standard_name here, which silently treated a rotated ROMS
+        # grid's `u` as if it were geographic east. ocean_skill.roms.standardize now
+        # derives this from ROMS' staggered u/v by averaging to rho points and
+        # rotating by the grid `angle`, so a model field pairs correctly against an
+        # in-situ instrument's own eastward reading (e.g. an ADCP mooring).
+        "standard_name": "eastward_sea_water_velocity",
         "aliases": [
-            "eastward_sea_water_velocity",
-            # DUACS/MULTIOBS ugos and ugosa. The "_assuming_sea_level_for_geoid"
-            # form is the one computed from sla rather than adt.
+            "eastward_velocity",  # pre-split key; old callers still resolve
+            # DUACS/MULTIOBS ugos and ugosa: geostrophic velocity is derived from
+            # sea-surface slope, not read off a model grid, so it IS geographic
+            # east/north and belongs here rather than with "x_velocity". The
+            # "_assuming_sea_level_for_geoid" form is the one computed from sla
+            # rather than adt.
             "surface_geostrophic_eastward_sea_water_velocity",
             "surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid",
         ],
     },
-    "northward_velocity": {
-        "standard_name": "sea_water_y_velocity",
+    "north_velocity": {
+        "standard_name": "northward_sea_water_velocity",
         "aliases": [
-            "northward_sea_water_velocity",
+            "northward_velocity",  # this entry's pre-split key
             "surface_geostrophic_northward_sea_water_velocity",
             "surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid",
         ],
     },
+    "x_velocity": {
+        # ROMS' own grid-relative x-velocity (build.py's ROMS_STANDARD_NAMES maps
+        # `u` here) -- the raw STAGGERED component (on xi_u, not xi_rho), not
+        # interpolated to rho points or rotated to geographic east. Kept as its own
+        # concept rather than folded into "east_velocity" above: on a rotated grid
+        # grid-x is not true east, and ocean_skill.roms.to_depth (and the transect
+        # regridder) deliberately skip this variable rather than silently
+        # interpolate a staggered field. `u` itself is not an alias here -- like the
+        # other ROMS/MARBL tracer letters (see the `_TYPEABLE_TRACERS` note in
+        # tests/test_vocabulary.py), it reaches this concept through this friendly
+        # key instead of being directly typeable.
+        "standard_name": "sea_water_x_velocity",
+    },
+    "y_velocity": {
+        # ROMS' grid-relative y-velocity (`v`); the staggered sibling of
+        # "x_velocity" above -- see that entry's note.
+        "standard_name": "sea_water_y_velocity",
+    },
     "upward_velocity": {
         # ROMS' vertical velocity `w` (build.py's ROMS_STANDARD_NAMES). `w` is a
         # single letter but matched whole (see the `Fe` note), so only a variable
-        # named exactly `w`/`W` resolves, not one merely starting with it. The
-        # horizontal siblings above deliberately carry no `u`/`v` short name yet; add
-        # them alongside this if the model-momentum triple is ever wanted as a set.
+        # named exactly `w`/`W` resolves, not one merely starting with it.
         "standard_name": "upward_sea_water_velocity",
         "aliases": ["w"],
     },
