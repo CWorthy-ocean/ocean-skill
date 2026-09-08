@@ -162,6 +162,13 @@ class Panel:
     metrics_text: str = ""
     metrics_corner: str = "upper left"
     legend_corner: str = "upper right"
+    #: True for an empty cell in a two-axis ``rows=``×``cols=`` grid (see
+    #: :func:`facet_grid`) -- a (row, column) combination nothing matched (a
+    #: variable missing one of the periods another one has, say). Every other
+    #: field is left at its default (no lines, no title); a renderer hides
+    #: such a panel's axes rather than drawing an empty one, the same way a
+    #: grid wider than its panel count already hides its trailing cells.
+    blank: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,6 +231,50 @@ def grid_shape(
         ncols = -(-n // max(int(nrows), 1))
     ncols = max(int(ncols), 1)
     return -(-n // ncols), ncols
+
+
+def facet_grid(indexed, row_key, col_key):
+    """Cross a ``rows=``×``cols=`` pair of facet keys into a row-major grid of
+    cells -- shared so a family wanting a genuine two-axis facet (only
+    :mod:`ocean_skill.plot.profile` does today) does not invent its own
+    cross-product bookkeeping, and any later adopter (:mod:`ocean_skill.plot.series`
+    included) draws the same grid the same way.
+
+    ``indexed`` is the family's own ``list(enumerate(items))`` -- the shape its
+    existing one-facet grouping already builds. ``row_key``/``col_key`` are
+    called as ``key(index, item)`` (the same two arguments a family's own
+    ``_group_key(item, by, index)`` takes, so ``comparison`` -- keyed on the
+    index -- still works as a grid axis) and return the value that item
+    belongs to on that axis.
+
+    Row and column values are ordered by first appearance in ``indexed`` --
+    the same rule a single facet's own grouping already follows (a ``dict``'s
+    insertion order), so a chronological key (a groupby month/season, a
+    resample period) comes out in the data's own order with no separate
+    sorting step, exactly as it does faceted on one axis alone.
+
+    Returns ``(cells, row_values, col_values)``: ``cells`` is a flat,
+    row-major list of length ``len(row_values) * len(col_values)`` -- row
+    outer, column inner, so ``cells[r * len(col_values) + c]`` is the
+    ``(row_values[r], col_values[c])`` cell -- each holding the ``(index,
+    item)`` pairs that landed there, or an empty list for a cell nothing
+    matched (a variable missing one of the months another one has, say). A
+    caller draws an empty list as a blank panel (see :attr:`Panel.blank`)
+    rather than skipping it, so the flat list stays aligned to the grid every
+    renderer already wraps by ``ncols``.
+    """
+    row_values: list = []
+    col_values: list = []
+    cell_map: dict[tuple, list] = {}
+    for index, item in indexed:
+        r, c = row_key(index, item), col_key(index, item)
+        if r not in row_values:
+            row_values.append(r)
+        if c not in col_values:
+            col_values.append(c)
+        cell_map.setdefault((r, c), []).append((index, item))
+    cells = [cell_map.get((r, c), []) for r in row_values for c in col_values]
+    return cells, row_values, col_values
 
 
 def value_span(arrays, *, lim: tuple[float, float] | None = None) -> tuple:

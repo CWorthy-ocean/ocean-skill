@@ -339,7 +339,20 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
             )
         return labels[1]
     if by == "time":
-        return _time_of(item["aligned"])
+        # A cast's own instant (a plain profile) or a resample period both
+        # carry a scalar `time` coordinate -- _time_of reads either. A
+        # groupby month/season fold instead renamed the axis away entirely
+        # (no `time` coordinate survives it at all), so `time` as a facet key
+        # falls back to whichever of those the item actually carries -- the
+        # same fold, spelled the way a caller reaching for "facet by time"
+        # naturally would, without having to know groupby's own dim name.
+        value = _time_of(item["aligned"])
+        if value is not None:
+            return value
+        month = _series_layout.month_of(item["aligned"])
+        if month is not None:
+            return month
+        return _series_layout.season_of(item["aligned"])
     if by == "season":
         return _series_layout.season_of(item["aligned"])
     if by == "month":
@@ -528,59 +541,92 @@ def compose(
     copy-pasteable ``ValueError`` listing the current titles, the same way
     ``line_labels=``'s does.
 
-    Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does:
-    at most one user facet (``rows=`` or ``cols=``), plus at most one
+    Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does
+    for *one* facet, extended to two: ``rows=`` and ``cols=`` may each name a
+    key (see :func:`_group_key`), together or alone, plus at most one
     ``secondary_x`` -- the profile twin of series' ``secondary_y``, transposed:
     a profile's value axis is x (depth is y), so the second axis it grows is a
-    *top* x axis rather than a right-hand y axis.
+    *top* x axis rather than a right-hand y axis (``secondary_x`` only ever
+    applies with neither facet given -- a panel already earning its identity
+    from a grid cell does not also grow a twin).
 
     ===================  ==================================================================
     one variable         one panel, every source/cast overlaid
     two variables        one panel, the second on a top x axis (``secondary_x``)
     three or more         one column per variable, sources/casts overlaid within each
+    both rows= and cols=  a genuine grid, one panel per (row, column) combination
     ===================  ==================================================================
+
+    ``rows=`` and ``cols=`` together build the grid's cross-product
+    (:func:`ocean_skill.plot.series.facet_grid`) rather than refusing the
+    second facet: a (row, column) combination nothing matched (a variable
+    missing one of the periods another one has, say) draws as a hidden blank
+    panel rather than shifting every later cell out of place. Combining an
+    explicit ``ncols=``/``nrows=`` with a two-axis facet is refused instead --
+    the grid's shape is already fixed by how many distinct rows/columns exist.
     """
     items = fan_season(list(items))
     if not items:
         raise ValueError("a profile needs at least one comparison to draw")
-    if rows is not None and cols is not None:
+    two_facets = rows is not None and cols is not None
+    if two_facets and (ncols is not None or nrows is not None):
         raise ValueError(
-            f"a profile takes one facet, not two: rows={rows!r} and cols={cols!r} "
-            "were both given. Overlaying the lanes of each comparison is already "
-            "one axis; pick rows= or cols= for the other."
+            f"rows={rows!r} and cols={cols!r} already fix the grid's shape -- "
+            "ncols=/nrows= (for wrapping a single facet) do not also apply on "
+            "top of a two-axis one. Drop ncols=/nrows=."
         )
     _refuse_depth_encode(encode)
 
     indexed = list(enumerate(items))
-    facet = rows or cols
+    facet = rows if two_facets else (rows or cols)
     variables = []
     for _, item in indexed:
         key = _group_key(item, "variable", 0)
         if key not in variables:
             variables.append(key)
-    use_secondary = facet is None and secondary_x and len(variables) == 2
+    use_secondary = (
+        not two_facets and facet is None and secondary_x and len(variables) == 2
+    )
 
     all_specs = [s for i, item in enumerate(items) for s in _line_specs(item, i)]
     # marker <- time replaces series' marker <- depth: every profile spec's own
     # depth is None (depth is the axis, not a style channel here), so time takes
     # its place as the default marker key, overridable like any other channel.
-    # color <- season (or, one level up, month) only when one actually varies
-    # across the figure (an overlay of several fanned seasons/months, the
-    # default reading of a seasonal or monthly profile) AND there is no twin
-    # axis -- on a merged panel the two variables need their own colours
-    # (CHANNELS' own color <- variable) so each axis label can honestly say
-    # whose lines are whose; an explicit encode= still wins. The two never both
-    # apply -- fan_season fans one dim per item -- so either is a safe default.
+    #
+    # color follows what actually varies *within* a panel, not across the whole
+    # figure: an *overlaid* season/month (several fanned values sharing one
+    # panel, the default reading of a seasonal or monthly profile with no
+    # facet asked for) earns color<-season/month, the same as before -- and a
+    # resample period, or a plain multi-cast overlay (several distinct real
+    # instants sharing one panel), gets the identical treatment via
+    # color<-time: every line an item's own cast/period shares gets one
+    # color, distinct from every other cast/period's. A season/month/time
+    # used as a rows=/cols= facet instead is constant *within* each panel
+    # (that is the point of faceting on it) -- coloring by it there would
+    # leave every line in a cell the same color, model and obs included -- so
+    # that case, and the plain single-comparison case with none of the three
+    # varying, colors by role instead: model and obs get distinct, consistent
+    # colors in every panel, and a twin axis (use_secondary) keeps CHANNELS'
+    # own color<-variable, each variable owning its axis. An explicit encode=
+    # still wins over any of these.
     seasons_vary = len({s.season for s in all_specs if s.season is not None}) > 1
     months_vary = len({s.month for s in all_specs if s.month is not None}) > 1
+    times_vary = len({s.time for s in all_specs if s.time is not None}) > 1
+    season_faceted = "season" in (rows, cols) or "time" in (rows, cols)
+    month_faceted = "month" in (rows, cols) or "time" in (rows, cols)
+    time_faceted = "time" in (rows, cols)
     defaults = {
         "marker": "time",
         **(
-            {"color": "season"}
-            if seasons_vary and not use_secondary
+            {}
+            if use_secondary
+            else {"color": "season"}
+            if seasons_vary and not season_faceted
             else {"color": "month"}
-            if months_vary and not use_secondary
-            else {}
+            if months_vary and not month_faceted
+            else {"color": "time"}
+            if times_vary and not time_faceted
+            else {"color": "role"}
         ),
     }
     styled = {
@@ -626,7 +672,15 @@ def compose(
 
     styled = _series_layout.remap_line_labels(styled, all_specs, line_labels)
 
-    if facet is not None:
+    row_values: list[Any] = []
+    col_values: list[Any] = []
+    if two_facets:
+        grouped, row_values, col_values = _series_layout.facet_grid(
+            indexed,
+            lambda n, item: _group_key(item, rows, n),
+            lambda n, item: _group_key(item, cols, n),
+        )
+    elif facet is not None:
         groups: dict[Any, list[tuple[int, dict]]] = {}
         for index, item in indexed:
             groups.setdefault(_group_key(item, facet, index), []).append((index, item))
@@ -646,6 +700,12 @@ def compose(
     legend_placement = _series_layout._normalize_legend(legend)
     panels = []
     for group in grouped:
+        if not group:
+            # A two-axis grid's cell nothing matched (facet_grid's own empty
+            # list) -- a blank panel, hidden by the renderer rather than
+            # shifting every later cell out of the (row, col) it belongs in.
+            panels.append(_series_layout.Panel(title="", ylabel="", lines=(), blank=True))
+            continue
         primary_items, secondary_items = group, []
         if use_secondary:
             primary_items = [
@@ -735,17 +795,23 @@ def compose(
             )
         panels = [replace(p, title=t) for p, t in zip(panels, titles, strict=True)]
 
-    # No explicit facet, and more than one variable that did not merge onto a
-    # twin axis: the default columns-per-variable layout (see the docstring
-    # table) -- the one case ncols follows the panel count without the caller
-    # having asked for cols= itself.
-    as_columns = cols is not None or (
-        facet is None and len(variables) > 1 and not use_secondary
-    )
-    eff_nrows, eff_ncols = _series_layout.grid_shape(
-        len(panels), as_columns=as_columns, ncols=ncols, nrows=nrows
-    )
-    wrapped = ncols is not None or nrows is not None
+    if two_facets:
+        # The shape is already fixed by how many distinct rows/columns exist
+        # -- facet_grid built `panels` to match, row-major -- so grid_shape's
+        # own count-wrap (a single facet's concern) does not apply here.
+        eff_nrows, eff_ncols = len(row_values), len(col_values)
+    else:
+        # No explicit facet, and more than one variable that did not merge onto a
+        # twin axis: the default columns-per-variable layout (see the docstring
+        # table) -- the one case ncols follows the panel count without the caller
+        # having asked for cols= itself.
+        as_columns = cols is not None or (
+            facet is None and len(variables) > 1 and not use_secondary
+        )
+        eff_nrows, eff_ncols = _series_layout.grid_shape(
+            len(panels), as_columns=as_columns, ncols=ncols, nrows=nrows
+        )
+    wrapped = two_facets or ncols is not None or nrows is not None
     cap_count = eff_nrows if wrapped else len(panels)
     if cap_count > _series_layout.PANEL_CAP:
         warnings.warn(
@@ -769,8 +835,12 @@ def compose(
         for line in panel.lines + panel.secondary:
             if line.label not in labels:
                 labels.append(line.label)
+    # A blank grid cell carries no lines at all -- excluded here so its empty
+    # label set does not, on its own, make an otherwise shared legend read as
+    # unshared (see Panel.blank).
+    drawn = [p for p in panels if not p.blank]
     shared = (
-        len({tuple(line.label for line in p.lines + p.secondary) for p in panels}) == 1
+        len({tuple(line.label for line in p.lines + p.secondary) for p in drawn}) <= 1
     )
     return _series_layout.Layout(
         panels=tuple(panels),
