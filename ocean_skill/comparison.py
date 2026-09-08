@@ -103,6 +103,15 @@ NARROWING_FEATURE_TYPES = frozenset(
 #: than the model's default surface.
 _FIXED_STATION_FEATURE_TYPES = frozenset({"timeSeries", "point", "station"})
 
+#: featureTypes whose real data always sits at one recoverable lon/lat --
+#: :data:`POINT_FEATURE_TYPES` and :data:`PROFILE_FEATURE_TYPES` together,
+#: deliberately excluding ``trajectory``/``trajectoryProfile`` (a moving
+#: platform legitimately has no single position) and ``grid`` (never had one).
+#: Used by :func:`_is_stale_positionless_station` to scope a cache-validity
+#: check to exactly the featureTypes where "no position" is itself evidence of
+#: a problem, not a normal reading.
+_SINGLE_POSITION_FEATURE_TYPES = POINT_FEATURE_TYPES | PROFILE_FEATURE_TYPES
+
 
 def _feature_type(source: str) -> str | None:
     """Return a source's catalog featureType, or ``None`` if it is unresolvable."""
@@ -112,6 +121,32 @@ def _feature_type(source: str) -> str | None:
         return resolve(source).metadata.get("featureType")
     except KeyError:
         return None
+
+
+def _is_stale_positionless_station(da, meta: dict[str, Any]) -> bool:
+    """Whether a cached lane is a fixed-position station with no position at all.
+
+    Read on every :func:`prepare_source` cache *hit*, not baked into the key: a
+    prepared lane for one of :data:`_SINGLE_POSITION_FEATURE_TYPES` (a mooring,
+    a repeat-visit profile) always has a recoverable lon/lat once read fresh --
+    :func:`ocean_skill.sources.read`'s singleton-horizontal squeeze sees to
+    that. An entry written *before* that squeeze existed has none, and a warm
+    cache would otherwise go on serving it forever, even though a fresh read of
+    the same source draws fine (see :meth:`ocean_skill.field.Field.plot`'s own
+    diagnostic for the failure this produces downstream).
+
+    Scoped to that feature-type set on purpose: a ``trajectory``'s lon/lat
+    legitimately varies with no single position to find, and a ``grid`` never
+    had one, so :func:`~ocean_skill.align.point_of` returning ``None`` for
+    either is the ordinary reading, not evidence of a stale entry -- checking
+    every cache hit this way would otherwise recompute those every time.
+    """
+    feature_type = str(meta.get("featureType") or "")
+    if feature_type not in _SINGLE_POSITION_FEATURE_TYPES:
+        return False
+    from ocean_skill.align import point_of
+
+    return point_of(da) is None
 
 
 def _is_climatology(source: str) -> bool:
@@ -2094,11 +2129,24 @@ def prepare_source(
         hit = _cache.load_field(key)
         if hit is not None:
             da_hit, depth_hit = hit
-            if da_hit is not None and require_reduced:
-                da_hit = _require_reduced(
-                    da_hit, require_reduced, source, keep=require_reduced_keep
+            if da_hit is not None and _is_stale_positionless_station(da_hit, meta):
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    f"ignoring a cached {source!r} lane with no recoverable "
+                    "lon/lat -- a stale entry from before a fix to how this "
+                    "shape is read (see ocean_skill.sources.read's singleton-"
+                    "horizontal squeeze); recomputing and overwriting it.",
+                    stacklevel=_stacklevel.find(),
                 )
-            return da_hit, depth_hit
+            else:
+                if da_hit is not None and require_reduced:
+                    da_hit = _require_reduced(
+                        da_hit, require_reduced, source, keep=require_reduced_keep
+                    )
+                return da_hit, depth_hit
 
     # An ERDDAP table is fetched whole in one request, so the time narrowing below has
     # to travel with the request rather than follow it -- see erddap_constraints, which

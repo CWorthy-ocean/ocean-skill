@@ -95,18 +95,17 @@ __all__ = [
 #: entirely, so a stale hit would silently keep the old refuses-to-plot
 #: behaviour rather than the new one.
 #:
-#: **7** -- :func:`ocean_skill.sources.read` now squeezes a size-1 X/Y
-#: *dimension* (SEANOE's ADCP moorings carry ``LATITUDE``/``LONGITUDE`` each on
-#: their own length-1 dim) into a scalar position coordinate every variable in
-#: the Dataset carries, so :func:`ocean_skill.align.point_of` can see it. A
-#: prepared lane cached *before* that fix carries no such coordinate at all --
-#: :func:`~ocean_skill.align.point_of` then finds no position, so
-#: :meth:`ocean_skill.field.Field.family` mistakes the station for a bare grid
-#: facet and :meth:`~ocean_skill.field.Field.plot` refuses it, even though a
-#: fresh (uncached) read of the exact same source draws fine. Bumping this
-#: retires every pre-fix entry so a warm cache can never serve a positionless
-#: mooring again.
-_FORMAT_VERSION = 7
+#: A related fix that did *not* bump this: :func:`ocean_skill.sources.read`'s
+#: singleton-horizontal squeeze (giving an ADCP-shaped station a recoverable
+#: scalar lon/lat) changed what a *fresh* read produces without changing what
+#: an already-cached lane holds. Bumping the version here would have orphaned
+#: every prepared/aligned entry in the cache, not just the (rare) positionless
+#: ones the fix was for -- an expensive, indiscriminate way to fix a handful
+#: of entries. Instead, :func:`ocean_skill.comparison.prepare_source` checks a
+#: cache hit for exactly this shape on the way out (see
+#: ``_is_stale_positionless_station`` there) and discards only an entry that
+#: actually lacks a position, recomputing and overwriting just that one.
+_FORMAT_VERSION = 6
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline
