@@ -858,6 +858,8 @@ def _time_depth(
     rasterize: bool | str = "auto",
     mark: str | None = None,
     clim: tuple[float, float] | None = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
     **_,
 ):
     """One interactive ``time_depth`` panel: depth against time, at one place.
@@ -878,7 +880,13 @@ def _time_depth(
 
     ``clim`` overrides the panel's own percentile-derived colour range -- how
     :func:`_time_depth_grid`'s ``shared_limits=True`` makes every panel share one
-    scale instead of each computing its own.
+    scale instead of each computing its own. ``xlim``/``ylim`` likewise override
+    the panel's own time/depth range -- how that grid's ``sharex``/``sharey`` link
+    every panel's own axis (there is no ``plt.subplots(sharex=, sharey=)``
+    equivalent here to do it for free). ``ylim`` is given ascending (``(shallow,
+    deep)``) like any other holoviews range -- ``invert_yaxis=True`` below still
+    flips it to read shallow-at-top the same way it flips the unset, autoscaled
+    range.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -938,10 +946,14 @@ def _time_depth(
         )
         if geometry.x_ticks:
             points = points.opts(xticks=list(geometry.x_ticks))
+        if xlim is not None:
+            points = points.opts(xlim=xlim)
+        if ylim is not None:
+            points = points.opts(ylim=ylim)
         return points
 
     raster = _should_rasterize(field, rasterize)
-    return _quadmesh(
+    mesh = _quadmesh(
         field,
         title=title,
         cmap=seq,
@@ -962,6 +974,15 @@ def _time_depth(
         bgcolor="#d9d9d9",
         xticks=geometry.x_ticks,
     )
+    # applied on the built element, not folded into _quadmesh's own opts, the same
+    # way invert_y is there -- _quadmesh's xlim is documented geo-only (see its
+    # caveat above), so a non-geographic mesh like this one sets it after the fact.
+    opts = {}
+    if xlim is not None:
+        opts["xlim"] = xlim
+    if ylim is not None:
+        opts["ylim"] = ylim
+    return mesh.opts(**opts) if opts else mesh
 
 
 def _time_depth_grid(
@@ -971,6 +992,8 @@ def _time_depth_grid(
     ncols: int | None = None,
     nrows: int | None = None,
     shared_limits: bool = False,
+    sharex: bool | None = None,
+    sharey: bool = False,
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
@@ -985,17 +1008,34 @@ def _time_depth_grid(
     docstring for the composition this mirrors: a single stacked column by
     default (``ncols=``/``nrows=`` to wrap instead), each panel its own colour
     scale unless ``shared_limits=True`` computes one shared range across all of
-    them (warning once if the items' ``standard_name``s actually differ).
+    them (warning once if the items' ``standard_name``s actually differ), and
+    ``sharex`` sharing (or not) every panel's time axis -- see below.
 
     Every panel draws through :func:`_time_depth` itself, given its own
     identity-only title (the item's ``label`` plus place/period context) rather
     than the standalone panel's own variable-naming default, since the variable
     is already named once, in the ``Layout``'s own title.
+
+    Bokeh has no ``plt.subplots(sharex=)`` to link panels the way the static
+    renderer does -- ``sharex=None`` (the default share-when-meaningful rule the
+    static ``time_depth_grid`` applies) instead computes one shared time range
+    (:func:`~ocean_skill.plot.series.value_span`, the same helper :func:`_series`
+    shares its own x with) and bakes it into every panel's own ``xlim``, exactly
+    as :func:`_series` does. ``sharex=False`` leaves each panel to its own data
+    range instead -- the disjoint-deployment case :func:`time_depth_grid`'s own
+    docstring describes.
+
+    ``sharey=False`` (the default) leaves each panel's depth axis to its own
+    instrument's range, the same default direction :func:`time_depth_grid` gives
+    -- moorings at very different depths each keep the range their own readings
+    reach. ``sharey=True`` computes one shared depth range the same way
+    (:func:`~ocean_skill.plot.series.value_span` again) and bakes it into every
+    panel's own ``ylim``.
     """
     hv = _extension()
 
     from ocean_skill.plot.matplotlib_renderer import _limits, grid_suptitle
-    from ocean_skill.plot.series import grid_shape
+    from ocean_skill.plot.series import grid_shape, time_values, value_span
     from ocean_skill.plot.time_depth import prepare_time_depth
 
     n = len(items)
@@ -1003,6 +1043,8 @@ def _time_depth_grid(
 
     if title is None:
         title = grid_suptitle(items)
+
+    prepared = [prepare_time_depth(item["field"]) for item in items]
 
     shared_clim = None
     if shared_limits:
@@ -1016,12 +1058,27 @@ def _time_depth_grid(
                 "so one shared colour scale won't mean the same thing on every panel.",
                 stacklevel=2,
             )
-        fields = [prepare_time_depth(item["field"])[0] for item in items]
-        shared_clim = _limits(*fields)
+        shared_clim = _limits(*(field for field, _ in prepared))
+
+    if sharex is None:
+        # the same auto rule time_depth_grid applies: one stacked column, every
+        # panel the same x-axis kind (all real dates, or all one groupby index)
+        sharex = grid_ncols == 1 and len({g.date_axis for _, g in prepared}) == 1
+    shared_xlim = None
+    if sharex and prepared[0][1].date_axis:
+        # a groupby's integer axis (month/year/...) already aligns across panels
+        # with no range to share; only a real date axis needs one computed.
+        shared_xlim = value_span(
+            [time_values(field[geometry.x_name]) for field, geometry in prepared]
+        )
+    shared_ylim = None
+    if sharey:
+        shared_ylim = value_span(
+            [np.asarray(field[geometry.y_name]) for field, geometry in prepared]
+        )
 
     plots = []
-    for item in items:
-        _, geometry = prepare_time_depth(item["field"])
+    for item, (_, geometry) in zip(items, prepared):
         panel_title = " · ".join(
             p
             for p in (item.get("label"), geometry.place_note, geometry.period_note)
@@ -1033,6 +1090,8 @@ def _time_depth_grid(
                 title=panel_title,
                 mark=mark,
                 clim=shared_clim,
+                xlim=shared_xlim,
+                ylim=shared_ylim,
                 font_scale=font_scale,
                 size=size,
                 zoom=zoom,

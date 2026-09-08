@@ -374,6 +374,80 @@ def test_a_time_depth_set_grid_layout_and_scale_options(stub):
         _make_set([NITRATE, "silicate"]).plot(shared_limits=True)
 
 
+def test_a_time_depth_set_sharex_option(monkeypatch):
+    """``sharex=False`` gives each panel its own time window instead of the
+    default shared one -- the ADCP-mooring case, several disjoint deployments
+    (one mooring's record ends where the next one's begins) rather than one
+    long overlapping record. ``sharex=True``/``False`` is a real parameter of
+    :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid` (and its
+    interactive twin), not silently dropped the way it was before this option
+    existed.
+    """
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    data = {
+        "nitrate": _point_time_depth(),
+        "silicate": _point_time_depth().assign_coords(
+            time=pd.date_range("2025-06-01", periods=6, freq="MS")
+        ),
+    }
+
+    def fake_prepare_source(source, variable, *args, **kwargs):
+        return (data["silicate" if "silicate" in variable else "nitrate"], None)
+
+    monkeypatch.setattr(comparison, "prepare_source", fake_prepare_source)
+    fs = make_field("stub", [NITRATE, "silicate"])
+
+    fig = fs.plot()
+    axes = fig.axes[:2]
+    assert axes[0].get_shared_x_axes().joined(axes[0], axes[1])
+
+    fig2 = fs.plot(sharex=False)
+    axes2 = fig2.axes[:2]
+    assert not axes2[0].get_shared_x_axes().joined(axes2[0], axes2[1])
+
+    obj = fs.plot(renderer="holoviews", sharex=False)
+    assert len(obj) == 2
+
+
+def test_a_time_depth_set_sharey_option(monkeypatch):
+    """``sharey=True`` shares one depth range across every panel instead of the
+    default per-panel one -- moorings at very different depths (a 20m
+    instrument next to a 100m one, say) each keep the range their own readings
+    reach by default (:func:`~ocean_skill.plot.matplotlib_renderer
+    .time_depth_grid`'s own ``sharey=False`` default), and can be lined up on
+    request instead, the same option :func:`profile` exposes for its own depth
+    axis.
+    """
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    data = {
+        "nitrate": _point_time_depth(depths=(0.0, 10.0, 20.0)),
+        "silicate": _point_time_depth(depths=(0.0, 50.0, 100.0)),
+    }
+
+    def fake_prepare_source(source, variable, *args, **kwargs):
+        return (data["silicate" if "silicate" in variable else "nitrate"], None)
+
+    monkeypatch.setattr(comparison, "prepare_source", fake_prepare_source)
+    fs = make_field("stub", [NITRATE, "silicate"])
+
+    fig = fs.plot()
+    axes = fig.axes[:2]
+    assert not axes[0].get_shared_y_axes().joined(axes[0], axes[1])
+    assert axes[0].get_ylim() != axes[1].get_ylim()
+
+    fig2 = fs.plot(sharey=True)
+    axes2 = fig2.axes[:2]
+    assert axes2[0].get_shared_y_axes().joined(axes2[0], axes2[1])
+    assert axes2[0].get_ylim() == axes2[1].get_ylim()
+
+    obj = fs.plot(renderer="holoviews", sharey=True)
+    assert len(obj) == 2
+
+
 def test_a_mixed_time_depth_and_series_set_refuses_to_plot(monkeypatch):
     """A ``time_depth`` panel and an overlaid line share no single figure -- see
     :meth:`~ocean_skill.field.FieldSet.plot`.

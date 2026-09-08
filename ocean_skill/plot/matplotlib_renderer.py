@@ -3355,6 +3355,8 @@ def time_depth_grid(
     ncols: int | None = None,
     nrows: int | None = None,
     shared_limits: bool = False,
+    sharex: bool | None = None,
+    sharey: bool = False,
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
@@ -3395,13 +3397,32 @@ def time_depth_grid(
     :meth:`~ocean_skill.field.Field._time_depth_item` gave it), plus place/period
     context only when no ``label`` says as much already.
 
+    ``sharex=None`` (the default) links every panel's time axis when they draw the
+    same way -- the default single stacked column, every panel a real date axis or
+    every panel the same groupby kind (see :attr:`~ocean_skill.plot.time_depth
+    .TimeDepthGeometry.date_axis`), exactly :func:`series`' own ``sharex=True``
+    default. Several moorings deployed one after another (disjoint windows, not one
+    long overlapping record) read as slivers of blank axis either side of their own
+    data under that default; pass ``sharex=False`` to autoscale each panel to its own
+    window instead, with its own date ticks -- the same option :func:`series` exposes,
+    given here rather than defaulted the other way, since sharing is meaningful far
+    more often than not for this family's own stacked-column shape.
+
+    ``sharey=False`` (the default) leaves each panel's depth axis to its own
+    instrument's range -- moorings at very different depths (22m vs 64m, say) each
+    keep the range their own readings actually reach, rather than a shallow one
+    inheriting a deep neighbour's mostly-empty axis. Pass ``sharey=True`` to line
+    every panel up on one common depth range instead -- :func:`profile`'s own
+    default direction, reversed here since this family's panels more often draw
+    genuinely different instruments than :func:`profile`'s own casts at one place.
+
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) -- neither changes
     anything here.
     """
     import matplotlib.pyplot as plt
 
-    from ocean_skill.plot.series import grid_shape
+    from ocean_skill.plot.series import grid_shape, value_span
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -3442,15 +3463,17 @@ def time_depth_grid(
     title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
-    # sharex only makes sense in the default single stacked column, and only when
-    # every panel's x axis is the same kind (all real dates, or all the same groupby
-    # index) -- see TimeDepthGeometry.date_axis.
-    sharex = grid_ncols == 1 and len({geometry.date_axis for _, geometry in prepared}) == 1
+    if sharex is None:
+        # auto: share only where it is physically meaningful -- one stacked column,
+        # every panel's x axis the same kind (all real dates, or all the same
+        # groupby index) -- see TimeDepthGeometry.date_axis.
+        sharex = grid_ncols == 1 and len({g.date_axis for _, g in prepared}) == 1
     fig, axes = plt.subplots(
         grid_nrows,
         grid_ncols,
         figsize=figsize,
         sharex=sharex,
+        sharey=sharey,
         squeeze=False,
         layout="constrained",
     )
@@ -3473,6 +3496,20 @@ def time_depth_grid(
         vmin, vmax = _limits(*(values for values, _ in prepared))
         shared_norm = norm_for(standard_name, vmin, vmax)
 
+    # One depth range for the whole figure when sharey -- explicit set_ylim on every
+    # panel rather than relying on invert_yaxis()'s toggle state (_draw_time_depth's
+    # own call), which sharey=True would otherwise flip twice on every panel but the
+    # first -- the same fix ocean_skill.plot.profile.depth_range's own docstring
+    # explains for that family's sharey. With sharey=False (the default) each panel
+    # keeps exactly the range _draw_time_depth's own invert_yaxis() already gives it
+    # -- untouched here, so a ragged (scatter) panel's axis still reflects only the
+    # depths it actually has readings at, not its full depth coordinate.
+    shared_depth = None
+    if sharey:
+        shared_depth = value_span(
+            [np.asarray(values[geometry.y_name]) for values, geometry in prepared]
+        )
+
     for index, (item, (values, geometry), panel_mark) in enumerate(
         zip(items, prepared, marks)
     ):
@@ -3484,6 +3521,9 @@ def time_depth_grid(
             vmin, vmax = _limits(values)
             norm = norm_for(item.get("standard_name"), vmin, vmax)
         im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark)
+        if shared_depth is not None:
+            y_lo, y_hi = shared_depth
+            ax.set_ylim(y_hi, y_lo)  # deep at the bottom, shallow at top
         panel_title = " · ".join(
             p for p in (item.get("label"), geometry.place_note, geometry.period_note) if p
         )
