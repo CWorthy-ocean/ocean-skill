@@ -520,8 +520,9 @@ def subset_to_time(obj, window):
     return obj if out.sizes.get(name, 0) == 0 else out
 
 
-def subset_to_time_targets(obj, targets):
-    """Crop ``obj`` to the step nearest each of ``targets``, along its time axis.
+def subset_to_time_targets(obj, targets, method: str = "nearest"):
+    """Crop ``obj`` to (or interpolate it onto) each of ``targets``, along its
+    time axis.
 
     The discrete counterpart of :func:`subset_to_time`'s contiguous window: a
     repeat-visit reference (a mooring, a CTD station visited every so often) is
@@ -530,16 +531,37 @@ def subset_to_time_targets(obj, targets):
     same one used here) -- every step a contiguous window keeps *between* two
     casts is read (and, for a ROMS lane, vertically transformed by ``_prepare``)
     only to be discarded once alignment picks its nearest neighbours. This
-    prunes to that same nearest-step set first.
+    prunes to that same nearest-step set first (``method="nearest"``, the
+    default), or -- for a low-frequency model whose nearest step could sit
+    meaningfully far in time from a cast -- linearly interpolates the whole
+    object onto the cast times instead (``method="interp"``/``"linear"``),
+    keeping only the bracketing steps read for it.
 
-    A superset by construction, never a stricter cut than alignment's own: no
-    ``tolerance`` is applied here (unlike :func:`_match_by_nearest`, which drops
-    a target with no step close enough), so a target far from every step still
-    keeps its single nearest one, and alignment's own tolerance -- with its own
-    "N steps unmatched" warning -- decides afterward whether that step actually
-    counts as a match. Silently returns ``obj`` unchanged if it has no time
-    *dimension* (already scalar, or none at all), or if ``targets`` is empty --
-    there is nothing to prune with.
+    ``method="nearest"`` is a superset by construction, never a stricter cut
+    than alignment's own: no ``tolerance`` is applied here (unlike
+    :func:`_match_by_nearest`, which drops a target with no step close
+    enough), so a target far from every step still keeps its single nearest
+    one, and alignment's own tolerance -- with its own "N steps unmatched"
+    warning -- decides afterward whether that step actually counts as a match.
+
+    ``method="interp"``/``"linear"`` instead keeps only the step *before* and
+    *after* each target (``pandas``' own ``ffill``/``bfill`` indexers) and
+    calls :meth:`xarray.Dataset.interp` on the whole object -- so every
+    variable sharing the time dimension (a ROMS lane's ``z_rho``/``zeta``/``h``
+    included) moves onto the cast times consistently, not just the requested
+    field. A target outside the object's own span (no step on one side) has no
+    bracket to interpolate from and is dropped, with a warning -- no
+    extrapolation, the same convention :func:`_match_vertical`/
+    :func:`ocean_skill.roms.to_depth` already use past their own data's range.
+    Unlike ``"nearest"``, this never takes the "keep everything, nothing to
+    prune" shortcut: even when every target already falls inside the record,
+    the object must still land exactly *on* the cast instants, not merely
+    somewhere close to all of them.
+
+    Silently returns ``obj`` unchanged if it has no time *dimension* (already
+    scalar, or none at all), if ``targets`` is empty, if there are fewer than
+    two steps to bracket with, or (``interp`` only) if every target fell
+    outside the object's span -- there is nothing to prune or interpolate with.
     """
     name = _time_name(obj)
     if name is None or name not in obj.dims:
@@ -551,11 +573,38 @@ def subset_to_time_targets(obj, targets):
         return obj
     import pandas as pd
 
-    pos = pd.Index(values).get_indexer(np.asarray(targets), method="nearest")
-    pos = np.unique(pos[pos >= 0])
-    if pos.size == 0 or pos.size == values.size:
+    targets = np.asarray(targets)
+    idx = pd.Index(values)
+    if method not in ("interp", "linear"):
+        pos = idx.get_indexer(targets, method="nearest")
+        pos = np.unique(pos[pos >= 0])
+        if pos.size == 0 or pos.size == values.size:
+            return obj
+        return obj.isel({name: pos})
+
+    lo = idx.get_indexer(targets, method="ffill")
+    hi = idx.get_indexer(targets, method="bfill")
+    in_span = (lo >= 0) & (hi >= 0)
+    if not in_span.all():
+        # Warned whether some or *all* targets are out of span -- silently
+        # falling back to the unpruned object when every target missed would
+        # leave the caller no sign that nothing was actually interpolated
+        # (the same "say so, don't just fail open quietly" idiom
+        # roms.to_depth's own all-NaN-target warning follows).
+        dropped = targets[~in_span]
+        warnings.warn(
+            f"{dropped.size} target time(s) fall outside {name!r}'s own span "
+            f"({values[0]} to {values[-1]}) and have no step to interpolate "
+            f"between -- dropped rather than extrapolated: {list(dropped)}.",
+            stacklevel=_stacklevel.find(),
+        )
+    if not in_span.any():
         return obj
-    return obj.isel({name: pos})
+    targets = targets[in_span]
+    lo, hi = lo[in_span], hi[in_span]
+    pos = np.unique(np.concatenate([lo, hi]))
+    cropped = obj.isel({name: pos})
+    return cropped.interp({name: targets}, method="linear")
 
 
 def bbox_of(obj) -> tuple[float, float, float, float]:
@@ -2267,27 +2316,25 @@ def align(
     if is_vertical_over and not is_section:
         # A climatology (aggregate={"time": {"groupby"/"resample": ...}}) folds
         # the raw time axis into bins on *both* lanes alike -- a "month"/"season"
-        # dim standing on both test and reference, exactly the shape a profile
-        # comparison scored down depth (over="Z") is meant to draw one row per
-        # bin from (see ocean_skill.plot.profile's month/season fan). That is not
-        # the leftover, un-reduced axis _require_2d otherwise refuses: it is
-        # legitimate only when the *same* dim, marked as a genuine fold
-        # (operators.TIME_GROUPBY_ATTR), survives *both* lanes identically -- one
-        # lane alone carrying it (an ordinary field a caller forgot to reduce)
-        # is still refused below, unchanged.
-        from .operators import TIME_GROUPBY_ATTR
+        # dim (groupby) or a still-"time"-named one (resample) standing on both
+        # test and reference, exactly the shape a profile comparison scored down
+        # depth (over="Z") is meant to draw one row per bin from (see
+        # ocean_skill.plot.profile's month/season/period fan). That is not the
+        # leftover, un-reduced axis _require_2d otherwise refuses: it is
+        # legitimate only when the *same* dim, marked as a genuine fold -- either
+        # spelling, groupby's renamed dim or resample's kept "time"
+        # (operators.is_time_fold_coord) -- survives *both* lanes identically.
+        # One lane alone carrying it (an ordinary field a caller forgot to
+        # reduce, or a resample only one side happened to apply) is still
+        # refused below, unchanged.
+        from .operators import is_time_fold_coord
 
         test_extra = _extra_dims(test, keep)
         ref_extra = _extra_dims(reference, keep)
         if test_extra and test_extra == ref_extra and len(test_extra) == 1:
             (dim,) = test_extra
             t_coord, r_coord = test.coords.get(dim), reference.coords.get(dim)
-            if (
-                t_coord is not None
-                and TIME_GROUPBY_ATTR in t_coord.attrs
-                and r_coord is not None
-                and TIME_GROUPBY_ATTR in r_coord.attrs
-            ):
+            if is_time_fold_coord(t_coord) and is_time_fold_coord(r_coord):
                 keep = (*keep, dim)
     if not is_section:
         # A profile reference is one cast at one instant, so a time-varying test lane

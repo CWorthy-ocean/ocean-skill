@@ -23,8 +23,10 @@ from ocean_skill.operators import (
     DERIVED,
     SPREAD_COORD,
     TIME_GROUPBY_ATTR,
+    TIME_RESAMPLE_ATTR,
     aggregate,
     combine,
+    is_time_fold_coord,
     point_in_spec,
     register_reducer,
     resolve_variable,
@@ -208,6 +210,52 @@ def test_a_renamed_time_axis_is_still_marked():
     out = aggregate(da, {"ocean_time": {"groupby": "month", "reduce": "mean"}})
     assert out["month"].attrs[TIME_GROUPBY_ATTR] == "ocean_time"
     assert time_axis_dim(out) == "month"
+
+
+# -- the time-resample marker (feeds fan_season's period fan) -----------------
+
+
+def test_a_resample_marks_its_kept_time_dim(marbl):
+    """Unlike groupby, resample keeps the dim named ``time`` -- already
+    resolvable by :func:`time_axis_dim` with no marker needed -- so the mark
+    exists only to tell this legitimate fold apart from an ordinary, un-reduced
+    ``time`` axis (see :func:`~ocean_skill.operators.is_time_fold_coord`), not
+    to help anything *find* it.
+    """
+    out = aggregate(marbl["spChl"], {"time": {"resample": "1MS", "reduce": "mean"}})
+    assert "time" in out.dims  # not renamed, unlike groupby
+    assert out["time"].attrs[TIME_RESAMPLE_ATTR] == "1MS"
+    assert time_axis_dim(out) == "time"  # already found by name, marker unneeded
+
+
+def test_groupby_and_resample_stamp_only_their_own_marker(marbl):
+    """A groupby result never carries the resample marker, and vice versa --
+    the two are distinct folds (climatology vs. consecutive period), not
+    interchangeable spellings of one mark.
+    """
+    gb = aggregate(marbl["spChl"], {"time": {"groupby": "month", "reduce": "mean"}})
+    rs = aggregate(marbl["spChl"], {"time": {"resample": "1MS", "reduce": "mean"}})
+    assert TIME_RESAMPLE_ATTR not in gb["month"].attrs
+    assert TIME_GROUPBY_ATTR not in rs["time"].attrs
+
+
+def test_is_time_fold_coord_recognizes_either_marker(marbl):
+    gb = aggregate(marbl["spChl"], {"time": {"groupby": "month", "reduce": "mean"}})
+    rs = aggregate(marbl["spChl"], {"time": {"resample": "1MS", "reduce": "mean"}})
+    assert is_time_fold_coord(gb.coords["month"])
+    assert is_time_fold_coord(rs.coords["time"])
+    assert not is_time_fold_coord(marbl.coords["time"])  # the raw, un-reduced axis
+    assert not is_time_fold_coord(None)
+
+
+def test_the_resample_marker_survives_a_selection_and_a_spread_rides_along(marbl):
+    out = aggregate(
+        marbl["spChl"],
+        {"time": {"resample": "1MS", "reduce": "mean", "spread": "std"}},
+    )
+    assert SPREAD_COORD in out.coords
+    narrowed = out.isel(time=0)
+    assert narrowed["time"].attrs[TIME_RESAMPLE_ATTR] == "1MS"
 
 
 # -- season groupby and spread -------------------------------------------------
@@ -1378,3 +1426,88 @@ def test_targets_covering_every_step_returns_the_object_unpruned():
     test = _daily_maps("2012-01-01", 5)
     out = subset_to_time_targets(test, pd.to_datetime(test.time.values))
     assert out.sizes["time"] == 5
+
+
+# -- method="interp": bracketing steps + a linear blend, not the nearest one -----
+
+
+def test_interp_lands_exactly_on_the_target_time_with_the_linear_blend():
+    """Unlike ``"nearest"``, ``"interp"`` keeps only the bracketing steps and
+    lands the object precisely on the cast time, at the linearly-interpolated
+    value -- not whichever real step happened to be closest.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    time = pd.date_range("2012-01-01", periods=10, freq="D")
+    test = xr.DataArray(np.arange(10, dtype="float64"), dims="time", coords={"time": time})
+    target = pd.to_datetime(["2012-01-04T18:00"])  # 3/4 of the way from day 4 to day 5
+    out = subset_to_time_targets(test, target, method="interp")
+    assert out.sizes["time"] == 1
+    assert pd.Timestamp(out.time.values[0]) == target[0]
+    assert np.isclose(float(out.isel(time=0)), 3.75)  # day index 3 + 0.75*(4-3)
+
+
+def test_interp_keeps_only_the_bracketing_steps_not_the_whole_span():
+    """The read/interpolation win: only the step before and after each target
+    is kept, not a contiguous crop across the whole set.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 365)
+    targets = pd.to_datetime(["2012-03-01T12:00", "2012-11-15T06:00"])
+    out = subset_to_time_targets(test, targets, method="interp")
+    assert out.sizes["time"] == 2
+    for t, kept in zip(targets, sorted(pd.to_datetime(out.time.values))):
+        assert kept == t
+
+
+def test_interp_drops_out_of_span_targets_with_a_warning():
+    """A target with no step on one side has nothing to interpolate between --
+    dropped, never extrapolated (mirrors ``_match_vertical``/``roms.to_depth``).
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 10)
+    targets = pd.to_datetime(
+        ["2012-01-05T12:00:00", "1990-01-01T00:00:00"]  # one in, one far out
+    )
+    with pytest.warns(UserWarning, match="outside"):
+        out = subset_to_time_targets(test, targets, method="interp")
+    assert out.sizes["time"] == 1
+    assert pd.Timestamp(out.time.values[0]) == targets[0]
+
+
+def test_interp_all_targets_out_of_span_leaves_the_object_alone():
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 10)
+    with pytest.warns(UserWarning, match="outside"):
+        out = subset_to_time_targets(
+            test, pd.to_datetime(["1990-01-01"]), method="interp"
+        )
+    assert out.sizes["time"] == 10  # unchanged, fail open
+
+
+def test_interp_single_step_object_returns_unchanged():
+    """No bracket possible with one step -- the same guard ``"nearest"`` has."""
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 1)
+    out = subset_to_time_targets(
+        test, pd.to_datetime(["2012-06-01"]), method="interp"
+    )
+    assert out.sizes["time"] == 1
+
+
+def test_interp_still_lands_exactly_even_when_every_target_is_covered():
+    """Unlike "nearest"'s own "covers everything, leave unpruned" shortcut,
+    interp must still land exactly on the targets, not merely somewhere close
+    to all of them -- there is no dense-coverage shortcut to take here.
+    """
+    from ocean_skill.align import subset_to_time_targets
+
+    test = _daily_maps("2012-01-01", 5)
+    targets = pd.to_datetime(["2012-01-02T12:00", "2012-01-03T12:00"])
+    out = subset_to_time_targets(test, targets, method="interp")
+    assert out.sizes["time"] == 2
+    assert list(pd.to_datetime(out.time.values)) == list(targets)
