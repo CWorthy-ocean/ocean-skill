@@ -202,8 +202,9 @@ class Field:
     panels. A ``select`` that narrows both horizontal axes to one position instead
     draws as a line over whatever axis survives — see :attr:`family`.
 
-    Holds exactly one variable. A list of them belongs to :func:`field`, which fans it
-    into a :class:`FieldSet` instead of a single ``Field``.
+    Holds exactly one source and one variable. A list of either belongs to
+    :func:`field`, which fans it into a :class:`FieldSet` instead of a single
+    ``Field``.
     """
 
     def __init__(
@@ -226,6 +227,13 @@ class Field:
         )
         from ocean_skill.vocabulary import resolve_and_report
 
+        if isinstance(source, (list, tuple)):
+            raise TypeError(
+                f"{source!r} is a list of sources, and a Field holds exactly one -- "
+                "pass the list to osk.field(), which fans it into a FieldSet (one "
+                "Field per source, drawn on one figure), or pass the one source this "
+                "Field is for."
+            )
         if isinstance(variable, (list, tuple)):
             raise TypeError(
                 f"{variable!r} is a list of variable specs, and a Field holds exactly "
@@ -1163,17 +1171,21 @@ class Field:
 
 
 class FieldSet:
-    """Several variables of one source, drawn together as one ``series``/``profile`` figure.
+    """Several fields -- variables and/or sources -- drawn together as one
+    ``series``/``profile`` figure.
 
-    ``osk.field(source, [v1, v2, ...])`` builds one :class:`Field` per variable,
-    sharing the same ``select``/``aggregate``/``label``/``cache`` (there is no
-    per-variable select yet — see :func:`field`), and pools them here. The layout is
-    whatever :mod:`ocean_skill.plot.series` or :mod:`ocean_skill.plot.profile` already
-    does with several variables: one panel with a twin axis for two (a right-hand
-    y axis for a series, a top x axis for a profile — ``secondary_y``/``secondary_x``
-    respectively), one row/column per variable for three or more, all overlaid within
-    a panel by source. There is nothing to configure beyond what :meth:`Field.plot`
-    already exposes, because the composition rule *is* the feature.
+    ``osk.field()`` builds one :class:`Field` per entry whenever ``source`` and/or
+    ``variable`` is a list, sharing the same ``select``/``aggregate``/``label``/
+    ``cache`` (there is no per-entry select yet — see :func:`field`), and pools
+    them here. The layout is whatever :mod:`ocean_skill.plot.series` or
+    :mod:`ocean_skill.plot.profile` already does with several lines: one panel
+    with a twin axis for two variables (a right-hand y axis for a series, a top
+    x axis for a profile — ``secondary_y``/``secondary_x`` respectively), one
+    row/column per variable for three or more, everything sharing a variable
+    overlaid within a panel and told apart by source (dashed by default; pass
+    ``encode={"color": "source"}`` to colour by source instead). There is
+    nothing to configure beyond what :meth:`Field.plot` already exposes, because
+    the composition rule *is* the feature.
 
     Series or profile only, and every member must reduce the same way — a set with a
     member that reduces to a map rather than a point has nothing in common to draw as
@@ -1185,8 +1197,8 @@ class FieldSet:
             if not isinstance(f, Field):
                 raise TypeError(
                     f"expected Fields, got {f!r}. A FieldSet is built by osk.field() "
-                    "from a list of variables -- construct it that way rather than "
-                    "by hand."
+                    "from a list of sources and/or variables -- construct it that "
+                    "way rather than by hand."
                 )
         self.fields = list(fields)
 
@@ -1209,7 +1221,7 @@ class FieldSet:
         return [item for f in self.fields for item in f._series_items()]
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw every member's variable on one figure, laid out by :mod:`plot.series`
+        """Draw every member on one figure, laid out by :mod:`plot.series`
         or :mod:`plot.profile`.
 
         Every member has to draw the same way -- all a :attr:`Field.family` of
@@ -1224,28 +1236,38 @@ class FieldSet:
 
         time_depth = [f for f in self.fields if f.family == "time_depth"]
         if time_depth:
+            multi_source = len({f.source for f in time_depth}) > 1
             names = ", ".join(
-                _short_variable_label(f.variable) for f in time_depth
+                f"{f.source} {_short_variable_label(f.variable)}"
+                if multi_source
+                else _short_variable_label(f.variable)
+                for f in time_depth
             )
             raise ValueError(
                 f"{names} draw as depth against time (see .family), which has no "
-                "overlay or facet composition of its own yet -- plot one variable "
+                "overlay or facet composition of its own yet -- plot one field "
                 "at a time with osk.field(source, variable).plot() instead. "
-                "Stacked time_depth panels for several variables are a follow-up."
+                "Stacked time_depth panels for several fields are a follow-up."
             )
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
         mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1
         if not_lines or mixed:
+            multi_source = len({f.source for f in self.fields}) > 1
             detail = "; ".join(
-                f"{_short_variable_label(f.variable)}: {f.family_reason}"
+                (
+                    f"{f.source} {_short_variable_label(f.variable)}"
+                    if multi_source
+                    else _short_variable_label(f.variable)
+                )
+                + f": {f.family_reason}"
                 for f in self.fields
             )
             raise ValueError(
-                f"several variables on one figure draw as overlaid lines, but not "
+                f"several fields on one figure draw as overlaid lines, but not "
                 f"every one of them reduced the same way -- {detail}. Narrow "
                 "select= to one lon/lat position -- keeping time standing draws "
                 "a series, keeping depth standing with no time draws a profile "
-                "-- so every member draws the same way, or plot each variable's "
+                "-- so every member draws the same way, or plot each one's "
                 "maps separately with osk.field(source, variable)."
             )
         family = self.fields[0].family
@@ -1253,12 +1275,12 @@ class FieldSet:
         return render(spec, renderer=renderer)
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Refuse: a set of variables drawn as lines has nothing to play as frames."""
+        """Refuse: a set of fields drawn as lines has nothing to play as frames."""
         raise ValueError(
-            "this set holds several variables of one source drawn as lines over "
-            "time or down depth -- there is nothing to play as a movie. Use "
-            ".plot(); it already shows the whole figure. For a movie of maps, "
-            "give osk.field() one variable."
+            "this set holds several fields drawn as lines over time or down "
+            "depth -- there is nothing to play as a movie. Use .plot(); it "
+            "already shows the whole figure. For a movie of maps, give "
+            "osk.field() one source and one variable."
         )
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -1288,16 +1310,23 @@ class FieldSet:
         from ocean_skill import outputs
         from ocean_skill.comparison import _short_variable_label
 
-        stem = stem or "_".join(
-            _short_variable_label(f.variable) for f in self.fields
-        )[:24]
+        variable_labels = list(
+            dict.fromkeys(_short_variable_label(f.variable) for f in self.fields)
+        )
+        source_labels = list(dict.fromkeys(f.source for f in self.fields))
+        # Distinct sources sharing a variable would otherwise collide on one
+        # filename -- fold the source in too, deduped, when there is more than one.
+        parts = variable_labels if len(source_labels) <= 1 else (
+            variable_labels + source_labels
+        )
+        stem = stem or "_".join(parts)[:24]
         path = outputs.figures_dir(project or self.fields[0].source) / f"{stem}.png"
         self.plot(renderer=renderer, save=path, **plot_kwargs)
         return {"figure": path}
 
 
 def field(
-    source: str,
+    source: Any,
     variable: Any,
     *,
     select: dict[str, Any] | None = None,
@@ -1388,49 +1417,72 @@ def field(
     alias repeats, like ``"temp"`` and ``"temperature"``) are dropped with a note
     rather than drawn twice. A single-element list still returns a ``FieldSet``, for
     the same reason ``compare(variables=[v])`` still returns a set.
-    """
-    if isinstance(variable, (list, tuple)):
-        if not variable:
-            raise ValueError(
-                "variable=[] names nothing to draw. Pass one spec (a name or a "
-                'dict), or a list of them -- osk.field(src, ["temperature", '
-                '"salinity"]).'
-            )
-        from ocean_skill.comparison import _canonical
 
-        members = [
-            Field(
-                source,
-                v,
-                select=select,
-                aggregate=aggregate,
-                label=label,
-                cache=cache,
-                qc=qc,
-                detide=detide,
-            )
-            for v in variable
-        ]
-        kept: list[Field] = []
-        seen: set[str] = set()
-        dropped = 0
-        for f in members:
-            key = _canonical(f.variable)
-            if key in seen:
-                dropped += 1
-                continue
-            seen.add(key)
-            kept.append(f)
-        if dropped:
-            print(f"  dropped {dropped} duplicate variable(s)")
-        return FieldSet(kept)
-    return Field(
-        source,
-        variable,
-        select=select,
-        aggregate=aggregate,
-        label=label,
-        cache=cache,
-        qc=qc,
-        detide=detide,
-    )
+    ``source`` accepts a list the same way -- one :class:`Field` per source, sharing
+    this same ``variable``/``select``/``aggregate``/``label``/``cache``, pooled into
+    a :class:`FieldSet`. This is what :func:`ocean_skill.catalog.find` chains into
+    directly, since it always returns a list of names::
+
+        osk.field(osk.find(catalog="CTD mooring"), "temperature").plot()
+
+    One line per mooring, overlaid on one figure (dashed by source; pass
+    ``encode={"color": "source"}`` to colour by source instead of variable). Passing
+    a list for *both* ``source`` and ``variable`` fans the full cross product --
+    one ``Field`` per ``(source, variable)`` pair, deduplicated the same way.
+    """
+    source_is_list = isinstance(source, (list, tuple))
+    variable_is_list = isinstance(variable, (list, tuple))
+    if source_is_list and not source:
+        raise ValueError(
+            "source=[] names nothing to draw -- often osk.find() matching "
+            "nothing; check its filters. Pass one source name, or a list of "
+            'them -- osk.field(["src_a", "src_b"], "temperature").'
+        )
+    if variable_is_list and not variable:
+        raise ValueError(
+            "variable=[] names nothing to draw. Pass one spec (a name or a "
+            'dict), or a list of them -- osk.field(src, ["temperature", '
+            '"salinity"]).'
+        )
+    if not source_is_list and not variable_is_list:
+        return Field(
+            source,
+            variable,
+            select=select,
+            aggregate=aggregate,
+            label=label,
+            cache=cache,
+            qc=qc,
+            detide=detide,
+        )
+    from ocean_skill.comparison import _canonical
+
+    sources = list(source) if source_is_list else [source]
+    variables = list(variable) if variable_is_list else [variable]
+    members = [
+        Field(
+            s,
+            v,
+            select=select,
+            aggregate=aggregate,
+            label=label,
+            cache=cache,
+            qc=qc,
+            detide=detide,
+        )
+        for s in sources
+        for v in variables
+    ]
+    kept: list[Field] = []
+    seen: set[tuple[str, str]] = set()
+    dropped = 0
+    for f in members:
+        key = (f.source, _canonical(f.variable))
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        kept.append(f)
+    if dropped:
+        print(f"  dropped {dropped} duplicate(s)")
+    return FieldSet(kept)

@@ -543,3 +543,85 @@ def test_secondary_x_false_stacks_two_profile_variables(stub):
     stub(_point_with_depth().isel(time=0))
     fig = _make_set([NITRATE, SILICATE]).plot(secondary_x=False)
     assert len([ax for ax in fig.axes if ax.get_title()]) == 2
+
+
+# -- several sources of one variable (FieldSet, fanned by source) -----------------------
+#
+# ``osk.find(...)`` always returns a list of source names, even a single match, so
+# ``osk.field(osk.find(...), "temp")`` is the chain this exercises -- one Field per
+# source, sharing this same stubbed data (the stub does not care what source name it
+# is called with), pooled the same way a list of variables already is.
+
+
+def _make_source_set(sources, **kwargs):
+    from ocean_skill.field import field as make_field
+
+    return make_field(sources, NITRATE, **kwargs)
+
+
+def test_a_list_of_sources_returns_a_fieldset(stub):
+    from ocean_skill.field import Field, FieldSet
+
+    stub(_point_series())
+    fs = _make_source_set(["stub_a", "stub_b"])
+    assert isinstance(fs, FieldSet)
+    assert len(fs) == 2
+    assert all(isinstance(f, Field) for f in fs)
+    assert [f.source for f in fs] == ["stub_a", "stub_b"]
+
+
+def test_a_one_element_source_list_is_still_a_set(stub):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    fs = _make_source_set(["stub_a"])
+    assert isinstance(fs, FieldSet)
+    assert len(fs) == 1
+    fig = fs.plot()
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 1
+
+
+def test_two_sources_overlay_as_lines_in_one_panel(stub):
+    """One variable, two sources -- no secondary axis (that's for two variables);
+    both lines share the one panel, told apart by source."""
+    stub(_point_series())
+    fs = _make_source_set(["stub_a", "stub_b"])
+    fig = fs.plot()
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 2
+    assert {line.get_label() for line in fig.axes[0].lines} == {"stub_a", "stub_b"}
+
+    import holoviews as hv
+
+    obj = _make_source_set(["stub_a", "stub_b"]).plot(renderer="holoviews")
+    assert len(obj.traverse(lambda x: x, [hv.Curve])) == 2
+
+
+def test_source_list_and_variable_list_fan_the_cross_product(stub):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    fs = make_field(["stub_a", "stub_b"], [NITRATE, SILICATE])
+    assert len(fs) == 4
+    pairs = {(f.source, f.standard_name) for f in fs}
+    assert len(pairs) == 4
+
+
+def test_a_source_list_passed_to_field_itself_is_refused():
+    from ocean_skill.field import Field
+
+    with pytest.raises(TypeError, match="list of sources"):
+        Field(["stub_a", "stub_b"], NITRATE)
+
+
+def test_an_empty_source_list_is_refused():
+    with pytest.raises(ValueError, match="names nothing"):
+        _make_source_set([])
+
+
+def test_duplicate_sources_are_dropped(stub, capsys):
+    stub(_point_series())
+    fs = _make_source_set(["stub_a", "stub_a"])
+    assert len(fs) == 1
+    assert "duplicate" in capsys.readouterr().out
