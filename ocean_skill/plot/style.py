@@ -269,12 +269,26 @@ def markevery_indices(n: int, target: int = MARKER_TARGET) -> list[int]:
     return list(range(0, n, step))
 
 
-def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[StyledLine]:
+def resolve(
+    specs,
+    *,
+    encode: dict[str, str | None] | None = None,
+    colors=None,
+) -> list[StyledLine]:
     """Resolve every line's colour, dash pattern, marker and label.
 
     One pass over the whole figure's lines, because every channel is relative: a
     colour is an *index* among the variables present, and a marker is drawn at all only
     if depth varies. Renderers consume the result and decide nothing.
+
+    ``colors=`` pins the auto cycle to specific values instead of leaving every level
+    at whatever :data:`COLOR_CYCLE` gives it -- the same ``None``/scalar/list/dict
+    shapes :func:`ocean_skill.plot.summary._resolve_colors` already gives the summary
+    diagrams: a dict names only the levels it wants to override (raising if a name
+    isn't one of the colour channel's actual values), a list is a palette assigned in
+    first-appearance order, a scalar broadcasts, and ``None`` (the default) reproduces
+    today's cycle exactly. A band's fill follows for free -- both renderers colour it
+    from the same resolved :attr:`StyledLine.color`.
     """
     specs = list(specs)
     channels = {**CHANNELS, **(encode or {})}
@@ -294,6 +308,16 @@ def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[Style
 
     varying = varying_fields(specs)
     colours = _levels(specs, channels["color"])
+    if colors is not None and not colours:
+        raise ValueError(
+            f"colors={colors!r} was given, but the colour channel is off "
+            "(encode sets it to None) -- there is no level left to key it on."
+        )
+    color_map = {}
+    if colours:
+        from ocean_skill.plot.summary import _resolve_colors
+
+        color_map = _resolve_colors(colors, colours, channels["color"])
     # The linestyle cycle is indexed among the *test* lines only: the reference is solid
     # by role, so letting it consume a level would leave the first model dotted while
     # nothing was dashed.
@@ -307,7 +331,7 @@ def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[Style
     out = []
     for spec in specs:
         colour_value = spec.get(channels["color"]) if channels["color"] else None
-        index = colours.index(colour_value) if colours else 0
+        color = color_map[colour_value] if colours else COLOR_CYCLE[0]
         dash_value = spec.get(channels["linestyle"]) if channels["linestyle"] else None
         level = dash_levels.index(dash_value) if dash_value in dash_levels else 0
         marker = None
@@ -317,7 +341,7 @@ def resolve(specs, *, encode: dict[str, str | None] | None = None) -> list[Style
         out.append(
             StyledLine(
                 spec=spec,
-                color=COLOR_CYCLE[index % len(COLOR_CYCLE)],
+                color=color,
                 linestyle=linestyle_for(spec.role, level),
                 marker=marker,
                 label=series_label(spec, varying=varying, ambiguous_sources=ambiguous),

@@ -965,6 +965,98 @@ def test_shared_axis_labels_is_no_longer_a_series_option():
         )
 
 
+# -- wspace=/hspace= subplot spacing (static-only) -------------------------------------
+
+
+def test_wspace_and_hspace_set_the_layout_engine():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    fig = render(
+        _spec(items, cols="comparison", wspace=0.5, hspace=0.3), renderer="matplotlib"
+    )
+    values = fig.get_layout_engine().get()
+    assert values["wspace"] == 0.5
+    assert values["hspace"] == 0.3
+
+
+def test_leaving_wspace_and_hspace_unset_reproduces_todays_layout():
+    default = render(_spec([_item()]), renderer="matplotlib").get_layout_engine().get()
+    explicit_none = (
+        render(_spec([_item()], wspace=None, hspace=None), renderer="matplotlib")
+        .get_layout_engine()
+        .get()
+    )
+    assert default["wspace"] == explicit_none["wspace"] == 0.02
+    assert default["hspace"] == explicit_none["hspace"] == 0.02
+
+
+def test_the_interactive_renderer_warns_for_wspace_and_hspace():
+    """No equivalent gutter exists on an ``hv.Layout`` in the installed holoviews.
+
+    Checked directly -- ``hv.opts.Layout`` raises "unexpected option" for both.
+    """
+    with pytest.warns(UserWarning, match="only affect the static"):
+        render(_spec([_item()], wspace=0.3), renderer="holoviews")
+
+
+# -- colors= line colour control -----------------------------------------------------
+
+
+def test_colors_dict_pins_named_levels_in_both_renderers():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    spec = _spec(
+        items, cols="comparison", encode={"color": "source"}, colors={"run0": "red"}
+    )
+    static = {label: color for label, color, *_ in _matplotlib_lines(
+        render(spec, renderer="matplotlib")
+    )}
+    assert static["run0"] == "red"
+
+    interactive = {label: color for label, color, *_ in _holoviews_lines(
+        render(spec, renderer="holoviews")
+    )}
+    assert interactive["run0"] == "red"
+
+
+def test_colors_list_assigns_a_palette_in_first_appearance_order():
+    items = [_item(SALINITY, units="1e-3"), _item()]
+    lines = _matplotlib_lines(
+        render(
+            _spec(items, encode={"color": "variable"}, colors=["grey", "orange"]),
+            renderer="matplotlib",
+        )
+    )
+    # first-appearance order across all_specs: salinity's pair comes first
+    colors_seen = [color for _, color, *_ in lines]
+    assert colors_seen[0] == "grey"
+    assert colors_seen[-1] == "orange"
+
+
+def test_colors_str_broadcasts_to_every_line():
+    items = [_item(SALINITY, units="1e-3"), _item()]
+    lines = _matplotlib_lines(
+        render(_spec(items, colors="black"), renderer="matplotlib")
+    )
+    assert all(color == "black" for _, color, *_ in lines)
+
+
+def test_colors_unknown_level_names_the_field_and_its_levels():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    with pytest.raises(ValueError, match="source"):
+        render(
+            _spec(items, encode={"color": "source"}, colors={"not-a-source": "red"}),
+            renderer="matplotlib",
+        )
+
+
+def test_colors_none_reproduces_todays_cycle():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    spec_default = _spec(items, cols="comparison")
+    spec_explicit_none = _spec(items, cols="comparison", colors=None)
+    with_none = _matplotlib_lines(render(spec_default, renderer="matplotlib"))
+    explicit_none = _matplotlib_lines(render(spec_explicit_none, renderer="matplotlib"))
+    assert with_none == explicit_none
+
+
 def test_a_gridded_only_option_raises_statically():
     with pytest.raises(TypeError, match="series"):
         render(
@@ -1058,6 +1150,9 @@ def test_series_is_registered_everywhere_it_has_to_be():
         "nrows",
         "sharex",
         "sharey",
+        "wspace",
+        "hspace",
+        "colors",
     ):
         assert option in _top_level_options(), option
 

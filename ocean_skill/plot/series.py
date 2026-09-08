@@ -34,9 +34,11 @@ __all__ = [
     "Layout",
     "Panel",
     "compose",
+    "corner_placement",
     "item_roles",
     "line_specs",
     "panel_title",
+    "remap_line_labels",
     "time_values",
     "value_span",
 ]
@@ -82,6 +84,54 @@ def _normalize_legend(legend: bool | str) -> str:
         f"legend={legend!r} is not a placement this family knows; expected True, "
         f"False, 'below', 'right', or a corner ({', '.join(CORNERS)})."
     )
+
+
+def remap_line_labels(styled, all_specs, line_labels):
+    """Override every line's legend label from an explicit list.
+
+    Shared by :mod:`series` and :mod:`profile` so the two cannot disagree on the
+    UX. ``line_labels=None`` returns ``styled`` unchanged. Otherwise one label is
+    expected per legend entry, in first-appearance draw order across
+    ``all_specs`` (items in their given order, reference before test within an
+    item) -- the same order a reader meets them, panel by panel. The wrong
+    count raises a copy-pasteable ``ValueError`` listing what draws today.
+    """
+    if line_labels is None:
+        return styled
+    seen: dict[str, None] = {}
+    for spec in all_specs:
+        seen.setdefault(styled[(spec.item, spec.role)].label, None)
+    current = list(seen)
+    line_labels = list(line_labels)
+    if len(line_labels) != len(current):
+        listing = "\n".join(f"  {i + 1}. {label!r}" for i, label in enumerate(current))
+        raise ValueError(
+            f"line_labels needs one label per legend entry -- this figure draws "
+            f"{len(current)}:\n{listing}\ngot {len(line_labels)}. Copy the list "
+            "above, edit the text, and pass it back in the same order."
+        )
+    remap = dict(zip(current, line_labels, strict=True))
+    return {key: replace(line, label=remap[line.label]) for key, line in styled.items()}
+
+
+def corner_placement(
+    legend_placement: str, ranked: list[str], metrics_loc: str
+) -> tuple[str, str]:
+    """``(metrics_corner, legend_corner)`` for one panel.
+
+    The box takes the emptiest corner and the legend the next emptiest, so the two
+    cannot land on top of each other however the data happens to run -- a forced
+    corner (``legend_placement`` itself a corner name) still gets this treatment: the
+    box simply is not offered that corner, so the two still cannot collide. Shared by
+    :mod:`series` and :mod:`profile`.
+    """
+    forced_corner = legend_placement if legend_placement in CORNERS else None
+    if metrics_loc == "auto":
+        free = next((c for c in ranked if c != forced_corner), ranked[0])
+    else:
+        free = metrics_loc
+    legend_at = forced_corner or next((c for c in ranked if c != free), CORNERS[1])
+    return free, legend_at
 
 
 @dataclass(frozen=True)
@@ -641,6 +691,7 @@ def compose(
     metrics_loc: str = "auto",
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    colors=None,
     ncols: int | None = None,
     nrows: int | None = None,
 ) -> Layout:
@@ -653,6 +704,9 @@ def compose(
     in the order those labels first appear (reference before test within an
     item, items in their given order) -- get that order from the ``ValueError``
     a wrong-length list raises, which lists the current labels for copying.
+
+    ``colors=`` pins the auto colour cycle to specific values instead; see
+    :func:`ocean_skill.plot.style.resolve`.
 
     ``ncols=``/``nrows=`` wrap the panels into a rectangular grid instead of
     today's single row (``cols=``) or single column (default/``rows=``); see
@@ -680,7 +734,7 @@ def compose(
     all_specs = [s for i, item in enumerate(items) for s in line_specs(item, i)]
     styled = {
         (line.spec.item, line.spec.role): line
-        for line in _style.resolve(all_specs, encode=encode)
+        for line in _style.resolve(all_specs, encode=encode, colors=colors)
     }
     varying = _style.varying_fields(all_specs)
 
@@ -704,28 +758,7 @@ def compose(
             for key, line in styled.items()
         }
 
-    if line_labels is not None:
-        # First appearance across the figure, in draw order: items in the order
-        # given, and within an item reference before test (line_specs's own
-        # order) -- the same order a reader meets the entries in, panel by panel.
-        seen: dict[str, None] = {}
-        for spec in all_specs:
-            seen.setdefault(styled[(spec.item, spec.role)].label, None)
-        current = list(seen)
-        line_labels = list(line_labels)
-        if len(line_labels) != len(current):
-            listing = "\n".join(
-                f"  {i + 1}. {label!r}" for i, label in enumerate(current)
-            )
-            raise ValueError(
-                f"line_labels needs one label per legend entry -- this figure draws "
-                f"{len(current)}:\n{listing}\ngot {len(line_labels)}. Copy the list "
-                "above, edit the text, and pass it back in the same order."
-            )
-        remap = dict(zip(current, line_labels, strict=True))
-        styled = {
-            key: replace(line, label=remap[line.label]) for key, line in styled.items()
-        }
+    styled = remap_line_labels(styled, all_specs, line_labels)
 
     # One axis, so one x-axis convention for the whole figure -- read off the
     # first line's own values, the same "one axis, so one name" rule _ylabel
@@ -808,17 +841,8 @@ def compose(
                 stacklevel=_stacklevel.find(),
             )
             box = ""
-        # The box takes the emptiest corner and the legend the next emptiest, so the two
-        # cannot land on top of each other however the data happens to run -- a forced
-        # corner (legend="upper right", say) still gets this treatment: the box simply
-        # is not offered that corner, so the two still cannot collide.
         ranked = free_corners(primary + second)
-        forced_corner = legend_placement if legend_placement in CORNERS else None
-        if metrics_loc == "auto":
-            free = next((c for c in ranked if c != forced_corner), ranked[0])
-        else:
-            free = metrics_loc
-        legend_at = forced_corner or next((c for c in ranked if c != free), CORNERS[1])
+        free, legend_at = corner_placement(legend_placement, ranked, metrics_loc)
         residual_lines = ()
         if residual:
             residual_lines = tuple(

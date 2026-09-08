@@ -312,6 +312,25 @@ def _merged(
     return {**defaults, **(overrides or {})}
 
 
+def _apply_subplot_spacing(fig, *, wspace: float | None, hspace: float | None) -> None:
+    """Override ``constrained_layout``'s panel gutter -- ``None`` leaves it alone.
+
+    ``wspace``/``hspace`` are matplotlib's own :class:`.ConstrainedLayoutEngine`
+    names (the fraction of a panel's own width/height reserved as a gutter,
+    default ``0.02`` each) -- exposed as-is rather than translated, so a value
+    a caller already knows from ``plt.subplots_adjust`` carries over unchanged.
+    """
+    if wspace is None and hspace is None:
+        return
+    engine = fig.get_layout_engine()
+    kwargs = {}
+    if wspace is not None:
+        kwargs["wspace"] = wspace
+    if hspace is not None:
+        kwargs["hspace"] = hspace
+    engine.set(**kwargs)
+
+
 def _draw_colorbar(
     fig, im, ax, label, colorbar_kwargs: dict[str, Any] | None, defaults
 ):
@@ -982,6 +1001,7 @@ def series(
     mark: str = "line",
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    colors=None,
     ylim: tuple[float, float] | None = None,
     panel_aspect: float | None = None,
     labels: tuple[str, str] | None = None,
@@ -995,6 +1015,8 @@ def series(
     sharey: bool = False,
     ncols: int | None = None,
     nrows: int | None = None,
+    wspace: float | None = None,
+    hspace: float | None = None,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
@@ -1029,7 +1051,8 @@ def series(
     already agree, and otherwise one key per panel in whichever corner the data leaves
     emptiest. ``line_labels=`` overrides the legend text itself, one string per unique
     line in first-appearance order -- pass the wrong count and the ``ValueError`` lists
-    the current labels, ready to copy and edit.
+    the current labels, ready to copy and edit. ``colors=`` pins the auto colour cycle
+    to specific values instead; see :func:`ocean_skill.plot.style.resolve`.
 
     ``residual=True`` adds a short ``test − reference`` strip under each panel, sharing
     its time axis. It is off by default: a difference *map* needs a panel of its own
@@ -1042,6 +1065,10 @@ def series(
     same quantity on the same scale the way a shared time axis is. Pass ``sharey=True``
     to line them up when they are (:func:`ocean_skill.plot.profile`'s twin, depth,
     defaults the other way -- shared, since every panel there reads the same axis).
+
+    ``wspace``/``hspace`` tighten or loosen the gap between panels -- the fraction
+    of a panel's own width/height ``constrained_layout`` reserves as a gutter
+    (matplotlib's own names; default ``0.02`` each, left alone when unset).
 
     Sized like every other family — ``size``/``zoom``/``figsize``, type from geometry
     (:mod:`ocean_skill.plot.typography`) — with the statistics box placed in whichever
@@ -1081,6 +1108,7 @@ def series(
         metrics_loc=metrics_loc,
         legend=legend,
         line_labels=line_labels,
+        colors=colors,
         ncols=ncols,
         nrows=nrows,
     )
@@ -1141,6 +1169,7 @@ def series(
             squeeze=False,
             layout="constrained",
         )
+    _apply_subplot_spacing(fig, wspace=wspace, hspace=hspace)
     flat = list(axes.ravel())
 
     per_panel: list[tuple[Any, list]] = []
@@ -1301,8 +1330,11 @@ def profile(
     metrics_loc: str = "auto",
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     metrics_stacked: bool = False,
+    colors=None,
     mark: str = "line",
-    legend: bool = True,
+    legend: bool | str = True,
+    line_labels: Sequence[str] | None = None,
+    titles: Sequence[str] | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     panel_aspect: float | None = None,
@@ -1317,6 +1349,8 @@ def profile(
     sharey: bool = True,
     ncols: int | None = None,
     nrows: int | None = None,
+    wspace: float | None = None,
+    hspace: float | None = None,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
@@ -1350,6 +1384,17 @@ def profile(
     instead of the default single row/column -- orthogonal to the facet choice,
     which only decides what goes in each panel.
 
+    ``legend=``/``line_labels=`` match :func:`series` exactly: ``True``/``False``
+    for the usual auto/off, ``"below"``/``"right"`` for one combined key, a corner
+    name to force every panel's own key there, and ``line_labels=`` to override the
+    legend text itself -- see :func:`series`' own docstring for the full rule.
+
+    A ``cols="comparison"``/``rows="comparison"`` facet (one panel per station)
+    auto-promotes the station into its panel's title and drops it from that
+    line's legend entry, since the title now already says it; ``titles=``
+    overrides the result by hand afterward, one string per panel in panel
+    order -- see :func:`ocean_skill.plot.profile.compose`.
+
     ``xlim`` bounds the (primary) value axis; with ``secondary_x`` merging a
     second variable in, it bounds only the bottom axis, the same rule ``ylim``
     follows for :func:`series`' twin. ``ylim`` bounds depth in the same
@@ -1370,7 +1415,18 @@ def profile(
     panel that a page-wide box would otherwise overrun into its neighbours; see
     :func:`ocean_skill.plot.series._metrics_text`. Panel width itself is not the
     box's doing either way -- it comes from ``panel_aspect``/``figsize`` divided
-    across ``ncols``, the same as any other panel dimension.
+    across ``ncols``, the same as any other panel dimension; ``panel_aspect``
+    only ever solves for figure *height* (this renderer sets no axes aspect), so
+    raising it will not widen a cramped grid.
+
+    ``wspace``/``hspace`` tighten or loosen the gap between panels -- the fraction
+    of a panel's own width/height ``constrained_layout`` reserves as a gutter
+    (matplotlib's own names; default ``0.02`` each, left alone when unset). A
+    ``sharey=False`` grid draws its own depth tick numbers on every panel, which
+    already sets a floor under how tight ``wspace`` can pull columns together.
+
+    ``colors=`` pins the auto colour cycle to specific values instead; see
+    :func:`ocean_skill.plot.style.resolve`. A band's fill follows for free.
 
     Sized like every other line family — ``size``/``zoom``/``figsize``, type from
     geometry (:mod:`ocean_skill.plot.typography`) — with the statistics box placed
@@ -1401,6 +1457,10 @@ def profile(
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
         metrics_stacked=metrics_stacked,
+        colors=colors,
+        legend=legend,
+        line_labels=line_labels,
+        titles=titles,
         ncols=ncols,
         nrows=nrows,
     )
@@ -1440,6 +1500,7 @@ def profile(
         squeeze=False,
         layout="constrained",
     )
+    _apply_subplot_spacing(fig, wspace=wspace, hspace=hspace)
     flat = list(axes.ravel())
 
     # One depth range for the whole figure when sharey -- explicit set_ylim on
@@ -1475,10 +1536,11 @@ def profile(
         if panel.xlabel_color:
             ax.xaxis.label.set_color(panel.xlabel_color)
             ax.tick_params(axis="x", labelcolor=panel.xlabel_color)
-        if not sharey or layout.ncols == 1 or index % layout.ncols == 0:
-            # A shared depth axis only needs its label on the left column --
-            # every other column repeats the same numbers. Without sharey each
-            # panel has its own scale, so its label belongs on every panel.
+        if layout.ncols == 1 or index % layout.ncols == 0:
+            # The label reads the same on every panel ("Depth [m]") whether or
+            # not sharey -- only the left column needs to say so. The tick
+            # *numbers* are a different thing: sharey hides them on inner
+            # columns already, and without sharey each panel keeps its own.
             ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
         if xlim is not None:
             ax.set_xlim(*xlim)
@@ -1516,7 +1578,7 @@ def profile(
 
     if title:
         fig.suptitle(title, **suptitle_kwargs)
-    if legend:
+    if layout.legend_placement != "off":
         _series_legend(fig, per_panel, layout, scale, legend_kwargs)
     _warn_if_cramped(
         fig,
@@ -1553,8 +1615,19 @@ def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
     this function does not need to know the difference. Per-panel keys carry that
     panel's own lines, not the figure's: with one variable per panel, a shared key
     would list every variable under each of them.
+
+    A blank or underscore-prefixed label (:mod:`ocean_skill.plot.profile`'s own
+    auto station-title drops a line's label entirely once its identity moved to
+    the panel title) is left out here too, matching matplotlib's own "don't
+    legend this" convention -- unlike :meth:`Axes.legend`'s *implicit* handle
+    discovery, an *explicit* ``(handles, labels)`` call like this one draws
+    whatever it is given, blank rows included, so the filter has to be explicit.
     """
     from ocean_skill.plot.summary import _legend_below, _legend_right
+
+    def _labelled(handle) -> bool:
+        label = handle.get_label()
+        return bool(label) and not label.startswith("_")
 
     auto_shared = layout.shared_legend and len(layout.panels) > 1
     combined = layout.legend_placement == "below" or (
@@ -1563,7 +1636,7 @@ def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
     if combined or layout.legend_placement == "right":
         seen: dict[str, Any] = {}
         for _, handles in per_panel:
-            for handle in handles:
+            for handle in filter(_labelled, handles):
                 seen.setdefault(handle.get_label(), handle)
         if seen:
             right = layout.legend_placement == "right"
@@ -1571,6 +1644,7 @@ def _series_legend(fig, per_panel, layout, scale, legend_kwargs) -> None:
             draw(fig, list(seen.values()), scale["legend"])
         return
     for (ax, handles), panel in zip(per_panel, layout.panels, strict=True):
+        handles = list(filter(_labelled, handles))
         if not handles:
             continue
         seen = {}

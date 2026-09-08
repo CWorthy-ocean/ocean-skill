@@ -84,6 +84,11 @@ _STATIC_ONLY_KWARGS = {
     # interactive grid's hv.Labels styling (size, colour) is fixed, not exposed as an
     # override -- the policy (annotate on/off) is honored here; the raw kwargs are not.
     "annot_kwargs",
+    # constrained_layout's own panel gutter. hv.Layout's bokeh plot has no matching
+    # option in the installed holoviews/bokeh (checked: hv.opts.Layout raises
+    # "unexpected option" for both) -- there is no equivalent spacing to set.
+    "wspace",
+    "hspace",
 }
 
 
@@ -2464,6 +2469,7 @@ def _series(
     metric_keys=DEFAULT_METRIC_KEYS,
     legend=True,
     line_labels=None,
+    colors=None,
     ylim=None,
     panel_aspect=None,
     labels=None,
@@ -2528,6 +2534,7 @@ def _series(
         metrics_loc=metrics_loc,
         legend=legend,
         line_labels=line_labels,
+        colors=colors,
         ncols=ncols,
         nrows=nrows,
     )
@@ -2865,7 +2872,10 @@ def _profile(
     metrics_loc="auto",
     metric_keys=DEFAULT_METRIC_KEYS,
     metrics_stacked: bool = False,
+    colors=None,
     legend=True,
+    line_labels=None,
+    titles=None,
     xlim=None,
     ylim=None,
     panel_aspect=None,
@@ -2897,11 +2907,14 @@ def _profile(
     gives each panel its own range from its own lines instead -- a shallow station no
     longer inherits a deep neighbour's mostly-empty axis. ``sharex=False`` (the
     default) leaves the value axis per-panel, matching the static renderer;
-    ``sharex=True`` links it. Either way, "linked" means every linked panel's Curve
-    shares one dimension *identity*, not just a matching label -- the same live
-    pan/zoom Bokeh gives ``field_facet``'s ``shared_axes`` -- so an unlinked axis
-    gets its own dimension per panel instead of silently sharing one just because
-    two panels both happen to draw a dimension called "value".
+    ``sharex=True`` links it. Either way the shared or per-panel range is computed
+    once here and baked into every affected Curve's own ``xlim``/``ylim`` --
+    ``shared_axes=False`` on the whole Layout below turns off Bokeh's own linking by
+    matching dimension *label* (not just name), which would otherwise couple every
+    panel drawing a dimension it happens to call "value" regardless of what these two
+    options asked for. The one thing this trades away against a genuinely shared
+    Bokeh ``Range`` object (``field_facet``'s ``shared_axes=True``, say): panels open
+    on the same range but do not pan/zoom together afterward.
 
     A ``secondary_x`` panel's top axis is drawn by :func:`_secondary_x_hook` --
     HoloViews' ``multi_y`` has no x-axis counterpart, and even ``invert_axes=True``
@@ -2924,6 +2937,10 @@ def _profile(
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
         metrics_stacked=metrics_stacked,
+        colors=colors,
+        legend=legend,
+        line_labels=line_labels,
+        titles=titles,
         ncols=ncols,
         nrows=nrows,
     )
@@ -2960,11 +2977,17 @@ def _profile(
         )
 
     plots = []
-    for panel in layout.panels:
+    for index, panel in enumerate(layout.panels):
         y_range = shared_depth or depth_range(panel.lines + panel.secondary, ylim=ylim)
+        # The label reads the same on every panel ("Depth [m]") -- only the left
+        # column needs to say so, matching the static renderer's rule; Bokeh
+        # draws its own tick numbers per panel regardless (no sharey to hide them).
+        # hv.Dimension refuses an empty label outright, so a blank column gets a
+        # single space instead -- reads as no label, the same as matplotlib's "".
+        left_column = layout.ncols == 1 or index % layout.ncols == 0
         dims = (
             hv.Dimension("value", label=panel.xlabel or ""),
-            hv.Dimension("depth", label=panel.ylabel),
+            hv.Dimension("depth", label=panel.ylabel if left_column else " "),
         )
         # Bands first, so every line's envelope sits beneath every line -- the
         # same two-pass order the static renderer's fill_betweenx-then-plot
@@ -3016,22 +3039,27 @@ def _profile(
                 x_range = shared_value
             if x_range is not None:
                 curve_opts["xlim"] = x_range
-        overlay_opts = dict(
-            title=panel.title,
-            show_legend=bool(legend),
-            legend_position=_BOKEH_LEGEND_POSITION.get(
-                panel.legend_corner, "top_right"
-            ),
-            fontsize=fontsize,
-        )
+        hooks = []
         if panel.secondary:
-            overlay_opts["hooks"] = [
+            hooks.append(
                 _secondary_x_hook(
                     panel,
                     _value_range(panel.lines, xlim),
                     _value_range(panel.secondary),
                 )
-            ]
+            )
+        if layout.legend_placement in ("below", "right"):
+            hooks.append(_outside_legend_hook(layout.legend_placement))
+        overlay_opts = dict(
+            title=panel.title,
+            show_legend=layout.legend_placement != "off",
+            legend_position=_BOKEH_LEGEND_POSITION.get(
+                panel.legend_corner, "top_right"
+            ),
+            fontsize=fontsize,
+        )
+        if hooks:
+            overlay_opts["hooks"] = hooks
         plot = overlay.opts(
             hv.opts.Curve(**curve_opts),
             hv.opts.Overlay(**overlay_opts),

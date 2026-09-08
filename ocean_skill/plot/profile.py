@@ -19,6 +19,8 @@ marker channel, so several casts overlaid in one panel still tell apart.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -303,7 +305,7 @@ def _refuse_depth_encode(encode: dict[str, str | None] | None) -> None:
         )
 
 
-def panel_title(specs, *, varying) -> str:
+def panel_title(specs, *, varying, source: str | None = None) -> str:
     """Return a panel title of identity only: what, where, when.
 
     Mirrors :func:`ocean_skill.plot.series.panel_title`, with "when" read off each
@@ -313,6 +315,12 @@ def panel_title(specs, *, varying) -> str:
     carry their own times in the legend) does not claim a single "when" for all of
     them. ``month`` follows the identical rule, one level up: a
     ``cols="month"``-faceted panel titles each with its own month.
+
+    ``source=`` names the one role (usually the station) that distinguishes this
+    panel from its neighbours when faceting by ``"comparison"`` -- see ``compose``'s
+    own rule for when exactly one role qualifies. ``None`` (every other facet, and
+    a comparison facet where zero or several roles distinguish) leaves the title
+    exactly as it read before this existed.
     """
     from ocean_skill.plot.series import _place_of, month_label
     from ocean_skill.plot.summary import pretty_level
@@ -321,6 +329,8 @@ def panel_title(specs, *, varying) -> str:
     variables = {s.variable for s in specs if s.variable}
     if len(variables) == 1:
         parts.append(pretty_level("variable", next(iter(variables))))
+    if source is not None:
+        parts.append(pretty_level("source", source))
     reference = next((s for s in specs if s.role == "reference"), specs[0])
     place = _place_of(reference.values)
     if place:
@@ -338,6 +348,29 @@ def panel_title(specs, *, varying) -> str:
     times = {s.time for s in specs if s.time}
     if len(times) == 1:
         parts.append(next(iter(times)))
+    return " · ".join(parts)
+
+
+def _dropped_source_label(spec, *, varying, ambiguous_sources) -> str:
+    """One surfaced-role line's legend entry once its station moved to the title.
+
+    :func:`ocean_skill.plot.style.series_label` falls back to ``spec.source``
+    when nothing else varies -- exactly what would silently re-print the name
+    the title now already says. This drops the source unconditionally instead,
+    reading whatever else varies, or nothing at all (an empty label, which both
+    renderers already know to leave out of the legend) if the station was the
+    only thing that did.
+    """
+    from ocean_skill.plot.summary import pretty_level
+
+    parts = []
+    for field in ("variable", "depth", "time", "season", "month"):
+        if field in varying:
+            value = spec.get(field)
+            if value is not None:
+                parts.append(pretty_level(field, value))
+    if spec.source in ambiguous_sources:
+        parts.append(f"({spec.role})")
     return " · ".join(parts)
 
 
@@ -393,6 +426,10 @@ def compose(
     metric_keys=(),
     metrics_loc: str = "auto",
     metrics_stacked: bool = False,
+    colors=None,
+    legend: bool | str = True,
+    line_labels: Sequence[str] | None = None,
+    titles: Sequence[str] | None = None,
     ncols: int | None = None,
     nrows: int | None = None,
 ) -> _series_layout.Layout:
@@ -403,7 +440,24 @@ def compose(
     ``metrics_stacked=True`` keeps the statistics box narrow-and-tall (one metric
     per line) instead of the default single wide line -- a box sized for a
     portrait panel rather than a page-wide one; see
-    :func:`ocean_skill.plot.series._metrics_text`.
+    :func:`ocean_skill.plot.series._metrics_text`. ``colors=`` pins the auto
+    colour cycle to specific values instead; see
+    :func:`ocean_skill.plot.style.resolve`. A band's fill follows for free.
+
+    ``legend=``/``line_labels=`` match :func:`ocean_skill.plot.series.compose`
+    exactly (:func:`~ocean_skill.plot.series._normalize_legend`,
+    :func:`~ocean_skill.plot.series.remap_line_labels`,
+    :func:`~ocean_skill.plot.series.corner_placement`) -- a forced placement
+    (``"below"``/``"right"``/a corner name) and custom legend text work the same
+    way here as they do for :mod:`series`.
+
+    A ``cols="comparison"``/``rows="comparison"`` facet (one panel per station)
+    auto-promotes the station into its panel's title and drops it from that
+    line's legend entry -- see :func:`panel_title` and
+    :func:`_dropped_source_label`. ``titles=`` overrides the result by hand
+    afterward, one string per panel in panel order; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles, the same way
+    ``line_labels=``'s does.
 
     Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does:
     at most one user facet (``rows=`` or ``cols=``), plus at most one
@@ -462,9 +516,46 @@ def compose(
     }
     styled = {
         (line.spec.item, line.spec.role): line
-        for line in _style.resolve(all_specs, encode={**defaults, **(encode or {})})
+        for line in _style.resolve(
+            all_specs, encode={**defaults, **(encode or {})}, colors=colors
+        )
     }
     varying = _style.varying_fields(all_specs)
+
+    # A "comparison" facet puts one item/station per panel; if exactly one role's
+    # source distinguishes panels (the station, usually the reference -- or
+    # whichever role the caller varied instead), promote it into the title
+    # (panel_title, below) and drop it from that line's own legend entry, since
+    # the title already says it. Two or more distinguishing roles (a genuine
+    # model-vs-model grid, where a title cannot cleanly name both) or none (a
+    # single-panel comparison) leave both the title and the legend unchanged.
+    surface_role = None
+    if facet == "comparison":
+        sources_by_role: dict[str, set] = {}
+        for spec in all_specs:
+            sources_by_role.setdefault(spec.role, set()).add(spec.source)
+        distinguishing = [
+            role for role, sources in sources_by_role.items() if len(sources) > 1
+        ]
+        if len(distinguishing) == 1:
+            surface_role = distinguishing[0]
+    if surface_role is not None:
+        ambiguous = _style.ambiguous_sources(all_specs)
+        styled = {
+            key: (
+                replace(
+                    line,
+                    label=_dropped_source_label(
+                        line.spec, varying=varying, ambiguous_sources=ambiguous
+                    ),
+                )
+                if line.spec.role == surface_role
+                else line
+            )
+            for key, line in styled.items()
+        }
+
+    styled = _series_layout.remap_line_labels(styled, all_specs, line_labels)
 
     if facet is not None:
         groups: dict[Any, list[tuple[int, dict]]] = {}
@@ -479,6 +570,11 @@ def compose(
             for v in variables
         ]
 
+    # A forced corner is handed straight to every Panel below (drawing it is then no
+    # different from the "auto" per-panel case); "below"/"right"/"off" have nothing to
+    # do per panel and are carried on the Layout instead, for the renderer to act on
+    # once, for the whole figure.
+    legend_placement = _series_layout._normalize_legend(legend)
     panels = []
     for group in grouped:
         primary_items, secondary_items = group, []
@@ -504,6 +600,11 @@ def compose(
         # and a corner judged empty by the primary lines is where the secondary
         # ones run.
         specs = [line.spec for line in primary + second]
+        panel_source = None
+        if surface_role is not None:
+            panel_source = next(
+                (s.source for s in specs if s.role == surface_role), None
+            )
         box = _series_layout._metrics_text(
             [i for _, i in group],
             metric_keys,
@@ -524,15 +625,16 @@ def compose(
             )
             box = ""
         ranked = _free_corners(primary + second)
-        free = ranked[0] if metrics_loc == "auto" else metrics_loc
-        legend_at = next((c for c in ranked if c != free), _series_layout.CORNERS[1])
+        free, legend_at = _series_layout.corner_placement(
+            legend_placement, ranked, metrics_loc
+        )
         # Colour a value label like its lines only where a twin axis makes the
         # label/axis pairing ambiguous; a lone axis already says what it is via
         # its title.
         colored = bool(second)
         panels.append(
             _series_layout.Panel(
-                title=panel_title(specs, varying=varying),
+                title=panel_title(specs, varying=varying, source=panel_source),
                 ylabel=_vertical_label(specs),
                 lines=primary,
                 xlabel=_series_layout._ylabel([line.spec for line in primary]),
@@ -550,6 +652,19 @@ def compose(
                 legend_corner=legend_at,
             )
         )
+
+    if titles is not None:
+        titles = list(titles)
+        if len(titles) != len(panels):
+            current_titles = "\n".join(
+                f"  {i + 1}. {panel.title!r}" for i, panel in enumerate(panels)
+            )
+            raise ValueError(
+                f"titles needs one entry per panel -- this figure draws "
+                f"{len(panels)}:\n{current_titles}\ngot {len(titles)}. Copy the "
+                "list above, edit the text, and pass it back in the same order."
+            )
+        panels = [replace(p, title=t) for p, t in zip(panels, titles, strict=True)]
 
     # No explicit facet, and more than one variable that did not merge onto a
     # twin axis: the default columns-per-variable layout (see the docstring
@@ -594,5 +709,15 @@ def compose(
         ncols=eff_ncols,
         legend_labels=tuple(labels),
         shared_legend=shared,
+        # A corner is already baked into every Panel above, so a renderer draws it no
+        # differently from "auto" -- *except* it must not then also fall into "auto"'s
+        # own shared-labels detection and combine anyway, overriding the very corner
+        # the caller forced. "corner" says so explicitly; "auto" is left for when
+        # nothing was forced and the renderer is free to decide for itself.
+        legend_placement=(
+            "corner"
+            if legend_placement in _series_layout.CORNERS
+            else legend_placement
+        ),
         xlabel="",  # unused: every panel carries its own value label (Panel.xlabel)
     )
