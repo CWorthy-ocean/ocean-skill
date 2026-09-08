@@ -857,6 +857,7 @@ def _time_depth(
     hover: bool = True,
     rasterize: bool | str = "auto",
     mark: str | None = None,
+    clim: tuple[float, float] | None = None,
     **_,
 ):
     """One interactive ``time_depth`` panel: depth against time, at one place.
@@ -874,6 +875,10 @@ def _time_depth(
     instead); ``"scatter"`` draws through the same ``hv.Points`` idiom
     :func:`_station_overlay` uses for a skill map's station dots, coloured by
     value here instead of a fixed colour.
+
+    ``clim`` overrides the panel's own percentile-derived colour range -- how
+    :func:`_time_depth_grid`'s ``shared_limits=True`` makes every panel share one
+    scale instead of each computing its own.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -895,7 +900,7 @@ def _time_depth(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(field)
+    vmin, vmax = clim if clim is not None else _limits(field)
     if log:
         vmin = max(vmin, 1e-6)
 
@@ -957,6 +962,87 @@ def _time_depth(
         bgcolor="#d9d9d9",
         xticks=geometry.x_ticks,
     )
+
+
+def _time_depth_grid(
+    items: list[dict[str, Any]],
+    title: str | None = None,
+    mark: str | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    shared_limits: bool = False,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    **_,
+):
+    """Stack several interactive ``time_depth`` panels -- one per item.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.time_depth_grid` -- see its
+    docstring for the composition this mirrors: a single stacked column by
+    default (``ncols=``/``nrows=`` to wrap instead), each panel its own colour
+    scale unless ``shared_limits=True`` computes one shared range across all of
+    them (warning once if the items' ``standard_name``s actually differ).
+
+    Every panel draws through :func:`_time_depth` itself, given its own
+    identity-only title (the item's ``label`` plus place/period context) rather
+    than the standalone panel's own variable-naming default, since the variable
+    is already named once, in the ``Layout``'s own title.
+    """
+    hv = _extension()
+
+    from ocean_skill.plot.matplotlib_renderer import _limits, grid_suptitle
+    from ocean_skill.plot.series import grid_shape
+    from ocean_skill.plot.time_depth import prepare_time_depth
+
+    n = len(items)
+    grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)[1]
+
+    if title is None:
+        title = grid_suptitle(items)
+
+    shared_clim = None
+    if shared_limits:
+        import warnings
+
+        names = {item.get("standard_name") for item in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but panels use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every panel.",
+                stacklevel=2,
+            )
+        fields = [prepare_time_depth(item["field"])[0] for item in items]
+        shared_clim = _limits(*fields)
+
+    plots = []
+    for item in items:
+        _, geometry = prepare_time_depth(item["field"])
+        panel_title = " · ".join(
+            p
+            for p in (item.get("label"), geometry.place_note, geometry.period_note)
+            if p
+        )
+        plots.append(
+            _time_depth(
+                item,
+                title=panel_title,
+                mark=mark,
+                clim=shared_clim,
+                font_scale=font_scale,
+                size=size,
+                zoom=zoom,
+                hover=hover,
+                rasterize=rasterize,
+            )
+        )
+
+    out = hv.Layout(plots).cols(grid_ncols).opts(hv.opts.Layout(shared_axes=False))
+    return out.opts(title=title or "")
 
 
 def _section_row(
@@ -3791,6 +3877,8 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
             opts.pop("domain", None)
+        if len(spec.items) > 1:
+            return _time_depth_grid(spec.items, **opts)
         return _time_depth(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
