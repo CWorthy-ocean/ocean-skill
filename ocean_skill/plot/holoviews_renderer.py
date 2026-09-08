@@ -3065,14 +3065,17 @@ def _profile(
     plots = []
     for index, panel in enumerate(layout.panels):
         y_range = shared_depth or depth_range(panel.lines + panel.secondary, ylim=ylim)
-        # The label reads the same on every panel ("Depth [m]") -- only the left
-        # column needs to say so, matching the static renderer's rule; Bokeh
-        # draws its own tick numbers per panel regardless (no sharey to hide them).
-        # hv.Dimension refuses an empty label outright, so a blank column gets a
-        # single space instead -- reads as no label, the same as matplotlib's "".
+        # The label reads the same on every panel ("salinity", "Depth [m]") --
+        # only the grid's outer edge needs to say so once, matching the static
+        # renderer's rule (see matplotlib_renderer.py's profile()); Bokeh draws
+        # its own tick numbers per panel regardless (no sharex/sharey to hide
+        # them). hv.Dimension refuses an empty label outright, so a blanked
+        # edge gets a single space instead -- reads as no label, the same as
+        # matplotlib's "".
         left_column = layout.ncols == 1 or index % layout.ncols == 0
+        bottom_row = index + layout.ncols >= len(layout.panels)
         dims = (
-            hv.Dimension("value", label=panel.xlabel or ""),
+            hv.Dimension("value", label=(panel.xlabel or "") if bottom_row else " "),
             hv.Dimension("depth", label=panel.ylabel if left_column else " "),
         )
         # Bands first, so every line's envelope sits beneath every line -- the

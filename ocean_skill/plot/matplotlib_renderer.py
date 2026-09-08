@@ -1533,15 +1533,18 @@ def profile(
                 "pad": 17 + 1.2 * (scale["tick_label"] + scale["axes_label"]),
             }
         ax.set_title(panel.title, fontsize=scale["title"], **panel_title_kwargs)
-        ax.set_xlabel(panel.xlabel or "", fontsize=scale["axes_label"])
+        # The label reads the same on every panel ("salinity", "Depth [m]") --
+        # only the grid's outer edge needs to say so once. "Is there a panel
+        # directly below/left of me?" is the question (a wrapped grid's last
+        # row can be ragged), not "am I in the last row/first column?" -- the
+        # same rule field_facet and series() already use for this. Tick
+        # *numbers* are a different thing and stay on every panel regardless.
+        if index + layout.ncols >= len(layout.panels):
+            ax.set_xlabel(panel.xlabel or "", fontsize=scale["axes_label"])
         if panel.xlabel_color:
             ax.xaxis.label.set_color(panel.xlabel_color)
             ax.tick_params(axis="x", labelcolor=panel.xlabel_color)
         if layout.ncols == 1 or index % layout.ncols == 0:
-            # The label reads the same on every panel ("Depth [m]") whether or
-            # not sharey -- only the left column needs to say so. The tick
-            # *numbers* are a different thing: sharey hides them on inner
-            # columns already, and without sharey each panel keeps its own.
             ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
         if xlim is not None:
             ax.set_xlim(*xlim)

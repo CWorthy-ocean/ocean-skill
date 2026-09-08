@@ -31,11 +31,6 @@ from ocean_skill.plot import style as _style
 
 __all__ = ["compose", "depth_range", "fan_season", "panel_title", "vertical_values"]
 
-#: Fraction of a panel's axes a corner box occupies -- the same measure
-#: :data:`ocean_skill.plot.series._CORNER_W`/``_CORNER_H`` use, imported rather than
-#: redefined so the two families' corner logic cannot drift apart on this constant.
-_CORNER_W, _CORNER_H = _series_layout._CORNER_W, _series_layout._CORNER_H
-
 #: The dimension name a season groupby produces (see
 #: :func:`ocean_skill.operators._reduce_dim`'s ``SeasonGrouper`` route) --
 #: always this literal name, whatever custom ``seasons=`` a caller passed. One
@@ -445,13 +440,17 @@ def _dropped_source_label(spec, *, varying, ambiguous_sources) -> str:
 def _free_corners(lines) -> list[str]:
     """Return the panel's corners, emptiest first -- the profile twin of
     :func:`ocean_skill.plot.series.free_corners`, with the axes swapped: x is a
-    line's own value (scaled 0-1, exactly as ``free_corners`` scales its y), y is
-    its own depth, scaled 0-1 and then flipped (1=shallowest, 0=deepest) to match
-    how the panel actually draws once its y-axis reads surface-at-top -- axes-
-    fraction y=1 is always the top of the panel, whatever the data axis reads.
-    Depth's own values are used directly rather than sample order (the proxy
-    ``free_corners`` needs for time): unlike time, depth is one comparable
-    quantity across every line, so there is no reason to approximate it.
+    line's own value (scaled 0-1, exactly as ``free_corners`` scales its y,
+    its drawn band included), y is its own depth, scaled 0-1 and then flipped
+    (1=shallowest, 0=deepest) to match how the panel actually draws once its
+    y-axis reads surface-at-top -- axes-fraction y=1 is always the top of the
+    panel, whatever the data axis reads. Depth's own values are used directly
+    rather than sample order (the proxy ``free_corners`` needs for time):
+    unlike time, depth is one comparable quantity across every line, so there
+    is no reason to approximate it. Ranking itself -- counting each corner's
+    box, then breaking ties by clearance rather than a fixed order -- is
+    :func:`ocean_skill.plot.series._rank_corners`, imported rather than
+    copied so the two families cannot rank a corner two different ways.
     """
     xs, ys = [], []
     for line in lines:
@@ -460,28 +459,30 @@ def _free_corners(lines) -> list[str]:
         finite = np.isfinite(values) & np.isfinite(depth)
         if not finite.any():
             continue
-        vlow, vhigh = np.nanmin(values), np.nanmax(values)
+        spread = line.spec.spread
+        if spread is not None:
+            spread = np.asarray(spread, dtype="float64")
+            lo, hi = values - spread, values + spread
+            vlow, vhigh = np.nanmin([values, lo, hi]), np.nanmax([values, lo, hi])
+        else:
+            lo = hi = None
+            vlow, vhigh = np.nanmin(values), np.nanmax(values)
         vspan = vhigh - vlow
-        x = (values - vlow) / vspan if vspan else np.full(values.size, 0.5)
         dlow, dhigh = np.nanmin(depth), np.nanmax(depth)
         dspan = dhigh - dlow
         scaled = (depth - dlow) / dspan if dspan else np.full(depth.size, 0.5)
         y = 1.0 - scaled
-        xs.append(x[finite])
+        xs.append(_series_layout._scale_into_unit(values, vlow, vspan)[finite])
         ys.append(y[finite])
+        if lo is not None:
+            band_finite = finite & np.isfinite(lo) & np.isfinite(hi)
+            xs.append(_series_layout._scale_into_unit(lo, vlow, vspan)[band_finite])
+            ys.append(y[band_finite])
+            xs.append(_series_layout._scale_into_unit(hi, vlow, vspan)[band_finite])
+            ys.append(y[band_finite])
     if not xs:
         return list(_series_layout.CORNERS)
-    x = np.concatenate(xs)
-    y = np.concatenate(ys)
-    counts = {}
-    for corner in _series_layout.CORNERS:
-        vertical, horizontal = corner.split()
-        in_x = x <= _CORNER_W if horizontal == "left" else x >= 1 - _CORNER_W
-        in_y = y >= 1 - _CORNER_H if vertical == "upper" else y <= _CORNER_H
-        counts[corner] = int(np.count_nonzero(in_x & in_y))
-    return sorted(
-        _series_layout.CORNERS, key=lambda c: (counts[c], _series_layout.CORNERS.index(c))
-    )
+    return _series_layout._rank_corners(np.concatenate(xs), np.concatenate(ys))
 
 
 def compose(
