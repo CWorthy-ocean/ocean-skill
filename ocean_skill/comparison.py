@@ -212,6 +212,20 @@ def _implied_over(
     if feature == "timeSeriesProfile":
         vertical_collapsed = _collapses_vertical(select, agg)
         time_collapsed = _time_collapsed(select, agg)
+        climatology = _time_is_climatology(agg)
+        depth_named = any(k in select for k in _VERTICAL_KEYS)
+        if climatology and not time_collapsed and not (depth_named and vertical_collapsed):
+            # groupby/resample *folds* the raw record into bins (a month, a season) --
+            # categorically different from a bare, un-reduced time axis (the genuinely
+            # ambiguous case below). Each bin is a full profile once depth is not
+            # separately pinned to one level, so depth is unambiguously the axis kept,
+            # faceted by the bins -- the same reading a scalar-season fan already gets
+            # below, one step earlier (before that fan has narrowed the climatology to
+            # one bin).
+            return "Z", (
+                f"the reference's featureType is {feature!r} and its time is folded "
+                "into a climatology (groupby/resample), so a profile is kept per bin"
+            )
         if vertical_collapsed and not time_collapsed:
             return "time", (
                 f"the reference's featureType is {feature!r} and its depth is "
@@ -259,6 +273,27 @@ def _collapses_time(agg: dict[str, Any] | None) -> bool:
         if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
             return False
         return True
+    return False
+
+
+def _time_is_climatology(agg: dict[str, Any] | None) -> bool:
+    """Whether ``agg`` folds the time axis into bins rather than reducing it away.
+
+    The positive counterpart of :func:`_collapses_time`'s own ``groupby``/
+    ``resample`` carve-out: those *keep* an axis (a ``month``/``season`` label, or
+    consecutive periods), and this names exactly that case -- a climatology,
+    specifically -- for callers (:func:`_implied_over`, :func:`_is_profile_reference`)
+    that need to tell it apart from a bare, un-reduced standing time axis (no
+    aggregate at all, or a plain reducer that has not yet run). Both leave
+    :func:`_collapses_time` and :func:`_time_collapsed` reporting time as "not
+    collapsed", but only a fold gives each bin its own well-defined depth axis --
+    an un-reduced axis has no bins to facet by yet, and is left ambiguous.
+    """
+    agg = agg or {}
+    for key in _TIME_KEYS:
+        spec = agg.get(key)
+        if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
+            return True
     return False
 
 
@@ -1877,6 +1912,7 @@ def prepare_source(
     require_reduced: str | None = None,
     require_reduced_keep: tuple[str, ...] = (),
     bbox: tuple[float, float, float, float] | None = None,
+    point_window_cells: int | None = None,
     time_window: tuple[Any, Any] | None = None,
     time_targets: Any = None,
     qc: Any = None,
@@ -1934,6 +1970,17 @@ def prepare_source(
     marker into the key below, so a lane cached before that policy existed — a
     wide, degree-padded crop, still a correct superset — is not silently kept
     forever just because its ``_bbox`` matches.
+
+    ``point_window_cells`` overrides how many cells that point crop keeps on each
+    side of the nearest one (:data:`ocean_skill.align.POINT_WINDOW_CELLS` by
+    default). Passed by :meth:`Comparison.align` for the *test* lane alone, and
+    only once the comparison's own regrid method is known to resolve to nearest at
+    a point (:data:`ocean_skill.align.NEAREST_POINT_WINDOW_CELLS`) — a nearest
+    sample keeps exactly one cell, so the full margin (sized to also cover an
+    interpolating stencil) reads ~121 columns through an expensive per-column
+    reduction for one that is ever kept. Folded into the key below alongside
+    ``_bbox`` so a shrunk and a full window are distinct cache entries, never one
+    silently served in place of the other.
 
     ``time_window`` is the same idea along time: ``(start, stop)`` the lane is cropped
     to, and part of the cache key for the same reason ``bbox`` is. A skill map derives
@@ -2004,8 +2051,13 @@ def prepare_source(
 
         if _is_point_bbox(bbox):
             # Re-keys only point-narrowed lanes -- see the bbox= docstring
-            # paragraph above -- so every other warm entry is untouched.
-            key_select["_point_window"] = POINT_WINDOW_CELLS
+            # paragraph above -- so every other warm entry is untouched. The
+            # *actual* cells used (point_window_cells= when given), not always
+            # the module default, so a nearest-shrunk window and the ordinary
+            # 5-cell one never collide.
+            key_select["_point_window"] = (
+                POINT_WINDOW_CELLS if point_window_cells is None else point_window_cells
+            )
     if time_window is not None:
         # A cropped lane is not the uncropped one, and two test lanes over the same
         # region but different years share a `_bbox`. Without this they would share an
@@ -2091,7 +2143,7 @@ def prepare_source(
     if pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
-        obj = subset_to_bbox(obj, bbox)
+        obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
     if pre_crop and time_window is not None:
         from ocean_skill.align import subset_to_time
 
@@ -2112,7 +2164,7 @@ def prepare_source(
     if da is not None and not pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
-        da = subset_to_bbox(da, bbox)
+        da = subset_to_bbox(da, bbox, point_window_cells=point_window_cells)
     if da is not None and not pre_crop and time_window is not None:
         from ocean_skill.align import subset_to_time
 
@@ -2866,6 +2918,7 @@ class Comparison:
         refresh: bool,
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
+        point_window_cells: int | None = None,
         time_window: tuple[Any, Any] | None = None,
         time_targets: Any = None,
         drop_keys: tuple[str, ...] = (),
@@ -2881,9 +2934,12 @@ class Comparison:
         :func:`ocean_skill.align.align` still refuses any further one.
 
         ``bbox`` crops the lane before it is read into memory; see
-        :func:`prepare_source`. ``time_targets`` is that same module's own
-        further, discrete time crop -- see its docstring and
-        :meth:`_reference_time_targets`.
+        :func:`prepare_source`. ``point_window_cells`` is that same module's own
+        override of how many cells a *point* bbox's crop keeps -- see
+        :meth:`align`, which passes a shrunk window for the test lane once it
+        knows the comparison's regrid resolves to a nearest-neighbour sample.
+        ``time_targets`` is that same module's own further, discrete time crop --
+        see its docstring and :meth:`_reference_time_targets`.
 
         ``drop_keys`` removes keys from this lane's own select before it is prepared
         — used by :meth:`align` to keep the test lane gridded when a shared point
@@ -2927,6 +2983,7 @@ class Comparison:
             require_reduced=None if self.over else role,
             require_reduced_keep=keep,
             bbox=bbox,
+            point_window_cells=point_window_cells,
             time_window=time_window,
             time_targets=time_targets,
             qc=qc_for(self.qc, role),
@@ -3002,6 +3059,7 @@ class Comparison:
         keep: tuple[str, ...],
         derived_window: tuple[Any, Any] | None,
         time_targets: Any = None,
+        point_window_cells: int | None = None,
     ):
         """Re-read the test lane if it was windowed around the wrong point.
 
@@ -3025,6 +3083,13 @@ class Comparison:
         that guarantee for a much smaller read, so this restores it deliberately:
         checked once against the point that will actually be sampled, and only
         re-read (once) if the window missed it.
+
+        ``point_window_cells`` is the *actual* cells used for the window just
+        read (:meth:`align`'s own ``test_cells``, ``None`` for the ordinary
+        :data:`~ocean_skill.align.POINT_WINDOW_CELLS`) -- the tolerance below has
+        to shrink alongside a caller-shrunk window (see
+        :data:`~ocean_skill.align.NEAREST_POINT_WINDOW_CELLS`), or a mismatch a
+        smaller window can no longer actually cover would go undetected.
         """
         from ocean_skill.align import (
             POINT_WINDOW_CELLS,
@@ -3045,7 +3110,25 @@ class Comparison:
         if cell <= 0:
             return t
         dist = _haversine_km(target[0], target[1], test_bbox[0], test_bbox[1])
-        if dist <= (POINT_WINDOW_CELLS - 2) * cell:
+        # The window is centred on the model cell nearest the *catalog* position;
+        # the cell nearest the *actual* position (`target`) is within
+        # dist/cell + 0.5 cells of that centre, so it is guaranteed inside a
+        # radius-`cells` window whenever dist <= (cells - 0.5)*cell. The ordinary
+        # (unshrunk) window keeps its pre-existing, more conservative margin
+        # unchanged -- `POINT_WINDOW_CELLS - 2`, an extra ~1.5-cell hedge past the
+        # tight bound above, kept for every caller that does not pass
+        # point_window_cells -- byte-identical to before this feature. A caller-
+        # shrunk window (point_window_cells=, from a nearest-only sample; see
+        # NEAREST_POINT_WINDOW_CELLS) has no room for that same fixed hedge (it
+        # would go negative), so it gets the tight bound itself instead -- still
+        # provably safe, and correctly *more* eager to re-read than the
+        # unshrunk window's own margin, matching how much less slack a smaller
+        # window actually has.
+        if point_window_cells is None:
+            slack = (POINT_WINDOW_CELLS - 2) * cell
+        else:
+            slack = max(point_window_cells - 0.5, 0.5) * cell
+        if dist <= slack:
             return t
         import warnings
 
@@ -3073,6 +3156,7 @@ class Comparison:
             refresh,
             role="test",
             bbox=(target[0], target[1], target[0], target[1]),
+            point_window_cells=point_window_cells,
             time_window=derived_window,
             time_targets=time_targets,
             drop_keys=drop_keys,
@@ -3140,8 +3224,9 @@ class Comparison:
                 '*list* to keep the column standing -- select={"depth": [5, 25, 50, '
                 "75, 100]}, or depths=[...] through osk.compare(). Against a profile "
                 "reference, or a timeSeriesProfile one whose time this call narrows "
-                "to one instant, osk.compare() fills in the reference's own levels "
-                "automatically when you name none."
+                "to one instant or folds into a climatology (groupby/resample), "
+                "osk.compare() fills in the reference's own levels automatically "
+                "when you name none."
             )
 
         # A reference that never carried this variable is worth discovering now,
@@ -3199,6 +3284,46 @@ class Comparison:
             if route is not None
             else derived_bbox
         )
+        # A degenerate test_bbox (above) only ever comes from a fixed-position
+        # reference (a mooring, profile, or timeSeriesProfile station) -- exactly
+        # the shape _align_at_point samples the test lane against, at one nearest
+        # cell (the package default, "conservative_normed", resolves to nearest at
+        # a point; see that function's own translation, mirrored here) unless the
+        # caller explicitly asked for an interpolating method. The ordinary 5-cell
+        # point window is sized to also cover an interpolating stencil, so a
+        # nearest sample -- which keeps exactly one cell -- gets a much tighter one
+        # instead: the heavy work between here and that final sample (a climatology
+        # reduction, a vertical transform) then runs over ~9 columns rather than
+        # ~121, byte-identical once sampled (see prepare_source's own note on the
+        # transform commuting with a horizontal crop).
+        #
+        # Restricted to a reference whose *catalog* featureType is `profile`/
+        # `timeSeriesProfile` (:data:`PROFILE_FEATURE_TYPES`), not every point
+        # comparison: below, `bbox = bbox_of(t)` crops the *reference* lane to
+        # this same (now possibly shrunk) test window, and for a profile/
+        # timeSeriesProfile station -- always read as a single scalar lon/lat
+        # coordinate, never a dimension (see tabular.to_dataset) -- that crop is
+        # a provable no-op (ocean_skill.align.subset_to_bbox returns its input
+        # unchanged when neither axis is a dimension to slice along), so shrinking
+        # the window changes nothing about what the reference read keeps. A
+        # *routed* point select (two independent grids sharing one requested
+        # lon/lat, POINT_SELECT-style) or a mooring/timeSeries reference can be a
+        # genuine, if coarse, grid instead -- there `bbox_of(t)` cropping the
+        # reference is doing real work (matching a coarser product's own nearest
+        # cell, which can sit outside a too-tight window; see
+        # test_a_routed_point_against_a_much_coarser_reference_is_still_verified),
+        # so those keep the ordinary, wider window. Left None (the module
+        # default) for anything interpolating, unrouted, region-shaped, or not
+        # this catalog-declared shape.
+        from ocean_skill.align import NEAREST, NEAREST_POINT_WINDOW_CELLS
+
+        sample_method = NEAREST if self.method.startswith("conservative") else self.method
+        test_cells = (
+            NEAREST_POINT_WINDOW_CELLS
+            if sample_method == NEAREST
+            and _feature_type(self.reference_name) in PROFILE_FEATURE_TYPES
+            else None
+        )
         # A further, discrete narrowing past derived_window's contiguous span --
         # see _reference_time_targets and prepare_source's time_targets= docstring.
         # None for anything but a repeat-visit/fixed-position reference whose time
@@ -3222,6 +3347,7 @@ class Comparison:
                 refresh,
                 role="test",
                 bbox=test_bbox,
+                point_window_cells=test_cells,
                 time_window=derived_window,
                 time_targets=time_targets,
                 drop_keys=drop_keys,
@@ -3330,6 +3456,7 @@ class Comparison:
             keep=keep,
             derived_window=derived_window,
             time_targets=time_targets,
+            point_window_cells=test_cells,
         )
         self._warn_on_pair_spec_mismatch(t, r)
         self._actual_depth = r_depth
@@ -4844,7 +4971,11 @@ def _fanned_select(
 
 
 def _is_profile_reference(
-    source: str, over: str | None, *, time_collapsed: bool = False
+    source: str,
+    over: str | None,
+    *,
+    time_collapsed: bool = False,
+    climatology: bool = False,
 ) -> bool:
     """Whether ``source`` is a single-cast profile whose own levels drive the compare.
 
@@ -4855,18 +4986,23 @@ def _is_profile_reference(
     time has been narrowed to one instant (a ``select={"time": <visit>}``, or one
     entry of a ``times=[...]`` fan -- see the ``compare()`` fan loop, which computes
     this per reference) is, for that one comparison, exactly a cast: one instant,
-    depth the only axis left to keep. A ``trajectoryProfile`` still carries more than
-    one candidate axis even then (position varies too) and is left to an explicit
-    ``depths=``/``select=``. An explicit ``over=`` that is *not* vertical -- a caller
-    scoring, say, time against a profile -- opts out: they have named the axis
-    themselves.
+    depth the only axis left to keep -- **or** with ``climatology=True``: time folded
+    into bins (a ``groupby``/``resample`` aggregate, :func:`_time_is_climatology`)
+    rather than one instant, but each bin is still exactly a cast at the reference's
+    own depths, the same reading :func:`_implied_over` gives this shape ``over="Z"``
+    for. A ``trajectoryProfile`` still carries more than one candidate axis even then
+    (position varies too) and is left to an explicit ``depths=``/``select=``. An
+    explicit ``over=`` that is *not* vertical -- a caller scoring, say, time against a
+    profile -- opts out: they have named the axis themselves.
     """
     from ocean_skill.operators import _CF_AXES
 
     if over is not None and _CF_AXES.get(over) != "vertical":
         return False
     feature = _feature_type(source)
-    return feature == "profile" or (feature == "timeSeriesProfile" and time_collapsed)
+    return feature == "profile" or (
+        feature == "timeSeriesProfile" and (time_collapsed or climatology)
+    )
 
 
 def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> list[float]:
@@ -4984,6 +5120,7 @@ def _profile_depth_plan(
     cache: dict[str, list[float]],
     *,
     ref_time_collapsed: bool = False,
+    ref_time_climatology: bool = False,
 ) -> tuple[tuple[Any, ...], bool]:
     """Per-reference ``(values, many_values)`` for compare()'s depth fan.
 
@@ -4992,12 +5129,13 @@ def _profile_depth_plan(
     * a calculated diagnostic has no vertical axis at all -- one comparison, no depth
       (``(None,)``);
     * a **profile** reference (or a **timeSeriesProfile** one whose time this
-      comparison has narrowed to a single instant -- ``ref_time_collapsed=True``,
-      computed by the caller per :func:`_is_profile_reference`'s extended scope)
-      keeps its depth axis standing, so its whole depth list is *one* comparison's
-      y-axis, never a scalar-per-depth fan (which would collapse the very axis the
-      profile exists to keep). The levels are the caller's ``depths=`` when given,
-      else -- the case this feature adds -- the reference's own
+      comparison has narrowed to a single instant -- ``ref_time_collapsed=True`` --
+      or folded into a climatology -- ``ref_time_climatology=True``, both computed
+      by the caller per :func:`_is_profile_reference`'s extended scope) keeps its
+      depth axis standing, so its whole depth list is *one* comparison's y-axis,
+      never a scalar-per-depth fan (which would collapse the very axis the profile
+      exists to keep). The levels are the caller's ``depths=`` when given, else --
+      the case this feature adds -- the reference's own
       (:func:`_profile_reference_depths`). An explicit ``select={"depth": [...]}`` is
       left to the ordinary path, which already carries a whole list as one comparison
       (``fan_values`` is then a 1-tuple holding that list);
@@ -5013,7 +5151,10 @@ def _profile_depth_plan(
     if calculated:
         return (None,), False
     if fan_key == "depth" and _is_profile_reference(
-        ref, over, time_collapsed=ref_time_collapsed
+        ref,
+        over,
+        time_collapsed=ref_time_collapsed,
+        climatology=ref_time_climatology,
     ):
         ref_sel = select_for(select, "reference")
         has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
@@ -5689,9 +5830,14 @@ def compare(
     cast, and the reference's own levels for it are read the same way a plain
     ``profile``'s are — a discrete-bottle-sample station visited unevenly (different
     depths on different visits) gets that one visit's own depths, not the record's
-    whole ragged union. Left with neither axis narrowed (or both), it is still the
-    ordinary ``timeSeriesProfile`` ambiguity, needing an explicit ``over=``. A
-    ``trajectoryProfile`` carries more than one candidate axis regardless, so it
+    whole ragged union. The same auto-derivation also covers a **climatology** —
+    ``aggregate={"time": {"groupby": "month", "reduce": "mean", "spread": "std"}}``
+    folds the repeat-visit record into monthly bins rather than one instant, and
+    each bin still gets its own profile down the reference's own levels, faceted by
+    the bins (``.plot()`` draws one row per month); no ``over=`` or ``depths=``
+    needed. Left with neither axis narrowed nor a climatology fold (or both), it is
+    still the ordinary ``timeSeriesProfile`` ambiguity, needing an explicit
+    ``over=``. A ``trajectoryProfile`` carries more than one candidate axis regardless, so it
     still needs an explicit ``depths=``/``select={"depth": [...]}``, and a vertical
     ``over=`` with no depth axis left standing is refused rather than compared
     against a single collapsed level.
@@ -6081,6 +6227,17 @@ def compare(
         select_for(select, "reference"), aggregate_for(aggregate, "reference")
     ) or (times_fan is not None and times_fan[0] == "list")
 
+    # Whether the reference's own aggregate folds time into bins (a groupby month or
+    # season, a resample) rather than reducing it to one instant -- see
+    # _time_is_climatology. Distinct from _ref_time_collapsed above: a climatology
+    # keeps a standing (labelled) time axis, but each bin is still exactly a cast at
+    # the reference's own depths, so a timeSeriesProfile reference gets the same
+    # "use my own levels" treatment _profile_depth_plan already gives the
+    # single-instant case, one comparison per depth *list*, faceted by the bins.
+    _ref_time_climatology = _time_is_climatology(
+        aggregate_for(aggregate, "reference")
+    )
+
     def _times_for(tst: str) -> tuple[Any, ...]:
         if times_fan is None:
             return (None,)
@@ -6216,6 +6373,7 @@ def compare(
                     depths if depths_was_explicit else None,
                     _ref_depths_cache,
                     ref_time_collapsed=_ref_time_collapsed,
+                    ref_time_climatology=_ref_time_climatology,
                 )
             except ValueError as exc:
                 # Reading a profile reference's own levels can fail (no vertical axis
