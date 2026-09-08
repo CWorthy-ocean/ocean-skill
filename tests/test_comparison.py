@@ -273,6 +273,78 @@ def test_a_cached_singleton_lane_is_squeezed_on_the_way_out(monkeypatch, gom_bgc
     assert again.sizes["time"] == 1, "the stored entry itself was never squeezed"
 
 
+def test_a_stale_positionless_station_entry_is_discarded_and_repaired(monkeypatch):
+    """A cache-hit self-heals a mooring lane that predates the position squeeze.
+
+    Reproduces the real-world bug: a prepared-lane entry written before
+    ``ocean_skill.sources.read``'s singleton-horizontal squeeze existed has no
+    recoverable lon/lat at all, but the cache key it was filed under is
+    unchanged, so today's code would otherwise go on serving it forever even
+    though a fresh read of the same source draws fine. ``prepare_source``
+    checks exactly this on a cache hit (``_is_stale_positionless_station``)
+    rather than a global cache-format bump, so only entries actually missing a
+    position are ever discarded -- see the second half below.
+    """
+    import warnings
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    import ocean_skill as osk
+    from ocean_skill import cache, catalog
+    from ocean_skill.comparison import prepare_source
+
+    depth = np.linspace(58.0, -10.0, 6)
+    time = pd.date_range("2024-04-04", periods=8, freq="h")
+    fresh = xr.DataArray(
+        np.random.default_rng(5).normal(0.0, 0.2, (depth.size, time.size)),
+        dims=("DEPTH", "TIME"),
+        coords={
+            "depth": ("DEPTH", depth),
+            "TIME": time,
+            "LATITUDE": 64.38,
+            "LONGITUDE": -21.52,
+        },
+        name="eastward_sea_water_velocity",
+    )
+    meta = {"featureType": "timeSeriesProfile"}
+    monkeypatch.setattr(osk, "read", lambda name: fresh.to_dataset())
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
+
+    # Pre-seed the cache with exactly the stale shape: the same array, position
+    # dropped -- what an old, pre-squeeze read produced -- under the very key
+    # prepare_source computes for this call.
+    key = cache.key_for_prepared(
+        source="adcp_mooring",
+        variable="eastward_sea_water_velocity",
+        select={"_aggregate": None},
+    )
+    stale = fresh.reset_coords(["LATITUDE", "LONGITUDE"], drop=True)
+    cache.save_field(key, stale, actual_depth=None)
+
+    from ocean_skill.align import point_of
+
+    assert point_of(stale) is None, "the seeded entry must reproduce the bug"
+
+    with pytest.warns(UserWarning, match="adcp_mooring.*stale"):
+        da, _ = prepare_source("adcp_mooring", "eastward_sea_water_velocity", None, None)
+    assert point_of(da) == (-21.52, 64.38), "the repair must recover the position"
+
+    # The repaired entry, once written, must not be discarded again -- a good
+    # position is the ordinary reading, not evidence of staleness -- and a
+    # legitimately positioned entry is never recomputed just because it shares
+    # this featureType (the point of scoping the check to point_of() is None).
+    monkeypatch.setattr(
+        osk, "read", lambda name: (_ for _ in ()).throw(AssertionError("should not re-read"))
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        again, _ = prepare_source(
+            "adcp_mooring", "eastward_sea_water_velocity", None, None
+        )
+    assert point_of(again) == (-21.52, 64.38)
+
+
 def test_depth_label():
     assert _depth_label(None) == "surface"
     assert _depth_label(SURFACE) == "surface"

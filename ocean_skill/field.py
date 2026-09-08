@@ -1016,29 +1016,33 @@ class Field:
                     "collapses it), or widen select= to keep a horizontal extent "
                     "for a map."
                 )
+            from ocean_skill.comparison import (
+                POINT_FEATURE_TYPES,
+                PROFILE_FEATURE_TYPES,
+            )
+
             feature_type = str(self._catalog_metadata().get("featureType") or "")
-            if feature_type and feature_type.lower() != "grid":
+            if feature_type in (POINT_FEATURE_TYPES | PROFILE_FEATURE_TYPES):
                 # The catalog says this source is one fixed station (a mooring,
-                # a repeat-visit profile), yet its prepared data carries no
-                # recoverable lon/lat at all -- point_of found nothing on
-                # *any* axis, not merely "narrowed to a point". A live read
-                # always attaches one (see ocean_skill.sources.read's
-                # singleton-horizontal squeeze); a cache entry written before
-                # that squeeze existed would not, and would still be served
-                # today (see cache._FORMAT_VERSION's own history for exactly
-                # this case). Named explicitly rather than falling through to
-                # the field_facet path below, which would otherwise fail on a
-                # field with no horizontal extent to lay out panels of, with
-                # no hint that the cache -- not the source -- is the problem.
+                # a repeat-visit profile) -- unlike a trajectory, whose lon/lat
+                # legitimately varies, this featureType's data always has one
+                # recoverable position -- yet point_of found none at all, not
+                # merely "narrowed to a point". prepare_source's own cache-hit
+                # check (_is_stale_positionless_station) already discards and
+                # recomputes exactly this shape of stale entry, so reaching
+                # here with cache still on means that repair already ran and
+                # still found nothing; the source's own lon/lat is the more
+                # likely culprit now. Named explicitly rather than falling
+                # through to the field_facet path below, which would otherwise
+                # fail on a field with no horizontal extent to lay out panels
+                # of, with no hint of why.
                 raise ValueError(
                     f"{self.source!r} is catalogued as featureType: "
                     f"{feature_type!r} (one fixed position), but its prepared "
-                    "data has no recoverable lon/lat at all. A stale cache "
-                    "entry -- written before a fix to how this shape is read "
-                    "or cached -- is the most likely cause: try "
-                    "osk.cache.clear() (or field(..., cache=False)) and plot "
-                    "again. If the position is still missing after that, the "
-                    "source's own lon/lat metadata is what needs fixing."
+                    "data has no recoverable lon/lat at all. Try field(..., "
+                    "cache=False) to rule out a stale cache entry; if the "
+                    "position is still missing, the source's own lon/lat "
+                    "metadata is what needs fixing."
                 )
             # The fallback half of the surface default -- whatever the read-free
             # check above could not settle (an uncatalogued source, a test stub)
