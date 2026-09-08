@@ -132,17 +132,24 @@ class PlotSpec:
         see :class:`~ocean_skill.comparison.ComparisonSet`'s refusal on more than
         one ``section_row``).
 
-        ``time_depth`` is ``section``'s other single-source exception: one item,
-        carrying ``field`` (one DataArray) at a fixed lon/lat with exactly a time
-        axis and a vertical axis standing — a ``timeSeriesProfile`` station's own
-        shape, or any point a bare :class:`~ocean_skill.field.Field` reduced no
-        further than that. Drawn as one panel with time on x and depth on y
-        (inverted, surface at top), coloured by value — scatter markers for a
-        ragged record, a mesh for a dense one (see
-        :func:`ocean_skill.plot.time_depth.default_mark`). Built by
-        :meth:`ocean_skill.field.Field._time_depth_item`; a comparison never
-        reaches this family, since :meth:`ocean_skill.comparison.Comparison
-        ._prepare_lane` always narrows a bare vertical select to the surface first.
+        ``time_depth`` is ``section``'s other single-source exception: one or
+        more items, each carrying ``field`` (one DataArray) at a fixed lon/lat
+        with exactly a time axis and a vertical axis standing — a
+        ``timeSeriesProfile`` station's own shape, or any point a bare
+        :class:`~ocean_skill.field.Field` reduced no further than that. Each
+        item draws as one panel with time on x and depth on y (inverted, surface
+        at top), coloured by value — scatter markers for a ragged record, a
+        mesh for a dense one (see :func:`ocean_skill.plot.time_depth.default_mark`).
+        A single item draws as one figure; more than one (a
+        :class:`~ocean_skill.field.FieldSet` of several stations/moorings) draws
+        as a stacked column of panels, one per item, rather than any overlay or
+        facet of its own -- see :func:`ocean_skill.plot.matplotlib_renderer
+        .time_depth_grid` / :func:`ocean_skill.plot.holoviews_renderer
+        ._time_depth_grid`. Built by :meth:`ocean_skill.field.Field
+        ._time_depth_item` (one item) and :meth:`ocean_skill.field.FieldSet
+        ._time_depth_items` (the list); a comparison never reaches this family,
+        since :meth:`ocean_skill.comparison.Comparison._prepare_lane` always
+        narrows a bare vertical select to the surface first.
 
         ``profile`` carries ``field_grid``'s list, one item per station/cast, each
         ``aligned`` 1-D on the vertical axis (``z``, ``depth``, or ``sigma0`` for an

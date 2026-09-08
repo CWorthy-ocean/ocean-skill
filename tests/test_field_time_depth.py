@@ -336,10 +336,60 @@ def test_movie_refuses_a_time_depth_field(stub):
         _make().movie()
 
 
-def test_a_time_depth_set_refuses_to_plot(stub):
+def test_a_time_depth_set_draws_a_stacked_column(stub):
+    """Every member ``time_depth`` draws as a stacked column, one panel each --
+    the ADCP-mooring shape ``osk.field(osk.find(...), variable).plot()`` gives
+    :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid`.
+    """
     stub(_point_time_depth())
     fs = _make_set([NITRATE, "silicate"])
-    with pytest.raises(ValueError, match="depth against time"):
+    fig = fs.plot()
+    from matplotlib.collections import QuadMesh
+
+    # panel axes are created (and registered in fig.axes) before any colorbar's
+    # own axes, so the first two are the panels themselves
+    panels = fig.axes[:2]
+    assert all(
+        any(isinstance(c, QuadMesh) for c in ax.collections) for ax in panels
+    )
+    # two panels, each with its own colorbar axes (four axes total)
+    assert len(fig.axes) == 4
+
+    obj = _make_set([NITRATE, "silicate"]).plot(renderer="holoviews")
+    assert len(obj) == 2
+
+
+def test_a_time_depth_set_grid_layout_and_scale_options(stub):
+    """``ncols=``/``nrows=`` wrap the panels; ``shared_limits=True`` warns once
+    when the set's variables actually differ (:func:`ocean_skill.plot
+    .matplotlib_renderer.time_depth_grid`'s own convention, mirroring
+    ``field_grid``).
+    """
+    stub(_point_time_depth())
+    fs = _make_set([NITRATE, "silicate", "oxygen"])
+    fig = fs.plot(ncols=2)
+    assert fig.axes[0].get_gridspec().ncols == 2
+
+    with pytest.warns(UserWarning, match="shared_limits=True"):
+        _make_set([NITRATE, "silicate"]).plot(shared_limits=True)
+
+
+def test_a_mixed_time_depth_and_series_set_refuses_to_plot(monkeypatch):
+    """A ``time_depth`` panel and an overlaid line share no single figure -- see
+    :meth:`~ocean_skill.field.FieldSet.plot`.
+    """
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    time_depth_da = _point_time_depth()
+    series_da = time_depth_da.isel(depth=0, drop=True)
+
+    def fake_prepare_source(source, variable, *args, **kwargs):
+        return (series_da if "silicate" in variable else time_depth_da, None)
+
+    monkeypatch.setattr(comparison, "prepare_source", fake_prepare_source)
+    fs = make_field("stub", [NITRATE, "silicate"])
+    with pytest.raises(ValueError, match="some fields draw as depth against time"):
         fs.plot()
 
 

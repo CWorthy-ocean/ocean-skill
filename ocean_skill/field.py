@@ -1248,35 +1248,49 @@ class FieldSet:
             return [item for f in self.fields for item in f._profile_items()]
         return [item for f in self.fields for item in f._series_items()]
 
+    def _time_depth_items(self) -> list[dict[str, Any]]:
+        """Every member's own single ``time_depth`` item, one panel each."""
+        return [f._time_depth_item() for f in self.fields]
+
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Draw every member on one figure, laid out by :mod:`plot.series`
-        or :mod:`plot.profile`.
+        """Draw every member on one figure, laid out by :mod:`plot.series`,
+        :mod:`plot.profile`, or (one panel per member) the ``time_depth`` family.
 
         Every member has to draw the same way -- all a :attr:`Field.family` of
-        ``"series"`` (a point over time) or all ``"profile"`` (a point down
-        depth, at one instant) -- for that to mean anything. A set that mixes
-        either with a map, or a series with a profile, has no single figure
-        that is both, so this refuses rather than picking one arbitrarily.
+        ``"series"`` (a point over time), all ``"profile"`` (a point down depth,
+        at one instant), or all ``"time_depth"`` (depth against time, at one
+        point -- drawn as a stacked column of panels rather than overlaid or
+        faceted lines) -- for that to mean anything. A set that mixes any of
+        those, or mixes one of them with a map, has no single figure that is
+        both, so this refuses rather than picking one arbitrarily.
         """
         from ocean_skill.comparison import _short_variable_label
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
         time_depth = [f for f in self.fields if f.family == "time_depth"]
-        if time_depth:
-            multi_source = len({f.source for f in time_depth}) > 1
-            names = ", ".join(
-                f"{f.source} {_short_variable_label(f.variable)}"
-                if multi_source
-                else _short_variable_label(f.variable)
-                for f in time_depth
+        if time_depth and len(time_depth) < len(self.fields):
+            multi_source = len({f.source for f in self.fields}) > 1
+            detail = "; ".join(
+                (
+                    f"{f.source} {_short_variable_label(f.variable)}"
+                    if multi_source
+                    else _short_variable_label(f.variable)
+                )
+                + f": {f.family_reason}"
+                for f in self.fields
             )
             raise ValueError(
-                f"{names} draw as depth against time (see .family), which has no "
-                "overlay or facet composition of its own yet -- plot one field "
-                "at a time with osk.field(source, variable).plot() instead. "
-                "Stacked time_depth panels for several fields are a follow-up."
+                f"some fields draw as depth against time (see .family) and "
+                f"others do not -- {detail}. A time_depth panel has no overlay "
+                "or facet composition with a series or profile line, so plot "
+                "each group separately with osk.field(source, variable)."
             )
+        if time_depth:
+            spec = PlotSpec(
+                family="time_depth", items=self._time_depth_items(), options=kwargs
+            )
+            return render(spec, renderer=renderer)
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
         mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1
         if not_lines or mixed:

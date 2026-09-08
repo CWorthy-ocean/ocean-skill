@@ -69,6 +69,7 @@ __all__ = [
     "series",
     "skill_map",
     "time_depth",
+    "time_depth_grid",
 ]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
@@ -3189,6 +3190,45 @@ def section(
     return fig
 
 
+def _draw_time_depth(ax, values, geometry, *, cmap, norm, mark: str) -> Any:
+    """Draw one ``time_depth`` panel's scatter/mesh into ``ax``, return its mappable.
+
+    ``values``/``geometry`` are :func:`~ocean_skill.plot.time_depth.prepare_time_depth`'s
+    own return; the caller has already resolved ``mark`` (via
+    :func:`~ocean_skill.plot.time_depth.default_mark`) and ``cmap``/``norm`` (its own
+    percentile range, or one shared across a grid's panels -- see
+    :func:`time_depth_grid`'s ``shared_limits``). Shared by :func:`time_depth` (one
+    panel, its own figure) and :func:`time_depth_grid` (several, one per axes) so the
+    two can never draw a cell differently.
+    """
+    import xarray as xr
+
+    ax.set_facecolor("0.85")  # the section family's absent-cell grey, doing the
+    # same job here: a mesh cell with no reading at all is genuinely absent data.
+    x = values[geometry.x_name]
+    y = values[geometry.y_name]
+    if mark == "scatter":
+        # x/y are always broadcast to the value grid's own shape already (see
+        # prepare_time_depth), so this is one scatter call over finite cells,
+        # no reshaping needed here.
+        xb, yb, vb = xr.broadcast(x, y, values)
+        finite = np.asarray(vb.notnull())
+        im = ax.scatter(
+            np.asarray(xb)[finite],
+            np.asarray(yb)[finite],
+            c=np.asarray(vb)[finite],
+            cmap=cmap,
+            norm=norm,
+            s=26,
+            edgecolor="white",
+            linewidth=0.4,
+        )
+    else:
+        im = ax.pcolormesh(x, y, values, cmap=cmap, norm=norm)
+    ax.invert_yaxis()
+    return im
+
+
 def time_depth(
     field,
     *,
@@ -3243,7 +3283,6 @@ def time_depth(
     changes anything here.
     """
     import matplotlib.pyplot as plt
-    import xarray as xr
 
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
     from ocean_skill.plot.typography import SECTION_ASPECT
@@ -3283,29 +3322,7 @@ def time_depth(
     norm = norm_for(standard_name, vmin, vmax)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-    ax.set_facecolor("0.85")  # the section family's absent-cell grey, doing the
-    # same job here: a mesh cell with no reading at all is genuinely absent data.
-    x = values[geometry.x_name]
-    y = values[geometry.y_name]
-    if mark == "scatter":
-        # x/y are always broadcast to the value grid's own shape already (see
-        # prepare_time_depth), so this is one scatter call over finite cells,
-        # no reshaping needed here.
-        xb, yb, vb = xr.broadcast(x, y, values)
-        finite = np.asarray(vb.notnull())
-        im = ax.scatter(
-            np.asarray(xb)[finite],
-            np.asarray(yb)[finite],
-            c=np.asarray(vb)[finite],
-            cmap=cmap,
-            norm=norm,
-            s=26,
-            edgecolor="white",
-            linewidth=0.4,
-        )
-    else:
-        im = ax.pcolormesh(x, y, values, cmap=cmap, norm=norm)
-    ax.invert_yaxis()
+    im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=mark)
     ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
     ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
     _x_axis(
@@ -3323,6 +3340,182 @@ def time_depth(
     if fit_text:
         _fit_text_widths(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=[ax])
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def time_depth_grid(
+    items: list[dict[str, Any]],
+    *,
+    title: str | None = None,
+    mark: str | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    shared_limits: bool = False,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+):
+    """Stack several ``time_depth`` panels -- one per item -- in a single figure.
+
+    The ``time_depth`` counterpart of :func:`series`/:func:`profile`: a
+    :class:`~ocean_skill.field.FieldSet` of several stations/moorings, each its own
+    ``time_depth`` item (see :meth:`ocean_skill.field.Field._time_depth_item`), drawn
+    one panel per item rather than any overlay -- a mesh or scatter has no second
+    channel (colour) free to carry a second source the way a line's colour does.
+
+    Panels stack in a single column by default (``ncols=None``, ``nrows=None``), time
+    on a shared x-axis, matching the layout :func:`~ocean_skill.plot.series.grid_shape`
+    gives every other line family for the same shape. ``ncols=``/``nrows=`` wrap the
+    panels into a rectangular grid instead -- shared with :func:`series`/:func:`profile`
+    so the three families cannot pick different wraps.
+
+    Each panel gets its own colour scale and colorbar by default (different moorings,
+    different depths, different ranges); ``shared_limits=True`` computes one shared
+    ``vmin``/``vmax`` (and a single warning if the items' ``standard_name``s actually
+    differ) across every panel instead -- :func:`field_grid`'s own convention, so the
+    two grid families agree on what the option means.
+
+    ``title`` defaults to whatever identity every item shares (ordinarily the
+    variable) via :func:`grid_suptitle`; each panel's own title is its identity instead
+    -- the item's ``label`` (a mooring's source name, or whatever
+    :meth:`~ocean_skill.field.Field._time_depth_item` gave it), plus place/period
+    context only when no ``label`` says as much already.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) -- neither changes
+    anything here.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.series import grid_shape
+    from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+
+    n = len(items)
+    prepared = [prepare_time_depth(item["field"]) for item in items]
+    marks = [mark or default_mark(values) for values, _ in prepared]
+
+    if title is None:
+        title = grid_suptitle(items)
+
+    grid_nrows, grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)
+
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=False,  # stacked panels: bars beside, height is scarce
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=grid_nrows,
+        ncols=grid_ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=grid_ncols,
+        nrows=grid_nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+
+    # sharex only makes sense in the default single stacked column, and only when
+    # every panel's x axis is the same kind (all real dates, or all the same groupby
+    # index) -- see TimeDepthGeometry.date_axis.
+    sharex = grid_ncols == 1 and len({geometry.date_axis for _, geometry in prepared}) == 1
+    fig, axes = plt.subplots(
+        grid_nrows,
+        grid_ncols,
+        figsize=figsize,
+        sharex=sharex,
+        squeeze=False,
+        layout="constrained",
+    )
+    flat = list(axes.ravel())
+
+    shared_cmap = shared_norm = None
+    if shared_limits:
+        import warnings
+
+        names = {item.get("standard_name") for item in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but panels use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every panel.",
+                stacklevel=_stacklevel.find(),
+            )
+        standard_name = items[0].get("standard_name")
+        shared_cmap, _ = cmaps_for(standard_name)
+        vmin, vmax = _limits(*(values for values, _ in prepared))
+        shared_norm = norm_for(standard_name, vmin, vmax)
+
+    for index, (item, (values, geometry), panel_mark) in enumerate(
+        zip(items, prepared, marks)
+    ):
+        ax = flat[index]
+        if shared_limits:
+            cmap, norm = shared_cmap, shared_norm
+        else:
+            cmap, _ = cmaps_for(item.get("standard_name"))
+            vmin, vmax = _limits(values)
+            norm = norm_for(item.get("standard_name"), vmin, vmax)
+        im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark)
+        panel_title = " · ".join(
+            p for p in (item.get("label"), geometry.place_note, geometry.period_note) if p
+        )
+        ax.set_title(panel_title, fontsize=scale["title"], **_without_font(title_kwargs))
+        ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+        _x_axis(
+            ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
+        )
+        lab = item.get("units") or ""
+        _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+
+    if grid_ncols == 1 or (grid_nrows == 1 and grid_ncols == n):
+        flat[-1].set_xlabel(prepared[-1][1].x_label, fontsize=scale["axes_label"])
+    else:
+        # A wrapped grid's bottom row is ragged when n does not fill it, so "is there
+        # a panel below me?" is the question, not "am I in the last row?" -- the same
+        # rule series()'s own wrapped grid uses for the same situation.
+        for index, ax in enumerate(flat[:n]):
+            if index + grid_ncols >= n:
+                ax.set_xlabel(prepared[index][1].x_label, fontsize=scale["axes_label"])
+                ax.xaxis.set_tick_params(labelbottom=True)
+        for ax in flat[n:]:
+            ax.set_visible(False)
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=grid_nrows, panels=flat[:n])
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -4821,7 +5014,7 @@ def render(spec, **kwargs: Any):
     elif family == "section_row":
         _check_options(section_row, opts)
     elif family == "time_depth":
-        _check_options(time_depth, opts)
+        _check_options(time_depth_grid if len(spec.items) > 1 else time_depth, opts)
     elif family == "profile":
         _check_options(profile, opts)
     elif family == "skill_map":
@@ -4901,6 +5094,8 @@ def render(spec, **kwargs: Any):
             **opts,
         )
     if family == "time_depth":
+        if len(spec.items) > 1:
+            return time_depth_grid(spec.items, **opts)
         item = spec.single
         return time_depth(
             item["field"],
