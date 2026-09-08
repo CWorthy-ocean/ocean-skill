@@ -756,12 +756,87 @@ def test_time_targets_also_fires_when_a_time_aggregate_collapses_it_under_over_z
     assert list(targets) == sorted(pd.to_datetime(casts.unique()))
 
 
-def test_time_targets_stays_none_for_a_climatology_under_over_z(monkeypatch):
-    """A groupby/resample aggregate *keeps* a time axis (a climatology, or
-    consecutive periods) rather than collapsing it -- it legitimately needs
-    every step in the window, not just the ones nearest a cast -- so pruning
-    must not fire here even though depth is kept and time is being aggregated.
-    """
+def test_time_targets_also_fires_for_a_groupby_climatology_under_over_z(monkeypatch):
+    """A groupby aggregate *keeps* a time axis (a climatology) rather than
+    collapsing it, but every in-between model step still feeds the mean/spread
+    directly (nothing downstream discards them) -- so a sparse repeat-visit
+    station gets the same treatment as the plain-reducer case just above:
+    matching the model to the reference's own cast times, then folding *that*
+    into a climatology, rather than reading a full window mostly never
+    visited. This inverts the pre-feature behaviour (a groupby/resample used to
+    be the one exception left un-pruned)."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    casts = pd.to_datetime(["2024-05-01", "2024-04-04", "2024-04-04"])  # dup, unsorted
+    ds = xr.Dataset(coords={"time": ("time", casts.values)})
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+    )
+    targets = c._reference_time_targets()
+    assert targets is not None
+    assert list(targets) == sorted(pd.to_datetime(casts.unique()))
+
+
+def test_time_targets_also_fires_for_a_resample_fold_under_over_z(monkeypatch):
+    """A resample fold (consecutive periods, not a climatology) gets the same
+    treatment as groupby -- both keep a time axis :func:`_time_is_climatology`
+    recognizes, and neither discards the in-between steps downstream."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    casts = pd.to_datetime(["2024-05-01", "2024-04-04", "2024-04-04"])  # dup, unsorted
+    ds = xr.Dataset(coords={"time": ("time", casts.values)})
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    _resolved(monkeypatch, {"featureType": "timeSeriesProfile"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+    )
+    targets = c._reference_time_targets()
+    assert targets is not None
+    assert list(targets) == sorted(pd.to_datetime(casts.unique()))
+
+
+def test_time_targets_still_none_for_a_gridded_reference_under_a_climatology(
+    monkeypatch,
+):
+    """The feature/point-population scope is unchanged: a gridded (WOA-style)
+    reference is not a repeat-visit station -- there are no "cast times" to
+    prune to -- so a groupby/resample aggregate still returns None for it,
+    the same as before this feature and the same as the plain-reducer case."""
+    import ocean_skill as osk
+    from ocean_skill.comparison import Comparison
+
+    monkeypatch.setattr(osk, "read", _read_must_not_be_called)
+    _resolved(monkeypatch, {"featureType": "grid"})
+
+    c = Comparison(
+        reference="papa",
+        test="product",
+        variable=MODEL_VAR,
+        over="Z",
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+    )
+    assert c._reference_time_targets() is None
+
+
+def test_time_targets_still_none_for_a_pair_spec_select_under_a_climatology(
+    monkeypatch,
+):
+    """A pair-spec select names two independently-narrowed positions on
+    purpose -- still left unrouted under a climatology fold, same as before."""
     import ocean_skill as osk
     from ocean_skill.comparison import Comparison
 
@@ -773,6 +848,7 @@ def test_time_targets_stays_none_for_a_climatology_under_over_z(monkeypatch):
         test="product",
         variable=MODEL_VAR,
         over="Z",
+        select={"test": {"lon": -100.0, "lat": 20.0}, "reference": {}},
         aggregate={"time": {"groupby": "month", "reduce": "mean"}},
     )
     assert c._reference_time_targets() is None

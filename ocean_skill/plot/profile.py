@@ -63,8 +63,27 @@ def _is_time_groupby_dim(aligned, dim: str) -> bool:
     return coord is not None and TIME_GROUPBY_ATTR in coord.attrs
 
 
+#: The dimension name a ``resample`` fold keeps -- unlike a groupby climatology,
+#: which renames the axis to its grouping label (see :data:`MONTH_DIM`), a
+#: resample bins by *interval* and leaves the axis named ``time`` (consecutive
+#: periods: January 2024, February 2024, ...). An ordinary, un-reduced ``time``
+#: dim is refused like any other extra axis (see
+#: :meth:`ocean_skill.field.Field._profile_items`/:func:`ocean_skill.align.align`'s
+#: own survival gate) -- :func:`fan_season` only fans it when the coordinate also
+#: carries :data:`ocean_skill.operators.TIME_RESAMPLE_ATTR`.
+TIME_DIM = "time"
+
+
+def _is_time_resample_dim(aligned, dim: str) -> bool:
+    from ocean_skill.operators import TIME_RESAMPLE_ATTR
+
+    coord = aligned.coords.get(dim)
+    return coord is not None and TIME_RESAMPLE_ATTR in coord.attrs
+
+
 def fan_season(items: list[dict]) -> list[dict]:
-    """Split a surviving season or (marked) month dim into one item per value.
+    """Split a surviving season, (marked) month, or (marked) time-period dim
+    into one item per value.
 
     The codebase's standing idiom for "several lines in one profile panel" is
     several *items*, not one item with a surviving axis (see
@@ -72,8 +91,11 @@ def fan_season(items: list[dict]) -> list[dict]:
     fans the same way, chronologically; a surviving ``month`` axis (only when
     an explicit ``select={"month": [...]}`` turned off its "this is time"
     reading -- see :data:`MONTH_DIM`) fans the same way too, in the order the
-    caller named the months. ``.isel`` leaves the dim as a scalar coordinate on
-    each slice (the convention a profile's own ``time`` already follows -- see
+    caller named the months. A surviving ``time`` axis marked as a resample
+    fold (:data:`ocean_skill.operators.TIME_RESAMPLE_ATTR` -- consecutive
+    periods, not a climatology) fans identically, chronologically, one item per
+    period. ``.isel`` leaves the dim as a scalar coordinate on each slice (the
+    convention a profile's own ``time`` already follows -- see
     :func:`_time_of`), and slices a same-dims ``spread`` coordinate along with
     it for free. Idempotent: a fanned item carries a scalar coordinate, not a
     dimension, so calling this on already-fanned items is a no-op.
@@ -86,6 +108,8 @@ def fan_season(items: list[dict]) -> list[dict]:
             dim = SEASON_DIM
         elif MONTH_DIM in aligned.dims and _is_time_groupby_dim(aligned, MONTH_DIM):
             dim = MONTH_DIM
+        elif TIME_DIM in aligned.dims and _is_time_resample_dim(aligned, TIME_DIM):
+            dim = TIME_DIM
         if dim is None:
             fanned.append(item)
             continue
@@ -176,6 +200,38 @@ def _vertical_label(specs) -> str:
     return f"Depth [{units}]"
 
 
+#: Resample frequency-alias prefixes (stripped of any leading multiplier, e.g.
+#: ``"1MS"`` -> ``"MS"``), grouped by the label granularity :func:`_time_of`
+#: formats a fanned period to. Exact membership, not substring matching -- a
+#: minute alias (``"min"``, or the older ``"T"``) must never fall into the
+#: month bucket the way a bare ``"M" in "MIN"`` substring check would.
+_RESAMPLE_LABEL_UNITS: dict[str, frozenset[str]] = {
+    "Y": frozenset({"Y", "YS", "YE", "A", "AS", "BA", "BY"}),
+    "M": frozenset({"M", "MS", "ME", "BM", "BMS"}),
+    "D": frozenset({"D", "W"}),  # a week's own label is still one date, its start
+}
+
+
+def _resample_label(timestamp: str, freq: str) -> str:
+    """Format ``timestamp`` (``"YYYY-MM-DD HH:MM:SS"``-shaped) to ``freq``'s
+    granularity -- ``"2024"`` for annual, ``"2024-04"`` for monthly, a bare date
+    for weekly/daily, or the full instant for anything finer (hourly and below,
+    where a period start reads the same as a cast's own instant anyway).
+    """
+    import re
+
+    match = re.match(r"^\d*([A-Za-z]+)", freq)
+    unit = (match.group(1) if match else freq).upper()
+    for granularity, aliases in _RESAMPLE_LABEL_UNITS.items():
+        if unit in aliases:
+            if granularity == "Y":
+                return timestamp[:4]
+            if granularity == "M":
+                return timestamp[:7]
+            return timestamp[:10]
+    return timestamp[:16].replace("T", " ")
+
+
 def _time_of(aligned) -> str | None:
     """The cast's own instant, pre-formatted -- or ``None`` for a multi-time item.
 
@@ -184,14 +240,26 @@ def _time_of(aligned) -> str | None:
     :meth:`ocean_skill.comparison.Comparison.as_item` both follow); several casts
     overlaid in one figure are several *items*, not one item with a surviving time
     axis, so ``time`` here is always scalar or absent, never an array to summarize.
+
+    A time :func:`fan_season` fanned out of a marked resample fold
+    (:data:`ocean_skill.operators.TIME_RESAMPLE_ATTR`) is the one exception to
+    "always a cast" -- it is a *period* start, not an observed instant, so it is
+    formatted to that period's own granularity (:func:`_resample_label`,
+    ``"2024-04"`` for a monthly resample) rather than down to the second.
     """
     time = aligned.coords.get("time")
     if time is None or time.dims:
         return None
     try:
-        return str(np.datetime64(time.values, "s"))[:16].replace("T", " ")
+        timestamp = str(np.datetime64(time.values, "s"))
     except (TypeError, ValueError):
         return str(time.values)
+    from ocean_skill.operators import TIME_RESAMPLE_ATTR
+
+    freq = time.attrs.get(TIME_RESAMPLE_ATTR)
+    if freq is not None:
+        return _resample_label(timestamp, str(freq))
+    return timestamp[:16].replace("T", " ")
 
 
 def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:

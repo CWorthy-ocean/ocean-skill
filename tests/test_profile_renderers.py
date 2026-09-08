@@ -143,6 +143,112 @@ def _seasonal_single_item(
     }
 
 
+def _resample_single_item(
+    *,
+    source: str = "run_new",
+    variable: str = TEMPERATURE,
+    units: str = "degC",
+    freq: str = "1MS",
+    periods: int = 4,
+    n: int = 8,
+    spread=None,
+) -> dict:
+    """A single-source profile item whose time axis was reduced to a resample
+    fold -- the ``(time, depth)`` shape ``operators.aggregate({"time":
+    {"resample": freq, ...}})`` leaves standing, marked with
+    ``operators.TIME_RESAMPLE_ATTR`` on its ``time`` coordinate (see
+    ``ocean_skill.plot.profile.fan_season``'s resample branch).
+    """
+    import pandas as pd
+
+    from ocean_skill.operators import TIME_RESAMPLE_ATTR
+
+    depths = np.linspace(5.0, 150.0, n)
+    base = 20.0 - 0.08 * depths
+    values = base[None, :] + np.arange(periods)[:, None]
+    time = pd.date_range("2024-01-01", periods=periods, freq=freq)
+    da = xr.DataArray(
+        values,
+        dims=("time", "depth"),
+        coords={"time": time.values, "depth": depths},
+        attrs={"units": units},
+    ).assign_coords(lon=-144.245, lat=49.978)
+    da["time"].attrs[TIME_RESAMPLE_ATTR] = freq
+    if spread is not None:
+        da = da.assign_coords(
+            spread=(("time", "depth"), np.broadcast_to(spread, values.shape).astype(float))
+        )
+    return {
+        "aligned": xr.Dataset({"value": da}),
+        "metrics": None,
+        "units": units,
+        "standard_name": variable,
+        "label": source,
+        "labels": (source,),
+    }
+
+
+def _resample_profile_item(
+    variable: str = TEMPERATURE,
+    *,
+    test: str = "run_new",
+    reference: str = "his",
+    units: str = "degC",
+    offset: float = 0.6,
+    freq: str = "1MS",
+    periods: int = 4,
+    n: int = 8,
+    metrics: dict | None = "auto",
+) -> dict:
+    """A comparison item whose aligned trio still has a marked resample ``time``
+    dim -- the shape ``compose()``'s ``fan_season`` splits into one item per
+    period, the same way ``_seasonal_profile_item`` does for a season groupby.
+    """
+    import pandas as pd
+
+    from ocean_skill.operators import TIME_RESAMPLE_ATTR
+
+    depths = np.linspace(5.0, 150.0, n)
+    base = 20.0 - 0.08 * depths
+    values = base[None, :] + np.arange(periods)[:, None]
+    time = pd.date_range("2024-01-01", periods=periods, freq=freq)
+    reference_da = xr.DataArray(
+        values,
+        dims=("time", "z"),
+        coords={"time": time.values, "z": depths},
+        attrs={"units": units},
+    ).assign_coords(lon=-144.245, lat=49.978)
+    reference_da["time"].attrs[TIME_RESAMPLE_ATTR] = freq
+    aligned = xr.Dataset(
+        {
+            "reference": reference_da,
+            "test": reference_da + offset,
+            "difference": reference_da * 0 + offset,
+        }
+    )
+    aligned["reference"].attrs["units"] = units
+    if metrics == "auto":
+        metrics = {
+            "bias": offset,
+            "rmse": abs(offset) + 0.1,
+            "corr": 0.97,
+            "n": n * periods,
+            "std_test": 2.8,
+            "std_reference": 2.8,
+            "crmsd": 0.1,
+            "sigma_ratio": 1.0,
+            "variable": variable,
+        }
+    return {
+        "aligned": aligned,
+        "metrics": metrics,
+        "units": units,
+        "standard_name": variable,
+        "label": None,
+        "labels": (test, reference),
+    }
+
+
 def _seasonal_profile_item(
     variable: str = TEMPERATURE,
     *,
@@ -854,6 +960,97 @@ def test_a_single_season_changes_nothing():
     label, color, _, _ = static[0]
     assert label == "run_new"  # not "run_new · JJA"
     assert color == _style.COLOR_CYCLE[0]
+
+
+# -- a surviving resample-marked time axis fans into one line per period, in both
+# renderers -- the same idiom as season/month above, for consecutive periods
+# rather than a climatology -------------------------------------------------------
+
+
+def test_resample_overlay_draws_one_line_per_period_in_both_renderers():
+    item = _resample_single_item()
+    static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_lines(render(_spec([item]), renderer="holoviews"))
+    assert [(a, b, c) for a, b, c, _ in static] == interactive
+    assert [label for label, *_ in static] == [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+    ]
+
+
+def test_resample_comparison_pairs_share_a_color_and_split_by_dash():
+    item = _resample_profile_item()
+    static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    by_period: dict[str, list] = {}
+    for label, color, dash, _ in static:
+        period = label.split(" · ")[-1] if " · " in label else label
+        by_period.setdefault(period, []).append((color, dash))
+    assert len(by_period) == 4
+    for pair in by_period.values():
+        assert len(pair) == 2
+        (color_a, dash_a), (color_b, dash_b) = pair
+        assert color_a == color_b  # one period, one colour
+        assert {dash_a, dash_b} == {"-", "--"}  # reference solid, test dashed
+
+
+def test_cols_time_makes_one_panel_per_period_in_both_renderers():
+    item = _resample_single_item()
+    static = render(_spec([item], cols="time"), renderer="matplotlib")
+    interactive = render(_spec([item], cols="time"), renderer="holoviews")
+    assert len(static.axes) == 4
+    assert _matplotlib_titles(static) == _holoviews_titles(interactive)
+    assert all(
+        any(m in t for m in ("2024-01", "2024-02", "2024-03", "2024-04"))
+        for t in _matplotlib_titles(static)
+    )
+
+
+def test_rows_time_stacks_panels_in_chronological_order():
+    item = _resample_single_item()
+    fig = render(_spec([item], rows="time"), renderer="matplotlib")
+    titles = _matplotlib_titles(fig)
+    periods_in_order = [t.split(" · ")[-1] for t in titles]
+    assert periods_in_order == ["2024-01", "2024-02", "2024-03", "2024-04"]
+
+
+def test_annual_resample_labels_by_year_only():
+    """A coarser resample frequency labels to its own granularity -- a year, not
+    a month -- via ``_resample_label``'s freq-alias dispatch."""
+    item = _resample_single_item(freq="1YS", periods=3)
+    static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    assert [label for label, *_ in static] == ["2024", "2025", "2026"]
+
+
+def test_a_single_resample_period_changes_nothing():
+    """One period is no more distinguishing than one variable or one source --
+    mirrors test_a_single_season_changes_nothing."""
+    item = _resample_single_item(periods=1)
+    static = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    assert len(static) == 1
+    label, color, _, _ = static[0]
+    assert label == "run_new"
+    assert color == _style.COLOR_CYCLE[0]
+
+
+def test_fan_season_does_not_fan_an_unmarked_time_dim():
+    """A surviving, un-reduced ``time`` dim (no TIME_RESAMPLE_ATTR) is not a
+    legitimate fold -- ``fan_season`` must leave it standing, unlike a marked
+    resample dim (mirrors the groupby/month ``_is_time_groupby_dim`` gate).
+    Refusing such a shape outright is ``Field._profile_items``'s own job
+    (unrelated to this plot-layer fan), covered by its existing tests -- and
+    ``align.align``'s survival gate refuses it the same way for a comparison
+    (see the align-level test alongside the groupby/resample marking tests).
+    """
+    from ocean_skill.operators import TIME_RESAMPLE_ATTR
+    from ocean_skill.plot.profile import fan_season
+
+    item = _resample_single_item()
+    del item["aligned"]["time"].attrs[TIME_RESAMPLE_ATTR]
+    fanned = fan_season([item])
+    assert len(fanned) == 1
+    assert "time" in fanned[0]["aligned"].dims
 
 
 def test_explicit_encode_beats_the_season_color_default():

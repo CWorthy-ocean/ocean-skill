@@ -51,9 +51,11 @@ __all__ = [
     "DERIVED",
     "REDUCERS",
     "TIME_GROUPBY_ATTR",
+    "TIME_RESAMPLE_ATTR",
     "aggregate",
     "box_in_spec",
     "combine",
+    "is_time_fold_coord",
     "oriented_slice",
     "point_in_spec",
     "register_calculator",
@@ -1326,6 +1328,44 @@ SPREAD_COORD = "spread"
 #: family's fan (see :mod:`ocean_skill.plot.profile`), not a plottable x axis.
 TIME_GROUPBY_ATTR = "time_groupby"
 
+#: The ``resample`` twin of :data:`TIME_GROUPBY_ATTR` -- stamped on the ``time``
+#: coordinate by :func:`_reduce_dim`'s ``resample`` branch, whose value is the
+#: bin's own frequency string (``"1MS"``, ...), not a dimension name: unlike a
+#: groupby climatology, ``resample`` keeps the axis named ``time`` (consecutive
+#: periods, not a renamed label), so nothing needs marking to be *found* --
+#: :func:`time_axis_dim` already resolves a plain ``time`` dim before ever
+#: reading either marker. This one exists for a narrower reason: to tell a
+#: legitimate fold (a period a profile comparison may fan a row from, see
+#: :func:`is_time_fold_coord` and :mod:`ocean_skill.plot.profile`'s
+#: ``fan_season``) apart from an ordinary, un-reduced ``time`` axis a caller
+#: simply forgot to collapse -- both are named ``time`` with datetime values,
+#: indistinguishable by shape alone. Kept separate from ``TIME_GROUPBY_ATTR``
+#: (rather than reused) because its value carries the period's own frequency for
+#: labelling (``"2024-04"`` vs a bare instant), and because stamping a groupby
+#: marker on an un-renamed dimension would make that marker's own "renamed
+#: dimension" contract dishonest for every other reader of it.
+TIME_RESAMPLE_ATTR = "time_resample"
+
+
+def is_time_fold_coord(coord) -> bool:
+    """Whether ``coord`` is a binned/folded time axis -- climatology or period.
+
+    True for either mark a time reduction can leave behind: a groupby
+    climatology's renamed dimension (:data:`TIME_GROUPBY_ATTR` -- every January
+    of the record folded into one field) or a resample's consecutive period
+    (:data:`TIME_RESAMPLE_ATTR` -- January 2024, February 2024, ... kept
+    distinct). Both are a legitimate surviving axis a profile comparison scored
+    ``over="Z"`` may fan one row per bin from (see
+    :mod:`ocean_skill.plot.profile`'s ``fan_season`` and
+    :func:`ocean_skill.align.align`'s own survival gate) -- not the un-reduced
+    axis :func:`ocean_skill.align._require_2d` otherwise refuses, which carries
+    neither mark. ``None`` (no such coordinate) is False, the same as an absent
+    mark.
+    """
+    return coord is not None and (
+        TIME_GROUPBY_ATTR in coord.attrs or TIME_RESAMPLE_ATTR in coord.attrs
+    )
+
 #: The twelve months' initials, in calendar order. Used to validate a season
 #: string as a genuine run of consecutive months (doubled below so a wraparound
 #: season like ``"NDJ"`` is a plain substring search).
@@ -1573,6 +1613,19 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
             var = coord.variable.copy(deep=False)
             var.attrs = fresh_attrs
             out = out.assign_coords({new_dim: var})
+    elif freq is not None and is_time_dim:
+        # Unlike groupby, resample keeps the dim's own name and its coordinate's
+        # own attrs (there is no SeasonGrouper-style accident here to normalize
+        # away) -- so this only *adds* TIME_RESAMPLE_ATTR, never replaces what a
+        # normal time coordinate already carries. Only for the time axis itself
+        # (mirroring groupby's own `is_time_dim` guard): a resample on some other
+        # axis has no business being fanned as a period the way a profile
+        # comparison fans a time one (see TIME_RESAMPLE_ATTR/is_time_fold_coord).
+        coord = out.coords.get(target)
+        if coord is not None:
+            var = coord.variable.copy(deep=False)
+            var.attrs = {**var.attrs, TIME_RESAMPLE_ATTR: str(freq)}
+            out = out.assign_coords({target: var})
 
     out.attrs = {**attrs, **out.attrs}  # reductions drop attrs; units must survive
     return out

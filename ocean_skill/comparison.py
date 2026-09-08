@@ -1950,6 +1950,7 @@ def prepare_source(
     point_window_cells: int | None = None,
     time_window: tuple[Any, Any] | None = None,
     time_targets: Any = None,
+    time_targets_method: str = "nearest",
     qc: Any = None,
     detide: dict[str, Any] | None = None,
 ):
@@ -2044,6 +2045,16 @@ def prepare_source(
     existed. ``None`` (the default) leaves ``time_window``'s ordinary
     contiguous crop as the only one applied.
 
+    ``time_targets_method`` chooses how ``time_targets`` is applied --
+    ``"nearest"`` (the default) keeps only the step nearest each target, exactly
+    as above; ``"interp"``/``"linear"`` instead keeps the bracketing steps and
+    linearly interpolates the whole lane onto the targets (see
+    :func:`ocean_skill.align.subset_to_time_targets`'s own ``method=``), for a
+    low-frequency model whose nearest step could sit meaningfully far from a
+    cast. Folded into the key only when it is not the default, so a
+    ``"nearest"`` lane's key is byte-identical to one cached before this option
+    existed.
+
     ``qc`` overrides the source's own saved provider-QC policy (see
     :mod:`ocean_skill.qc`) at read time -- a dict (typically ``{"keep": [...]}``/
     ``{"keep_provider": [...]}``), the string ``"off"``, or ``None`` to use the
@@ -2110,6 +2121,12 @@ def prepare_source(
             ",".join(sorted(str(t) for t in time_targets)).encode()
         ).hexdigest()[:16]
         key_select["_time_targets"] = digest
+        if time_targets_method != "nearest":
+            # Re-keys only a non-default choice -- see time_targets_method=`s
+            # own docstring paragraph -- so a "nearest" lane's key (the
+            # overwhelming majority, and everything cached before this option
+            # existed) is untouched.
+            key_select["_time_targets_method"] = time_targets_method
     if effective_qc is not None:
         key_select["_qc"] = {
             "keep": sorted(str(v) for v in (effective_qc.get("keep") or [])),
@@ -2199,7 +2216,7 @@ def prepare_source(
     if pre_crop and time_targets is not None:
         from ocean_skill.align import subset_to_time_targets
 
-        obj = subset_to_time_targets(obj, time_targets)
+        obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
     da, depth = _prepare(
         obj, meta, variable, dict(select or {}), aggregate, source=source, detide=detide
     )
@@ -2220,7 +2237,7 @@ def prepare_source(
     if da is not None and not pre_crop and time_targets is not None:
         from ocean_skill.align import subset_to_time_targets
 
-        da = subset_to_time_targets(da, time_targets)
+        da = subset_to_time_targets(da, time_targets, method=time_targets_method)
     if da is not None and da.nbytes > LOAD_WARN_BYTES:
         import warnings
 
@@ -2698,19 +2715,19 @@ class Comparison:
         """The reference's own cast times, worth pre-selecting the test lane near.
 
         ``None`` unless this comparison either keeps the reference's *time*
-        axis standing (``over`` resolves to the "time" CF axis) or collapses
-        it with a plain reducer (:func:`_collapses_time` on the *test* lane's
-        own aggregate spec -- a ``groupby``/``resample`` climatology is
-        excluded, since that legitimately needs every step in the window, not
-        just the ones nearest a cast) -- against a fixed-position or
-        repeat-visit reference -- :data:`POINT_FEATURE_TYPES` plus
-        ``timeSeriesProfile``, the same population :meth:`_reference_narrowing`
-        collapses to a point, minus ``profile`` (already a single instant, with
-        nothing to prune between) and ``trajectory``/``trajectoryProfile`` (a
-        moving position pairs on space *and* time together, which a time-only
-        prune here could get wrong). A pair-spec select stays unrouted for the
-        same reason :meth:`_reference_narrowing` leaves it alone: two
-        independently-named recipes, not one this can second-guess.
+        axis standing (``over`` resolves to the "time" CF axis), collapses it
+        with a plain reducer (:func:`_collapses_time` on the *test* lane's own
+        aggregate spec), or folds it into a climatology/consecutive periods
+        (:func:`_time_is_climatology` -- ``groupby``/``resample``) -- against a
+        fixed-position or repeat-visit reference -- :data:`POINT_FEATURE_TYPES`
+        plus ``timeSeriesProfile``, the same population
+        :meth:`_reference_narrowing` collapses to a point, minus ``profile``
+        (already a single instant, with nothing to prune between) and
+        ``trajectory``/``trajectoryProfile`` (a moving position pairs on space
+        *and* time together, which a time-only prune here could get wrong). A
+        pair-spec select stays unrouted for the same reason
+        :meth:`_reference_narrowing` leaves it alone: two independently-named
+        recipes, not one this can second-guess.
 
         ``_reference_narrowing`` only ever narrows the test lane to the
         reference's declared *coverage* -- ``(start, stop)``, a contiguous span
@@ -2722,16 +2739,27 @@ class Comparison:
         casts is read, and for a ROMS lane run through the vertical transform,
         for nothing -- so pruning to cast-nearest steps here is lossless, a pure
         optimization. When a time aggregate collapses the axis instead (an
-        ``over="Z"`` profile-family comparison averaged over time, say), those
-        in-between steps are not discarded downstream -- they feed the
-        mean/spread directly -- so pruning here *changes the result*, on
-        purpose: matching the model to the times the reference actually
-        sampled, rather than to a full window mostly not sampled at all is the
-        intended comparison, not just the fast one. This reads the reference
-        itself (unlike ``_reference_narrowing``, not read-free) to return its
-        own cast times, so :func:`prepare_source`'s ``time_targets=`` can prune
-        the test lane to that same nearest-step set before the read/transform
-        rather than after.
+        ``over="Z"`` profile-family comparison averaged over time, say) *or*
+        folds it into a climatology, those in-between steps are not discarded
+        downstream -- they feed the mean/spread directly -- so pruning here
+        *changes the result*, on purpose: matching the model to the times the
+        reference actually sampled, rather than to a full window mostly not
+        sampled at all, is the intended comparison, not just the fast one --
+        the same reasoning a plain ``{"time": "mean"}`` station comparison
+        already applies by default; a climatology fold was, until this feature,
+        the one inconsistent exception. A 22-cast, one-year repeat-visit
+        station otherwise forces a ``groupby: "month"``/``resample: "1MS"``
+        comparison to read every model step across the whole year (one full
+        chunk each, for a ROMS lane chunked one field per time step) just to
+        keep the handful nearest each cast -- pruning first, before the fold
+        ever runs, is what actually avoids that read, not the fold itself. This
+        reads the reference itself (unlike ``_reference_narrowing``, not
+        read-free) to return its own cast times, so :func:`prepare_source`'s
+        ``time_targets=`` can prune the test lane to that same nearest-step set
+        before the read/transform rather than after -- or, for a low-frequency
+        model whose nearest step could sit meaningfully far from a cast, to
+        interpolate onto the cast times instead (see ``time_method="interp"``,
+        :func:`ocean_skill.align.subset_to_time_targets`'s own ``method=``).
 
         The read is of the *reference* -- a sparse tabular record, not the
         model -- so it costs little next to what it saves; still, this fails
@@ -2744,8 +2772,10 @@ class Comparison:
         from ocean_skill.operators import _CF_AXES
 
         over_is_time = _CF_AXES.get(self.over) == "time"
-        collapses_time = _collapses_time(aggregate_for(self.aggregate, "test"))
-        if not over_is_time and not collapses_time:
+        test_agg = aggregate_for(self.aggregate, "test")
+        collapses_time = _collapses_time(test_agg)
+        folds_time = _time_is_climatology(test_agg)
+        if not over_is_time and not collapses_time and not folds_time:
             return None
         if is_pair_spec(self.select):
             return None
@@ -2969,6 +2999,7 @@ class Comparison:
         point_window_cells: int | None = None,
         time_window: tuple[Any, Any] | None = None,
         time_targets: Any = None,
+        time_targets_method: str = "nearest",
         drop_keys: tuple[str, ...] = (),
         extra_select: dict[str, Any] | None = None,
         keep: tuple[str, ...] = (),
@@ -2987,7 +3018,10 @@ class Comparison:
         :meth:`align`, which passes a shrunk window for the test lane once it
         knows the comparison's regrid resolves to a nearest-neighbour sample.
         ``time_targets`` is that same module's own further, discrete time crop --
-        see its docstring and :meth:`_reference_time_targets`.
+        see its docstring and :meth:`_reference_time_targets` -- and
+        ``time_targets_method`` chooses how it is applied (nearest-step prune, the
+        default, or a linear interpolation onto the targets); see
+        :meth:`align`, which derives it from :attr:`time_method`.
 
         ``drop_keys`` removes keys from this lane's own select before it is prepared
         — used by :meth:`align` to keep the test lane gridded when a shared point
@@ -3034,6 +3068,7 @@ class Comparison:
             point_window_cells=point_window_cells,
             time_window=time_window,
             time_targets=time_targets,
+            time_targets_method=time_targets_method,
             qc=qc_for(self.qc, role),
             detide=detide_for(self.detide, role),
         )
@@ -3107,6 +3142,7 @@ class Comparison:
         keep: tuple[str, ...],
         derived_window: tuple[Any, Any] | None,
         time_targets: Any = None,
+        time_targets_method: str = "nearest",
         point_window_cells: int | None = None,
     ):
         """Re-read the test lane if it was windowed around the wrong point.
@@ -3207,6 +3243,7 @@ class Comparison:
             point_window_cells=point_window_cells,
             time_window=derived_window,
             time_targets=time_targets,
+            time_targets_method=time_targets_method,
             drop_keys=drop_keys,
             keep=keep,
         )
@@ -3378,6 +3415,14 @@ class Comparison:
         # axis this comparison keeps, so every other lane reads exactly the
         # contiguous window it always has.
         time_targets = self._reference_time_targets()
+        # How that discrete crop is applied: nearest-step (the default) or a
+        # linear interpolation onto the targets, for a low-frequency model
+        # whose nearest step could sit meaningfully far from a cast -- see
+        # prepare_source's time_targets_method= docstring. Only the *test*
+        # lane ever receives time_targets at all (see the _prepare_lane calls
+        # below), so the reference -- which *is* the casts -- is never
+        # interpolated either way.
+        tt_method = "interp" if self.time_method in ("interp", "linear") else "nearest"
         # A vertical section is the same "route around the ordinary select" idea as
         # a point, one level down: the reference is not narrowed independently, it is
         # sampled at wherever the *test* lane's own transect actually snapped to (see
@@ -3398,6 +3443,7 @@ class Comparison:
                 point_window_cells=test_cells,
                 time_window=derived_window,
                 time_targets=time_targets,
+                time_targets_method=tt_method,
                 drop_keys=drop_keys,
                 keep=keep,
             )
@@ -3433,6 +3479,7 @@ class Comparison:
                 role="test",
                 time_window=derived_window,
                 time_targets=time_targets,
+                time_targets_method=tt_method,
                 drop_keys=drop_keys,
                 keep=keep,
             )
@@ -3504,6 +3551,7 @@ class Comparison:
             keep=keep,
             derived_window=derived_window,
             time_targets=time_targets,
+            time_targets_method=tt_method,
             point_window_cells=test_cells,
         )
         self._warn_on_pair_spec_mismatch(t, r)
@@ -3513,6 +3561,19 @@ class Comparison:
         # in the same state or the session that *fills* the cache is the slowest one
         # -- every plot re-reading the sources through a graph that was already
         # evaluated once to write the entry.
+        #
+        # "interp"/"linear" is this comparison's own knob for how the *discrete
+        # cast-time prune* above is applied (tt_method) -- align.match_axis's
+        # own method= switch (mean/nearest/exact/auto, for a *kept* time axis)
+        # knows nothing of it and would raise "unknown time_method" if it
+        # leaked through unmapped. Translated to "auto" here so match_axis's
+        # validator is untouched either way: for our own over="Z" fold path it
+        # dispatches to _match_vertical before method is even read, and for an
+        # over="time" comparison it falls back to the ordinary auto-resolution
+        # instead of erroring on a method it was never meant to receive.
+        match_time_method = (
+            "auto" if self.time_method in ("interp", "linear") else self.time_method
+        )
         self._aligned = _align.align(
             t,
             r,
@@ -3520,7 +3581,7 @@ class Comparison:
             test_name="test",
             reference_name="reference",
             over=self.over,
-            time_method=self.time_method,
+            time_method=match_time_method,
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
             min_coverage=self.min_coverage,
@@ -5810,6 +5871,15 @@ def compare(
     ``time_method``/``tolerance``/``bin_anchor`` tune the matching, ``min_pairs`` how
     many pairs a cell needs before it is reported, and ``metrics`` which maps are
     computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
+
+    Against a repeat-visit station under a time climatology (below), ``time_method``
+    doubles as the knob for how the test lane is matched to the reference's own cast
+    times (see :meth:`Comparison._reference_time_targets`): the default keeps only the
+    model step *nearest* each cast (cheap, exact where the model runs often enough);
+    ``time_method="interp"`` (or ``"linear"``) instead linearly interpolates the model
+    onto each cast time, for a low-frequency model whose nearest step could sit
+    meaningfully far from a cast. Inert everywhere else -- an ordinary ``over="time"``
+    comparison still reads it as ``mean``/``nearest``/``exact``/``auto``, unaffected.
 
     ``min_coverage`` (default 0.5) is the map-regrid counterpart of ``min_pairs``: when
     the finer lane (a model, most often) is regridded onto the coarser one's cells (a
