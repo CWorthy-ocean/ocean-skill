@@ -341,7 +341,8 @@ def _band_item(band: str, *, offset: float = 0.6) -> dict:
 def test_a_band_has_no_realized_depth_to_fall_back_on():
     """The exact gap this closes: ``_depth_of`` alone would lose every band's identity
     (a pooled ``.average()`` drops ``actual_depth``, and a band never had one for two
-    of three bands to begin with) -- ``_depth_channel`` reads the range instead."""
+    of three bands to begin with) -- ``_depth_channel`` reads the range instead.
+    """
     item = _band_item("0-5 m")
     assert _series._depth_of(item["aligned"]) is None
     assert _series._depth_channel(item) == "0-5 m"
@@ -350,7 +351,8 @@ def test_a_band_has_no_realized_depth_to_fall_back_on():
 def test_a_scalar_depth_keeps_its_realized_numeric_channel():
     """The fix is band-only -- a plain level still reports its realized number, not
     a label, since the two can genuinely differ (nearest standard level vs. asked-for
-    depth)."""
+    depth).
+    """
     item = _item(depth=48.0)
     assert item.get("depth_band") is None
     assert _series._depth_channel(item) == 48.0
@@ -367,7 +369,8 @@ def test_depth_group_key_reads_the_band_range():
 def test_three_depth_bands_share_colour_within_a_band_and_differ_across_bands():
     """Mirrors ``compare(depths=[...bands]).average(by=["variable", "depth"]).plot(
     encode={"color": "depth"})``: three bands, each pooled across stations, none
-    carrying a realized ``actual_depth`` any more."""
+    carrying a realized ``actual_depth`` any more.
+    """
     bands = ["0-5 m", "10-15 m", "30-40 m"]
     items = [_band_item(b, offset=0.3 * (i + 1)) for i, b in enumerate(bands)]
     lines = _matplotlib_lines(
@@ -791,7 +794,101 @@ def test_residual_is_opt_in_and_adds_one_panel_in_both_renderers():
     assert len(interactive) == 2
 
 
-# -- option plumbing -------------------------------------------------------------------
+# -- ncols=/nrows= grid control --------------------------------------------------------
+
+
+def test_ncols_wraps_facet_panels_into_a_grid_in_both_renderers():
+    items = [_item(test=f"run{i}") for i in range(4)]
+    static = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in static.axes if ax.get_visible()]
+    assert len(visible) == 4
+    rows = {round(ax.get_subplotspec().rowspan.start) for ax in visible}
+    cols = {round(ax.get_subplotspec().colspan.start) for ax in visible}
+    assert len(rows) == 2
+    assert len(cols) == 2
+
+    interactive = render(
+        _spec(items, cols="comparison", ncols=2), renderer="holoviews"
+    )
+    assert interactive._max_cols == 2
+
+
+def test_a_wrapped_grid_hides_its_blank_cells():
+    items = [_item(test=f"run{i}") for i in range(3)]
+    fig = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    hidden = [ax for ax in fig.axes if not ax.get_visible()]
+    assert len(visible) == 3
+    assert len(hidden) == 1
+
+
+def test_a_wrapped_grid_labels_only_its_ragged_bottom_edge():
+    items = [_item(test=f"run{i}") for i in range(5)]
+    fig = render(_spec(items, cols="comparison", ncols=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 5
+    # row-major fill of a 2-column grid: panels 3 and 4 have no panel below them.
+    labelled = {i for i, ax in enumerate(visible) if ax.get_xlabel()}
+    assert labelled == {3, 4}
+    for i, ax in enumerate(visible):
+        if i in labelled:
+            assert any(t.get_visible() for t in ax.get_xticklabels())
+
+
+def test_nrows_alone_derives_ncols_from_the_panel_count():
+    items = [_item(test=f"run{i}") for i in range(5)]
+    fig = render(_spec(items, cols="comparison", nrows=2), renderer="matplotlib")
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 5
+    cols = {round(ax.get_subplotspec().colspan.start) for ax in visible}
+    assert len(cols) == 3  # ceil(5/2) columns needed, rows then recomputed to 2
+
+
+def test_ncols_and_nrows_together_must_cover_every_panel():
+    items = [_item(test=f"run{i}") for i in range(5)]
+    with pytest.raises(ValueError, match=r"ncols=2 x nrows=2 holds 4 panels"):
+        render(
+            _spec(items, cols="comparison", ncols=2, nrows=2), renderer="matplotlib"
+        )
+    with pytest.raises(ValueError, match=r"ncols=2 x nrows=2 holds 4 panels"):
+        render(
+            _spec(items, cols="comparison", ncols=2, nrows=2), renderer="holoviews"
+        )
+
+
+def test_residual_and_a_multi_column_grid_are_refused_in_both_renderers():
+    items = [_item(test=f"run{i}") for i in range(4)]
+    with pytest.raises(ValueError, match="residual"):
+        render(
+            _spec(items, cols="comparison", residual=True, ncols=2),
+            renderer="matplotlib",
+        )
+    with pytest.raises(ValueError, match="residual"):
+        render(
+            _spec(items, cols="comparison", residual=True, ncols=2),
+            renderer="holoviews",
+        )
+
+
+def test_residual_still_works_with_ncols_explicitly_1():
+    items = [_item(test=f"run{i}") for i in range(2)]
+    fig = render(
+        _spec(items, cols="comparison", residual=True, ncols=1), renderer="matplotlib"
+    )
+    assert len(fig.axes) == 4  # 2 panels x (line panel + residual strip)
+
+
+def test_leaving_ncols_and_nrows_unset_reproduces_todays_layout():
+    """The byte-identity guarantee: unset kwargs must not perturb the default."""
+    items = [_item(test=f"run{i}") for i in range(4)]
+    with_none = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    explicit_none = render(
+        _spec(items, cols="comparison", ncols=None, nrows=None), renderer="matplotlib"
+    )
+    assert len(with_none.axes) == len(explicit_none.axes) == 4
+    assert _matplotlib_titles(with_none) == _matplotlib_titles(explicit_none)
+
+
 
 
 def test_a_gridded_only_option_raises_statically():
@@ -877,7 +974,15 @@ def test_series_is_registered_everywhere_it_has_to_be():
     from ocean_skill.plot.spec import FAMILIES
 
     assert "series" in FAMILIES
-    for option in ("residual", "ylim", "panel_aspect", "legend", "encode"):
+    for option in (
+        "residual",
+        "ylim",
+        "panel_aspect",
+        "legend",
+        "encode",
+        "ncols",
+        "nrows",
+    ):
         assert option in _top_level_options(), option
 
 
