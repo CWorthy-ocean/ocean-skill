@@ -775,6 +775,79 @@ def test_alkalinity_variants_that_are_different_quantities_stay_separate():
         assert not vocabulary.is_known(other), f"{other} is a distinct quantity"
 
 
+def test_east_and_x_velocity_are_typeable_nicknames():
+    """The short keys a caller types resolve to their own, now-separate standard_names.
+
+    ``east_velocity``/``north_velocity`` (true geographic velocity) and
+    ``x_velocity``/``y_velocity`` (ROMS' own grid-relative components) used to share
+    one standard_name apiece -- see the next test.
+    """
+    assert vocabulary.resolve_name("east_velocity") == "eastward_sea_water_velocity"
+    assert vocabulary.resolve_name("north_velocity") == "northward_sea_water_velocity"
+    assert vocabulary.resolve_name("x_velocity") == "sea_water_x_velocity"
+    assert vocabulary.resolve_name("y_velocity") == "sea_water_y_velocity"
+    # the pre-split keys still resolve, for a caller who already typed them
+    assert vocabulary.resolve_name("eastward_velocity") == "eastward_sea_water_velocity"
+    assert (
+        vocabulary.resolve_name("northward_velocity") == "northward_sea_water_velocity"
+    )
+
+
+def test_geographic_and_grid_relative_velocity_are_no_longer_the_same_quantity():
+    """The intended semantic change: ROMS' `u` is not geographic east on a rotated grid.
+
+    Before the "east_velocity"/"x_velocity" split, both resolved to
+    ``sea_water_x_velocity`` and this was True -- which let compare() silently treat
+    ROMS' grid-relative x-velocity as if it were an ADCP's own eastward reading.
+    """
+    assert not vocabulary.same_quantity(
+        "sea_water_x_velocity", "eastward_sea_water_velocity"
+    )
+    assert not vocabulary.same_quantity(
+        "sea_water_y_velocity", "northward_sea_water_velocity"
+    )
+
+
+def test_geostrophic_velocity_aliases_true_geographic_velocity_not_grid_relative():
+    """DUACS/MULTIOBS geostrophic current is real east/north, not a model grid's x/y."""
+    for spelling in (
+        "surface_geostrophic_eastward_sea_water_velocity",
+        "surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid",
+    ):
+        assert vocabulary.resolve_name(spelling) == "eastward_sea_water_velocity"
+    for spelling in (
+        "surface_geostrophic_northward_sea_water_velocity",
+        "surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid",
+    ):
+        assert vocabulary.resolve_name(spelling) == "northward_sea_water_velocity"
+
+
+def test_total_current_wins_over_geostrophic_when_a_dataset_carries_both():
+    """Copernicus/DUACS's own shape: total (`uo`) and geostrophic (`ugos`) current.
+
+    Both are renamed at build time (catalogs/copernicus.yaml's ``standard_names`` map)
+    to their own literal CF names -- ``eastward_sea_water_velocity`` and
+    ``surface_geostrophic_eastward_sea_water_velocity`` respectively. Both are now
+    aliases of the same "east_velocity" concept (they were before this split too), but
+    ``find_variable``'s literal-name-first check (see its own docstring) matches the
+    exact standard_name outright before cf-xarray's alias search ever runs, so asking
+    for east_velocity on a dataset carrying both correctly returns the *total*
+    current, not an ambiguity error -- unaffected by this fix.
+    """
+    ds = xr.Dataset(
+        {
+            "eastward_sea_water_velocity": (("y", "x"), np.zeros((2, 2))),
+            "surface_geostrophic_eastward_sea_water_velocity": (
+                ("y", "x"),
+                np.ones((2, 2)),
+            ),
+        }
+    )
+    da = find_variable(ds, "east_velocity")
+    assert da.name == "eastward_sea_water_velocity"
+    assert bool((da == 0).all())
+
+
 # -- coordinate vocabulary ------------------------------------------------------
 
 
