@@ -943,6 +943,78 @@ def test_a_nan_gap_splits_the_band_into_runs_in_both_renderers():
     assert len(interactive) == 2
 
 
+# -- colors= line/fill colour control -----------------------------------------------
+
+
+def test_colors_dict_pins_named_levels_and_the_band_follows_in_both_renderers():
+    from matplotlib.colors import to_hex
+
+    item = _seasonal_single_item(spread=0.5)  # color <- season by default
+    spec = _spec([item], colors={"DJF": "red", "JJA": "grey"})
+
+    fig = render(spec, renderer="matplotlib")
+    lines = _matplotlib_lines(fig)
+    bands = _matplotlib_bands(fig)
+    by_label = {label: color for label, color, *_ in lines}
+    assert by_label["DJF"] == "red"
+    assert by_label["JJA"] == "grey"
+    seasons_in_order = [label for label, *_ in lines]
+    band_by_season = dict(zip(seasons_in_order, (b[0] for b in bands), strict=True))
+    assert band_by_season["DJF"] == to_hex("red")
+    assert band_by_season["JJA"] == to_hex("grey")
+
+    obj = render(spec, renderer="holoviews")
+    hv_lines = {label: color for label, color, *_ in _holoviews_lines(obj)}
+    assert hv_lines["DJF"] == "red"
+    assert hv_lines["JJA"] == "grey"
+
+
+def test_colors_list_assigns_a_palette_in_first_appearance_order():
+    item = _seasonal_single_item()
+    lines = _matplotlib_lines(
+        render(
+            _spec([item], colors=["red", "grey", "blue", "green"]),
+            renderer="matplotlib",
+        )
+    )
+    by_label = {label: color for label, color, *_ in lines}
+    assert by_label["DJF"] == "red"
+    assert by_label["MAM"] == "grey"
+    assert by_label["JJA"] == "blue"
+    assert by_label["SON"] == "green"
+
+
+def test_colors_str_broadcasts_to_every_line():
+    item = _seasonal_single_item()
+    lines = _matplotlib_lines(
+        render(_spec([item], colors="black"), renderer="matplotlib")
+    )
+    assert all(color == "black" for _, color, *_ in lines)
+
+
+def test_colors_unknown_level_names_the_field_and_its_levels():
+    item = _seasonal_single_item()
+    with pytest.raises(ValueError, match="season"):
+        render(_spec([item], colors={"WINTER": "red"}), renderer="matplotlib")
+
+
+def test_colors_without_a_color_channel_is_refused():
+    with pytest.raises(ValueError, match="colour channel is off"):
+        render(
+            _spec([_profile_item()], encode={"color": None}, colors="red"),
+            renderer="matplotlib",
+        )
+
+
+def test_colors_none_reproduces_todays_cycle():
+    item = _seasonal_single_item()
+    with_none = _matplotlib_lines(render(_spec([item]), renderer="matplotlib"))
+    explicit_none = _matplotlib_lines(
+        render(_spec([item], colors=None), renderer="matplotlib")
+    )
+    assert with_none == explicit_none
+
+
 # -- ncols=/nrows= grid control --------------------------------------------------------
 
 
@@ -1102,6 +1174,57 @@ def test_sharey_false_still_gives_the_twin_axis_the_right_depth_range():
     assert ax.get_ylim() == twin.get_ylim()
 
 
+def test_sharey_false_still_labels_only_the_left_column():
+    """The axis LABEL is left-column-only regardless of sharey.
+
+    Only the tick NUMBERS legitimately differ per panel when sharey=False.
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(2)]
+    fig = render(_spec(items, cols="comparison", sharey=False), renderer="matplotlib")
+    assert fig.axes[0].get_ylabel() == "Depth [m]"
+    assert fig.axes[1].get_ylabel() == ""
+
+    obj = render(_spec(items, cols="comparison", sharey=False), renderer="holoviews")
+    import holoviews as hv
+
+    curves = obj.traverse(lambda x: x, [hv.Curve])
+    assert curves[0].vdims[0].label == "Depth [m]"
+    assert curves[-1].vdims[0].label == " "
+
+
+# -- wspace=/hspace= subplot spacing (static-only) -------------------------------------
+
+
+def test_wspace_and_hspace_set_the_layout_engine():
+    items = [_profile_item(test=f"run{i}") for i in range(2)]
+    fig = render(
+        _spec(items, cols="comparison", wspace=0.5, hspace=0.3), renderer="matplotlib"
+    )
+    values = fig.get_layout_engine().get()
+    assert values["wspace"] == 0.5
+    assert values["hspace"] == 0.3
+
+
+def test_leaving_wspace_and_hspace_unset_reproduces_todays_layout():
+    default = render(_spec([_profile_item()]), renderer="matplotlib")
+    explicit_none = render(
+        _spec([_profile_item()], wspace=None, hspace=None), renderer="matplotlib"
+    )
+    default_values = default.get_layout_engine().get()
+    explicit_values = explicit_none.get_layout_engine().get()
+    assert default_values["wspace"] == explicit_values["wspace"] == 0.02
+    assert default_values["hspace"] == explicit_values["hspace"] == 0.02
+
+
+def test_the_interactive_renderer_warns_for_wspace_and_hspace():
+    """No equivalent gutter exists on an ``hv.Layout`` in the installed holoviews.
+
+    Checked directly -- ``hv.opts.Layout`` raises "unexpected option" for both.
+    """
+    with pytest.warns(UserWarning, match="only affect the static"):
+        render(_spec([_profile_item()], wspace=0.3), renderer="holoviews")
+
+
 # -- metrics_stacked= -----------------------------------------------------------------
 
 
@@ -1126,6 +1249,203 @@ def test_metrics_stacked_draws_in_both_renderers():
 
     texts = obj.traverse(lambda x: x, [hv.Text])
     assert texts and "\n" in texts[0].data[2]
+
+
+# -- legend placement and custom labels ---------------------------------------------
+
+
+def test_profile_line_labels_overrides_the_text_in_both_renderers():
+    items = [
+        _profile_item(test="modelA", reference="obsA"),
+        _profile_item(test="modelB", reference="obsB"),
+    ]
+    layout = _profile.compose(items, cols="comparison")
+    current = [line.label for panel in layout.panels for line in panel.lines]
+    custom = [f"custom {i}" for i in range(len(current))]
+
+    static = _matplotlib_lines(
+        render(
+            _spec(items, cols="comparison", line_labels=custom), renderer="matplotlib"
+        )
+    )
+    interactive = _holoviews_lines(
+        render(
+            _spec(items, cols="comparison", line_labels=custom), renderer="holoviews"
+        )
+    )
+    assert {label for label, *_ in static} == set(custom)
+    assert {label for label, *_ in interactive} == set(custom)
+
+
+def test_profile_line_labels_wrong_length_lists_the_current_labels_to_copy():
+    items = [_profile_item(test="modelA"), _profile_item(test="modelB")]
+    with pytest.raises(ValueError, match="needs one label per legend entry") as exc:
+        render(
+            _spec(items, cols="comparison", line_labels=["only one"]),
+            renderer="matplotlib",
+        )
+    layout = _profile.compose(items, cols="comparison")
+    for panel in layout.panels:
+        for line in panel.lines:
+            assert repr(line.label) in str(exc.value)
+
+
+def test_profile_legend_below_combines_even_when_the_panels_disagree():
+    items = [_profile_item(test="modelA"), _profile_item(test="modelB")]
+    fig = render(
+        _spec(items, cols="comparison", legend="below"), renderer="matplotlib"
+    )
+    assert len(fig.legends) == 1
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_profile_legend_right_combines_outside_the_axes():
+    items = [_profile_item(test="modelA"), _profile_item(test="modelB")]
+    fig = render(
+        _spec(items, cols="comparison", legend="right"), renderer="matplotlib"
+    )
+    assert len(fig.legends) == 1
+    assert fig.legends[0].get_bbox_to_anchor()._bbox.x0 == pytest.approx(1.0)
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_profile_legend_off_draws_nothing():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, legend=False), renderer="matplotlib")
+    assert not fig.legends
+    assert all(ax.get_legend() is None for ax in fig.axes)
+
+
+def test_profile_legend_corner_forces_every_panel_even_when_labels_are_shared():
+    """A forced corner must not fall into "auto"'s own combine-when-shared rule."""
+    items = [_profile_item(test="modelA"), _profile_item(test="modelB")]
+    fig = render(
+        _spec(items, cols="comparison", legend="upper right"), renderer="matplotlib"
+    )
+    assert not fig.legends
+    assert all(ax.get_legend() is not None for ax in fig.axes)
+    assert all(ax.get_legend()._get_loc() == 1 for ax in fig.axes)  # 1 = "upper right"
+
+
+def test_profile_unknown_legend_placement_names_the_valid_ones():
+    with pytest.raises(ValueError, match="'below', 'right', or a corner"):
+        render(_spec([_profile_item()], legend="sideways"), renderer="matplotlib")
+
+
+def test_profile_legend_below_and_right_still_move_bokehs_key_outside_the_frame():
+    """Bokeh's per-panel divergence: pushed to the edge, not truly combined."""
+    import holoviews as hv
+    from bokeh.models import Legend
+
+    for side in ("below", "right"):
+        obj = render(_spec([_profile_item()], legend=side), renderer="holoviews")
+        overlay = obj.traverse(lambda x: x, [hv.Overlay])[0]
+        bokeh_fig = hv.render(overlay, backend="bokeh")
+        assert any(isinstance(r, Legend) for r in getattr(bokeh_fig, side))
+
+
+# -- comparison facet: auto station title, and titles= by hand -----------------------
+
+
+def test_comparison_facet_promotes_the_distinguishing_station_into_the_title():
+    items = [
+        _profile_item(test="his", reference="ctd_station_HV1"),
+        _profile_item(test="his", reference="ctd_station_HV2"),
+    ]
+    spec = _spec(items, cols="comparison")
+    static_titles = _matplotlib_titles(render(spec, renderer="matplotlib"))
+    interactive_titles = _holoviews_titles(render(spec, renderer="holoviews"))
+    assert any("ctd_station_HV1" in t for t in static_titles)
+    assert any("ctd_station_HV2" in t for t in static_titles)
+    assert static_titles == interactive_titles
+
+
+def test_comparison_facet_drops_the_promoted_station_from_the_legend():
+    items = [
+        _profile_item(test="his", reference="ctd_station_HV1"),
+        _profile_item(test="his", reference="ctd_station_HV2"),
+    ]
+    spec = _spec(items, cols="comparison")
+    static_labels = {label for label, *_ in _matplotlib_lines(
+        render(spec, renderer="matplotlib")
+    )}
+    interactive_labels = {label for label, *_ in _holoviews_lines(
+        render(spec, renderer="holoviews")
+    )}
+    # the model stays in the legend; the (now-titled) stations do not
+    assert static_labels == interactive_labels == {"his"}
+
+
+def test_comparison_facet_single_panel_leaves_the_title_and_legend_unchanged():
+    """Nothing distinguishes a lone panel, so there is nothing to promote."""
+    item = _profile_item(test="his", reference="ctd_station_HV1")
+    spec = _spec([item], cols="comparison")
+    fig = render(spec, renderer="matplotlib")
+    titles = _matplotlib_titles(fig)
+    labels = {label for label, *_ in _matplotlib_lines(fig)}
+    assert not any("ctd_station_HV1" in t for t in titles)
+    assert labels == {"his", "ctd_station_HV1"}
+
+
+def test_comparison_facet_model_vs_model_leaves_both_unchanged():
+    """Two distinguishing roles (both sides vary).
+
+    A title cannot cleanly name both, so the legend keeps carrying the
+    identity, same as before this existed.
+    """
+    items = [
+        _profile_item(test="modelA", reference="obsA"),
+        _profile_item(test="modelB", reference="obsB"),
+    ]
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    titles = _matplotlib_titles(fig)
+    labels = {label for label, *_ in _matplotlib_lines(fig)}
+    assert not any("modelA" in t or "obsA" in t for t in titles)
+    assert labels == {"modelA", "modelB", "obsA", "obsB"}
+
+
+def test_value_only_comparison_facet_promotes_the_source_and_empties_the_legend():
+    items = [
+        _single_item(source="ctd_station_HV1"),
+        _single_item(source="ctd_station_HV2"),
+    ]
+    fig = render(_spec(items, cols="comparison"), renderer="matplotlib")
+    titles = _matplotlib_titles(fig)
+    labels = {label for label, *_ in _matplotlib_lines(fig)}
+    assert any("ctd_station_HV1" in t for t in titles)
+    assert labels == set()  # nothing else varies once the source moved to the title
+
+
+def test_a_non_comparison_facet_does_not_promote_a_source_into_the_title():
+    item = _seasonal_single_item()
+    fig = render(_spec([item], cols="season"), renderer="matplotlib")
+    titles = _matplotlib_titles(fig)
+    assert all("run_new" not in t for t in titles)
+
+
+def test_titles_overrides_the_auto_result():
+    items = [
+        _profile_item(test="his", reference="ctd_station_HV1"),
+        _profile_item(test="his", reference="ctd_station_HV2"),
+    ]
+    spec = _spec(items, cols="comparison", titles=["North mooring", "South mooring"])
+    static_titles = _matplotlib_titles(render(spec, renderer="matplotlib"))
+    interactive_titles = _holoviews_titles(render(spec, renderer="holoviews"))
+    assert static_titles == interactive_titles == ["North mooring", "South mooring"]
+
+
+def test_titles_wrong_length_lists_the_current_titles_to_copy():
+    items = [
+        _profile_item(test="his", reference="ctd_station_HV1"),
+        _profile_item(test="his", reference="ctd_station_HV2"),
+    ]
+    with pytest.raises(ValueError, match="needs one entry per panel") as exc:
+        render(
+            _spec(items, cols="comparison", titles=["only one"]), renderer="matplotlib"
+        )
+    layout = _profile.compose(items, cols="comparison")
+    for panel in layout.panels:
+        assert repr(panel.title) in str(exc.value)
 
 
 # -- option plumbing -----------------------------------------------------------------------
@@ -1172,6 +1492,11 @@ def test_profile_is_registered_everywhere_it_has_to_be():
         "secondary_x",
         "ncols",
         "nrows",
+        "wspace",
+        "hspace",
+        "colors",
+        "line_labels",
+        "titles",
     ):
         assert option in _top_level_options(), option
 

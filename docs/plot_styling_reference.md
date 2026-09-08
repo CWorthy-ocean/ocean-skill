@@ -814,6 +814,78 @@ still opens on the same range, but panning one does not move the others.
 `series`' `residual=True` strip is a difference, not the panel's own value -- pairing
 it with `sharey=True` is refused, the same way a `ncols`/facet conflict is.
 
+### `wspace` / `hspace` (`series` and `profile`, static only)
+
+Matplotlib's own `constrained_layout` gutter names -- the fraction of a panel's own
+width/height reserved as space around it. Left alone, both default to `0.02`, the
+same as any other matplotlib figure.
+
+```python
+cs.plot(cols="comparison", ncols=4, sharey=False, wspace=-0.2)  # pull the columns in
+```
+
+This is the real lever for a grid that reads too narrow, and it is a *different*
+lever from `panel_aspect`/`figsize`: neither renderer ever calls `Axes.set_aspect`
+for a line family, so `panel_aspect` only solves for the figure's *height* --
+raising it does not widen a panel or close the gap between columns. Panel *width*
+is always `figsize`'s own width divided across `ncols`; `wspace`/`hspace` is what
+narrows or widens the gutter within that. A `sharey=False` grid draws its own depth
+tick numbers on every panel (there is no shared axis to hide them behind), which
+sets a floor under how tight `wspace` can pull the columns before the numbers
+themselves start to crowd.
+
+There is no interactive equivalent -- checked directly against the installed
+holoviews/bokeh, whose `Layout` plot class has no matching spacing parameter at
+all. Passing either to `renderer="holoviews"` warns once ("only affect the static
+renderer") and is dropped, the same as any other matplotlib-only option.
+
+### `colors` (`series` and `profile`)
+
+Pins the auto colour cycle to specific values instead of leaving every level at
+whatever the next unused colour in the cycle would be -- the line-family twin of
+the summary diagrams' own [`colors`](#colors--alpha--marker_scale-summary-diagrams).
+Keyed on whatever field the `color` channel already reads (`variable` by default, or
+whatever `encode={"color": ...}` names):
+
+```python
+cs.plot(cols="comparison", encode={"color": "source"},
+        colors={"his": "grey", "ctd_station_HV1": "orange"})   # name only the levels you care about
+run.plot(colors=["black", "tab:red", "tab:blue"])               # a palette, first-appearance order
+run.plot(colors="black")                                        # every line the same colour
+```
+
+A dict names only the levels it should override -- anything it leaves out keeps its
+place in the cycle; naming a level the colour channel doesn't actually carry raises,
+listing the levels that do. A mean±spread envelope's fill always follows its own
+line's resolved colour (at a fixed opacity), so pinning a
+line's colour repaints its band too, with no separate fill-colour option. **Default:**
+`None` (today's cycle, unchanged).
+
+### `titles` (`profile`)
+
+One title per panel, in panel order, overriding whatever `panel_title` would
+otherwise write there -- the panel-title twin of `line_labels`'s legend-text
+override (see the [`profile`-only parameters](#profile-only-parameters) table),
+including the same wrong-length `ValueError` (quoting the current title of every
+panel, ready to copy and edit):
+
+```python
+cs.plot(cols="comparison", titles=["North mooring", "South mooring"])
+```
+
+**A `cols="comparison"`/`rows="comparison"` facet (one panel per station) already
+does this automatically**, without `titles=`: if exactly one side of the comparison
+varies across panels (the reference/station, usually, but whichever side the data
+actually varies), its name moves from the legend into that panel's own title --
+`"salinity · ctd_station_HV1 · 64.3°N 21.5°W"` rather than a legend entry the
+12-panel grid would otherwise have repeated 12 times for no new information. The
+line that lost its legend entry keeps its colour and its lines; only its *label* is
+gone, so a shared legend below the whole grid reads just `his` (or whatever the
+model side is called) once. This does not fire when nothing distinguishes the
+panels (a single-panel comparison) or when *both* sides vary (a true model-vs-model
+grid, where no single title could honestly name both) -- either way, `titles=` still
+overrides whatever the panel ended up reading, by hand.
+
 ### `labels` (summary diagrams)
 
 `taylor`, `target` and `paired` only. Chooses how each point is identified:
@@ -1282,13 +1354,17 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 | `residual` | `False` | adds a short `test − reference` strip under each panel, sharing its time axis |
 | `mark` | `"line"` | `"line+marker"`, `"marker"` or `"step"` |
 | `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
-| `legend` | `True` | draw the key at all |
+| `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
+| `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
+| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
 | `ylim` | `None` | y limits for every panel |
 | `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
 | `sharex` | `True` | every panel reads the same time range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
 | `sharey` | `False` | every panel keeps its own value range; refused with `residual=True` |
+| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
+| `hspace` | `None` | as `wspace`, the vertical gap |
 
 ### `line_kwargs`
 
@@ -1415,20 +1491,26 @@ for example).
 | `secondary_x` | `True` | merge two variables onto one panel with a top x axis; `False` gives each its own column |
 | `mark` | `"line"` | `"line+marker"` or `"marker"` — no `"step"` (a profile's levels are irregularly spaced, with nothing between them a step-hold represents honestly) |
 | `metrics_loc` | `"auto"` | the corner the statistics box takes; `"auto"` picks the emptiest, and the key takes the next emptiest |
-| `legend` | `True` | draw the key at all |
+| `metrics_stacked` | `False` | draw the statistics box narrow-and-tall (one metric per line) instead of one wide line — a portrait panel's own shape, not a page-wide series panel's |
+| `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
+| `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
+| `titles` | `None` | one string per panel, overriding the auto-derived title; see [`titles`](#titles-profile) |
+| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
 | `xlim` | `None` | value-axis limits; bounds only the bottom (primary) axis when `secondary_x` merges a second variable in |
 | `ylim` | `None` | depth limits, `(shallow, deep)` in positive-down metres |
-| `panel_aspect` | `0.62` | width/height of a panel — portrait, since a water column reads top-to-bottom |
+| `panel_aspect` | `0.62` | height/width ratio the figure solves for — portrait, since a water column reads top-to-bottom; does **not** set panel width, see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
 | `sharex` | `False` | every panel keeps its own value range |
 | `sharey` | `True` | every panel reads the same depth range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
-| `metrics_stacked` | `False` | draw the statistics box narrow-and-tall (one metric per line) instead of one wide line — a portrait panel's own shape, not a page-wide series panel's |
+| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
+| `hspace` | `None` | as `wspace`, the vertical gap |
 
-Panel width is not the metrics box's doing either way — it comes from `panel_aspect`
-(or an explicit `figsize`) divided across `ncols`, the same as any other panel
-dimension. `metrics_stacked` only changes how the box's own text wraps within
-whatever width the panel already has.
+Panel *width* is not `panel_aspect`'s doing, nor the metrics box's — neither renderer
+gives a line-family panel a fixed data aspect, so `panel_aspect` only solves for
+figure *height*. Width is `figsize`'s own width divided across `ncols`; `wspace`
+narrows or widens the gutter within that. `metrics_stacked` only changes how the
+box's own text wraps within whatever width the panel already has.
 
 There is no `residual` option yet (a `test − reference` strip beside each depth
 panel is a follow-up) and no `profile_movie` (several casts over time played as
