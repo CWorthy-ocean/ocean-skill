@@ -272,7 +272,11 @@ sources (`"CartoLight"`, etc.): they now require an API key geoviews has no way 
 supply, and render watermarked with "API KEY REQUIRED" without one. The view opens framed
 on the field's own domain, with the basemap filling in around it and under anywhere the
 field is masked. With tiles on there is no separate coastline outline — the basemap *is*
-the coastline; `tiles=False` brings back a 50 m outline, clipped to the domain.
+the coastline; `tiles=False` brings back a Natural Earth outline, clipped to the domain,
+at `coastline_resolution` (`"auto"` by default — see
+[`coastline_resolution`](plot_styling_reference.md#coastline_resolution); a GSHHS scale
+falls back to its nearest Natural Earth neighbour here, with a warning, since this
+outline is built from Natural Earth geometry only).
 
 The panel title says **what** as well as **when** — `GOM_bgc: alkalinity, surface —
 2010-01-29`. The variable comes from the CF standard name via `vars.short_name`, the

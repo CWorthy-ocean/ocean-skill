@@ -1446,3 +1446,114 @@ def test_static_field_row_accepts_rasterize_and_hover_with_a_warning():
     )
     with pytest.warns(UserWarning, match="only affect the interactive renderer"):
         render(spec, renderer="matplotlib")
+
+
+# ---------------------------------------------------------------------------
+# coastline_resolution: see ocean_skill.plot.coastline. "auto" (the default)
+# scales Natural Earth to the panel's own extent -- the small domain _field_row()
+# items use (8 x 10 degrees) is well under both AdaptiveScaler thresholds, so it
+# resolves to "10m" in both renderers. GSHHS scales need a one-time shapefile
+# download (large at "full"), so the static tests that draw one skip rather than
+# fail on a machine with no network / an unreachable NOAA mirror.
+# ---------------------------------------------------------------------------
+
+
+def _land_features(fig):
+    """Every cartopy ``Feature`` drawn on ``fig``'s axes, static renderer only."""
+    from cartopy.mpl.feature_artist import FeatureArtist
+
+    return [
+        a._feature
+        for ax in fig.axes
+        for a in ax.get_children()
+        if isinstance(a, FeatureArtist)
+    ]
+
+
+def _force_gshhs_draw(fig):
+    """Actually render ``fig`` so a GSHHS feature's shapefile is fetched.
+
+    ``add_feature`` alone never touches disk or network -- the geometries are only
+    read the first time the axes are drawn (see ``FeatureArtist.draw``). Skips the
+    calling test when that fetch cannot complete offline, the same accommodation
+    ``test_movie_coastline_lands_in_the_180_centred_frame_for_a_straddling_domain``
+    (tests/test_antimeridian.py) makes for Natural Earth.
+    """
+    try:
+        fig.canvas.draw()
+    except Exception as err:  # pragma: no cover - depends on local GSHHS cache
+        pytest.skip(f"GSHHS shapefile unavailable offline ({err})")
+
+
+def test_coastline_resolution_defaults_to_auto_natural_earth():
+    """No option given draws Natural Earth, adaptively -- never a GSHHS download."""
+    import cartopy.feature as cfeature
+
+    fig = render(PlotSpec(family="field_row", items=[_row_item()], options={}))
+    features = _land_features(fig)
+    assert features, "expected at least one land/coastline feature"
+    assert all(isinstance(f, cfeature.NaturalEarthFeature) for f in features)
+    assert not any(isinstance(f, cfeature.GSHHSFeature) for f in features)
+
+
+def test_coastline_resolution_accepts_a_fixed_natural_earth_scale():
+    spec = PlotSpec(
+        family="field_row",
+        items=[_row_item()],
+        options={"coastline_resolution": "10m"},
+    )
+    fig = render(spec)
+    features = _land_features(fig)
+    assert features and all(f.scale == "10m" for f in features)
+
+
+def test_coastline_resolution_gshhs_draws_from_gshhs():
+    """An explicit GSHHS scale -- finer than Natural Earth's own limit -- draws GSHHS."""
+    import cartopy.feature as cfeature
+
+    spec = PlotSpec(
+        family="field_row",
+        items=[_row_item()],
+        options={"coastline_resolution": "full"},
+    )
+    fig = render(spec)
+    _force_gshhs_draw(fig)
+    features = _land_features(fig)
+    assert features and all(isinstance(f, cfeature.GSHHSFeature) for f in features)
+
+
+def test_coastline_resolution_rejects_an_unknown_value():
+    spec = PlotSpec(
+        family="field_row",
+        items=[_row_item()],
+        options={"coastline_resolution": "extra-crispy"},
+    )
+    with pytest.raises(ValueError, match="coastline_resolution"):
+        render(spec)
+
+
+def _coastline_scale(row):
+    """The Natural Earth scale a rendered interactive row's coastline opts to."""
+    import holoviews as hv
+
+    feat = next(el for el in row.traverse() if isinstance(el, hv.Element)
+                and type(el).__name__ == "Feature")
+    return feat.opts.get("plot").kwargs.get("scale")
+
+
+def test_coastline_resolution_auto_resolves_by_extent_interactively():
+    """``"auto"`` reaches the interactive renderer too, not just the static one."""
+    row = _hv_row(_row_item())  # 8 x 10 degree domain: under both NE thresholds
+    assert _coastline_scale(row) == "10m"
+
+
+def test_coastline_resolution_accepts_a_fixed_natural_earth_scale_interactively():
+    row = _hv_row(_row_item(), coastline_resolution="50m")
+    assert _coastline_scale(row) == "50m"
+
+
+def test_coastline_resolution_gshhs_falls_back_to_natural_earth_interactively():
+    """GSHHS has no interactive renderer support, so it degrades -- loudly."""
+    with pytest.warns(UserWarning, match="GSHHS"):
+        row = _hv_row(_row_item(), coastline_resolution="full")
+    assert _coastline_scale(row) == "10m"

@@ -844,6 +844,31 @@ def test_the_comparison_movie_shares_one_offline_coastline_too(frames):
     assert all(p is paths[0] for p in paths), "panels or frames rebuilt the coastline"
 
 
+def test_offline_movie_coastline_resolution_accepts_a_natural_earth_scale():
+    """``coastline_resolution`` reaches the movie's one shared coastline outline."""
+    movie = _hv(
+        _facet_film(
+            _run(3), renderer="holoviews", domain=None, tiles=False,
+            coastline_resolution="10m",
+        )
+    )
+    path = next(n for n in _frames(movie)[0].traverse() if type(n).__name__ == "Path")
+    assert len(path.dimension_values(0)) > 2, "the clipped coastline came back empty"
+
+
+def test_offline_movie_coastline_resolution_gshhs_falls_back_with_a_warning():
+    """GSHHS has no interactive-renderer path, so a movie falls back and says so."""
+    with pytest.warns(UserWarning, match="GSHHS"):
+        movie = _hv(
+            _facet_film(
+                _run(3), renderer="holoviews", domain=None, tiles=False,
+                coastline_resolution="full",
+            )
+        )
+    path = next(n for n in _frames(movie)[0].traverse() if type(n).__name__ == "Path")
+    assert len(path.dimension_values(0)) > 2, "the fallback coastline came back empty"
+
+
 def test_the_field_is_projected_once_at_build_not_once_per_frame():
     """``project=True``: frames land in the output projection before embedding.
 

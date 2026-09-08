@@ -9,9 +9,9 @@ so any keyword that call accepts works, not just a hand-picked subset. An eighth
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
 no per-frame label on a still, and a ninth, [`annot_kwargs`](#the-portrait-family-metrics-scoreboard),
 belongs to `portrait` alone, styling its cell-value text. A few more parameters aren't styling dicts at all
-(`title`, `metric_keys`, `metric_names`, `shared_limits`, `shared_axis_labels`,
-`shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
-of this doc.
+(`title`, `metric_keys`, `metric_names`, [`coastline_resolution`](#coastline_resolution),
+`shared_limits`, `shared_axis_labels`, `shared_axes`) — see
+[Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
 
 > **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
 > matplotlib or cartopy call, so none of them do anything with `renderer="holoviews"`
@@ -481,6 +481,41 @@ that survives pan/zoom/resize as cleanly as a title does.
 ```python
 c.plot(metric_keys=("corr", "sigma_ratio"))
 ```
+
+### `coastline_resolution`
+
+Which coastline/land dataset every map panel draws, on every map family
+(`field_row`/`field_grid`/`field_facet`/`skill_map`/`field_movie`/`facet_movie`/
+`locations`) and both renderers. Coarser to finer:
+
+| Value | Dataset | Notes |
+|---|---|---|
+| `"auto"` (default) | Natural Earth | scaled to each panel's own extent via cartopy's `AdaptiveScaler` — `"110m"` for a large/near-global domain, down to `"10m"` once zoomed in |
+| `"110m"` / `"50m"` / `"10m"` | Natural Earth | pins one scale regardless of extent |
+| `"coarse"` / `"low"` / `"intermediate"` / `"high"` / `"full"` | GSHHS | finer than Natural Earth's own limit — resolves a spit or a fjord head `"10m"` smears over |
+
+`"auto"` never escalates to GSHHS on its own: past Natural Earth's finest, more detail
+is an explicit ask, since a domain drawn at GSHHS `"full"` is not free — a one-time
+shapefile download (large at `"full"`) and slower renders on a big domain.
+
+```python
+physics.plot()                                     # auto: Natural Earth, by extent
+physics.plot(coastline_resolution="10m")           # Natural Earth's own finest, pinned
+cook_inlet.plot(coastline_resolution="full")       # GSHHS, resolves the Homer Spit
+```
+
+**GSHHS only draws on the static renderer.** geoviews/hvplot has no GSHHS support, so
+`renderer="holoviews"` (and a movie's offline coastline outline) falls back to the
+*nearest* Natural Earth scale and warns once, rather than silently drawing something
+coarser than asked for:
+
+```python
+cook_inlet.plot(coastline_resolution="full", renderer="holoviews")
+# UserWarning: coastline_resolution='full' (GSHHS) is not supported on the
+# interactive renderer; using Natural Earth '10m' instead. ...
+```
+
+**Default:** `"auto"`
 
 ### `shared_axes` (holoviews only)
 
