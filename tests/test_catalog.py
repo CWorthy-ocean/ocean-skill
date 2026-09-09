@@ -636,6 +636,58 @@ def test_variable_combines_with_other_filters(mixed_spellings):
 
 
 @pytest.fixture
+def roms_velocity_catalog(monkeypatch):
+    """Build a ROMS entry declaring only grid-relative u/v -- a pre-derived catalog.
+
+    ocean_skill.roms.standardize derives true eastward/northward velocity from
+    these two at READ time; this entry's stored `variables` predates that (or was
+    otherwise never rebuilt), the exact shape find()'s ROMS augmentation targets.
+    A non-ROMS entry declaring the identical names is included as a control -- the
+    augmentation must not fire for it.
+    """
+    return _fake_index(
+        monkeypatch,
+        {
+            "his": (
+                "GOM offline run",
+                {
+                    "model": "roms",
+                    "variables": ["sea_water_x_velocity", "sea_water_y_velocity"],
+                },
+            ),
+            "not_roms": (
+                "some other product",
+                {"variables": ["sea_water_x_velocity", "sea_water_y_velocity"]},
+            ),
+        },
+    )
+
+
+def test_roms_source_is_findable_by_its_derived_geographic_velocity(
+    roms_velocity_catalog,
+):
+    """A ROMS source is findable by eastward velocity though it only declares u/v.
+
+    Regression for the gap the "east_velocity"/"x_velocity" vocabulary split opened:
+    before it, eastward_sea_water_velocity was a plain alias of sea_water_x_velocity,
+    so this matched by accident; after the split the two are different quantities,
+    and only this ROMS-aware augmentation (ocean_skill.roms
+    .derived_geographic_velocities) keeps a ROMS source findable by the variable
+    its own standardize() actually produces.
+    """
+    assert roms_velocity_catalog.find(variable="eastward_sea_water_velocity") == [
+        "his"
+    ]
+
+
+def test_the_augmentation_is_roms_only(roms_velocity_catalog):
+    """A non-ROMS source declaring the same raw names is not credited with it."""
+    assert "not_roms" not in roms_velocity_catalog.find(
+        variable="eastward_sea_water_velocity"
+    )
+
+
+@pytest.fixture
 def pattern_spellings(monkeypatch):
     """One source declares the canonical name, the other only a pattern spelling.
 

@@ -1534,6 +1534,22 @@ def _probe(
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))
     md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
+
+    if md.get("model") == "roms" and "variables" in md:
+        # ocean_skill.roms.standardize derives true eastward/northward velocity
+        # from ROMS' grid-relative sea_water_x/y_velocity (rotated by the grid
+        # angle) whenever a source has both -- advertise that here too, so
+        # compare()'s catalog pre-filter (`_offers`) and osk.find()/search() see a
+        # ROMS source as offering geographic velocity without opening the file,
+        # the same way they already do for temperature or salinity. One source of
+        # truth (ocean_skill.roms.derived_geographic_velocities) so this list
+        # cannot drift from what standardize actually produces.
+        from ocean_skill.roms import derived_geographic_velocities
+
+        derived = derived_geographic_velocities(md["variables"])
+        if derived:
+            md["variables"] = sorted(set(md["variables"]) | set(derived))
+
     return md
 
 
