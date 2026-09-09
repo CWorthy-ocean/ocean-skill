@@ -9,11 +9,53 @@ featureTypes → :class:`pandas.DataFrame`; gridded/multidim → :class:`xarray.
 
 from __future__ import annotations
 
+import json
+from collections import OrderedDict
 from typing import Any
 
 from ocean_skill.catalog import SourceRef, resolve
 
 __all__ = ["erddap_constraints", "read"]
+
+#: In-process memo of :func:`read`'s standardized result, keyed on source identity +
+#: catalog-file freshness + the call's own qc/kwargs (see ``_read_cache_key`` below).
+#: Bounded (see ``_READ_CACHE_MAXSIZE``) since only lazy objects are held -- dask data
+#: is never realized, and even a ROMS entry's eagerly-read coords are a few MiB.
+#: Exists because a station-fan ``compare()`` (one :class:`~ocean_skill.comparison
+#: .Comparison` per reference) otherwise reopens and re-standardizes the *same* test
+#: source once per station -- for a large ROMS history file (tens of thousands of
+#: dask chunks), that open/standardize cost dwarfs the few-column point read each
+#: comparison actually needs. Cleared by :func:`ocean_skill.cache.clear` and disabled
+#: alongside :func:`ocean_skill.cache.disable` -- see the ``cache.enabled()`` guard
+#: below -- so the existing cache controls also govern this one.
+_READ_CACHE: OrderedDict[tuple, Any] = OrderedDict()
+_READ_CACHE_MAXSIZE = 8
+
+
+def _read_cache_key(ref: SourceRef, qc: Any, kwargs: dict[str, Any]) -> tuple | None:
+    """The memo key for one ``read()`` call, or ``None`` to skip caching it.
+
+    Identity is ``(path, name)``; freshness is the catalog file's own
+    ``(mtime_ns, size)``, the same pair :func:`ocean_skill.catalog._catalog_fingerprint`
+    already uses to notice a rebuilt catalog -- an edited/rewritten catalog file
+    changes this key, so a stale open is never served past that edit. This says
+    nothing about the *data* the catalog entry points at (a model rerun in place,
+    say) -- exactly like the on-disk aligned-pair cache, which the module docstring
+    there already documents as identity-keyed, not content-keyed; ``osk.cache.clear()``
+    remains the way to force a rebuilt/rerun source to be reread, and now clears this
+    memo too. ``None`` when the catalog file cannot be stat'd (a remote or otherwise
+    unusual path) -- failing open (no memo) rather than caching under a freshness
+    signal that cannot actually detect a change.
+    """
+    import os
+
+    try:
+        st = os.stat(ref.path)
+    except OSError:
+        return None
+    qc_key = json.dumps(qc, sort_keys=True, default=str)
+    kwargs_key = json.dumps(kwargs, sort_keys=True, default=str)
+    return (str(ref.path), ref.name, st.st_mtime_ns, st.st_size, qc_key, kwargs_key)
 
 
 def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
@@ -39,11 +81,47 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
         download, and ``osk.read(entry, constraints={"time>=": "2015-01-01"})``
         subsets it *server-side*, where a later ``select={"time": ...}`` cannot.
         These used to be accepted and silently discarded.
+
+    Repeat calls naming the same entry, the same ``qc=``/``**kwargs``, and an
+    unchanged catalog file reuse one already-opened, already-standardized lazy
+    result rather than reopening it (see :data:`_READ_CACHE`) -- each caller still
+    gets its own shallow copy (independent ``.attrs``/coords, shared lazy data), so
+    mutating one caller's result is never visible to another's. Governed by
+    :mod:`ocean_skill.cache`: :func:`ocean_skill.cache.disable` also disables this
+    memo, and :func:`ocean_skill.cache.clear` also empties it -- call
+    ``read.cache_clear()`` directly to do just that without touching the on-disk
+    cache. A bare ``cache=False`` passed to :func:`ocean_skill.compare`/``align()``
+    is a per-call flag, not :func:`ocean_skill.cache.disable`, so it still benefits
+    from (and populates) this memo across one fan's comparisons.
     """
-    import intake
+    from ocean_skill import cache as _cache
 
     ref = source if isinstance(source, SourceRef) else resolve(source)
     meta = ref.metadata
+
+    use_memo = _cache.enabled()
+    key = _read_cache_key(ref, qc, kwargs) if use_memo else None
+    if key is not None and key in _READ_CACHE:
+        _READ_CACHE.move_to_end(key)
+        return _READ_CACHE[key].copy(deep=False)
+
+    obj = _read_uncached(ref, meta, qc, kwargs)
+
+    if key is not None:
+        _READ_CACHE[key] = obj
+        _READ_CACHE.move_to_end(key)
+        while len(_READ_CACHE) > _READ_CACHE_MAXSIZE:
+            _READ_CACHE.popitem(last=False)
+        return _READ_CACHE[key].copy(deep=False)
+    return obj
+
+
+read.cache_clear = _READ_CACHE.clear  # type: ignore[attr-defined]
+
+
+def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[str, Any]):
+    """The actual open + standardize, uncached -- see :func:`read`'s own memo."""
+    import intake
 
     cat = intake.from_yaml_file(str(ref.path))
     entry = cat[ref.name]

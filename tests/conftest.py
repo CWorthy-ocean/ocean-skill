@@ -62,6 +62,36 @@ def fresh_regridder_memo():
 
 
 @pytest.fixture(autouse=True)
+def fresh_open_cache():
+    """Give every test its own empty ``osk.read`` open memo.
+
+    :func:`ocean_skill.sources.read` keys its in-process memo on catalog-file
+    identity (path/name) plus freshness (mtime/size), which recurs across many
+    test modules that write similar temp catalogs at different paths within one
+    test but can collide across tests that happen to reuse a path/mtime/size
+    combination (a monkeypatched or synthetic entry, most often) -- an object one
+    test cached would otherwise leak into the next. Mirrors ``fresh_regridder_memo``
+    above.
+
+    ``getattr(..., "cache_clear", None)`` rather than a bare call: several tests
+    monkeypatch ``ocean_skill.sources.read`` itself with a plain lambda for the
+    span of the test (``monkeypatch`` restores the real one on its own teardown,
+    which runs *after* this fixture's) -- at this fixture's post-yield point
+    ``sources.read`` can be that lambda, which has no ``cache_clear`` to call.
+    """
+    from ocean_skill import sources
+
+    def _clear() -> None:
+        clear = getattr(sources.read, "cache_clear", None)
+        if clear is not None:
+            clear()
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def fresh_availability_memo():
     """Give every test its own empty reference-availability memo.
 
