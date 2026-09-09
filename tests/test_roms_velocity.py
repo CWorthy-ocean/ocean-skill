@@ -605,6 +605,92 @@ def test_prepare_source_temperature_point_does_not_take_the_velocity_path(monkey
     assert da is not None
 
 
+# -- end-to-end: a grid constant requested directly (_prepare's own regression) -----
+
+
+def test_prepare_leaves_a_grid_constant_untouched_with_no_depth_key_at_all():
+    """The other regression: ``FieldSet.plot`` classifies every member by reading
+    ``Field.family``, which forces a full prepare with the member's *raw* select
+    -- no ``depth`` key at all, unlike the surface-hoist tests above (that
+    injection only happens once a map is actually drawn, in ``Field._map_item``/
+    ``_surfaced``). A bare select routes ``h``/``mask_rho`` past the surface hoist
+    (``surface`` is only ever true for an *explicit* request) straight into the
+    ROMS vertical ladder's own ``elif column or depth is None:`` branch, which
+    used to assume a vertical axis exists (``roms.depth_band`` -> ``sigma_w``/
+    ``Cs_w`` a 2-D field never had) after already failing earlier at the same
+    self-referencing-coordinate ``to_dataset`` collision the surface hoist has.
+    """
+    from ocean_skill.comparison import _prepare
+
+    ds, meta = _roms_like(raw_names=True)
+    meta = {**meta, "model": "roms"}
+    standardized = roms.standardize(ds, meta)
+
+    for variable in ("h", "mask_rho"):
+        da, depth = _prepare(standardized, meta, variable, {})
+        assert set(da.dims) == {"eta_rho", "xi_rho"}
+        assert "s_rho" not in da.dims
+
+
+def test_as_named_dataset_survives_a_self_colliding_vertical_coordinate():
+    """Unit-level guard for the ladder's own ``to_dataset`` call
+    ([comparison.py] ``_as_named_dataset``, used at the surface hoist and the
+    ROMS vertical ladder alike). ``Cs_r``/``sigma_r`` -- unlike ``h``/
+    ``mask_rho`` -- carry a vertical axis (``s_rho``) once promoted to a
+    coordinate, so they *do* reach the ladder body rather than this fix's
+    no-vertical-axis pass-through, and still collide the same way ``h`` did.
+    Checked directly against the helper rather than through the full
+    ``depth_band``/``add_interface_coord`` machinery: ``Cs_r``/``sigma_r`` are
+    vertical-transform *parameters*, not real fields with a water column to
+    band-average, so driving them through that unrelated machinery would test
+    a scenario no caller actually reaches.
+    """
+    from ocean_skill.comparison import _as_named_dataset
+
+    ds, meta = _roms_like(raw_names=True)
+    meta = {**meta, "model": "roms"}
+    standardized = roms.standardize(ds, meta)
+
+    da = standardized["Cs_r"]
+    assert "Cs_r" in da.coords  # the self-reference this fix guards against
+
+    out = _as_named_dataset(da, "Cs_r")
+
+    assert "Cs_r" in out.data_vars
+    np.testing.assert_allclose(out["Cs_r"].values, da.values)
+
+
+def test_fieldset_of_two_grid_constants_plots_in_both_renderers():
+    """The full regression, through the public API: two variables neither of
+    which has a vertical axis, drawn side by side (see
+    ``tests/test_field_map_grid.py`` for the family-agnostic version of this
+    composition -- this file is the ROMS-specific shape that used to crash
+    before either variable's map was ever drawn).
+    """
+    from types import SimpleNamespace
+    from unittest import mock
+
+    import ocean_skill as osk
+    from ocean_skill.field import field as make_field
+
+    ds, meta = _roms_like(raw_names=True)
+    meta = {**meta, "model": "roms", "featureType": "grid"}
+    standardized = roms.standardize(ds, meta)
+
+    with mock.patch.object(osk, "read", lambda name, **kw: standardized), mock.patch(
+        "ocean_skill.catalog.resolve",
+        lambda name: SimpleNamespace(metadata=meta, name=name, path="x"),
+    ):
+        fs = make_field("stub", ["h", "mask_rho"])
+        fig = fs.plot()
+        assert len(fig.axes) == 4  # two map panels, each its own colorbar
+
+        obj = fs.plot(renderer="holoviews")
+        import holoviews as hv
+
+        assert len(obj.traverse(lambda x: x, [hv.QuadMesh])) == 2
+
+
 # -- derived_geographic_velocities: the shared "what standardize adds" fact --------
 
 

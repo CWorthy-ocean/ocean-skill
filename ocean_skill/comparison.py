@@ -1122,6 +1122,24 @@ def _display_depth(
     return _selected_depth(select_for(select, "test"), default=default)
 
 
+def _as_named_dataset(da, name: str):
+    """``da.to_dataset(name=name)``, safe against ``da`` naming one of its own coords.
+
+    A ROMS grid constant (``h``, ``mask_rho``, ``angle``, ``Cs_r``, ``sigma_r`` --
+    :func:`ocean_skill.roms.standardize`'s own promoted-to-coordinate list) resolves
+    to a DataArray that, by ordinary xarray semantics for any coordinate pulled out
+    of its own Dataset, lists itself among its own ``.coords``. Plain
+    ``to_dataset(name=name)`` refuses that outright (``"cannot create a Dataset from
+    a DataArray with the same name as one of its coordinates"``), so the
+    self-reference is dropped first here -- costing nothing, since ``da`` already
+    *is* that data. A ``da`` that never collided (the ordinary case) passes through
+    unchanged.
+    """
+    if name in da.coords:
+        da = da.reset_coords(name, drop=True)
+    return da.to_dataset(name=name)
+
+
 def _surface_and_levels(sub, meta, name: str, depths) -> Any:
     """Assemble a ``z`` axis mixing the model's own surface with interpolated levels.
 
@@ -1165,7 +1183,7 @@ def _surface_and_levels(sub, meta, name: str, depths) -> Any:
     # caller's ordering, not a fact about the field.
     da = xr.concat(pieces, dim="z", combine_attrs="drop_conflicts")
     da["z"].attrs["level_labels"] = [_depth_label(d) for d in depths]
-    return da.to_dataset(name=name)
+    return _as_named_dataset(da, name)
 
 
 #: What ``aggregate=None`` means: **reduce nothing**. There is deliberately no default
@@ -1577,18 +1595,9 @@ def _prepare(
     # further down the ladder handles, sections included.
     if not calculated and sigma is None and surface and meta.get("model") == "roms":
         name = da.name or "field"
-        # A variable roms.standardize() itself promoted to a *coordinate* (h,
-        # Cs_r, sigma_r, mask_rho, angle -- its own grid-constant list) carries
-        # itself as one of its own coords once pulled out by this name: xarray
-        # attaches every coordinate sharing a DataArray's dims, and that
-        # includes the array's own backing coordinate when the two are the
-        # same variable. to_dataset() below refuses a name colliding with one
-        # of its own coordinates, so that self-reference is dropped first --
-        # costing nothing (da already *is* that data) and letting a bare grid
-        # constant like `h` pass through this branch (a no-op here: it has no
-        # s_dim to isel away) the same as any other field.
-        da_for_surface = da.reset_coords(name, drop=True) if name in da.coords else da
-        da = roms.surface(da_for_surface.to_dataset(name=name), meta)[name]
+        # _as_named_dataset guards a grid constant (h, mask_rho, angle, ...)
+        # against colliding with itself -- see its own docstring.
+        da = roms.surface(_as_named_dataset(da, name), meta)[name]
 
     # Order matters three ways now. Selection precedes reduction, or "the mean of
     # January" would average the whole record. The *non-vertical* reduction runs
@@ -1654,121 +1663,147 @@ def _prepare(
             "source directly."
         )
     elif meta.get("model") == "roms":
-        # The vertical transform needs a Dataset carrying the grid; a DataArray
-        # brings its coordinates (h, mask, Cs_r, ...) along, so this round trip
-        # keeps everything roms.surface/to_depth reads.
         name = da.name or "field"
-        sub = da.to_dataset(name=name)
-        # A DataArray only carries coordinates sharing its dimensions, so the
-        # interface-grid variables (on s_w, which a tracer has no part of) are
-        # dropped by to_dataset. They are exactly what depth_average needs.
-        #
-        # Static grid fields only -- deliberately not `zeta`, which still carries the
-        # time dimension this field has already been averaged over; re-attaching it
-        # would make z_rho time-varying against a time-less field and break the xgcm
-        # transform. Both depth routines fall back to zeta=0, which is the
-        # approximation already in force here and is small against metre-scale cells.
-        for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
-            if grid_var in obj.variables and grid_var not in sub.variables:
-                sub = sub.assign({grid_var: obj[grid_var]})
-        if is_section and depth is None:
-            # A section with no depth request draws the model's own s-levels --
-            # no transform, so no xgcm grid needed and nothing interpolated. But
-            # add_depth_coord still runs: without it the vertical axis would be
-            # bare sigma-level *indices* (0..N-1), which say nothing about where
-            # in the water column they actually are. Attaching z_rho is a
-            # coordinate assignment, not an interpolation, so it costs nothing
-            # extra here the way to_depth's transform would.
-            if "z_rho" not in sub.coords:
-                sub = roms.add_depth_coord(sub, meta)
-        elif sigma is not None:
-            # An isopycnal slice needs the full water column of temperature and
-            # salinity, not just the one variable this lane resolved -- reduced by
-            # the *same* horizontal select and non-vertical aggregate the sliced
-            # variable already went through (not the raw column), or the target
-            # density would still vary along an axis (e.g. time) the field being
-            # sliced no longer has, which xgcm's transform cannot reconcile.
-            for standard_name in (
-                "sea_water_potential_temperature",
-                "sea_water_practical_salinity",
-            ):
-                column = units.find_variable(obj, standard_name)
-                if column is None:
-                    raise ValueError(
-                        f"an isopycnal slice needs {standard_name!r}, which is not "
-                        "in this dataset (or not standardized to that name -- "
-                        "check the catalog entry's standard_names map, or that the "
-                        "source actually carries it)."
-                    )
-                column = _select_horizontal_then_aggregate(
-                    column, horizontal, early_agg, source
-                )
-                sub = sub.assign({standard_name: column})
-            targets = (
-                [float(v) for v in sigma]
-                if isinstance(sigma, list | tuple)
-                else float(sigma)
-            )
-            sub = _materialize_point_column(sub, point_window)
-            sub = roms.to_sigma0(sub, meta, targets)
-        elif surface:
-            # A no-op when the hoist above already ran (s_dim is gone from sub's dims,
-            # so roms.surface's own guard skips the isel) -- kept unconditional rather
-            # than tracked with a flag, since re-entering an already-surfaced dataset
-            # costs nothing and one fewer branch is one fewer thing to keep in sync.
-            sub = roms.surface(sub, meta)
-        elif band:
-            # A band is averaged over native cells with thickness weights, not
-            # interpolated: above the shallowest cell *centre* -- 7 m down in deep
-            # water on this grid -- there is nothing to interpolate from, so a
-            # target grid over 0-10 m would be mostly NaN offshore.
-            # A *selection*: keeps the cells and their thickness weights, so the
-            # vertical aggregation below decides how to collapse them.
-            sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
-        elif column or depth is None:
-            # The whole water column, native levels standing: an unbounded band --
-            # every cell overlaps a 0..inf m range, so nothing is excluded, but the
-            # cells still come back with real depth_band()/depth_average() weights
-            # attached (unlike the plain add_depth_coord the is_section branch
-            # above uses), so {"Z": "mean"} on a column request is the same
-            # thickness-weighted mean a band gives, not an unweighted one. An absent
-            # depth key reaches here too now (a bare field() call, never a compare
-            # lane -- see `surface`'s definition above) and gets the identical
-            # treatment: nothing reduced, nothing assumed, just the coordinates a
-            # profile/section/{"Z": ...} consumer needs attached.
-            sub = roms.depth_band(sub, meta, 0.0, float("inf"))
-        elif isinstance(depth, list | tuple) and any(
-            is_surface_request(d) for d in depth
+        s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
+        if (
+            operators.resolve_dim(da, "Z") is None
+            and s_dim not in da.dims
+            and "s_w" not in da.dims
         ):
-            # "surface" beside numbers, e.g. ["surface", 50, 100]: no single
-            # vertical operation produces that, so the levels are assembled.
-            sub = _surface_and_levels(sub, meta, name, depth)
+            # A 2-D grid constant (h, mask_rho, angle, zeta, ...) has no vertical
+            # axis to select or reduce -- every branch below exists to isel,
+            # interpolate, or band-average *that* axis, and assumes one is
+            # present (down to depth_band's add_interface_coord needing
+            # sigma_w/Cs_w a 2-D field never had). Left as-is, exactly as a
+            # non-ROMS 2-D field with no depth key would be: nothing here is
+            # this field's to reduce. FieldSet.plot's own family-classification
+            # pass (Field.family, read before a map is surfaced) reaches this
+            # branch with the *raw*, unsurfaced select, so a bare grid-constant
+            # Field/FieldSet member takes this path routinely, not as an edge
+            # case.
+            pass
         else:
-            # A list interpolates to several levels in one field, which the vertical
-            # aggregation then collapses; a scalar gives one level and no axis.
-            try:
+            # The vertical transform needs a Dataset carrying the grid; a DataArray
+            # brings its coordinates (h, mask, Cs_r, ...) along, so this round trip
+            # keeps everything roms.surface/to_depth reads. _as_named_dataset
+            # guards against da naming one of its own coordinates (a promoted
+            # grid constant that -- unlike h/mask_rho above -- does carry a
+            # vertical axis, e.g. Cs_r/sigma_r).
+            sub = _as_named_dataset(da, name)
+            # A DataArray only carries coordinates sharing its dimensions, so the
+            # interface-grid variables (on s_w, which a tracer has no part of) are
+            # dropped by to_dataset. They are exactly what depth_average needs.
+            #
+            # Static grid fields only -- deliberately not `zeta`, which still
+            # carries the time dimension this field has already been averaged
+            # over; re-attaching it would make z_rho time-varying against a
+            # time-less field and break the xgcm transform. Both depth
+            # routines fall back to zeta=0, which is the approximation
+            # already in force here and is small against metre-scale cells.
+            for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
+                if grid_var in obj.variables and grid_var not in sub.variables:
+                    sub = sub.assign({grid_var: obj[grid_var]})
+            if is_section and depth is None:
+                # A section with no depth request draws the model's own s-levels --
+                # no transform, so no xgcm grid needed and nothing interpolated. But
+                # add_depth_coord still runs: without it the vertical axis would be
+                # bare sigma-level *indices* (0..N-1), which say nothing about where
+                # in the water column they actually are. Attaching z_rho is a
+                # coordinate assignment, not an interpolation, so it costs nothing
+                # extra here the way to_depth's transform would.
+                if "z_rho" not in sub.coords:
+                    sub = roms.add_depth_coord(sub, meta)
+            elif sigma is not None:
+                # An isopycnal slice needs the full water column of temperature and
+                # salinity, not just the one variable this lane resolved -- reduced by
+                # the *same* horizontal select and non-vertical aggregate the sliced
+                # variable already went through (not the raw column), or the target
+                # density would still vary along an axis (e.g. time) the field being
+                # sliced no longer has, which xgcm's transform cannot reconcile.
+                for standard_name in (
+                    "sea_water_potential_temperature",
+                    "sea_water_practical_salinity",
+                ):
+                    column = units.find_variable(obj, standard_name)
+                    if column is None:
+                        raise ValueError(
+                            f"an isopycnal slice needs {standard_name!r}, which is not "
+                            "in this dataset (or not standardized to that name -- "
+                            "check the catalog entry's standard_names map, or that the "
+                            "source actually carries it)."
+                        )
+                    column = _select_horizontal_then_aggregate(
+                        column, horizontal, early_agg, source
+                    )
+                    sub = sub.assign({standard_name: column})
                 targets = (
-                    [float(d) for d in depth]
-                    if isinstance(depth, list | tuple)
-                    else float(depth)
+                    [float(v) for v in sigma]
+                    if isinstance(sigma, list | tuple)
+                    else float(sigma)
                 )
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"cannot read {depth!r} as a depth selection: use metres (50), "
-                    '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
-                    'metres and "surface" (["surface", 50, 100]).'
-                ) from None
-            sub = _materialize_point_column(sub, point_window)
-            sub = roms.to_depth(sub, meta, targets)
-        da = sub[name]
-        # Squeeze only a single interpolated level: a scalar depth request collapses
-        # the axis by itself (as `.sel` does everywhere), while a list or band leaves
-        # several levels for the vertical aggregation to reduce. Squeezing
-        # unconditionally used to discard every level but the first, silently.
-        if "z" in da.dims and da.sizes["z"] == 1:
-            da = da.isel(z=0)
-        if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
-            da = da.isel(sigma0=0)
+                sub = _materialize_point_column(sub, point_window)
+                sub = roms.to_sigma0(sub, meta, targets)
+            elif surface:
+                # A no-op when the hoist above already ran (s_dim is gone
+                # from sub's dims, so roms.surface's own guard skips the
+                # isel) -- kept unconditional rather than tracked with a
+                # flag, since re-entering an already-surfaced dataset costs
+                # nothing and one fewer branch is one fewer thing to keep in
+                # sync.
+                sub = roms.surface(sub, meta)
+            elif band:
+                # A band is averaged over native cells with thickness weights, not
+                # interpolated: above the shallowest cell *centre* -- 7 m down in deep
+                # water on this grid -- there is nothing to interpolate from, so a
+                # target grid over 0-10 m would be mostly NaN offshore.
+                # A *selection*: keeps the cells and their thickness weights, so the
+                # vertical aggregation below decides how to collapse them.
+                sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
+            elif column or depth is None:
+                # The whole water column, native levels standing: an unbounded band --
+                # every cell overlaps a 0..inf m range, so nothing is excluded, but the
+                # cells still come back with real depth_band()/depth_average() weights
+                # attached (unlike the plain add_depth_coord the is_section branch
+                # above uses), so {"Z": "mean"} on a column request is the same
+                # thickness-weighted mean a band gives, not an unweighted one. An absent
+                # depth key reaches here too now (a bare field() call, never a compare
+                # lane -- see `surface`'s definition above) and gets the identical
+                # treatment: nothing reduced, nothing assumed, just the coordinates a
+                # profile/section/{"Z": ...} consumer needs attached.
+                sub = roms.depth_band(sub, meta, 0.0, float("inf"))
+            elif isinstance(depth, list | tuple) and any(
+                is_surface_request(d) for d in depth
+            ):
+                # "surface" beside numbers, e.g. ["surface", 50, 100]: no single
+                # vertical operation produces that, so the levels are assembled.
+                sub = _surface_and_levels(sub, meta, name, depth)
+            else:
+                # A list interpolates to several levels in one field, which the vertical
+                # aggregation then collapses; a scalar gives one level and no axis.
+                try:
+                    targets = (
+                        [float(d) for d in depth]
+                        if isinstance(depth, list | tuple)
+                        else float(depth)
+                    )
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"cannot read {depth!r} as a depth selection: use metres (50), "
+                        '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
+                        'metres and "surface" (["surface", 50, 100]).'
+                    ) from None
+                sub = _materialize_point_column(sub, point_window)
+                sub = roms.to_depth(sub, meta, targets)
+            da = sub[name]
+            # Squeeze only a single interpolated level: a scalar depth
+            # request collapses the axis by itself (as `.sel` does
+            # everywhere), while a list or band leaves several levels for
+            # the vertical aggregation to reduce. Squeezing unconditionally
+            # used to discard every level but the first, silently.
+            if "z" in da.dims and da.sizes["z"] == 1:
+                da = da.isel(z=0)
+            if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
+                da = da.isel(sigma0=0)
     else:
         # observational depth axes vary: real metres, or an index with depths alongside.
         # The catalog's own declared axis name wins when there is one -- meta["axes"]
