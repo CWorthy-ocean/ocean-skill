@@ -170,14 +170,37 @@ def depth_range(
     default) or just one panel's own lines (``sharey=False``) -- so the two
     modes agree on exactly how an empty or all-``NaN`` panel falls back
     (``(1.0, 0.0)``, a full-figure axis with nothing plotted).
+
+    Measured from where each line's *data* is finite, not from its vertical
+    coordinate's own extent -- the two differ for a profile reference given an
+    explicit ``depths=`` list (see :func:`ocean_skill.comparison._prepare`'s
+    ``literal_depths`` paragraph): a target past the reference's own reach is
+    kept standing on purpose (NaN on the observational lane, finite on the
+    model's where the water column actually reaches that deep -- the "model
+    below the data" case), so a coordinate-only reading of the axis would run
+    every panel out to the caller's deepest *requested* level even where
+    nothing -- on either lane -- is plotted that deep. Keying on the data
+    instead means a station whose column bottoms out at 15 m gets a 15 m axis
+    while one that reaches the full requested depth keeps it, matching how a
+    caller reading the figure would expect the axis to describe what is
+    actually drawn. Mirrors the identical finite-data masking in
+    :func:`_free_corners` below; a NaN-data level's ``spread`` band cannot pull
+    the axis back out on its own, since :func:`ocean_skill.plot.style.band_runs`
+    already requires the value itself finite before drawing a band there.
     """
     if ylim is not None:
         return float(ylim[1]), float(ylim[0])
     lines = list(lines)
     if lines:
-        depths = np.concatenate([vertical_values(line.spec.values) for line in lines])
-        finite = depths[np.isfinite(depths)]
-        if finite.size:
+        finite_depths = []
+        for line in lines:
+            depth = vertical_values(line.spec.values)
+            values = np.asarray(line.spec.values.values, dtype="float64")
+            mask = np.isfinite(values) & np.isfinite(depth)
+            if mask.any():
+                finite_depths.append(depth[mask])
+        if finite_depths:
+            finite = np.concatenate(finite_depths)
             lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
             return (hi, lo) if hi > lo else (lo + 1.0, lo)
     return 1.0, 0.0
