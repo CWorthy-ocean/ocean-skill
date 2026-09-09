@@ -127,12 +127,32 @@ def _average_to_rho(da: xr.DataArray, stagger_dim: str, rho_dim: str) -> xr.Vari
     not describe rho positions.
     """
     var = da.variable
+    # Collapse the staggered dim to a single chunk before the misaligned
+    # ``[:-1]``/``[1:]`` slices below, then merge the ``[edge, interior, edge]``
+    # concat back into one chunk after. Without this, ``0.5*(left+right)`` adds two
+    # slices whose chunk boundaries are offset by one, so dask unifies them into a
+    # (1, N, 1, N, 1, ...) chunking -- a size-1 chunk at every boundary -- and the
+    # concat's size-1 edges compound it; the later rotation multiply
+    # (:func:`_add_geographic_velocity`) then has to unify *that* against the grid
+    # ``angle``, building a task graph that scales into the millions over a long,
+    # one-step-per-chunk history file (thousands of hourly steps x s_rho x the
+    # fragments) -- the confirmed cause of a multi-minute hang, mostly in memory
+    # pressure, before either lane is even cropped. Only one spatial dim is made a
+    # single chunk, so the transient stays modest; ``.rechunk`` never moves values,
+    # so the averaged result is byte-identical.
+    if var.chunks is not None:
+        axis = var.dims.index(stagger_dim)
+        if len(var.chunks[axis]) > 1:
+            var = xr.Variable(var.dims, var.data.rechunk({axis: -1}))
     left = var.isel({stagger_dim: slice(None, -1)})
     right = var.isel({stagger_dim: slice(1, None)})
     interior = 0.5 * (left + right)
     edge_lo = var.isel({stagger_dim: slice(0, 1)})
     edge_hi = var.isel({stagger_dim: slice(-1, None)})
     full = xr.Variable.concat([edge_lo, interior, edge_hi], dim=stagger_dim)
+    if full.chunks is not None:
+        axis = full.dims.index(stagger_dim)
+        full = xr.Variable(full.dims, full.data.rechunk({axis: -1}))
     rho_dims = tuple(rho_dim if d == stagger_dim else d for d in full.dims)
     return xr.Variable(rho_dims, full.data)
 
@@ -186,7 +206,25 @@ def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
     # would wrongly pick "s_rho"/"time" themselves when u/v still carry those.
     u_rho = _average_to_rho(u, "xi_u", "xi_rho") if "xi_u" in u.dims else u.variable
     v_rho = _average_to_rho(v, "eta_v", "eta_rho") if "eta_v" in v.dims else v.variable
+    return _rotate_and_assign(ds, u_rho, v_rho, u.attrs, v.attrs)
 
+
+def _rotate_and_assign(
+    ds: xr.Dataset,
+    u_rho: xr.Variable,
+    v_rho: xr.Variable,
+    u_attrs: dict[str, Any],
+    v_attrs: dict[str, Any],
+) -> xr.Dataset:
+    """Rotate rho-point ``u_rho``/``v_rho`` by ``ds["angle"]`` and assign east/north.
+
+    The shared tail of :func:`_add_geographic_velocity` (full-domain) and
+    :func:`add_geographic_velocity_windowed` (a point-cropped column) -- both
+    average their own staggered input to rho points first, by different means, then
+    reach here with the same rotation/transpose/assign. See
+    :func:`_add_geographic_velocity` for the rotation convention.
+    """
+    east_name, north_name = GEOGRAPHIC_VELOCITY_NAMES
     angle = ds["angle"].variable
     cos_a, sin_a = np.cos(angle), np.sin(angle)
     east = u_rho * cos_a - v_rho * sin_a
@@ -206,7 +244,7 @@ def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
                 {
                     "standard_name": east_name,
                     "long_name": "eastward (true geographic) sea water velocity",
-                    "units": u.attrs.get("units", "m s-1"),
+                    "units": u_attrs.get("units", "m s-1"),
                 },
             ),
             north_name: (
@@ -215,11 +253,74 @@ def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
                 {
                     "standard_name": north_name,
                     "long_name": "northward (true geographic) sea water velocity",
-                    "units": v.attrs.get("units", "m s-1"),
+                    "units": v_attrs.get("units", "m s-1"),
                 },
             ),
         }
     )
+
+
+def add_geographic_velocity_windowed(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
+    """Re-derive east/north on a point-cropped window, byte-identical to a full-domain
+    derive-then-crop.
+
+    A full-domain :func:`_add_geographic_velocity` builds a task graph over the whole
+    grid and every time step; for a ROMS history file chunked one step per chunk, that
+    graph scales into the millions and stays that large even after cropping to a
+    single water column (culling it does not remove the per-step task overhead the
+    concat/rechunk inside :func:`_average_to_rho` creates) -- the confirmed cause of a
+    multi-minute hang on a point/station comparison. This instead re-derives on a
+    lane whose staggered ``sea_water_x_velocity``/``sea_water_y_velocity`` were
+    cropped to the point window *plus a one-cell halo* by
+    :func:`ocean_skill.align._point_window`, which records how many extra halo rho
+    points that produced, per rho dim, in ``ds.attrs["_roms_stagger_trim"]`` --
+    ``{dim: (low, high)}``, each ``1`` when that side of the window is interior (an
+    extra halo rho point was produced there) or ``0`` when it already sits at the
+    domain edge (the ordinary edge rule already lands on the right value, nothing to
+    trim). Popped and consumed here; a caller that never set it (no halo crop
+    happened) gets an untrimmed, already-exact result.
+
+    Requires ``ds`` to already have any pre-derived ``east/north`` dropped (a stale
+    full-width pair here would silently prefer the wrong one) -- see the point-lane
+    gate in :func:`ocean_skill.comparison.prepare_source`. A no-op, mirroring
+    :func:`_add_geographic_velocity`, when ``u``, ``v`` or ``angle`` is missing.
+    Re-applies the identical ``mask_rho == 1`` land mask :func:`standardize` uses,
+    since this runs after that mask already ran once (on the stale, now-dropped
+    pair).
+    """
+    trim = dict(ds.attrs.pop("_roms_stagger_trim", {}) or {})
+    x_name, y_name = GRID_RELATIVE_VELOCITY_NAMES
+    u = ds.get(x_name)
+    v = ds.get(y_name)
+    if u is None or v is None or "angle" not in ds.coords:
+        return ds
+
+    def _trimmed(component, stagger_dim, rho_dim):
+        rho = (
+            _average_to_rho(component, stagger_dim, rho_dim)
+            if stagger_dim in component.dims
+            else component.variable
+        )
+        low, high = trim.get(rho_dim, (0, 0))
+        if not low and not high:
+            return rho
+        axis = rho.dims.index(rho_dim)
+        n = rho.shape[axis]
+        return rho.isel({rho_dim: slice(low, n - high)})
+
+    u_rho = _trimmed(u, "xi_u", "xi_rho")
+    v_rho = _trimmed(v, "eta_v", "eta_rho")
+    ds = _rotate_and_assign(ds, u_rho, v_rho, u.attrs, v.attrs)
+
+    # Same rule as standardize's own land-mask loop, scoped to the pair just
+    # derived -- everything else on this lane was already masked once, before the
+    # stale full-width pair this replaces was dropped.
+    if "mask_rho" in ds.variables:
+        mask = ds["mask_rho"] == 1
+        for name in GEOGRAPHIC_VELOCITY_NAMES:
+            if {"eta_rho", "xi_rho"} <= set(ds[name].dims):
+                ds[name] = ds[name].where(mask)
+    return ds
 
 
 def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
