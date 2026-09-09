@@ -920,3 +920,153 @@ def test_from_reference_refuses_times_fan(casts_and_model):
             aggregate={"time": "mean"},
             times=["2024-04", "2024-05"],
         )
+
+
+# -- regression: the test/model lane must not read its whole time record ------------
+#
+# The route above forgot to narrow the test lane's own time axis to the casts'
+# times, so `aggregate={"time": "mean"}` forced a read of the model's *entire*
+# time record before averaging (a 34-minute hang on a real ROMS run against 7
+# casts). The fix makes that narrowing automatic wherever a test lane is
+# prepared (`Comparison._prepare_lane`, via `_reference_narrowing`/
+# `_reference_time_targets`, now shape-agnostic over `_reference_sources()`),
+# rather than something each route has to remember to compute and pass through
+# by hand -- so `_prepare_section_from_casts`'s own test-lane call needed no
+# change at all. `_roms_run()` itself carries no time axis (it is a single,
+# static field), so a fixture with one is built here specifically to exercise
+# this.
+
+
+def _roms_run_with_time(n_time: int = 60) -> xr.Dataset:
+    """``_roms_run()`` with ``n_time`` daily steps of drift added to the field.
+
+    The drift is uniform across depth and space -- added *after* the
+    depth-dependent base field, to a model with no free surface (no ``zeta``,
+    so ``z_rho`` itself is time-independent) -- so it commutes exactly through
+    the vertical interpolation: the model sampled at any subset of days equals
+    the same depth profile plus that subset's own mean drift. A full-record
+    mean and a cast-times-only mean therefore disagree by a known, exact
+    amount, which is what lets the correctness test below check the pruned
+    result without reimplementing ``roms.to_depth`` itself.
+    """
+    ds = _roms_run()
+    time = pd.date_range("2024-01-01", periods=n_time, freq="D")
+    drift = xr.DataArray(0.5 * np.arange(n_time), dims="time", coords={"time": time})
+    ds = ds.drop_vars(VAR).assign({VAR: ds[VAR] + drift})
+    ds[VAR].attrs["units"] = "degC"
+    return ds
+
+
+_PROFILE_META = {"featureType": "profile"}
+
+
+def _profile_cast(lon: float, lat: float, time, *, base: float) -> xr.Dataset:
+    """A single-instant profile cast at 2 fixed depths -- one CTD visit."""
+    depth = np.array([50.0, 200.0])
+    values = base - 0.01 * depth
+    return xr.Dataset(
+        {VAR: (("depth",), values, {"units": "degC"})},
+        coords={"depth": depth, "time": pd.Timestamp(time)},
+    ).assign_coords(lon=lon, lat=lat)
+
+
+@pytest.fixture
+def casts_and_model_with_time(patched_sources):
+    """Two profile casts, well apart in time, against a 60-day model."""
+    n_time = 60
+    model = _roms_run_with_time(n_time)
+    base_time = pd.Timestamp("2024-01-01")
+    # Day indices 4 and 44 -- well inside the 60-day record, far enough apart
+    # that their mean drift (2.0, 22.0 -> mean 12.0) differs clearly from the
+    # full record's own mean drift (0..59 -> mean 14.75).
+    cast_times = [base_time + pd.Timedelta(days=4), base_time + pd.Timedelta(days=44)]
+    lonlats = [(-94.9, 24.2), (-93.1, 27.8)]
+    sources = {
+        "roms_test": (model, {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}),
+    }
+    casts = []
+    for i, ((lon, lat), t) in enumerate(zip(lonlats, cast_times, strict=True), start=1):
+        name = f"cast_{i}"
+        sources[name] = (_profile_cast(lon, lat, t, base=16.0 + i), _PROFILE_META)
+        casts.append(name)
+    patched_sources(sources)
+    return casts, n_time, cast_times
+
+
+def test_from_reference_prunes_the_model_to_cast_nearest_steps(
+    casts_and_model_with_time,
+):
+    """The section's model column must match the casts' own times, not the
+    full-record mean -- the observable proof the test lane was pruned before
+    the read/vertical-transform/mean, rather than averaged over everything.
+    """
+    casts, n_time, cast_times = casts_and_model_with_time
+    points = [[-94.9, 24.2], [-93.1, 27.8]]
+    depths = [50.0, 200.0]
+
+    # Independently, via the plain model-only path (Field, not Comparison):
+    # the full 60-day mean at the same points/depths.
+    full_mean = osk.field(
+        "roms_test",
+        VAR,
+        select={"transect": {"points": points}, "depth": depths},
+        aggregate={"time": "mean"},
+    ).data
+    full_mean_drift = 0.5 * np.mean(np.arange(n_time))
+    cast_day_indices = [(t - pd.Timestamp("2024-01-01")).days for t in cast_times]
+    cast_mean_drift = 0.5 * np.mean(cast_day_indices)
+    # The depth/space-dependent part is the same either way (see
+    # _roms_run_with_time's docstring on why the drift commutes exactly out).
+    expected_pruned = full_mean - full_mean_drift + cast_mean_drift
+
+    result = osk.compare(
+        reference=casts,
+        test="roms_test",
+        variables=[VAR],
+        select={"transect": {"from": "reference"}, "depth": depths},
+        aggregate={"time": "mean"},
+    )
+    aligned = result.comparisons[0].aligned
+    np.testing.assert_allclose(
+        np.asarray(aligned["test"]).ravel(),
+        np.asarray(expected_pruned).ravel(),
+        rtol=1e-10,
+    )
+    # And, the failure this guards against made concrete: the pruned result
+    # must NOT equal the naive full-record mean.
+    assert not np.allclose(
+        np.asarray(aligned["test"]).ravel(), np.asarray(full_mean).ravel()
+    )
+
+
+def test_from_reference_test_lane_prep_receives_time_targets(
+    monkeypatch, casts_and_model
+):
+    """Mechanism-level companion to the correctness test above: pins *how* the
+    fix works (the chokepoint auto-computes narrowing when none is passed),
+    not just that the end-to-end result happens to come out right, so a
+    future change that silently drops the auto-injection but stays correct
+    by some other accident does not slip through unnoticed.
+    """
+    casts = casts_and_model
+    from ocean_skill import comparison as _comparison_module
+
+    captured = {}
+    real_prepare_source = _comparison_module.prepare_source
+
+    def _spy(source, variable, select, aggregate, **kwargs):
+        if source == "roms_test":
+            captured["time_targets"] = kwargs.get("time_targets")
+        return real_prepare_source(source, variable, select, aggregate, **kwargs)
+
+    monkeypatch.setattr(_comparison_module, "prepare_source", _spy)
+    osk.compare(
+        reference=casts,
+        test="roms_test",
+        variables=[VAR],
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        aggregate={"time": "mean"},
+    )
+    assert "time_targets" in captured
+    assert captured["time_targets"] is not None
+    assert len(captured["time_targets"]) == len(casts)

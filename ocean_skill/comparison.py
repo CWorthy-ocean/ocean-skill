@@ -2518,11 +2518,14 @@ def prepare_source(
     # first gives byte-identical values to cropping the transform's output, for a
     # fraction of the work (a profile narrowed to one catalog point would otherwise
     # interpolate the entire domain onto the reference's own levels just to keep one
-    # column). A transect is the exception: it index-slices the grid itself at the
-    # top of _prepare (apply_transect), so a window applied first would shift the
-    # grid-line indices it names -- and its lane is already one path, not a domain,
-    # so the crop stays after _prepare for it. A "no overlap" raise here propagates
-    # exactly as the post-_prepare crop's did, to align()'s unnarrowed retry.
+    # column). A transect's own *bbox* crop is the exception: apply_transect
+    # index-slices the grid itself at the top of _prepare, so a spatial window
+    # applied first would shift the grid-line indices it names -- and its lane
+    # is already one path, not a domain, so the bbox crop stays after _prepare
+    # for it (see pre_crop, just below). Time narrowing has no such exception
+    # -- see pre_crop_time -- since apply_transect never slices along `time`.
+    # A "no overlap" raise here propagates exactly as the post-_prepare crop's
+    # did, to align()'s unnarrowed retry.
     #
     # A tabular (point/station/profile) source arrives as a DataFrame -- _prepare
     # converts it to a Dataset at its top (tabular.to_dataset), but subset_to_bbox
@@ -2531,7 +2534,19 @@ def prepare_source(
     # post-_prepare crop below, exactly as before this optimization existed.
     from ocean_skill import tabular
 
-    pre_crop = "transect" not in (select or {}) and not tabular.is_frame(obj)
+    is_frame = tabular.is_frame(obj)
+    pre_crop = "transect" not in (select or {}) and not is_frame
+    # Time is independent of apply_transect's own spatial index-slicing --
+    # subset_to_time/subset_to_time_targets only ever touch the `time`
+    # dimension, which a transect's grid-line indices (xi_rho/eta_rho, sliced
+    # inside _prepare) never reference -- so, unlike bbox just above, a
+    # transect gives time narrowing no reason to wait: cropping the record
+    # before apply_transect ever runs is exact, not approximate, the same way
+    # the ordinary (non-transect) case already is. Left gated on `is_frame`
+    # alone, matching `pre_crop`'s own reason for excluding a frame (no
+    # .coords yet) -- the tabular collapses_time special case just below
+    # still gets its one, separate, pre-_prepare crop.
+    pre_crop_time = not is_frame
     # A ROMS point/station comparison asking for the derived geographic velocity
     # (see ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES) is the one lane where the
     # crop below is not enough on its own: standardize() already baked east/north
@@ -2566,11 +2581,11 @@ def prepare_source(
         from ocean_skill.align import subset_to_bbox
 
         obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
-    if pre_crop and time_window is not None:
+    if pre_crop_time and time_window is not None:
         from ocean_skill.align import subset_to_time
 
         obj = subset_to_time(obj, time_window)
-    if pre_crop and time_targets is not None:
+    if pre_crop_time and time_targets is not None:
         from ocean_skill.align import subset_to_time_targets
 
         obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
@@ -2584,9 +2599,9 @@ def prepare_source(
 
         obj = _roms.add_geographic_velocity_windowed(obj, meta)
     if (
-        not pre_crop
+        not pre_crop_time
         and time_window is not None
-        and tabular.is_frame(obj)
+        and is_frame
         and _collapses_time(aggregate)
     ):
         # A tabular (station/profile) lane's ordinary post-_prepare crop further
@@ -2633,11 +2648,11 @@ def prepare_source(
         from ocean_skill.align import subset_to_bbox
 
         da = subset_to_bbox(da, bbox, point_window_cells=point_window_cells)
-    if da is not None and not pre_crop and time_window is not None:
+    if da is not None and not pre_crop_time and time_window is not None:
         from ocean_skill.align import subset_to_time
 
         da = subset_to_time(da, time_window)
-    if da is not None and not pre_crop and time_targets is not None:
+    if da is not None and not pre_crop_time and time_targets is not None:
         from ocean_skill.align import subset_to_time_targets
 
         da = subset_to_time_targets(da, time_targets, method=time_targets_method)
@@ -3083,6 +3098,22 @@ class Comparison:
         )
         return extra_select, bbox
 
+    def _reference_sources(self) -> list[str]:
+        """The catalog source name(s) standing in for ``reference``.
+
+        ``[self.reference_name]`` for an ordinary comparison; the ordered cast
+        list itself (:attr:`_section_casts`) for a ``select={"transect":
+        {"from": "reference"}}`` section, whose ``reference_name`` is a "+"
+        -joined display string built only for labelling (see ``__init__``)
+        and does not resolve on its own. This is the one place
+        :meth:`_reference_narrowing` and :meth:`_reference_time_targets_uncached`
+        need to know which shape they are reading, so a route that stands a
+        collection of sources in for a single reference gets the same
+        test-lane narrowing either way, automatically -- rather than each
+        needing its own copy of the same fix (see :meth:`_prepare_lane`).
+        """
+        return list(self._section_casts) if self._section_casts else [self.reference_name]
+
     def _reference_narrowing(
         self,
     ) -> tuple[tuple[float, float, float, float] | None, tuple[Any, Any] | None]:
@@ -3146,15 +3177,30 @@ class Comparison:
         """
         if is_pair_spec(self.select):
             return None, None
-        feature = _feature_type(self.reference_name)
+        sources = self._reference_sources()
+        feature = _feature_type(sources[0])
         if feature not in NARROWING_FEATURE_TYPES:
             return None, None
-        bbox = _domain_of(self.reference_name)
+        windows = [w for w in (_time_coverage_of(s) for s in sources) if w is not None]
+        window = (
+            (min(w[0] for w in windows), max(w[1] for w in windows))
+            if windows
+            else None
+        )
+        if len(sources) > 1:
+            # An ordered collection of discrete casts (a from_reference section,
+            # the only way _reference_sources() ever returns more than one name)
+            # has no single catalog position or extent for a bbox to mean -- the
+            # test lane is already cropped to exactly these positions by the
+            # transect's own resolved `points` select (see
+            # _prepare_section_from_casts). Only the time half applies here.
+            return None, window
+        bbox = _domain_of(sources[0])
         if bbox is not None and feature != "trajectory":
             lon = 0.5 * (bbox[0] + bbox[2])
             lat = 0.5 * (bbox[1] + bbox[3])
             bbox = (lon, lat, lon, lat)
-        return bbox, _time_coverage_of(self.reference_name)
+        return bbox, window
 
     def _reference_time_targets(self) -> np.ndarray | None:
         """Memoized :meth:`_reference_time_targets_uncached`.
@@ -3237,9 +3283,21 @@ class Comparison:
             return None
         if is_pair_spec(self.select):
             return None
-        feature = _feature_type(self.reference_name)
-        if feature not in POINT_FEATURE_TYPES and feature != "timeSeriesProfile":
-            return None
+        sources = self._reference_sources()
+        # A single profile is one instant already -- _reference_narrowing's own
+        # catalog-declared window already narrows tightly around it, and there
+        # is nothing "in between" a single cast to prune away (see this
+        # method's own docstring). An ordered *collection* of casts
+        # (len(sources) > 1, a from_reference section) is exactly the
+        # repeat-visit case this method exists for, whatever each individual
+        # cast's own featureType is -- the union of N profiles' declared
+        # windows can span the whole campaign, with the model's every step in
+        # between read for nothing, so the featureType gate below only applies
+        # to the single-source case.
+        if len(sources) == 1:
+            feature = _feature_type(sources[0])
+            if feature not in POINT_FEATURE_TYPES and feature != "timeSeriesProfile":
+                return None
         try:
             import ocean_skill as osk
             from ocean_skill import tabular
@@ -3247,29 +3305,90 @@ class Comparison:
             from ocean_skill.cf import find_coord
             from ocean_skill.sources import erddap_constraints
 
-            meta = resolve(self.reference_name).metadata
             ref_select = select_for(self.select, "reference")
-            constraints = erddap_constraints(meta, ref_select, None)
             ref_qc = qc_for(self.qc, "reference")
             read_kwargs = {"qc": ref_qc} if ref_qc is not None else {}
-            obj = (
-                osk.read(self.reference_name, constraints=constraints, **read_kwargs)
-                if constraints
-                else osk.read(self.reference_name, **read_kwargs)
-            )
-            if tabular.is_frame(obj):
-                obj = tabular.to_dataset(obj, meta)
-            coord = find_coord(obj, "time")
-            if coord is None:
-                return None
-            values = np.asarray(coord.values).ravel()
+            all_values = []
+            for source in sources:
+                meta = resolve(source).metadata
+                constraints = erddap_constraints(meta, ref_select, None)
+                obj = (
+                    osk.read(source, constraints=constraints, **read_kwargs)
+                    if constraints
+                    else osk.read(source, **read_kwargs)
+                )
+                if tabular.is_frame(obj):
+                    obj = tabular.to_dataset(obj, meta)
+                coord = find_coord(obj, "time")
+                if coord is None:
+                    continue
+                values = np.asarray(coord.values).ravel()
+                if values.dtype.kind == "M":
+                    values = values[~np.isnat(values)]
+                if values.size:
+                    all_values.append(values)
         except Exception:
             return None
-        if values.dtype.kind == "M":
-            values = values[~np.isnat(values)]
-        if values.size == 0:
+        if not all_values:
             return None
-        return np.unique(values)
+        values = np.unique(np.concatenate(all_values))
+        # When a time aggregate collapses the axis (a profile-family {"time":
+        # "mean"} station comparison, most often -- and, since the check above
+        # never gates a casts collection on featureType, the from_reference
+        # section case too), every kept model step and every kept cast both
+        # feed the mean/spread directly, rather than being read only to be
+        # discarded once alignment picks nearest neighbours the way the
+        # over="time"/climatology cases above work -- so a cast outside the
+        # test source's own record is not a fast-path detail here: reading a
+        # model snapshot for it, and letting it into the reference's own mean
+        # further down, both silently blend a period the test never ran with
+        # the one it did. Clamped here, once, so every caller of
+        # _reference_time_targets() -- not just align()'s ordinary branch --
+        # gets the same restriction to the casts the test source's own
+        # catalog record (read-free, the same mechanism _reference_narrowing
+        # already uses to crop the *test* lane to the *reference*'s coverage,
+        # applied the other way around) actually covers. Fails open -- leaves
+        # values untouched -- when that source declares no coverage, exactly
+        # as _reference_narrowing's own window already can.
+        if collapses_time:
+            test_cov = _time_coverage_of(self.test_name)
+            if test_cov is not None:
+                import pandas as pd
+
+                lo, hi = (np.datetime64(x) for x in test_cov)
+                in_cov = (values >= lo) & (values <= hi)
+                total = values.size
+                if not in_cov.all():
+                    if not in_cov.any():
+                        raise ValueError(
+                            f"none of {self.reference_name!r}'s {total} cast "
+                            f"times fall within {self.test_name!r}'s time record "
+                            f"({pd.Timestamp(test_cov[0])} to "
+                            f"{pd.Timestamp(test_cov[1])}) -- there is no "
+                            "overlapping period for this comparison's time "
+                            "aggregate to average over. Check osk.catalog.overlap"
+                            f"({self.test_name!r}, {self.reference_name!r}), or "
+                            "point select={'time': ...} at a period the two "
+                            "sources actually share."
+                        )
+                    excluded = int((~in_cov).sum())
+                    values = values[in_cov]
+                    import warnings
+
+                    from ocean_skill import _stacklevel
+
+                    warnings.warn(
+                        "the time aggregate collapses time, so this comparison "
+                        f"is restricted to the period {self.test_name!r} and "
+                        f"{self.reference_name!r} actually share: {excluded} of "
+                        f"{total} casts from {self.reference_name!r} fall "
+                        f"outside {self.test_name!r}'s time record "
+                        f"({pd.Timestamp(test_cov[0])} to "
+                        f"{pd.Timestamp(test_cov[1])}) and are excluded from "
+                        "both lanes' statistics.",
+                        stacklevel=_stacklevel.find(),
+                    )
+        return values
 
     def _warn_if_no_overlap(self) -> None:
         """Warn, before either lane is read, when the two sources provably never meet.
@@ -3478,9 +3597,9 @@ class Comparison:
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
         point_window_cells: int | None = None,
-        time_window: tuple[Any, Any] | None = None,
-        time_targets: Any = None,
-        time_targets_method: str = "nearest",
+        time_window: tuple[Any, Any] | None | object = _UNSET,
+        time_targets: Any = _UNSET,
+        time_targets_method: str | object = _UNSET,
         drop_keys: tuple[str, ...] = (),
         extra_select: dict[str, Any] | None = None,
         keep: tuple[str, ...] = (),
@@ -3504,6 +3623,25 @@ class Comparison:
         default, or a linear interpolation onto the targets); see
         :meth:`align`, which derives it from :attr:`time_method`.
 
+        ``time_window``/``time_targets``/``time_targets_method`` default to the
+        sentinel :data:`_UNSET`, not ``None``/``"nearest"`` -- distinguishing "the
+        caller has an opinion, even if it's 'nothing to narrow to'" from "the
+        caller named none, so decide for them". For ``role="test"`` an ``_UNSET``
+        narrowing arg is computed from ``self`` (:meth:`_reference_narrowing`,
+        :meth:`_reference_time_targets`, :attr:`time_method`) rather than left as
+        "no narrowing" -- so every route that reduces the test lane through this
+        method narrows it to the reference automatically, the one thing that
+        used to have to be recomputed and threaded through by hand at each call
+        site (:meth:`align`'s ordinary branch does; a ``select={"transect":
+        {"from": "reference"}}`` section forgot to, and read a model lane's
+        entire time record trying to average a handful of casts against it). A
+        caller with its own opinion -- an explicit value, ``None`` included --
+        always wins: the bbox-miss retry below still wants the narrower window
+        even without a bbox, and :meth:`_verify_point_window`'s re-centred
+        re-read passes its own already-resolved values. ``role="reference"``
+        never auto-narrows -- a reference is never pruned to itself -- so
+        ``_UNSET`` there just becomes the ordinary "nothing given" default.
+
         ``drop_keys`` removes keys from this lane's own select before it is prepared
         — used by :meth:`align` to keep the test lane gridded when a shared point
         select is routed through :func:`ocean_skill.align.sample_at` instead of also
@@ -3522,6 +3660,22 @@ class Comparison:
         ``keep`` is :func:`_require_reduced`'s own ``keep=`` — the axes this
         comparison draws rather than refuses (a vertical section's depth axis).
         """
+        if role == "test":
+            if time_window is _UNSET:
+                time_window = self._reference_narrowing()[1]
+            if time_targets is _UNSET:
+                time_targets = self._reference_time_targets()
+            if time_targets_method is _UNSET:
+                time_targets_method = (
+                    "interp" if self.time_method in ("interp", "linear") else "nearest"
+                )
+        else:
+            if time_window is _UNSET:
+                time_window = None
+            if time_targets is _UNSET:
+                time_targets = None
+            if time_targets_method is _UNSET:
+                time_targets_method = "nearest"
         select = select_for(self.select, role)
         if drop_keys:
             select = {k: v for k, v in select.items() if k not in drop_keys}
@@ -3909,7 +4063,10 @@ class Comparison:
             # see _reference_time_targets and prepare_source's time_targets= docstring.
             # None for anything but a repeat-visit/fixed-position reference whose time
             # axis this comparison keeps, so every other lane reads exactly the
-            # contiguous window it always has.
+            # contiguous window it always has. Already clamped to the test source's
+            # own declared record when the aggregate collapses time -- see
+            # _reference_time_targets_uncached's own paragraph on that -- so nothing
+            # further to do with it here.
             time_targets = self._reference_time_targets()
             # How that discrete crop is applied: nearest-step (the default) or a
             # linear interpolation onto the targets, for a low-frequency model
@@ -3921,60 +4078,6 @@ class Comparison:
             tt_method = (
                 "interp" if self.time_method in ("interp", "linear") else "nearest"
             )
-            # When a time aggregate collapses the axis (a profile-family {"time":
-            # "mean"} station comparison, most often), every kept model step and every
-            # kept cast both feed the mean/spread directly, rather than being read only
-            # to be discarded once alignment picks nearest neighbours the way the
-            # ordinary case above works -- so a cast outside the test source's own
-            # record is not a fast-path detail here, the way it is above: reading a
-            # model snapshot for it, and letting it into the reference's own mean
-            # further down, both silently blend a period the test never ran with the
-            # one it did. Restricted here, before either lane is read, to the casts
-            # the test source's own catalog record (read-free, the same mechanism
-            # _reference_narrowing already uses to crop the *test* lane to the
-            # *reference*'s coverage, applied the other way around) actually covers.
-            # Fails open -- leaves time_targets untouched -- when that source declares
-            # no coverage, exactly as derived_window already can.
-            if time_targets is not None and _collapses_time(
-                aggregate_for(self.aggregate, "test")
-            ):
-                test_cov = _time_coverage_of(self.test_name)
-                if test_cov is not None:
-                    import pandas as pd
-
-                    lo, hi = (np.datetime64(x) for x in test_cov)
-                    in_cov = (time_targets >= lo) & (time_targets <= hi)
-                    total = time_targets.size
-                    if not in_cov.all():
-                        if not in_cov.any():
-                            raise ValueError(
-                                f"none of {self.reference_name!r}'s {total} cast "
-                                f"times fall within {self.test_name!r}'s time record "
-                                f"({pd.Timestamp(test_cov[0])} to "
-                                f"{pd.Timestamp(test_cov[1])}) -- there is no "
-                                "overlapping period for this comparison's time "
-                                "aggregate to average over. Check osk.catalog.overlap"
-                                f"({self.test_name!r}, {self.reference_name!r}), or "
-                                "point select={'time': ...} at a period the two "
-                                "sources actually share."
-                            )
-                        excluded = int((~in_cov).sum())
-                        time_targets = time_targets[in_cov]
-                        import warnings
-
-                        from ocean_skill import _stacklevel
-
-                        warnings.warn(
-                            "the time aggregate collapses time, so this comparison "
-                            f"is restricted to the period {self.test_name!r} and "
-                            f"{self.reference_name!r} actually share: {excluded} of "
-                            f"{total} casts from {self.reference_name!r} fall "
-                            f"outside {self.test_name!r}'s time record "
-                            f"({pd.Timestamp(test_cov[0])} to "
-                            f"{pd.Timestamp(test_cov[1])}) and are excluded from "
-                            "both lanes' statistics.",
-                            stacklevel=_stacklevel.find(),
-                        )
             # A vertical section is the same "route around the ordinary select"
             # idea as a point, one level down: the reference is not narrowed
             # independently, it is sampled at wherever the *test* lane's own
