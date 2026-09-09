@@ -754,6 +754,38 @@ def test_rows_time_is_an_alias_for_rows_month_on_a_groupby_climatology():
     assert _matplotlib_titles(by_month) == _matplotlib_titles(by_time)
 
 
+def test_two_facet_legend_drops_the_faceted_fields_in_both_renderers():
+    """rows="month", cols="variable" already puts both facts in every panel's
+    title (see test_rows_month_cols_variable_builds_the_full_grid_in_both_renderers)
+    -- repeating them in every line's own legend entry, as series_label's plain
+    default would, is exactly the giant-legend redundancy a real pooled-station
+    climatology (many stations averaged into one mean profile per month) hits.
+    Only the source should remain to tell the two lines in a panel apart, and
+    rows="time" (the groupby-month alias) must drop the same fields."""
+    from ocean_skill.plot.series import month_label
+
+    months = (4, 5, 6, 7)
+    items = [
+        _month_profile_item(TEMPERATURE, months=months),
+        _month_profile_item(SALINITY, units="1e-3", months=months),
+    ]
+    for row_facet in ("month", "time"):
+        static = render(
+            _spec(items, rows=row_facet, cols="variable"), renderer="matplotlib"
+        )
+        interactive = render(
+            _spec(items, rows=row_facet, cols="variable"), renderer="holoviews"
+        )
+        static_labels = {label for label, *_ in _matplotlib_lines(static)}
+        interactive_labels = {label for label, *_ in _holoviews_lines(interactive)}
+        assert static_labels == interactive_labels == {"run_new", "whots"}
+        for label in static_labels:
+            assert "temperature" not in label.lower()
+            assert "salinity" not in label.lower()
+            for month in months:
+                assert month_label(month) not in label
+
+
 def test_model_and_obs_get_distinct_colors_in_every_grid_cell():
     """Colour follows what varies *within* a panel: month is a facet axis here
     (constant per cell), so model/obs colour by role instead -- the same two
