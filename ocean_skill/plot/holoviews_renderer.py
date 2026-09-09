@@ -1104,6 +1104,102 @@ def _time_depth_grid(
     return out.opts(title=title or "")
 
 
+def _field_map_grid(
+    items: list[dict[str, Any]],
+    title: str | None = None,
+    ncols: int | None = None,
+    shared_axes: bool = True,
+    domain=None,
+    geo: bool = True,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    **_,
+):
+    """One interactive map per item -- several *variables*, not one facet axis.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.field_map_grid` -- see its docstring
+    for the composition this mirrors. Each item (see
+    :meth:`ocean_skill.field.Field._map_item`) is already a single, reduced-to-one-
+    instant field, so unlike :func:`_field_facet` there is no facet coordinate
+    ordering the panels: each gets its own colour scale, drawn through the same
+    :func:`_quadmesh` every geographic family shares, and its own title is its
+    variable (:func:`~ocean_skill.plot.matplotlib_renderer.field_title`) rather than
+    a facet label. ``title`` defaults to whatever the whole set shares
+    (:func:`~ocean_skill.plot.matplotlib_renderer.grid_suptitle`), the same as the
+    static renderer.
+
+    The column count comes from the shared
+    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange
+    the same panels the same way -- the grid is free here too, these panels having
+    no inherent order either.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import (
+        _aspect_of,
+        _limits,
+        field_title,
+        grid_suptitle,
+    )
+    from ocean_skill.plot.typography import facet_layout
+
+    hv = _extension()
+    factor = _canvas_factor(size, zoom)
+    n = len(items)
+    if title is None:
+        title = grid_suptitle(items)
+    if ncols is None:
+        ncols, _nrows = facet_layout(
+            n, _aspect_of(items[0]["field"]), canvas=resolve_canvas(size, zoom)
+        )
+    ncols = max(int(ncols), 1)
+
+    panels = []
+    for item in items:
+        field = item["field"]
+        standard_name = item.get("standard_name")
+        seq, _div = cmaps_for(standard_name)
+        log = is_log(standard_name)
+        lo, hi = _limits(field)
+        clim = (max(lo, 1e-6) if log else lo, hi)
+        raster = _should_rasterize(field, rasterize)
+        mesh = _quadmesh(
+            field,
+            title=field_title(standard_name),
+            cmap=seq,
+            clim=clim,
+            units=item.get("units") or "",
+            geo=geo,
+            log=log,
+            font_scale=font_scale,
+            canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
+            coastline_resolution=coastline_resolution,
+        )
+        outline = _domain_overlay(domain, field, geo=geo)
+        panels.append(mesh if outline is None else mesh * outline)
+
+    if len(panels) == 1:
+        # A lone panel is an Overlay, which has no .cols() -- the same
+        # single-item shortcut _field_facet's own lone frame takes.
+        single = panels[0]
+        if title:
+            single = single.opts(title=str(title))
+        return single
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
 def _section_row(
     item: dict[str, Any],
     labels=("test", "reference"),
@@ -3905,6 +4001,8 @@ def render(spec, **kwargs: Any):
         return _field_grid(spec.items, **opts)
     if family == "field_facet":
         return _field_facet(spec.single, **opts)
+    if family == "field_map_grid":
+        return _field_map_grid(spec.items, **opts)
     if family == "field_movie":
         return _field_movie(spec.items, **opts)
     if family == "facet_movie":

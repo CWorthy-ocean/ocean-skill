@@ -2115,6 +2115,76 @@ def _variable_available(
     return available
 
 
+def _bare_time_is_multistep(
+    source: str,
+    variable: Any,
+    select: dict[str, Any] | None,
+    *,
+    qc: Any = None,
+) -> bool | None:
+    """Report whether ``variable`` genuinely carries a multi-step time axis, cheaply.
+
+    Exists so :meth:`ocean_skill.field.Field._refuse_bare_multistep_time_precheck` can
+    refuse (or not) *before* :func:`prepare_source` runs -- a full prepare over a
+    catalogued grid can mean a vertical transform and a ``.load()`` of the whole
+    record, and paying that just to discover the requested variable never had a time
+    axis at all (a time-invariant grid field like ROMS's ``h``) is the bug this closes.
+
+    Mirrors :func:`_variable_available`'s read/resolve exactly -- same lazy
+    :func:`ocean_skill.read`, same :func:`ocean_skill.operators.resolve_variable` --
+    but asks a different question of the resolved array: not whether it exists, but
+    the size of whatever axis :func:`ocean_skill.operators.resolve_dim` calls its
+    ``"T"``. Nothing here loads a value; a lazy array's dimension sizes are metadata.
+
+    Returns ``True`` when the variable's own time axis survives with more than one
+    step (a real refusal case), ``False`` when it has none or exactly one (static, or
+    a single-step record -- draw it), and ``None`` when the question could not be
+    answered cheaply -- an unresolvable variable, a read that failed, or a
+    ``calculate``-spec (see :func:`_is_calculated`; a calculator runs real work inside
+    :func:`~ocean_skill.operators.resolve_variable` and the only honest way to probe
+    one is the full prepare this function exists to avoid running twice). ``None``
+    means "ask the definitive, data-in-hand check instead" -- the caller's contract,
+    not a failure of its own.
+
+    Deliberately **fails open** to ``None`` on any error, the same policy
+    :func:`_variable_available` uses for the opposite verdict: a probe that itself
+    errors defers to the normal path, which raises with today's type and traceback if
+    something is genuinely wrong, rather than this function inventing its own.
+    """
+    import warnings
+
+    if _is_calculated(variable):
+        return None
+
+    try:
+        import ocean_skill as osk
+        from ocean_skill import operators, tabular
+        from ocean_skill.catalog import resolve
+        from ocean_skill.sources import erddap_constraints
+
+        meta = resolve(source).metadata
+        constraints = erddap_constraints(meta, select, None)
+        read_kwargs = {"qc": qc} if qc is not None else {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            obj = (
+                osk.read(source, constraints=constraints, **read_kwargs)
+                if constraints
+                else osk.read(source, **read_kwargs)
+            )
+            if tabular.is_frame(obj):
+                obj = tabular.to_dataset(obj, meta)
+            da = operators.resolve_variable(obj, variable)
+        if da is None:
+            return None
+        tdim = operators.resolve_dim(da, "T")
+        if tdim is None or tdim not in da.dims:
+            return False
+        return bool(da.sizes[tdim] > 1)
+    except Exception:
+        return None
+
+
 def prepare_source(
     source: str,
     variable: Any,

@@ -10,6 +10,11 @@ read-free half of each default, and ``tests/test_field_series.py``'s
 ``prepare_source`` stub for the post-load fallback half -- ``"stub"``/other
 made-up source names are never catalogued, so those tests exercise the
 fallback exclusively (``catalog.resolve`` raises ``KeyError`` for them).
+
+The time-check half is read-*cheap* rather than read-free: it opens the source
+lazily (``osk.read``, mocked here the same way ``tests/test_availability_probe.py``
+mocks it for ``comparison._variable_available``) to look at the requested
+variable's own dimensions, never ``prepare_source``'s full crop/transform/load.
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+
+import ocean_skill as osk
 
 NITRATE = "mole_concentration_of_nitrate_in_sea_water"
 
@@ -69,6 +76,44 @@ def _roms_point_facet(nt: int = 1, ns: int = 4, ny: int = 3, nx: int = 3):
         name="temperature",
         attrs={"units": "degC"},
     )
+
+
+def _nitrate_dataset(nt: int = 3) -> xr.Dataset:
+    """A lazily-shaped Dataset the ``osk.read`` peek can see NITRATE's own time axis on.
+
+    The variable is named literally as the canonical standard_name, the same way
+    :func:`ocean_skill.roms.standardize`/:func:`ocean_skill.sources.read` already
+    rename the primary variable before ``find_variable`` ever runs (see
+    ``ocean_skill/units.py::find_variable``), so ``resolve_variable(ds, NITRATE)``
+    resolves it with no vocabulary lookup needed.
+    """
+    time = pd.date_range("2024-01-01", periods=nt, freq="MS")
+    lat = np.linspace(60.0, 66.0, 5)
+    lon = np.linspace(-25.0, -15.0, 6)
+    return xr.Dataset(
+        {
+            NITRATE: (
+                ("time", "lat", "lon"),
+                np.random.default_rng(0).normal(5.0, 1.0, (nt, 5, 6)),
+            )
+        },
+        coords={"time": time, "lat": lat, "lon": lon},
+    )
+
+
+def _static_h_dataset() -> xr.Dataset:
+    """A time-invariant grid variable -- ROMS's ``h`` has no time dimension at all."""
+    lat = np.linspace(60.0, 66.0, 5)
+    lon = np.linspace(-25.0, -15.0, 6)
+    return xr.Dataset(
+        {"h": (("lat", "lon"), np.full((5, 6), 50.0))},
+        coords={"lat": lat, "lon": lon},
+    )
+
+
+def _stub_read(monkeypatch, dataset: xr.Dataset) -> None:
+    """Mock ``ocean_skill.read`` so the lazy peek sees ``dataset`` -- no reader I/O."""
+    monkeypatch.setattr(osk, "read", lambda name, **kwargs: dataset)
 
 
 def _resolve(monkeypatch, name: str, metadata: dict) -> None:
@@ -126,12 +171,50 @@ def _make(source: str, **kwargs):
 # -- the bare-multi-step-time refusal, read-free ------------------------------------------
 
 
-def test_a_bare_multistep_grid_refuses_read_free(monkeypatch):
+def test_a_bare_multistep_grid_refuses_read_cheap(monkeypatch):
+    """A variable whose own axis genuinely has several time steps is refused --
+    from the lazy peek, before ``prepare_source`` (the full crop/transform/load)
+    is ever reached.
+    """
     _resolve(monkeypatch, "iceland_his", _grid_meta())
+    _stub_read(monkeypatch, _nitrate_dataset(nt=3))
     _refuses_to_call(monkeypatch)
 
     with pytest.raises(ValueError, match="no single default"):
         _make("iceland_his").plot()
+
+
+def test_a_time_invariant_variable_is_never_refused(monkeypatch):
+    """A static grid variable (ROMS's ``h``, no time dimension at all) has no
+    ambiguous instant to pick -- the lazy peek sees no time axis on it and lets
+    the map draw, the same source's genuinely time-varying variables notwithstanding.
+    """
+    _resolve(monkeypatch, "iceland_his", _grid_meta())
+    _stub_read(monkeypatch, _static_h_dataset())
+    _stub_prepare_source(monkeypatch, _static_h_dataset()["h"])
+
+    from ocean_skill.field import field as make_field
+
+    fig = make_field("iceland_his", "h").plot()
+    assert fig is not None
+
+
+def test_a_calculate_spec_falls_through_to_the_post_load_check(monkeypatch):
+    """The peek never runs a calculator to answer its own question -- it defers,
+    and the definitive post-load check (which does run the calculator, as the
+    real prepare always would) settles it instead.
+    """
+    from ocean_skill.field import field as make_field
+
+    def boom_if_read(name, **kwargs):
+        raise AssertionError("a calculate-spec must not be peeked at via osk.read")
+
+    monkeypatch.setattr(osk, "read", boom_if_read)
+    _resolve(monkeypatch, "iceland_his", _grid_meta())
+    _stub_prepare_source(monkeypatch, _grid_field(nt=1))
+
+    fig = make_field("iceland_his", {"calculate": "mld"}).plot()
+    assert fig is not None
 
 
 def test_a_timeseriesprofile_entry_is_not_pre_checked(monkeypatch):
@@ -194,15 +277,19 @@ def test_movie_is_never_refused_for_bare_time(monkeypatch):
     assert capture["select"]["depth"] == "surface"
 
 
-def test_a_short_declared_coverage_falls_through_to_the_post_load_check(monkeypatch):
-    """Same-day (or near-enough) declared coverage cannot settle it read-free --
-    the post-load check on the *actual* surviving time dim still catches a
-    genuinely multi-step field.
+def test_an_unpeekable_source_falls_through_to_the_post_load_check(monkeypatch):
+    """A flaky/unavailable read (the same fail-open case
+    ``test_availability_probe.py::test_the_probe_fails_open_on_a_reader_error``
+    covers for the sibling probe) leaves the peek inconclusive -- the post-load
+    check on the *actual* surviving time dim still catches a genuinely
+    multi-step field either way.
     """
-    meta = _grid_meta(
-        time_coverage_start="2024-01-01", time_coverage_end="2024-01-01"
-    )
-    _resolve(monkeypatch, "iceland_his", meta)
+
+    def flaky_read(name, **kwargs):
+        raise RuntimeError("flaky reader")
+
+    monkeypatch.setattr(osk, "read", flaky_read)
+    _resolve(monkeypatch, "iceland_his", _grid_meta())
     _stub_prepare_source(monkeypatch, _grid_field(nt=3, with_depth=False))
 
     with pytest.raises(ValueError, match="no single default"):

@@ -892,27 +892,31 @@ class Field:
             "month), or call .movie() to play every step instead."
         )
 
-    def _refuse_bare_multistep_time_precheck(self, meta: dict[str, Any]) -> None:
-        """Read-free half of the bare-time refusal, against catalog time coverage.
+    def _refuse_bare_multistep_time_precheck(self) -> None:
+        """Read-cheap half of the bare-time refusal, against this variable's own axis.
 
-        ``meta`` is what :meth:`_grid_metadata_if_eligible` already resolved --
-        not re-resolved here, so a caller that already paid for it (:meth:`plot`)
-        never pays twice. A source with no declared coverage, or one no more
-        than a couple of days wide (same-day multi-step output, most often),
-        slips through to the definitive check in :meth:`plot`, once the data
-        actually says how many steps survived.
+        A lazy peek (:func:`ocean_skill.comparison._bare_time_is_multistep`) opens
+        the source the same way :func:`~ocean_skill.comparison.prepare_source`
+        eventually would, but stops at dimension metadata -- no crop, no vertical
+        transform, no ``.load()`` -- and reports whether *this* variable's own time
+        axis survives with more than one step. That is the same verdict the
+        definitive post-load check in :meth:`plot` would reach (nothing has
+        narrowed time, so the raw axis and the surviving one are the same size),
+        just without paying for a full prepare first -- the point of a bare,
+        multi-day *source* record like a two-week run is exactly that reading it
+        whole is expensive, and a time-invariant variable (ROMS's ``h``, say) has
+        no ambiguity to refuse in the first place.
+
+        ``True`` refuses outright. ``False`` (static, or a single-step record) and
+        ``None`` (the peek could not answer cheaply -- an unresolvable variable, a
+        calculate-spec, a read that failed) both fall through to the definitive
+        check, which always has the real data to settle it.
         """
-        import pandas as pd
-
-        from ocean_skill.comparison import _TIME_COVERAGE_PAD_DAYS, _time_coverage_of
+        from ocean_skill.comparison import _bare_time_is_multistep
 
         if not self._bare_time():
             return
-        coverage = _time_coverage_of(self.source)
-        if coverage is None:
-            return
-        start, stop = coverage
-        if stop - start > pd.Timedelta(days=2 * _TIME_COVERAGE_PAD_DAYS):
+        if _bare_time_is_multistep(self.source, self.variable, self.select, qc=self.qc):
             self._refuse_bare_multistep_time()
 
     def _facet_field_and_depth(self) -> tuple[Any, str | None]:
@@ -962,6 +966,141 @@ class Field:
         row_dim, facet_dim = _facet_dims_of(field)
         return {**item, "facet_dim": facet_dim, "row_dim": row_dim}
 
+    def _facet_item_or_refuse(self) -> dict[str, Any]:
+        """Build this field's ``field_facet`` item, running every refusal a map needs.
+
+        Shared by :meth:`plot`'s own map branch and :meth:`_map_item` (the
+        :class:`FieldSet` counterpart), so the two never drift on what a map is
+        allowed to draw: the same point-with-no-extent and fixed-station
+        diagnostics, the same bare-multistep-time and labelless-facet refusals
+        :meth:`plot` has always raised here. Called only once the read-cheap
+        grid preamble (the surface default, the bare-multistep-time precheck)
+        has already run or does not apply -- this does not re-run it.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.operators import resolve_dim
+
+        if point_of(self.data) is not None:
+            # A point with neither a surviving time nor depth axis: no line
+            # (nothing to run it along, either way) and no map (no horizontal
+            # extent left) can be drawn -- field_facet would otherwise try to
+            # lay out panels of a field with no axes at all, which fails
+            # confusingly further in.
+            raise ValueError(
+                f"{self.source!r} has been reduced to one place with no "
+                f"surviving time or depth axis ({sorted(self.data.dims)} "
+                "standing), so there is no horizontal extent left for map "
+                "panels and nothing for a line to run along either. Keep time "
+                "standing for a series, or depth for a profile (drop a "
+                "select= that pins it to one value, or an aggregate that "
+                "collapses it), or widen select= to keep a horizontal extent "
+                "for a map."
+            )
+        from ocean_skill.comparison import POINT_FEATURE_TYPES, PROFILE_FEATURE_TYPES
+
+        feature_type = str(self._catalog_metadata().get("featureType") or "")
+        if feature_type in (POINT_FEATURE_TYPES | PROFILE_FEATURE_TYPES):
+            # The catalog says this source is one fixed station (a mooring,
+            # a repeat-visit profile) -- unlike a trajectory, whose lon/lat
+            # legitimately varies, this featureType's data always has one
+            # recoverable position -- yet point_of found none at all, not
+            # merely "narrowed to a point". prepare_source's own cache-hit
+            # check (_is_stale_positionless_station) already discards and
+            # recomputes exactly this shape of stale entry, so reaching
+            # here with cache still on means that repair already ran and
+            # still found nothing; the source's own lon/lat is the more
+            # likely culprit now. Named explicitly rather than falling
+            # through to the field_facet path below, which would otherwise
+            # fail on a field with no horizontal extent to lay out panels
+            # of, with no hint of why.
+            raise ValueError(
+                f"{self.source!r} is catalogued as featureType: "
+                f"{feature_type!r} (one fixed position), but its prepared "
+                "data has no recoverable lon/lat at all. Try field(..., "
+                "cache=False) to rule out a stale cache entry; if the "
+                "position is still missing, the source's own lon/lat "
+                "metadata is what needs fixing."
+            )
+        # The fallback half of the surface default -- whatever the read-free
+        # check above could not settle (an uncatalogued source, a test stub)
+        # -- runs first: it raises its own labelless-axis message when the
+        # bare vertical axis it finds cannot be reduced at all, before the
+        # bare-time check below gets a chance to raise a less specific one for
+        # the same field.
+        field, depth_override = self._facet_field_and_depth()
+        tdim = resolve_dim(field, "T")
+        if (
+            tdim is not None
+            and tdim in field.dims
+            and field.sizes[tdim] > 1
+            and self._bare_time()
+        ):
+            self._refuse_bare_multistep_time()
+        self._refuse_labelless_facet(field)
+        return self._facet_item(field, depth_override)
+
+    def _map_item(self) -> dict[str, Any]:
+        """This field's own single map item, refusing anything that isn't one.
+
+        The self-contained counterpart of :meth:`plot`'s map branch for a
+        caller that never goes through :meth:`plot` at all --
+        :meth:`~ocean_skill.field.FieldSet._map_items`, building several
+        fields' maps to place beside each other. Runs the same read-cheap grid
+        preamble :meth:`plot` runs at its own top (the surface default via
+        :meth:`_surfaced`, the bare-multistep-time precheck) before deferring
+        to :meth:`_facet_item_or_refuse` for the rest -- so a :class:`FieldSet`
+        member gets exactly the defaults a bare :meth:`plot` call on that same
+        field would have, not a second, looser set of rules.
+
+        Beyond that shared ground, this also refuses a field whose item still
+        carries a facet axis of more than one step (several timesteps, several
+        depths) -- a set of several variables drawn beside each other has room
+        for one map per member, not a grid of grids. A facet/row dim of size
+        *one* (a WOA climatology's bare ``time``, unsqueezed but never really
+        a choice -- see :data:`~ocean_skill.comparison.NO_AGGREGATION`'s own
+        docstring) is not this: :func:`~ocean_skill.plot.matplotlib_renderer
+        .field_facet` already draws it as the single panel it is, the same as
+        a solo :meth:`plot` call would. Narrow a genuinely standing axis the
+        same way that solo call would draw it instead: ``select=`` to one
+        instant, or ``aggregate=`` to collapse it.
+        """
+        grid_meta = self._grid_metadata_if_eligible()
+        if grid_meta is not None:
+            if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
+                return self._surfaced()._map_item()
+            self._refuse_bare_multistep_time_precheck()
+
+        item = self._facet_item_or_refuse()
+        field = item["field"]
+        standing = next(
+            (
+                d
+                for d in (item["facet_dim"], item["row_dim"])
+                if d is not None and field.sizes[d] > 1
+            ),
+            None,
+        )
+        if standing is not None:
+            raise ValueError(
+                f"{self.source!r} still has {standing!r}={field.sizes[standing]} "
+                "standing beyond its map, so it is not a single map to place "
+                f"beside the others in this set. Narrow it with select= to one "
+                f"{standing} (e.g. select={{{standing!r}: ...}}) or collapse it "
+                f"with aggregate= (e.g. aggregate={{{standing!r}: 'mean'}}), so "
+                "every member is one map."
+            )
+        axes = [d for d in (item["facet_dim"], item["row_dim"]) if d is not None]
+        if axes:
+            # Every named axis survives, but only at size one -- field_facet's own
+            # single panel already isels exactly this away (see the loop over
+            # n == 1 there); field_map_grid's items carry no such isel step of
+            # their own, so it has to happen here instead. drop=False keeps it as
+            # the scalar coordinate field_suptitle/grid_suptitle already know how
+            # to read for context (e.g. a WOA climatology's bare "time").
+            field = field.squeeze(axes, drop=False)
+            item = {**item, "field": field, "facet_dim": None, "row_dim": None}
+        return item
+
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
 
@@ -975,22 +1114,21 @@ class Field:
         registry, so ``renderer="holoviews"`` gives the interactive version of
         the same plot with no other change.
         """
-        from ocean_skill.align import point_of
-        from ocean_skill.operators import resolve_dim
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
-        # The two grid defaults, read-free where a catalog can settle them before
-        # anything is read: a bare vertical select on a catalogued grid draws the
-        # surface (recurse on the surfaced field, which then runs this same method
-        # start to finish -- including the time check right below, now that the
-        # vertical question is settled); a bare, genuinely multi-step time axis has
-        # no single default instant, and says so rather than guessing one.
+        # The two grid defaults: a bare vertical select on a catalogued grid draws
+        # the surface (recurse on the surfaced field, which then runs this same
+        # method start to finish -- including the time check right below, now that
+        # the vertical question is settled), read-free; a bare, genuinely
+        # multi-step time axis has no single default instant, and says so rather
+        # than guessing one -- read-cheap (a lazy peek at this variable's own axis,
+        # see _refuse_bare_multistep_time_precheck), never a full prepare.
         grid_meta = self._grid_metadata_if_eligible()
         if grid_meta is not None:
             if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
                 return self._surfaced().plot(renderer=renderer, **kwargs)
-            self._refuse_bare_multistep_time_precheck(grid_meta)
+            self._refuse_bare_multistep_time_precheck()
 
         if self.family == "time_depth":
             spec = PlotSpec(
@@ -1008,69 +1146,14 @@ class Field:
             self._require_section_shape()
             spec = PlotSpec(family="section", items=[self.as_item()], options=kwargs)
         else:
-            if point_of(self.data) is not None:
-                # A point with neither a surviving time nor depth axis: no line
-                # (nothing to run it along, either way) and no map (no horizontal
-                # extent left) can be drawn -- field_facet would otherwise try to
-                # lay out panels of a field with no axes at all, which fails
-                # confusingly further in.
-                raise ValueError(
-                    f"{self.source!r} has been reduced to one place with no "
-                    f"surviving time or depth axis ({sorted(self.data.dims)} "
-                    "standing), so there is no horizontal extent left for map "
-                    "panels and nothing for a line to run along either. Keep time "
-                    "standing for a series, or depth for a profile (drop a "
-                    "select= that pins it to one value, or an aggregate that "
-                    "collapses it), or widen select= to keep a horizontal extent "
-                    "for a map."
-                )
-            from ocean_skill.comparison import (
-                POINT_FEATURE_TYPES,
-                PROFILE_FEATURE_TYPES,
-            )
-
-            feature_type = str(self._catalog_metadata().get("featureType") or "")
-            if feature_type in (POINT_FEATURE_TYPES | PROFILE_FEATURE_TYPES):
-                # The catalog says this source is one fixed station (a mooring,
-                # a repeat-visit profile) -- unlike a trajectory, whose lon/lat
-                # legitimately varies, this featureType's data always has one
-                # recoverable position -- yet point_of found none at all, not
-                # merely "narrowed to a point". prepare_source's own cache-hit
-                # check (_is_stale_positionless_station) already discards and
-                # recomputes exactly this shape of stale entry, so reaching
-                # here with cache still on means that repair already ran and
-                # still found nothing; the source's own lon/lat is the more
-                # likely culprit now. Named explicitly rather than falling
-                # through to the field_facet path below, which would otherwise
-                # fail on a field with no horizontal extent to lay out panels
-                # of, with no hint of why.
-                raise ValueError(
-                    f"{self.source!r} is catalogued as featureType: "
-                    f"{feature_type!r} (one fixed position), but its prepared "
-                    "data has no recoverable lon/lat at all. Try field(..., "
-                    "cache=False) to rule out a stale cache entry; if the "
-                    "position is still missing, the source's own lon/lat "
-                    "metadata is what needs fixing."
-                )
-            # The fallback half of the surface default -- whatever the read-free
-            # check above could not settle (an uncatalogued source, a test stub)
-            # -- runs first: it raises its own labelless-axis message when the
-            # bare vertical axis it finds cannot be reduced at all, before the
-            # bare-time check below gets a chance to raise a less specific one for
-            # the same field.
-            field, depth_override = self._facet_field_and_depth()
-            tdim = resolve_dim(field, "T")
-            if (
-                tdim is not None
-                and tdim in field.dims
-                and field.sizes[tdim] > 1
-                and self._bare_time()
-            ):
-                self._refuse_bare_multistep_time()
-            self._refuse_labelless_facet(field)
+            # Every other refusal a map needs -- the point-with-no-extent and
+            # fixed-station diagnostics, the bare-multistep-time and
+            # labelless-facet checks -- lives in _facet_item_or_refuse, shared
+            # with FieldSet._map_items so the two never draw a map by different
+            # rules.
             spec = PlotSpec(
                 family="field_facet",
-                items=[self._facet_item(field, depth_override)],
+                items=[self._facet_item_or_refuse()],
                 options=kwargs,
             )
         return render(spec, renderer=renderer)
@@ -1199,25 +1282,38 @@ class Field:
 
 
 class FieldSet:
-    """Several fields -- variables and/or sources -- drawn together as one
-    ``series``/``profile`` figure.
+    """Several fields -- variables and/or sources -- drawn together as one figure.
 
     ``osk.field()`` builds one :class:`Field` per entry whenever ``source`` and/or
     ``variable`` is a list, sharing the same ``select``/``aggregate``/``label``/
     ``cache`` (there is no per-entry select yet — see :func:`field`), and pools
-    them here. The layout is whatever :mod:`ocean_skill.plot.series` or
-    :mod:`ocean_skill.plot.profile` already does with several lines: one panel
-    with a twin axis for two variables (a right-hand y axis for a series, a top
-    x axis for a profile — ``secondary_y``/``secondary_x`` respectively), one
-    row/column per variable for three or more, everything sharing a variable
-    overlaid within a panel and told apart by source (dashed by default; pass
-    ``encode={"color": "source"}`` to colour by source instead). There is
-    nothing to configure beyond what :meth:`Field.plot` already exposes, because
-    the composition rule *is* the feature.
+    them here. Every member has to reduce the same way for that to mean one
+    figure -- all a :attr:`Field.family` of ``"series"``, all ``"profile"``, all
+    ``"time_depth"``, or all ``"field_facet"`` (a map) -- and :meth:`plot` says
+    so rather than guessing which one it should be when they don't.
 
-    Series or profile only, and every member must reduce the same way — a set with a
-    member that reduces to a map rather than a point has nothing in common to draw as
-    one figure, and :meth:`plot` says so rather than guessing which one it should be.
+    **Series or profile** members overlay: the layout is whatever
+    :mod:`ocean_skill.plot.series` or :mod:`ocean_skill.plot.profile` already does
+    with several lines -- one panel with a twin axis for two variables (a
+    right-hand y axis for a series, a top x axis for a profile —
+    ``secondary_y``/``secondary_x`` respectively), one row/column per variable for
+    three or more, everything sharing a variable overlaid within a panel and told
+    apart by source (dashed by default; pass ``encode={"color": "source"}`` to
+    colour by source instead).
+
+    **Time_depth** members stack: one panel per member, down the page.
+
+    **Map** (``field_facet``) members stack too, but side by side rather than
+    down a page -- one map panel per member, each with its own colour scale and
+    colorbar (different variables, different units, different ranges), under one
+    suptitle naming whatever the set shares (see :func:`Field._map_item`). Each
+    member must already reduce to *one* map -- a member still faceted over time
+    or depth (several timesteps, several levels) is refused, the same way a bare
+    :meth:`Field.plot` call on it would ask you to narrow it first, since a set
+    of several variables has room for one map per member, not a grid of grids.
+
+    There is nothing to configure beyond what :meth:`Field.plot` already exposes,
+    because the composition rule *is* the feature.
     """
 
     def __init__(self, fields: list[Field]):
@@ -1252,17 +1348,26 @@ class FieldSet:
         """Every member's own single ``time_depth`` item, one panel each."""
         return [f._time_depth_item() for f in self.fields]
 
+    def _map_items(self) -> list[dict[str, Any]]:
+        """Every member's own single map item, one panel each.
+
+        See :meth:`Field._map_item`.
+        """
+        return [f._map_item() for f in self.fields]
+
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw every member on one figure, laid out by :mod:`plot.series`,
-        :mod:`plot.profile`, or (one panel per member) the ``time_depth`` family.
+        :mod:`plot.profile`, one panel per member for ``time_depth``, or one map
+        panel per member for a set of maps.
 
         Every member has to draw the same way -- all a :attr:`Field.family` of
         ``"series"`` (a point over time), all ``"profile"`` (a point down depth,
-        at one instant), or all ``"time_depth"`` (depth against time, at one
+        at one instant), all ``"time_depth"`` (depth against time, at one
         point -- drawn as a stacked column of panels rather than overlaid or
-        faceted lines) -- for that to mean anything. A set that mixes any of
-        those, or mixes one of them with a map, has no single figure that is
-        both, so this refuses rather than picking one arbitrarily.
+        faceted lines), or all ``"field_facet"`` (a map, one panel per member,
+        each with its own colour scale -- see :meth:`_map_items`) -- for that to
+        mean anything. A set that mixes any of those has no single figure that
+        is all of them, so this refuses rather than picking one arbitrarily.
         """
         from ocean_skill.comparison import _short_variable_label
         from ocean_skill.plot.registry import render
@@ -1291,6 +1396,17 @@ class FieldSet:
                 family="time_depth", items=self._time_depth_items(), options=kwargs
             )
             return render(spec, renderer=renderer)
+        maps = [f for f in self.fields if f.family == "field_facet"]
+        if maps and len(maps) == len(self.fields):
+            # Every member draws as a map -- one panel each, its own colour
+            # scale and colorbar (different variables, different units), unlike
+            # the shared-scale rows below. _map_item refuses any member still
+            # faceted over time or depth, so every item reaching here is
+            # already a single map.
+            items = self._map_items()
+            family = "field_facet" if len(items) == 1 else "field_map_grid"
+            spec = PlotSpec(family=family, items=items, options=kwargs)
+            return render(spec, renderer=renderer)
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
         mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1
         if not_lines or mixed:
@@ -1317,12 +1433,26 @@ class FieldSet:
         return render(spec, renderer=renderer)
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Refuse: a set of fields drawn as lines has nothing to play as frames."""
+        """Refuse: a set of fields has nothing shared left to play as frames.
+
+        Deliberately does not consult :attr:`Field.family` to tailor this to
+        which shape the set happens to be -- that would force every member's
+        full prepare just to word an error about not proceeding, the opposite
+        of every other read-cheap refusal in this module. Lines over time or
+        down depth already show the whole record in one :meth:`plot`; a set of
+        maps (see :meth:`Field._map_item`) has had every member narrowed to one
+        instant to draw beside the others, with no shared time axis left
+        standing on any of them either. Either way, there is nothing left to
+        animate as a set -- only one field at a time keeps its own facet axis
+        to play.
+        """
         raise ValueError(
-            "this set holds several fields drawn as lines over time or down "
-            "depth -- there is nothing to play as a movie. Use .plot(); it "
-            "already shows the whole figure. For a movie of maps, give "
-            "osk.field() one source and one variable."
+            "a FieldSet has nothing to play as frames -- lines over time or "
+            "down depth already show the whole record in .plot(), and a set "
+            "of maps has had every member narrowed to one instant to draw "
+            "beside the others, with no shared time axis left to animate. "
+            "Movie one variable at a time with osk.field(source, variable), "
+            "which keeps its own time facet to play."
         )
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -1459,6 +1589,23 @@ def field(
     alias repeats, like ``"temp"`` and ``"temperature"``) are dropped with a note
     rather than drawn twice. A single-element list still returns a ``FieldSet``, for
     the same reason ``compare(variables=[v])`` still returns a set.
+
+    A ``select`` that keeps a horizontal extent standing (a map, not a point) composes
+    the same way -- several variables become several map panels side by side, each with
+    its own colour scale and colorbar, since different variables carry unrelated units
+    and ranges::
+
+        osk.field(
+            "second_2wks", ["h", "temperature"],
+            select={"time": "2024-06-15", "depth": "surface"},
+        ).plot()
+
+    One panel for bathymetry, one for temperature, under one suptitle naming whatever
+    the set shares (here, ``surface``). Each member still has to reduce to *one* map
+    first -- a member left with several timesteps or levels standing is refused the
+    same way a bare :meth:`Field.plot` call on it would ask you to narrow it first
+    (see :meth:`Field._map_item`); a time-invariant variable like ``h`` needs no
+    ``select={"time": ...}`` of its own, since it has no time axis to narrow.
 
     ``source`` accepts a list the same way -- one :class:`Field` per source, sharing
     this same ``variable``/``select``/``aggregate``/``label``/``cache``, pooled into
