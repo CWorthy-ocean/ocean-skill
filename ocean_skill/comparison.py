@@ -1557,7 +1557,18 @@ def _prepare(
     # further down the ladder handles, sections included.
     if not calculated and sigma is None and surface and meta.get("model") == "roms":
         name = da.name or "field"
-        da = roms.surface(da.to_dataset(name=name), meta)[name]
+        # A variable roms.standardize() itself promoted to a *coordinate* (h,
+        # Cs_r, sigma_r, mask_rho, angle -- its own grid-constant list) carries
+        # itself as one of its own coords once pulled out by this name: xarray
+        # attaches every coordinate sharing a DataArray's dims, and that
+        # includes the array's own backing coordinate when the two are the
+        # same variable. to_dataset() below refuses a name colliding with one
+        # of its own coordinates, so that self-reference is dropped first --
+        # costing nothing (da already *is* that data) and letting a bare grid
+        # constant like `h` pass through this branch (a no-op here: it has no
+        # s_dim to isel away) the same as any other field.
+        da_for_surface = da.reset_coords(name, drop=True) if name in da.coords else da
+        da = roms.surface(da_for_surface.to_dataset(name=name), meta)[name]
 
     # Order matters three ways now. Selection precedes reduction, or "the mean of
     # January" would average the whole record. The *non-vertical* reduction runs
