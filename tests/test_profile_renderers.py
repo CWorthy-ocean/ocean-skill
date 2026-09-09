@@ -964,6 +964,56 @@ def test_depth_range_spans_both_variables():
     assert bottom == pytest.approx(300.0)
 
 
+def test_depth_range_stops_at_finite_data_not_the_coordinate():
+    """A literal ``depths=`` past a station's real reach keeps the level standing
+    (NaN, not dropped -- see ``ocean_skill.comparison._prepare``'s
+    ``literal_depths`` paragraph) so the *other* lane can be finite there
+    instead. The axis has to describe what is actually drawn, not the deepest
+    depth either lane merely carries a coordinate for.
+    """
+    depths = np.array([5.0, 15.0, 30.0, 50.0, 80.0])
+    coord = -depths
+    reference_values = np.array([20.0, 18.0, np.nan, np.nan, np.nan])
+    test_values = np.array([20.2, 18.2, 16.0, np.nan, np.nan])
+    reference_da = xr.DataArray(
+        reference_values, coords={"z": coord}, dims="z", attrs={"units": "degC"}
+    ).assign_coords(lon=-144.245, lat=49.978)
+    test_da = xr.DataArray(test_values, coords={"z": coord}, dims="z")
+    aligned = xr.Dataset(
+        {"reference": reference_da, "test": test_da, "difference": reference_da * 0}
+    )
+    aligned["reference"].attrs["units"] = "degC"
+    item = {
+        "aligned": aligned,
+        "metrics": {
+            "bias": 0.2,
+            "rmse": 0.3,
+            "corr": 0.97,
+            "n": 3,
+            "std_test": 2.8,
+            "std_reference": 2.8,
+            "crmsd": 0.1,
+            "sigma_ratio": 1.0,
+            "variable": TEMPERATURE,
+        },
+        "units": "degC",
+        "standard_name": TEMPERATURE,
+        "label": None,
+        "labels": ("run_new", "whots"),
+    }
+    fig = render(_spec([item]), renderer="matplotlib")
+    bottom, top = fig.axes[0].get_ylim()
+    # the test lane's deepest finite value (30 m) sets the axis, not the 80 m
+    # coordinate carried by both lanes' all-NaN trailing levels.
+    assert bottom == pytest.approx(30.0)
+    assert top == pytest.approx(5.0)
+
+    obj = render(_spec([item]), renderer="holoviews")
+    (start, end), = _bokeh_y_range(obj)
+    assert start == pytest.approx(30.0)
+    assert end == pytest.approx(5.0)
+
+
 def test_the_title_clears_the_twin_axis_instead_of_overlapping_it():
     """A twin's own ticks and axis label are drawn above the shared top spine,
     exactly where the title's default pad would otherwise land it (matplotlib
