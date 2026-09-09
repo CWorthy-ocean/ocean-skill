@@ -38,8 +38,8 @@ import numpy as np
 import xarray as xr
 
 __all__ = [
-    "as_transect",
     "apply_transect",
+    "as_transect",
     "densify_waypoints",
     "grid_slice",
     "sample_along",
@@ -53,6 +53,12 @@ _ARBITRARY_PATH_KEYS = frozenset({"waypoints", "lon", "lat", "points"})
 _OPTION_KEYS = frozenset({"spacing_km", "method"})
 _METHODS = frozenset({"nearest", "bilinear"})
 
+#: The one key naming the reference-derived-path form -- see
+#: :func:`_as_from_reference_transect`. Kept apart from :data:`_ARBITRARY_PATH_KEYS`
+#: since it names no path itself; the path comes from the reference's own casts,
+#: resolved once :func:`ocean_skill.comparison.Comparison.align` has read them.
+_FROM_REFERENCE_KEYS = frozenset({"from"})
+
 
 def as_transect(spec: Any) -> dict[str, Any]:
     """Validate and normalize a ``select={"transect": ...}`` value.
@@ -65,7 +71,10 @@ def as_transect(spec: Any) -> dict[str, Any]:
     ``select`` in :func:`ocean_skill.cache.key_for_prepared`, before this ever
     runs; a tuple and a list of the same waypoints already serialize identically
     through ``json.dumps``, and a numpy-scalar spelling merely earns its own cache
-    entry rather than colliding with or corrupting another one).
+    entry rather than colliding with or corrupting another one). Reference-derived
+    (see :func:`_as_from_reference_transect`): ``{"kind": "from_reference",
+    "method": ...}`` -- no points of its own; the path comes from whichever
+    ordered collection of casts is standing in as the reference lane.
     """
     if not isinstance(spec, dict) or not spec:
         raise ValueError(
@@ -73,6 +82,8 @@ def as_transect(spec: Any) -> dict[str, Any]:
             "name a grid dimension and its index (select={'transect': {'xi_rho': "
             "30}}), a list of lon/lat waypoints, or a fixed lon/lat line."
         )
+    if _FROM_REFERENCE_KEYS & set(spec):
+        return _as_from_reference_transect(spec)
     if _ARBITRARY_PATH_KEYS & set(spec):
         return _as_path_transect(spec)
     if _OPTION_KEYS & set(spec):
@@ -101,32 +112,18 @@ def as_transect(spec: Any) -> dict[str, Any]:
     return {"kind": "grid", "dim": str(dim), "index": int(index)}
 
 
-def _normalize_options(spec: dict[str, Any]) -> tuple[float | None, str]:
-    """Return ``(spacing_km, method)`` from a transect spec's option keys.
+def _normalize_method(method: Any) -> str:
+    """Return ``method`` as ``"nearest"`` or ``"bilinear"``, or raise.
 
-    ``spacing_km=None`` means "use the source's own cell size" (resolved at apply
-    time, once the source is known -- see :func:`apply_transect`). ``method``
-    defaults to ``"nearest"``, matching :func:`ocean_skill.align.sample_at`'s own
-    default; ``"linear"`` is accepted as a synonym for ``"bilinear"`` (they are one
-    branch downstream). A conservative method is refused with the same reasoning
-    :func:`~ocean_skill.align.sample_at` refuses one for a single point: a path has
-    no area to conservatively regrid onto either.
+    Shared by :func:`_normalize_options` (the arbitrary-path forms) and
+    :func:`_as_from_reference_transect`, which has no ``spacing_km`` to normalize
+    alongside it but the same ``method`` question -- how the *model* is sampled
+    at the casts' positions. ``"linear"`` is accepted as a synonym for
+    ``"bilinear"`` (they are one branch downstream). A conservative method is
+    refused with the same reasoning :func:`~ocean_skill.align.sample_at` refuses
+    one for a single point: a path has no area to conservatively regrid onto
+    either.
     """
-    spacing_km = spec.get("spacing_km")
-    if spacing_km is not None:
-        if isinstance(spacing_km, bool) or not isinstance(spacing_km, int | float):
-            raise ValueError(
-                f"select={{'transect': ...}}: spacing_km must be a positive "
-                f"number of kilometres, got {spacing_km!r}."
-            )
-        spacing_km = float(spacing_km)
-        if not (np.isfinite(spacing_km) and spacing_km > 0):
-            raise ValueError(
-                f"select={{'transect': ...}}: spacing_km must be a positive "
-                f"number of kilometres, got {spacing_km!r}."
-            )
-
-    method = spec.get("method", "nearest")
     if not isinstance(method, str):
         raise ValueError(
             f"select={{'transect': ...}}: method must be 'nearest' or "
@@ -143,7 +140,68 @@ def _normalize_options(spec: dict[str, Any]) -> tuple[float | None, str]:
             "ocean_skill.align.sample_at refuses one for a single point); use "
             "'nearest' or 'bilinear'."
         )
-    return spacing_km, normalized
+    return normalized
+
+
+def _normalize_options(spec: dict[str, Any]) -> tuple[float | None, str]:
+    """Return ``(spacing_km, method)`` from a transect spec's option keys.
+
+    ``spacing_km=None`` means "use the source's own cell size" (resolved at apply
+    time, once the source is known -- see :func:`apply_transect`). ``method``
+    defaults to ``"nearest"``, matching :func:`ocean_skill.align.sample_at`'s own
+    default; see :func:`_normalize_method` for its own validation.
+    """
+    spacing_km = spec.get("spacing_km")
+    if spacing_km is not None:
+        if isinstance(spacing_km, bool) or not isinstance(spacing_km, int | float):
+            raise ValueError(
+                f"select={{'transect': ...}}: spacing_km must be a positive "
+                f"number of kilometres, got {spacing_km!r}."
+            )
+        spacing_km = float(spacing_km)
+        if not (np.isfinite(spacing_km) and spacing_km > 0):
+            raise ValueError(
+                f"select={{'transect': ...}}: spacing_km must be a positive "
+                f"number of kilometres, got {spacing_km!r}."
+            )
+
+    return spacing_km, _normalize_method(spec.get("method", "nearest"))
+
+
+def _as_from_reference_transect(spec: dict[str, Any]) -> dict[str, Any]:
+    """The reference-derived-path branch of :func:`as_transect`.
+
+    ``select={"transect": {"from": "reference"}}`` asks the inverse of an
+    ordinary transect: rather than the caller naming a path for the model to cut
+    along (and the reference then sampled at wherever it snapped to -- see
+    :meth:`ocean_skill.comparison.Comparison._resolved_path`), a *reference* that
+    is an ordered collection of discrete casts names its own path, in the order
+    it was given, and the model is sampled along that instead (see
+    :meth:`ocean_skill.comparison.Comparison._prepare_section_from_casts`, the
+    only caller). It carries no points of its own -- there is nothing here for
+    :func:`apply_transect` to apply to a plain Dataset -- so it only ever reaches
+    a live path (a concrete ``points`` form) once ``compare()``'s
+    ``reference=[...]`` fan-out has resolved it, which is also the only route
+    that can supply the required ordered cast list in the first place; naming it
+    directly to :func:`~ocean_skill.field.field` or a hand-built
+    :class:`~ocean_skill.comparison.Comparison` (which have no such list) raises
+    there.
+    """
+    if spec.get("from") != "reference":
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: 'from' must be the string "
+            "'reference' -- the only path source that is not already a plain "
+            "path spec ('waypoints', 'points', or a fixed lon/lat line)."
+        )
+    extra = set(spec) - {"from", "method"}
+    if extra:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: {sorted(extra)} do not apply to "
+            "a reference-derived path -- only 'method' (how the model is "
+            "sampled at the casts' positions) is accepted alongside 'from'."
+        )
+    method = _normalize_method(spec.get("method", "nearest"))
+    return {"kind": "from_reference", "method": method}
 
 
 def _normalize_pairs(value: Any, *, key: str) -> list[list[float]]:
@@ -309,7 +367,7 @@ def grid_slice(obj, dim: str, index: int, *, subject: str = "the source"):
     result lazy -- the caller (:func:`ocean_skill.comparison._prepare`) computes it
     together with the rest of the reduction, not here.
     """
-    from ocean_skill.align import ALONG_DIM, _haversine_km, _lat_name, _lon_name
+    from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
 
     if dim not in obj.dims:
         raise ValueError(
@@ -645,7 +703,7 @@ def _bilinear_dataset(cropped, lon_name: str, lat_name: str, lons, lats):
     import xarray as xr
 
     from ocean_skill import _stacklevel
-    from ocean_skill.align import ALONG_DIM, _interp_locstream
+    from ocean_skill.align import _interp_locstream
 
     spatial = set(cropped[lon_name].dims)
     promote = [v for v in ("h", "mask_rho") if v in cropped.coords]

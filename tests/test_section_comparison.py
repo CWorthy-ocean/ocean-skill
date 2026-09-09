@@ -32,7 +32,6 @@ import ocean_skill as osk
 from ocean_skill import catalog, roms
 from ocean_skill.align import ALONG_DIM, _align_along_path, _haversine_km
 from ocean_skill.comparison import Comparison
-from ocean_skill.transect import apply_transect
 
 N_S = 12
 HC = 250.0
@@ -541,7 +540,8 @@ def test_full_pipeline_metrics_are_unweighted_section_cells(patched_sources):
 
 def test_full_pipeline_waypoints_reach_the_reference_as_resolved_points(patched_sources):
     """The reference's own select gets replaced with the test's snapped points --
-    check that end to end, not just at the _resolved_path unit level."""
+    check that end to end, not just at the _resolved_path unit level.
+    """
     patched_sources(
         {
             "roms_test": (
@@ -633,7 +633,8 @@ def test_full_pipeline_cache_round_trip_restores_family(patched_sources):
 
 def test_transect_sample_marks_the_cache_key(patched_sources):
     """A routed comparison's cache key must differ from an unrouted hypothetical --
-    see the _point_sample precedent this mirrors."""
+    see the _point_sample precedent this mirrors.
+    """
     patched_sources(
         {
             "roms_test": (
@@ -736,3 +737,186 @@ def test_comparison_plot_excludes_domain_for_sections(patched_sources, monkeypat
     assert captured["family"] == "section_row"
     assert "domain" not in captured["options"]
     assert captured["options"].get("labels") == ("roms_test", "woa_ref")
+
+
+# -- select={"transect": {"from": "reference"}}: a section built from casts ---------
+#
+# The reference IS the path here -- an ordered collection of discrete casts, laid
+# along the section in the caller's own list order, with the model sampled at
+# exactly those cast positions (Comparison._prepare_section_from_casts). Layer 1
+# (construction) mirrors the plain _section_kwargs refusals above; Layer 2 (the
+# real pipeline) reuses _roms_run() as the model and adds a handful of
+# timeSeriesProfile-shaped casts, the same fixture shape
+# tests/test_whots_profile_end_to_end.py uses for a real repeat-visit station.
+
+
+def _from_reference_kwargs(**overrides):
+    kwargs = dict(
+        reference="cast_1+cast_2",
+        test="nope_test",
+        variable=VAR,
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        section_casts=["cast_1", "cast_2"],
+        cache=False,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_a_valid_from_reference_request_constructs():
+    c = Comparison(**_from_reference_kwargs())
+    assert c.select["transect"] == {"from": "reference"}
+    assert c._section_casts == ["cast_1", "cast_2"]
+
+
+def test_from_reference_without_section_casts_refused():
+    """Built directly, with no ordered cast list to derive the path from."""
+    with pytest.raises(ValueError, match="ordered collection of discrete casts"):
+        Comparison(**_from_reference_kwargs(section_casts=None))
+
+
+def test_from_reference_needs_at_least_two_casts():
+    with pytest.raises(ValueError, match="at least 2 casts"):
+        Comparison(**_from_reference_kwargs(section_casts=["cast_1"]))
+
+
+def test_section_casts_without_from_reference_refused():
+    """section_casts= only means something alongside {'from': 'reference'}."""
+    with pytest.raises(ValueError, match="section_casts= only applies to"):
+        Comparison(
+            **_from_reference_kwargs(
+                select={"transect": {"xi_rho": 1}, "depth": [50.0, 200.0]}
+            )
+        )
+
+
+def _cast(lon: float, lat: float, *, n_time: int = 3, base: float = 15.0) -> xr.Dataset:
+    """A timeSeriesProfile-shaped cast: 2 fixed depths, a few repeat visits.
+
+    ``depth``/``time`` lowercase, matching what a properly-built catalog entry
+    presents (unlike tests/test_whots_profile_end_to_end.py's deliberately
+    unrenamed ``DEPTH``/``TIME`` -- a documented quirk of one real ERDDAP
+    dataset, not the general shape :data:`~ocean_skill.align.SECTION_VERTICAL_DIMS`
+    assumes for a section's vertical axis).
+    """
+    time = pd.date_range("2024-04-01", periods=n_time, freq="MS")
+    depth = np.array([50.0, 200.0])
+    values = base - 0.01 * depth[None, :] + 0.05 * np.arange(n_time)[:, None]
+    return xr.Dataset(
+        {VAR: (("time", "depth"), values, {"units": "degC"})},
+        coords={"time": time, "depth": depth},
+    ).assign_coords(lon=lon, lat=lat)
+
+
+_CAST_META = {"featureType": "timeSeriesProfile"}
+
+# Three stations, in order, spread across _roms_run()'s lon -95..-93/lat 24..28
+# domain so each one's nearest model cell is a distinct one -- one column per
+# cast, no coarse-grid snapping collisions -- while still exercising the
+# along-path order this whole feature is about honouring.
+_CAST_LONLATS = [(-94.9, 24.2), (-94.0, 26.0), (-93.1, 27.8)]
+
+
+@pytest.fixture
+def casts_and_model(patched_sources):
+    sources = {
+        "roms_test": (
+            _roms_run(),
+            {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}},
+        ),
+    }
+    for i, (lon, lat) in enumerate(_CAST_LONLATS, start=1):
+        sources[f"cast_{i}"] = (_cast(lon, lat, base=15.0 + i), _CAST_META)
+    patched_sources(sources)
+    return [f"cast_{i}" for i in range(1, len(_CAST_LONLATS) + 1)]
+
+
+def test_full_pipeline_from_reference_casts_form_a_section(casts_and_model):
+    casts = casts_and_model
+    result = osk.compare(
+        reference=casts,
+        test="roms_test",
+        variables=[VAR],
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        aggregate={"time": "mean"},
+    )
+    assert len(result.comparisons) == 1
+    c = result.comparisons[0]
+    assert c.is_section
+    assert c.family == "section_row"
+    aligned = c.aligned
+    assert set(aligned.data_vars) == {"test", "reference", "difference"}
+    # one column per cast -- none dropped, none merged, since all three sit well
+    # inside the model's own domain and at distinct positions.
+    assert aligned.sizes[ALONG_DIM] == len(casts)
+    np.testing.assert_allclose(aligned["test"]["z"].values, [-50.0, -200.0])
+
+
+def test_from_reference_columns_are_in_list_order(casts_and_model):
+    casts = casts_and_model
+    result = osk.compare(
+        reference=casts,
+        test="roms_test",
+        variables=[VAR],
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        aggregate={"time": "mean"},
+    )
+    aligned = result.comparisons[0].aligned
+    ref_lon = np.asarray(aligned["reference"]["lon"])
+    ref_lat = np.asarray(aligned["reference"]["lat"])
+    expected_lon, expected_lat = zip(*_CAST_LONLATS, strict=True)
+    np.testing.assert_allclose(ref_lon, expected_lon)
+    np.testing.assert_allclose(ref_lat, expected_lat)
+    # cumulative distance is strictly increasing in list order -- the along-path
+    # axis this feature exists to build.
+    along = np.asarray(aligned[ALONG_DIM])
+    assert np.all(np.diff(along) > 0)
+
+
+def test_from_reference_reversed_order_is_a_different_cache_key(casts_and_model):
+    casts = casts_and_model
+    forward = Comparison(
+        reference="+".join(casts),
+        test="roms_test",
+        variable=VAR,
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        aggregate={"time": "mean"},
+        section_casts=casts,
+        cache=False,
+    )
+    backward = Comparison(
+        reference="+".join(reversed(casts)),
+        test="roms_test",
+        variable=VAR,
+        select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+        aggregate={"time": "mean"},
+        section_casts=list(reversed(casts)),
+        cache=False,
+    )
+    assert forward._cache_key != backward._cache_key
+
+
+def test_from_reference_single_reference_source_refused(casts_and_model):
+    """compare()'s reference=[...] must be a *collection*, not one source."""
+    casts = casts_and_model
+    with pytest.raises(ValueError, match="ordered \\*collection\\*"):
+        osk.compare(
+            reference=casts[0],
+            test="roms_test",
+            variables=[VAR],
+            select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+            aggregate={"time": "mean"},
+        )
+
+
+def test_from_reference_refuses_times_fan(casts_and_model):
+    casts = casts_and_model
+    with pytest.raises(ValueError, match="times="):
+        osk.compare(
+            reference=casts,
+            test="roms_test",
+            variables=[VAR],
+            select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+            aggregate={"time": "mean"},
+            times=["2024-04", "2024-05"],
+        )
