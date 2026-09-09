@@ -1326,6 +1326,79 @@ def _select_horizontal_then_aggregate(
     return da
 
 
+def _reindex_tolerance(sorted_levels: np.ndarray) -> float:
+    """Half the largest gap between an observational lane's own, deduped and
+    sorted, reported levels -- the tolerance :func:`_reindex_onto_literal_depths`
+    reindexes an obs lane onto caller-named depths with.
+
+    Small enough that a requested level genuinely *inside* the obs's own range
+    still snaps to its nearest real level (a midpoint between two adjacent
+    levels sits exactly half their gap away from each), but not so wide that a
+    level clearly beyond the obs's deepest report gets pulled in as though it
+    had been measured there. A single-level obs (nothing to take a gap from)
+    gets a 1 m floor instead.
+    """
+    lv = np.asarray(sorted_levels, dtype="float64")
+    if lv.size < 2:
+        return 1.0
+    return float(np.max(np.diff(lv)) / 2.0)
+
+
+def _reindex_onto_literal_depths(
+    da,
+    zname: str,
+    levels: np.ndarray,
+    targets: list[float],
+    source: str,
+):
+    """Put an observational lane onto exactly the caller-named ``targets``.
+
+    Unlike the ordinary nearest-level ``isel`` (which always finds *some* real
+    level, silently clamping a too-deep request to the obs's own deepest one),
+    this reads the obs's real value near an in-range target and leaves a
+    target beyond its deepest reported level genuinely ``NaN`` -- the caller
+    named that literal depth, so it is honored, missing data and all, rather
+    than quietly repeating a shallower reading. :func:`ocean_skill.align.
+    align`'s "always lands on the reference" rule then carries these
+    NaN-below-obs levels straight through to the aligned pair, where the
+    model lane -- already interpolated onto these same literal targets by
+    :func:`ocean_skill.roms.to_depth` -- is free to be finite there instead:
+    the "see the model below the data" case this path exists for.
+
+    A cast can log the same depth twice, or store its axis descending --
+    :meth:`~xarray.DataArray.reindex` needs a unique, ascending index, so both
+    are resolved first (``groupby(...).mean(...)``, which also collapses a
+    duplicate to its honest mean, the same way an overlapping band's cells are
+    averaged above).
+    """
+    attrs = dict(da.attrs)
+    da = da.assign_coords({zname: (zname, levels)}).groupby(zname).mean(zname)
+    tol = _reindex_tolerance(da[zname].values)
+    target_arr = np.asarray(targets, dtype="float64")
+    da = da.reindex({zname: target_arr}, method="nearest", tolerance=tol)
+    da.attrs = attrs
+    if len(target_arr) == 1:
+        da.attrs["actual_depth"] = float(target_arr[0])
+    finite_levels = levels[np.isfinite(levels)]
+    if finite_levels.size:
+        deepest = float(np.max(finite_levels))
+        below = [t for t in targets if t > deepest + tol]
+        if below:
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"{source!r}: an explicit depth list reaches {max(below):g} m, "
+                f"{max(below) - deepest:g} m below this reference's deepest "
+                f"observed level ({deepest:g} m) -- the observation has no "
+                "data there (a gap on the plot), so the model at that depth "
+                "is not scored against anything.",
+                stacklevel=_stacklevel.find(),
+            )
+    return da
+
+
 def _prepare(
     obj,
     meta: dict[str, Any],
@@ -1335,6 +1408,7 @@ def _prepare(
     *,
     source: str = "<unnamed>",
     detide: dict[str, Any] | None = None,
+    literal_depths: bool = False,
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -1355,6 +1429,16 @@ def _prepare(
     nothing detiding can do; that is warned about and left alone rather than raised,
     the same way :meth:`Comparison._subtract_scalar_means` warns rather than raises on
     a lane with no finite mean.
+
+    ``literal_depths`` (only meaningful for a profile-shaped reference's observational
+    lane -- see :data:`PROFILE_FEATURE_TYPES`) says whether ``select``'s depth list was
+    named by the caller (``depths=``, or their own ``select={"depth": [...]}``) rather
+    than auto-filled from the reference's own levels (see :func:`_profile_depth_plan`).
+    When it is, the observational branch below reads the obs at exactly those depths
+    (:func:`_reindex_onto_literal_depths`) -- NaN below its own deepest reported level,
+    rather than the ordinary nearest-level ``isel``'s silent clamp -- so a caller who
+    deliberately asked for a depth past the data gets to see the model there too.
+    ``False`` (the default) is today's clamped behaviour, unchanged.
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -1407,6 +1491,12 @@ def _prepare(
     surface = depth is not None and is_surface_request(depth)
     band = is_depth_band(depth)
     column = is_column_request(depth)
+    # See _prepare's own literal_depths= paragraph above: honor a caller-named depth
+    # list on the observational side too, rather than clamping it to the obs's own
+    # deepest level. Scoped to profile-shaped featureTypes -- a gridded/timeSeries
+    # reference has no "clamp to the deepest reported level" behavior to relax in the
+    # first place.
+    _deepen = literal_depths and str(meta.get("featureType") or "") in PROFILE_FEATURE_TYPES
     agg = NO_AGGREGATION if aggregate is None else aggregate
     # A registered calculator (mixed layer depth, ...) reads the whole water column
     # itself and returns a field with no vertical axis at all -- there is nothing
@@ -1669,6 +1759,15 @@ def _prepare(
                 else np.asarray(da[zname])
             )
             if band:
+                if _deepen:
+                    warnings.warn(
+                        f"{source!r}: an explicit depth list past the observed "
+                        "range only applies to a discrete depth list "
+                        '(depths=[...] or select={"depth": [...]}) -- a '
+                        '{"min", "max"} band still takes the levels inside it, '
+                        "clamped to the nearest one when none fall inside.",
+                        stacklevel=_stacklevel.find(),
+                    )
                 # Observational products report at standard levels, so a band is just
                 # the levels inside it -- no cell thicknesses to weight by, and
                 # inventing some would imply structure the product does not claim.
@@ -1695,14 +1794,21 @@ def _prepare(
                 targets = [
                     0.0 if is_surface_request(d) else float(d) for d in depth
                 ]
-                keep = [int(np.abs(levels - t).argmin()) for t in targets]
-                attrs = dict(da.attrs)
-                da = da.isel({zname: keep})
-                da.attrs = attrs
-                # Same rule as the band above: skip only when these levels are
-                # genuinely going to survive (no vertical aggregate collapsing them).
-                if len(keep) == 1 or _vertical_only(agg):
-                    da.attrs["actual_depth"] = float(np.mean(levels[keep]))
+                if _deepen:
+                    # A caller-named depth list is honored literally: read at exactly
+                    # these targets, NaN below the obs's own deepest report, rather
+                    # than the ordinary nearest-level clamp just below.
+                    da = _reindex_onto_literal_depths(da, zname, levels, targets, source)
+                else:
+                    keep = [int(np.abs(levels - t).argmin()) for t in targets]
+                    attrs = dict(da.attrs)
+                    da = da.isel({zname: keep})
+                    da.attrs = attrs
+                    # Same rule as the band above: skip only when these levels are
+                    # genuinely going to survive (no vertical aggregate collapsing
+                    # them).
+                    if len(keep) == 1 or _vertical_only(agg):
+                        da.attrs["actual_depth"] = float(np.mean(levels[keep]))
             else:
                 target = 0.0 if surface else float(depth)
                 k = int(np.abs(levels - target).argmin())
@@ -1741,21 +1847,29 @@ def _prepare(
 
     if (
         da is not None
-        and str(meta.get("featureType") or "") == "timeSeriesProfile"
+        and not _deepen
+        and str(meta.get("featureType") or "") in PROFILE_FEATURE_TYPES
         and zname is not None
         and zname in da.dims
         and operators.resolve_dim(da, "T") not in da.dims
     ):
-        # A ragged station's own union of levels (every visit's distinct depths
-        # pooled together, written by _profile_depth_plan's timeSeriesProfile
-        # branch) is what "keep the whole depth axis standing" means here -- but
-        # any one visit only ever sampled a handful of them. Once time has
-        # narrowed to this one cast (no "time" dimension left -- see the
-        # singleton-time squeeze above), every level this cast did not sample is
-        # NaN by construction, and is dropped here rather than handed to
-        # align()'s vertical interpolation (_match_vertical) as if it were a
-        # real gap the model should be interpolated onto too -- the cast is
-        # compared on exactly the depths it actually has.
+        # A profile's own declared levels, or a ragged station's own union of
+        # levels (every visit's distinct depths pooled together, written by
+        # _profile_depth_plan's timeSeriesProfile branch), is what "keep the
+        # whole depth axis standing" means here -- but a plain cast's axis can
+        # itself carry levels this variable was never actually measured at, and
+        # a ragged station's one visit only ever sampled a handful of its
+        # station-wide union. Once time has narrowed to one cast (no "time"
+        # dimension left -- a plain profile has none to begin with; a
+        # timeSeriesProfile gets there via the singleton-time squeeze above),
+        # every level this cast did not sample is NaN by construction, and is
+        # dropped here rather than handed to align()'s vertical interpolation
+        # (_match_vertical) as if it were a real gap the model should be
+        # interpolated onto too -- the cast is compared on exactly the depths
+        # it actually has. Skipped when _deepen already put exactly the
+        # caller's own literal depths here (including any deliberately below
+        # the obs's own range) -- those NaN levels are the point, not a hole
+        # to prune.
         da = da.dropna(zname, how="all")
 
     if da is None:
@@ -1953,6 +2067,7 @@ def prepare_source(
     time_targets_method: str = "nearest",
     qc: Any = None,
     detide: dict[str, Any] | None = None,
+    literal_depths: bool = False,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -2074,6 +2189,11 @@ def prepare_source(
     that never changes what gets cached), this changes the field itself, so it joins
     the cache key below -- a raw lane and its detided twin must never collide.
 
+    ``literal_depths`` is :func:`_prepare`'s own flag, passed straight through --
+    see its docstring paragraph. It changes what this lane's observational branch
+    reads (a caller-named depth past the reference's own range is honored rather
+    than clamped), so it joins the cache key below the same way ``detide`` does.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -2137,6 +2257,12 @@ def prepare_source(
         }
     if detide is not None:
         key_select["_detide"] = {"filter": "PL33", "T": detide["T"]}
+    if literal_depths:
+        # Re-keys only a lane that actually asked for this treatment -- see the
+        # literal_depths= docstring paragraph above -- so every lane cached before
+        # this feature existed (and every ordinary, non-literal lane today) keeps
+        # its byte-identical key.
+        key_select["_literal_depths"] = True
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -2218,7 +2344,14 @@ def prepare_source(
 
         obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
     da, depth = _prepare(
-        obj, meta, variable, dict(select or {}), aggregate, source=source, detide=detide
+        obj,
+        meta,
+        variable,
+        dict(select or {}),
+        aggregate,
+        source=source,
+        detide=detide,
+        literal_depths=literal_depths,
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
@@ -2309,6 +2442,7 @@ class Comparison:
         qc: Any = None,
         subtract_mean: Any = False,
         detide: Any = False,
+        literal_depths: bool | None = None,
     ):
         from ocean_skill.vocabulary import resolve_and_report
 
@@ -2405,6 +2539,21 @@ class Comparison:
         # detide= paragraph). {"test": {"T": ...} | None, "reference": ...}; see
         # _normalize_detide.
         self.detide = _normalize_detide(detide)
+        # Whether a profile-shaped reference's depth list was named by the caller
+        # (rather than auto-filled from the reference's own levels -- see
+        # _profile_depth_plan) -- see _prepare's own literal_depths= paragraph for
+        # what it changes. None (the default) infers it from this Comparison's own
+        # select: a depth key already carrying an explicit vertical request (list,
+        # scalar, or band) can only have gotten there by the caller writing it
+        # themselves, since a direct Comparison(...) call has no auto-fill step of
+        # its own to second-guess. compare()'s fan passes this explicitly instead,
+        # since its own auto-filled select looks identical to a caller's literal
+        # one by the time it reaches here.
+        if literal_depths is None:
+            ref_sel = select_for(self.select, "reference")
+            self.literal_depths = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
+        else:
+            self.literal_depths = bool(literal_depths)
         self._aligned = None
         self._metrics = None
         self._pointwise_metrics = None
@@ -3071,6 +3220,13 @@ class Comparison:
             time_targets_method=time_targets_method,
             qc=qc_for(self.qc, role),
             detide=detide_for(self.detide, role),
+            # Only the reference lane's own observational branch reads a caller-
+            # named depth list any differently (see _prepare's literal_depths=
+            # paragraph) -- the test/model lane already reads exactly what it is
+            # asked for regardless, so this is scoped to "reference" alone, the
+            # same way the profile-depth machinery elsewhere in this class treats
+            # the reference as the one lane with "its own levels" to speak of.
+            literal_depths=self.literal_depths and role == "reference",
         )
 
     def _warn_on_pair_spec_mismatch(
@@ -5230,8 +5386,8 @@ def _profile_depth_plan(
     *,
     ref_time_collapsed: bool = False,
     ref_time_climatology: bool = False,
-) -> tuple[tuple[Any, ...], bool]:
-    """Per-reference ``(values, many_values)`` for compare()'s depth fan.
+) -> tuple[tuple[Any, ...], bool, bool]:
+    """Per-reference ``(values, many_values, literal)`` for compare()'s depth fan.
 
     Four cases, in order:
 
@@ -5256,45 +5412,60 @@ def _profile_depth_plan(
       unlike a profile's *whole* column, this quietly overrides a real default
       (surface) rather than filling in one that never existed;
     * anything else keeps the ordinary depth fan unchanged.
+
+    ``literal`` says whether the depths this call settled on were named by the
+    caller (``depths=``, or their own ``select={"depth": [...]}``) as opposed to
+    auto-filled from the reference's own levels or its catalog metadata -- see
+    :attr:`Comparison.literal_depths`, which this feeds. Only ever ``True`` for a
+    profile-shaped reference (:data:`PROFILE_FEATURE_TYPES`); the fixed-station
+    branch's own depth is inferred from metadata, never the caller's, so it is
+    always ``False`` even though it also skips the ordinary per-depth fan.
     """
     if calculated:
-        return (None,), False
-    if fan_key == "depth" and _is_profile_reference(
+        return (None,), False, False
+    is_depth_fan = fan_key == "depth"
+    is_profile_ref = is_depth_fan and _is_profile_reference(
         ref,
         over,
         time_collapsed=ref_time_collapsed,
         climatology=ref_time_climatology,
-    ):
-        ref_sel = select_for(select, "reference")
-        has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
-        if not has_vertical_select:
-            if explicit_depths is not None:
-                levels = (
-                    list(explicit_depths)
-                    if isinstance(explicit_depths, list | tuple)
-                    else [explicit_depths]
-                )
-            else:
-                levels = _profile_reference_depths(ref, cache)
-            return (levels,), False
-    if fan_key == "depth" and explicit_depths is None:
-        ref_sel = select_for(select, "reference")
-        has_vertical_select = any(k in ref_sel for k in _ANY_VERTICAL_KEYS)
-        if not has_vertical_select:
-            depth = _station_depth_from_metadata(ref)
-            if depth is not None:
-                import warnings
+    )
+    ref_sel = select_for(select, "reference") if is_depth_fan else {}
+    has_vertical_select = (
+        any(k in ref_sel for k in _ANY_VERTICAL_KEYS) if is_depth_fan else False
+    )
+    if is_profile_ref and not has_vertical_select:
+        if explicit_depths is not None:
+            levels = (
+                list(explicit_depths)
+                if isinstance(explicit_depths, list | tuple)
+                else [explicit_depths]
+            )
+            return (levels,), False, True
+        levels = _profile_reference_depths(ref, cache)
+        return (levels,), False, False
+    if is_depth_fan and explicit_depths is None and not has_vertical_select:
+        depth = _station_depth_from_metadata(ref)
+        if depth is not None:
+            import warnings
 
-                from ocean_skill import _stacklevel
+            from ocean_skill import _stacklevel
 
-                warnings.warn(
-                    f"{ref!r} sits at ~{depth:g} m per its catalog entry -- "
-                    f"comparing the model at {depth:g} m, not the surface. Pass "
-                    "depths=[...] to override.",
-                    stacklevel=_stacklevel.find(),
-                )
-                return (depth,), False
-    return fan_values, len(fan_values) > 1
+            warnings.warn(
+                f"{ref!r} sits at ~{depth:g} m per its catalog entry -- "
+                f"comparing the model at {depth:g} m, not the surface. Pass "
+                "depths=[...] to override.",
+                stacklevel=_stacklevel.find(),
+            )
+            return (depth,), False, False
+    # A profile reference whose vertical select was already explicit (has_vertical_
+    # select True) falls through to here with the ordinary fan_values unchanged --
+    # see the docstring's third bullet -- but it is still the caller's own literal
+    # request, not an auto-fill, so it is marked so as long as it is genuinely a
+    # profile-shaped reference (a gridded/timeSeries reference's own vertical
+    # select has no "clamp to the deepest observed level" behavior for literal to
+    # change, so marking it there would be meaningless, not just unused).
+    return fan_values, len(fan_values) > 1, bool(is_profile_ref and has_vertical_select)
 
 
 def _selected_time(select: dict[str, Any]) -> Any:
@@ -6493,7 +6664,7 @@ def compare(
             # reference _profile_depth_plan hands back the ordinary depth fan
             # unchanged (the surface default, unless the caller named depths=).
             try:
-                these_values, many_values = _profile_depth_plan(
+                these_values, many_values, literal_depths = _profile_depth_plan(
                     ref,
                     select,
                     over,
@@ -6591,6 +6762,7 @@ def compare(
                             qc=qc,
                             subtract_mean=subtract_mean,
                             detide=detide,
+                            literal_depths=literal_depths,
                         )
                         try:
                             c.align(refresh=refresh)
