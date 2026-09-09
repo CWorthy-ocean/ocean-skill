@@ -30,6 +30,7 @@ from ocean_skill.cf import find_coord
 
 __all__ = [
     "ALONG_DIM",
+    "NoValidData",
     "align",
     "axis_edges",
     "clear_regridder_memo",
@@ -46,6 +47,21 @@ __all__ = [
     "subset_to_bbox",
     "subset_to_box",
 ]
+
+
+class NoValidData(ValueError):
+    """A point sample fell where the source has no valid data (a masked/dry cell).
+
+    Raised by :func:`sample_at` when every candidate cell around a station is masked --
+    a coastal or fjord station whose interpolation stencil (or nearest cell) the model
+    grid treats as land, say. Subclasses ``ValueError`` so every existing caller and any
+    ``skip_missing=False`` user still sees a plain ``ValueError``; ``compare()`` under
+    ``skip_missing=True`` (:mod:`ocean_skill.comparison`) catches this specific type to
+    skip the one unformable station rather than aborting the whole run over it. A caller
+    misusing ``sample_at`` itself (a conservative regrid against a zero-area point, just
+    below) is a different, non-skippable mistake and stays a bare ``ValueError``.
+    """
+
 
 #: Sampling methods :func:`sample_at` understands, and what each means at a point.
 #: ``nearest`` takes the containing cell's own value; the interpolating spellings weight
@@ -951,7 +967,7 @@ def sample_at(
             if method in _INTERPOLATING
             else "The station may sit in a masked cell; check the source covers it."
         )
-        raise ValueError(
+        raise NoValidData(
             f"{subject} has no valid data at ({lon:g}, {lat:g}) — the "
             f"{'interpolated' if method in _INTERPOLATING else 'nearest'} value is "
             f"missing everywhere (offset {offset:.1f} km, cell ~{cell_km:.1f} km). "
