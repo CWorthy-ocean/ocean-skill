@@ -5849,9 +5849,13 @@ def _profile_depth_plan(
       never a scalar-per-depth fan (which would collapse the very axis the profile
       exists to keep). The levels are the caller's ``depths=`` when given, else --
       the case this feature adds -- the reference's own
-      (:func:`_profile_reference_depths`). An explicit ``select={"depth": [...]}`` is
-      left to the ordinary path, which already carries a whole list as one comparison
-      (``fan_values`` is then a 1-tuple holding that list);
+      (:func:`_profile_reference_depths`). A ``depths=`` naming one or more **bands**
+      (``{"min", "max"}``) is the exception: a band collapses depth rather than
+      standing on it, so it falls through to the ordinary per-depth fan instead --
+      one comparison per band -- exactly as it would against a non-profile reference.
+      An explicit ``select={"depth": [...]}`` is left to the ordinary path too, which
+      already carries a whole list as one comparison (``fan_values`` is then a
+      1-tuple holding that list);
     * a **fixed-station** reference (a mooring, say) names its own depth the same
       way, but as one scalar rather than a column -- comparing it against the
       model's default surface would silently score the wrong level. Only when the
@@ -5883,15 +5887,29 @@ def _profile_depth_plan(
         any(k in ref_sel for k in _ANY_VERTICAL_KEYS) if is_depth_fan else False
     )
     if is_profile_ref and not has_vertical_select:
-        if explicit_depths is not None:
+        explicit_bands = explicit_depths is not None and (
+            is_depth_band(explicit_depths)
+            or (
+                isinstance(explicit_depths, list | tuple)
+                and any(is_depth_band(d) for d in explicit_depths)
+            )
+        )
+        # A band collapses the depth axis rather than standing on it -- it is
+        # averaged, not a level to plot against -- so a list of bands is a fan (one
+        # collapsed value per band), not a profile's kept y-axis. Falling through to
+        # the ordinary per-depth fan below (fan_values) treats it exactly as a
+        # non-profile reference already would; only scalar/"surface" levels (or the
+        # reference's own, just below) stay standing as one profile.
+        if explicit_depths is not None and not explicit_bands:
             levels = (
                 list(explicit_depths)
                 if isinstance(explicit_depths, list | tuple)
                 else [explicit_depths]
             )
             return (levels,), False, True
-        levels = _profile_reference_depths(ref, cache)
-        return (levels,), False, False
+        if explicit_depths is None:
+            levels = _profile_reference_depths(ref, cache)
+            return (levels,), False, False
     if is_depth_fan and explicit_depths is None and not has_vertical_select:
         depth = _station_depth_from_metadata(ref)
         if depth is not None:
