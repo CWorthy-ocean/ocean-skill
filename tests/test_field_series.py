@@ -51,7 +51,8 @@ def _gridded_map(nt: int = 3):
 def _point_with_season(depths=(0.0, 50.0, 100.0), seasons=("DJF", "MAM", "JJA", "SON")):
     """A point profile whose time axis was reduced to a season groupby -- the
     shape ``operators.aggregate({"time": {"groupby": "season", ...}})`` leaves
-    standing on a model column."""
+    standing on a model column.
+    """
     depth = np.array(depths)
     values = 8.0 + np.arange(len(seasons))[:, None] + 0.01 * depth[None, :]
     da = xr.DataArray(
@@ -237,7 +238,8 @@ def test_a_point_with_neither_time_nor_depth_refuses_to_plot(stub):
 def test_a_point_with_depth_fans_into_one_item_per_level(stub):
     """An explicit list of levels keeps the per-level lines (see
     ``Field.is_time_depth``): a bare or banded select at this same point instead
-    draws the new ``time_depth`` panel (tests/test_field_time_depth.py)."""
+    draws the new ``time_depth`` panel (tests/test_field_time_depth.py).
+    """
     stub(_point_with_depth(depths=(0.0, 50.0, 100.0)))
     f = _make()
     items = f._series_items()
@@ -260,7 +262,8 @@ def test_a_seasonal_point_column_is_a_profile_fanned_per_season(stub):
     """The one exception to _profile_items' "no axis beyond depth" rule: a
     surviving season axis fans into one item per season, in coordinate
     (chronological) order -- the same idiom as fanning depth levels for a
-    series."""
+    series.
+    """
     stub(_point_with_season())
     f = _make()
     assert not f.is_series
@@ -465,7 +468,8 @@ def test_three_variables_become_three_rows(stub):
 def test_depth_fanout_multiplies_items_per_variable(stub):
     """An explicit list of levels keeps every member drawing as ``series`` -- a
     bare or banded select instead makes every member ``time_depth``, which
-    ``FieldSet.plot`` refuses (see ``test_a_time_depth_set_refuses_to_plot``)."""
+    ``FieldSet.plot`` refuses (see ``test_a_time_depth_set_refuses_to_plot``).
+    """
     stub(_point_with_depth(depths=(0.0, 50.0, 100.0)))
     fs = _make_set([NITRATE, SILICATE], select={"depth": [0.0, 50.0, 100.0]})
     assert len(fs._items()) == 6
@@ -492,10 +496,16 @@ def test_duplicate_variables_are_dropped(stub, capsys):
     assert "duplicate" in capsys.readouterr().out
 
 
-def test_a_map_shaped_member_refuses_the_set_plot(stub):
+def test_map_shaped_members_still_faceted_over_time_refuse_the_set_plot(stub):
+    """A set whose members all draw as maps composes (see
+    ``tests/test_field_map_grid.py``) -- but each map still has to reduce to
+    *one* instant first, the same read-cheap/post-load refusal a solo
+    ``Field.plot()`` would give this same field (see
+    ``tests/test_field_grid_defaults.py``).
+    """
     stub(_gridded_map())
     fs = _make_set([NITRATE, SILICATE])
-    with pytest.raises(ValueError, match="overlaid lines"):
+    with pytest.raises(ValueError, match="no single default"):
         fs.plot()
 
 
@@ -584,7 +594,8 @@ def test_a_one_element_source_list_is_still_a_set(stub):
 
 def test_two_sources_overlay_as_lines_in_one_panel(stub):
     """One variable, two sources -- no secondary axis (that's for two variables);
-    both lines share the one panel, told apart by source."""
+    both lines share the one panel, told apart by source.
+    """
     stub(_point_series())
     fs = _make_source_set(["stub_a", "stub_b"])
     fig = fs.plot()
@@ -630,7 +641,8 @@ def test_duplicate_sources_are_dropped(stub, capsys):
 def test_the_vocabulary_warning_fires_once_across_many_sources(stub):
     """The same alias resolves the same way for every source -- one warning for
     the whole fan-out, not one per source (mirrors ``compare()``'s identical
-    up-front resolution)."""
+    up-front resolution).
+    """
     stub(_point_series())
     with pytest.warns(UserWarning, match="resolved to standard_name") as record:
         _make_source_set(["stub_a", "stub_b", "stub_c"])

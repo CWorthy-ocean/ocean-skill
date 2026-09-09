@@ -35,6 +35,7 @@ FAMILIES = (
     "field_row",
     "field_grid",
     "field_facet",
+    "field_map_grid",
     "field_movie",
     "facet_movie",
     "series",
@@ -177,6 +178,23 @@ class PlotSpec:
         :meth:`ocean_skill.field.Field.as_item` (a model column at one point) and
         :meth:`ocean_skill.comparison.Comparison.as_item` (``over=`` a vertical
         axis, at a station).
+
+        ``field_map_grid`` is ``field_facet``'s counterpart for several *different*
+        variables rather than one variable's own facet axis: a
+        :class:`~ocean_skill.field.FieldSet` whose members are all maps (see
+        :meth:`ocean_skill.field.Field._map_item`/:meth:`ocean_skill.field.FieldSet
+        ._map_items`). Each item is the same single-field dict ``field_facet``'s own
+        item is (``field``, ``units``, ``standard_name``, ``depth``, ``label``), but
+        with ``facet_dim``/``row_dim`` always ``None`` -- every member has already been
+        narrowed to one instant, since a set of several variables has room for one map
+        per member, not a grid of grids. Unlike ``field_facet``, each panel gets its
+        own colour scale and colorbar (different variables, unrelated ranges) and is
+        titled by its own variable rather than a shared facet coordinate; the suptitle
+        carries whatever the whole set shares instead (depth/time/region, via
+        :func:`ocean_skill.plot.matplotlib_renderer.grid_suptitle`). A single-item set
+        routes through ``field_facet`` itself rather than this family, the same way a
+        one-element :class:`~ocean_skill.field.FieldSet` of lines still draws as one
+        clean panel.
 
         ``locations`` carries no field payload at all: one item per catalog *source*,
         with ``kind`` (``"point"`` or ``"extent"``), a lon/lat midpoint, ``bboxes``

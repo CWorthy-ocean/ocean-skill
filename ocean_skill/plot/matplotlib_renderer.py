@@ -57,6 +57,7 @@ __all__ = [
     "facet_labels",
     "field_facet",
     "field_grid",
+    "field_map_grid",
     "field_row",
     "locations",
     "metric_panel_titles",
@@ -3573,6 +3574,190 @@ def time_depth_grid(
     return fig
 
 
+def field_map_grid(
+    items: list[dict[str, Any]],
+    *,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    ncols: int | None = None,
+    domain: tuple[float, float, float, float] | np.ndarray | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+):
+    """Draw one map per item -- several *variables*, not one variable's own facet axis.
+
+    The ``field_facet`` counterpart for a :class:`~ocean_skill.field.FieldSet` of
+    several maps (see :meth:`ocean_skill.field.Field._map_item`): each item is a single,
+    already-reduced-to-one-instant field, so unlike :func:`field_facet` there is no
+    facet coordinate ordering the panels and nothing shared for them to share a colour
+    scale over. Each panel gets **its own** colour scale and **its own** colorbar --
+    :func:`skill_map`'s convention, not :func:`field_facet`'s -- since different
+    variables carry different units and unrelated ranges; a shared bar across nitrate
+    and temperature would be meaningless on both ends.
+
+    The grid is free (these panels have no inherent order): ``ncols`` defaults to
+    :func:`~ocean_skill.plot.typography.facet_layout`, which reads the orientation off
+    the domain's own aspect ratio, the same rule :func:`field_facet`'s one-facet-axis
+    case and :func:`skill_map`'s single-item case use.
+
+    Each panel is titled by its own **variable** (:func:`field_title`) -- the inverse of
+    :func:`field_facet`, where the panels say *when* and the variable rides in the
+    suptitle, because here the panels are exactly what differs and the suptitle is
+    whatever the whole set shares instead (``title`` defaults to :func:`grid_suptitle`,
+    which composes only the depth/time/region every item has in common, dropping the
+    variable since the items' ``standard_name``s differ by construction).
+
+    Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`.
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
+    set to each renderer (see :func:`_warn_if_interactive_only`) -- they are the
+    interactive renderer's fix for a large mesh and do nothing here.
+    """
+    import warnings
+
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.typography import facet_figsize, facet_layout
+
+    _warn_if_interactive_only(rasterize, hover)
+    if not items:
+        raise ValueError("field_map_grid needs at least one field, got none")
+
+    n = len(items)
+    aspect = _aspect_of(items[0]["field"])
+    canvas = resolve_canvas(size, zoom)
+    if title is None:
+        title = grid_suptitle(items)
+
+    if ncols is None:
+        ncols, nrows = facet_layout(n, aspect, canvas=canvas)
+    else:
+        ncols = max(int(ncols), 1)
+        nrows = -(-n // ncols)
+
+    # Vertical, one per panel -- see skill_map's identical choice:
+    # colorbar_is_horizontal forces horizontal above a wide-domain aspect,
+    # which is right for one bar shared across a row but would put a bar
+    # under *every* panel here at fixed height, something facet_figsize is
+    # not charged for below.
+    horizontal = str((colorbar_kwargs or {}).get("orientation", "vertical")).startswith(
+        "h"
+    )
+    if horizontal:
+        warnings.warn(
+            "colorbar_kwargs={'orientation': 'horizontal'} puts a bar under every "
+            "panel, but this family's height is not re-charged for that (see "
+            "facet_figsize). Pass figsize= or zoom= to compensate.",
+            stacklevel=_stacklevel.find(),
+        )
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=nrows,
+        ncols=ncols,
+        title_every_row=True,  # every panel names its own variable
+        canvas=canvas,
+        # PANEL_W_FRACTION (0.72), not the facet default: a bar beside every panel,
+        # not one shared bar with nothing beside the maps -- see skill_map's own
+        # identical comment on this choice.
+        panel_w_fraction=(
+            PANEL_W_FRACTION_HORIZONTAL_CBAR if horizontal else PANEL_W_FRACTION
+        ),
+        font_scale=font_scale,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        # the suptitle spans the page, sized as every other family's is rather than
+        # off this grid's own column count -- see type_scale
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    # FACET_COLORBAR_ASPECT is deliberately not applied: it exists for one bar
+    # refitted across a whole row, and each bar here spans exactly one panel --
+    # which is what the grid default already describes.
+    merged_title = _merged(defaults["title_kwargs"], title_kwargs)
+    merged_gridline = _merged(defaults["gridline_kwargs"], gridline_kwargs)
+    merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    merged_suptitle = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        subplot_kw={"projection": _map_projection(*(item["field"] for item in items))},
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes.ravel())
+
+    for i, item in enumerate(items):
+        ax = flat[i]
+        col = i % ncols
+        field = item["field"]
+        standard_name = item.get("standard_name")
+        cmap, _ = cmaps_for(standard_name)
+        vmin, vmax = _limits(field)
+        norm = norm_for(standard_name, vmin, vmax)
+        im = _draw_map(
+            ax,
+            field,
+            label=field_title(standard_name),
+            cmap=cmap,
+            norm=norm,
+            mark=mark,
+            domain=domain,
+            gridline_kwargs=merged_gridline,
+            tick_label_kwargs=merged_tick,
+            title_kwargs=merged_title,
+            left_labels=(col == 0) if shared_axis_labels else None,
+            # The bottom row is ragged when n does not fill the grid, so the question
+            # is "is there a panel below me?", not "am I in the last row?".
+            bottom_labels=(i + ncols >= n) if shared_axis_labels else None,
+            coastline_resolution=coastline_resolution,
+        )
+        ax.title._osk_size_pinned = title_pinned
+        bar_label = f"[{item['units']}]" if item.get("units") else ""
+        _draw_colorbar(
+            fig, im, ax, bar_label, colorbar_kwargs, defaults["colorbar_kwargs"]
+        )
+
+    # Cells past the last panel carry no map and so no label artists -- hidden
+    # rather than deleted, which keeps the drawn panels on the grid they were
+    # sized for instead of letting the layout engine expand them into the gap.
+    for ax in flat[n:]:
+        ax.set_visible(False)
+
+    if title:
+        sup = fig.suptitle(title, **merged_suptitle)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, ncols, canvas=canvas, nrows=nrows)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def section_row(
     aligned,
     *,
@@ -5053,6 +5238,8 @@ def render(spec, **kwargs: Any):
         _check_options(field_row, opts)
     elif family == "field_facet":
         _check_options(field_facet, opts)
+    elif family == "field_map_grid":
+        _check_options(field_map_grid, opts)
     elif family == "field_movie":
         _check_options(field_movie, opts)
     elif family == "facet_movie":
@@ -5112,6 +5299,8 @@ def render(spec, **kwargs: Any):
         )
     if family == "skill_map":
         return skill_map(spec.items, **opts)
+    if family == "field_map_grid":
+        return field_map_grid(spec.items, **opts)
     if family == "locations":
         return locations(spec.items, **opts)
     if family == "field_grid":
