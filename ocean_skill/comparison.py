@@ -2012,10 +2012,15 @@ def _materialize_point_column(sub, point_window: bool):
     :data:`POINT_COLUMN_MATERIALIZE_MAX_BYTES`. Either failing leaves ``sub``
     exactly as given -- lazy, to be loaded the ordinary way once the whole
     aligned pair is finished (see :func:`prepare_source`'s own ``.load()``).
-    An already-numpy ``sub`` (``sub.chunks`` empty) is returned unchanged too --
-    nothing to gain by "loading" it again.
+    An already-numpy ``sub`` (no dask-backed variable) is returned unchanged too --
+    nothing to gain by "loading" it again. The laziness test is per-variable
+    rather than ``Dataset.chunks``, which *raises* when two variables disagree on
+    their chunk size along a shared dim -- a real ROMS file does exactly that
+    (``Cs_r``/``sigma_r`` one chunk along ``s_rho``, the field several), and
+    ``sub`` re-attaches those grid fields alongside the resolved field.
     """
-    if not point_window or not sub.chunks:
+    lazy = any(v.chunks is not None for v in sub.variables.values())
+    if not point_window or not lazy:
         return sub
     if sub.nbytes > POINT_COLUMN_MATERIALIZE_MAX_BYTES:
         return sub

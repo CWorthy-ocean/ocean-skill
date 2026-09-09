@@ -30,7 +30,15 @@ META = {"model": "roms", "vertical": {"hc": 20.0, "s_dim": "s_rho"}}
 
 
 def _roms_timeseries(nt=200, ns=12, ny=6, nx=8) -> xr.Dataset:
-    """A ROMS-shaped tracer, chunked one time step per chunk like a real history file."""
+    """A ROMS-shaped tracer, chunked one time step per chunk like a real history file.
+
+    ``Cs_r``/``sigma_r`` are deliberately re-chunked to a *single* whole-column
+    chunk, while ``temp`` keeps several ``s_rho`` chunks -- a real ROMS output
+    stores its 1-D vertical grid fields this way regardless of how a data
+    variable is chunked, and the resulting cross-variable chunk mismatch is
+    exactly what made ``Dataset.chunks`` raise in production (see the
+    ``_materialize_point_column`` fix this file exercises).
+    """
     sigma = np.linspace(-1.0, 0.0, ns)
     rng = np.random.default_rng(0)
     h = 50.0 + 150.0 * rng.random((ny, nx))
@@ -53,7 +61,10 @@ def _roms_timeseries(nt=200, ns=12, ny=6, nx=8) -> xr.Dataset:
             ),
         },
     )
-    return ds.chunk({"time": 1, "s_rho": ns})
+    ds = ds.chunk({"time": 1, "s_rho": max(1, ns // 3)})
+    ds["sigma_r"] = ds["sigma_r"].chunk({"s_rho": -1})
+    ds["Cs_r"] = ds["Cs_r"].chunk({"s_rho": -1})
+    return ds
 
 
 # Squarely inside the synthetic grid, and exactly on a grid point so
