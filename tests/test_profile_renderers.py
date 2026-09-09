@@ -1842,6 +1842,45 @@ def test_metrics_stacked_draws_in_both_renderers():
     assert texts and "\n" in texts[0].data[2]
 
 
+def test_profile_metrics_labels_overrides_the_prefix_in_both_renderers():
+    """Mirrors ``test_merged_metrics_box_prefixes_each_variables_row``'s fixture --
+    two variables merged onto one profile panel, two metrics rows to override.
+    """
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    custom = ["surface layer", "bottom layer"]
+
+    static = render(
+        _spec(items, metric_keys=("bias",), metrics_labels=custom),
+        renderer="matplotlib",
+    )
+    static_text = " ".join(t.get_text() for ax in static.axes for t in ax.texts)
+    assert all(label in static_text for label in custom)
+
+    import holoviews as hv
+
+    interactive = render(
+        _spec(items, metric_keys=("bias",), metrics_labels=custom),
+        renderer="holoviews",
+    )
+    interactive_text = " ".join(
+        t.text for t in interactive.traverse(lambda x: x, [hv.Text])
+    )
+    assert all(label in interactive_text for label in custom)
+
+
+def test_profile_metrics_labels_wrong_length_lists_the_current_labels_to_copy():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    with pytest.raises(
+        ValueError, match="needs one label per metrics-box row"
+    ) as exc:
+        render(
+            _spec(items, metric_keys=("bias",), metrics_labels=["only one"]),
+            renderer="matplotlib",
+        )
+    assert "temperature" in str(exc.value).lower()
+    assert "salinity" in str(exc.value).lower()
+
+
 # -- legend placement and custom labels ---------------------------------------------
 
 
@@ -2088,6 +2127,7 @@ def test_profile_is_registered_everywhere_it_has_to_be():
         "colors",
         "line_labels",
         "titles",
+        "metrics_labels",
     ):
         assert option in _top_level_options(), option
 

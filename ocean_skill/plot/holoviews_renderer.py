@@ -2707,6 +2707,7 @@ def _series(
     encode=None,
     residual=False,
     metrics_loc="auto",
+    metrics_labels=None,
     metric_keys=DEFAULT_METRIC_KEYS,
     legend=True,
     line_labels=None,
@@ -2730,7 +2731,8 @@ def _series(
     :mod:`ocean_skill.plot.series` and :mod:`ocean_skill.plot.style`, the same as the
     static renderer, so the two cannot disagree about anything but the drawing call
     (including ``line_labels=``, which overrides the legend text itself the same way in
-    both — see :func:`ocean_skill.plot.series.compose`).
+    both, and ``metrics_labels=``, which overrides each statistics-box row's prefix
+    the same way — see :func:`ocean_skill.plot.series.compose`).
 
     Two things differ, both stated rather than silent. First, the statistics box is an
     ``hv.Text`` in data coordinates, so it pans and zooms with the data instead of
@@ -2773,6 +2775,7 @@ def _series(
         residual=residual,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        metrics_labels=metrics_labels,
         legend=legend,
         line_labels=line_labels,
         colors=colors,
@@ -3113,6 +3116,7 @@ def _profile(
     metrics_loc="auto",
     metric_keys=DEFAULT_METRIC_KEYS,
     metrics_stacked: bool = False,
+    metrics_labels=None,
     colors=None,
     legend=True,
     line_labels=None,
@@ -3178,6 +3182,7 @@ def _profile(
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
         metrics_stacked=metrics_stacked,
+        metrics_labels=metrics_labels,
         colors=colors,
         legend=legend,
         line_labels=line_labels,

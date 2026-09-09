@@ -531,6 +531,7 @@ def compose(
     metric_keys=(),
     metrics_loc: str = "auto",
     metrics_stacked: bool = False,
+    metrics_labels: Sequence[str] | None = None,
     colors=None,
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
@@ -545,8 +546,12 @@ def compose(
     ``metrics_stacked=True`` keeps the statistics box narrow-and-tall (one metric
     per line) instead of the default single wide line -- a box sized for a
     portrait panel rather than a page-wide one; see
-    :func:`ocean_skill.plot.series._metrics_text`. ``colors=`` pins the auto
-    colour cycle to specific values instead; see
+    :func:`ocean_skill.plot.series._metrics_text`. ``metrics_labels=`` overrides
+    each row's automatic prefix by hand, matching
+    :func:`ocean_skill.plot.series.compose` exactly (one string per metrics-box
+    row, figure-wide, panel by panel; see
+    :func:`ocean_skill.plot.series._resolve_metrics_labels`). ``colors=`` pins the
+    auto colour cycle to specific values instead; see
     :func:`ocean_skill.plot.style.resolve`. A band's fill follows for free.
 
     ``legend=``/``line_labels=`` match :func:`ocean_skill.plot.series.compose`
@@ -740,8 +745,14 @@ def compose(
     # do per panel and are carried on the Layout instead, for the renderer to act on
     # once, for the whole figure.
     legend_placement = _series_layout._normalize_legend(legend)
+    # Validated once, up front, against every panel's own row count (including a
+    # blank cell's zero rows) -- see _series_layout._resolve_metrics_labels. One
+    # slice per panel, in the same order `grouped` (and so `panels`) draws them in.
+    metrics_label_slices = _series_layout._resolve_metrics_labels(
+        [[i for _, i in group] for group in grouped], metric_keys, metrics_labels
+    )
     panels = []
-    for group in grouped:
+    for group, label_slice in zip(grouped, metrics_label_slices, strict=True):
         if not group:
             # A two-axis grid's cell nothing matched (facet_grid's own empty
             # list) -- a blank panel, hidden by the renderer rather than
@@ -781,6 +792,7 @@ def compose(
             metric_keys,
             prefix=len(group) > 1,
             stacked=metrics_stacked,
+            labels=label_slice,
         )
         # Row count, not item count: a fanned season axis puts several items in
         # one group that all share one comparison's metrics, deduped to one row
