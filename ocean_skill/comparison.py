@@ -2343,6 +2343,29 @@ def prepare_source(
         from ocean_skill.align import subset_to_time_targets
 
         obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
+    if (
+        not pre_crop
+        and time_window is not None
+        and tabular.is_frame(obj)
+        and _collapses_time(aggregate)
+    ):
+        # A tabular (station/profile) lane's ordinary post-_prepare crop further
+        # down is a no-op once a time aggregate has collapsed the axis it would
+        # have cropped: _prepare's own tabular.to_dataset conversion and time
+        # reduction have both already run by the time that crop would apply (see
+        # the "frame" branch at the top of _prepare). Applied here instead,
+        # before _prepare, so a time_window derived from the *test* lane's own
+        # record (Comparison.align's fallback for when its own time axis is
+        # already gone -- see the docstring paragraph above) actually excludes
+        # the casts outside it from this lane's mean/spread, rather than
+        # silently keeping every one. Converted to a Dataset first (what
+        # _prepare would do anyway) since subset_to_time needs an xarray object,
+        # not a DataFrame; _prepare's own is_frame check then sees a Dataset
+        # already and skips reconverting.
+        from ocean_skill.align import subset_to_time
+
+        obj = tabular.to_dataset(obj, meta)
+        obj = subset_to_time(obj, time_window)
     da, depth = _prepare(
         obj,
         meta,
@@ -3102,6 +3125,22 @@ class Comparison:
             extra["_ref_time_targets"] = hashlib.sha1(
                 ",".join(sorted(str(t) for t in ref_targets)).encode()
             ).hexdigest()
+        # A time aggregate that collapses time now also crops the *reference* (and
+        # prunes its cast times) to the *test* source's own catalog-declared record
+        # -- see align()'s window/time_targets fallbacks -- which changes the
+        # mean/spread this entry holds whenever that record is narrower than the
+        # reference's own. `_ref_time_targets` above still digests the reference's
+        # *full* cast list (that method's own contract is unrelated to this), so
+        # without a marker here a run cached before this crop existed would keep
+        # being served forever as if nothing changed. The test's declared coverage
+        # itself, not a boolean, so a later catalog rebuild that widens or narrows
+        # that record also invalidates the entries it actually affects, the same
+        # way `_ref_window` already does for the reference's own coverage.
+        if _collapses_time(aggregate_for(self.aggregate, "test")):
+            test_cov = _time_coverage_of(self.test_name)
+            extra["_test_time_coverage"] = (
+                [str(w) for w in test_cov] if test_cov is not None else None
+            )
         if self.qc is not None:
             # Not resolved against either lane's own contract here (unlike
             # prepare_source's per-lane `_qc`, which folds in the *effective*
@@ -3579,6 +3618,60 @@ class Comparison:
         # below), so the reference -- which *is* the casts -- is never
         # interpolated either way.
         tt_method = "interp" if self.time_method in ("interp", "linear") else "nearest"
+        # When a time aggregate collapses the axis (a profile-family {"time":
+        # "mean"} station comparison, most often), every kept model step and every
+        # kept cast both feed the mean/spread directly, rather than being read only
+        # to be discarded once alignment picks nearest neighbours the way the
+        # ordinary case above works -- so a cast outside the test source's own
+        # record is not a fast-path detail here, the way it is above: reading a
+        # model snapshot for it, and letting it into the reference's own mean
+        # further down, both silently blend a period the test never ran with the
+        # one it did. Restricted here, before either lane is read, to the casts
+        # the test source's own catalog record (read-free, the same mechanism
+        # _reference_narrowing already uses to crop the *test* lane to the
+        # *reference*'s coverage, applied the other way around) actually covers.
+        # Fails open -- leaves time_targets untouched -- when that source declares
+        # no coverage, exactly as derived_window already can.
+        if time_targets is not None and _collapses_time(
+            aggregate_for(self.aggregate, "test")
+        ):
+            test_cov = _time_coverage_of(self.test_name)
+            if test_cov is not None:
+                import pandas as pd
+
+                lo, hi = (np.datetime64(x) for x in test_cov)
+                in_cov = (time_targets >= lo) & (time_targets <= hi)
+                total = time_targets.size
+                if not in_cov.all():
+                    if not in_cov.any():
+                        raise ValueError(
+                            f"none of {self.reference_name!r}'s {total} cast "
+                            f"times fall within {self.test_name!r}'s time record "
+                            f"({pd.Timestamp(test_cov[0])} to "
+                            f"{pd.Timestamp(test_cov[1])}) -- there is no "
+                            "overlapping period for this comparison's time "
+                            "aggregate to average over. Check osk.catalog.overlap"
+                            f"({self.test_name!r}, {self.reference_name!r}), or "
+                            "point select={'time': ...} at a period the two "
+                            "sources actually share."
+                        )
+                    excluded = int((~in_cov).sum())
+                    time_targets = time_targets[in_cov]
+                    import warnings
+
+                    from ocean_skill import _stacklevel
+
+                    warnings.warn(
+                        "the time aggregate collapses time, so this comparison "
+                        f"is restricted to the period {self.test_name!r} and "
+                        f"{self.reference_name!r} actually share: {excluded} of "
+                        f"{total} casts from {self.reference_name!r} fall "
+                        f"outside {self.test_name!r}'s time record "
+                        f"({pd.Timestamp(test_cov[0])} to "
+                        f"{pd.Timestamp(test_cov[1])}) and are excluded from "
+                        "both lanes' statistics.",
+                        stacklevel=_stacklevel.find(),
+                    )
         # A vertical section is the same "route around the ordinary select" idea as
         # a point, one level down: the reference is not narrowed independently, it is
         # sampled at wherever the *test* lane's own transect actually snapped to (see
@@ -3650,6 +3743,22 @@ class Comparison:
             # still reads the whole record: MUR over a regional model's footprint is a
             # workable map per step and 2.2 TB across its 8838 daily ones.
             window = time_span_of(t)
+            if window is None and _collapses_time(
+                aggregate_for(self.aggregate, "test")
+            ):
+                # A time aggregate already reduced the test lane's own time axis
+                # away before bbox_of/time_span_of ever saw it -- the profile-
+                # family case this exists for -- so there is no axis left here to
+                # read a window off, and the reference below would otherwise be
+                # read (and averaged/spread) over its *whole* record rather than
+                # cropped to what the test actually covers. Falls back to the test
+                # *source*'s own catalog-declared record instead (read-free, the
+                # same mechanism the time_targets narrowing just above already
+                # uses). None, the same as derived_window can already be, when
+                # the test source declares no coverage -- fails open, leaving
+                # this comparison exactly as it behaved before this fallback
+                # existed.
+                window = _time_coverage_of(self.test_name)
         elif troute is not None and t is not None:
             ref_extra, bbox = self._resolved_path(t, troute)
         try:
