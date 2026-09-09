@@ -183,3 +183,135 @@ def test_a_tz_aware_bound_is_converted_rather_than_refused():
     assert erddap_constraints(TABLE, {"time": slice(aware, None)}) == {
         "time>=": "2015-01-01T12:00:00Z"
     }
+
+
+# -- the in-process open memo -------------------------------------------------
+#
+# ``fresh_open_cache`` (tests/conftest.py) clears ``osk.read``'s memo around every
+# test; ``isolated_cache`` (also autouse) already leaves caching *enabled* (just
+# relocated to a temp dir), which is what lets this memo do anything in these tests
+# at all.
+
+
+def test_repeat_reads_reuse_one_open(csv_source, monkeypatch):
+    """A second read of the same, unchanged entry never reopens the catalog file.
+
+    The regression this guards: a station-fan comparison opens the *same* test
+    source once per reference -- for a large gridded model, reopening +
+    re-standardizing it per station is the dominant cost of an otherwise-cheap
+    per-station point read.
+    """
+    import intake
+
+    opens = []
+    real_from_yaml_file = intake.from_yaml_file
+
+    def spy(*args, **kwargs):
+        opens.append(args)
+        return real_from_yaml_file(*args, **kwargs)
+
+    monkeypatch.setattr(intake, "from_yaml_file", spy)
+
+    osk.read(csv_source)
+    osk.read(csv_source)
+    osk.read(csv_source)
+
+    assert len(opens) == 1
+
+
+def test_cached_reads_have_independent_attrs(csv_source):
+    """Two reads share the same underlying object, but not the same attrs dict.
+
+    A caller downstream (``_prepare``'s ``da.attrs["actual_depth"] = ...``, e.g.)
+    writes into the result's attrs after extracting one variable -- if the memo
+    handed out the identical object twice, that write would leak into every other
+    caller holding "the same" cached read.
+    """
+    first = osk.read(csv_source)
+    second = osk.read(csv_source)
+    assert first is not second
+    first.attrs["mutated_by"] = "first caller"
+    assert "mutated_by" not in second.attrs
+
+
+def test_editing_the_catalog_file_forces_a_reopen(csv_source, monkeypatch, tmp_path):
+    """A rewritten catalog file (new mtime/size) is never served from the old memo."""
+    import time
+
+    import intake
+
+    opens = []
+    real_from_yaml_file = intake.from_yaml_file
+
+    def spy(*args, **kwargs):
+        opens.append(args)
+        return real_from_yaml_file(*args, **kwargs)
+
+    monkeypatch.setattr(intake, "from_yaml_file", spy)
+
+    osk.read(csv_source)
+    assert len(opens) == 1
+
+    # Rewrite the underlying CSV with a fourth row, then touch the catalog file
+    # itself (its own mtime/size is the memo key, not the CSV's) so the read that
+    # follows is not served from before this edit.
+    csv_path = tmp_path / "station.csv"
+    csv_path.write_text(
+        "time,temp\n2015-01-01,1\n2015-01-02,2\n2015-01-03,3\n2015-01-04,4\n"
+    )
+    time.sleep(0.01)
+    csv_source.path.touch()
+
+    result = osk.read(csv_source)
+    assert len(opens) == 2
+    assert len(result) == 4
+
+
+def test_cache_clear_empties_the_open_memo(csv_source, monkeypatch):
+    """``osk.cache.clear()`` also flushes the read memo, not just the on-disk one."""
+    import intake
+
+    from ocean_skill import cache
+
+    opens = []
+    real_from_yaml_file = intake.from_yaml_file
+
+    def spy(*args, **kwargs):
+        opens.append(args)
+        return real_from_yaml_file(*args, **kwargs)
+
+    monkeypatch.setattr(intake, "from_yaml_file", spy)
+
+    osk.read(csv_source)
+    osk.read(csv_source)
+    assert len(opens) == 1
+
+    cache.clear()
+
+    osk.read(csv_source)
+    assert len(opens) == 2
+
+
+def test_cache_disable_bypasses_the_open_memo(csv_source, monkeypatch):
+    """``osk.cache.disable()`` also turns off the read memo, like the on-disk one."""
+    import intake
+
+    from ocean_skill import cache
+
+    opens = []
+    real_from_yaml_file = intake.from_yaml_file
+
+    def spy(*args, **kwargs):
+        opens.append(args)
+        return real_from_yaml_file(*args, **kwargs)
+
+    monkeypatch.setattr(intake, "from_yaml_file", spy)
+
+    cache.disable()
+    try:
+        osk.read(csv_source)
+        osk.read(csv_source)
+    finally:
+        cache.enable()
+
+    assert len(opens) == 2

@@ -514,7 +514,18 @@ def clear(kind: str | None = None) -> int:
     The thing to run after rerunning a model in place — see the module docstring on
     why identity-keyed entries cannot notice that themselves. Clears every kind
     unless one is named.
+
+    Also empties :func:`ocean_skill.sources.read`'s own in-process open memo
+    (unconditionally, regardless of ``kind``) — it holds an already-opened,
+    already-standardized source, so a rerun-in-place this call exists for needs
+    that memo gone too, or a since-edited source would keep being served from
+    before the rerun. Imported locally: :mod:`ocean_skill.sources` imports from
+    this module's sibling :mod:`ocean_skill.catalog`, not from here, but importing
+    it at this module's top would still invite a cycle as the package grows.
     """
+    from ocean_skill import sources as _sources
+
+    _sources.read.cache_clear()
     found = entries(kind)
     for entry in found:
         _remove_entry(entry)
