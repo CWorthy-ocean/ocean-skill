@@ -660,6 +660,24 @@ def compose(
     }
     varying = _style.varying_fields(all_specs)
 
+    # A rows=/cols= facet that names "variable" or a temporal field (season,
+    # month, or the "time" facet, which falls back through cast instant ->
+    # month -> season -- see _group_key) already puts that fact in every
+    # panel's title (panel_title, below); repeating it in every line's own
+    # legend entry is the same redundancy series() already avoids for its own
+    # "variable" facet (series.py's label_varying trim), generalized here to
+    # profile's other title fields and to both rows and cols at once, since
+    # compose() -- unlike series() -- can facet on both simultaneously.
+    facet_fields: set[str] = set()
+    for axis in (rows, cols):
+        if axis in ("variable", "standard_name"):
+            facet_fields.add("variable")
+        elif axis == "time":
+            facet_fields |= {"time", "month", "season"}
+        elif axis in ("month", "season"):
+            facet_fields.add(axis)
+    label_varying = varying - facet_fields if facet_fields else varying
+
     # A "comparison" facet puts one item/station per panel; if exactly one role's
     # source distinguishes panels (the station, usually the reference -- or
     # whichever role the caller varied instead), promote it into the title
@@ -677,21 +695,22 @@ def compose(
         ]
         if len(distinguishing) == 1:
             surface_role = distinguishing[0]
-    if surface_role is not None:
+    if surface_role is not None or facet_fields:
         ambiguous = _style.ambiguous_sources(all_specs)
-        styled = {
-            key: (
-                replace(
-                    line,
-                    label=_dropped_source_label(
-                        line.spec, varying=varying, ambiguous_sources=ambiguous
-                    ),
+        new_styled = {}
+        for key, line in styled.items():
+            if line.spec.role == surface_role:
+                label = _dropped_source_label(
+                    line.spec, varying=label_varying, ambiguous_sources=ambiguous
                 )
-                if line.spec.role == surface_role
-                else line
-            )
-            for key, line in styled.items()
-        }
+            elif facet_fields:
+                label = _style.series_label(
+                    line.spec, varying=label_varying, ambiguous_sources=ambiguous
+                )
+            else:
+                label = line.label
+            new_styled[key] = replace(line, label=label)
+        styled = new_styled
 
     styled = _series_layout.remap_line_labels(styled, all_specs, line_labels)
 
