@@ -237,3 +237,97 @@ def test_to_depth_includes_derived_velocity_but_still_skips_staggered_components
     assert np.isfinite(east.isel(z=0)).any()
     assert "sea_water_x_velocity" not in at_depth
     assert "sea_water_y_velocity" not in at_depth
+
+
+# -- derived_geographic_velocities: the shared "what standardize adds" fact --------
+
+
+def test_derived_geographic_velocities_needs_both_grid_relative_components():
+    both = {"sea_water_x_velocity", "sea_water_y_velocity", "salt"}
+    assert roms.derived_geographic_velocities(both) == [
+        "eastward_sea_water_velocity",
+        "northward_sea_water_velocity",
+    ]
+
+
+@pytest.mark.parametrize(
+    "present",
+    [
+        {"sea_water_x_velocity", "salt"},
+        {"sea_water_y_velocity", "salt"},
+        {"salt"},
+        set(),
+    ],
+)
+def test_derived_geographic_velocities_needs_both_not_either(present):
+    assert roms.derived_geographic_velocities(present) == []
+
+
+# -- catalog-time advertisement: ocean_skill.build._probe --------------------------
+
+
+def _roms_probe_dataset(with_v=True):
+    """Build a minimal raw ROMS Dataset shaped for ocean_skill.build._probe.
+
+    Not run through :func:`roms.standardize` -- ``Cs_r``/``sigma_r`` are what
+    ``_roms_metadata`` keys off to set ``model: "roms"``; ``u``/``v`` are the
+    literal ROMS names ``_probe`` renames via ``ROMS_STANDARD_NAMES`` before
+    ``derived_geographic_velocities`` ever sees them.
+    """
+    ny, nx = 3, 4
+    rng = np.random.default_rng(0)
+    data = {
+        "u": (("s_rho", "eta_rho", "xi_u"), rng.random((N, ny, nx - 1))),
+        "temp": (("s_rho", "eta_rho", "xi_rho"), rng.random((N, ny, nx))),
+        "Cs_r": ("s_rho", np.linspace(-1.0, 0.0, N)),
+        "sigma_r": ("s_rho", np.linspace(-1.0, 0.0, N)),
+    }
+    if with_v:
+        data["v"] = (
+            ("s_rho", "eta_v", "xi_rho"),
+            rng.random((N, ny - 1, nx)),
+        )
+    return xr.Dataset(data)
+
+
+def test_probe_advertises_geographic_velocity_for_a_roms_source_with_both_components():
+    from ocean_skill.build import ROMS_STANDARD_NAMES, _probe
+
+    md = _probe(_roms_probe_dataset(with_v=True), ROMS_STANDARD_NAMES)
+    assert md.get("model") == "roms"
+    assert {
+        "sea_water_x_velocity",
+        "sea_water_y_velocity",
+        "eastward_sea_water_velocity",
+        "northward_sea_water_velocity",
+    } <= set(md["variables"])
+
+
+def test_probe_does_not_advertise_geographic_velocity_without_both_components():
+    from ocean_skill.build import ROMS_STANDARD_NAMES, _probe
+
+    md = _probe(_roms_probe_dataset(with_v=False), ROMS_STANDARD_NAMES)
+    assert md.get("model") == "roms"
+    assert "sea_water_x_velocity" in md["variables"]
+    assert "eastward_sea_water_velocity" not in md["variables"]
+    assert "northward_sea_water_velocity" not in md["variables"]
+
+
+def test_probe_does_not_advertise_geographic_velocity_for_a_non_roms_source():
+    """A plain gridded source that happens to declare u/v-shaped names is untouched.
+
+    Guards the ROMS-only gate: without ``Cs_r``/``sigma_r`` (ROMS' own tell),
+    ``_roms_metadata`` sets no ``model`` key, so the advertisement must not fire.
+    """
+    from ocean_skill.build import ROMS_STANDARD_NAMES, _probe
+
+    ds = xr.Dataset(
+        {
+            "sea_water_x_velocity": (("lat", "lon"), np.ones((2, 2))),
+            "sea_water_y_velocity": (("lat", "lon"), np.ones((2, 2))),
+        },
+        coords={"lat": [10.0, 11.0], "lon": [200.0, 201.0]},
+    )
+    md = _probe(ds, ROMS_STANDARD_NAMES)
+    assert md.get("model") is None
+    assert "eastward_sea_water_velocity" not in md.get("variables", [])

@@ -6282,12 +6282,24 @@ def compare(
         from ocean_skill.vocabulary import is_known
 
         try:
-            declared = resolve(source).metadata.get("variables")
+            entry_meta = resolve(source).metadata
         except KeyError:
             return True
+        declared = entry_meta.get("variables")
         if not declared:
             return True  # no metadata to filter on; let the read decide
         declared = set(declared)
+        if entry_meta.get("model") == "roms":
+            # roms.standardize derives true eastward/northward velocity from
+            # grid-relative u/v (rotated by the grid angle) at READ time, which a
+            # catalog's stored `variables` may not list -- built before this
+            # derivation existed, or otherwise missing the same augmentation
+            # ocean_skill.build._probe now applies at build time. Without this, a
+            # ROMS source that plainly ends up offering the variable at read time
+            # would be wrongly excluded here, before the read ever runs.
+            from ocean_skill.roms import derived_geographic_velocities
+
+            declared |= set(derived_geographic_velocities(declared))
         options = spec_names(variable)
         if not options:
             # A calculator that registered no `inputs=` (ocean_skill.operators

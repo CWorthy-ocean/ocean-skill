@@ -18,16 +18,57 @@ import xarray as xr
 
 __all__ = [
     "AREA_COORD",
+    "GEOGRAPHIC_VELOCITY_NAMES",
+    "GRID_RELATIVE_VELOCITY_NAMES",
     "WEIGHT_COORD",
     "add_depth_coord",
     "add_interface_coord",
     "depth_average",
     "depth_band",
+    "derived_geographic_velocities",
     "standardize",
     "surface",
     "to_depth",
     "to_sigma0",
 ]
+
+#: ROMS' own grid-relative velocity standard_names (build.py's ROMS_STANDARD_NAMES
+#: maps `u`/`v` here) -- staggered, not directly comparable to an in-situ instrument
+#: on a rotated grid. See :data:`GEOGRAPHIC_VELOCITY_NAMES` and
+#: :func:`derived_geographic_velocities`.
+GRID_RELATIVE_VELOCITY_NAMES = ("sea_water_x_velocity", "sea_water_y_velocity")
+
+#: The true geographic velocity :func:`_add_geographic_velocity` derives from
+#: :data:`GRID_RELATIVE_VELOCITY_NAMES` + the grid ``angle``, whenever a ROMS source
+#: has both. This pair (and the fact that *both* grid-relative names are the
+#: trigger) is also what :func:`derived_geographic_velocities` reports to callers
+#: outside this module -- kept as one set of names so ocean_skill.build (catalog-time
+#: advertisement) and ocean_skill.comparison (runtime catalog pre-filter) cannot
+#: silently drift from what this module actually produces.
+GEOGRAPHIC_VELOCITY_NAMES = (
+    "eastward_sea_water_velocity",
+    "northward_sea_water_velocity",
+)
+
+
+def derived_geographic_velocities(present) -> list[str]:
+    """Return the geographic velocity names :func:`standardize` would derive.
+
+    ``present`` is any iterable of standard_names a ROMS source declares or carries
+    (a catalog entry's ``variables`` list, or a Dataset's own data_var names).
+    Returns :data:`GEOGRAPHIC_VELOCITY_NAMES` as a list when ``present`` has BOTH of
+    :data:`GRID_RELATIVE_VELOCITY_NAMES` -- exactly the condition
+    :func:`_add_geographic_velocity` checks before rotating -- else an empty list.
+
+    The single source of truth for "what standardize adds" so a catalog-time
+    advertisement (:func:`ocean_skill.build._probe`) and a runtime catalog
+    pre-filter (:func:`ocean_skill.comparison.compare`'s ``_offers``,
+    :func:`ocean_skill.catalog.find`/``search``) agree with this module and with
+    each other, rather than each hardcoding its own copy of these four names.
+    """
+    if set(GRID_RELATIVE_VELOCITY_NAMES) <= set(present):
+        return list(GEOGRAPHIC_VELOCITY_NAMES)
+    return []
 
 #: Coordinate name carrying per-cell horizontal area, so a spatial mean can honour
 #: it — mirrors :data:`WEIGHT_COORD`'s "weights ride on the data" pattern:
@@ -124,16 +165,18 @@ def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
     silently leaves only the grid-relative components for a caller who asked for
     geographic east/north.
     """
-    u = ds.get("sea_water_x_velocity")
-    v = ds.get("sea_water_y_velocity")
+    x_name, y_name = GRID_RELATIVE_VELOCITY_NAMES
+    east_name, north_name = GEOGRAPHIC_VELOCITY_NAMES
+    u = ds.get(x_name)
+    v = ds.get(y_name)
     have_angle = "angle" in ds.coords
     if u is None or v is None or not have_angle:
         if (u is not None or v is not None) and not have_angle:
             warnings.warn(
-                "ROMS grid-relative velocity (sea_water_x/y_velocity) is present "
-                "but the grid `angle` is not, so true geographic eastward/"
-                "northward velocity cannot be derived (the rotation needs it) -- "
-                "only the grid-relative components are available.",
+                f"ROMS grid-relative velocity ({x_name}/{y_name}) is present but "
+                "the grid `angle` is not, so true geographic eastward/northward "
+                "velocity cannot be derived (the rotation needs it) -- only the "
+                "grid-relative components are available.",
                 stacklevel=2,
             )
         return ds
@@ -156,24 +199,26 @@ def _add_geographic_velocity(ds: xr.Dataset) -> xr.Dataset:
     east, north = east.transpose(*order), north.transpose(*order)
 
     return ds.assign(
-        eastward_sea_water_velocity=(
-            east.dims,
-            east.data,
-            {
-                "standard_name": "eastward_sea_water_velocity",
-                "long_name": "eastward (true geographic) sea water velocity",
-                "units": u.attrs.get("units", "m s-1"),
-            },
-        ),
-        northward_sea_water_velocity=(
-            north.dims,
-            north.data,
-            {
-                "standard_name": "northward_sea_water_velocity",
-                "long_name": "northward (true geographic) sea water velocity",
-                "units": v.attrs.get("units", "m s-1"),
-            },
-        ),
+        {
+            east_name: (
+                east.dims,
+                east.data,
+                {
+                    "standard_name": east_name,
+                    "long_name": "eastward (true geographic) sea water velocity",
+                    "units": u.attrs.get("units", "m s-1"),
+                },
+            ),
+            north_name: (
+                north.dims,
+                north.data,
+                {
+                    "standard_name": north_name,
+                    "long_name": "northward (true geographic) sea water velocity",
+                    "units": v.attrs.get("units", "m s-1"),
+                },
+            ),
+        }
     )
 
 

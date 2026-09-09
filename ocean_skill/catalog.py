@@ -781,6 +781,17 @@ def find(
                 continue
         if wanted is not None:
             declared = set(meta.get("variables") or [])
+            if meta.get("model") == "roms":
+                # ocean_skill.roms.standardize derives true eastward/northward
+                # velocity from ROMS' grid-relative u/v (rotated by the grid
+                # angle) at read time; a catalog's stored `variables` may not
+                # list it (built before this derivation existed, or otherwise
+                # missing the augmentation ocean_skill.build._probe now applies)
+                # -- without this, a ROMS source that plainly ends up offering
+                # the variable at read time would not be findable by it.
+                from ocean_skill.roms import derived_geographic_velocities
+
+                declared |= set(derived_geographic_velocities(declared))
             # The literal intersection is the regex-free fast path; same_quantity
             # additionally reaches a declared spelling only a vocabulary pattern
             # recognizes (e.g. "Temperature_CTD") and declared names differing only
