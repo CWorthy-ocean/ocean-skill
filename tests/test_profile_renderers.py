@@ -540,6 +540,85 @@ def test_negative_down_z_and_positive_down_depth_render_identical_positive_depth
         assert (np.asarray(m) >= 0).all()
 
 
+def _deep_model_item() -> dict:
+    """A literal-depths comparison (see ``tests/test_profile_literal_depths.py``):
+    the reference is finite down to 150 m and ``NaN`` past it, while the model
+    (already interpolated onto the same requested depths) is finite the whole
+    way to 300 m -- exactly the aligned shape ``_prepare``'s
+    ``_reindex_onto_literal_depths`` produces. Neither renderer needs to know
+    anything about this shape: it draws from ``NaN``/finite alone, no depth-
+    range trimming of its own required.
+    """
+    depths = np.array([5.0, 25.0, 60.0, 100.0, 150.0, 300.0])
+    reference_vals = np.where(depths <= 150.0, 20.0 - 0.08 * depths, np.nan)
+    test_vals = 19.5 - 0.03 * depths
+    reference_da = xr.DataArray(
+        reference_vals, coords={"DEPTH": depths}, dims="DEPTH", attrs={"units": "degC"}
+    ).assign_coords(lon=-158.0, lat=22.75)
+    test_da = xr.DataArray(
+        test_vals, coords={"DEPTH": depths}, dims="DEPTH", attrs={"units": "degC"}
+    )
+    aligned = xr.Dataset(
+        {
+            "reference": reference_da,
+            "test": test_da,
+            "difference": test_da - reference_da,
+        }
+    )
+    aligned["reference"].attrs["units"] = "degC"
+    return {
+        "aligned": aligned,
+        "metrics": {
+            "bias": 0.3,
+            "rmse": 0.4,
+            "corr": 0.95,
+            "n": 5,
+            "std_test": 2.0,
+            "std_reference": 2.0,
+            "crmsd": 0.1,
+            "sigma_ratio": 1.0,
+            "variable": TEMPERATURE,
+        },
+        "units": "degC",
+        "standard_name": TEMPERATURE,
+        "label": None,
+        "labels": ("run_new", "ctd_cast"),
+    }
+
+
+def test_a_literal_deep_model_level_draws_past_the_obs_gap_in_both_renderers():
+    """The model line drawn past the observation's own range (see
+    ``tests/test_profile_literal_depths.py``) needs no renderer change: a
+    ``NaN`` reference is simply a gap, and the finite model line -- and the
+    shared depth axis -- both still reach the deepest requested level, in
+    matplotlib and holoviews alike.
+    """
+    item = _deep_model_item()
+    fig = render(_spec([item]), renderer="matplotlib")
+    lines = {
+        line.get_label(): line
+        for line in fig.axes[0].get_lines()
+        if not line.get_label().startswith("_")
+    }
+    model_line = lines["run_new"]
+    assert np.nanmax(model_line.get_ydata()) == pytest.approx(300.0)
+    assert np.isfinite(model_line.get_xdata()[np.argmax(model_line.get_ydata())])
+    bottom, _top = fig.axes[0].get_ylim()
+    assert bottom == pytest.approx(300.0)  # the axis reaches the deep model level
+
+    obj = render(_spec([item]), renderer="holoviews")
+    import holoviews as hv
+
+    curves = {c.label: c for c in obj.traverse(lambda x: x, [hv.Curve]) if c.label}
+    model_curve = curves["run_new"]
+    depths, values = model_curve.data["depth"], model_curve.data["value"]
+    deepest = int(np.argmax(depths))
+    assert float(depths[deepest]) == pytest.approx(300.0)
+    assert np.isfinite(values[deepest])
+    (start, _end), = _bokeh_y_range(obj)
+    assert start == pytest.approx(300.0)
+
+
 def test_sigma0_axis_labels_as_density_and_still_inverts():
     depths = np.linspace(5.0, 150.0, 8)
     sigma0 = 22.0 + 0.02 * depths  # denser (higher sigma0) with depth

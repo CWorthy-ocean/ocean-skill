@@ -191,11 +191,12 @@ def test_a_vertical_select_on_the_reference_side_is_left_alone():
             }
         ),
     ):
-        values, many = _profile_depth_plan(
+        values, many, literal = _profile_depth_plan(
             "m", {"depth": 5.0}, None, False, "depth", ("surface",), None, {}
         )
     assert values == ("surface",)
     assert many is False
+    assert literal is False
 
 
 def test_a_calculated_diagnostic_is_left_alone():
@@ -209,11 +210,12 @@ def test_a_calculated_diagnostic_is_left_alone():
             }
         ),
     ):
-        values, many = _profile_depth_plan(
+        values, many, literal = _profile_depth_plan(
             "m", {}, None, True, "depth", ("surface",), None, {}
         )
     assert values == (None,)
     assert many is False
+    assert literal is False
 
 
 def test_a_sigma0_fan_is_left_alone():
@@ -227,8 +229,9 @@ def test_a_sigma0_fan_is_left_alone():
             }
         ),
     ):
-        values, many = _profile_depth_plan(
+        values, many, literal = _profile_depth_plan(
             "m", {}, None, False, "sigma0", (1025.0,), None, {}
         )
     assert values == (1025.0,)
     assert many is False
+    assert literal is False
