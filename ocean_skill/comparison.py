@@ -1409,6 +1409,7 @@ def _prepare(
     source: str = "<unnamed>",
     detide: dict[str, Any] | None = None,
     literal_depths: bool = False,
+    point_window: bool = False,
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -1439,6 +1440,22 @@ def _prepare(
     rather than the ordinary nearest-level ``isel``'s silent clamp -- so a caller who
     deliberately asked for a depth past the data gets to see the model there too.
     ``False`` (the default) is today's clamped behaviour, unchanged.
+
+    ``point_window`` says whether this lane was already cropped to a small
+    near-point horizontal window (see :func:`ocean_skill.align.subset_to_bbox`'s
+    own point branch) rather than left at its full gridded extent. A ROMS
+    vertical transform (:func:`ocean_skill.roms.to_depth`/``to_sigma0``, both
+    below) runs xgcm's ``apply_ufunc`` once per *chunk* along whatever axes are
+    not the vertical core dim -- for a lane chunked one time step per chunk (a
+    ROMS history file, typically) and a long point time series (an ADCP mooring
+    sampled continuously, unlike a CTD's sparse casts), that is one tiny task
+    per time step, each paying its own interpolator setup, rather than one
+    vectorized call. A point-cropped column is small enough to fit in memory
+    outright (see :func:`_materialize_point_column`'s own byte ceiling below),
+    so ``True`` here materializes it just before the transform, collapsing that
+    per-chunk explosion into a single numpy pass -- a pure performance change,
+    never taken for a gridded/full-domain lane, where eagerly loading would risk
+    exhausting memory instead of saving time.
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -1661,6 +1678,7 @@ def _prepare(
                 if isinstance(sigma, list | tuple)
                 else float(sigma)
             )
+            sub = _materialize_point_column(sub, point_window)
             sub = roms.to_sigma0(sub, meta, targets)
         elif surface:
             # A no-op when the hoist above already ran (s_dim is gone from sub's dims,
@@ -1709,6 +1727,7 @@ def _prepare(
                     '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
                     'metres and "surface" (["surface", 50, 100]).'
                 ) from None
+            sub = _materialize_point_column(sub, point_window)
             sub = roms.to_depth(sub, meta, targets)
         da = sub[name]
         # Squeeze only a single interpolated level: a scalar depth request collapses
@@ -1961,6 +1980,47 @@ def _warn_if_chunk_is_large(obj: Any, source: str) -> None:
 #: worse than taking a while over it. But the load is eager (see below), so an extra
 #: axis nobody meant to keep is worth catching before the memory is spent, not after.
 LOAD_WARN_BYTES = 2 * 1024**3
+
+#: Ceiling (bytes) for :func:`_materialize_point_column`'s eager load. A 3x3-cell
+#: column, every s-level, a multi-month hourly deployment, is tens of MB -- this
+#: only refuses a pathological point lane (a station kept for a decade at native
+#: frequency, say), where materializing everything at once would trade the
+#: per-chunk task explosion for an out-of-memory error instead of fixing it.
+POINT_COLUMN_MATERIALIZE_MAX_BYTES = 512 * 1024**2
+
+
+def _materialize_point_column(sub, point_window: bool):
+    """Load a small, point-cropped column into memory before an xgcm transform.
+
+    :func:`ocean_skill.roms.to_depth`/``to_sigma0`` run xgcm's ``apply_ufunc``
+    once per chunk outside the vertical core dim -- for a lane already narrowed
+    to a near-point horizontal window (``point_window=True``, see :func:`_prepare`'s
+    own paragraph on this) but still chunked one time step per chunk upstream (a
+    ROMS history file, typically), that means one tiny transform task per time
+    step: fine for a CTD's dozen sparse casts, but an ADCP mooring's thousands of
+    hourly steps turn into thousands of tasks, each repaying the interpolator's
+    own setup cost -- the dominant cost of a real hang this exists to fix (see
+    the git history around ``POINT_COLUMN_MATERIALIZE_MAX_BYTES`` for the case).
+    Loading first collapses that into a single vectorized call over numpy, with
+    the exact same result -- ``.load()`` only changes the backing store, never
+    the values, so this is a pure performance change.
+
+    Two independent gates, so a gridded/full-domain lane is *never* eagerly
+    loaded here: ``point_window`` must actually be set (only true for a lane
+    :func:`ocean_skill.align.subset_to_bbox`'s point branch narrowed), and the
+    lane's own ``nbytes`` (read from dask metadata, not a read) must sit under
+    :data:`POINT_COLUMN_MATERIALIZE_MAX_BYTES`. Either failing leaves ``sub``
+    exactly as given -- lazy, to be loaded the ordinary way once the whole
+    aligned pair is finished (see :func:`prepare_source`'s own ``.load()``).
+    An already-numpy ``sub`` (``sub.chunks`` empty) is returned unchanged too --
+    nothing to gain by "loading" it again.
+    """
+    if not point_window or not sub.chunks:
+        return sub
+    if sub.nbytes > POINT_COLUMN_MATERIALIZE_MAX_BYTES:
+        return sub
+    return sub.load()
+
 
 #: Sources already probed by :func:`_variable_available` and found to carry the
 #: variable asked of them, this process. Positive results only, for the same reason
@@ -2366,6 +2426,12 @@ def prepare_source(
 
         obj = tabular.to_dataset(obj, meta)
         obj = subset_to_time(obj, time_window)
+    # Whether the crop above actually narrowed this lane to a small near-point
+    # column, rather than leaving it at its full gridded extent -- see
+    # _materialize_point_column's own docstring for what this lets _prepare do.
+    from ocean_skill.align import _is_point_bbox
+
+    point_window_applied = pre_crop and bbox is not None and _is_point_bbox(bbox)
     da, depth = _prepare(
         obj,
         meta,
@@ -2375,6 +2441,7 @@ def prepare_source(
         source=source,
         detide=detide,
         literal_depths=literal_depths,
+        point_window=point_window_applied,
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
