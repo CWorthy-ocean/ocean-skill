@@ -156,16 +156,21 @@ def test_a_station_far_outside_the_grid_warns_about_the_distance():
 
 
 def test_a_masked_cell_raises_rather_than_moving_the_comparison():
-    """Relocating to the nearest wet cell would compare a different body of water."""
+    """Relocating to the nearest wet cell would compare a different body of water.
+
+    Raises :class:`~ocean_skill.align.NoValidData` specifically (a ``ValueError``
+    subclass), not a bare ``ValueError`` -- ``compare(skip_missing=True)`` catches
+    that type to skip one uncoverable station rather than aborting the whole run.
+    """
     grid = monthly_grid().isel(time=0)
     masked = grid.where((grid.lon > -142) | (grid.lat > 54))
-    with pytest.raises(ValueError, match="no valid data"):
+    with pytest.raises(align.NoValidData, match="no valid data"):
         align.sample_at(masked, *STATION)
 
 
 def test_a_masked_neighbour_under_interpolation_names_nearest_as_the_remedy():
     grid = monthly_grid().isel(time=0)
-    with pytest.raises(ValueError, match='method="nearest"'):
+    with pytest.raises(align.NoValidData, match='method="nearest"'):
         align.sample_at(grid.where(grid.lon > -142), *STATION, method="bilinear")
 
 
@@ -197,10 +202,13 @@ def test_the_translated_conservative_default_does_not_warn():
 
 
 def test_a_conservative_method_cannot_sample_a_point():
-    with pytest.raises(ValueError, match="has no area"):
+    """Caller misuse, not a coverage gap -- stays a plain ValueError, not
+    NoValidData, so compare(skip_missing=True) does not swallow it."""
+    with pytest.raises(ValueError, match="has no area") as exc_info:
         align.sample_at(
             monthly_grid().isel(time=0), *STATION, method="conservative_normed"
         )
+    assert not isinstance(exc_info.value, align.NoValidData)
 
 
 # -- a station comparison, through align() -------------------------------------------

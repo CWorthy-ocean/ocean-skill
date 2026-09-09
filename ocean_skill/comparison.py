@@ -6468,8 +6468,11 @@ def compare(
     outside the test's record doesn't cost a full read of the test lane per stray
     cast. A source marked ``climatology`` is exempt from the time half of that check
     (its declared calendar span is a labelling convention, not a record); only space
-    can disqualify one. Progress prints one line per pair considered, plus a final
-    count of comparisons formed and skipped.
+    can disqualify one. A station whose position falls in a masked/dry cell of the
+    test grid -- no valid data to sample there at all (see
+    :func:`ocean_skill.align.sample_at`) -- is skipped the same way, discovered only
+    once that one station's read is attempted. Progress prints one line per pair
+    considered, plus a final count of comparisons formed and skipped.
 
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
@@ -6771,6 +6774,7 @@ def compare(
     import warnings
 
     from ocean_skill import _stacklevel
+    from ocean_skill.align import NoValidData
     from ocean_skill.catalog import resolve
     from ocean_skill.vocabulary import (
         equivalent_names,
@@ -7260,7 +7264,7 @@ def compare(
                 )
                 try:
                     c.align(refresh=refresh)
-                except KeyError as exc:
+                except (KeyError, NoValidData) as exc:
                     if not skip_missing:
                         raise
                     n_skipped += 1
@@ -7420,7 +7424,7 @@ def compare(
                         )
                         try:
                             c.align(refresh=refresh)
-                        except KeyError as exc:
+                        except (KeyError, NoValidData) as exc:
                             if not skip_missing:
                                 raise
                             n_skipped += 1
