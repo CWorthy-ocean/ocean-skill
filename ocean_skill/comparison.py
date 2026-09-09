@@ -925,6 +925,26 @@ def _is_calculated(spec: Any) -> bool:
     return False
 
 
+def _names_geographic_velocity(spec: Any) -> bool:
+    """Report whether ``spec`` (a plain name, alias, or combination) names either of
+    :data:`ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES`.
+
+    Used to gate ``prepare_source``'s ROMS point-lane fast path -- see its own
+    comment -- onto exactly the request that fast path exists for. Goes through
+    :func:`ocean_skill.operators.spec_names` (the same read-free name-resolution
+    :func:`compare`'s own catalog pre-filtering uses) rather than a bare string
+    check, so an alias (``"east_velocity"``) or a combination naming east/north as
+    one of its components is caught too, not just the already-canonical spelling
+    ``compare()`` itself resolves a bare ``variables=[...]`` entry to.
+    """
+    from ocean_skill.operators import spec_names
+    from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
+    from ocean_skill.vocabulary import resolve_name
+
+    names = {n for group in spec_names(spec) for n in group}
+    return any(resolve_name(n) in GEOGRAPHIC_VELOCITY_NAMES for n in names)
+
+
 def _calculate_method(spec: Any) -> str | None:
     """The ``method`` a calculate-spec (or a pair-spec's test side) declares, if any.
 
@@ -2477,6 +2497,36 @@ def prepare_source(
     from ocean_skill import tabular
 
     pre_crop = "transect" not in (select or {}) and not tabular.is_frame(obj)
+    # A ROMS point/station comparison asking for the derived geographic velocity
+    # (see ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES) is the one lane where the
+    # crop below is not enough on its own: standardize() already baked east/north
+    # into `obj` over the WHOLE domain and every time step (roms.py's
+    # _add_geographic_velocity, run once at read time), and for a ROMS history
+    # file chunked one step per chunk that graph scales into the millions --
+    # culling it down to a single water column does not remove the per-step task
+    # overhead the average/rotate built into it, which is what turns one mooring's
+    # `over="time"` comparison into a multi-minute hang. Dropping the pre-derived
+    # pair here, before the crop, means _point_window's own halo (see its
+    # docstring) crops the *raw* staggered components instead, and
+    # roms.add_geographic_velocity_windowed below re-derives on just that small,
+    # already time-cropped window -- byte-identical, at a fraction of the graph.
+    # Every other consumer of a ROMS read (a direct osk.read, Field, a map, a
+    # gridded/regional comparison) never takes this branch (point_window_cells is
+    # only ever set once align() has already resolved to a nearest-neighbour point
+    # sample), so this changes nothing about them.
+    from ocean_skill.align import _is_point_bbox
+
+    roms_velocity_point = (
+        pre_crop
+        and bbox is not None
+        and _is_point_bbox(bbox)
+        and meta.get("model") == "roms"
+        and _names_geographic_velocity(variable)
+    )
+    if roms_velocity_point:
+        from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
+
+        obj = obj.drop_vars(list(GEOGRAPHIC_VELOCITY_NAMES), errors="ignore")
     if pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
@@ -2489,6 +2539,15 @@ def prepare_source(
         from ocean_skill.align import subset_to_time_targets
 
         obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
+    if roms_velocity_point:
+        # Re-derive now, after every space/time crop above -- the raw staggered
+        # components this re-derives from are already narrowed to (a small halo
+        # around one water column) x (only the kept time steps), so the graph this
+        # builds is bounded by that, never the full domain/record the dropped
+        # pair above was built over.
+        from ocean_skill import roms as _roms
+
+        obj = _roms.add_geographic_velocity_windowed(obj, meta)
     if (
         not pre_crop
         and time_window is not None

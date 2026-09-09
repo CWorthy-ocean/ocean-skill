@@ -235,11 +235,35 @@ def _point_window(
         # around a padded box.
         iy, ix = _nearest_indices(lon_values, np.asarray(obj[lat_name]), lon, lat)
         dims = obj[lon_name].dims
-        window = {
-            dims[0]: slice(max(iy - cells, 0), iy + cells + 1),
-            dims[1]: slice(max(ix - cells, 0), ix + cells + 1),
-        }
-        return obj.isel(window)
+        eta_dim, xi_dim = dims
+        eta0, eta1 = max(iy - cells, 0), iy + cells + 1
+        xi0, xi1 = max(ix - cells, 0), ix + cells + 1
+        window = {eta_dim: slice(eta0, eta1), xi_dim: slice(xi0, xi1)}
+        # A ROMS grid also carries the velocity components' own staggered dims
+        # (xi_u/eta_v), one shorter than the rho dims they sit next to -- windowed
+        # one cell further out (a halo) so a caller re-deriving geographic velocity
+        # on just this window (ocean_skill.roms.add_geographic_velocity_windowed)
+        # can reproduce the exact rho-point average/rotation a full-domain derive
+        # would give, without ever building that full-domain graph. `trim` records,
+        # per rho dim, how many of the *kept* rho points beyond the window's true
+        # edge that windowed re-derive has to discard again -- 1 on a side that is
+        # genuinely interior (the halo produced one extra usable rho point there),
+        # 0 on a side already at the domain edge (nothing extra to trim; the
+        # ordinary edge rule already lands on the right value). A no-op for any
+        # other kind of source: xi_u/eta_v simply are not there to find.
+        trim: dict[str, tuple[int, int]] = {}
+        if "xi_u" in obj.dims and xi_dim == "xi_rho":
+            n_xi = obj.sizes[xi_dim]
+            window["xi_u"] = slice(max(xi0 - 1, 0), min(xi1, n_xi - 1))
+            trim[xi_dim] = (1 if xi0 > 0 else 0, 1 if xi1 < n_xi else 0)
+        if "eta_v" in obj.dims and eta_dim == "eta_rho":
+            n_eta = obj.sizes[eta_dim]
+            window["eta_v"] = slice(max(eta0 - 1, 0), min(eta1, n_eta - 1))
+            trim[eta_dim] = (1 if eta0 > 0 else 0, 1 if eta1 < n_eta else 0)
+        out = obj.isel(window)
+        if trim:
+            out.attrs["_roms_stagger_trim"] = trim
+        return out
     sel: dict[str, slice] = {}
     if lon_name in obj.dims:
         axis = np.asarray(obj[lon_name], dtype="float64")
