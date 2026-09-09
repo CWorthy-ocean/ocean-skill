@@ -189,6 +189,53 @@ def test_month_climatology_pinned_to_one_depth_keeps_time(stubbed_tsp_fan):
     assert select == {"depth": 10.0}
 
 
+# -- explicit depth bands: a fan, not a kept profile axis ------------------------------
+
+
+def test_explicit_band_depths_fan_into_one_comparison_per_band(stubbed_tsp_fan):
+    """A depths= list of bands collapses depth (aggregate's "Z": "mean" reduces
+    each band to one value), so it is a genuine fan -- one comparison per band --
+    not the profile's kept y-axis, even though the monthly resample otherwise makes
+    this reference read as a climatology profile (see
+    test_month_climatology_reads_as_one_profile_per_bin). Regression test for the
+    band list reaching _prepare's depth handling as one unparseable list and
+    raising ValueError.
+    """
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        depths=[{"min": 0, "max": 5}, {"min": 10, "max": 15}],
+        aggregate={"Z": "mean", "time": {"resample": "1MS", "reduce": "mean"}},
+    )
+    assert len(stubbed_tsp_fan) == 2
+    for over, _select in stubbed_tsp_fan:
+        assert over == "time"
+    assert [select["depth"] for _, select in stubbed_tsp_fan] == [
+        {"min": 0, "max": 5},
+        {"min": 10, "max": 15},
+    ]
+
+
+def test_explicit_scalar_depths_still_stay_one_profile(stubbed_tsp_fan):
+    """Regression guard: scalar/"surface" levels are the case that legitimately
+    stays standing as one profile comparison -- unchanged by the band carve-out
+    above (mirrors test_explicit_depths_are_honored_over_the_references_own_levels,
+    but under the climatology route rather than a pinned single visit).
+    """
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        depths=[0, 5, 10],
+        aggregate={"time": {"groupby": "month", "reduce": "mean"}},
+    )
+    assert len(stubbed_tsp_fan) == 1
+    over, select = stubbed_tsp_fan[0]
+    assert over == "Z"
+    assert select["depth"] == [0, 5, 10]
+
+
 # -- _is_profile_reference: the extended scope ----------------------------------------
 
 
