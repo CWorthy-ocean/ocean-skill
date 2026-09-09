@@ -574,6 +574,107 @@ def test_no_sample_counts_are_drawn_on_the_figure():
     assert not [t for t in drawn if "n=" in t]
 
 
+# -- metrics-box prefix: name what varies, and metrics_labels= override -----------------
+
+
+def test_the_box_prefixes_by_depth_when_only_depth_varies():
+    """The exact case this feature closes: three depth bands sharing one panel (one
+    variable, no facet) used to prefix every row with the one shared variable, which
+    said nothing the panel title didn't already -- the depth band is what actually
+    tells the rows apart, so that is what the prefix should say instead.
+    """
+    bands = ["0-5 m", "10-15 m", "30-40 m"]
+    items = [_band_item(b, offset=0.3 * (i + 1)) for i, b in enumerate(bands)]
+    layout = _series.compose(items, metric_keys=("bias",))
+    lines = layout.panels[0].metrics_text.split("\n")
+    assert len(lines) == 3
+    assert [line.split(":")[0] for line in lines] == bands
+    assert "temperature" not in layout.panels[0].metrics_text
+
+
+def test_the_box_still_prefixes_by_variable_when_only_variable_varies():
+    """Regression guard: today's behaviour is unchanged when variable is what
+    actually distinguishes the rows (the common case -- two variables sharing one
+    twin-axis panel, say)."""
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    layout = _series.compose(items, metric_keys=("bias",))
+    lines = layout.panels[0].metrics_text.split("\n")
+    assert len(lines) == 2
+    assert {line.split(":")[0] for line in lines} == {"temperature", "salinity"}
+
+
+def test_the_box_joins_variable_and_depth_when_both_vary():
+    items = [
+        _band_item("0-5 m"),
+        _item(SALINITY, units="1e-3", depth=None, depth_band="10-15 m", offset=-0.2),
+    ]
+    layout = _series.compose(items, metric_keys=("bias",))
+    lines = layout.panels[0].metrics_text.split("\n")
+    assert len(lines) == 2
+    assert {line.split(":")[0] for line in lines} == {
+        "temperature · 0-5 m",
+        "salinity · 10-15 m",
+    }
+
+
+def test_a_single_comparisons_box_still_draws_no_prefix():
+    """Nothing to distinguish with only one row -- unchanged from before this
+    feature (``prefix=len(group) > 1`` still gates it off)."""
+    layout = _series.compose([_item()], metric_keys=("bias",))
+    box = layout.panels[0].metrics_text
+    assert box.count("\n") == 0
+    assert ":" not in box or "bias" in box.split(":")[0]
+
+
+def test_metrics_labels_overrides_the_prefix_in_both_renderers():
+    bands = ["0-5 m", "10-15 m", "30-40 m"]
+    items = [_band_item(b, offset=0.3 * (i + 1)) for i, b in enumerate(bands)]
+    custom = ["shallow", "mid-depth", "deep"]
+
+    static = render(
+        _spec(items, metric_keys=("bias",), metrics_labels=custom),
+        renderer="matplotlib",
+    )
+    static_text = " ".join(t.get_text() for ax in static.axes for t in ax.texts)
+    assert all(label in static_text for label in custom)
+
+    import holoviews as hv
+
+    interactive = render(
+        _spec(items, metric_keys=("bias",), metrics_labels=custom),
+        renderer="holoviews",
+    )
+    interactive_text = " ".join(
+        t.text for t in interactive.traverse(lambda x: x, [hv.Text])
+    )
+    assert all(label in interactive_text for label in custom)
+
+
+def test_metrics_labels_wrong_length_lists_the_current_labels_to_copy():
+    bands = ["0-5 m", "10-15 m", "30-40 m"]
+    items = [_band_item(b, offset=0.3 * (i + 1)) for i, b in enumerate(bands)]
+    with pytest.raises(
+        ValueError, match="needs one label per metrics-box row"
+    ) as exc:
+        render(
+            _spec(items, metric_keys=("bias",), metrics_labels=["only one"]),
+            renderer="matplotlib",
+        )
+    for band in bands:
+        assert repr(band) in str(exc.value)
+
+
+def test_metrics_labels_none_is_the_default_and_changes_nothing():
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    with_none = _series.compose(items, metric_keys=("bias",)).panels[0].metrics_text
+    explicit_none = (
+        _series.compose(items, metric_keys=("bias",), metrics_labels=None)
+        .panels[0]
+        .metrics_text
+    )
+    assert with_none == explicit_none
+
+
 # -- legend placement and custom labels --------------------------------------------
 
 
@@ -1182,6 +1283,7 @@ def test_series_is_registered_everywhere_it_has_to_be():
         "wspace",
         "hspace",
         "colors",
+        "metrics_labels",
     ):
         assert option in _top_level_options(), option
 

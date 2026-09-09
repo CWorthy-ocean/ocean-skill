@@ -999,6 +999,7 @@ def series(
     encode: dict[str, str | None] | None = None,
     residual: bool = False,
     metrics_loc: str = "auto",
+    metrics_labels: Sequence[str] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     mark: str = "line",
     legend: bool | str = True,
@@ -1056,6 +1057,14 @@ def series(
     the current labels, ready to copy and edit. ``colors=`` pins the auto colour cycle
     to specific values instead; see :func:`ocean_skill.plot.style.resolve`.
 
+    Each panel's statistics box prefixes its rows automatically with whichever
+    field(s) actually distinguish them -- the variable when a panel holds several,
+    else depth/source/season/time when a panel's rows share one variable but differ
+    some other way (three depth bands in one panel, say). ``metrics_labels=``
+    overrides that prefix by hand, one string per metrics-box row figure-wide, panel
+    by panel -- same wrong-count-lists-the-current-labels UX as ``line_labels=``; see
+    :func:`ocean_skill.plot.series._resolve_metrics_labels`.
+
     ``residual=True`` adds a short ``test − reference`` strip under each panel, sharing
     its time axis. It is off by default: a difference *map* needs a panel of its own
     because it needs its own colour scale, while a difference *series* is a note on the
@@ -1108,6 +1117,7 @@ def series(
         residual=residual,
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
+        metrics_labels=metrics_labels,
         legend=legend,
         line_labels=line_labels,
         colors=colors,
@@ -1332,6 +1342,7 @@ def profile(
     metrics_loc: str = "auto",
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     metrics_stacked: bool = False,
+    metrics_labels: Sequence[str] | None = None,
     colors=None,
     mark: str = "line",
     legend: bool | str = True,
@@ -1415,7 +1426,9 @@ def profile(
     ``metrics_stacked=True`` draws the statistics box narrow-and-tall (one metric
     per line) instead of the default single wide line -- fits a narrow, portrait
     panel that a page-wide box would otherwise overrun into its neighbours; see
-    :func:`ocean_skill.plot.series._metrics_text`. Panel width itself is not the
+    :func:`ocean_skill.plot.series._metrics_text`. ``metrics_labels=`` overrides
+    each row's automatic prefix by hand, matching :func:`series` exactly -- see
+    :func:`ocean_skill.plot.series._resolve_metrics_labels`. Panel width itself is not the
     box's doing either way -- it comes from ``panel_aspect``/``figsize`` divided
     across ``ncols``, the same as any other panel dimension; ``panel_aspect``
     only ever solves for figure *height* (this renderer sets no axes aspect), so
@@ -1459,6 +1472,7 @@ def profile(
         metric_keys=metric_keys,
         metrics_loc=metrics_loc,
         metrics_stacked=metrics_stacked,
+        metrics_labels=metrics_labels,
         colors=colors,
         legend=legend,
         line_labels=line_labels,

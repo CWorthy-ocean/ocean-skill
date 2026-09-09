@@ -733,8 +733,8 @@ def free_corners(lines) -> list[str]:
     return _rank_corners(np.concatenate(xs), np.concatenate(ys))
 
 
-def _metrics_text(items, metric_keys, *, prefix: bool, stacked: bool = False) -> str:
-    """Return the box's text: a line per distinct comparison, prefixed if several.
+def _metrics_rows(items, metric_keys, *, stacked: bool = False):
+    """Return this box's deduped rows: ``(item, body)`` per distinct comparison.
 
     Deduped by the *identity* of each item's ``metrics`` object, not by the
     rendered text: several items can share one comparison's metrics -- a season
@@ -751,11 +751,14 @@ def _metrics_text(items, metric_keys, *, prefix: bool, stacked: bool = False) ->
     ``one_row``'s newlines too, so a lone comparison's own metrics read
     narrow-and-tall instead -- a profile panel's own shape, portrait rather than
     the page-wide line a series panel affords.
+
+    Shared by :func:`_metrics_text` (the plain box) and :func:`_resolve_metrics_labels`
+    (``metrics_labels=``'s figure-wide validation) so both agree on exactly which rows
+    a box draws, in what order.
     """
     from ocean_skill.plot.matplotlib_renderer import _metrics_text as one_row
-    from ocean_skill.plot.summary import pretty_level
 
-    lines = []
+    rows = []
     seen: set[int] = set()
     for item in items:
         metrics = item.get("metrics")
@@ -768,10 +771,134 @@ def _metrics_text(items, metric_keys, *, prefix: bool, stacked: bool = False) ->
             text = text.replace("\n", " ")
         if not text:
             continue
-        if prefix:
-            name = item.get("standard_name") or item.get("label") or ""
-            text = f"{pretty_level('variable', name)}: {text}" if name else text
-        lines.append(text)
+        rows.append((item, text))
+    return rows
+
+
+#: Fields (in display order) a metrics-box row's automatic prefix may name --
+#: whichever of these actually differ across the box's own rows. A box faceted by
+#: variable already shares one variable per panel, so a prefix repeating it says
+#: nothing the panel title didn't; a box whose rows differ by depth (three bands
+#: sharing one panel, say) needs the depth said instead, or the rows are
+#: indistinguishable. See :func:`_auto_prefixes`.
+_PREFIX_FIELDS = ("variable", "depth", "time", "season", "source")
+
+
+def _prefix_value(item, field_name: str, index: int):
+    """The raw (unformatted) value ``field_name`` takes for one metrics-box row.
+
+    Reuses :func:`_group_key` for every field it already understands (``variable``,
+    ``depth``, ``season``, ``source``) so a box's auto prefix, a facet, and a legend
+    entry can never spell one level three different ways. ``"time"`` has no
+    :func:`_group_key` case (it is not a facet key today) -- ``item["time"]`` is
+    already the comparison's own pre-formatted label (:func:`~ocean_skill.
+    comparison._time_label`, set by ``Comparison.as_item``), read directly.
+    """
+    if field_name == "variable":
+        return item.get("standard_name") or item.get("label")
+    if field_name == "time":
+        return item.get("time")
+    return _group_key(item, field_name, index)
+
+
+def _auto_prefixes(rows) -> list[str]:
+    """Per-row prefix naming whichever field(s) actually vary across ``rows``.
+
+    ``rows`` is :func:`_metrics_rows`' own ``(item, body)`` list. A field counts as
+    varying when at least two rows carry distinct non-``None`` values for it (order
+    fixed by :data:`_PREFIX_FIELDS`, so a box varying in both variable and depth
+    reads ``"salinity 0-5 m"``, not ``"0-5 m salinity"``). Falls back to the
+    variable alone -- today's behaviour -- when nothing else varies, so a box never
+    loses its prefix outright.
+    """
+    from ocean_skill.plot.summary import pretty_level
+
+    items = [item for item, _ in rows]
+    varying = []
+    for field_name in _PREFIX_FIELDS:
+        values = {_prefix_value(item, field_name, i) for i, item in enumerate(items)}
+        values.discard(None)
+        if len(values) > 1:
+            varying.append(field_name)
+    if not varying:
+        varying = ["variable"]
+    prefixes = []
+    for i, item in enumerate(items):
+        parts = []
+        for field_name in varying:
+            value = _prefix_value(item, field_name, i)
+            if value is not None:
+                parts.append(pretty_level(field_name, value))
+        prefixes.append(" · ".join(parts))
+    return prefixes
+
+
+def _resolve_metrics_labels(panel_item_lists, metric_keys, metrics_labels):
+    """Return one metrics-box label slice per panel, or all-``None``.
+
+    ``panel_item_lists`` is one items list per panel, in panel order (an empty list
+    for a blank grid cell -- :func:`_metrics_rows` on it contributes zero rows,
+    exactly as a blank panel draws no box). ``metrics_labels=None`` (the default)
+    skips validation and returns one ``None`` per panel, which
+    :func:`_metrics_text` reads as "compute the prefix automatically" (see
+    :func:`_auto_prefixes`).
+
+    Otherwise ``metrics_labels`` is a flat, figure-wide list -- one string per
+    metrics-box row, top-to-bottom, panel by panel -- validated against the total
+    row count across every panel and, on a mismatch, raising a copy-pasteable
+    ``ValueError`` naming the current auto-computed labels, the same UX
+    :func:`remap_line_labels` gives for ``line_labels=``.
+    """
+    rows_per_panel = [_metrics_rows(items, metric_keys) for items in panel_item_lists]
+    if metrics_labels is None:
+        return [None] * len(panel_item_lists)
+    total = sum(len(rows) for rows in rows_per_panel)
+    metrics_labels = list(metrics_labels)
+    if total != len(metrics_labels):
+        current = [prefix for rows in rows_per_panel for prefix in _auto_prefixes(rows)]
+        listing = "\n".join(f"  {i + 1}. {label!r}" for i, label in enumerate(current))
+        raise ValueError(
+            f"metrics_labels needs one label per metrics-box row -- this figure "
+            f"draws {total}:\n{listing}\ngot {len(metrics_labels)}. Copy the list "
+            "above, edit the text, and pass it back in the same order."
+        )
+    slices: list[list[str] | None] = []
+    cursor = 0
+    for rows in rows_per_panel:
+        n = len(rows)
+        slices.append(metrics_labels[cursor : cursor + n] if n else None)
+        cursor += n
+    return slices
+
+
+def _metrics_text(
+    items, metric_keys, *, prefix: bool, stacked: bool = False, labels=None
+) -> str:
+    """Return the box's text: a line per distinct comparison, prefixed if several.
+
+    ``prefix=True`` computes each row's prefix automatically (:func:`_auto_prefixes`)
+    -- whichever field(s) actually vary across this box's own rows, falling back to
+    the variable name alone when nothing else does. ``prefix=False`` draws no prefix
+    at all (today's "only one comparison, nothing to distinguish" case).
+
+    ``labels=`` (set by ``compose()`` from ``metrics_labels=``, via
+    :func:`_resolve_metrics_labels`) overrides the prefix outright, one string per
+    row in :func:`_metrics_rows`' own order -- takes precedence over ``prefix``
+    either way, since an explicit label is exactly as much an override when there is
+    only one row to draw as when there are several.
+    """
+    rows = _metrics_rows(items, metric_keys, stacked=stacked)
+    if not rows:
+        return ""
+    if labels is not None:
+        prefixes = list(labels)
+    elif prefix:
+        prefixes = _auto_prefixes(rows)
+    else:
+        prefixes = [None] * len(rows)
+    lines = []
+    for pfx, (_, text) in zip(prefixes, rows, strict=True):
+        lines.append(f"{pfx}: {text}" if pfx else text)
     return "\n".join(lines)
 
 
@@ -785,6 +912,7 @@ def compose(
     residual: bool = False,
     metric_keys=(),
     metrics_loc: str = "auto",
+    metrics_labels: Sequence[str] | None = None,
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
     colors=None,
@@ -800,6 +928,16 @@ def compose(
     in the order those labels first appear (reference before test within an
     item, items in their given order) -- get that order from the ``ValueError``
     a wrong-length list raises, which lists the current labels for copying.
+
+    Each panel's statistics box prefixes its rows automatically with whichever
+    field(s) actually vary across them -- the variable, when a panel holds several
+    (the common case); depth, source, season, or time instead when the panel's
+    rows all share one variable but differ some other way (see
+    :func:`_auto_prefixes`). ``metrics_labels=`` overrides that prefix by hand: one
+    string per metrics-box row, top-to-bottom across the whole figure, panel by
+    panel -- the wrong count raises a copy-pasteable ``ValueError`` listing the
+    current auto labels, the same UX ``line_labels=`` gives (see
+    :func:`_resolve_metrics_labels`).
 
     ``colors=`` pins the auto colour cycle to specific values instead; see
     :func:`ocean_skill.plot.style.resolve`.
@@ -899,8 +1037,14 @@ def compose(
     # do per panel and are carried on the Layout instead, for the renderer to act on
     # once, for the whole figure.
     legend_placement = _normalize_legend(legend)
+    # Validated once, up front, against every panel's own row count -- see
+    # _resolve_metrics_labels. One slice per panel, in the same order `grouped` (and
+    # so `panels`, below) draws them in.
+    metrics_label_slices = _resolve_metrics_labels(
+        [[i for _, i in group] for group in grouped], metric_keys, metrics_labels
+    )
     panels = []
-    for group in grouped:
+    for group, label_slice in zip(grouped, metrics_label_slices, strict=True):
         primary_items, secondary_items = group, []
         if use_secondary:
             primary_items = [
@@ -923,7 +1067,12 @@ def compose(
         # title naming one variable while a second is drawn beside it is wrong, and a
         # corner judged empty by the primary lines is where the secondary ones run.
         specs = [line.spec for line in primary + second]
-        box = _metrics_text([i for _, i in group], metric_keys, prefix=len(group) > 1)
+        box = _metrics_text(
+            [i for _, i in group],
+            metric_keys,
+            prefix=len(group) > 1,
+            labels=label_slice,
+        )
         # Row count, not item count: several items can share one comparison's
         # metrics (a fanned season axis, most concretely) and dedup to one row
         # in _metrics_text -- counting items here would drop a box that, once
