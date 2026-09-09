@@ -239,6 +239,51 @@ def test_to_depth_includes_derived_velocity_but_still_skips_staggered_components
     assert "sea_water_y_velocity" not in at_depth
 
 
+# -- end-to-end: a grid constant requested directly (_prepare's own regression) -----
+
+
+def test_prepare_draws_a_grid_constant_standardize_promoted_to_a_coordinate():
+    """``osk.field(src, "h").plot()`` used to raise ``ValueError: cannot create a
+    Dataset from a DataArray with the same name as one of its coordinates``.
+
+    ``roms.standardize`` deliberately promotes ``h`` (and ``Cs_r``/``sigma_r``/
+    ``mask_rho``/``angle``) out of ``data_vars`` into ``ds.coords`` -- grid
+    geometry, not a comparable field (see its own comment). Resolving ``h`` by
+    name then returns ``ds["h"]``, a DataArray that -- by ordinary xarray
+    semantics for any coordinate pulled out of its own Dataset -- carries
+    itself among its own ``.coords``. ``_prepare``'s ROMS-surface branch used
+    to hand that self-referential DataArray straight to ``.to_dataset(name=...)``,
+    which xarray refuses outright for exactly this shape.
+    """
+    from ocean_skill.comparison import _prepare
+
+    ds, meta = _roms_like(raw_names=True)
+    meta = {**meta, "model": "roms"}
+    standardized = roms.standardize(ds, meta)
+    assert "h" in standardized.coords and "h" not in standardized.data_vars
+
+    da, depth = _prepare(standardized, meta, "h", {"depth": "surface"})
+
+    assert set(da.dims) == {"eta_rho", "xi_rho"}
+    np.testing.assert_allclose(da.values, 100.0)  # _roms_like's own constant h
+
+
+def test_prepare_still_reduces_an_ordinary_field_on_the_same_dataset():
+    """The unaffected case still works after the fix -- a real field with an
+    actual ``s_rho`` level to drop, on the same standardized Dataset.
+    """
+    from ocean_skill.comparison import _prepare
+
+    ds, meta = _roms_like(raw_names=True)
+    meta = {**meta, "model": "roms"}
+    standardized = roms.standardize(ds, meta)
+
+    da, depth = _prepare(
+        standardized, meta, "sea_water_x_velocity", {"depth": "surface"}
+    )
+    assert "s_rho" not in da.dims
+
+
 # -- derived_geographic_velocities: the shared "what standardize adds" fact --------
 
 
