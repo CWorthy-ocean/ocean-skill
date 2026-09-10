@@ -7119,6 +7119,7 @@ def compare(
     min_coverage: float = 0.5,
     min_pairs: int = DEFAULT_MIN_PAIRS,
     metrics: tuple[str, ...] | None = None,
+    labels: list[str] | None = None,
     skip_missing: bool = True,
     cache: bool | None = None,
     refresh: bool = False,
@@ -7203,6 +7204,16 @@ def compare(
         Tuple of metric names to compute, or ``None`` (default,
         :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`, currently
         ``("bias", "crmsd", "corr", "sigma_ratio")``).
+    labels
+        Optional list of str, one per comparison this call actually forms (in
+        fan order -- the count printed as "N comparison(s) formed"), overriding
+        the auto-derived name (built from whichever of variable/depth/time
+        varies across the fan) with your own text. Raises if the length
+        doesn't match. Set on the returned :class:`ComparisonSet` as
+        ``.labels`` -- honored by ``.taylor()``/``.target()``/``.summary()``
+        in both renderers, but not by re-pooling the set (``+`` or
+        :func:`summary` over several sets re-derives labels from what varies
+        across the pool).
     skip_missing
         Bool (default ``True``) -- skip a pair whose variable is absent from
         a source, or whose catalog extents never overlap, with a message,
@@ -8237,4 +8248,4 @@ def compare(
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
-    return ComparisonSet(out)
+    return ComparisonSet(out, labels=labels)
