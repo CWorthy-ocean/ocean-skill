@@ -1949,8 +1949,23 @@ def _prepare(
                 # in the water column they actually are. Attaching z_rho is a
                 # coordinate assignment, not an interpolation, so it costs nothing
                 # extra here the way to_depth's transform would.
-                if "z_rho" not in sub.coords:
-                    sub = roms.add_depth_coord(sub, meta)
+                #
+                # Always recomputed with zero_zeta=True, *overwriting* whatever
+                # z_rho standardize already attached at load time (never skipped
+                # via an "if 'z_rho' not in sub.coords" guard, since it already is
+                # -- that z_rho was built from a zeta already land-masked to NaN
+                # there, see roms.standardize). A section draws this coordinate as
+                # a plot *mesh*, not a water column to interpolate data onto: the
+                # seafloor under land is still known (it's h, never masked), so the
+                # mesh has no business going NaN there. Forcing zero_zeta here
+                # replaces that NaN with the same zeta-free, h-only depth
+                # add_depth_coord already falls back to when there is no zeta at
+                # all -- finite everywhere, and off by at most zeta's own ~1 m
+                # against an h of hundreds to thousands, invisible at section
+                # scale. See ocean_skill.plot.section.prepare_section, which no
+                # longer has (or needs) a placeholder fill for a NaN it will now
+                # never receive.
+                sub = roms.add_depth_coord(sub, meta, zero_zeta=True)
             elif sigma is not None:
                 # An isopycnal slice needs the full water column of temperature and
                 # salinity, not just the one variable this lane resolved -- reduced by
@@ -3869,7 +3884,7 @@ class Comparison:
         role: str = "test",
         bbox: tuple[float, float, float, float] | None = None,
         point_window_cells: int | None = None,
-        time_window: tuple[Any, Any] | None | object = _UNSET,
+        time_window: tuple[Any, Any] | object | None = _UNSET,
         time_targets: Any = _UNSET,
         time_targets_method: str | object = _UNSET,
         drop_keys: tuple[str, ...] = (),

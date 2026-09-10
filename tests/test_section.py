@@ -300,21 +300,30 @@ def test_section_renders_interactively():
     assert obj is not None
 
 
-# -- native-s land columns: prepare_section must not hand pcolormesh a NaN coord ----
+# -- native-s land columns: prepare_section must never see a NaN depth coord -------
 #
 # roms.standardize masks the free-surface zeta over land, and z_rho/z_w are built
-# from zeta -- so a native-s section's depth coordinate is NaN over every land
-# column, unlike the all-wet synthetic grid every other test in this file uses.
-# pcolormesh tolerates NaN in the *data* it colours (the below-bathymetry grey) but
-# raises on NaN in its x/y coordinate arrays -- this used to reach real ROMS output
-# (an `esper` run) as a bare ValueError with no synthetic-grid test to catch it.
+# from zeta -- so *without* correction a native-s section's depth coordinate would
+# be NaN over every land column, unlike the all-wet synthetic grid every other test
+# in this file uses. pcolormesh tolerates NaN in the *data* it colours (the
+# below-bathymetry grey) but raises on NaN in its x/y coordinate arrays -- this
+# used to reach real ROMS output (an `esper` run) as a bare ValueError.
+#
+# The fix lives upstream of prepare_section: ocean_skill.comparison._prepare builds
+# a section's z_rho/z_w with roms.add_depth_coord(..., zero_zeta=True), which is
+# finite everywhere -- land included -- because it is built from h (bathymetry,
+# never masked) alone, dropping zeta rather than trying to fill around its absence.
+# prepare_section itself no longer patches a NaN depth (see git history for the old
+# mean-profile fill this replaced); confirmed here so a fill doesn't quietly
+# reappear as a band-aid for some future path that reintroduces the NaN.
 
 
 def _native_s_item_with_land():
     """Build a (z_rho, along) section item whose westernmost column is land.
 
-    ``z_rho`` is NaN there, mirroring ``roms.standardize``'s masked-zeta chain --
-    the shape ``prepare_section`` must turn into a finite depth coordinate.
+    ``z_rho`` is NaN there, mirroring what ``roms.standardize``'s masked-zeta chain
+    would produce *without* the zero_zeta correction -- the shape prepare_section
+    must no longer be asked to fix.
     """
     n_s, n_along = 6, 5
     sigma = np.linspace(-0.95, -0.05, n_s)
@@ -336,24 +345,27 @@ def _native_s_item_with_land():
     return da
 
 
-def test_prepare_section_fills_nan_depth_over_land_columns():
+def test_prepare_section_no_longer_fills_a_nan_depth_column():
+    """prepare_section trusts its input's depth mesh -- filling moved upstream.
+
+    In practice prepare_section never receives this shape any more (see the
+    module-level comment above), but confirming it propagates a NaN depth rather
+    than silently patching one guards against the mean-profile fill (and the
+    bathymetry "dips" it drew into land boundaries) quietly coming back.
+    """
     from ocean_skill.plot.section import prepare_section
 
     da = _native_s_item_with_land()
     assert bool(np.isnan(da["z_rho"]).any())  # the land column is genuinely NaN
     values, geometry = prepare_section(da)
     assert geometry.native_s
-    assert bool(np.isfinite(np.asarray(values["depth"])).all())
-    # the data itself is untouched -- the land column still draws grey
+    assert bool(np.isnan(np.asarray(values["depth"])).any())
+    # the data is NaN there too, same as before -- only the fill is gone
     assert bool(np.isnan(np.asarray(values)).any())
 
 
-def test_prepare_section_land_fill_is_a_no_op_on_an_all_wet_section():
-    """Confirm the fill only ever engages on a genuine NaN.
-
-    An all-wet grid, or a fixed-depth section's 1-D z (no ALONG_DIM in its own
-    dims), draw unchanged.
-    """
+def test_prepare_section_all_wet_section_is_finite():
+    """An all-wet grid, or a fixed-depth section's 1-D z, draw with a finite mesh."""
     from ocean_skill.plot.section import prepare_section
 
     values, _ = prepare_section(_section_item()["field"])  # fixed-depth "z", all-wet
@@ -400,15 +412,57 @@ def _roms_run_with_land() -> xr.Dataset:
     return ds
 
 
-def test_a_native_s_transect_through_land_renders_statically(patched_read):
-    """Pin the exact real-world failure.
+def test_native_s_section_depth_over_land_matches_zero_zeta_formula(patched_read):
+    """The land-column depth mesh is exactly the h-only (zeta=0) formula.
 
-    A native-s section crossing land used to reach ``ax.pcolormesh`` with a
-    NaN depth coordinate and raise.
+    Regression for the bathymetry "dips": before, a land column's depth
+    coordinate was filled with the transect's *mean* depth profile -- a guess
+    that could be far deeper than the real seafloor there, dragging a wet
+    neighbor's meshed bottom edge down into a downward wedge. Now every column
+    -- wet or land -- reads its own h through the same zero-zeta formula
+    add_depth_coord already used when a run carries no free surface at all, so a
+    shallow column next to land never meshes against a placeholder deeper than
+    its own bathymetry.
+    """
+    ds = _roms_run_with_land()
+    h_row = np.asarray(ds["h"])[2, :]  # eta_rho=2, the row the transect below cuts
+    sigma_r = np.asarray(ds["sigma_r"])
+    cs_r = np.asarray(ds["Cs_r"])
+
+    name = patched_read(ds)
+    f = osk.field(name, VAR, select={"transect": {"eta_rho": 2}}, cache=False)
+    z_rho = np.asarray(f.data["z_rho"])  # (s_rho, along)
+    assert bool(np.isfinite(z_rho).all())
+
+    expected = (
+        h_row[None, :]
+        * (HC * sigma_r[:, None] + h_row[None, :] * cs_r[:, None])
+        / (HC + h_row[None, :])
+    )
+    np.testing.assert_allclose(z_rho, expected)
+
+    # no dip: every column's own depth stays within its own bathymetry -- the
+    # land column (xi=0) is no deeper than its own h, so a wet neighbour's mesh
+    # edge against it can never be pulled below the neighbour's real seafloor.
+    depth = -z_rho
+    assert bool((depth <= h_row[None, :] + 1e-6).all())
+
+
+def test_a_native_s_transect_through_land_renders_statically(patched_read):
+    """Pin the exact real-world failure, and its fix.
+
+    A native-s section crossing land used to reach ``ax.pcolormesh`` with a NaN
+    depth coordinate and raise; ``_prepare`` then patched it with a transect-mean
+    profile, which drew bathymetry "dips" into the land boundary (a deep guessed
+    depth meshed against a shallow real one). ``_roms_run_with_land`` reproduces
+    the masked-zeta chain that *would* leave ``z_rho`` NaN over land, but
+    ``osk.field`` (via ``comparison._prepare``'s ``zero_zeta=True`` section
+    handling) rebuilds it from ``h`` alone first, so it is finite here already --
+    the render below no longer needs to (and does not) fill anything.
     """
     name = patched_read(_roms_run_with_land())
     f = osk.field(name, VAR, select={"transect": {"eta_rho": 2}}, cache=False)
-    assert bool(np.isnan(f.data["z_rho"]).any())  # the fixture actually has land
+    assert bool(np.isfinite(np.asarray(f.data["z_rho"])).all())
     fig = f.plot()
     assert fig.axes
 
