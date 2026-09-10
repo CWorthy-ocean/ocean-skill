@@ -2731,6 +2731,32 @@ def frame_labels(coord) -> list[str]:
     return facet_labels(coord)
 
 
+#: How long a single ``suptitle_text`` part (the variable name, a depth, a place, a
+#: period, ...) can run before it is elided. Sized for a normal short phrase like
+#: "45–55°N, 165°E–155°W" or "2024-04 to 2024-11" to pass untouched; this is a
+#: backstop against the rare part that grows past what any of those formatters
+#: expect to produce (a long combined-variable label, a depth list that slipped
+#: past :func:`ocean_skill.comparison._depth_label`'s own collapsing), not the
+#: primary shortening mechanism -- that lives in each part's own formatter.
+_MAX_TITLE_PART_CHARS = 40
+
+
+def _elide(text: str, limit: int = _MAX_TITLE_PART_CHARS) -> str:
+    """Shorten ``text`` to ``limit`` chars with a trailing ``"…"``, at a word break.
+
+    Breaks on the last space within the limit so the cut does not land mid-word;
+    falls back to a hard cut when there is no space to break on (one long token,
+    e.g. a run-together identifier). Text at or under the limit is returned as-is.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit].rstrip()
+    space = head.rfind(" ")
+    if space > 0:
+        head = head[:space]
+    return f"{head}…"
+
+
 def field_title(standard_name) -> str:
     """The suptitle a one-field figure carries when the caller has not named one.
 
@@ -2826,9 +2852,16 @@ def suptitle_text(standard_name, extras, *, label: str | None = None) -> str:
     coords) and :func:`field_row` (which is handed the comparison's already-formatted
     depth and time), so a one-field figure and a ``test | reference | difference`` row
     name the same quantity the same way.
+
+    Each part is elided independently (:func:`_elide`) before joining -- a backstop
+    against any one part running unexpectedly long, so a single oversized part cannot
+    blow up the whole title, and the other parts (place, period, ...) are never
+    dropped to make room for it.
     """
-    parts = [field_title(standard_name), *(e for e in extras if e)]
-    subject = " · ".join(p for p in parts if p)
+    parts = [
+        _elide(p) for p in (field_title(standard_name), *(e for e in extras if e)) if p
+    ]
+    subject = " · ".join(parts)
     return f"{label}: {subject}" if label and subject else subject
 
 

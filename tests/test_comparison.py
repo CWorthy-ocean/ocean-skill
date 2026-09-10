@@ -355,6 +355,17 @@ def test_depth_label():
     assert _depth_label(100.0) == "100 m"
 
 
+def test_depth_label_collapses_a_long_numeric_list_to_its_span():
+    # A handful of chosen levels is still worth naming individually...
+    assert _depth_label([10, 20]) == "10 m, 20 m"
+    # ...but a full profile's worth of levels reads as "the whole column", not as
+    # a deliberate few, and collapses to its span instead.
+    assert _depth_label(list(range(1, 37))) == "1–36 m"
+    # A mixed list (not all bare numbers) is short enough in practice that
+    # spelling each element still reads fine -- it never collapses.
+    assert _depth_label(["surface", 50, 100]) == "surface, 50 m, 100 m"
+
+
 # -- narrowing an ERDDAP lane before it is downloaded -------------------------
 
 

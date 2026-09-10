@@ -275,6 +275,11 @@ def test_sigma_label_formats_a_scalar_and_a_list():
     assert _sigma_label([24.0, 26.5]) == "σ₀ = 24 kg/m³, σ₀ = 26.5 kg/m³"
 
 
+def test_sigma_label_collapses_a_long_list_to_its_span():
+    values = [24.0 + 0.1 * i for i in range(10)]
+    assert _sigma_label(values) == "σ₀ = 24–24.9 kg/m³"
+
+
 def test_facet_labels_reads_sigma0_as_a_density_not_a_depth():
     from ocean_skill.plot.matplotlib_renderer import facet_labels
 
