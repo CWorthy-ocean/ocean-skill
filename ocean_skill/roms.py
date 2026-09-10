@@ -637,6 +637,31 @@ def _transform_spread(grid, ds: xr.Dataset, s_dim: str, targets, target_data, h_
     return transformed
 
 
+def _nearest_depth_spread(ds, s_dim: str, idx, h_dims):
+    """Snap a riding ``spread`` coordinate onto :func:`nearest_depth_levels`' own index.
+
+    The nearest counterpart of :func:`_transform_spread`: the same "a mean+std
+    envelope silently vanishes through a fixed coordinate whitelist" problem,
+    solved the same way :func:`nearest_depth_levels` reads every ordinary data
+    variable -- ``isel`` at the already-computed nearest-level ``idx``, not a
+    fresh interpolation. Returns ``None`` under the same conditions
+    :func:`_transform_spread` does: no spread riding at all, or its dims do not
+    match this transform (nothing to select against). Reachability (NaN below/
+    above the reference column's range) is left to the caller, exactly as the
+    ordinary data variables get ``.where(reachable)`` applied after this returns.
+    """
+    from ocean_skill.operators import SPREAD_COORD
+
+    if SPREAD_COORD not in ds.coords:
+        return None
+    spread = ds[SPREAD_COORD]
+    if s_dim not in spread.dims or not (h_dims <= set(spread.dims)):
+        return None
+    selected = spread.isel({s_dim: idx}).reset_coords(drop=True)
+    selected.attrs = dict(spread.attrs)
+    return selected
+
+
 def to_depth(
     ds: xr.Dataset, meta: dict[str, Any], d: float | list[float]
 ) -> xr.Dataset:
@@ -820,6 +845,7 @@ def nearest_depth_levels(
     coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
     if AREA_COORD in ds.coords:
         coords[AREA_COORD] = ds[AREA_COORD]
+    spread = _nearest_depth_spread(ds, s_dim, idx, h_dims)
 
     # Reachability, exactly as to_depth checks it: a property of the reference
     # column's geometry alone, not of any one variable's data.
@@ -829,6 +855,10 @@ def nearest_depth_levels(
     reachable = (col_min <= targets) & (targets <= col_max)
     for name in out:
         out[name] = out[name].where(reachable)
+    if spread is not None:
+        from ocean_skill.operators import SPREAD_COORD
+
+        coords[SPREAD_COORD] = spread.where(reachable)
     result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
     reachable_any = reachable.any(dim=other) if other else reachable
