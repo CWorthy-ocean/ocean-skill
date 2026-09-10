@@ -921,9 +921,33 @@ panels (a single-panel comparison) or when *both* sides vary (a true model-vs-mo
 grid, where no single title could honestly name both) -- either way, `titles=` still
 overrides whatever the panel ended up reading, by hand.
 
-### `labels` (summary diagrams)
+### `labels` (summary diagrams: point text)
 
-`taylor`, `target` and `paired` only. Chooses how each point is identified:
+`ComparisonSet.taylor()`/`.target()`/`.summary()` (and the module-level
+`osk.summary()`) only. A list of str, one per comparison in the set's own order,
+naming each point outright — overriding whatever it would otherwise be called (its
+own `Comparison.label`, a name a pooled `+` re-derived from what varies across the
+pool, or a named-group key). Raises if the length doesn't match.
+
+```python
+(along + across).summary(labels=["Along fjord transect", "Across fjord transect"])
+```
+
+This is applied **last**, at draw time, to the exact points about to be plotted —
+which matters once sets are pooled: `+` (and `osk.summary()` over a list) always
+relabels by whatever dimension varies across the pool, so a name set earlier (say,
+at `compare()`'s own comparisons) does not survive being pooled with another set that
+differs only in, e.g., its reference station list. `labels=` here sidesteps that:
+there is no re-derivation left to discard it.
+
+Passing a plain string (rather than a list) raises — that is almost always
+`legend_style=`'s value meant for the *other* keyword below.
+
+### `legend_style` (summary diagrams: how points are keyed)
+
+`taylor`, `target` and `paired` only (formerly spelled `labels=` on these three
+functions — see above for the current, unrelated meaning of that name). Chooses how
+each point is identified:
 
 | Value | Effect |
 |---|---|
@@ -947,10 +971,10 @@ one (or neither) it warns and falls back to `"legend"`, since a one-channel matr
 just the flat legend.
 
 ```python
-suite.paired(labels="annotate")   # both panels annotated
-suite.paired(labels="legend")     # one shared key below both panels
-suite.target(labels="legend")     # target keyed like a Taylor
-suite.paired(color_by="variable", marker_by="test", labels="grid")  # matrix key
+suite.paired(legend_style="annotate")   # both panels annotated
+suite.paired(legend_style="legend")     # one shared key below both panels
+suite.target(legend_style="legend")     # target keyed like a Taylor
+suite.paired(color_by="variable", marker_by="test", legend_style="grid")  # matrix key
 ```
 
 `paired` applies **one** choice to both panels, since they show the same points and
@@ -979,8 +1003,9 @@ suite.taylor(color_by="variable", marker_by="test")   # 3 models × 6 variables
 Naming only `marker_by` colours by the *same* groups, so the legend's swatches match
 the points rather than varying with nothing to explain them.
 
-With both set, [`labels="grid"`](#labels-summary-diagrams) draws their cross-product
-as an explicit matrix instead of the flat legend's two separate blocks.
+With both set, [`legend_style="grid"`](#legend_style-summary-diagrams-how-points-are-keyed)
+draws their cross-product as an explicit matrix instead of the flat legend's two
+separate blocks.
 
 A third *grouping* channel (size, or filled vs hollow) is possible but deliberately
 absent: three encodings on one point tend to be slower to decode than two diagrams
@@ -992,7 +1017,7 @@ tell points apart.
 Interactively, bokeh cannot show two independent legend blocks, so `color_by` +
 `marker_by` produces combined entries (`"chl · runA"`) where the static diagram shows
 a colour block and a marker block. Same groups, one legend instead of two. (This is
-also what interactive `target` falls back to when asked for `labels="grid"`.)
+also what interactive `target` falls back to when asked for `legend_style="grid"`.)
 
 ### `groups` (summary diagrams)
 

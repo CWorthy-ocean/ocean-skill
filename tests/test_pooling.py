@@ -252,6 +252,87 @@ def test_metric_items_units_default_to_none_without_an_aligned_pair():
     assert ComparisonSet([a])._metric_items()[0]["units"] is None
 
 
+# --- labels= as per-point text at draw time, applied after any pooling --------------
+#
+# Pooling (``+``, list/dict ``summary()``) always relabels by what varies across the
+# pool — the whole point of the tests above. That means a name given anywhere upstream
+# (a comparison's own ``label``, a named group's key) cannot survive being pooled with
+# something else, since the pool may need to say more to keep its points apart. The
+# ``labels=`` on ``.taylor()``/``.target()``/``.summary()`` sidesteps this entirely: it
+# is applied last, to the exact points about to be drawn, so it always wins.
+
+
+def test_metric_items_labels_override_the_comparisons_own_ones_in_order():
+    a = _FakeComparison(variable=NO3, label="mine")
+    b = _FakeComparison(variable=PO4, label="theirs")
+    items = ComparisonSet([a, b])._metric_items(labels=["A", "B"])
+    assert [i["label"] for i in items] == ["A", "B"]
+
+
+def test_metric_items_labels_must_be_one_per_comparison():
+    a, b = _FakeComparison(variable=NO3), _FakeComparison(variable=PO4)
+    with pytest.raises(ValueError, match="one per comparison"):
+        ComparisonSet([a, b])._metric_items(labels=["only one"])
+
+
+def test_metric_items_labels_rejects_a_display_mode_string():
+    """A bare string is almost always ``legend_style=``'s value, passed to the wrong
+    keyword — refused with a pointer to the right one rather than silently treated as
+    a one-character-per-point list."""
+    a = _FakeComparison()
+    with pytest.raises(ValueError, match="legend_style="):
+        ComparisonSet([a])._metric_items(labels="legend")
+
+
+@pytest.mark.parametrize("kind", ["taylor", "target", "summary"])
+def test_pooled_sets_can_still_be_named_at_draw_time(kind):
+    """The along/across-fjord case: two sections pooled by ``+`` collide on their own
+    label (``depth``/``time``/etc. are shared) and would otherwise be renamed by what
+    *does* vary across the pool — here the reference station list. ``labels=`` at draw
+    time overrides that outright, regardless of how the set was assembled."""
+    along = ComparisonSet(
+        [_FakeComparison(reference="ctd_station_HV1+ctd_station_HV3", label="salinity")]
+    )
+    across = ComparisonSet(
+        [_FakeComparison(reference="ctd_station_HV6+ctd_station_HV7", label="salinity")]
+    )
+
+    fig = getattr(along + across, kind)(labels=["Along fjord transect", "Across fjord transect"])
+
+    texts = {t.get_text() for t in fig.findobj(plt.Text)}
+    assert {"Along fjord transect", "Across fjord transect"} <= texts
+    assert not {"ctd_station_HV1+ctd_station_HV3", "ctd_station_HV6+ctd_station_HV7"} & texts
+
+
+def test_target_labels_reach_the_interactive_renderer_too():
+    hv = pytest.importorskip("holoviews")
+
+    along = ComparisonSet([_FakeComparison(label="salinity")])
+    across = ComparisonSet([_FakeComparison(reference="other", label="salinity")])
+
+    obj = (along + across).target(
+        labels=["Along fjord transect", "Across fjord transect"], renderer="holoviews"
+    )
+    points = [e for e in obj if isinstance(e, hv.Points)]
+    assert {e.label for e in points} == {"Along fjord transect", "Across fjord transect"}
+
+
+def test_summary_labels_must_be_one_per_pooled_comparison():
+    with pytest.raises(ValueError, match="one per comparison"):
+        summary(
+            [
+                _FakeComparison(variable=NO3, label="a"),
+                _FakeComparison(variable=PO4, label="b"),
+            ],
+            labels=["only one"],
+        )
+
+
+def test_summary_labels_are_refused_alongside_portrait():
+    with pytest.raises(ValueError, match="portrait"):
+        summary([_FakeComparison()], kind="portrait", labels=["a"])
+
+
 # --- the front door ------------------------------------------------------------------
 
 
@@ -268,7 +349,7 @@ def test_summary_draws_the_pooled_labels(kind):
             _FakeComparison(variable=PO4, depth=0, label="po4"),
         ],
         kind=kind,
-        labels="legend",
+        legend_style="legend",
     )
     texts = {t.get_text() for t in fig.findobj(plt.Text)}
     assert {"nitrate", "phosphate"} <= texts
@@ -281,7 +362,7 @@ def test_summary_of_named_groups_draws_the_keys():
             "forecast": _FakeComparison(variable=NO3, depth=50),
         },
         kind="target",
-        labels="legend",
+        legend_style="legend",
     )
     texts = {t.get_text() for t in fig.findobj(plt.Text)}
     assert {"hindcast", "forecast"} <= texts

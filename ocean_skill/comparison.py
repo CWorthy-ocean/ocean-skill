@@ -5945,7 +5945,9 @@ class ComparisonSet:
             items.append({**c.as_item(), "label": label, "row_label": label})
         return items
 
-    def _metric_items(self) -> list[dict[str, Any]]:
+    def _metric_items(
+        self, labels: list[str] | None = None
+    ) -> list[dict[str, Any]]:
         """Spec items carrying only what a summary diagram reads: metrics, a label,
         and the reference's units.
 
@@ -5958,14 +5960,32 @@ class ComparisonSet:
         ``units`` mirrors :meth:`Comparison.as_item`, defensively: a hand-built
         comparison (see ``test_pooling``) has no ``aligned`` to read it from and gets
         ``None`` instead, which the absolute-axes diagrams already treat as "unknown".
+
+        ``labels``, given, overrides the point text one-for-one in comparison order —
+        the last word on what a diagram calls each point, applied here rather than
+        stored, so it never has to survive a later ``+``/:func:`summary` re-pool the
+        way a stored override would. A bare string is refused: that is almost always a
+        display-mode value (``"legend"``/``"annotate"``/``"grid"``) meant for
+        ``legend_style=`` on the diagram call, not a list of point names.
         """
+        if isinstance(labels, str):
+            raise ValueError(
+                f"labels={labels!r} looks like a display mode, not point text — "
+                "labels= now takes one string per point (e.g. "
+                '["run A", "run B"]); for the legend/annotate/grid display mode use '
+                "legend_style= instead."
+            )
+        if labels is not None and len(labels) != len(self.comparisons):
+            raise ValueError(
+                f"labels has {len(labels)} entries for {len(self.comparisons)} "
+                "comparisons — there must be one per comparison"
+            )
         items = []
         for i, c in enumerate(self.comparisons):
             aligned = getattr(c, "aligned", None)
             units = aligned["reference"].attrs.get("units") if aligned is not None else None
-            items.append(
-                {"metrics": c.metrics(), "label": self._label_for(i), "units": units}
-            )
+            label = labels[i] if labels is not None else self._label_for(i)
+            items.append({"metrics": c.metrics(), "label": label, "units": units})
         return items
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -6165,17 +6185,30 @@ class ComparisonSet:
             renderer=renderer,
         )
 
-    def taylor(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def taylor(
+        self,
+        *,
+        labels: list[str] | None = None,
+        renderer: str = "matplotlib",
+        **kwargs: Any,
+    ):
         """Taylor diagram of the set (correlation + variability; blind to bias).
 
         Parameters
         ----------
+        labels
+            Optional list of str, one per comparison in this set's order,
+            naming each point -- overriding what it would otherwise be
+            called (its own label, a pooled ``+`` name, or a named-group
+            key). Raises if the length doesn't match. Applied here, at draw
+            time, rather than stored on the set, so it is exactly what shows
+            up on this diagram regardless of how the set was pooled.
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive).
         **kwargs
             Plot options forwarded to the renderer: ``color_by``,
-            ``marker_by``, ``labels``, ``title``, ``save``, and the
+            ``marker_by``, ``legend_style``, ``title``, ``save``, and the
             ``*_kwargs`` styling dicts; ``arrows`` (``True``, or a field name
             such as ``"time"`` -- e.g. from :func:`compare`'s ``times=`` fan)
             connects each run's time-ordered points with an arrow, hollow at
@@ -6186,21 +6219,33 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="taylor", items=self._metric_items(), options=kwargs),
+            PlotSpec(
+                family="taylor", items=self._metric_items(labels=labels), options=kwargs
+            ),
             renderer=renderer,
         )
 
-    def target(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def target(
+        self,
+        *,
+        labels: list[str] | None = None,
+        renderer: str = "matplotlib",
+        **kwargs: Any,
+    ):
         """Target diagram of the set (bias vs signed centred RMSD).
 
         Parameters
         ----------
+        labels
+            Optional list of str, one per comparison in this set's order,
+            naming each point -- see :meth:`taylor`'s ``labels`` for the full
+            explanation.
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive).
         **kwargs
             Plot options forwarded to the renderer: ``color_by``,
-            ``marker_by``, ``labels``, ``title``, ``save``, and the
+            ``marker_by``, ``legend_style``, ``title``, ``save``, and the
             ``*_kwargs`` styling dicts; ``arrows`` (``True``, or a field name
             such as ``"time"``) connects each run's time-ordered points with
             an arrow, hollow at the start. See
@@ -6210,21 +6255,33 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="target", items=self._metric_items(), options=kwargs),
+            PlotSpec(
+                family="target", items=self._metric_items(labels=labels), options=kwargs
+            ),
             renderer=renderer,
         )
 
-    def summary(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def summary(
+        self,
+        *,
+        labels: list[str] | None = None,
+        renderer: str = "matplotlib",
+        **kwargs: Any,
+    ):
         """Taylor and Target side by side for the whole set.
 
         Parameters
         ----------
+        labels
+            Optional list of str, one per comparison in this set's order,
+            naming each point on **both** panels -- see :meth:`taylor`'s
+            ``labels`` for the full explanation.
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive).
         **kwargs
             Plot options forwarded to the renderer, shared by both panels:
-            the same ``color_by``/``marker_by``/``labels``/``title``/
+            the same ``color_by``/``marker_by``/``legend_style``/``title``/
             ``save``/``arrows``/``*_kwargs`` families as :meth:`taylor`/
             :meth:`target`. See ``docs/plot_styling_reference.md`` for the
             full list.
@@ -6233,7 +6290,9 @@ class ComparisonSet:
         from ocean_skill.plot.spec import PlotSpec
 
         return render(
-            PlotSpec(family="paired", items=self._metric_items(), options=kwargs),
+            PlotSpec(
+                family="paired", items=self._metric_items(labels=labels), options=kwargs
+            ),
             renderer=renderer,
         )
 
@@ -6434,6 +6493,7 @@ def summary(
     comparisons: Any,
     *,
     kind: str = "both",
+    labels: list[str] | None = None,
     renderer: str = "matplotlib",
     **kwargs: Any,
 ):
@@ -6449,12 +6509,18 @@ def summary(
         One of ``"both"`` (default, Taylor and target side by side),
         ``"taylor"``, ``"target"``, or ``"portrait"`` (the metrics
         scoreboard heatmap) -- see :data:`_SUMMARY_KINDS`.
+    labels
+        Optional list of str, one per pooled comparison (in flattened
+        order), naming each point on the chosen overview -- overriding
+        the pooled/dict-key name it would otherwise draw. Raises if the
+        length doesn't match, or if ``kind="portrait"`` (a scoreboard has
+        no per-point label to override).
     renderer
         One of ``"matplotlib"`` (default, static), ``"holoviews"``
         (interactive), or ``"both"`` (side by side).
     **kwargs
         Forwarded to the chosen overview: ``color_by``, ``marker_by``,
-        ``labels``, ``title``, ``save``, ... for Taylor/target/both;
+        ``legend_style``, ``title``, ``save``, ... for Taylor/target/both;
         ``row_by``, ``col_by``, ``metric_names``, ``annotate``, ... for
         portrait. See :mod:`ocean_skill.plot.summary` and
         :mod:`ocean_skill.plot.portrait`.
@@ -6467,6 +6533,7 @@ def summary(
         osk.summary([nutrients, depths, c])
         osk.summary({"hindcast": nutrients, "forecast": other}, kind="taylor")
         osk.summary(comparisons, kind="portrait", metric_names="corr")
+        osk.summary([along, across], labels=["Along fjord", "Across fjord"])
 
     Pooling is safe here in a way it is not for :meth:`ComparisonSet.plot`, which
     refuses a set mixing plot families: a metrics record is a handful of scalars whether
@@ -6483,12 +6550,13 @@ def summary(
     both take that value.
 
     Points are named by what varies across the pool, or by your own names if
-    ``comparisons`` is a ``{name: comparisons}`` dict. Either way the comparisons
-    themselves are untouched — see :meth:`ComparisonSet._label_for`. Remaining keyword
-    arguments go to the chosen overview (``color_by``, ``marker_by``, ``labels``,
-    ``title``, ``save``, ... for Taylor/target/both; ``row_by``, ``col_by``,
-    ``metric_names``, ``annotate``, ... for portrait); see
-    :mod:`ocean_skill.plot.summary` and :mod:`ocean_skill.plot.portrait`.
+    ``comparisons`` is a ``{name: comparisons}`` dict, unless ``labels=`` overrides them
+    outright. Either way the comparisons themselves are untouched — see
+    :meth:`ComparisonSet._label_for`. Remaining keyword arguments go to the chosen
+    overview (``color_by``, ``marker_by``, ``legend_style``, ``title``, ``save``, ...
+    for Taylor/target/both; ``row_by``, ``col_by``, ``metric_names``, ``annotate``,
+    ... for portrait); see :mod:`ocean_skill.plot.summary` and
+    :mod:`ocean_skill.plot.portrait`.
     """
     if kind not in _SUMMARY_KINDS:
         raise ValueError(
@@ -6497,12 +6565,20 @@ def summary(
             "'portrait' the metrics scoreboard heatmap. (To choose static vs "
             "interactive, use renderer=.)"
         )
+    if labels is not None and kind == "portrait":
+        raise ValueError(
+            "labels= names points on a Taylor/target/paired diagram; "
+            "kind='portrait' draws a metrics scoreboard with no per-point label."
+        )
     if isinstance(comparisons, dict):
         pooled = ComparisonSet(comparisons)  # keys are the labels
     else:
         members = _flatten(comparisons)
         pooled = ComparisonSet(members, labels=_pooled_labels(members))
-    return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **kwargs)
+    method_kwargs = dict(kwargs)
+    if kind != "portrait":
+        method_kwargs["labels"] = labels
+    return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **method_kwargs)
 
 
 def _fan_vertical_entries(
@@ -7305,7 +7381,6 @@ def compare(
     min_coverage: float = 0.5,
     min_pairs: int = DEFAULT_MIN_PAIRS,
     metrics: tuple[str, ...] | None = None,
-    labels: list[str] | None = None,
     skip_missing: bool = True,
     cache: bool | None = None,
     refresh: bool = False,
@@ -7402,16 +7477,6 @@ def compare(
         Tuple of metric names to compute, or ``None`` (default,
         :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`, currently
         ``("bias", "crmsd", "corr", "sigma_ratio")``).
-    labels
-        Optional list of str, one per comparison this call actually forms (in
-        fan order -- the count printed as "N comparison(s) formed"), overriding
-        the auto-derived name (built from whichever of variable/depth/time
-        varies across the fan) with your own text. Raises if the length
-        doesn't match. Set on the returned :class:`ComparisonSet` as
-        ``.labels`` -- honored by ``.taylor()``/``.target()``/``.summary()``
-        in both renderers, but not by re-pooling the set (``+`` or
-        :func:`summary` over several sets re-derives labels from what varies
-        across the pool).
     skip_missing
         Bool (default ``True``) -- skip a pair whose variable is absent from
         a source, or whose catalog extents never overlap, with a message,
@@ -8446,4 +8511,4 @@ def compare(
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
-    return ComparisonSet(out, labels=labels)
+    return ComparisonSet(out)

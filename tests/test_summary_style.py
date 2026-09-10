@@ -81,7 +81,7 @@ def _taylor_lines(fig):
 
 
 def test_taylor_marker_scale_scales_points_and_star(comparisons):
-    fig = taylor(comparisons, marker_scale=2.0, labels=None)
+    fig = taylor(comparisons, marker_scale=2.0, legend_style=None)
 
     lines = _taylor_lines(fig)
     samples = [ln for ln in lines if ln.get_marker() == "o"]
@@ -94,7 +94,7 @@ def test_taylor_marker_scale_scales_points_and_star(comparisons):
 
 
 def test_target_marker_scale_scales_points_star_and_swatches(comparisons):
-    fig = target(comparisons, marker_scale=2.0, labels="legend")
+    fig = target(comparisons, marker_scale=2.0, legend_style="legend")
     ax = fig.axes[0]
 
     assert ax.collections[0].get_sizes() == pytest.approx([70 * 2.0**2])
@@ -114,7 +114,7 @@ def test_marker_scale_dict_styles_points_by_level_star_stays_default(comparisons
         comparisons,
         color_by="variable",
         marker_scale={"sea_water_temperature": 2.0},
-        labels=None,
+        legend_style=None,
     )
     ax = fig.axes[0]
     sizes = [c.get_sizes()[0] for c in ax.collections]
@@ -126,7 +126,7 @@ def test_marker_scale_dict_styles_points_by_level_star_stays_default(comparisons
 
 
 def test_paired_forwards_marker_scale_and_alpha(comparisons):
-    fig = paired(comparisons, marker_scale=2.0, alpha=0.5, labels=None)
+    fig = paired(comparisons, marker_scale=2.0, alpha=0.5, legend_style=None)
     target_ax = fig.axes[1]
 
     collection = target_ax.collections[0]
@@ -137,7 +137,7 @@ def test_paired_forwards_marker_scale_and_alpha(comparisons):
 def test_paired_legend_swatches_honor_explicit_colors(comparisons):
     """Regression: the shared legend used to ignore ``colors`` and key off the cycle."""
     explicit = ["#1b9e77", "#d95f02", "#7570b3"]
-    fig = paired(comparisons, colors=explicit, labels="legend")
+    fig = paired(comparisons, colors=explicit, legend_style="legend")
 
     swatches = {h.get_label(): h.get_mfc() for h in fig.legends[0].legend_handles}
     for label, color in zip(("temp GOM", "salt GOM", "no3 GOM"), explicit, strict=True):
@@ -153,7 +153,7 @@ def test_paired_one_call_layers_less_noticeable_groups_under_more_noticeable_one
         color_by="variable",
         alpha={"sea_water_salinity": 0.15},
         marker_scale={"sea_water_temperature": 1.6},
-        labels=None,
+        legend_style=None,
     )
     target_ax = fig.axes[1]
     alphas = [c.get_alpha() for c in target_ax.collections]
@@ -169,7 +169,7 @@ def test_paired_one_call_layers_less_noticeable_groups_under_more_noticeable_one
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_alpha_reaches_the_points_but_not_the_star(diagram, comparisons):
-    fig = diagram(comparisons, alpha=0.5, labels=None)
+    fig = diagram(comparisons, alpha=0.5, legend_style=None)
 
     if diagram is taylor:
         lines = _taylor_lines(fig)
@@ -186,7 +186,7 @@ def test_alpha_reaches_the_points_but_not_the_star(diagram, comparisons):
 
 def test_alpha_dict_styles_one_group_leaves_the_rest_opaque(comparisons):
     fig = target(
-        comparisons, color_by="variable", alpha={"sea_water_salinity": 0.2}, labels=None
+        comparisons, color_by="variable", alpha={"sea_water_salinity": 0.2}, legend_style=None
     )
     ax = fig.axes[0]
     alphas = [c.get_alpha() for c in ax.collections]
@@ -208,7 +208,7 @@ def test_colors_composes_with_color_by_instead_of_being_ignored(diagram, compari
         comparisons,
         colors=["y", "r", "g"],
         color_by="variable",
-        labels=None,
+        legend_style=None,
     )
     if diagram is taylor:
         cols = [ln.get_mfc() for ln in _taylor_lines(fig) if ln.get_marker() == "o"]
@@ -224,7 +224,7 @@ def test_colors_composes_with_groups_instead_of_being_ignored(comparisons):
     # when the comparison carries no `reference` — these fakes don't, so key by label.
     groups = {"temp GOM": "g1", "salt GOM": "g1", "no3 GOM": "g2"}
     fig = target(
-        comparisons, groups=groups, colors=["orange", "purple"], labels="legend"
+        comparisons, groups=groups, colors=["orange", "purple"], legend_style="legend"
     )
     swatches = {h.get_label(): h.get_mfc() for h in fig.legends[0].legend_handles}
     assert mcolors.to_hex(swatches["g1"]) == mcolors.to_hex("orange")
@@ -232,7 +232,7 @@ def test_colors_composes_with_groups_instead_of_being_ignored(comparisons):
 
 
 def test_bare_string_colors_broadcasts_to_every_point(comparisons):
-    fig = target(comparisons, colors="y", labels=None)
+    fig = target(comparisons, colors="y", legend_style=None)
     ax = fig.axes[0]
     cols = [mcolors.to_hex(c.get_facecolor()[0]) for c in ax.collections]
     assert cols == [mcolors.to_hex("y")] * 3
@@ -240,7 +240,7 @@ def test_bare_string_colors_broadcasts_to_every_point(comparisons):
 
 def test_short_colors_list_raises_a_clear_error_instead_of_a_zip_crash(comparisons):
     with pytest.raises(ValueError, match="colors has 1 entries but there are 3"):
-        target(comparisons, colors=["y"], labels=None)
+        target(comparisons, colors=["y"], legend_style=None)
 
 
 def test_colors_dict_rejects_an_unknown_level_and_lists_the_real_ones(comparisons):
@@ -249,7 +249,7 @@ def test_colors_dict_rejects_an_unknown_level_and_lists_the_real_ones(comparison
             comparisons,
             color_by="variable",
             colors={"sea_water_chlorophyll": "r"},
-            labels=None,
+            legend_style=None,
         )
 
 
@@ -261,7 +261,7 @@ def test_colors_dict_partial_override_falls_back_to_the_cycle(comparisons):
         comparisons,
         color_by="variable",
         colors={"sea_water_temperature": "r"},
-        labels=None,
+        legend_style=None,
     )
     ax = fig.axes[0]
     cols = [c.get_facecolor()[0] for c in ax.collections]
@@ -274,7 +274,7 @@ def test_colors_dict_partial_override_falls_back_to_the_cycle(comparisons):
 def test_marker_by_only_swatches_match_the_points_they_key(comparisons):
     """Regression: marker-by swatches used the cycle while points took `colors`."""
     fig = target(
-        comparisons, marker_by="variable", colors=["y", "r", "g"], labels="legend"
+        comparisons, marker_by="variable", colors=["y", "r", "g"], legend_style="legend"
     )
     ax = fig.axes[0]
     point_colors = [mcolors.to_hex(c.get_facecolor()[0]) for c in ax.collections]
@@ -294,7 +294,7 @@ def test_marker_by_only_swatches_match_the_points_they_key(comparisons):
 
 
 def test_grid_swatches_honor_explicit_colors_and_marker_scale(comparisons):
-    """``labels="grid"``'s cells key on the same ``colors``/``marker_scale`` dicts."""
+    """``legend_style="grid"``'s cells key on the same ``colors``/``marker_scale`` dicts."""
     for c, method in zip(comparisons, ("depth_interp", "mld_interp", "esper"), strict=True):
         c._metrics["method"] = method
 
@@ -304,7 +304,7 @@ def test_grid_swatches_honor_explicit_colors_and_marker_scale(comparisons):
         marker_by="method",
         colors={"sea_water_temperature": "r"},
         marker_scale={"sea_water_temperature": 2.0},
-        labels="grid",
+        legend_style="grid",
     )
     handles = fig.legends[0].legend_handles
     rows = ["sea_water_temperature", "sea_water_salinity", "nitrate"]
@@ -340,7 +340,7 @@ def _points(obj):
 
 def test_interactive_target_honors_explicit_colors(items):
     explicit = ["#1b9e77", "#d95f02", "#7570b3"]
-    obj = _interactive_target(items, colors=explicit, labels="legend")
+    obj = _interactive_target(items, colors=explicit, legend_style="legend")
 
     colors = {e.label: e.opts.get("style").kwargs["color"] for e in _points(obj)}
     for label, color in zip(("temp GOM", "salt GOM", "no3 GOM"), explicit, strict=True):
@@ -350,7 +350,7 @@ def test_interactive_target_honors_explicit_colors(items):
 def test_interactive_colors_composes_with_color_by(comparisons, items):
     """Regression, interactive side: color_by used to discard `colors` entirely."""
     obj = _interactive_target(
-        items, colors=["y", "r", "g"], color_by="variable", labels="legend"
+        items, colors=["y", "r", "g"], color_by="variable", legend_style="legend"
     )
     colors = [e.opts.get("style").kwargs["color"] for e in _points(obj)]
     assert colors == ["y", "r", "g"]
@@ -363,7 +363,7 @@ def test_both_renderers_use_the_same_explicit_colors(comparisons, items):
     )
     static = [mcolors.to_hex(c) for c in styles.colors]
 
-    obj = _interactive_target(items, colors=explicit, labels="legend")
+    obj = _interactive_target(items, colors=explicit, legend_style="legend")
     interactive = [e.opts.get("style").kwargs["color"] for e in _points(obj)]
 
     assert static == interactive
@@ -377,7 +377,7 @@ def test_both_renderers_agree_on_dict_styling(comparisons, items):
         "alpha": {"sea_water_salinity": 0.2},
         "marker_scale": {"sea_water_temperature": 1.5},
     }
-    fig = target(comparisons, labels=None, **kwargs)
+    fig = target(comparisons, legend_style=None, **kwargs)
     static_colors = [
         mcolors.to_hex(c.get_facecolor()[0]) for c in fig.axes[0].collections
     ]
@@ -468,7 +468,7 @@ def test_interactive_colors_dict_rejects_an_unknown_level(items):
 def test_taylor_summary_points_draws_one_centroid_per_group_matching_its_colour_and_shape(
     comparisons,
 ):
-    fig = taylor(comparisons, color_by="variable", summary_points=True, labels=None)
+    fig = taylor(comparisons, color_by="variable", summary_points=True, legend_style=None)
     lines = _taylor_lines(fig)
     # base sample points draw at Line2D's default zorder (2); every overlay/centroid
     # is 10 -- see test_taylor_summary_split_markers_matches_colour_and_marker_shape
@@ -488,7 +488,7 @@ def test_taylor_summary_points_draws_one_centroid_per_group_matching_its_colour_
 
 def test_taylor_summary_points_with_no_grouping_draws_a_single_centroid(comparisons):
     """No color_by/marker_by: one centroid across ALL comparisons, not one each."""
-    fig = taylor(comparisons, summary_points=True, labels=None)
+    fig = taylor(comparisons, summary_points=True, legend_style=None)
     lines = _taylor_lines(fig)
     centroids = [ln for ln in lines if ln.get_zorder() == 10]
     assert len(centroids) == 1, "a single aggregate centroid, not one per comparison"
@@ -505,7 +505,7 @@ def test_taylor_summary_points_with_no_grouping_draws_a_single_centroid(comparis
 
 
 def test_target_summary_points_with_no_grouping_draws_a_single_centroid(comparisons):
-    fig = target(comparisons, summary_points=True, labels=None)
+    fig = target(comparisons, summary_points=True, legend_style=None)
     ax = fig.axes[0]
     centroids = [c for c in ax.collections if c.get_zorder() == 10]
     assert len(centroids) == 1, "a single aggregate centroid, not one per comparison"
@@ -518,7 +518,7 @@ def test_target_summary_points_median_matches_a_hand_computed_centroid():
         _FakeComparison("a", 0.9, 1.2, 0.10, 0.20, "sea_water_temperature"),  # x=+0.20
         _FakeComparison("b", 0.8, 0.8, -0.30, 0.40, "sea_water_temperature"),  # x=-0.40
     ]
-    fig = target(pair, color_by="variable", summary_points=True, labels=None)
+    fig = target(pair, color_by="variable", summary_points=True, legend_style=None)
     ax = fig.axes[0]
     # base points at zorder=4; the centroid is drawn separately at zorder=10
     centroid = next(c for c in ax.collections if c.get_zorder() == 10)
@@ -540,7 +540,7 @@ def test_overlay_highlights_a_point_without_recycling_its_colour(comparisons):
     (comparisons[2], "no3 GOM") is the one the highlighted overlay must match.
     """
     fig = target(
-        comparisons, color_by="variable", overlay=[comparisons[2]], labels=None
+        comparisons, color_by="variable", overlay=[comparisons[2]], legend_style=None
     )
     ax = fig.axes[0]
     base_collections = [c for c in ax.collections if c.get_zorder() == 4]
@@ -554,21 +554,21 @@ def test_overlay_highlights_a_point_without_recycling_its_colour(comparisons):
 
 def test_overlay_and_summary_points_do_not_add_legend_entries(comparisons):
     """Neither highlighting a point nor a centroid introduces a new legend key."""
-    fig_base = target(comparisons, color_by="variable", labels="legend")
+    fig_base = target(comparisons, color_by="variable", legend_style="legend")
     n_base = len(fig_base.legends[0].legend_handles)
     fig_more = target(
         comparisons,
         color_by="variable",
         overlay=[comparisons[0]],
         summary_points=True,
-        labels="legend",
+        legend_style="legend",
     )
     n_more = len(fig_more.legends[0].legend_handles)
     assert n_more == n_base
 
 
 def test_overlay_marker_scale_and_alpha_default_to_emphasized(comparisons):
-    fig = target(comparisons, color_by="variable", overlay=[comparisons[0]], labels=None)
+    fig = target(comparisons, color_by="variable", overlay=[comparisons[0]], legend_style=None)
     ax = fig.axes[0]
     overlay_collection = next(c for c in ax.collections if c.get_zorder() == 10)
     assert overlay_collection.get_sizes()[0] == pytest.approx(70 * 1.8**2)
@@ -619,7 +619,7 @@ def test_target_signed_medabs_keeps_magnitude_where_median_would_cancel():
         _FakeComparison("a", 0.9, 1.2, 0.10, 0.20, "sea_water_temperature"),  # x=+0.20
         _FakeComparison("b", 0.8, 0.8, -0.30, 0.40, "sea_water_temperature"),  # x=-0.40
     ]
-    fig = target(pair, color_by="variable", summary_points="signed_medabs", labels=None)
+    fig = target(pair, color_by="variable", summary_points="signed_medabs", legend_style=None)
     cx, cy = _star(fig)
     # magnitude = median(|+0.20|, |-0.40|) = 0.30; sign = sign(median(+0.20, -0.40)) = -1
     assert cx == pytest.approx(-0.30)
@@ -649,7 +649,7 @@ def test_target_summary_weights_puts_the_star_on_the_heavier_point():
         color_by="variable",
         summary_points="median",
         summary_weights="n_eff",
-        labels=None,
+        legend_style=None,
     )
     cx, cy = _star(fig)
     assert cx == pytest.approx(-0.40)
@@ -661,12 +661,12 @@ def test_target_summary_weights_missing_on_some_records_warns_and_defaults_to_on
 ):
     comparisons[0]._metrics["n_eff"] = 5.0  # the other two comparisons carry none
     with pytest.warns(UserWarning, match="n_eff"):
-        target(comparisons, summary_points=True, summary_weights="n_eff", labels=None)
+        target(comparisons, summary_points=True, summary_weights="n_eff", legend_style=None)
 
 
 def test_target_summary_weights_missing_on_every_record_raises(comparisons):
     with pytest.raises(ValueError, match="no record carries"):
-        target(comparisons, summary_points=True, summary_weights="bogus_field", labels=None)
+        target(comparisons, summary_points=True, summary_weights="bogus_field", legend_style=None)
 
 
 def test_target_summary_weights_rejects_nonpositive_weights(comparisons):
@@ -674,7 +674,7 @@ def test_target_summary_weights_rejects_nonpositive_weights(comparisons):
     comparisons[1]._metrics["n_eff"] = 1.0
     comparisons[2]._metrics["n_eff"] = 1.0
     with pytest.raises(ValueError, match="finite"):
-        target(comparisons, summary_points=True, summary_weights="n_eff", labels=None)
+        target(comparisons, summary_points=True, summary_weights="n_eff", legend_style=None)
 
 
 def test_interactive_target_summary_weights_matches_static_star_position():
@@ -695,7 +695,7 @@ def test_interactive_target_summary_weights_matches_static_star_position():
 
     static_fig = target(
         pair, color_by="variable", summary_points=True, summary_weights="n_eff",
-        labels=None,
+        legend_style=None,
     )
     static_xy = _star(static_fig)
 
@@ -781,7 +781,7 @@ def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
         marker_by="signal",
         summary_points=True,
         summary_split_markers=True,
-        labels=None,
+        legend_style=None,
     )
     lines = _taylor_lines(fig)
     # base sample points draw at Line2D's default zorder (2); the reference star is
@@ -808,7 +808,7 @@ def test_target_summary_split_markers_matches_colour_and_marker_shape():
         marker_by="signal",
         summary_points=True,
         summary_split_markers=True,
-        labels=None,
+        legend_style=None,
     )
     ax = fig.axes[0]
     base = [c for c in ax.collections if c.get_zorder() == 4]
@@ -835,10 +835,10 @@ def test_summary_split_markers_ignored_without_marker_by(comparisons):
     """Docstring contract: no marker_by means the usual one-centroid-per-group."""
     with_flag = target(
         comparisons, color_by="variable", summary_points=True,
-        summary_split_markers=True, labels=None,
+        summary_split_markers=True, legend_style=None,
     )
     without_flag = target(
-        comparisons, color_by="variable", summary_points=True, labels=None,
+        comparisons, color_by="variable", summary_points=True, legend_style=None,
     )
     n_with = sum(1 for c in with_flag.axes[0].collections if c.get_zorder() == 10)
     n_without = sum(1 for c in without_flag.axes[0].collections if c.get_zorder() == 10)

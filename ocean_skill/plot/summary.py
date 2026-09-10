@@ -981,21 +981,21 @@ def _draw_arrows(ax, chains, points, colors, *, zorder: float, clip_patch=None) 
 LABEL_MODES = ("legend", "annotate", "grid")
 
 
-def _resolve_labels(labels):
-    """Normalize the ``labels`` argument, rejecting typos loudly."""
-    if labels is None or labels is False or labels == "none":
+def _resolve_legend_style(legend_style):
+    """Normalize the ``legend_style`` argument, rejecting typos loudly."""
+    if legend_style is None or legend_style is False or legend_style == "none":
         return None
-    if labels not in LABEL_MODES:
+    if legend_style not in LABEL_MODES:
         raise ValueError(
-            f"labels={labels!r} is not one of {LABEL_MODES} or None — "
+            f"legend_style={legend_style!r} is not one of {LABEL_MODES} or None — "
             "'legend' keys the points below the axes, 'annotate' writes each "
             "label beside its marker, 'grid' keys the color_by x marker_by "
             "cross-product as a matrix."
         )
-    return labels
+    return legend_style
 
 
-def _fallback_grid_without_both_channels(labels, color_by, marker_by):
+def _fallback_grid_without_both_channels(legend_style, color_by, marker_by):
     """``"grid"`` needs both channels to have a cross-product to tabulate.
 
     Called after any ``groups``-defaulting of ``color_by``/``marker_by`` has already
@@ -1004,14 +1004,14 @@ def _fallback_grid_without_both_channels(labels, color_by, marker_by):
     — so this warns and falls back to it rather than drawing a degenerate grid or
     raising, which would be unfriendly to a caller whose grouping fields vary.
     """
-    if labels == "grid" and not (color_by and marker_by):
+    if legend_style == "grid" and not (color_by and marker_by):
         warnings.warn(
-            'labels="grid" keys the color_by x marker_by cross-product, which needs '
-            "both to be set; drawing the flat legend instead.",
+            'legend_style="grid" keys the color_by x marker_by cross-product, which '
+            "needs both to be set; drawing the flat legend instead.",
             stacklevel=3,
         )
         return "legend"
-    return labels
+    return legend_style
 
 
 def _reference_handle(marker_scale=1.0):
@@ -1214,7 +1214,7 @@ def taylor(
     groups: dict[str, Any] | None = None,
     fig=None,
     rect: int = 111,
-    labels: str | None = "legend",
+    legend_style: str | None = "legend",
     figsize: tuple[float, float] | None = None,
     font_scale: float = 1.0,
     size=None,
@@ -1268,18 +1268,18 @@ def taylor(
     metrics first; it defaults ``color_by`` to ``"group"`` when neither ``color_by``
     nor ``marker_by`` is otherwise given.
 
-    ``labels`` chooses how points are identified: ``"legend"`` (a key below the axes),
-    ``"annotate"`` (each label written beside its marker), or ``"grid"`` (a matrix key:
-    one row per ``color_by`` level in that row's colour, one column per ``marker_by``
-    level in that column's marker, each cell the exact glyph its points are drawn
-    with — reading off a point's row and column tells you both groups it belongs to at
-    once, which the flat ``"legend"`` leaves the reader to cross-reference); ``None``
-    for neither. Annotation is the better choice for a handful of points, a legend once
-    there are enough that the labels would collide, and grid once both ``color_by`` and
-    ``marker_by`` are set and the reader would otherwise have to mentally combine two
-    separate swatch blocks. ``"grid"`` needs both grouping fields — given only one (or
-    neither) it warns and falls back to ``"legend"``, since a one-channel matrix is just
-    the flat legend.
+    ``legend_style`` chooses how points are identified: ``"legend"`` (a key below the
+    axes), ``"annotate"`` (each label written beside its marker), or ``"grid"`` (a
+    matrix key: one row per ``color_by`` level in that row's colour, one column per
+    ``marker_by`` level in that column's marker, each cell the exact glyph its points
+    are drawn with — reading off a point's row and column tells you both groups it
+    belongs to at once, which the flat ``"legend"`` leaves the reader to
+    cross-reference); ``None`` for neither. Annotation is the better choice for a
+    handful of points, a legend once there are enough that the labels would collide,
+    and grid once both ``color_by`` and ``marker_by`` are set and the reader would
+    otherwise have to mentally combine two separate swatch blocks. ``"grid"`` needs
+    both grouping fields — given only one (or neither) it warns and falls back to
+    ``"legend"``, since a one-channel matrix is just the flat legend.
 
     Text sizes follow the figure size rather than being fixed, so a diagram drawn at
     twice the default is not a diagram with half-size labels; ``font_scale`` multiplies
@@ -1345,13 +1345,13 @@ def taylor(
 
     from ocean_skill.plot._taylor import TaylorDiagram
 
-    labels = _resolve_labels(labels)
+    legend_style = _resolve_legend_style(legend_style)
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
     if groups and not color_by and not marker_by:
         color_by = "group"
-    labels = _fallback_grid_without_both_channels(labels, color_by, marker_by)
+    legend_style = _fallback_grid_without_both_channels(legend_style, color_by, marker_by)
     style_field = color_by or marker_by or "label"
     arrows_field = _resolve_arrows(arrows)
     chains = _arrow_chains(recs, arrows_field) if arrows_field else []
@@ -1522,16 +1522,16 @@ def taylor(
         if units:
             dia._ax.axis["left"].label.set_text(f"Standard deviation [{units}]")
 
-    if labels == "legend":
+    if legend_style == "legend":
         _legend_below(
             fig, [*styles.handles, _reference_handle(star_scale)], scale["legend"]
         )
-    elif labels == "grid":
+    elif legend_style == "grid":
         handles, ncols = _grid_handles(
             recs, color_by, marker_by, colors, marker_scale, alpha, star_scale
         )
         _grid_legend_below(fig, handles, ncols, scale["legend"])
-    elif labels == "annotate":
+    elif legend_style == "annotate":
         # The aux axes are polar: a sample sits at (arccos(corr), stddev), which is
         # exactly where add_sample put it. A robust-clipped point's marker disappears
         # via its clip path, but ``ax.annotate``'s own clipping only hides an anchor
@@ -1578,7 +1578,7 @@ def target(
     groups: dict[str, Any] | None = None,
     circles=None,
     ax=None,
-    labels: str | None = "annotate",
+    legend_style: str | None = "annotate",
     figsize: tuple[float, float] | None = None,
     font_scale: float = 1.0,
     size=None,
@@ -1620,7 +1620,7 @@ def target(
 
     ``color_by``/``marker_by``/``groups`` mean exactly what they do in :func:`taylor`.
 
-    ``labels`` chooses how points are identified — ``"legend"`` below the axes,
+    ``legend_style`` chooses how points are identified — ``"legend"`` below the axes,
     ``"annotate"`` beside each marker, or ``"grid"`` (a color_by x marker_by matrix
     key) — exactly as for :func:`taylor`, so the two can be made to match. It defaults
     to ``"annotate"`` here because target points cluster near the origin when a model
@@ -1651,7 +1651,7 @@ def target(
     """
     import matplotlib.pyplot as plt
 
-    labels_mode = _resolve_labels(labels)
+    labels_mode = _resolve_legend_style(legend_style)
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
@@ -1824,7 +1824,7 @@ def paired(
     title: str | None = None,
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
-    labels: str | None = "legend",
+    legend_style: str | None = "legend",
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
@@ -1839,10 +1839,10 @@ def paired(
     ``arrows`` style arguments, so the two panels stay visually consistent. Neither
     function knows about the other.
 
-    ``labels`` applies to **both** panels, since the diagrams show the same points and
-    identifying them two different ways in one figure reads as two unrelated plots. With
-    ``"legend"`` or ``"grid"`` the key is drawn once beneath both panels rather than
-    twice.
+    ``legend_style`` applies to **both** panels, since the diagrams show the same
+    points and identifying them two different ways in one figure reads as two
+    unrelated plots. With ``"legend"`` or ``"grid"`` the key is drawn once beneath
+    both panels rather than twice.
 
     One type scale is computed here for the two-column figure and handed to both panels,
     rather than each sizing itself: called alone they are square and near page width, so
@@ -1854,23 +1854,23 @@ def paired(
     """
     import matplotlib.pyplot as plt
 
-    labels = _resolve_labels(labels)
+    legend_style = _resolve_legend_style(legend_style)
     color_by = kwargs.get("color_by")
     marker_by = kwargs.get("marker_by")
     if kwargs.get("groups") and not color_by and not marker_by:
         color_by = "group"
-    labels = _fallback_grid_without_both_channels(labels, color_by, marker_by)
+    legend_style = _fallback_grid_without_both_channels(legend_style, color_by, marker_by)
     figsize = figsize or _diagram_figsize(PAIRED_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, ncols=2, font_scale=font_scale, override=scale)
     fig = plt.figure(figsize=figsize)
     # Panels never draw their own key: with "legend"/"grid" it is shared (below), and
     # with "annotate" each panel labels its own markers.
-    panel_labels = "annotate" if labels == "annotate" else None
+    panel_legend_style = "annotate" if legend_style == "annotate" else None
     taylor(
         comparisons,
         fig=fig,
         rect=121,
-        labels=panel_labels,
+        legend_style=panel_legend_style,
         title="Taylor",
         scale=scale,
         **kwargs,
@@ -1879,7 +1879,7 @@ def paired(
     target(
         comparisons,
         ax=ax_t,
-        labels=panel_labels,
+        legend_style=panel_legend_style,
         title="Target",
         scale=scale,
         **kwargs,
@@ -1890,11 +1890,11 @@ def paired(
     # Both of these move the axes, so they come before the key, which is placed by
     # measuring where the axes and their labels actually ended up.
     fig.subplots_adjust(wspace=0.35)
-    if labels in ("legend", "grid"):
+    if legend_style in ("legend", "grid"):
         # One shared key beneath both panels, so it cannot collide with either title
         recs = _records(comparisons, kwargs.get("groups"))
         panel_marker_scale = kwargs.get("marker_scale", 1.0)
-        if labels == "grid":
+        if legend_style == "grid":
             handles, ncols = _grid_handles(
                 recs,
                 color_by,
