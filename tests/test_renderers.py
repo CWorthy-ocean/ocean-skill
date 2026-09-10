@@ -1557,3 +1557,102 @@ def test_coastline_resolution_gshhs_falls_back_to_natural_earth_interactively():
     with pytest.warns(UserWarning, match="GSHHS"):
         row = _hv_row(_row_item(), coastline_resolution="full")
     assert _coastline_scale(row) == "10m"
+
+
+# ---------------------------------------------------------------------------
+# land: the grey fill _basemap paints over the field, which can hide data hugging
+# or crossing the coastline (see ocean_skill.plot.matplotlib_renderer._basemap).
+# True (default) is today's opaque fill, a float in [0, 1] fades it while keeping
+# the coastline outline, and False draws neither -- a completely bare map.
+# ---------------------------------------------------------------------------
+
+
+def test_land_defaults_to_grey_fill_with_coastline():
+    fig = render(PlotSpec(family="field_row", items=[_row_item()], options={}))
+    names = {f.name for f in _land_features(fig)}
+    assert "land" in names
+    assert "coastline" in names
+
+
+def test_land_false_is_bare():
+    spec = PlotSpec(family="field_row", items=[_row_item()], options={"land": False})
+    fig = render(spec)
+    names = {f.name for f in _land_features(fig)}
+    assert "land" not in names
+    assert "coastline" not in names
+
+
+def test_land_zero_float_keeps_coastline_without_fill():
+    """``land=0.0`` (a float) is not ``land=False``: the outline still shows."""
+    spec = PlotSpec(family="field_row", items=[_row_item()], options={"land": 0.0})
+    fig = render(spec)
+    names = {f.name for f in _land_features(fig)}
+    assert "land" not in names
+    assert "coastline" in names
+
+
+def test_land_opacity_sets_fill_alpha():
+    from cartopy.mpl.feature_artist import FeatureArtist
+
+    spec = PlotSpec(family="field_row", items=[_row_item()], options={"land": 0.4})
+    fig = render(spec)
+    artists = [
+        a
+        for ax in fig.axes
+        for a in ax.get_children()
+        if isinstance(a, FeatureArtist) and a._feature.name == "land"
+    ]
+    assert artists and all(a._kwargs.get("alpha") == pytest.approx(0.4) for a in artists)
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.5, "half"])
+def test_land_invalid_raises(bad):
+    spec = PlotSpec(family="field_row", items=[_row_item()], options={"land": bad})
+    with pytest.raises(ValueError, match="land"):
+        render(spec)
+
+
+@pytest.mark.parametrize(
+    "family, build_spec",
+    [
+        ("field_row", lambda: PlotSpec(family="field_row", items=[_row_item()])),
+        ("field_grid", lambda: PlotSpec(family="field_grid", items=[_row_item()])),
+        (
+            "locations",
+            lambda: PlotSpec(
+                family="locations",
+                items=[
+                    {
+                        "kind": "point",
+                        "featureType": "timeSeries",
+                        "lon": -122.0,
+                        "lat": 37.0,
+                    }
+                ],
+            ),
+        ),
+    ],
+)
+def test_land_accepted_by_every_map_family(family, build_spec):
+    """``land`` must reach every map family's signature, not just field_row's.
+
+    ``locations`` is the odd one out: it calls ``_basemap`` directly rather than
+    through ``_draw_map``, so it is the case most likely to be missed.
+    """
+    render(build_spec(), renderer="matplotlib", land=False)
+
+
+def test_land_false_drops_the_coastline_interactively():
+    """Interactively there is no fill to hide -- ``land=False`` drops the outline too."""
+    import holoviews as hv
+
+    row = _hv_row(_row_item(), land=False)
+    assert not any(
+        isinstance(el, hv.Element) and type(el).__name__ == "Feature"
+        for el in row.traverse()
+    )
+
+
+def test_land_true_keeps_the_coastline_interactively():
+    row = _hv_row(_row_item())
+    assert _coastline_scale(row) == "10m"

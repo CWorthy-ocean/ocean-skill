@@ -477,6 +477,7 @@ def _basemap(
     left_labels: bool | None = None,
     bottom_labels: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Land fill, coastlines and labelled gridlines — what every map panel shares.
 
@@ -491,18 +492,33 @@ def _basemap(
     finer dataset instead — GSHHS ``levels=[1]`` is land, drawn twice (a filled
     polygon, then its edge) since :class:`~cartopy.feature.GSHHSFeature` has no
     separate coastline-only feature the way Natural Earth does.
+
+    ``land`` controls the grey land fill, which otherwise paints over any data drawn
+    underneath it: ``True`` (the default) is today's opaque ``"0.85"`` fill, a float
+    in ``[0, 1]`` fades that fill to the given opacity (data shows through) while
+    still drawing the coastline outline, and ``False`` draws neither fill nor
+    outline — a completely bare map.
     """
     import cartopy.feature as cfeature
 
+    if land is not True and land is not False:
+        if not isinstance(land, (int, float)) or not 0.0 <= land <= 1.0:
+            raise ValueError("land must be True, False, or a number in [0, 1]")
     resolution = normalize_coastline_resolution(coastline_resolution)
-    if is_gshhs(resolution):
-        land = cfeature.GSHHSFeature(scale=resolution, levels=[1])
-        ax.add_feature(land, facecolor="0.85", edgecolor="none", zorder=2)
-        ax.add_feature(land, facecolor="none", edgecolor="black", linewidth=0.4, zorder=3)
-    else:
-        land = cfeature.LAND if resolution == "auto" else cfeature.LAND.with_scale(resolution)
-        ax.add_feature(land, facecolor="0.85", zorder=2)
-        ax.coastlines(resolution=resolution, linewidth=0.4, zorder=3)
+    if land is not False:
+        fill_alpha = 1.0 if land is True else float(land)
+        if is_gshhs(resolution):
+            land_feature = cfeature.GSHHSFeature(scale=resolution, levels=[1])
+            if fill_alpha > 0:
+                ax.add_feature(
+                    land_feature, facecolor="0.85", edgecolor="none", alpha=fill_alpha, zorder=2
+                )
+            ax.add_feature(land_feature, facecolor="none", edgecolor="black", linewidth=0.4, zorder=3)
+        else:
+            land_feature = cfeature.LAND if resolution == "auto" else cfeature.LAND.with_scale(resolution)
+            if fill_alpha > 0:
+                ax.add_feature(land_feature, facecolor="0.85", alpha=fill_alpha, zorder=2)
+            ax.coastlines(resolution=resolution, linewidth=0.4, zorder=3)
     gl = ax.gridlines(draw_labels=True, **gridline_kwargs)
     gl.top_labels = gl.right_labels = False
     if left_labels is not None:
@@ -588,6 +604,7 @@ def _draw_map(
     left_labels: bool | None = None,
     bottom_labels: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one map panel into ``ax`` and return its mappable.
 
@@ -601,7 +618,7 @@ def _draw_map(
     default standing, i.e. every panel labels its own axes; ``True``/``False`` set them
     explicitly, which is how a grid shows each axis once.
 
-    ``coastline_resolution`` is forwarded to :func:`_basemap` — see there.
+    ``coastline_resolution``/``land`` are forwarded to :func:`_basemap` — see there.
     """
     import cartopy.crs as ccrs
 
@@ -616,6 +633,7 @@ def _draw_map(
         left_labels=left_labels,
         bottom_labels=bottom_labels,
         coastline_resolution=coastline_resolution,
+        land=land,
     )
     ring = domain_ring(domain)
     if ring is not None:
@@ -676,6 +694,7 @@ def _draw_row(
     is_bottom_row: bool = True,
     defaults: dict[str, dict[str, Any]] | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -740,6 +759,7 @@ def _draw_row(
                 left_labels=(j == 0) if shared_axis_labels else None,
                 bottom_labels=is_bottom_row if shared_axis_labels else None,
                 coastline_resolution=coastline_resolution,
+                land=land,
             )
         )
         ax.title._osk_size_pinned = title_pinned
@@ -1760,6 +1780,7 @@ def field_row(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -1828,6 +1849,12 @@ def field_row(
     panel's extent, ``"110m"``/``"50m"``/``"10m"`` pin a Natural Earth scale, and
     ``"coarse"``..``"full"`` draw from GSHHS, finer than Natural Earth's own limit but
     a one-time download the first time a given scale is used.
+
+    ``land`` controls the grey land fill, which otherwise paints over any data drawn
+    under it — the usual reason to reach for this is data hugging or crossing the
+    coastline. ``True`` (the default) is today's opaque fill, a float in ``[0, 1]``
+    fades it to that opacity while keeping the coastline outline, and ``False`` draws
+    neither fill nor outline.
     """
     import matplotlib.pyplot as plt
 
@@ -1880,6 +1907,7 @@ def field_row(
         is_bottom_row=True,
         defaults=defaults,
         coastline_resolution=coastline_resolution,
+        land=land,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2318,6 +2346,7 @@ def field_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -2379,8 +2408,8 @@ def field_grid(
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
 
-    ``coastline_resolution`` picks the coastline/land dataset for every row — see
-    :func:`field_row`'s docstring.
+    ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
+    fill's visibility for every row — see :func:`field_row`'s docstring.
     """
     import matplotlib.pyplot as plt
 
@@ -2462,6 +2491,7 @@ def field_grid(
             is_bottom_row=(i == n - 1),
             defaults=defaults,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         _draw_colorbar(
             fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2777,6 +2807,7 @@ def field_facet(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -2824,8 +2855,8 @@ def field_facet(
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
 
-    ``coastline_resolution`` picks the coastline/land dataset for every panel — see
-    :func:`field_row`'s docstring.
+    ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
+    fill's visibility for every panel — see :func:`field_row`'s docstring.
     """
     import matplotlib.pyplot as plt
 
@@ -2985,6 +3016,7 @@ def field_facet(
             left_labels=(col == 0) if shared_axis_labels else None,
             bottom_labels=(i + ncols >= n_panels) if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         used.append(ax)
         ims.append(im)
@@ -3767,6 +3799,7 @@ def field_map_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one map per item -- several *variables*, not one variable's own facet axis.
 
@@ -3900,6 +3933,7 @@ def field_map_grid(
             # is "is there a panel below me?", not "am I in the last row?".
             bottom_labels=(i + ncols >= n) if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         ax.title._osk_size_pinned = title_pinned
         bar_label = f"[{item['units']}]" if item.get("units") else ""
@@ -4157,6 +4191,7 @@ def skill_map(
     hover: bool | None = None,
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Draw one map per skill metric: where the model agrees, metric by metric.
 
@@ -4228,8 +4263,8 @@ def skill_map(
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
     interactive renderer's fix for a large mesh and do nothing here.
 
-    ``coastline_resolution`` picks the coastline/land dataset for every panel — see
-    :func:`field_row`'s docstring.
+    ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
+    fill's visibility for every panel — see :func:`field_row`'s docstring.
     """
     import warnings
 
@@ -4405,6 +4440,7 @@ def skill_map(
             # question is "is there a panel below me?", not "am I in the last row?"
             bottom_labels=(i + ncols >= len(panels)) if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         stations = item.get("stations")
         if station_markers and stations is not None and name in stations["values"]:
@@ -4725,6 +4761,7 @@ def field_movie(
     zoom: float = 1.0,
     progress: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
 
@@ -4834,6 +4871,7 @@ def field_movie(
         is_bottom_row=True,
         defaults=defaults,
         coastline_resolution=coastline_resolution,
+        land=land,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -4951,6 +4989,7 @@ def facet_movie(
     zoom: float = 1.0,
     progress: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
 
@@ -5046,6 +5085,7 @@ def facet_movie(
         tick_label_kwargs=_merged(defaults["tick_label_kwargs"], tick_label_kwargs),
         title_kwargs=_merged(defaults["title_kwargs"], title_kwargs),
         coastline_resolution=coastline_resolution,
+        land=land,
     )
     _draw_colorbar(
         fig,
@@ -5111,6 +5151,7 @@ def locations(
     tick_label_kwargs: dict[str, Any] | None = None,
     legend_kwargs: dict[str, Any] | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
 ):
     """Map where things sit: markers for points, dashed boxes for extents and
     domains, solid lines for selection slices.
@@ -5128,8 +5169,8 @@ def locations(
     so ``renderer="both"`` can pass one set of options, but web tiles are the
     interactive renderer's; here it warns and draws the usual coastline basemap.
 
-    ``coastline_resolution`` picks that basemap's coastline/land dataset — see
-    :func:`field_row`'s docstring.
+    ``coastline_resolution``/``land`` pick that basemap's coastline/land dataset and
+    the land fill's visibility — see :func:`field_row`'s docstring.
     """
     import warnings
 
@@ -5186,6 +5227,7 @@ def locations(
             tick_label_kwargs,
         ),
         coastline_resolution=coastline_resolution,
+        land=land,
     )
 
     groups: dict[str, list[dict[str, Any]]] = {}
