@@ -2,9 +2,10 @@
 
 Currently implements the **field row**: ``test | reference | difference`` maps for a
 gridded comparison. Test and reference share one colour scale (so they are visually
-comparable) taken from the 10th–90th percentile of the pair; the difference panel uses
-a diverging map centred on zero. Metrics go in a corner box, leaving the title for
-identity. Registers itself under ``"matplotlib"``.
+comparable) taken from the full range of the pair by default, or its 10th–90th
+percentile with ``robust=True``; the difference panel uses a diverging map centred on
+zero. Metrics go in a corner box, leaving the title for identity. Registers itself
+under ``"matplotlib"``.
 
 Every family here draws its panels through :func:`_draw_map`, and the two movie
 families are the two static map families played rather than laid out:
@@ -79,12 +80,30 @@ __all__ = [
 __all__ += ["PAGE_H", "PAGE_W"]
 
 
-def _limits(*arrays, lo: float = 10, hi: float = 90) -> tuple[float, float]:
-    """Shared colour limits from percentiles across all arrays (robust to outliers)."""
+def _limits(*arrays, robust: bool | float = False) -> tuple[float, float]:
+    """Shared colour limits across all arrays.
+
+    Default is the full finite range (min, max), so a colourbar's top always
+    matches what :meth:`~ocean_skill.field.Field.extremum` and ``.series()``
+    report at the same cell — nothing is clipped unless asked for. ``robust=True``
+    clips to the 10th/90th percentile instead (the classic xarray-style "robust
+    to outliers" scaling); a float ``q`` in ``(0, 1)`` clips to the central
+    fraction ``q`` of the data (``q=0.8`` is the same as ``robust=True``).
+    """
     vals = np.concatenate([np.asarray(a).ravel() for a in arrays])
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return 0.0, 1.0
+    if robust is False or robust is None:
+        return float(np.min(vals)), float(np.max(vals))
+    q = 0.8 if robust is True else float(robust)
+    if not 0.0 < q < 1.0:
+        raise ValueError(
+            f"robust={robust!r} is not True/False or a central fraction in (0, 1) "
+            "— pass the fraction itself (robust=0.8 for the 10th-90th percentile, "
+            "same as robust=True), or robust=False for the plain min/max."
+        )
+    lo, hi = (1 - q) / 2 * 100, (1 + q) / 2 * 100
     return float(np.percentile(vals, lo)), float(np.percentile(vals, hi))
 
 
@@ -695,12 +714,14 @@ def _draw_row(
     defaults: dict[str, dict[str, Any]] | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
-    ``seq_norm``/``div_norm``, if given, override the row's own percentile-derived
-    colour limits — how :func:`field_grid`'s ``shared_limits=True`` makes every row
-    share one scale instead of each computing its own.
+    ``seq_norm``/``div_norm``, if given, override the row's own colour limits —
+    how :func:`field_grid`'s ``shared_limits=True`` makes every row share one
+    scale instead of each computing its own. ``robust`` means what it does in
+    :func:`_limits`, and is ignored once ``seq_norm`` is given.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only draws coordinate *labels* on the leftmost panel (latitude) and, if
@@ -729,7 +750,7 @@ def _draw_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r)
+        vmin, vmax = _limits(t, r, robust=robust)
         seq_norm = norm_for(standard_name, vmin, vmax)
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
@@ -797,6 +818,7 @@ def _draw_section_row(
     shared_axis_labels: bool = True,
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
+    robust: bool | float = False,
 ):
     """Draw one test|reference|difference section row into three existing axes.
 
@@ -808,6 +830,7 @@ def _draw_section_row(
 
     ``values``/``geometry`` are :func:`ocean_skill.plot.section.prepare_section_row`'s
     own return, unpacked by the caller so this function stays a pure drawing step.
+    ``robust`` means what it does in :func:`_limits`.
     """
     import matplotlib.colors as mcolors
 
@@ -818,7 +841,7 @@ def _draw_section_row(
     t, r, d = values["test"], values["reference"], values["difference"]
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
-    vmin, vmax = _limits(t, r)
+    vmin, vmax = _limits(t, r, robust=robust)
     seq_norm = norm_for(standard_name, vmin, vmax)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
     div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
@@ -1781,6 +1804,7 @@ def field_row(
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -1855,6 +1879,11 @@ def field_row(
     coastline. ``True`` (the default) is today's opaque fill, a float in ``[0, 1]``
     fades it to that opacity while keeping the coastline outline, and ``False`` draws
     neither fill nor outline.
+
+    ``robust`` means what it does in :func:`_limits`: the sequential colour scale
+    (test/reference) spans the full range of the pair by default, or its 10th–90th
+    percentile with ``robust=True`` — useful when a few outlier cells would
+    otherwise crush the rest of the map against one end of the bar.
     """
     import matplotlib.pyplot as plt
 
@@ -1908,6 +1937,7 @@ def field_row(
         defaults=defaults,
         coastline_resolution=coastline_resolution,
         land=land,
+        robust=robust,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2292,19 +2322,22 @@ def _row_height(
     )
 
 
-def _shared_norms(comparisons, test_name: str, reference_name: str):
+def _shared_norms(
+    comparisons, test_name: str, reference_name: str, *, robust: bool | float = False
+):
     """Return one ``(seq_norm, div_norm)`` computed across *every* row.
 
     For ``field_grid(..., shared_limits=True)``: colour limits derived from all
     rows' test+reference values combined, and one difference range from all rows'
-    diffs — rather than each row scaling to its own data.
+    diffs — rather than each row scaling to its own data. ``robust`` means what it
+    does in :func:`_limits`.
     """
     import matplotlib.colors as mcolors
 
     standard_name = comparisons[0].get("standard_name")
     all_t = [np.asarray(c["aligned"][test_name]) for c in comparisons]
     all_r = [np.asarray(c["aligned"][reference_name]) for c in comparisons]
-    vmin, vmax = _limits(*all_t, *all_r)
+    vmin, vmax = _limits(*all_t, *all_r, robust=robust)
     seq_norm = norm_for(standard_name, vmin, vmax)
 
     all_d = np.concatenate(
@@ -2347,6 +2380,7 @@ def field_grid(
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -2382,6 +2416,10 @@ def field_grid(
     different variables have unrelated ranges and units; sharing across those would
     make every row's colours meaningless relative to the numbers on the bar. Warns
     if the rows' ``standard_name``s actually differ.
+
+    ``robust`` means what it does in :func:`_limits`: each row's (or, with
+    ``shared_limits=True``, the whole grid's) sequential colour scale spans the
+    full data range by default, or the 10th–90th percentile with ``robust=True``.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only labels the leftmost column's latitude axis and the bottom row's longitude
@@ -2463,7 +2501,7 @@ def field_grid(
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
-            comparisons, test_name, reference_name
+            comparisons, test_name, reference_name, robust=robust
         )
 
     for i, comp in enumerate(comparisons):
@@ -2492,6 +2530,7 @@ def field_grid(
             defaults=defaults,
             coastline_resolution=coastline_resolution,
             land=land,
+            robust=robust,
         )
         _draw_colorbar(
             fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2808,6 +2847,7 @@ def field_facet(
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -2857,6 +2897,10 @@ def field_facet(
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every panel — see :func:`field_row`'s docstring.
+
+    ``robust`` means what it does in :func:`_limits`: each row's colour scale spans
+    the full range of its own data by default, or its 10th–90th percentile with
+    ``robust=True``.
     """
     import matplotlib.pyplot as plt
 
@@ -2957,7 +3001,7 @@ def field_facet(
     cmap, _ = cmaps_for(standard_name)
 
     def _norm_of(sub):
-        vmin, vmax = _limits(sub)
+        vmin, vmax = _limits(sub, robust=robust)
         return norm_for(standard_name, vmin, vmax)
 
     # Computed before drawing so each panel is drawn against its scale rather than
@@ -3149,6 +3193,7 @@ def section(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    robust: bool | float = False,
 ):
     """Draw one vertical section: depth against along-path distance.
 
@@ -3176,6 +3221,10 @@ def section(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
     option set to each renderer (see :func:`_warn_if_interactive_only`) — a
     section's mesh is small enough that neither changes anything here.
+
+    ``robust`` means what it does in :func:`_limits`: the colour scale spans the
+    full range of the section by default, or its 10th–90th percentile with
+    ``robust=True``.
     """
     import matplotlib.pyplot as plt
 
@@ -3209,7 +3258,7 @@ def section(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(values)
+    vmin, vmax = _limits(values, robust=robust)
     norm = norm_for(standard_name, vmin, vmax)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
@@ -3266,6 +3315,7 @@ def cross(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    robust: bool | float = False,
 ):
     """Draw two vertical sections through one point, one along each grid direction.
 
@@ -3296,8 +3346,8 @@ def cross(
     Everything else -- sizing (``size``/``zoom``/``figsize``), ``font_scale``,
     ``fit_text``, ``align_colorbars``, the ``*_kwargs`` dicts,
     ``rasterize``/``hover`` (interactive-only, see
-    :func:`_warn_if_interactive_only`) -- means exactly what it does in
-    :func:`section`.
+    :func:`_warn_if_interactive_only`), ``robust`` -- means exactly what it does in
+    :func:`section`, applied to the one scale the two panels share.
     """
     import matplotlib.pyplot as plt
 
@@ -3352,7 +3402,7 @@ def cross(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(*(values for values, _ in prepared))
+    vmin, vmax = _limits(*(values for values, _ in prepared), robust=robust)
     norm = norm_for(standard_name, vmin, vmax)
 
     fig, axes_grid = plt.subplots(
@@ -3409,7 +3459,7 @@ def _draw_time_depth(ax, values, geometry, *, cmap, norm, mark: str) -> Any:
     ``values``/``geometry`` are :func:`~ocean_skill.plot.time_depth.prepare_time_depth`'s
     own return; the caller has already resolved ``mark`` (via
     :func:`~ocean_skill.plot.time_depth.default_mark`) and ``cmap``/``norm`` (its own
-    percentile range, or one shared across a grid's panels -- see
+    range, or one shared across a grid's panels -- see
     :func:`time_depth_grid`'s ``shared_limits``). Shared by :func:`time_depth` (one
     panel, its own figure) and :func:`time_depth_grid` (several, one per axes) so the
     two can never draw a cell differently.
@@ -3462,6 +3512,7 @@ def time_depth(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    robust: bool | float = False,
 ):
     """Draw one ``time_depth`` panel: depth against time, at one place.
 
@@ -3494,6 +3545,10 @@ def time_depth(
     option set to each renderer (see :func:`_warn_if_interactive_only`) — a
     ``time_depth`` panel's own mesh or scatter is small enough that neither
     changes anything here.
+
+    ``robust`` means what it does in :func:`_limits`: the colour scale spans the
+    full range of the panel by default, or its 10th–90th percentile with
+    ``robust=True``.
     """
     import matplotlib.pyplot as plt
 
@@ -3531,7 +3586,7 @@ def time_depth(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(values)
+    vmin, vmax = _limits(values, robust=robust)
     norm = norm_for(standard_name, vmin, vmax)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
@@ -3583,6 +3638,7 @@ def time_depth_grid(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    robust: bool | float = False,
 ):
     """Stack several ``time_depth`` panels -- one per item -- in a single figure.
 
@@ -3632,6 +3688,10 @@ def time_depth_grid(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) -- neither changes
     anything here.
+
+    ``robust`` means what it does in :func:`_limits`: each panel's (or, with
+    ``shared_limits=True``, every panel's shared) colour scale spans the full data
+    range by default, or its 10th–90th percentile with ``robust=True``.
     """
     import matplotlib.pyplot as plt
 
@@ -3706,7 +3766,7 @@ def time_depth_grid(
             )
         standard_name = items[0].get("standard_name")
         shared_cmap, _ = cmaps_for(standard_name)
-        vmin, vmax = _limits(*(values for values, _ in prepared))
+        vmin, vmax = _limits(*(values for values, _ in prepared), robust=robust)
         shared_norm = norm_for(standard_name, vmin, vmax)
 
     # One depth range for the whole figure when sharey -- explicit set_ylim on every
@@ -3731,7 +3791,7 @@ def time_depth_grid(
             cmap, norm = shared_cmap, shared_norm
         else:
             cmap, _ = cmaps_for(item.get("standard_name"))
-            vmin, vmax = _limits(values)
+            vmin, vmax = _limits(values, robust=robust)
             norm = norm_for(item.get("standard_name"), vmin, vmax)
         im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark)
         if shared_depth is not None:
@@ -3800,6 +3860,7 @@ def field_map_grid(
     hover: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Draw one map per item -- several *variables*, not one variable's own facet axis.
 
@@ -3824,7 +3885,9 @@ def field_map_grid(
     which composes only the depth/time/region every item has in common, dropping the
     variable since the items' ``standard_name``s differ by construction).
 
-    Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`.
+    Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`,
+    including ``robust`` (see :func:`_limits`) -- each panel's own colour scale spans
+    its full data range by default, or its 10th–90th percentile with ``robust=True``.
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) -- they are the
     interactive renderer's fix for a large mesh and do nothing here.
@@ -3915,7 +3978,7 @@ def field_map_grid(
         field = item["field"]
         standard_name = item.get("standard_name")
         cmap, _ = cmaps_for(standard_name)
-        vmin, vmax = _limits(field)
+        vmin, vmax = _limits(field, robust=robust)
         norm = norm_for(standard_name, vmin, vmax)
         im = _draw_map(
             ax,
@@ -3988,6 +4051,7 @@ def section_row(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    robust: bool | float = False,
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -3995,9 +4059,10 @@ def section_row(
     geometry substituted for the map — a comparison whose select cuts a transect
     (see :func:`ocean_skill.comparison.Comparison.is_section`) gets this family
     instead, the same way one that reduces to a single time axis gets
-    :func:`series`. Test and reference share one colour scale (the 10th-90th
-    percentile of the pair); the difference panel uses a diverging map centred on
-    zero; metrics go in the difference panel's corner box — all exactly as
+    :func:`series`. Test and reference share one colour scale (the full range of
+    the pair by default, or its 10th-90th percentile with ``robust=True``); the
+    difference panel uses a diverging map centred on zero; metrics go in the
+    difference panel's corner box — all exactly as
     :func:`field_row` draws a gridded comparison, just against depth and
     along-path distance instead of longitude and latitude.
 
@@ -4059,6 +4124,7 @@ def section_row(
         shared_axis_labels=shared_axis_labels,
         scale=scale,
         defaults=defaults,
+        robust=robust,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -4762,6 +4828,7 @@ def field_movie(
     progress: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
 
@@ -4840,7 +4907,9 @@ def field_movie(
 
     seq_norm = div_norm = None
     if shared_limits and len(frames) > 1:
-        seq_norm, div_norm = _shared_norms(frames, test_name, reference_name)
+        seq_norm, div_norm = _shared_norms(
+            frames, test_name, reference_name, robust=robust
+        )
 
     fig, axes = plt.subplots(
         1,
@@ -4872,6 +4941,7 @@ def field_movie(
         defaults=defaults,
         coastline_resolution=coastline_resolution,
         land=land,
+        robust=robust,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -4990,6 +5060,7 @@ def facet_movie(
     progress: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
 
@@ -5054,7 +5125,7 @@ def facet_movie(
     # spirit either way: a scale re-derived per frame would make the ruler move with the
     # field. field_facet shares one scale across its panels for the same reason.
     scope = field if shared_limits else field.isel({facet_dim: indices[0]})
-    vmin, vmax = _limits(scope)
+    vmin, vmax = _limits(scope, robust=robust)
     norm = norm_for(standard_name, vmin, vmax)
     cmap, _ = cmaps_for(standard_name)
 

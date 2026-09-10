@@ -423,6 +423,7 @@ def _field_row(
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -455,6 +456,9 @@ def _field_row(
     ``coastline_resolution`` picks the coastline dataset for every panel — see
     :mod:`ocean_skill.plot.coastline` and the static renderer's ``field_row`` docstring.
     ``land`` is honored the same way as :func:`_quadmesh` — see there.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits` — see the static renderer's ``field_row`` docstring.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits
@@ -467,7 +471,7 @@ def _field_row(
     standard_name = item.get("standard_name")
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(t, r)
+    vmin, vmax = _limits(t, r, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
@@ -551,6 +555,7 @@ def _field_grid(
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -580,7 +585,7 @@ def _field_grid(
     ``rasterize`` and ``hover`` pass straight through to every row (see
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
     can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
-    same way.
+    same way, as does ``robust`` — each row's colour scale is its own.
     """
     hv = _extension()
     title = _default_grid_title(items, title)
@@ -600,6 +605,7 @@ def _field_grid(
             rasterize=rasterize,
             coastline_resolution=coastline_resolution,
             land=land,
+            robust=robust,
         )
         for it in items
     ]
@@ -639,6 +645,7 @@ def _field_facet(
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -674,6 +681,9 @@ def _field_facet(
 
     ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
     every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits` — see the static renderer's ``field_facet`` docstring.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
@@ -719,7 +729,7 @@ def _field_facet(
     raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
-        lo, hi = _limits(sub)
+        lo, hi = _limits(sub, robust=robust)
         return (max(lo, 1e-6) if log else lo, hi)
 
     # One scale per row when the rows are levels, matching the static renderer: depths
@@ -807,6 +817,7 @@ def _section(
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    robust: bool | float = False,
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -819,6 +830,9 @@ def _section(
     :func:`_quadmesh` every geographic family draws through, just with ``geo=False``
     (no tiles, no coastline, no cartopy projection: a section is not a map) and its
     non-geographic options (``aspect``, ``invert_y``, ``bgcolor``) instead.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits` — see the static renderer's ``section`` docstring.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -837,7 +851,7 @@ def _section(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(field)
+    vmin, vmax = _limits(field, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
     raster = _should_rasterize(field, rasterize)
@@ -873,6 +887,7 @@ def _cross(
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    robust: bool | float = False,
     **_,
 ):
     """Two interactive vertical sections through one point, one per grid direction.
@@ -918,6 +933,7 @@ def _cross(
             zoom=zoom,
             hover=hover,
             rasterize=rasterize,
+            robust=robust,
         )
         for item in items
     ]
@@ -940,6 +956,7 @@ def _time_depth(
     clim: tuple[float, float] | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
+    robust: bool | float = False,
     **_,
 ):
     """One interactive ``time_depth`` panel: depth against time, at one place.
@@ -958,15 +975,16 @@ def _time_depth(
     :func:`_station_overlay` uses for a skill map's station dots, coloured by
     value here instead of a fixed colour.
 
-    ``clim`` overrides the panel's own percentile-derived colour range -- how
+    ``clim`` overrides the panel's own colour range -- how
     :func:`_time_depth_grid`'s ``shared_limits=True`` makes every panel share one
-    scale instead of each computing its own. ``xlim``/``ylim`` likewise override
-    the panel's own time/depth range -- how that grid's ``sharex``/``sharey`` link
-    every panel's own axis (there is no ``plt.subplots(sharex=, sharey=)``
-    equivalent here to do it for free). ``ylim`` is given ascending (``(shallow,
-    deep)``) like any other holoviews range -- ``invert_yaxis=True`` below still
-    flips it to read shallow-at-top the same way it flips the unset, autoscaled
-    range.
+    scale instead of each computing its own; when it is not given, ``robust``
+    means what it does in :func:`~ocean_skill.plot.matplotlib_renderer._limits`.
+    ``xlim``/``ylim`` likewise override the panel's own time/depth range -- how
+    that grid's ``sharex``/``sharey`` link every panel's own axis (there is no
+    ``plt.subplots(sharex=, sharey=)`` equivalent here to do it for free).
+    ``ylim`` is given ascending (``(shallow, deep)``) like any other holoviews
+    range -- ``invert_yaxis=True`` below still flips it to read shallow-at-top the
+    same way it flips the unset, autoscaled range.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -988,7 +1006,7 @@ def _time_depth(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = clim if clim is not None else _limits(field)
+    vmin, vmax = clim if clim is not None else _limits(field, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
 
@@ -1079,6 +1097,7 @@ def _time_depth_grid(
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    robust: bool | float = False,
     **_,
 ):
     """Stack several interactive ``time_depth`` panels -- one per item.
@@ -1138,7 +1157,7 @@ def _time_depth_grid(
                 "so one shared colour scale won't mean the same thing on every panel.",
                 stacklevel=2,
             )
-        shared_clim = _limits(*(field for field, _ in prepared))
+        shared_clim = _limits(*(field for field, _ in prepared), robust=robust)
 
     if sharex is None:
         # the same auto rule time_depth_grid applies: one stacked column, every
@@ -1177,6 +1196,7 @@ def _time_depth_grid(
                 zoom=zoom,
                 hover=hover,
                 rasterize=rasterize,
+                robust=robust,
             )
         )
 
@@ -1198,6 +1218,7 @@ def _field_map_grid(
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """One interactive map per item -- several *variables*, not one facet axis.
@@ -1218,6 +1239,10 @@ def _field_map_grid(
     :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange
     the same panels the same way -- the grid is free here too, these panels having
     no inherent order either.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits`, applied to each panel's own scale -- see the static renderer's
+    ``field_map_grid`` docstring.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
@@ -1245,7 +1270,7 @@ def _field_map_grid(
         standard_name = item.get("standard_name")
         seq, _div = cmaps_for(standard_name)
         log = is_log(standard_name)
-        lo, hi = _limits(field)
+        lo, hi = _limits(field, robust=robust)
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
@@ -1293,6 +1318,7 @@ def _section_row(
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    robust: bool | float = False,
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -1311,6 +1337,9 @@ def _section_row(
     this function rather than a grid caller passing one in: it needs the path's own
     endpoints (:attr:`~ocean_skill.plot.section.SectionGeometry.path_note`), which
     only :func:`~ocean_skill.plot.section.prepare_section_row` can supply.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits` — see the static renderer's ``section_row`` docstring.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -1329,7 +1358,7 @@ def _section_row(
         )
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(t, r)
+    vmin, vmax = _limits(t, r, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
@@ -2187,6 +2216,7 @@ def _facet_movie(
     domain=None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -2230,7 +2260,8 @@ def _facet_movie(
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
-    in the field.
+    in the field. ``robust`` means what it does in
+    :func:`~ocean_skill.plot.matplotlib_renderer._limits`.
 
     What the movie is *of* joins each frame's title (``GOM_bgc: alkalinity, surface —
     2013-01-16``) rather than sitting above it as the static suptitle does: bokeh's only
@@ -2274,7 +2305,7 @@ def _facet_movie(
         scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
     else:
         scope = frames_da.isel({facet_dim: 0})
-    vmin, vmax = _limits(scope)
+    vmin, vmax = _limits(scope, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
     raster = _should_rasterize(frames_da.isel({facet_dim: 0}), rasterize)
@@ -2345,6 +2376,7 @@ def _field_movie(
     domain=None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    robust: bool | float = False,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -2371,7 +2403,8 @@ def _field_movie(
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
     reason — a scale that moves as you drag the slider makes the field look like it is
     changing when only the ruler is. ``shared_limits=True`` derives it from every frame,
-    ``False`` from the first.
+    ``False`` from the first. ``robust`` means what it does in
+    :func:`~ocean_skill.plot.matplotlib_renderer._limits`.
 
     ``save`` writes a self-contained HTML page, the interactive analogue of the static
     renderer's mp4; anything else is left to the static renderer, which is what can
@@ -2416,6 +2449,7 @@ def _field_movie(
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
         *[f["aligned"]["reference"] for f in scope],
+        robust=robust,
     )
     if log:
         vmin = max(vmin, 1e-6)
