@@ -427,6 +427,29 @@ def test_a_list_fans_one_comparison_per_entry(stubbed_fan):
     ]
 
 
+def test_labels_override_the_auto_derived_names(stubbed_fan):
+    cs = comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        times=["2010-01", "2010-02"],
+        labels=["First", "Second"],
+    )
+    assert cs.labels == ["First", "Second"]
+    assert [cs._label_for(i) for i in range(len(cs))] == ["First", "Second"]
+
+
+def test_labels_must_be_one_per_formed_comparison(stubbed_fan):
+    with pytest.raises(ValueError, match="one per comparison"):
+        comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=["temperature"],
+            times=["2010-01", "2010-02"],
+            labels=["only one"],
+        )
+
+
 def test_a_single_entry_list_does_not_earn_its_own_label(stubbed_fan):
     """Mirrors depths=(50,) alone: one value never disambiguates anything."""
     comparison.compare(
