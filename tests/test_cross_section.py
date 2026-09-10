@@ -390,7 +390,15 @@ def roms_grid_with_land():
 
 
 def test_cross_through_land_renders_statically(patched_read, roms_grid_with_land):
-    """The exact ``esper`` failure: a native-s cross whose window reaches land."""
+    """The exact ``esper`` failure, and its fix: a native-s cross reaching land.
+
+    ``roms_grid_with_land`` reproduces the masked-zeta chain that *would* leave
+    ``z_rho`` NaN over land, but ``osk.field`` (via ``comparison._prepare``'s
+    ``zero_zeta=True`` section handling) rebuilds it from ``h`` alone first, so
+    it is finite here already -- no NaN depth reaches ``pcolormesh``, and no
+    transect-mean placeholder is drawn into the land boundary either (the
+    bathymetry "dips" that placeholder used to cause).
+    """
     name = patched_read(roms_grid_with_land)
     c = osk.field(
         name,
@@ -398,7 +406,7 @@ def test_cross_through_land_renders_statically(patched_read, roms_grid_with_land
         select={"transect": {"cross": {"eta_rho": 2, "xi_rho": 2}, "half_width": 3}},
         cache=False,
     )
-    assert bool(np.isnan(c.along.data["z_rho"]).any())  # the fixture has real land
+    assert bool(np.isfinite(np.asarray(c.along.data["z_rho"])).all())
     fig = c.plot()
     assert len(fig.axes) == 3
 

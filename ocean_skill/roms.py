@@ -386,15 +386,30 @@ def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     return ds
 
 
-def add_depth_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
+def add_depth_coord(
+    ds: xr.Dataset, meta: dict[str, Any], *, zero_zeta: bool = False
+) -> xr.Dataset:
     """Attach the (lazy) ROMS z_rho depth coordinate via Vtransform 2.
 
     ``z_rho = zeta + (zeta + h) * (hc*sigma_r + h*Cs_r) / (hc + h)`` (metres, negative
     down). Requires ``h``/``Cs_r``/``sigma_r`` (from the grid) and ``zeta``.
+
+    ``zero_zeta=True`` ignores any ``zeta``/``sea_surface_height_above_geoid`` on
+    ``ds`` and uses ``zeta = 0`` instead, the same fallback already used when neither
+    is present -- collapsing the formula to ``z_rho = h * (hc*sigma_r + h*Cs_r) /
+    (hc + h)``, a pure function of the (always-finite) bathymetry. This is for a
+    section's depth *mesh*, not the water column itself: ``zeta`` is a land-masked
+    rho-point field (see :func:`standardize`), so the ordinary path leaves ``z_rho``
+    NaN over land -- fine for interpolating data onto depths, fatal for a plot's
+    depth-mesh coordinate (pcolormesh refuses to draw with a non-finite coordinate).
+    ``zeta`` is metres against an ``h`` of hundreds to thousands, so dropping it here
+    costs nothing a vertical section could show.
     """
     vert = meta.get("vertical", {})
     hc = float(vert.get("hc"))
-    if "zeta" in ds.variables:
+    if zero_zeta:
+        zeta = xr.zeros_like(ds["h"])
+    elif "zeta" in ds.variables:
         zeta = ds["zeta"]
     elif "sea_surface_height_above_geoid" in ds.variables:
         zeta = ds["sea_surface_height_above_geoid"]
@@ -411,7 +426,9 @@ def add_depth_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     return ds.assign_coords(z_rho=z_rho)
 
 
-def add_interface_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
+def add_interface_coord(
+    ds: xr.Dataset, meta: dict[str, Any], *, zero_zeta: bool = False
+) -> xr.Dataset:
     """Attach the (lazy) ``z_w`` cell-*interface* depths, the companion to ``z_rho``.
 
     Same Vtransform-2 formula as :func:`add_depth_coord`, evaluated on ``sigma_w``/
@@ -424,10 +441,15 @@ def add_interface_coord(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     free surface, which is why a band average has no NaN problem where interpolation
     does: the shallowest ``z_rho`` can be 7 m down in deep water, but the shallowest
     ``z_w`` is always 0.
+
+    ``zero_zeta`` -- see :func:`add_depth_coord`, the same zeta-free mesh for a
+    section built on ``s_w`` instead of ``s_rho``.
     """
     vert = meta.get("vertical", {})
     hc = float(vert.get("hc"))
-    if "zeta" in ds.variables:
+    if zero_zeta:
+        zeta = xr.zeros_like(ds["h"])
+    elif "zeta" in ds.variables:
         zeta = ds["zeta"]
     elif "sea_surface_height_above_geoid" in ds.variables:
         zeta = ds["sea_surface_height_above_geoid"]
