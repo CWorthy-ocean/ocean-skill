@@ -945,6 +945,209 @@ def _names_geographic_velocity(spec: Any) -> bool:
     return any(resolve_name(n) in GEOGRAPHIC_VELOCITY_NAMES for n in names)
 
 
+#: A per-``compare()``-call cache of one already-decompressed raw window per ROMS
+#: test source, shared across every point-like reference that call fans over --
+#: see :func:`_build_shared_slabs` (populated) and :func:`_shared_slab` (consulted,
+#: from :func:`prepare_source`). Deliberately module-level rather than threaded as a
+#: parameter through ``Comparison``/``align``/``_prepare_lane``/``prepare_source``:
+#: every one of those already resolves its *own* nearest cell, depth and time
+#: targets from whatever raw object it is handed, so a slab only ever needs to look
+#: like what :func:`ocean_skill.sources.read` would have returned -- a smaller,
+#: already-loaded stand-in for the same lazy object -- for every one of those
+#: per-pair steps to reproduce today's exact result. Cleared and rebuilt at the top
+#: of every :func:`compare` call (never explicitly cleared at the *end*): a stale
+#: leftover entry from an earlier call can only ever be a *miss* for a differently
+#: keyed request (the key below is exact on source+qc, never approximate), so it is
+#: never served wrong -- it would just sit unused, which the next call's rebuild
+#: clears anyway. Bounded in size to whatever the most recent call's own window
+#: needed, never the model's full domain.
+_SHARED_SLABS: dict[tuple[str, str], Any] = {}
+
+#: Ceiling on one shared slab's decompressed size, generous relative to
+#: :data:`POINT_COLUMN_MATERIALIZE_MAX_BYTES` (that ceiling is per *pair*; this one
+#: covers every point-like reference sharing a test lane at once, so a wider margin
+#: is expected) -- past it, :func:`_build_shared_slabs` skips that source rather
+#: than risk turning "N redundant small reads" into "one large one": every
+#: consumer still works, just back on its own per-pair read, exactly as before this
+#: batching existed.
+SHARED_SLAB_MAX_BYTES = 2 * 1024**3
+
+
+def _shared_slab_key(source: str, qc: Any) -> tuple[str, str]:
+    """The exact-match key :func:`_build_shared_slabs` stores under and
+    :func:`_shared_slab` looks up -- source name plus ``qc``'s own repr (``qc`` is
+    typically ``None`` or a small dict, never large enough for repr to be costly).
+    """
+    return source, repr(qc)
+
+
+def _shared_slab(source: str, qc: Any):
+    """The shared raw window for ``source`` this ``compare()`` call built, or
+    ``None`` if none was built (the overwhelming majority of calls: a single
+    comparison, a gridded reference, a non-ROMS test, or fewer than two point-like
+    references sharing it). A miss here is never a correctness concern -- the
+    caller falls straight back to :func:`ocean_skill.sources.read`.
+    """
+    return _SHARED_SLABS.get(_shared_slab_key(source, qc))
+
+
+def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
+    """Read each ROMS source in ``tests`` once, decompressed, over a window that
+    covers every point-like reference in ``refs`` -- so a fan of many moorings/
+    stations/casts sharing one gridded test lane does not each independently
+    decompress the same model chunks (see :data:`_SHARED_SLABS`'s own docstring
+    for why this is module-level rather than threaded through the fan).
+
+    Only ever builds a *superset* of what any one pair would have read on its own,
+    never a partial or approximate stand-in: every reference in ``refs`` must
+    resolve to an exact catalog point (:func:`_domain_of` returning a degenerate
+    bbox) for a given test source to get a slab at all -- one reference that isn't
+    a fixed point (a trajectory, a region, an unresolvable name) skips batching
+    for *that* source entirely rather than build a window that might not cover it.
+    Any other problem (no position, oversized window, a read failure) skips the
+    same way. This is a pure optimization: :func:`_shared_slab` returning ``None``
+    for a source this could not batch just means every pair reads it itself,
+    exactly as :func:`compare` behaved before this existed.
+    """
+    _SHARED_SLABS.clear()
+    if len(refs) < 2:
+        return
+    import ocean_skill as osk
+    from ocean_skill.align import (
+        POINT_WINDOW_CELLS,
+        _bbox_lon_in_convention,
+        _lat_name,
+        _lon_name,
+        _nearest_indices,
+        subset_to_time,
+    )
+    from ocean_skill.catalog import resolve as _resolve
+    from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
+
+    positions = []
+    for ref in refs:
+        bbox = _domain_of(ref)
+        if bbox is None or bbox[0] != bbox[2] or bbox[1] != bbox[3]:
+            # Not every reference is a fixed point -- a slab sized to the point-like
+            # ones could silently miss whatever this one actually needs, so no
+            # source gets batched at all this call rather than risk that.
+            return
+        positions.append((bbox[0], bbox[1]))
+    time_windows = [tw for tw in (_time_coverage_of(ref) for ref in refs) if tw]
+
+    for tst in tests:
+        try:
+            meta = _resolve(tst).metadata
+        except KeyError:
+            continue
+        if meta.get("model") != "roms" and meta.get("loader") != "ocean_skill.roms":
+            continue
+        read_kwargs = {"qc": qc} if qc is not None else {}
+        try:
+            obj = osk.read(tst, **read_kwargs)
+        except Exception:
+            continue
+        lon_name, lat_name = _lon_name(obj), _lat_name(obj)
+        if lon_name is None or lat_name is None:
+            continue
+        lon_values = np.asarray(obj[lon_name])
+        lat_values = np.asarray(obj[lat_name])
+        if lon_name in obj.dims or lon_values.ndim != 2:
+            continue  # only the curvilinear (ROMS) case is worth batching here
+        eta_dim, xi_dim = obj[lon_name].dims
+        n_eta, n_xi = obj.sizes[eta_dim], obj.sizes[xi_dim]
+        eta0 = eta1 = xi0 = xi1 = None
+        try:
+            for p_lon, p_lat in positions:
+                wrapped, _ = _bbox_lon_in_convention(lon_values, p_lon, p_lon)
+                iy, ix = _nearest_indices(lon_values, lat_values, wrapped, p_lat)
+                e0, e1 = max(iy - POINT_WINDOW_CELLS, 0), min(
+                    iy + POINT_WINDOW_CELLS + 1, n_eta
+                )
+                x0, x1 = max(ix - POINT_WINDOW_CELLS, 0), min(
+                    ix + POINT_WINDOW_CELLS + 1, n_xi
+                )
+                eta0 = e0 if eta0 is None else min(eta0, e0)
+                eta1 = e1 if eta1 is None else max(eta1, e1)
+                xi0 = x0 if xi0 is None else min(xi0, x0)
+                xi1 = x1 if xi1 is None else max(xi1, x1)
+        except Exception:
+            continue
+        if eta0 is None or eta0 >= eta1 or xi0 >= xi1:
+            continue
+        # One extra cell of slack beyond the naive union, clamped to the domain --
+        # not for the rho window itself (any padding beyond a reference's own
+        # window there is inert: a later per-pair crop re-finds the identical
+        # nearest cell and re-applies the identical +/-cells slice regardless of
+        # how much surrounding context it has), but for the staggered-halo TRIM
+        # decision below and its later re-derivation in :func:`ocean_skill.roms.
+        # add_geographic_velocity_windowed`. That decision asks "does my window's
+        # edge sit at the *true* domain edge, or is there real data just past it".
+        # A reference whose own eta1/xi1 falls strictly inside the domain (not
+        # already clamped to n_eta/n_xi) needs the slab to extend at least one
+        # cell past it for that question to be answered the same way against the
+        # slab as it would be against the full domain -- otherwise the slab's own
+        # boundary, landing exactly on that reference's edge by coincidence, reads
+        # as "domain edge" when it is not one, and trims a real, valid rho point.
+        # Clamping below means a bound that already reached the true edge stays
+        # there, so that (correct) trim=0 case is untouched.
+        eta0, eta1 = max(eta0 - 1, 0), min(eta1 + 1, n_eta)
+        xi0, xi1 = max(xi0 - 1, 0), min(xi1 + 1, n_xi)
+
+        window: dict[str, Any] = {eta_dim: slice(eta0, eta1), xi_dim: slice(xi0, xi1)}
+        # Same staggered-halo + trim rule align._point_window applies to one point,
+        # applied once to the *union* window instead -- the union's own edges equal
+        # a true domain edge exactly when some reference's own individual window was
+        # itself clamped there, so a later per-pair crop of this slab reproduces the
+        # identical trim :func:`ocean_skill.roms.add_geographic_velocity_windowed`
+        # would compute against the full domain (see align._point_window's own
+        # comment on this rule).
+        trim: dict[str, tuple[int, int]] = {}
+        if "xi_u" in obj.dims and xi_dim == "xi_rho":
+            window["xi_u"] = slice(max(xi0 - 1, 0), min(xi1, n_xi - 1))
+            trim[xi_dim] = (1 if xi0 > 0 else 0, 1 if xi1 < n_xi else 0)
+        if "eta_v" in obj.dims and eta_dim == "eta_rho":
+            window["eta_v"] = slice(max(eta0 - 1, 0), min(eta1, n_eta - 1))
+            trim[eta_dim] = (1 if eta0 > 0 else 0, 1 if eta1 < n_eta else 0)
+
+        try:
+            sub = obj.isel(window)
+        except Exception:
+            continue
+        if trim:
+            sub.attrs["_roms_stagger_trim"] = trim
+
+        if time_windows and "time" in sub.dims:
+            lo = min(tw[0] for tw in time_windows)
+            hi = max(tw[1] for tw in time_windows)
+            try:
+                sub = subset_to_time(sub, (lo, hi))
+            except Exception:
+                pass
+
+        # Drop the pre-derived east/north before ever cropping+loading: they are a
+        # lazy expression over the WHOLE domain (roms.standardize's own
+        # _add_geographic_velocity), and cropping that graph down to even a small
+        # window does not remove the per-time-step task overhead building it left
+        # behind (the exact cost prepare_source's own velocity fast path exists to
+        # route around, see its comment) -- so any slab that kept them would pay
+        # that cost right here regardless of which variable this call actually
+        # wants. Harmless to drop unconditionally: a velocity request re-derives
+        # from the raw components this keeps (errors="ignore" makes
+        # prepare_source's own drop of these a no-op), and a non-velocity request
+        # never looked at them anyway.
+        sub = sub.drop_vars(list(GEOGRAPHIC_VELOCITY_NAMES), errors="ignore")
+
+        try:
+            if sub.nbytes > SHARED_SLAB_MAX_BYTES:
+                continue
+            sub = sub.load()
+        except Exception:
+            continue
+
+        _SHARED_SLABS[_shared_slab_key(tst, qc)] = sub
+
+
 def _calculate_method(spec: Any) -> str | None:
     """The ``method`` a calculate-spec (or a pair-spec's test side) declares, if any.
 
@@ -2503,11 +2706,20 @@ def prepare_source(
     # osk.read's own qc=None default already means "use the entry's own contract
     # unchanged", so omitting the keyword here changes nothing about the result.
     read_kwargs = {"qc": qc} if qc is not None else {}
-    obj = (
-        osk.read(source, constraints=constraints, **read_kwargs)
-        if constraints
-        else osk.read(source, **read_kwargs)
-    )
+    # A shared slab (compare()'s own pre-fan batching, see _build_shared_slabs) is
+    # never built for a source read with ERDDAP constraints (a table, never this
+    # lane's own ROMS test source) -- so consulting it only in the plain-read branch
+    # is exact, not an approximation. A miss just falls through to the ordinary
+    # read below, unchanged from before this batching existed.
+    obj = None if constraints else _shared_slab(source, qc)
+    if obj is None:
+        obj = (
+            osk.read(source, constraints=constraints, **read_kwargs)
+            if constraints
+            else osk.read(source, **read_kwargs)
+        )
+    else:
+        obj = obj.copy(deep=False)
     _warn_if_chunk_is_large(obj, source)
     # Crop horizontally and in time *before* _prepare, so the vertical transform it
     # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
@@ -7256,6 +7468,15 @@ def compare(
                 _time_select_value(start, last, time_freq) for start, last in bins
             )
         return _time_bins_cache[tst]
+
+    # A pure speed optimization ahead of the fan below: if every reference this call
+    # names is a fixed point/station/profile and shares a ROMS test lane, read and
+    # decompress that lane's covering window ONCE here rather than once per pair --
+    # see _build_shared_slabs and _SHARED_SLABS' own docstrings. Any reference that
+    # is not a plain string (a pair-spec select's own reference list, say) or any
+    # problem along the way just leaves no slab, and every pair reads its own test
+    # lane exactly as before this existed.
+    _build_shared_slabs(refs, tests, qc)
 
     out: list[Comparison] = []
     n_skipped = 0
