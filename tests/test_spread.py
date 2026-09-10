@@ -287,6 +287,41 @@ def test_to_depth_without_a_spread_coordinate_is_unaffected(roms_column):
     assert SPREAD_COORD not in out.coords
 
 
+def test_nearest_depth_levels_carries_spread_onto_the_new_vertical_axis(roms_column):
+    """The nearest-snap counterpart of ``test_to_depth_carries_spread_...`` above.
+
+    ``nearest_depth_levels`` rebuilds its result with the same fixed coordinate
+    whitelist ``to_depth`` does, dropping a riding ``spread`` coordinate the same
+    silent way -- this is the gap the diagnosis actually found (``depth_method``
+    defaults to ``"nearest"``, so an ordinary compare() call goes through this
+    function, not ``to_depth``). ``chl`` equals its own depth by construction, so
+    picking the same nearest-level index for ``spread`` as every other variable
+    reproduces the relationship exactly, whichever real level got snapped to.
+    """
+    ds, meta = roms_column
+    spread = 3.0 + 0.5 * ds["chl"]
+    ds = ds.assign_coords({SPREAD_COORD: spread})
+
+    targets = [5.0, 15.0]  # within every column's range (shallowest h is 20 m)
+    out = roms.nearest_depth_levels(ds, meta, targets)
+
+    assert SPREAD_COORD in out.coords
+    assert SPREAD_COORD in out["chl"].coords  # rides with the variable downstream
+    assert "z" in out[SPREAD_COORD].dims
+    assert "s_rho" not in out[SPREAD_COORD].dims
+
+    expected = 3.0 + 0.5 * out["chl"]
+    np.testing.assert_allclose(
+        out[SPREAD_COORD].values, expected.values, equal_nan=True
+    )
+
+
+def test_nearest_depth_levels_without_a_spread_coordinate_is_unaffected(roms_column):
+    ds, meta = roms_column
+    out = roms.nearest_depth_levels(ds, meta, [5.0, 15.0])
+    assert SPREAD_COORD not in out.coords
+
+
 def test_to_sigma0_carries_spread_onto_the_new_vertical_axis(roms_column):
     gsw = pytest.importorskip("gsw")
     ds, meta = roms_column
