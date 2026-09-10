@@ -5848,6 +5848,50 @@ def render(spec, **kwargs: Any):
     """Draw a :class:`~ocean_skill.plot.spec.PlotSpec` with matplotlib.
 
     Dispatches on ``spec.family``; ``spec.options`` are merged with any keyword
+    arguments, with the explicit keywords winning. The figure is detached from
+    pyplot's registry before being returned, so it renders once (via the
+    returned object) rather than twice (once from pyplot's own end-of-cell
+    auto-show, once from the returned object) -- matching the holoviews
+    renderer, which never had a stateful figure pool to auto-show from in the
+    first place.
+    """
+    result = _render(spec, **kwargs)
+    _detach_from_pyplot(result)
+    return result
+
+
+def _detach_from_pyplot(result: Any) -> None:
+    """Remove ``result``'s figure from pyplot's registry of open figures.
+
+    Deliberately *not* ``plt.close(fig)``: that also strips the figure down to
+    a bare, backend-less canvas (``Figure._set_base_canvas``), which breaks
+    anything downstream that still wants to draw or measure it (``fig.
+    canvas.get_renderer()``, ``tight_layout``, ...). Popping it out of
+    pyplot's own bookkeeping is enough to stop the inline backend from
+    auto-showing it a second time -- the figure and its real canvas are left
+    fully intact, so it's still modifiable, ``fig.savefig(...)`` still works,
+    and ``display(fig)`` still shows it on request.
+    """
+    from matplotlib._pylab_helpers import Gcf
+    from matplotlib.figure import Figure
+
+    if isinstance(result, Figure):
+        fig = result
+    else:
+        # FuncAnimation (the movie families) only exposes the figure as the
+        # private ``_fig``; fall back to a public ``figure`` for anything else.
+        fig = getattr(result, "_fig", None) or getattr(result, "figure", None)
+    if not isinstance(fig, Figure):
+        return
+    manager = next((m for m in Gcf.figs.values() if m.canvas.figure is fig), None)
+    if manager is not None:
+        Gcf.figs.pop(manager.num, None)
+
+
+def _render(spec, **kwargs: Any):
+    """Draw a :class:`~ocean_skill.plot.spec.PlotSpec` with matplotlib.
+
+    Dispatches on ``spec.family``; ``spec.options`` are merged with any keyword
     arguments, with the explicit keywords winning.
     """
     from ocean_skill.plot.portrait import portrait
