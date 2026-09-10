@@ -848,6 +848,70 @@ def _section(
     )
 
 
+def _cross(
+    items: list[dict[str, Any]],
+    orientation: str = "vertical",
+    title: str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    **_,
+):
+    """Two interactive vertical sections through one point, one per grid direction.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.cross`: each panel draws
+    through :func:`_section` itself (its own docstring covers the shared
+    :func:`~ocean_skill.plot.section.prepare_section` conventions), so a
+    ``cross`` panel here and its static counterpart cannot disagree about axis
+    conventions or per-panel titling (each item's own ``label`` -- which grid
+    dimension it holds fixed -- plus its own ``path_note``, exactly as
+    :func:`_section` already titles a lone panel). Laid out as a holoviews
+    ``Layout`` of the two, one column (``orientation="vertical"``, the
+    default, stacked) or two (``"horizontal"``, side by side) -- unlike
+    :func:`cross`, there is no shared colour scale to compute here: each panel
+    already gets its own from :func:`_section`, close enough for the same
+    variable that a second pass to force them identical is not worth bokeh's
+    own per-panel colorbar convention.
+    """
+    hv = _extension()
+
+    if len(items) != 2:
+        raise ValueError(
+            f"cross needs exactly 2 items (one section per grid direction), "
+            f"got {len(items)}."
+        )
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError(
+            f"orientation={orientation!r} -- expected 'vertical' (stacked, the "
+            "default) or 'horizontal' (side by side)."
+        )
+
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
+
+    if title is None:
+        title = suptitle_text(items[0].get("standard_name"), (items[0].get("depth"),))
+
+    panels = [
+        _section(
+            item,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            hover=hover,
+            rasterize=rasterize,
+        )
+        for item in items
+    ]
+    layout = (panels[0] + panels[1]).cols(1 if orientation == "vertical" else 2)
+    layout = layout.opts(hv.opts.Layout(shared_axes=False))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
 def _time_depth(
     item: dict[str, Any],
     title: str | None = None,
@@ -4041,6 +4105,15 @@ def render(spec, **kwargs: Any):
             )
             opts.pop("domain", None)
         return _section_row(spec.single, **opts)
+    if family == "cross":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of cross -- a cross has no map to "
+                "outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _cross(spec.items, **opts)
     if family == "time_depth":
         if "domain" in opts:
             warnings.warn(

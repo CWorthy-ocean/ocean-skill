@@ -497,6 +497,24 @@ picker = osk.pick_path("pac_dt_ramp")          # click waypoints on the domain m
 osk.field("pac_dt_ramp", NITRATE, select=picker.as_select()).plot()
 ```
 
+**A window around a point, in both grid directions** —
+`select={"transect": {"cross": ...}}` cuts two windowed grid-aligned transects
+through one lon/lat point (or grid-index pair), one along each grid direction,
+rather than the whole line:
+
+```python
+osk.field(
+    "pac_dt_ramp", NITRATE,
+    select={"transect": {"cross": {"lon": 200.0, "lat": 15.0}, "half_width": 10}},
+).plot()                       # two sections, stacked; orientation="horizontal" for side by side
+```
+
+`half_width` (grid cells either side of the point) defaults to 15; a window
+reaching past the domain edge is clamped there, with one warning. This returns an
+`ocean_skill.field.Cross` (two independent `Field`s, `.along`/`.across`) rather
+than a `Field` — see `docs/plot_styling_reference.md` for the full grammar,
+including a single windowed direction without the `cross` sugar.
+
 **Matching a section against a dataset** works the same way through `osk.compare()` —
 the reference is sampled at exactly the same points the model's own path resolved
 to, so comparing the two is pairing columns along the path, not regridding one grid

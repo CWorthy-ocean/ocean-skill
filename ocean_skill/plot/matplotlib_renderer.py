@@ -54,6 +54,7 @@ from ocean_skill.plot.typography import (
 from ocean_skill.plot.typography import row_height as _typographic_row_height
 
 __all__ = [
+    "cross",
     "facet_labels",
     "field_facet",
     "field_grid",
@@ -3215,6 +3216,161 @@ def section(
     return fig
 
 
+def cross(
+    items: list[dict[str, Any]],
+    *,
+    orientation: str = "vertical",
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+):
+    """Draw two vertical sections through one point, one along each grid direction.
+
+    :func:`section`'s two-panel sibling -- ``osk.field(..., select={"transect":
+    {"cross": ...}}).plot()`` builds a :class:`~ocean_skill.field.Cross` of two
+    independent sections (one along each grid dimension through the shared
+    point, see :mod:`ocean_skill.transect`), and this draws them on one
+    figure, sharing one colour scale (the same variable, so the two read as
+    directly comparable) rather than a scale per panel. ``orientation``
+    (``"vertical"``, the default) stacks the two panels down the page;
+    ``"horizontal"`` lays them side by side instead.
+
+    Each panel draws exactly as :func:`section` draws its own single panel --
+    the same below-bathymetry grey, inverted positive-down depth axis,
+    along-path distance axis -- but titled by its own item's ``label`` (which
+    grid dimension it holds fixed) followed by its own ``path_note``
+    (:attr:`ocean_skill.plot.section.SectionGeometry.path_note`), since the two
+    panels cut through different parts of the domain and so have different
+    endpoints to name. ``title`` is the one suptitle both panels share, naming
+    the variable and depth (identical on both, since a cross's two directions
+    share one variable and one vertical request) -- there is no per-panel
+    ``standard_name``/``units``/``depth`` argument the way :func:`section` has,
+    since both of ``items`` already carry the same ones.
+
+    There is no ``domain``, ``metrics``/``metrics_kwargs`` or ``labels``: a
+    cross panel has no map to outline and no reference to score against, and
+    each item's own ``label`` already says which panel is which (see above).
+    Everything else -- sizing (``size``/``zoom``/``figsize``), ``font_scale``,
+    ``fit_text``, ``align_colorbars``, the ``*_kwargs`` dicts,
+    ``rasterize``/``hover`` (interactive-only, see
+    :func:`_warn_if_interactive_only`) -- means exactly what it does in
+    :func:`section`.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.section import prepare_section
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    if len(items) != 2:
+        raise ValueError(
+            f"cross needs exactly 2 items (one section per grid direction), "
+            f"got {len(items)}."
+        )
+    if orientation not in ("vertical", "horizontal"):
+        raise ValueError(
+            f"orientation={orientation!r} -- expected 'vertical' (stacked, the "
+            "default) or 'horizontal' (side by side)."
+        )
+    _warn_if_interactive_only(rasterize, hover)
+
+    prepared = [prepare_section(item["field"]) for item in items]
+    standard_name = items[0].get("standard_name")
+    units = items[0].get("units")
+    depth = items[0].get("depth")
+    if title is None:
+        title = suptitle_text(standard_name, (depth,))
+
+    nrows, ncols = (2, 1) if orientation == "vertical" else (1, 2)
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=(orientation == "vertical"),
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=nrows,
+        ncols=ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+
+    cmap, _ = cmaps_for(standard_name)
+    vmin, vmax = _limits(*(values for values, _ in prepared))
+    norm = norm_for(standard_name, vmin, vmax)
+
+    fig, axes_grid = plt.subplots(
+        nrows, ncols, figsize=figsize, constrained_layout=True
+    )
+    axes = list(np.atleast_1d(axes_grid).ravel())
+    ims = []
+    for ax, item, (values, geometry) in zip(axes, items, prepared, strict=True):
+        ax.set_facecolor("0.85")  # section()'s below-bathymetry/off-domain grey
+        draw = ax.contourf if mark == "contourf" else ax.pcolormesh
+        kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+        im = draw(
+            values[geometry.x_name],
+            values[geometry.y_name],
+            values,
+            cmap=cmap,
+            norm=norm,
+            **kw,
+        )
+        ax.invert_yaxis()
+        ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+        ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+        ax.tick_params(axis="both", labelsize=scale["tick_label"])
+        label = item.get("label") or ""
+        path_note = geometry.path_note
+        panel_title = f"{label} — {path_note}" if label else path_note
+        t = ax.set_title(panel_title, **title_kwargs)
+        t._osk_size_pinned = title_pinned
+        ims.append(im)
+
+    lab = units or ""
+    _draw_colorbar(
+        fig, ims[-1], axes, lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+    )
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=nrows, panels=axes)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def _draw_time_depth(ax, values, geometry, *, cmap, norm, mark: str) -> Any:
     """Draw one ``time_depth`` panel's scatter/mesh into ``ax``, return its mappable.
 
@@ -5183,6 +5339,7 @@ def _top_level_options() -> frozenset[str]:
             series,
             section,
             section_row,
+            cross,
             profile,
             skill_map,
             locations,
@@ -5264,6 +5421,8 @@ def render(spec, **kwargs: Any):
         _check_options(section, opts)
     elif family == "section_row":
         _check_options(section_row, opts)
+    elif family == "cross":
+        _check_options(cross, opts)
     elif family == "time_depth":
         _check_options(time_depth_grid if len(spec.items) > 1 else time_depth, opts)
     elif family == "profile":
@@ -5346,6 +5505,8 @@ def render(spec, **kwargs: Any):
             metrics=item.get("metrics"),
             **opts,
         )
+    if family == "cross":
+        return cross(spec.items, **opts)
     if family == "time_depth":
         if len(spec.items) > 1:
             return time_depth_grid(spec.items, **opts)

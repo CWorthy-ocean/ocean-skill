@@ -20,6 +20,18 @@ waypoints/lines to roughly the model's own resolution
 ocean_skill.align.path_of`, the ``section`` plot family — reads either one
 identically.
 
+A grid-aligned transect can also be **windowed** rather than taking the whole
+line: ``{"<dim>": <index>, "center": <index>, "half_width": <cells>}`` keeps only
+``half_width`` cells on either side of ``center`` along the surviving axis, or
+``{"<dim>": {"lon": ..., "lat": ...}, "half_width": <cells>}`` resolves both the
+fixed index and the window's center from one nearest-cell lookup, at apply time
+(see :func:`grid_slice`). ``select={"transect": {"cross": ...}}`` is sugar for the
+common case of *two* such windows sharing one center, one along each grid
+direction — see :func:`ocean_skill.field.field`'s ``Cross`` handling, which is
+where it is actually expanded (this module's :func:`apply_transect` only ever
+produces one section, so a cross is validated here, in :func:`as_transect`, but
+never reaches :func:`apply_transect` itself).
+
 Applied *before* variable resolution and the vertical ladder in
 :func:`ocean_skill.comparison._prepare`, on the whole source ``Dataset`` rather than
 one resolved variable: a ROMS vertical transform (:func:`ocean_skill.roms.to_depth`)
@@ -59,6 +71,18 @@ _METHODS = frozenset({"nearest", "bilinear"})
 #: resolved once :func:`ocean_skill.comparison.Comparison.align` has read them.
 _FROM_REFERENCE_KEYS = frozenset({"from"})
 
+#: Sibling keys that turn a grid-aligned transect from "the whole line" into "a
+#: window of it" -- see :func:`_as_grid_transect`. Named separately from the one
+#: key that names the fixed dimension itself, since that key's own name is not
+#: known in advance.
+_GRID_WINDOW_KEYS = frozenset({"center", "half_width"})
+
+#: The default half-width (grid cells on either side of the center), when a
+#: windowed or ``cross`` transect does not say otherwise -- generous enough to
+#: show real vertical structure either side of a point on a typical ROMS grid
+#: without reading most of the domain.
+_DEFAULT_HALF_WIDTH = 15
+
 
 def as_transect(spec: Any) -> dict[str, Any]:
     """Validate and normalize a ``select={"transect": ...}`` value.
@@ -82,6 +106,8 @@ def as_transect(spec: Any) -> dict[str, Any]:
             "name a grid dimension and its index (select={'transect': {'xi_rho': "
             "30}}), a list of lon/lat waypoints, or a fixed lon/lat line."
         )
+    if "cross" in spec:
+        return _as_cross_transect(spec)
     if _FROM_REFERENCE_KEYS & set(spec):
         return _as_from_reference_transect(spec)
     if _ARBITRARY_PATH_KEYS & set(spec):
@@ -93,23 +119,201 @@ def as_transect(spec: Any) -> dict[str, Any]:
             "line) -- a grid-aligned slice is exact, with nothing to space out "
             "or interpolate."
         )
-    keys = set(spec)
+    return _as_grid_transect(spec)
+
+
+def _as_half_width(half_width: Any) -> int:
+    """Return ``half_width`` as a positive int (cells), or :data:`_DEFAULT_HALF_WIDTH`.
+
+    Shared by :func:`_as_grid_transect` (a windowed single-direction transect)
+    and :func:`_as_cross_transect` (which, per direction, means the same thing).
+    """
+    if half_width is None:
+        return _DEFAULT_HALF_WIDTH
+    if isinstance(half_width, bool) or not isinstance(half_width, int | np.integer):
+        raise ValueError(
+            f"select={{'transect': ...}}: half_width must be a positive int "
+            f"(a count of grid cells on either side of the center), got "
+            f"{half_width!r}."
+        )
+    half_width = int(half_width)
+    if half_width < 1:
+        raise ValueError(
+            f"select={{'transect': ...}}: half_width must be a positive int "
+            f"(a count of grid cells on either side of the center), got "
+            f"{half_width!r}."
+        )
+    return half_width
+
+
+def _as_point(value: Any, *, context: str) -> dict[str, float]:
+    """Return ``value`` as ``{"lon": float, "lat": float}``, or raise."""
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"lon", "lat"}
+        or any(
+            isinstance(value[k], bool) or not isinstance(value[k], int | float)
+            for k in ("lon", "lat")
+        )
+    ):
+        raise ValueError(
+            f"{context}: a point must be exactly {{'lon': <float>, 'lat': "
+            f"<float>}}, got {value!r}."
+        )
+    return {"lon": float(value["lon"]), "lat": float(value["lat"])}
+
+
+def _as_grid_transect(spec: dict[str, Any]) -> dict[str, Any]:
+    """The grid-aligned branch of :func:`as_transect`: exact, or windowed.
+
+    Names exactly one grid dimension, plus optionally :data:`_GRID_WINDOW_KEYS`.
+    Its value is either a plain int index (today's exact, whole-line slice,
+    unchanged), an int index alongside a sibling ``center``/``half_width`` pair
+    (the fixed dimension is exact, but the *surviving* axis is windowed to
+    ``half_width`` cells either side of ``center`` -- see :func:`grid_slice`), or
+    a ``{"lon": ..., "lat": ...}`` point alongside an optional ``half_width``
+    (both the fixed index and the window's center are then resolved together, at
+    apply time, from one nearest-cell lookup -- there is no ``center`` to give
+    here, since the point already names it).
+    """
+    keys = set(spec) - _GRID_WINDOW_KEYS
     if len(keys) != 1:
         raise ValueError(
             f"select={{'transect': {spec!r}}}: a grid-aligned transect names "
-            "exactly one grid dimension and its index, e.g. {'xi_rho': 30}."
+            "exactly one grid dimension and its index (or a {'lon': ..., 'lat': "
+            "...} point to center a window on it), e.g. {'xi_rho': 30} or "
+            "{'xi_rho': {'lon': -94.0, 'lat': 26.0}}."
         )
     dim = next(iter(keys))
-    index = spec[dim]
-    if isinstance(index, bool) or not isinstance(index, int | np.integer):
+    value = spec[dim]
+    half_width = spec.get("half_width")
+    center = spec.get("center")
+
+    if isinstance(value, dict):
+        if center is not None:
+            raise ValueError(
+                f"select={{'transect': {spec!r}}}: 'center' does not apply "
+                f"alongside a {{'lon': ..., 'lat': ...}} point for {dim!r} -- "
+                "the point itself resolves both the fixed index and the "
+                "window's center."
+            )
+        point = _as_point(value, context=f"select={{'transect': {{{dim!r}: ...}}}}")
+        return {
+            "kind": "grid",
+            "dim": str(dim),
+            "point": point,
+            "half_width": _as_half_width(half_width),
+        }
+
+    if isinstance(value, bool) or not isinstance(value, int | np.integer):
         raise ValueError(
-            f"select={{'transect': {{{dim!r}: {index!r}}}}}: the grid index must "
-            "be an int (e.g. 30) naming a position along the dimension -- this is "
-            "the grid-aligned pathway. A coordinate value (a longitude, a "
+            f"select={{'transect': {{{dim!r}: {value!r}}}}}: the grid index must "
+            "be an int (e.g. 30) naming a position along the dimension, or a "
+            "{'lon': ..., 'lat': ...} point to center a window on it -- this is "
+            "the grid-aligned pathway. A bare coordinate value (a longitude, a "
             "latitude) belongs to the arbitrary-path pathway: select={'transect': "
             "{'lon': ...}} or {'waypoints': [...]}."
         )
-    return {"kind": "grid", "dim": str(dim), "index": int(index)}
+    index = int(value)
+    if center is None and half_width is None:
+        return {"kind": "grid", "dim": str(dim), "index": index}
+    if center is None or half_width is None:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: a windowed grid transect needs "
+            "both 'center' (the index to window the surviving axis around) and "
+            "'half_width' (how many cells on either side) together -- give "
+            "both, or neither for the whole line."
+        )
+    if isinstance(center, bool) or not isinstance(center, int | np.integer):
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: 'center' must be an int grid "
+            f"index, got {center!r}."
+        )
+    return {
+        "kind": "grid",
+        "dim": str(dim),
+        "index": index,
+        "along_center": int(center),
+        "half_width": _as_half_width(half_width),
+    }
+
+
+def _as_cross_transect(spec: dict[str, Any]) -> dict[str, Any]:
+    """The ``cross`` branch of :func:`as_transect`: two windows through one point.
+
+    Sugar for the common request "both crossing transects through this point" --
+    one held along each grid direction, sharing one ``half_width``. Validated
+    here so a malformed request fails immediately, at ``select=`` time, but
+    *expanded* into two ordinary windowed-grid specs by
+    :func:`ocean_skill.field.field` instead of here: :func:`apply_transect`
+    turns one ``Dataset`` into one sliced ``Dataset``, and a cross needs two
+    (see the module docstring) -- one section per direction, drawn together by
+    the new :class:`~ocean_skill.field.Cross`.
+
+    ``point`` is either ``{"lon": ..., "lat": ...}`` (resolved per-direction, at
+    apply time, against whichever dimensions the source's own 2-D lon/lat
+    coordinate rides on -- ``eta_rho``/``xi_rho`` for ROMS, or the pair named by
+    an optional ``"dims"`` key for a differently-named curvilinear grid) or two
+    explicit grid indices, e.g. ``{"eta_rho": 40, "xi_rho": 30}`` (name-agnostic
+    -- any two of the source's own dimensions).
+    """
+    extra = set(spec) - {"cross", "half_width", "dims"}
+    if extra:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: {sorted(extra)} do not apply "
+            "alongside 'cross' -- only 'half_width' (cells on either side) and, "
+            "for a {'lon':,'lat':} point, 'dims' (the two grid dimensions to "
+            "cross, if not 'eta_rho'/'xi_rho') are accepted."
+        )
+    point = spec["cross"]
+    half_width = _as_half_width(spec.get("half_width"))
+    dims = spec.get("dims")
+
+    if not isinstance(point, dict):
+        raise ValueError(
+            f"select={{'transect': {{'cross': {point!r}}}}}: name the crossing "
+            "point as {'lon': <float>, 'lat': <float>} or as two grid indices, "
+            "e.g. {'eta_rho': 40, 'xi_rho': 30}."
+        )
+    if set(point) == {"lon", "lat"}:
+        normalized: dict[str, Any] = _as_point(
+            point, context="select={'transect': {'cross': ...}}"
+        )
+        if dims is not None:
+            if (
+                not isinstance(dims, list | tuple)
+                or len(dims) != 2
+                or len({str(d) for d in dims}) != 2
+                or any(not isinstance(d, str) for d in dims)
+            ):
+                raise ValueError(
+                    f"select={{'transect': {{'cross': ..., 'dims': {dims!r}}}}}: "
+                    "'dims' must name exactly two distinct grid dimensions, e.g. "
+                    "['eta_rho', 'xi_rho']."
+                )
+            normalized = {**normalized, "dims": (str(dims[0]), str(dims[1]))}
+        return {"kind": "cross", "point": normalized, "half_width": half_width}
+
+    if dims is not None:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: 'dims' only applies alongside a "
+            "{'lon':,'lat':} point -- naming grid indices directly already "
+            "names the two dimensions."
+        )
+    if len(point) == 2 and all(
+        not isinstance(v, bool) and isinstance(v, int | np.integer)
+        for v in point.values()
+    ):
+        return {
+            "kind": "cross",
+            "point": {str(k): int(v) for k, v in point.items()},
+            "half_width": half_width,
+        }
+    raise ValueError(
+        f"select={{'transect': {{'cross': {point!r}}}}}: name the crossing "
+        "point as {'lon': <float>, 'lat': <float>} or as two grid indices "
+        "(e.g. {'eta_rho': 40, 'xi_rho': 30})."
+    )
 
 
 def _normalize_method(method: Any) -> str:
@@ -352,7 +556,81 @@ def _as_line_transect(
     )
 
 
-def grid_slice(obj, dim: str, index: int, *, subject: str = "the source"):
+def _resolve_point_on_grid(
+    obj, dim: str, point: dict[str, float], *, subject: str
+) -> tuple[int, int]:
+    """Return ``(fixed_index, along_center)``: where ``point`` lands on ``obj``'s grid.
+
+    The nearest cell to ``point`` on ``obj``'s own 2-D lon/lat coordinate, read off
+    as both the index along ``dim`` (what :func:`grid_slice` fixes) and the index
+    along whichever other dimension that coordinate rides on (the along-path
+    axis's own window center) -- one lookup answering both questions, since they
+    are the same cell. A curvilinear grid only: a nearest-cell search needs a 2-D
+    coordinate to search over (see :func:`ocean_skill.align._nearest_indices`).
+    """
+    from ocean_skill.align import (
+        _cell_km,
+        _haversine_km,
+        _lat_name,
+        _lon_name,
+        _nearest_indices,
+    )
+
+    lon_name, lat_name = _lon_name(obj), _lat_name(obj)
+    if lon_name is None or lat_name is None:
+        raise ValueError(
+            f"{subject}: cannot center a transect on {point!r} -- no "
+            "longitude/latitude coordinate found to search against."
+        )
+    lon_vals = np.asarray(obj[lon_name], dtype="float64")
+    lat_vals = np.asarray(obj[lat_name], dtype="float64")
+    if lon_vals.ndim != 2:
+        raise ValueError(
+            f"{subject}: a {{'lon': ..., 'lat': ...}}-centered transect needs a "
+            f"curvilinear (2-D lon/lat) grid to search for the nearest cell -- "
+            f"{lon_name!r} is {lon_vals.ndim}-D here. Name the grid index "
+            "directly instead: select={'transect': {"
+            f"{dim!r}: <int>, 'center': <int>, 'half_width': ...}}}}."
+        )
+    dims = obj[lon_name].dims
+    if dim not in dims:
+        raise ValueError(
+            f"{subject}: select={{'transect': {{{dim!r}: {point!r}}}}}: "
+            f"{dim!r} is not one of {lon_name!r}'s own dimensions {dims} -- a "
+            "point-centered transect names the dimension to fix from the same "
+            "pair the lon/lat coordinate rides on."
+        )
+    along_dim = next(d for d in dims if d != dim)
+    iy, ix = _nearest_indices(lon_vals, lat_vals, point["lon"], point["lat"])
+    by_dim = dict(zip(dims, (int(iy), int(ix)), strict=True))
+
+    snapped_lon, snapped_lat = float(lon_vals[iy, ix]), float(lat_vals[iy, ix])
+    offset = float(_haversine_km(snapped_lon, snapped_lat, point["lon"], point["lat"]))
+    cell_km = _cell_km(obj, lon_name, lat_name)
+    if offset > max(cell_km, 1e-9):
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        warnings.warn(
+            f"{subject}: the nearest cell to {point} is {offset:.1f} km away "
+            f"(~{cell_km:.1f} km per cell) -- the point may be outside the "
+            "domain, or between cells at the edge of a coarse grid.",
+            stacklevel=_stacklevel.find(),
+        )
+    return by_dim[dim], by_dim[along_dim]
+
+
+def grid_slice(
+    obj,
+    dim: str,
+    index: int | None = None,
+    *,
+    point: dict[str, float] | None = None,
+    along_center: int | None = None,
+    half_width: int | None = None,
+    subject: str = "the source",
+):
     """Slice ``obj`` to one index along ``dim``: the grid-aligned transect pathway.
 
     A plain ``obj.isel({dim: index})`` — no interpolation, no grid attached, exact.
@@ -363,6 +641,15 @@ def grid_slice(obj, dim: str, index: int, *, subject: str = "the source"):
     lon/lat), so both the grid-aligned pathway and a future interpolated one produce
     the same shape for :func:`ocean_skill.align.path_of` and the renderer to read.
 
+    ``index`` names the exact position along ``dim`` to fix, the whole-line case.
+    ``point`` (a ``{"lon": ..., "lat": ...}`` dict) instead resolves both ``index``
+    and ``along_center`` together, from the cell nearest that point
+    (:func:`_resolve_point_on_grid`) -- give one or the other, never both.
+    ``along_center``/``half_width`` (cells) window the surviving axis to
+    ``half_width`` cells either side of ``along_center``, clamped at the domain
+    edge (warned about once, when it clamps) rather than the whole line -- see
+    :func:`ocean_skill.field.field`'s ``cross``, built from two of these.
+
     Runs on the whole ``Dataset`` (see the module docstring for why), and leaves the
     result lazy -- the caller (:func:`ocean_skill.comparison._prepare`) computes it
     together with the rest of the reduction, not here.
@@ -371,11 +658,15 @@ def grid_slice(obj, dim: str, index: int, *, subject: str = "the source"):
 
     if dim not in obj.dims:
         raise ValueError(
-            f"{subject}: select={{'transect': {{{dim!r}: {index!r}}}}} names "
+            f"{subject}: select={{'transect': {{{dim!r}: ...}}}} names "
             f"{dim!r}, which is not one of this source's dimensions "
             f"({sorted(obj.dims)}). A grid-aligned transect names a real grid "
             "dimension -- for a ROMS run, typically 'xi_rho' or 'eta_rho'."
         )
+
+    if point is not None:
+        index, along_center = _resolve_point_on_grid(obj, dim, point, subject=subject)
+
     size = obj.sizes[dim]
     if not -size <= index < size:
         raise ValueError(
@@ -412,6 +703,30 @@ def grid_slice(obj, dim: str, index: int, *, subject: str = "the source"):
             "left to measure a distance against."
         )
     along_dim = next(iter(surviving))
+
+    if along_center is not None:
+        along_size = sliced.sizes[along_dim]
+        if not 0 <= along_center < along_size:
+            raise ValueError(
+                f"{subject}: select={{'transect': ...}}: the window center "
+                f"{along_center} is out of range for {along_dim!r} (size "
+                f"{along_size})."
+            )
+        hw = half_width if half_width is not None else 0
+        lo, hi = max(along_center - hw, 0), min(along_center + hw + 1, along_size)
+        if lo != along_center - hw or hi != along_center + hw + 1:
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"{subject}: the ±{hw}-cell window around {along_dim}="
+                f"{along_center} reaches past the domain edge and is clamped "
+                f"to indices {lo}:{hi} (of 0:{along_size}).",
+                stacklevel=_stacklevel.find(),
+            )
+        sliced = sliced.isel({along_dim: slice(lo, hi)})
+
     lon_bc, lat_bc = xr.broadcast(sliced[lon_name], sliced[lat_name])
     sliced = sliced.assign_coords({lon_name: lon_bc, lat_name: lat_bc})
     sliced = sliced.rename({along_dim: ALONG_DIM})
@@ -780,15 +1095,38 @@ def apply_transect(obj, spec: dict[str, Any], *, subject: str = "the source"):
     """Validate ``spec`` and apply it to ``obj``: the one entry point ``_prepare`` calls.
 
     Dispatches on :func:`as_transect`'s normalized ``kind``. A grid index is a
-    pure ``isel`` (:func:`grid_slice`). Everything else is a path sampled with
-    :func:`sample_along`: ``waypoints`` and a fixed ``lon``/``lat`` line are
-    densified first, to roughly the source's own grid resolution unless
-    ``spacing_km`` says otherwise (:func:`densify_waypoints`); ``points`` are
-    sampled exactly as given, with no densification.
+    pure ``isel`` (:func:`grid_slice`), plain or windowed. Everything else is a
+    path sampled with :func:`sample_along`: ``waypoints`` and a fixed
+    ``lon``/``lat`` line are densified first, to roughly the source's own grid
+    resolution unless ``spacing_km`` says otherwise (:func:`densify_waypoints`);
+    ``points`` are sampled exactly as given, with no densification.
+
+    ``kind == "cross"`` never reaches here: :func:`ocean_skill.field.field`
+    expands it into two ordinary ``"grid"`` specs (one ``apply_transect`` call
+    each) before either one is prepared -- a cross is two sections, and this
+    function turns one ``Dataset`` into one sliced ``Dataset`` (see the module
+    docstring). Reaching it here means a cross was handed to something other
+    than :func:`~ocean_skill.field.field` (a bare :class:`~ocean_skill.comparison
+    .Comparison`, most likely), which does not yet support one.
     """
     parsed = as_transect(spec)
+    if parsed["kind"] == "cross":
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: a 'cross' transect draws two "
+            "sections (one along each grid direction) and is only supported "
+            "through osk.field(...), which builds the ocean_skill.field.Cross "
+            "that draws them together -- not through a bare select= elsewhere."
+        )
     if parsed["kind"] == "grid":
-        return grid_slice(obj, parsed["dim"], parsed["index"], subject=subject)
+        return grid_slice(
+            obj,
+            parsed["dim"],
+            parsed.get("index"),
+            point=parsed.get("point"),
+            along_center=parsed.get("along_center"),
+            half_width=parsed.get("half_width"),
+            subject=subject,
+        )
 
     from ocean_skill.align import (
         _cell_km,
