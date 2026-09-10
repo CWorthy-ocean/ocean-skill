@@ -10,7 +10,7 @@ so any keyword that call accepts works, not just a hand-picked subset. An eighth
 no per-frame label on a still, and a ninth, [`annot_kwargs`](#the-portrait-family-metrics-scoreboard),
 belongs to `portrait` alone, styling its cell-value text. A few more parameters aren't styling dicts at all
 (`title`, `metric_keys`, `metric_names`, [`coastline_resolution`](#coastline_resolution),
-`shared_limits`, `shared_axis_labels`, `shared_axes`) — see
+[`land`](#land), `shared_limits`, `shared_axis_labels`, `shared_axes`) — see
 [Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
 
 > **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
@@ -516,6 +516,33 @@ cook_inlet.plot(coastline_resolution="full", renderer="holoviews")
 ```
 
 **Default:** `"auto"`
+
+### `land`
+
+Whether — and how visibly — the grey land fill covers the data underneath it, on every
+map family and both renderers. The static renderer's land fill (`facecolor="0.85"`) is
+drawn *over* the field, so a value that hugs or crosses the coastline can be hidden by
+it; `land` gives that back:
+
+| Value | Static renderer | Interactive renderer |
+|---|---|---|
+| `True` (default) | opaque `"0.85"` fill + coastline outline — today's look | coastline outline (there is no fill to begin with) |
+| a float in `[0, 1]` | fill faded to that opacity + coastline outline | same as `True` — no fill exists to fade |
+| `False` | neither fill nor outline — a completely bare map | no coastline outline |
+
+```python
+physics.plot()                 # today's opaque grey land
+physics.plot(land=0.4)         # faint land, data shows through
+physics.plot(land=False)       # no land at all — check nothing is hiding under it
+```
+
+The interactive renderer never draws a land *fill* to begin with (data already shows
+through land there), so a float opacity has no visible effect on it — only `land=False`
+changes anything interactively, dropping the coastline outline too. This makes the two
+renderers agree at both ends: `land=True` is each renderer's own current default look,
+and `land=False` is bare in both.
+
+**Default:** `True`
 
 ### `shared_axes` (holoviews only)
 

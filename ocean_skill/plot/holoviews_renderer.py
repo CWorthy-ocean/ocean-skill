@@ -231,6 +231,7 @@ def _quadmesh(
     tiles: str | bool | None = None,
     coastline: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     project: bool = False,
     x: str = "lon",
     y: str = "lat",
@@ -259,6 +260,12 @@ def _quadmesh(
     other two a non-geographic panel needs and a geographic one never does: a
     section's y-axis reads shallow-at-top, and its off-domain/below-bathymetry
     cells want the same grey a map draws for land.
+
+    ``land`` mirrors the static renderer's option of the same name: there is no land
+    *fill* here (this panel already draws data through land, unlike the opaque grey
+    the static renderer paints by default — see ``matplotlib_renderer._basemap``), so
+    a float has no fill to fade and is treated as truthy; only ``land=False`` has a
+    visible effect here, dropping the coastline outline too for a fully bare map.
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
@@ -314,7 +321,7 @@ def _quadmesh(
             from ocean_skill.plot.proj_check import warn_projection_skew
 
             warn_projection_skew()
-        if coastline:
+        if coastline and land is not False:
             # hvplot's coastline is a geoviews Feature, which the plot re-projects
             # from scratch every time it renders a frame. Fine for the single draw
             # every other family does; ruinous for an embedded movie, which renders
@@ -415,6 +422,7 @@ def _field_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -446,6 +454,7 @@ def _field_row(
 
     ``coastline_resolution`` picks the coastline dataset for every panel — see
     :mod:`ocean_skill.plot.coastline` and the static renderer's ``field_row`` docstring.
+    ``land`` is honored the same way as :func:`_quadmesh` — see there.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits
@@ -485,6 +494,7 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         ),
         _quadmesh(
             r,
@@ -499,6 +509,7 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         ),
         _quadmesh(
             d,
@@ -512,6 +523,7 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         ),
     ]
     outline = _domain_overlay(domain, t, geo=geo)
@@ -538,6 +550,7 @@ def _field_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -566,8 +579,8 @@ def _field_grid(
 
     ``rasterize`` and ``hover`` pass straight through to every row (see
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
-    can carry different-sized grids. ``coastline_resolution`` passes through the same
-    way.
+    can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
+    same way.
     """
     hv = _extension()
     title = _default_grid_title(items, title)
@@ -586,6 +599,7 @@ def _field_grid(
             hover=hover,
             rasterize=rasterize,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         for it in items
     ]
@@ -624,6 +638,7 @@ def _field_facet(
     hover: bool = True,
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -657,8 +672,8 @@ def _field_facet(
     mesh — the fix for the same per-cell Python loop :func:`_field_row` avoids, since a
     facet grid draws just as many curvilinear panels as it has frames.
 
-    ``coastline_resolution`` picks the coastline dataset for every panel — see
-    :mod:`ocean_skill.plot.coastline`.
+    ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
+    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
@@ -755,6 +770,7 @@ def _field_facet(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         return mesh if outline is None else mesh * outline
 
@@ -1181,6 +1197,7 @@ def _field_map_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """One interactive map per item -- several *variables*, not one facet axis.
@@ -1244,6 +1261,7 @@ def _field_map_grid(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         outline = _domain_overlay(domain, field, geo=geo)
         panels.append(mesh if outline is None else mesh * outline)
@@ -1419,6 +1437,7 @@ def _skill_map(
     layout: str = "rows",
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -1463,8 +1482,8 @@ def _skill_map(
     bokeh panel already carries both the metric and (when stacked) the comparison's
     own label in its own title.
 
-    ``coastline_resolution`` picks the coastline dataset for every panel — see
-    :mod:`ocean_skill.plot.coastline`.
+    ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
+    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
     """
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot.matplotlib_renderer import (
@@ -1565,6 +1584,7 @@ def _skill_map(
             hover=hover,
             rasterize=raster,
             coastline_resolution=coastline_resolution,
+            land=land,
         )
         points = (
             _station_overlay(
@@ -2166,6 +2186,7 @@ def _facet_movie(
     tiles: str | bool | None = True,
     domain=None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -2202,6 +2223,10 @@ def _facet_movie(
       coastline outline at ``coastline_resolution`` (see :func:`_movie_coastline` for
       why a movie never uses hvplot's own). Has no effect when ``tiles`` is truthy,
       the basemap drawing the coast already.
+
+    ``land=False`` drops that static coastline outline too (a fully bare map); it has
+    no effect when ``tiles`` is truthy, for the same reason ``tiles`` overrides
+    ``coastline_resolution`` above.
 
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
@@ -2258,7 +2283,7 @@ def _facet_movie(
     # outline stands in for the per-frame Feature that hvplot would overlay
     coast = (
         _movie_coastline(frames_da, coastline_resolution=coastline_resolution)
-        if geo and not tiles
+        if geo and not tiles and land is not False
         else None
     )
     outline = _domain_overlay(domain, frames_da, geo=geo, tiles=tiles)
@@ -2319,6 +2344,7 @@ def _field_movie(
     tiles: str | bool | None = True,
     domain=None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -2337,6 +2363,9 @@ def _field_movie(
     name for a different map, or ``tiles=False`` for a notebook that has to work
     offline, which swaps the basemap for one static coastline outline shared by all
     three panels, at ``coastline_resolution`` (see :func:`_movie_coastline`).
+    ``land=False`` drops that outline too, for a fully bare map; it has no effect
+    when ``tiles`` is truthy, for the same reason ``tiles`` overrides
+    ``coastline_resolution`` above.
 
     The colour scale is fixed across frames exactly as it is statically (see
     :func:`~ocean_skill.plot.matplotlib_renderer.field_movie`), and for the same
@@ -2379,7 +2408,7 @@ def _field_movie(
             first["aligned"]["reference"],
             coastline_resolution=coastline_resolution,
         )
-        if geo and not tiles
+        if geo and not tiles and land is not False
         else None
     )
     outline = _domain_overlay(domain, first["aligned"]["test"], geo=geo, tiles=tiles)
@@ -3800,6 +3829,7 @@ def _locations(
     zoom: float = 1.0,
     font_scale: float = 1.0,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
     **_,
 ):
     """Interactive dataset-location map: hoverable markers and extent boxes.
@@ -3821,6 +3851,9 @@ def _locations(
     limits on a tiled plot silently blank it (see :func:`_quadmesh`); projecting
     the bounds is the real fix, and lets the map open framed on the datasets
     rather than at world extent.
+
+    ``land=False`` drops that offline coastline outline too, for a bare basemap; it
+    has no effect with ``tiles`` on, the tile layer already showing land.
     """
     import geoviews as gv
     import pandas as pd
@@ -3854,12 +3887,17 @@ def _locations(
         from geoviews import tile_sources
 
         overlay = tile_sources.tile_sources[tiles]
-    else:
+    elif land is not False:
         ne_resolution = nearest_ne_resolution(
             normalize_coastline_resolution(coastline_resolution),
             extent=(lon0, lon1, lat0, lat1),
         )
         overlay = gv.feature.coastline.opts(scale=ne_resolution)
+    else:
+        # land=False and no tiles: a bare basemap. An empty Overlay rather than None
+        # so every subsequent group below can keep composing with `overlay * ...`
+        # unconditionally.
+        overlay = hv.Overlay([])
 
     def _ordered(groups: dict[str, list[dict[str, Any]]]) -> list[str]:
         ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
