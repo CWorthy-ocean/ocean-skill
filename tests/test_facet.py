@@ -594,6 +594,21 @@ def test_field_suptitle_prefixes_the_source_label():
     assert ":" not in field_suptitle(field, standard_name=NITRATE, depth="surface")
 
 
+def test_suptitle_text_elides_one_over_long_part_without_dropping_the_others():
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
+
+    short = suptitle_text(NITRATE, ("surface", "2013-01-30"))
+    assert short == "nitrate · surface · 2013-01-30"
+
+    # a part that runs well past the per-part cap is elided with a trailing "…",
+    # broken at a word boundary -- but the other parts still make it onto the title
+    long_part = "a very long depth-list label that somehow slipped past collapsing"
+    title = suptitle_text(NITRATE, (long_part, "2013-01-30"))
+    assert title.endswith("· 2013-01-30")
+    assert "…" in title
+    assert long_part not in title
+
+
 def test_every_panel_shares_one_colour_scale(daily):
     """The point of the family: a change between panels has to be visible as one.
 

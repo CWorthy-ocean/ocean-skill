@@ -600,13 +600,42 @@ def is_column_request(depth: Any) -> bool:
 NO_VERTICAL_AXIS = "n/a"
 
 
+#: How many numeric levels a facet list still spells out one by one before this
+#: collapses to a span instead. A handful of *chosen* levels (say, 2-4 depths picked
+#: for facet rows) are each worth naming; a full profile (dozens of native s-levels,
+#: every standard depth a climatology ships) is not -- past this count the list is
+#: read as "the whole column", not as a deliberate few, and a title enumerating all
+#: of them stopped being useful long before it stopped being long.
+_MAX_ENUMERATED_LEVELS = 4
+
+
+def _numeric_span(values: list) -> str | None:
+    """``[1, 2, 3, ..., 36] -> "1–36"``, or ``None`` if not a plain numeric run.
+
+    Only fires when every element is a bare number (no ``"surface"``, no nested
+    sigma0/band dict) -- a mixed list is short enough in practice that spelling
+    each element still reads fine, and collapsing it would blur genuinely
+    different kinds of request into one misleading range.
+    """
+    if len(values) <= _MAX_ENUMERATED_LEVELS:
+        return None
+    if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in values):
+        return None
+    return f"{min(values):g}–{max(values):g}"
+
+
 def _sigma_label(value: Any) -> str:
     """Format a sigma0 request for labels/repr: ``"σ₀ = 26.5 kg/m³"``.
 
     A list — several isopycnals kept as facet rows — spells each element the same
-    way, comma-joined, matching how :func:`_depth_label` spells a list of depths.
+    way, comma-joined, matching how :func:`_depth_label` spells a list of depths --
+    unless the list runs past :data:`_MAX_ENUMERATED_LEVELS`, in which case it
+    collapses to one span the same way a long depth list does.
     """
     if isinstance(value, list | tuple):
+        span = _numeric_span(list(value))
+        if span is not None:
+            return f"σ₀ = {span} kg/m³"
         return ", ".join(_sigma_label(v) for v in value)
     return f"σ₀ = {float(value):g} kg/m³"
 
@@ -615,7 +644,13 @@ def _depth_label(depth: Any) -> str:
     """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``.
 
     A list — several levels kept as facet rows — spells each element by the same
-    rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``.
+    rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``. But a list of
+    more than :data:`_MAX_ENUMERATED_LEVELS` bare numbers -- a full profile's worth
+    of native or standard levels, not a deliberate handful -- collapses to its span
+    instead: ``list(range(1, 37))`` reads ``"1–36 m"``, an en dash rather than a
+    band's hyphen (``"0-10 m"``, above) since this is many discrete levels, not one
+    averaged slab, and the span names *only* the extremes -- it does not claim
+    every metre in between was actually sampled.
 
     ``{"sigma0": ...}`` is the marker :func:`_selected_depth` returns for an
     isopycnal request — distinct from a depth band's ``{"min", "max"}`` — and is
@@ -632,6 +667,9 @@ def _depth_label(depth: Any) -> str:
     if is_depth_band(depth):
         return f"{float(depth['min']):g}-{float(depth['max']):g} m"
     if isinstance(depth, list | tuple):
+        span = _numeric_span(list(depth))
+        if span is not None:
+            return f"{span} m"
         return ", ".join(_depth_label(d) for d in depth)
     return f"{float(depth):g} m"
 
