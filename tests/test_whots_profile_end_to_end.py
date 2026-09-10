@@ -136,7 +136,9 @@ def test_a_depth_list_with_time_pinned_reads_as_a_profile_end_to_end(
     assert c.is_profile
     assert c.family == "profile"
     assert set(aligned.data_vars) >= {"test", "reference", "difference"}
-    assert aligned.attrs["match_method"] == "interp"
+    # "nearest" is depth_method's default (see Comparison.depth_method) -- the
+    # model is snapped to its closest real level rather than interpolated.
+    assert aligned.attrs["match_method"] == "nearest"
     assert np.isfinite(aligned["difference"].values).any()
 
     item = c.as_item()

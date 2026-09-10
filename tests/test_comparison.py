@@ -313,11 +313,14 @@ def test_a_stale_positionless_station_entry_is_discarded_and_repaired(monkeypatc
 
     # Pre-seed the cache with exactly the stale shape: the same array, position
     # dropped -- what an old, pre-squeeze read produced -- under the very key
-    # prepare_source computes for this call.
+    # prepare_source computes for this call. `_depth_method` included because
+    # prepare_source's own key always carries it now (see its docstring
+    # paragraph) -- omitting it here would make this a cache *miss*, not the
+    # hit this test means to reproduce.
     key = cache.key_for_prepared(
         source="adcp_mooring",
         variable="eastward_sea_water_velocity",
-        select={"_aggregate": None},
+        select={"_aggregate": None, "_depth_method": "nearest"},
     )
     stale = fresh.reset_coords(["LATITUDE", "LONGITUDE"], drop=True)
     cache.save_field(key, stale, actual_depth=None)
@@ -551,6 +554,10 @@ def test_a_point_bbox_folds_a_marker_into_the_lane_key(monkeypatch):
             "_aggregate": None,
             "_bbox": [102.0, 12.0, 102.0, 12.0],
             "_point_window": POINT_WINDOW_CELLS,
+            # prepare_source's own key always carries this now (see its
+            # docstring paragraph) -- omitting it here would make this key
+            # simply not match either saved one, for an unrelated reason.
+            "_depth_method": "nearest",
         },
     )
     assert point_key in saved_keys

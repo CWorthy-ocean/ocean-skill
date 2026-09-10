@@ -159,12 +159,37 @@ def test_split_spread_handles_only_one_lane_carrying_it():
 
 def test_spread_is_interpolated_onto_reference_levels():
     """The whole point: a season aggregate's ``spread`` coordinate on the test
-    lane rides through ``_match_vertical``'s interpolation for free, and the
+    lane rides through ``_match_vertical``'s matching for free, and the
     reference's own spread survives untouched, landing as two separate data
-    variables with no MergeError.
+    variables with no MergeError. ``depth_method="interp"`` is explicit here --
+    this test is specifically about the interpolated values; nearest, the
+    default, is exercised by ``test_spread_is_snapped_onto_reference_levels``
+    below.
     """
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
     depth = np.array([5.0, 20.0, 60.0])
+    test = _gridded_test(z, spread=[1.0, 1.1, 1.2, 1.3, 1.4])
+    reference = _station_reference(depth, spread=[0.5, 0.6, 0.7])
+
+    out = A.align(
+        test, reference, over="Z", method="nearest", test_name="test",
+        reference_name="reference", depth_method="interp",
+    )
+
+    assert "test_spread" in out.data_vars
+    assert "reference_spread" in out.data_vars
+    assert list(out["reference_spread"].values) == [0.5, 0.6, 0.7]
+    # linear interpolation of [1.0, 1.1, 1.2, 1.3, 1.4] (at |z|=0,10,25,50,100)
+    # onto depths [5, 20, 60]
+    expected = np.interp([5.0, 20.0, 60.0], [0.0, 10.0, 25.0, 50.0, 100.0], [1.0, 1.1, 1.2, 1.3, 1.4])
+    assert np.allclose(out["test_spread"].values, expected)
+    assert SPREAD_COORD not in out.coords
+
+
+def test_spread_is_snapped_onto_reference_levels():
+    """The nearest (default) counterpart just above: no blending, real test values."""
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
+    depth = np.array([3.0, 22.0, 60.0])  # closest to 0, 25, 50 m respectively -- no ties
     test = _gridded_test(z, spread=[1.0, 1.1, 1.2, 1.3, 1.4])
     reference = _station_reference(depth, spread=[0.5, 0.6, 0.7])
 
@@ -176,10 +201,8 @@ def test_spread_is_interpolated_onto_reference_levels():
     assert "test_spread" in out.data_vars
     assert "reference_spread" in out.data_vars
     assert list(out["reference_spread"].values) == [0.5, 0.6, 0.7]
-    # linear interpolation of [1.0, 1.1, 1.2, 1.3, 1.4] (at |z|=0,10,25,50,100)
-    # onto depths [5, 20, 60]
-    expected = np.interp([5.0, 20.0, 60.0], [0.0, 10.0, 25.0, 50.0, 100.0], [1.0, 1.1, 1.2, 1.3, 1.4])
-    assert np.allclose(out["test_spread"].values, expected)
+    # the test's own values at its 0/25/50 m levels, unblended
+    assert list(out["test_spread"].values) == [1.0, 1.2, 1.3]
     assert SPREAD_COORD not in out.coords
 
 

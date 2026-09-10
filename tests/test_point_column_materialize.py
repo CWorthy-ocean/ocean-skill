@@ -80,7 +80,14 @@ def _resolve_stub(monkeypatch):
 
 
 def test_a_point_lane_is_materialized_before_the_transform(monkeypatch):
-    """The transform's own input is numpy for a point lane -- zero xgcm tasks."""
+    """The transform's own input is numpy for a point lane -- zero xgcm tasks.
+
+    ``depth_method="interp"`` is explicit here: it is this file's original
+    concern (:func:`ocean_skill.roms.to_depth`'s xgcm transform, see the module
+    docstring), which is no longer the default path (see
+    ``test_a_point_lane_is_materialized_before_the_nearest_lookup`` below for
+    that one) but must still keep the same contract whenever it is asked for.
+    """
     _resolve_stub(monkeypatch)
     captured = {}
     real_to_depth = roms.to_depth
@@ -98,6 +105,7 @@ def test_a_point_lane_is_materialized_before_the_transform(monkeypatch):
         None,
         use_cache=False,
         bbox=(_POINT_LON, _POINT_LAT, _POINT_LON, _POINT_LAT),
+        depth_method="interp",
     )
     assert captured["chunks"] is None
 
@@ -107,7 +115,9 @@ def test_a_gridded_lane_is_never_eagerly_loaded(monkeypatch):
 
     The whole point of gating on ``point_window`` -- a full-domain lane must
     never be materialized here, or a real regional model would blow up memory
-    instead of saving time.
+    instead of saving time. ``depth_method="interp"`` again exercises
+    :func:`ocean_skill.roms.to_depth` specifically -- see the note on
+    ``test_a_point_lane_is_materialized_before_the_transform`` above.
     """
     _resolve_stub(monkeypatch)
     captured = {}
@@ -119,12 +129,16 @@ def test_a_gridded_lane_is_never_eagerly_loaded(monkeypatch):
 
     monkeypatch.setattr(roms, "to_depth", spy)
 
-    prepare_source("his", "temp", {"depth": 10.0}, None, use_cache=False)
+    prepare_source("his", "temp", {"depth": 10.0}, None, use_cache=False, depth_method="interp")
     assert captured["chunks"] is not None
 
 
 def test_the_byte_ceiling_falls_back_to_lazy(monkeypatch):
-    """A point lane over the ceiling keeps its laziness contract."""
+    """A point lane over the ceiling keeps its laziness contract.
+
+    ``depth_method="interp"`` again -- see the note on
+    ``test_a_point_lane_is_materialized_before_the_transform`` above.
+    """
     _resolve_stub(monkeypatch)
     monkeypatch.setattr(comparison, "POINT_COLUMN_MATERIALIZE_MAX_BYTES", 0)
     captured = {}
@@ -143,8 +157,38 @@ def test_the_byte_ceiling_falls_back_to_lazy(monkeypatch):
         None,
         use_cache=False,
         bbox=(_POINT_LON, _POINT_LAT, _POINT_LON, _POINT_LAT),
+        depth_method="interp",
     )
     assert captured["chunks"] is not None
+
+
+def test_a_point_lane_is_materialized_before_the_nearest_lookup(monkeypatch):
+    """The default path: :func:`ocean_skill.roms.nearest_depth_levels` gets numpy too.
+
+    Its own lookup is a single static index, not a per-chunk xgcm transform, so
+    it never had this file's original cost problem -- but the point-cropped lane
+    it receives should still be the same eagerly-loaded input either way, not a
+    dask graph that happens to work out cheaply anyway.
+    """
+    _resolve_stub(monkeypatch)
+    captured = {}
+    real_nearest = roms.nearest_depth_levels
+
+    def spy(sub, meta, targets):
+        captured["chunks"] = sub["temp"].chunks
+        return real_nearest(sub, meta, targets)
+
+    monkeypatch.setattr(roms, "nearest_depth_levels", spy)
+
+    prepare_source(
+        "his",
+        "temp",
+        {"depth": 10.0},
+        None,
+        use_cache=False,
+        bbox=(_POINT_LON, _POINT_LAT, _POINT_LON, _POINT_LAT),
+    )
+    assert captured["chunks"] is None
 
 
 def test_materializing_early_does_not_change_the_result(monkeypatch):
