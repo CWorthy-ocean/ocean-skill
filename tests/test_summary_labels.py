@@ -52,7 +52,7 @@ def _close_figures():
 def crossed_comparisons():
     """2 variables x 2 methods — one combination (alk/esper) deliberately missing.
 
-    Exercises ``labels="grid"``: rows are ``variable`` levels, columns are ``method``
+    Exercises ``legend_style="grid"``: rows are ``variable`` levels, columns are ``method``
     levels, and the missing cell must draw blank rather than a glyph.
     """
     specs = [
@@ -92,7 +92,7 @@ def _legend_texts(fig) -> set[str]:
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_either_diagram_can_key_its_points_with_a_legend(diagram, comparisons):
-    fig = diagram(comparisons, labels="legend")
+    fig = diagram(comparisons, legend_style="legend")
 
     assert {"temp GOM", "salt GOM", "no3 GOM"} <= _legend_texts(fig)
     assert "reference" in _legend_texts(fig), "the star needs identifying too"
@@ -101,7 +101,7 @@ def test_either_diagram_can_key_its_points_with_a_legend(diagram, comparisons):
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_either_diagram_can_annotate_its_markers(diagram, comparisons):
-    fig = diagram(comparisons, labels="annotate")
+    fig = diagram(comparisons, legend_style="annotate")
 
     assert {"temp GOM", "salt GOM", "no3 GOM"} <= set(_annotated_texts(fig))
     assert not fig.legends
@@ -109,7 +109,7 @@ def test_either_diagram_can_annotate_its_markers(diagram, comparisons):
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_labels_none_gives_neither(diagram, comparisons):
-    fig = diagram(comparisons, labels=None)
+    fig = diagram(comparisons, legend_style=None)
 
     assert not fig.legends
     assert not {"temp GOM", "salt GOM", "no3 GOM"} & set(_annotated_texts(fig))
@@ -120,12 +120,12 @@ def test_a_legend_needs_no_grouping_field(comparisons):
 
     Without this the common small-fan-out call produced a figure with no key at all.
     """
-    fig = target(comparisons, labels="legend")
+    fig = target(comparisons, legend_style="legend")
     assert {"temp GOM", "salt GOM"} <= _legend_texts(fig)
 
 
 def test_paired_draws_one_shared_legend_not_two(comparisons):
-    fig = paired(comparisons, labels="legend")
+    fig = paired(comparisons, legend_style="legend")
 
     assert len(fig.legends) == 1, "one key for both panels, not one per panel"
     assert {"temp GOM", "salt GOM", "no3 GOM"} <= _legend_texts(fig)
@@ -135,7 +135,7 @@ def test_paired_draws_one_shared_legend_not_two(comparisons):
 
 def test_paired_annotates_both_panels_or_neither(comparisons):
     """The whole point: the two panels must not disagree about how they label."""
-    fig = paired(comparisons, labels="annotate")
+    fig = paired(comparisons, legend_style="annotate")
 
     assert not fig.legends
     # Each label appears twice — once per panel — rather than once on the target only.
@@ -146,7 +146,7 @@ def test_paired_annotates_both_panels_or_neither(comparisons):
 
 def test_an_unknown_label_mode_is_rejected(comparisons):
     with pytest.raises(ValueError, match="not one of"):
-        taylor(comparisons, labels="below")
+        taylor(comparisons, legend_style="below")
 
 
 def test_grid_is_a_recognized_label_mode():
@@ -155,7 +155,7 @@ def test_grid_is_a_recognized_label_mode():
     assert "grid" in LABEL_MODES
 
 
-# ---------------------------------------------------------------- labels="grid"
+# ---------------------------------------------------------------- legend_style="grid"
 
 
 def _grid_cell_index(row, col, n_rows):
@@ -170,7 +170,7 @@ def _grid_cell_index(row, col, n_rows):
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_grid_renders_rows_by_colour_and_columns_by_marker(diagram, crossed_comparisons):
     fig = diagram(
-        crossed_comparisons, color_by="variable", marker_by="method", labels="grid"
+        crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
 
     texts = _legend_texts(fig)
@@ -188,7 +188,7 @@ def test_grid_cell_glyphs_cross_colour_and_marker(crossed_comparisons):
     from ocean_skill.plot.style import COLOR_CYCLE
 
     fig = target(
-        crossed_comparisons, color_by="variable", marker_by="method", labels="grid"
+        crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
     handles = fig.legends[0].legend_handles
     rows, cols = ["alk", "dic"], ["depth_interp", "mld_interp", "esper"]
@@ -215,7 +215,7 @@ def test_grid_cell_glyphs_cross_colour_and_marker(crossed_comparisons):
 
 def test_grid_leaves_missing_combinations_blank(crossed_comparisons):
     fig = target(
-        crossed_comparisons, color_by="variable", marker_by="method", labels="grid"
+        crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
     handles = fig.legends[0].legend_handles
     rows, cols = ["alk", "dic"], ["depth_interp", "mld_interp", "esper"]
@@ -227,7 +227,7 @@ def test_grid_leaves_missing_combinations_blank(crossed_comparisons):
 
 def test_grid_shows_the_reference_star_once(crossed_comparisons):
     fig = target(
-        crossed_comparisons, color_by="variable", marker_by="method", labels="grid"
+        crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
     handles = fig.legends[0].legend_handles
     stars = [h for h in handles if h.get_marker() == "*"]
@@ -241,17 +241,17 @@ def test_grid_shows_the_reference_star_once(crossed_comparisons):
 )
 def test_grid_without_both_channels_warns_and_falls_back(crossed_comparisons, grouping):
     with pytest.warns(UserWarning, match="grid"):
-        fig = target(crossed_comparisons, labels="grid", **grouping)
+        fig = target(crossed_comparisons, legend_style="grid", **grouping)
     with_grid_texts = _legend_texts(fig)
     plt.close(fig)
 
-    fig = target(crossed_comparisons, labels="legend", **grouping)
+    fig = target(crossed_comparisons, legend_style="legend", **grouping)
     assert with_grid_texts == _legend_texts(fig)
 
 
 def test_paired_grid_draws_one_shared_grid_not_two(crossed_comparisons):
     fig = paired(
-        crossed_comparisons, color_by="variable", marker_by="method", labels="grid"
+        crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
 
     assert len(fig.legends) == 1
@@ -290,7 +290,7 @@ def _points(obj):
 
 
 def test_interactive_target_keys_its_points_with_a_legend(items):
-    obj = _interactive_target(items, labels="legend")
+    obj = _interactive_target(items, legend_style="legend")
 
     assert all(e.opts.get("plot").kwargs["show_legend"] for e in _points(obj))
     assert {e.label for e in _points(obj)} == {"temp GOM", "salt GOM", "no3 GOM"}
@@ -299,7 +299,7 @@ def test_interactive_target_keys_its_points_with_a_legend(items):
 def test_interactive_target_annotates_its_markers(items):
     import holoviews as hv
 
-    obj = _interactive_target(items, labels="annotate")
+    obj = _interactive_target(items, legend_style="annotate")
 
     text = [e for e in obj if isinstance(e, hv.Labels)]
     assert text, "annotate must add a Labels element"
@@ -309,7 +309,7 @@ def test_interactive_target_annotates_its_markers(items):
 def test_interactive_target_labels_none_gives_neither(items):
     import holoviews as hv
 
-    obj = _interactive_target(items, labels=None)
+    obj = _interactive_target(items, legend_style=None)
 
     assert not [e for e in obj if isinstance(e, hv.Labels)]
     assert not any(e.opts.get("plot").kwargs["show_legend"] for e in _points(obj))
@@ -317,7 +317,7 @@ def test_interactive_target_labels_none_gives_neither(items):
 
 def test_interactive_target_rejects_an_unknown_mode(items):
     with pytest.raises(ValueError, match="not one of"):
-        _interactive_target(items, labels="below")
+        _interactive_target(items, legend_style="below")
 
 
 @pytest.fixture
@@ -338,8 +338,8 @@ def test_interactive_target_grid_warns_and_falls_back_to_combined_legend(
     """
     grouping = {"color_by": "variable", "marker_by": "method"}
     with pytest.warns(UserWarning, match="grid"):
-        grid_obj = _interactive_target(crossed_items, labels="grid", **grouping)
-    legend_obj = _interactive_target(crossed_items, labels="legend", **grouping)
+        grid_obj = _interactive_target(crossed_items, legend_style="grid", **grouping)
+    legend_obj = _interactive_target(crossed_items, legend_style="legend", **grouping)
 
     assert all(e.opts.get("plot").kwargs["show_legend"] for e in _points(grid_obj))
     assert {e.label for e in _points(grid_obj)} == {
@@ -362,7 +362,7 @@ def test_both_renderers_agree_on_legend_entries(comparisons, items, grouping):
     styles = _group_styles(recs, grouping.get("color_by"), grouping.get("marker_by"))
     static = [h.get_label() for h in styles.handles]
 
-    obj = _interactive_target(items, labels="legend", **grouping)
+    obj = _interactive_target(items, legend_style="legend", **grouping)
     interactive = [e.label for e in _points(obj)]
 
     assert static == interactive
@@ -378,7 +378,7 @@ def test_both_renderers_use_the_same_colours(comparisons, items):
     styles = _group_styles(recs, "variable", None)
     static = [mcolors.to_hex(c) for c in styles.colors]
 
-    obj = _interactive_target(items, labels="legend", color_by="variable")
+    obj = _interactive_target(items, legend_style="legend", color_by="variable")
     interactive = [e.opts.get("style").kwargs["color"] for e in _points(obj)]
 
     assert static == interactive

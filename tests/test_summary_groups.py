@@ -61,7 +61,7 @@ def _legend_texts(fig) -> set[str]:
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_groups_defaults_color_by_to_group(diagram, comparisons):
-    fig = diagram(comparisons, groups=GROUPS, labels="legend")
+    fig = diagram(comparisons, groups=GROUPS, legend_style="legend")
 
     assert {"upper inlet", "lower inlet"} <= _legend_texts(fig)
     # One entry per *group*, since nothing else was named to split on.
@@ -70,7 +70,7 @@ def test_groups_defaults_color_by_to_group(diagram, comparisons):
 
 @pytest.mark.parametrize("diagram", [taylor, target])
 def test_an_explicit_color_by_is_not_overridden_by_groups(diagram, comparisons):
-    fig = diagram(comparisons, groups=GROUPS, color_by="label", labels="legend")
+    fig = diagram(comparisons, groups=GROUPS, color_by="label", legend_style="legend")
 
     assert {"station A", "station B", "station C"} <= _legend_texts(fig)
     assert not ({"upper inlet", "lower inlet"} & _legend_texts(fig))
@@ -91,12 +91,12 @@ def test_groups_falls_back_to_the_label_with_no_reference_key():
                 "crmsd": 0.2,
             }
 
-    fig = target([_NoReference()], groups={"one-off": "special"}, labels="legend")
+    fig = target([_NoReference()], groups={"one-off": "special"}, legend_style="legend")
     assert "special" in _legend_texts(fig)
 
 
 def test_paired_shares_one_group_legend(comparisons):
-    fig = paired(comparisons, groups=GROUPS, labels="legend")
+    fig = paired(comparisons, groups=GROUPS, legend_style="legend")
 
     assert len(fig.legends) == 1, "one key for both panels, not one per panel"
     assert {"upper inlet", "lower inlet"} <= _legend_texts(fig)
@@ -123,12 +123,12 @@ def items(comparisons):
 
 
 def test_interactive_target_groups_defaults_color_by_to_group(items):
-    obj = _interactive_target(items, groups=GROUPS, labels="legend")
+    obj = _interactive_target(items, groups=GROUPS, legend_style="legend")
 
     assert {e.label for e in _points(obj)} == {"upper inlet", "lower inlet"}
 
 
 def test_interactive_target_explicit_color_by_is_not_overridden(items):
-    obj = _interactive_target(items, groups=GROUPS, color_by="label", labels="legend")
+    obj = _interactive_target(items, groups=GROUPS, color_by="label", legend_style="legend")
 
     assert {e.label for e in _points(obj)} == {"station A", "station B", "station C"}

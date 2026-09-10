@@ -3734,7 +3734,7 @@ def _target(
     robust: bool | float = False,
     lim: float | None = None,
     circles=None,
-    labels="annotate",
+    legend_style="annotate",
     color_by=None,
     marker_by=None,
     groups=None,
@@ -3755,15 +3755,16 @@ def _target(
 ):
     """Interactive Target diagram: hover a point for its full metric record.
 
-    ``labels``, ``color_by``, ``marker_by``, ``groups``, ``colors``, ``marker_scale``
-    and ``alpha`` mean exactly what they do in :mod:`ocean_skill.plot.summary`, so one
-    call renders the same way in either renderer — including the default
-    (``"annotate"``), which matches the static target. ``font_scale`` likewise: text is
-    sized from the frame by the shared type scale, so the point labels here and on the
-    static target are the same size relative to the diagram.
+    ``legend_style``, ``color_by``, ``marker_by``, ``groups``, ``colors``,
+    ``marker_scale`` and ``alpha`` mean exactly what they do in
+    :mod:`ocean_skill.plot.summary`, so one call renders the same way in either
+    renderer — including the default (``"annotate"``), which matches the static
+    target. ``font_scale`` likewise: text is sized from the frame by the shared type
+    scale, so the point labels here and on the static target are the same size
+    relative to the diagram.
 
-    ``labels="grid"`` is the one deliberate divergence: bokeh legends are flat, so
-    there is no matrix layout to draw here (the static target, and interactive
+    ``legend_style="grid"`` is the one deliberate divergence: bokeh legends are flat,
+    so there is no matrix layout to draw here (the static target, and interactive
     ``taylor``/``paired`` since they delegate to it, draw the real grid). This warns
     and falls back to the combined ``"colour · marker"`` entries ``"legend"`` already
     draws — each present (colour, marker) pair with its true glyph — so no information
@@ -3797,7 +3798,7 @@ def _target(
         _overlay_point_specs,
         _resolve_arrows,
         _resolve_colors,
-        _resolve_labels,
+        _resolve_legend_style,
         _resolve_overlay_style,
         _resolve_per_level,
         _scalar_scale,
@@ -3821,7 +3822,7 @@ def _target(
     frame_size = (TARGET_FRAME_PX[0] * factor, TARGET_FRAME_PX[1] * factor)
     sizes = bokeh_scale(frame_size, font_scale=font_scale)
     fontsize = bokeh_fontsize(frame_size, font_scale=font_scale)
-    labels_mode = _resolve_labels(labels)
+    labels_mode = _resolve_legend_style(legend_style)
     if labels_mode == "grid":
         # Bokeh legends are flat — there is no matrix layout to draw here, unlike the
         # static renderer (and interactive taylor/paired, which delegate to it). The
@@ -3829,7 +3830,7 @@ def _target(
         # present (colour, marker) pair with its true glyph, so the fallback loses
         # only the tabular arrangement, not the information.
         warnings.warn(
-            'labels="grid" has no interactive form (bokeh legends are flat); '
+            'legend_style="grid" has no interactive form (bokeh legends are flat); '
             'showing combined "colour · marker" entries instead.',
             stacklevel=2,
         )

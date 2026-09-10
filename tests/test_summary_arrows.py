@@ -130,7 +130,7 @@ def _all_arrows(fig):
 
 
 def test_target_arrows_connects_time_ordered_points_per_run(comparisons):
-    fig = target(comparisons, color_by="test", arrows=True, labels=None)
+    fig = target(comparisons, color_by="test", arrows=True, legend_style=None)
     arrows = _arrows(fig.axes[0])
 
     # 2 runs x 2 consecutive segments each (3 time steps per run)
@@ -151,7 +151,7 @@ def test_target_arrows_connects_time_ordered_points_per_run(comparisons):
 
 
 def test_target_arrows_start_point_is_hollow(comparisons):
-    fig = target(comparisons, color_by="test", arrows=True, labels=None)
+    fig = target(comparisons, color_by="test", arrows=True, legend_style=None)
     collections = fig.axes[0].collections  # one per point, in record order
 
     # record order: runA 2010, 2015, 2020, runB 2010, 2015, 2020 -- indices 0 and 3
@@ -168,8 +168,8 @@ def test_target_arrows_start_point_is_hollow(comparisons):
 
 
 def test_target_arrows_true_means_time(comparisons):
-    fig_true = target(comparisons, color_by="test", arrows=True, labels=None)
-    fig_name = target(comparisons, color_by="test", arrows="time", labels=None)
+    fig_true = target(comparisons, color_by="test", arrows=True, legend_style=None)
+    fig_name = target(comparisons, color_by="test", arrows="time", legend_style=None)
     by_true = _arrows(fig_true.axes[0])
     by_name = _arrows(fig_name.axes[0])
     assert {(tuple(a.xyann), tuple(a.xy)) for a in by_true} == {
@@ -178,7 +178,7 @@ def test_target_arrows_true_means_time(comparisons):
 
 
 def test_target_arrows_color_matches_group(comparisons):
-    fig = target(comparisons, color_by="test", arrows=True, labels=None)
+    fig = target(comparisons, color_by="test", arrows=True, legend_style=None)
     arrows = _arrows(fig.axes[0])
     collections = fig.axes[0].collections
 
@@ -193,7 +193,7 @@ def test_target_arrows_color_matches_group(comparisons):
 
 def test_target_arrows_sorts_out_of_order_times(comparisons):
     shuffled = [comparisons[2], comparisons[0], comparisons[1], *comparisons[3:]]
-    fig = target(shuffled, color_by="test", arrows=True, labels=None)
+    fig = target(shuffled, color_by="test", arrows=True, legend_style=None)
     arrows = _arrows(fig.axes[0])
 
     runA_recs = [c.metrics() for c in comparisons[:3]]  # already chronological
@@ -219,7 +219,7 @@ def test_target_arrows_min_max_window_sorts_by_start(comparisons):
             ({"min": "2010-01", "max": "2010-12"}, 0.4),
         ]
     ]
-    fig = target(windowed, arrows=True, labels=None)
+    fig = target(windowed, arrows=True, legend_style=None)
     (arrow,) = _arrows(fig.axes[0])
     # the 2010 window (input index 1) sorts before the 2015 one (input index 0)
     assert arrow.xyann[1] == pytest.approx(0.4)
@@ -233,7 +233,7 @@ def test_target_arrows_unsortable_values_keep_input_order():
         )
         for t, b in [("phase-two", 0.2), ("phase-one", 0.4)]
     ]
-    fig = target(unsortable, arrows=True, labels=None)
+    fig = target(unsortable, arrows=True, legend_style=None)
     (arrow,) = _arrows(fig.axes[0])
     # input order preserved: phase-two (bias 0.2) is first, phase-one (0.4) second
     assert arrow.xyann[1] == pytest.approx(0.2)
@@ -251,14 +251,14 @@ def test_target_arrows_nothing_to_connect_warns(comparisons):
     for i, c in enumerate(comparisons):
         c._record["reference"] = f"obs{i}"
     with pytest.warns(UserWarning, match="nothing to connect"):
-        fig = target(comparisons, arrows="reference", labels=None)
+        fig = target(comparisons, arrows="reference", legend_style=None)
     assert _arrows(fig.axes[0]) == []
     # no hollow points either -- nothing to draw as a chain start
     assert all(len(c.get_facecolor()) == 1 for c in fig.axes[0].collections)
 
 
 def test_target_without_arrows_is_unchanged(comparisons):
-    fig = target(comparisons, color_by="test", labels=None)
+    fig = target(comparisons, color_by="test", legend_style=None)
     assert _arrows(fig.axes[0]) == []
     assert all(len(c.get_facecolor()) == 1 for c in fig.axes[0].collections)
 
@@ -274,7 +274,7 @@ def _taylor_ax(fig):
 
 
 def test_taylor_arrows_draws_on_the_polar_axes(comparisons):
-    fig = taylor(comparisons, color_by="test", arrows=True, labels=None)
+    fig = taylor(comparisons, color_by="test", arrows=True, legend_style=None)
     arrows = _arrows(_taylor_ax(fig))
     assert len(arrows) == 4
 
@@ -290,7 +290,7 @@ def test_taylor_arrows_draws_on_the_polar_axes(comparisons):
 
 
 def test_taylor_arrows_start_sample_is_hollow(comparisons):
-    fig = taylor(comparisons, color_by="test", arrows=True, labels=None)
+    fig = taylor(comparisons, color_by="test", arrows=True, legend_style=None)
     lines = [
         ln
         for ax in fig.axes
@@ -314,7 +314,7 @@ def test_taylor_arrows_unknown_field_raises(comparisons):
 
 
 def test_paired_forwards_arrows_to_both_panels(comparisons):
-    fig = paired(comparisons, color_by="test", arrows=True, labels=None)
+    fig = paired(comparisons, color_by="test", arrows=True, legend_style=None)
     assert len(_all_arrows(fig)) == 8  # 4 on the target panel, 4 on the taylor panel
 
 
@@ -342,12 +342,12 @@ def _rounded(segments):
 
 
 def test_interactive_target_arrows_match_static(comparisons, items):
-    static_fig = target(comparisons, color_by="test", arrows=True, labels=None)
+    static_fig = target(comparisons, color_by="test", arrows=True, legend_style=None)
     static_segments = _rounded(
         (a.xyann, a.xy) for a in _arrows(static_fig.axes[0])
     )
 
-    obj = _interactive_target(items, color_by="test", arrows=True, labels=None)
+    obj = _interactive_target(items, color_by="test", arrows=True, legend_style=None)
     arrows = _bokeh_arrows(obj)
     interactive_segments = _rounded(
         ((a.x_start, a.y_start), (a.x_end, a.y_end)) for a in arrows
@@ -360,13 +360,13 @@ def test_interactive_target_arrows_match_static(comparisons, items):
 def test_interactive_target_arrows_color_matches_static(comparisons, items):
     import matplotlib.colors as mcolors
 
-    static_fig = target(comparisons, color_by="test", arrows=True, labels=None)
+    static_fig = target(comparisons, color_by="test", arrows=True, legend_style=None)
     static_arrows = _arrows(static_fig.axes[0])
     static_colors = {
         mcolors.to_hex(a.arrow_patch.get_edgecolor()) for a in static_arrows
     }
 
-    obj = _interactive_target(items, color_by="test", arrows=True, labels=None)
+    obj = _interactive_target(items, color_by="test", arrows=True, legend_style=None)
     interactive_colors = {a.line_color for a in _bokeh_arrows(obj)}
 
     assert static_colors == interactive_colors
@@ -397,7 +397,7 @@ def test_interactive_target_all_starts_group_keeps_legend(items):
     import holoviews as hv
 
     two_step = [i for i in items if i["metrics"]["time"] in ("2010", "2015")]
-    obj = _interactive_target(two_step, color_by="time", arrows=True, labels="legend")
+    obj = _interactive_target(two_step, color_by="time", arrows=True, legend_style="legend")
     hollow_2010 = [
         e
         for e in obj
