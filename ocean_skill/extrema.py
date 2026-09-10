@@ -71,7 +71,8 @@ def _locate(da, kind: str, *, source: str) -> dict[str, int]:
 
 def _time_reason(time: Any, select: dict[str, Any]) -> str:
     """Why :attr:`Extremum.time` came out the way it did -- read by the repr and by
-    :meth:`Extremum.series`'s default-window fallback."""
+    :meth:`Extremum.series`'s default-window fallback.
+    """
     if time is not None:
         return "the time coordinate at the extremum"
     from ocean_skill.sources import _TIME_KEYS
@@ -90,6 +91,41 @@ def _time_reason(time: Any, select: dict[str, Any]) -> str:
 @dataclasses.dataclass(frozen=True)
 class Extremum:
     """Where a field's min/max value is: value, position, grid indices, snapshot.
+
+    Parameters
+    ----------
+    kind
+        One of ``"max"``, ``"min"`` -- which extremum was located.
+    value
+        The extremum's scalar value (``float``).
+    units
+        The field's units (``str``), or ``None`` if it has none.
+    variable
+        The field's variable spec, in whatever form the parent recipe used.
+    standard_name
+        The field's CF ``standard_name`` (``str``), or ``None`` if unresolved.
+    source
+        The parent field's source name (``str``).
+    lon, lat
+        The extremum's horizontal position (``float``), or ``None`` if the field
+        has no lon/lat coordinate.
+    lon_convention
+        The longitude convention the field's grid uses (``str``, e.g.
+        ``"-180-180"`` or ``"0-360"`` -- see :func:`ocean_skill.align.natural_convention`).
+    indices
+        ``dict`` of every dim of the prepared field at the extremum, e.g.
+        ``{"eta_rho": 112, "xi_rho": 387}`` on a curvilinear grid.
+    coords
+        ``dict`` of non-horizontal, non-time coordinate values at the extremum
+        (depth, sigma0, a climatology's ``month``, ...), keyed by coordinate name.
+    time
+        The snapshot time at the extremum, or ``None`` if none is available (see
+        ``time_reason``).
+    time_reason
+        ``str`` explaining why ``time`` came out the way it did.
+    grid
+        ``str`` naming which grid ``indices`` is into -- always ``"the source's
+        own grid"`` for a ``Field`` today.
 
     Built by :func:`field_extremum` (reached as ``Field.extremum()``), never
     directly. :meth:`series` follows the same location through time.
@@ -149,6 +185,23 @@ class Extremum:
         label: str | None = None,
     ):
         """Follow this extremum through time: a point series at its location.
+
+        Parameters
+        ----------
+        variables
+            Extra variables (list, or ``None``) to add as more lines on the same
+            figure; the extremum's own variable is always plotted first.
+        time
+            The ordinary :func:`ocean_skill.operators.select` grammar (a slice, a
+            partial date, a ``{"min", "max"}`` range) to control the time window
+            directly. ``None`` (default) uses the extremum's own snapshot, padded
+            by ``pad`` native steps each side.
+        pad
+            ``int``, native time steps kept on each side of the snapshot when
+            ``time`` is not given (default :data:`DEFAULT_PAD_STEPS`).
+        label
+            ``str`` label for the resulting field/series, or ``None`` (default)
+            to reuse the parent field's own label.
 
         Builds an ordinary :func:`ocean_skill.field.field` call from the parent
         field's own recipe -- same source, same vertical selection, same
@@ -267,6 +320,14 @@ class Extremum:
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Shortcut for ``.series().plot(...)`` -- the default window, drawn now.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"``, ``"holoviews"`` (default ``"matplotlib"``).
+        **kwargs
+            Plot styling kwargs forwarded to the resulting series' ``.plot()`` --
+            see ``docs/plot_styling_reference.md`` for the full list.
+
         Use :meth:`series` directly when ``variables=``/``time=``/``pad=`` need to
         be set; this only forwards ``renderer=`` and plot styling kwargs.
         """
@@ -325,7 +386,8 @@ def _scalar_time(coord) -> Any:
 
 def _window_select(index, snapshot: Any, pad: int) -> dict[str, str]:
     """Return a ``{"min", "max"}`` range spanning ``pad`` native steps each side of
-    ``snapshot``, clamped to ``index``'s own ends."""
+    ``snapshot``, clamped to ``index``'s own ends.
+    """
     try:
         pos = int(index.get_indexer([snapshot], method="nearest")[0])
     except (TypeError, NotImplementedError):
@@ -341,7 +403,17 @@ def _window_select(index, snapshot: Any, pad: int) -> dict[str, str]:
 
 def field_extremum(fld, kind: str = "max") -> Extremum:
     """Build an :class:`Extremum` for ``fld`` -- the implementation behind
-    ``Field.extremum()``."""
+    ``Field.extremum()``.
+
+    Parameters
+    ----------
+    fld
+        A :class:`~ocean_skill.field.Field` whose prepared data has not already
+        been reduced to a single point.
+    kind
+        One of ``"max"``, ``"min"`` (default ``"max"``) -- which extremum to
+        locate.
+    """
     from ocean_skill.align import (
         _lat_name,
         _lon_name,

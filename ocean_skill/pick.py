@@ -150,6 +150,13 @@ class PathPicker:
         """``{"transect": {"waypoints": self.waypoints, ...}}``, ready to hand
         to :func:`ocean_skill.field.field`/:func:`ocean_skill.comparison.compare`
         as (or merged into) ``select=``.
+
+        Parameters
+        ----------
+        spacing_km
+            ``float`` resample spacing along the transect in km, or ``None``
+            (default) to omit it and let the transect grammar's own default
+            apply.
         """
         transect: dict[str, Any] = {"waypoints": self.waypoints}
         if spacing_km is not None:
@@ -170,6 +177,13 @@ class PathPicker:
 
 def pick_path(source: str) -> PathPicker:
     """Click transect waypoints on ``source``'s domain, in a live notebook.
+
+    Parameters
+    ----------
+    source
+        A catalog source name (``str``) whose domain to draw and click on —
+        resolved via :func:`ocean_skill.catalog.resolve`, so an unknown or
+        ambiguous name raises that function's own "Did you mean...?" error.
 
     Displays the source's own domain outline (from catalog metadata alone —
     nothing is opened) with a point-draw tool already active; each click adds

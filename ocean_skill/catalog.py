@@ -657,6 +657,15 @@ class SourceNames(list):
     def map(self, **kwargs):
         """Map where these sources are.
 
+        Parameters
+        ----------
+        **kwargs
+            Forwarded to :func:`ocean_skill.plot.map_locations.map_locations` --
+            ``catalog``, ``renderer`` (one of ``"matplotlib"``, ``"holoviews"``),
+            ``domain``, plus any other plot option (``extent``, ``title``,
+            ``save``, ``tiles``, ``legend``, ...). See
+            ``docs/plot_styling_reference.md`` for the full list.
+
         See :func:`ocean_skill.plot.map_locations.map_locations`.
         """
         from ocean_skill.plot.map_locations import map_locations
@@ -679,6 +688,50 @@ def find(
     vertical: bool | None = None,
 ) -> SourceNames:
     """Search discovered sources by name and metadata; return matching source names.
+
+    Parameters
+    ----------
+    text
+        Free-text query: ``str`` or list of terms, all ANDed. Matches anywhere in
+        a source's name, its catalog's name, or its metadata (title, summary,
+        institution, period, declared variables). ``None`` (default) skips this
+        filter.
+    name
+        Substring or glob (case-insensitive), matched against a source's own name
+        **or its catalog's**. ``None`` (default) skips this filter.
+    catalog
+        Substring or glob (case-insensitive), matched only against the catalog
+        name. ``None`` (default) skips this filter.
+    climatology
+        ``True``/``False`` to include or exclude climatologies, or a period string
+        (``"January"``, ``"jan"``, ``"01"``, ``"month01"``) to match a specific
+        one. ``None`` (default) skips this filter.
+    variable
+        A short vocabulary key, CF ``standard_name``, or alias (any case) — see
+        :mod:`ocean_skill.vocabulary`. ``None`` (default) skips this filter.
+    featureType
+        Exact match against the entry's declared ``featureType`` (e.g.
+        ``"timeSeries"``). ``None`` (default) skips this filter.
+    bbox
+        ``(lon_min, lat_min, lon_max, lat_max)``; kept on any *overlap* with a
+        source's extent, not containment. ``None`` (default) skips this filter.
+    time
+        ``(start, end)`` date strings; kept on overlap, and climatologies are
+        excluded outright since they carry no date range. ``None`` (default) skips
+        this filter.
+    resolution
+        Grid spacing in km: a bare number is an upper bound (``5`` means "5 km or
+        finer"), or a ``(low, high)`` tuple for a closed range. ``None`` (default)
+        skips this filter.
+    cadence
+        Time-step upper bound/range in seconds (like ``resolution``), or one of
+        the words in ``_CADENCE_ALIASES`` — ``"hourly"``, ``"6-hourly"``,
+        ``"6hourly"``, ``"daily"``, ``"weekly"``, ``"8-day"``, ``"8day"``,
+        ``"monthly"``, ``"annual"``, ``"yearly"`` — matched within 25%. ``None``
+        (default) skips this filter.
+    vertical
+        ``True``/``False`` to require or exclude a depth axis. ``None`` (default)
+        skips this filter.
 
     Only the filters given are applied::
 
@@ -954,6 +1007,12 @@ def _coord_staleness_notes(name: str, index: dict[str, SourceRef]) -> list[str]:
 def describe(name: str) -> Text:
     """Human-readable summary of a source or a catalog — whichever ``name`` is.
 
+    Parameters
+    ----------
+    name
+        A discovered source name or catalog name (``str``); which one determines
+        which summary is produced.
+
     For a source: its catalog, path, and full entry metadata (featureType,
     standard_names, extents, ...), followed by a live vocabulary match report over
     its declared variables, then a live coordinate report over its declared
@@ -1001,6 +1060,13 @@ def describe(name: str) -> Text:
 def match_report(name: str) -> Text:
     """Live vocabulary match report for a source's or catalog's declared variables.
 
+    Parameters
+    ----------
+    name
+        A discovered source name or catalog name (``str``); which one determines
+        whether the report covers one source's declared variables or the union
+        across a catalog's sources.
+
     For a source: which of its declared ``variables`` resolve to a vocabulary
     nickname (and to which), and which don't. For a catalog: the same report over
     the union of every source's variables (see :func:`_declared_variables`).
@@ -1031,6 +1097,14 @@ def match_report(name: str) -> Text:
 
 def coord_report(source) -> Text:
     """Live coordinate report: which of T/X/Y/Z is recognized, and as what.
+
+    Parameters
+    ----------
+    source
+        A catalog/source name (``str``), a :class:`pandas.DataFrame`, or an
+        :class:`xarray.Dataset`/:class:`~xarray.DataArray`. Which type determines
+        whether the report is over stored metadata (name) or a live, per-axis scan
+        of the object's actual columns/coordinates (DataFrame/Dataset/DataArray).
 
     ``source`` may be:
 

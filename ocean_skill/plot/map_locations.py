@@ -564,6 +564,32 @@ def map_locations(
 ):
     """Map where something sits: catalog datasets, or a plotted selection.
 
+    Parameters
+    ----------
+    what
+        ``None`` (default, everything discoverable), a catalog source name
+        (``str``), a :func:`~ocean_skill.catalog.find` result, a
+        :class:`~ocean_skill.comparison.Comparison`,
+        :class:`~ocean_skill.comparison.ComparisonSet`,
+        :class:`~ocean_skill.field.Field`, :class:`~ocean_skill.field.FieldSet`,
+        or a list mixing names and such objects.
+    catalog
+        Restrict a name-based (metadata-only) lookup to one catalog (``str``), or
+        ``None`` (default) to search all discovered catalogs. Ignored for object
+        input.
+    renderer
+        One of ``"matplotlib"``, ``"holoviews"`` (default ``"matplotlib"``).
+    domain
+        Object input only: the default outlines each distinct test source once;
+        ``None`` suppresses the outline; a bbox or ``(N, 2)`` ring overrides it
+        for every lane, the same spelling
+        :meth:`~ocean_skill.comparison.Comparison.plot`'s own ``domain=`` takes.
+    **kwargs
+        Other plot options forwarded to the renderer -- ``extent`` (default:
+        frames everything mapped, with a margin), ``title``, ``save``, ``tiles``,
+        ``legend``, and the rest of the ``"locations"`` family's styling options.
+        See ``docs/plot_styling_reference.md`` for the full list.
+
     ::
 
         osk.map_locations()                       # everything discoverable
