@@ -457,21 +457,58 @@ def test_interactive_colors_dict_rejects_an_unknown_level(items):
 # (overlay=) or a per-group centroid (summary_points=), or both. The one property that
 # matters most: an overlay point's colour must match its own group's colour in the base
 # cloud, never an independently re-cycled one -- a lone highlighted or summarized point
-# has no encounter order of its own to cycle by.
+# has no encounter order of its own to cycle by. A centroid also always draws with its
+# own group's individual marker shape (never a forced shape of its own), distinguished
+# from the cloud only by the overlay layer's usual size bump and black edge. With no
+# color_by/marker_by there is no group to centre -- one-per-comparison would be
+# degenerate (a single point's median is itself) -- so a single centroid is drawn
+# across every comparison instead.
 
 
-def test_taylor_summary_points_draws_one_hexagon_per_group_matching_its_colour(
+def test_taylor_summary_points_draws_one_centroid_per_group_matching_its_colour_and_shape(
     comparisons,
 ):
     fig = taylor(comparisons, color_by="variable", summary_points=True, labels=None)
     lines = _taylor_lines(fig)
-    samples = {ln.get_markerfacecolor() for ln in lines if ln.get_marker() == "o"}
-    # centroids are hexagons, never stars -- the star is reserved for the reference
-    hexagons = [ln for ln in lines if ln.get_marker() == "h"]
-    assert len(hexagons) == 3, "one centroid hexagon per group (3 variables)"
-    assert {ln.get_markerfacecolor() for ln in hexagons} <= samples, (
+    # base sample points draw at Line2D's default zorder (2); every overlay/centroid
+    # is 10 -- see test_taylor_summary_split_markers_matches_colour_and_marker_shape
+    samples = [ln for ln in lines if ln.get_zorder() == 2]
+    sample_colors = {ln.get_markerfacecolor() for ln in samples}
+    # centroids share the sample marker ("o": no marker_by here) but are drawn
+    # separately, at the overlay zorder, black-edged and larger
+    centroids = [ln for ln in lines if ln.get_zorder() == 10]
+    assert len(centroids) == 3, "one centroid per group (3 variables)"
+    for c in centroids:
+        assert c.get_marker() == "o", "centroid keeps the individual marker, never a hexagon"
+        assert c.get_markeredgecolor() == "k", "centroid stays black-edged, its own emphasis"
+    assert {c.get_markerfacecolor() for c in centroids} <= sample_colors, (
         "every centroid's colour must be one already used by the base cloud"
     )
+
+
+def test_taylor_summary_points_with_no_grouping_draws_a_single_centroid(comparisons):
+    """No color_by/marker_by: one centroid across ALL comparisons, not one each."""
+    fig = taylor(comparisons, summary_points=True, labels=None)
+    lines = _taylor_lines(fig)
+    centroids = [ln for ln in lines if ln.get_zorder() == 10]
+    assert len(centroids) == 1, "a single aggregate centroid, not one per comparison"
+    (centroid,) = centroids
+    assert centroid.get_marker() == "o"
+    # zorder==2 alone also catches the diagram's own reference star and dashed
+    # reference arc (both drawn at the same default zorder, before any sample) --
+    # marker=="o" narrows to the actual data points.
+    samples = [ln for ln in lines if ln.get_zorder() == 2 and ln.get_marker() == "o"]
+    first_color = samples[0].get_markerfacecolor()
+    assert centroid.get_markerfacecolor() == first_color, (
+        "the aggregate centroid takes the cloud's first cycle colour"
+    )
+
+
+def test_target_summary_points_with_no_grouping_draws_a_single_centroid(comparisons):
+    fig = target(comparisons, summary_points=True, labels=None)
+    ax = fig.axes[0]
+    centroids = [c for c in ax.collections if c.get_zorder() == 10]
+    assert len(centroids) == 1, "a single aggregate centroid, not one per comparison"
 
 
 def test_target_summary_points_median_matches_a_hand_computed_centroid():
@@ -552,11 +589,14 @@ def test_interactive_target_summary_points_matches_static_colour(comparisons, it
     static_hex = {mcolors.to_hex(c) for c in static_colors}
 
     obj = _interactive_target(items, color_by="variable", summary_points=True)
+    # the base cloud draws as hv.Points, the reference point and every centroid as
+    # hv.Scatter -- isinstance + excluding the black reference dot isolates exactly
+    # the centroids, regardless of which marker each one draws (it now matches its
+    # own group's shape, same as the base cloud, rather than a forced "hex").
     centroids = [
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") == "hex"
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
     interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in centroids}
@@ -662,11 +702,13 @@ def test_interactive_target_summary_weights_matches_static_star_position():
     obj = interactive_target(
         items, color_by="variable", summary_points=True, summary_weights="n_eff"
     )
+    # the base cloud draws as hv.Points, the reference point and the centroid as
+    # hv.Scatter -- isinstance + excluding the black reference dot isolates the one
+    # centroid here regardless of its marker.
     (star,) = [
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") == "hex"
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
     interactive_xy = tuple(star.data.iloc[0][["x", "y"]])
@@ -675,11 +717,11 @@ def test_interactive_target_summary_weights_matches_static_star_position():
 
 # ------------------------------------------------------------- summary_split_markers
 #
-# A cloud coloured by one field and marker-shaped by a second gets, with
-# summary_split_markers=True, one centroid per (colour, marker) combination instead of
-# one per colour group -- each keeping its own group's marker instead of the forced
-# "h"/"hex" (the reference point alone owns "*"/"star"), so it reads as "the typical
-# point of this exact colour+shape group."
+# A centroid always keeps its own group's marker (never a forced shape of its own --
+# the reference point alone owns "*"/"star"). summary_split_markers=True changes only
+# the *grouping*: a cloud coloured by one field and marker-shaped by a second gets one
+# centroid per (colour, marker) combination instead of one per colour group, so it
+# reads as "the typical point of this exact colour+shape group."
 
 
 def _split_recs():
@@ -704,14 +746,16 @@ def test_summary_point_specs_splits_by_colour_and_marker_when_asked():
 
     unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
     assert len(unsplit) == 2, "one centroid per variable, the pre-existing behaviour"
-    assert {mk for *_, mk in unsplit} == {"h"}
+    assert {mk for *_, mk in unsplit} == {None}, (
+        "a centroid always defers to its own group's marker, never a forced shape"
+    )
 
     split = _summary_point_specs(
         recs, coord1, coord2, "variable", True, marker_field="signal"
     )
     assert len(split) == 4, "one centroid per (variable, signal) combination"
     assert {mk for *_, mk in split} == {None}, (
-        "a split centroid defers to its group's own marker, never the forced 'h'"
+        "a split centroid defers to its group's own marker too"
     )
     groups = {(rec["variable"], rec["signal"]) for _, _, rec, _ in split}
     assert groups == {("temp", "raw"), ("temp", "subtidal"), ("salt", "raw"), ("salt", "subtidal")}
@@ -727,7 +771,7 @@ def test_summary_point_specs_marker_field_same_as_style_field_is_a_no_op():
     )
     unsplit = _summary_point_specs(recs, coord1, coord2, "variable", True)
     assert len(same_field) == len(unsplit) == 2
-    assert {mk for *_, mk in same_field} == {"h"}
+    assert {mk for *_, mk in same_field} == {None}
 
 
 def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
@@ -749,9 +793,8 @@ def test_taylor_summary_split_markers_matches_colour_and_marker_shape():
     assert len(centroids) == 4, "one centroid per (variable, signal) combination"
     base_pairs = {(ln.get_markerfacecolor(), ln.get_marker()) for ln in base}
     for c in centroids:
-        assert c.get_marker() not in ("*", "h"), (
-            "a split centroid keeps its group's own shape, never the reference's "
-            "'*' or the unsplit default's 'h'"
+        assert c.get_marker() != "*", (
+            "a split centroid keeps its group's own shape, never the reference's '*'"
         )
         assert (c.get_markerfacecolor(), c.get_marker()) in base_pairs, (
             "each centroid's colour+shape must match a real base-cloud group"
@@ -789,7 +832,7 @@ def test_target_summary_split_markers_matches_colour_and_marker_shape():
 
 
 def test_summary_split_markers_ignored_without_marker_by(comparisons):
-    """Docstring contract: no marker_by means the usual one-star-per-group."""
+    """Docstring contract: no marker_by means the usual one-centroid-per-group."""
     with_flag = target(
         comparisons, color_by="variable", summary_points=True,
         summary_split_markers=True, labels=None,
@@ -799,7 +842,7 @@ def test_summary_split_markers_ignored_without_marker_by(comparisons):
     )
     n_with = sum(1 for c in with_flag.axes[0].collections if c.get_zorder() == 10)
     n_without = sum(1 for c in without_flag.axes[0].collections if c.get_zorder() == 10)
-    assert n_with == n_without == 3, "one star per variable either way"
+    assert n_with == n_without == 3, "one centroid per variable either way"
 
 
 def test_interactive_target_summary_split_markers_matches_static_colours():
@@ -825,13 +868,14 @@ def test_interactive_target_summary_split_markers_matches_static_colours():
     )
     # every overlay/centroid layer draws as hv.Scatter (the base cloud is hv.Points),
     # so isinstance + excluding the black reference dot already isolates exactly the
-    # 4 split centroids; the marker check also excludes "hex", the un-split default,
-    # for a check that still means something once bokeh's marker vocabulary changes.
+    # 4 split centroids; the marker check also excludes "star", the reference point's
+    # own marker, for a check that still means something regardless of which shape
+    # each split group happens to draw.
     centroids = [
         e
         for e in obj.traverse(lambda x: x)
         if isinstance(e, hv.Scatter)
-        and e.opts.get(group="style").kwargs.get("marker") not in ("star", "hex")
+        and e.opts.get(group="style").kwargs.get("marker") != "star"
         and e.opts.get(group="style").kwargs.get("color") != "black"
     ]
     assert len(centroids) == 4
