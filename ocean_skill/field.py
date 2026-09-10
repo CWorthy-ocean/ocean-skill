@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Field", "FieldSet", "field"]
+__all__ = ["Cross", "Field", "FieldSet", "field"]
 
 
 def _facet_dims(da, spatial_dims: set[str]) -> tuple[str | None, str | None]:
@@ -1497,6 +1497,180 @@ class FieldSet:
         return {"figure": path}
 
 
+class Cross:
+    """Two vertical sections through one point, one along each grid direction.
+
+    Built by :func:`field` from ``select={"transect": {"cross": ...}}`` (see
+    :mod:`ocean_skill.transect`) -- the vertical structure either side of one
+    lon/lat point or grid-index pair, cut both ways: one section running
+    along ``eta_rho`` (``xi_rho`` held fixed), one along ``xi_rho`` (``eta_rho``
+    held fixed), each windowed to a half-width of grid cells either side of
+    the shared point rather than the whole line. The two directions share no
+    axis to align onto, so each is its own independent :class:`Field` --
+    its own (variable, aggregation, depth) reduction, prepared and cached
+    separately -- and :meth:`plot` is what draws the pair together, through
+    the ``cross`` plot family.
+
+    There is no ``.movie()`` here: a time-animated section is a follow-up (see
+    :meth:`Field._require_section_shape`), and a cross would be two of those.
+    """
+
+    def __init__(self, along: Field, across: Field, *, labels: tuple[str, str]):
+        self.along = along
+        self.across = across
+        self.labels = labels
+
+    def __repr__(self) -> str:
+        return f"Cross({self.along!r}, {self.across!r})"
+
+    def plot(
+        self,
+        *,
+        renderer: str = "matplotlib",
+        orientation: str = "vertical",
+        **kwargs: Any,
+    ):
+        """Draw both sections on one figure: stacked (default), or side by side.
+
+        Each direction must itself already draw as a section (see
+        :attr:`Field.family`) -- a ``select=``/``aggregate=`` that collapses
+        the vertical axis, or leaves some further axis standing, on either
+        field raises the same way a lone :meth:`Field.plot` call on it would
+        (:meth:`Field._require_section_shape`), since a cross panel has the
+        same one shape (depth, along-path distance) a lone section does.
+        ``orientation="horizontal"`` lays the two panels side by side instead
+        of the default stacked column. ``renderer="holoviews"`` gives the
+        interactive version, with no other change.
+        """
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        self.along._require_section_shape()
+        self.across._require_section_shape()
+        item_along, item_across = self.along.as_item(), self.across.as_item()
+        item_along["label"], item_across["label"] = self.labels
+        spec = PlotSpec(
+            family="cross",
+            items=[item_along, item_across],
+            options={"orientation": orientation, **kwargs},
+        )
+        return render(spec, renderer=renderer)
+
+    def save(
+        self,
+        project: str | None = None,
+        *,
+        stem: str | None = None,
+        renderer: str = "matplotlib",
+        **plot_kwargs: Any,
+    ) -> dict[str, Path]:
+        """Write this cross's figure under ``output/<project>/figures/``.
+
+        The same layout :meth:`Field.save` writes to, minus the metrics table --
+        there is no reference for either direction here either.
+        """
+        from ocean_skill import outputs
+
+        # Truncated *before* appending "_cross", not after -- a standard_name at or
+        # past Field.save()'s own 24-char budget (most of them; CF names run long)
+        # would otherwise have the suffix sliced away entirely, leaving a cross
+        # figure named indistinguishably from a plain Field's.
+        base = str(self.along.standard_name or "field")[:18]
+        stem = stem or f"{base}_cross"
+        path = outputs.figures_dir(project or self.along.source) / f"{stem}.png"
+        self.plot(renderer=renderer, save=path, **plot_kwargs)
+        return {"figure": path}
+
+
+def _expand_cross_transect(
+    select: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], tuple[str, str]]:
+    """Split ``select={"transect": {"cross": ...}}`` into its two directions.
+
+    Returns ``(select_along, select_across, labels)`` -- two ordinary windowed
+    grid-transect ``select``s (see :func:`ocean_skill.transect.as_transect`),
+    identical to ``select`` except for ``"transect"``, plus a short label per
+    direction naming which grid dimension it holds fixed. A ``{"lon": ...,
+    "lat": ...}`` point is passed through to each *unresolved* -- resolving it
+    (which cell it lands on, for each direction) happens once each is actually
+    prepared (:func:`ocean_skill.transect.grid_slice`), against that field's
+    own grid, so building the two selects here reads nothing.
+    """
+    from ocean_skill.transect import as_transect
+
+    parsed = as_transect(select["transect"])
+    point, half_width = parsed["point"], parsed["half_width"]
+    rest = {k: v for k, v in select.items() if k != "transect"}
+
+    if "lon" in point and "lat" in point:
+        anchor = {"lon": point["lon"], "lat": point["lat"]}
+        dim_along, dim_across = point.get("dims", ("eta_rho", "xi_rho"))
+        transect_along = {dim_across: anchor, "half_width": half_width}
+        transect_across = {dim_along: anchor, "half_width": half_width}
+    else:
+        (dim_along, idx_along), (dim_across, idx_across) = point.items()
+        transect_along = {
+            dim_across: idx_across,
+            "center": idx_along,
+            "half_width": half_width,
+        }
+        transect_across = {
+            dim_along: idx_along,
+            "center": idx_across,
+            "half_width": half_width,
+        }
+
+    labels = (f"along {dim_along}", f"along {dim_across}")
+    return (
+        {**rest, "transect": transect_along},
+        {**rest, "transect": transect_across},
+        labels,
+    )
+
+
+def _cross_field(
+    source: Any,
+    variable: Any,
+    select: dict[str, Any] | None,
+    *,
+    aggregate: dict[str, Any] | None,
+    label: str | None,
+    cache: bool | None,
+    qc: Any,
+    detide: Any,
+) -> Cross:
+    """Build a :class:`Cross`: :func:`field`'s own handling of ``cross``.
+
+    Splits ``select`` by :func:`_expand_cross_transect` into the two
+    directions' own selects, then builds one :class:`Field` per direction,
+    sharing everything else (``variable``/``aggregate``/``label``/``cache``/
+    ``qc``/``detide``) -- the same members :func:`field`'s ordinary,
+    non-cross path would build, just two of them instead of one.
+    """
+    select_along, select_across, labels = _expand_cross_transect(select)
+    along = Field(
+        source,
+        variable,
+        select=select_along,
+        aggregate=aggregate,
+        label=label,
+        cache=cache,
+        qc=qc,
+        detide=detide,
+    )
+    across = Field(
+        source,
+        variable,
+        select=select_across,
+        aggregate=aggregate,
+        label=label,
+        cache=cache,
+        qc=qc,
+        detide=detide,
+    )
+    return Cross(along, across, labels=labels)
+
+
 def field(
     source: Any,
     variable: Any,
@@ -1633,7 +1807,28 @@ def field(
             'dict), or a list of them -- osk.field(src, ["temperature", '
             '"salinity"]).'
         )
+    transect = select.get("transect") if isinstance(select, dict) else None
+    is_cross = isinstance(transect, dict) and "cross" in transect
+    if is_cross and (source_is_list or variable_is_list):
+        raise ValueError(
+            "select={'transect': {'cross': ...}} draws two sections from one "
+            "source and one variable -- it has no per-source/per-variable "
+            "fan-out the way an ordinary select= does (see the module "
+            "docstring on FieldSet's own shared-select limit). Call "
+            "osk.field() once per source/variable instead."
+        )
     if not source_is_list and not variable_is_list:
+        if is_cross:
+            return _cross_field(
+                source,
+                variable,
+                select,
+                aggregate=aggregate,
+                label=label,
+                cache=cache,
+                qc=qc,
+                detide=detide,
+            )
         return Field(
             source,
             variable,

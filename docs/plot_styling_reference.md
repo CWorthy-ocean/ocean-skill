@@ -1608,6 +1608,62 @@ opens a click-to-add-waypoints map in a live notebook — see its own docstring.
 Matching a section against a gridded dataset (`osk.compare`, not just `osk.field`)
 draws through the `section_row` family instead — see below.
 
+### Windowed grid-aligned transects
+
+A grid-aligned transect can also be windowed to a stretch of the surviving axis
+rather than the whole line — `center`/`half_width` (grid cells on either side):
+
+```python
+osk.field("run_new", "temperature",
+          select={"transect": {"xi_rho": 30, "center": 40, "half_width": 15}}).plot()
+```
+
+Or centered on a lon/lat point instead of a raw index — both the fixed index and
+the window's center are resolved from one nearest-cell lookup, at prepare time:
+
+```python
+osk.field("run_new", "temperature",
+          select={"transect": {"xi_rho": {"lon": -94.0, "lat": 26.0}},
+                  "half_width": 10}).plot()
+```
+
+`half_width` defaults to 15 cells. A window that reaches past the domain edge is
+clamped there, with one warning.
+
+## The `cross` family (two sections through one point)
+
+`select={"transect": {"cross": ...}}` is sugar for the common case of *two*
+windowed grid-aligned transects sharing one point, one along each grid
+direction — the vertical structure either side of a lon/lat point (or grid-index
+pair), cut both ways:
+
+```python
+# by grid indices
+osk.field("run_new", "temperature",
+          select={"transect": {"cross": {"eta_rho": 40, "xi_rho": 30}}}).plot()
+
+# by a lon/lat point, custom half-width, panels side by side instead of stacked
+osk.field("run_new", "temperature",
+          select={"transect": {"cross": {"lon": -94.0, "lat": 26.0}, "half_width": 10}}
+          ).plot(orientation="horizontal")
+```
+
+`osk.field(...)` returns an `ocean_skill.field.Cross` rather than a `Field` — two
+independent `Field`s (`.along`, `.across`), one per direction, sharing everything
+else (`variable`/`aggregate`/`label`/`cache`/`qc`/`detide`); each is prepared (and
+cached) on its own, since the two directions share no axis to align onto.
+`Cross.plot()` draws both together: stacked down the page (`orientation="vertical"`,
+the default) or side by side (`"horizontal"`), sharing one colour scale (the same
+variable, so the two read as directly comparable), each panel titled by which
+dimension it holds fixed and its own path endpoints. A lon/lat point assumes the
+source's own grid dimensions are named `eta_rho`/`xi_rho` (ROMS's own convention);
+a differently-named curvilinear grid can override that with `"dims": [<dim0>,
+<dim1>]` alongside the point, or use explicit grid indices instead, which are
+name-agnostic. Not yet supported: fanning `cross` over a list of sources/variables,
+or matching one against a gridded reference (`osk.compare`) — call `osk.field()`
+once per source/variable, or draw the two directions as separate `section_row`
+comparisons instead.
+
 ### Axis conventions
 
 * **y is depth, positive down, inverted** — 0 m draws at the top, the seafloor at

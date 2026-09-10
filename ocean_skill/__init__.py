@@ -55,7 +55,7 @@ from ocean_skill.catalog import (
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.detide import detide
 from ocean_skill.extrema import Extremum
-from ocean_skill.field import Field, FieldSet, field
+from ocean_skill.field import Cross, Field, FieldSet, field
 from ocean_skill.pick import pick_path
 from ocean_skill.plot.map_locations import map_locations
 from ocean_skill.plot.map_metrics import map_metrics
@@ -66,6 +66,7 @@ __version__ = "0.0.1"
 __all__ = [
     "Comparison",
     "ComparisonSet",
+    "Cross",
     "Extremum",
     "Field",
     "FieldSet",

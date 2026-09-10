@@ -41,6 +41,7 @@ FAMILIES = (
     "series",
     "section",
     "section_row",
+    "cross",
     "time_depth",
     "profile",
     "skill_map",
@@ -132,6 +133,24 @@ class PlotSpec:
         ``field_grid``-style stack of its own (``section_grid`` is a follow-up —
         see :class:`~ocean_skill.comparison.ComparisonSet`'s refusal on more than
         one ``section_row``).
+
+        ``cross`` carries exactly two ``section``-shaped items -- one along each
+        grid direction through one lon/lat point or grid-index pair (see
+        :mod:`ocean_skill.transect`'s ``cross``/windowed-grid forms), each
+        windowed to a half-width of grid cells either side of that point rather
+        than running the whole line. The two share one colour scale (the same
+        variable) but draw as two independent panels, each titled by its own
+        item's ``label`` (which grid dimension it holds fixed) and its own
+        ``path_note`` -- there is no ``test``/``reference``/``difference`` trio
+        here, only two cuts through the same field. ``options["orientation"]``
+        lays them out stacked (``"vertical"``, the default) or side by side
+        (``"horizontal"``). Built by
+        :meth:`ocean_skill.field.Cross.plot`, which is also the only way to
+        reach this family -- a cross does not fit :func:`ocean_skill.transect
+        .apply_transect`'s one-``Dataset``-in-one-``Dataset``-out contract (it
+        is two independent reductions), so :func:`ocean_skill.field.field`
+        builds it from two ordinary :class:`~ocean_skill.field.Field` objects rather
+        than one prepared item the way ``section`` is.
 
         ``time_depth`` is ``section``'s other single-source exception: one or
         more items, each carrying ``field`` (one DataArray) at a fixed lon/lat
