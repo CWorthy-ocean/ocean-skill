@@ -231,9 +231,14 @@ def _implied_over(
     ``agg`` instead (:func:`_collapses_time`/:func:`_collapses_vertical`, the
     reference's own side): narrowing depth to one value keeps time (the familiar
     mooring-at-a-depth reading), narrowing time to one value keeps depth (a cast at
-    an instant). Neither, or both, collapsed is genuinely ambiguous and is left
-    unset -- :func:`_require_reduced`'s own error already names ``over=`` as the
-    way out, and guessing wrong here would draw something plausible and wrong.
+    an instant). Neither narrowed is genuinely ambiguous too, but not the same way
+    *both* narrowed is: with no axis pinned at all, every ``(time, depth)`` pair the
+    station sampled is worth keeping and pooling into one metric, rather than
+    guessing which single axis to draw -- see :data:`ocean_skill.align.
+    TIME_DEPTH_OVER`, the sentinel this returns for exactly that case. Both
+    genuinely narrowed (a single instant *and* a single level) is left unset --
+    :func:`_require_reduced`'s own error already names ``over=`` as the way out,
+    and guessing wrong here would draw something plausible and wrong.
 
     Returning the *reason* alongside is the point — the choice is then recorded on
     the aligned result (``family_reason``), so a family that surprises someone can
@@ -271,10 +276,35 @@ def _implied_over(
                 f"the reference's featureType is {feature!r} and its time is "
                 "narrowed to one value, so the depth axis is kept"
             )
+        if not time_collapsed and not vertical_collapsed:
+            # Neither axis is narrowed at all -- the bare-call shape osk.compare()
+            # routes to _profile_depth_plan's "stand up the reference's own depth
+            # column" branch (see _is_profile_reference's both_standing=). By the
+            # time this runs against compare()'s own fanned select, depth already
+            # carries that column as a list (not the surface sentinel), which is
+            # exactly what makes vertical_collapsed False here -- a direct
+            # Comparison(...) call with a genuinely empty select never reaches this
+            # branch, since _collapses_vertical reads "no depth key at all" as
+            # collapsed (see its own docstring).
+            from ocean_skill.align import TIME_DEPTH_OVER
+
+            return TIME_DEPTH_OVER, (
+                f"the reference's featureType is {feature!r}, which carries both a "
+                "time and a depth axis, and neither select= nor aggregate= narrows "
+                "either one, so every (time, depth) pair it sampled is kept and "
+                "pooled into one metric"
+            )
         return None, (
             f"the reference's featureType is {feature!r}, which carries both a "
-            "time and a depth axis -- neither select= nor aggregate= narrows just "
-            "one of them, so which to keep is ambiguous"
+            "time and a depth axis, each narrowed to a single value -- there is no "
+            "axis left to keep, so name over= to say what a comparison of two "
+            "single values should look like"
+        )
+    if feature in ("trajectory", "trajectoryProfile"):
+        return None, (
+            f"the reference's featureType is {feature!r} -- a moving platform has "
+            "no single recipe to keep an axis by, so name over= (or depths=/"
+            "select=, for a trajectoryProfile) explicitly"
         )
     return None, "the reference is gridded"
 
@@ -3627,9 +3657,16 @@ class Comparison:
         crop (and, for a time aggregate, the full-window mean/spread) exactly
         as if this didn't exist.
         """
+        from ocean_skill.align import TIME_DEPTH_OVER
         from ocean_skill.operators import _CF_AXES
 
-        over_is_time = _CF_AXES.get(self.over) == "time"
+        # A time_depth comparison keeps time standing beside depth, exactly the
+        # mooring recipe this method exists for, just with a further vertical axis
+        # riding along -- so it gets the same discrete-cast-times pruning a plain
+        # over="time" comparison does, for the same reason: without it, the model
+        # lane reads its whole declared window just to nearest-match down to a
+        # handful of visits.
+        over_is_time = _CF_AXES.get(self.over) == "time" or self.over == TIME_DEPTH_OVER
         test_agg = aggregate_for(self.aggregate, "test")
         collapses_time = _collapses_time(test_agg)
         folds_time = _time_is_climatology(test_agg)
@@ -4796,7 +4833,9 @@ class Comparison:
         aligned = self._aligned
         # A station/profile/section has one latitude (or none), so cos(lat) is a
         # constant -- mirrors how Comparison.metrics() itself decides weighted=.
-        weighted = not (self.is_series or self.is_profile or self.is_section)
+        weighted = not (
+            self.is_series or self.is_profile or self.is_time_depth or self.is_section
+        )
         means = _metrics.evaluate(
             aligned, [f"mean_{role}" for role in lanes], dim=None, weighted=weighted
         )
@@ -4909,12 +4948,15 @@ class Comparison:
         ``over`` scoring the vertical axis (see :attr:`is_profile`) is excluded here
         even though its aligned reference is also a point -- that point's surviving
         axis is depth, not time, so it draws down a water column, not across a
-        calendar.
+        calendar. So is :data:`~ocean_skill.align.TIME_DEPTH_OVER` (see
+        :attr:`is_time_depth`): that point's aligned pair keeps *both* axes, which is
+        neither a line drawn across a calendar alone nor a column drawn down depth
+        alone.
         """
-        from ocean_skill.align import point_of
+        from ocean_skill.align import TIME_DEPTH_OVER, point_of
         from ocean_skill.operators import _CF_AXES
 
-        if _CF_AXES.get(self.over) == "vertical":
+        if _CF_AXES.get(self.over) == "vertical" or self.over == TIME_DEPTH_OVER:
             return False
         return point_of(self.aligned["reference"]) is not None
 
@@ -4961,20 +5003,44 @@ class Comparison:
         return path_of(self.aligned["reference"]) is not None
 
     @property
+    def is_time_depth(self) -> bool:
+        """Whether this comparison pools a station's own time *and* depth axes.
+
+        The two-axis sibling of :attr:`is_series`/:attr:`is_profile`: a bare
+        ``timeSeriesProfile`` reference (see :func:`_implied_over`) carries both a
+        time axis (repeat visits) and a depth axis (levels per visit), and neither
+        select nor aggregate narrows either one away, so both are kept standing in
+        the aligned pair rather than one being collapsed to draw the other. Read
+        off ``self.over`` being the dedicated sentinel
+        (:data:`~ocean_skill.align.TIME_DEPTH_OVER`) *and* the aligned reference
+        still sitting at one point (:func:`~ocean_skill.align.point_of`) --
+        mirroring how :attr:`is_series`/:attr:`is_profile` each read a single axis
+        off the same two facts.
+        """
+        from ocean_skill.align import TIME_DEPTH_OVER, point_of
+
+        if self.over != TIME_DEPTH_OVER:
+            return False
+        return point_of(self.aligned["reference"]) is not None
+
+    @property
     def family(self) -> str:
         """The plot family this comparison's own shape admits.
 
-        Five cases, in the order the data decides them: a place through time draws
-        as ``series``, a place through depth as ``profile``, a vertical slice
-        through space as ``section_row``, a pair scored over any other axis as
-        ``skill_map``, and a pair of single maps as ``field_row``. No argument
-        selects it — the same rule :meth:`ocean_skill.field.Field.plot` follows
-        between a map and a facet grid.
+        Six cases, in the order the data decides them: a place through time draws
+        as ``series``, a place through depth as ``profile``, a place through both
+        time and depth (pooled to one point per metric) as ``time_depth``, a
+        vertical slice through space as ``section_row``, a pair scored over any
+        other axis as ``skill_map``, and a pair of single maps as ``field_row``. No
+        argument selects it — the same rule :meth:`ocean_skill.field.Field.plot`
+        follows between a map and a facet grid.
         """
         if self.is_series:
             return "series"
         if self.is_profile:
             return "profile"
+        if self.is_time_depth:
+            return "time_depth"
         if self.is_section:
             return "section_row"
         return "field_row" if self.over is None else "skill_map"
@@ -4993,6 +5059,11 @@ class Comparison:
             return f"drawn as lines: {self.over_reason}, so the time axis is kept"
         if self.is_profile:
             return f"drawn as a profile: {self.over_reason}, so the depth axis is kept"
+        if self.is_time_depth:
+            return (
+                f"pooled over time and depth: {self.over_reason}, so both axes are "
+                "kept and every (time, depth) pair is scored into one metric"
+            )
         if self.is_section:
             return (
                 "drawn as test | reference | difference sections: the select cuts "
@@ -5053,6 +5124,13 @@ class Comparison:
                 "make: a per-cell metric over one column is the number metrics() "
                 "already gives. Use .metrics() for the numbers and .plot() for "
                 "the profile."
+            )
+        if self.is_time_depth:
+            raise ValueError(
+                "this comparison pools a station's time and depth axes into one "
+                "point, so there is no map to make: a per-cell metric over both "
+                "axes at once is the number metrics() already gives. Use "
+                ".metrics() for the numbers."
             )
         if self.is_section:
             raise ValueError(
@@ -5137,7 +5215,12 @@ class Comparison:
             # The mask is per *cell*: it exists so the scalar describes the same domain
             # the maps show. A station (through time or through depth) has one cell
             # and no maps, so there is nothing to mask and asking for them would raise.
-            if self.over is not None and not self.is_series and not self.is_profile:
+            if (
+                self.over is not None
+                and not self.is_series
+                and not self.is_profile
+                and not self.is_time_depth
+            ):
                 enough = self.pointwise_metrics("n")["n"] >= self.min_pairs
                 aligned = aligned.where(enough)
             self._metrics = _metrics.compute(
@@ -5161,11 +5244,17 @@ class Comparison:
                 **(
                     {
                         "weighted": False,
-                        "sample_noun": "depth levels" if self.is_profile else "time steps",
+                        "sample_noun": (
+                            "depth levels"
+                            if self.is_profile
+                            else "(time, depth) pairs"
+                            if self.is_time_depth
+                            else "time steps"
+                        ),
                         "station_lon": self.aligned.attrs.get("station_lon"),
                         "station_lat": self.aligned.attrs.get("station_lat"),
                     }
-                    if self.is_series or self.is_profile
+                    if self.is_series or self.is_profile or self.is_time_depth
                     else {"weighted": False, "sample_noun": "section cells"}
                     if self.is_section
                     else {}
@@ -5249,8 +5338,11 @@ class Comparison:
         }
         # A scored comparison carries metric maps -- unless it is a place through time
         # or through depth, where there is no map to carry and the series/profile
-        # family draws the pair itself.
-        if self.over is None or self.is_series or self.is_profile:
+        # family draws the pair itself. is_time_depth joins them here for the same
+        # reason: a bare timeSeriesProfile pools both axes into one metric (over is
+        # TIME_DEPTH_OVER, not None), but there is still no map -- the aligned trio
+        # itself is what a time_depth_row draws.
+        if self.over is None or self.is_series or self.is_profile or self.is_time_depth:
             return {"aligned": self.aligned, **common}
         from ocean_skill.metrics import DEFAULT_MAP_METRICS
 
@@ -5291,21 +5383,34 @@ class Comparison:
         family = self.family
         if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
-        if family not in ("series", "section_row", "profile") and "domain" not in kwargs:
+        if (
+            family not in ("series", "section_row", "profile", "time_depth")
+            and "domain" not in kwargs
+        ):
             # Outline the test (model) source's own true grid shape when the catalog
             # declares one, falling back to its bbox otherwise — matching Abigale
             # Wyatt's side-by-side plots. Pass domain=None to suppress it, or your own
             # bbox/ring to override; checking "not in kwargs" (rather than
             # kwargs.setdefault) keeps that override working once the default value
             # is an ndarray, whose truthiness setdefault can't rely on. A line, a
-            # profile or a section plot has no map to outline, and any of the three
-            # would refuse the option outright.
+            # profile, a section or a time_depth plot has no map to outline, and any
+            # of the four would refuse the option outright.
             convention = self.aligned.attrs.get("lon_convention")
             outline = _outline_of(self.test_name, convention)
             kwargs["domain"] = (
                 outline if outline is not None else _domain_of(self.test_name)
             )
-        spec = PlotSpec(family=family, items=[self.as_item()], options=kwargs)
+        # self.family reads "time_depth" -- the same name a bare Field's own single
+        # time_depth panel uses (see ocean_skill.plot.spec.FAMILIES), since both draw
+        # the same *kind* of panel, just a row of three rather than one. The two are
+        # told apart only where a plot is actually built: a comparison's aligned trio
+        # renders through the distinct "time_depth_row" family instead (the same
+        # split "section"/"section_row" already makes for a single field vs a
+        # comparison of the same shape) -- translated here, not on self.family
+        # itself, so introspecting a comparison's own shape (family, family_reason)
+        # keeps naming it "time_depth" regardless of whether it ever gets plotted.
+        plot_family = "time_depth_row" if family == "time_depth" else family
+        spec = PlotSpec(family=plot_family, items=[self.as_item()], options=kwargs)
         return render(spec, renderer=renderer)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -5916,10 +6021,17 @@ class ComparisonSet:
         # identity is a rotated left-edge row label. The grid is what more than one
         # comparison needs; one does not.
         single_row = family == "field_row" and len(self.comparisons) == 1
-        if family in ("field_row", "field_grid", "series", "section_row", "profile"):
+        if family in (
+            "field_row",
+            "field_grid",
+            "series",
+            "section_row",
+            "profile",
+            "time_depth",
+        ):
             kwargs.setdefault("labels", (first.test_name, first.reference_name))
         if (
-            family not in ("series", "section_row", "profile")
+            family not in ("series", "section_row", "profile", "time_depth")
             and "domain" not in kwargs
         ):
             # Outlines the first row's test (model) true grid shape (or its bbox,
@@ -5940,9 +6052,23 @@ class ComparisonSet:
                 "need a section_grid family, which does not exist yet -- plot "
                 "each comparison separately."
             )
+        if family == "time_depth" and len(self.comparisons) > 1:
+            # Mirrors section_row's own refusal just above, for the same reason: a
+            # station's time_depth row has no stacked-grid family yet either.
+            raise ValueError(
+                f"{len(self.comparisons)} time_depth comparisons in one figure "
+                "would need a stacked family, which does not exist yet -- plot "
+                "each comparison separately."
+            )
         # field_row is one comparison's family; a set of *more than one* stacks as a
         # grid. A lone comparison keeps field_row and its single-row title.
         family = "field_grid" if family == "field_row" and not single_row else family
+        # self.family (and so this set's shared family) reads "time_depth" for the
+        # same reason Comparison.plot's own docstring gives -- translated to the
+        # distinct "time_depth_row" render family only here, at the point a plot is
+        # actually built (the guard just above already limits this branch to exactly
+        # one comparison, so this is the same single-row shape Comparison.plot draws).
+        family = "time_depth_row" if family == "time_depth" else family
         return render(
             PlotSpec(family=family, items=items, options=kwargs),
             renderer=renderer,
@@ -6003,6 +6129,14 @@ class ComparisonSet:
                 "have no frames to play yet: their depth axis is already the y axis "
                 "of the figure, and time-animated profiles are a follow-up. Use "
                 ".plot() instead."
+            )
+        time_depths = [c for c in self.comparisons if c.is_time_depth]
+        if time_depths:
+            raise ValueError(
+                f"{len(time_depths)} of these comparisons pool a station's time and "
+                "depth axes into one point each, which has no further axis left to "
+                "step through as frames. Use .plot() (or .metrics() for the "
+                "numbers) instead."
             )
         sections = [c for c in self.comparisons if c.is_section]
         if sections:
@@ -6455,6 +6589,7 @@ def _is_profile_reference(
     *,
     time_collapsed: bool = False,
     climatology: bool = False,
+    both_standing: bool = False,
 ) -> bool:
     """Whether ``source`` is a single-cast profile whose own levels drive the compare.
 
@@ -6469,18 +6604,25 @@ def _is_profile_reference(
     into bins (a ``groupby``/``resample`` aggregate, :func:`_time_is_climatology`)
     rather than one instant, but each bin is still exactly a cast at the reference's
     own depths, the same reading :func:`_implied_over` gives this shape ``over="Z"``
-    for. A ``trajectoryProfile`` still carries more than one candidate axis even then
-    (position varies too) and is left to an explicit ``depths=``/``select=``. An
-    explicit ``over=`` that is *not* vertical -- a caller scoring, say, time against a
-    profile -- opts out: they have named the axis themselves.
+    for -- **or** with ``both_standing=True``: a genuinely bare call, neither axis
+    narrowed at all (see :func:`_profile_depth_plan`'s own computation of it), where
+    the reference's own depths still make the natural default, only now standing
+    beside a kept time axis rather than instead of one (:data:`ocean_skill.align.
+    TIME_DEPTH_OVER`, via :func:`_implied_over`, once this decision has written that
+    depth column into the fanned select). A ``trajectoryProfile`` still carries more
+    than one candidate axis even then (position varies too) and is left to an
+    explicit ``depths=``/``select=``. An explicit ``over=`` that is *not* vertical
+    and not :data:`~ocean_skill.align.TIME_DEPTH_OVER` -- a caller scoring, say, time
+    against a profile -- opts out: they have named the axis themselves.
     """
+    from ocean_skill.align import TIME_DEPTH_OVER
     from ocean_skill.operators import _CF_AXES
 
-    if over is not None and _CF_AXES.get(over) != "vertical":
+    if over is not None and _CF_AXES.get(over) != "vertical" and over != TIME_DEPTH_OVER:
         return False
     feature = _feature_type(source)
     return feature == "profile" or (
-        feature == "timeSeriesProfile" and (time_collapsed or climatology)
+        feature == "timeSeriesProfile" and (time_collapsed or climatology or both_standing)
     )
 
 
@@ -6603,18 +6745,21 @@ def _profile_depth_plan(
 ) -> tuple[tuple[Any, ...], bool, bool]:
     """Per-reference ``(values, many_values, literal)`` for compare()'s depth fan.
 
-    Four cases, in order:
+    Five cases, in order:
 
     * a calculated diagnostic has no vertical axis at all -- one comparison, no depth
       (``(None,)``);
     * a **profile** reference (or a **timeSeriesProfile** one whose time this
       comparison has narrowed to a single instant -- ``ref_time_collapsed=True`` --
-      or folded into a climatology -- ``ref_time_climatology=True``, both computed
-      by the caller per :func:`_is_profile_reference`'s extended scope) keeps its
-      depth axis standing, so its whole depth list is *one* comparison's y-axis,
-      never a scalar-per-depth fan (which would collapse the very axis the profile
-      exists to keep). The levels are the caller's ``depths=`` when given, else --
-      the case this feature adds -- the reference's own
+      or folded into a climatology -- ``ref_time_climatology=True`` -- or a
+      genuinely bare call narrowing neither axis at all -- ``both_standing``,
+      computed here from ``ref_time_collapsed``/``ref_time_climatology`` plus
+      whether the caller named an explicit depth of their own; all three computed
+      by the caller or here per :func:`_is_profile_reference`'s extended scope)
+      keeps its depth axis standing, so its whole depth list is *one* comparison's
+      y-axis, never a scalar-per-depth fan (which would collapse the very axis the
+      profile exists to keep). The levels are the caller's ``depths=`` when given,
+      else -- the case this feature adds -- the reference's own
       (:func:`_profile_reference_depths`). A ``depths=`` naming one or more **bands**
       (``{"min", "max"}``) is the exception: a band collapses depth rather than
       standing on it, so it falls through to the ordinary per-depth fan instead --
@@ -6629,6 +6774,11 @@ def _profile_depth_plan(
       like the profile case; a warning says which depth was chosen and why, since
       unlike a profile's *whole* column, this quietly overrides a real default
       (surface) rather than filling in one that never existed;
+    * a bare **trajectoryProfile** reference (position varies too, so even a
+      genuinely empty select has no single depth -- or single axis -- to default
+      to) warns that this call is about to collapse depth to the surface and leave
+      ``over=`` unresolved, pointing at ``depths=``/``select=``/``over=`` as the
+      way out;
     * anything else keeps the ordinary depth fan unchanged.
 
     ``literal`` says whether the depths this call settled on were named by the
@@ -6642,15 +6792,30 @@ def _profile_depth_plan(
     if calculated:
         return (None,), False, False
     is_depth_fan = fan_key == "depth"
+    ref_sel = select_for(select, "reference") if is_depth_fan else {}
+    has_vertical_select = (
+        any(k in ref_sel for k in _ANY_VERTICAL_KEYS) if is_depth_fan else False
+    )
+    # A genuinely bare call for this reference -- neither axis collapsed, no
+    # explicit depths=/select={"depth": ...} of its own -- is the "keep both axes"
+    # shape _is_profile_reference's both_standing= routes to the reference's own
+    # depth column below, exactly like the time_collapsed/climatology cases already
+    # do, just without narrowing time away too. See _implied_over's matching branch,
+    # which reads this decision back off the depth column this then writes into the
+    # fanned select (a list, not the surface sentinel).
+    both_standing = (
+        is_depth_fan
+        and explicit_depths is None
+        and not has_vertical_select
+        and not ref_time_collapsed
+        and not ref_time_climatology
+    )
     is_profile_ref = is_depth_fan and _is_profile_reference(
         ref,
         over,
         time_collapsed=ref_time_collapsed,
         climatology=ref_time_climatology,
-    )
-    ref_sel = select_for(select, "reference") if is_depth_fan else {}
-    has_vertical_select = (
-        any(k in ref_sel for k in _ANY_VERTICAL_KEYS) if is_depth_fan else False
+        both_standing=both_standing,
     )
     if is_profile_ref and not has_vertical_select:
         explicit_bands = explicit_depths is not None and (
@@ -6690,6 +6855,27 @@ def _profile_depth_plan(
                 stacklevel=_stacklevel.find(),
             )
             return (depth,), False, False
+        if _feature_type(ref) == "trajectoryProfile":
+            # A moving platform with more than one candidate vertical reading (see
+            # _is_profile_reference's own note on it) has no natural default the
+            # way a profile's own column or a fixed station's metadata depth do --
+            # this call is about to fall through to the ordinary fan below, which
+            # for a bare call means the surface sentinel, and over stays unresolved
+            # (see _implied_over's own trajectoryProfile branch). Both are silent
+            # otherwise, so say so once, pointing at the escape hatches.
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"{ref!r} is a trajectoryProfile -- a moving platform with more "
+                "than one candidate vertical reading, so there is no single depth "
+                "to default to and no single recipe to keep an axis by. This call "
+                "collapses depth to the surface and leaves over= unresolved. Pass "
+                "depths=[...] (or select={'depth': ...}) to name a depth "
+                'explicitly, or over="time"/over="Z" to choose which axis to keep.',
+                stacklevel=_stacklevel.find(),
+            )
     # A profile reference whose vertical select was already explicit (has_vertical_
     # select True) falls through to here with the ordinary fan_values unchanged --
     # see the docstring's third bullet -- but it is still the caller's own literal
@@ -7145,8 +7331,14 @@ def compare(
         Sequence of depth requests, fanned one comparison per entry --
         ``None`` (default) means ``("surface",)``. Each entry is a literal
         number (metres), ``"surface"``, ``"column"``, or a ``{"min": ...,
-        "max": ...}`` band. Not used for a ``profile``/``timeSeriesProfile``
-        reference, which keeps its own levels.
+        "max": ...}`` band. Not used for a ``profile`` reference, nor for a
+        ``timeSeriesProfile`` one whose own axes are not both narrowed to a
+        single value by ``select``/``aggregate`` -- a bare call (both axes
+        kept and pooled), one narrowed to a single instant (depth kept), or
+        one folded into a time climatology (depth kept) all keep the
+        reference's own levels instead of fanning this: the whole ragged
+        union of every visit's own depths for the first, one visit's own
+        depths for the other two.
     times
         ``None`` (default, no time fan), a dict deriving bins from the
         test's own time axis (``{"resample": ..., "reduce": ...}``,
@@ -7172,7 +7364,13 @@ def compare(
         The axis to keep and score cell by cell (``"time"`` or ``"Z"``),
         instead of collapsing to one map. ``None`` (default) reduces to a
         single map; also inferred automatically for a station/mooring
-        reference or a select pinning both horizontal axes to one point.
+        reference or a select pinning both horizontal axes to one point. A
+        bare ``timeSeriesProfile`` reference (neither axis narrowed by
+        ``select``/``aggregate``/``depths=``) infers a third reading of its
+        own instead: both axes are kept standing and pooled into one metric
+        together (``family == "time_depth"``), rather than one being picked
+        over the other -- an internal sentinel this call resolves to on its
+        own, not a spelling to pass here yourself.
     time_method
         One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
         ``"exact"`` -- how the two lanes are matched along a kept time axis.

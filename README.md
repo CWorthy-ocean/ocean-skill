@@ -436,20 +436,42 @@ all: a `profile` reference implies it outright (no time axis to draw instead), a
 a `timeSeriesProfile` reference — which carries both axes — reads whichever one
 your own `select`/`aggregate` narrows to a single value (a `depth=` pinned to one
 number keeps the familiar mooring-at-a-depth series; a `time=` pinned to one
-instant, or one entry of `times=[...]`, keeps the cast).
+instant, or one entry of `times=[...]`, keeps the cast). Narrow *neither* one and
+both axes stay standing instead of picking one to guess at: every `(time, depth)`
+pair the station actually sampled is matched against the model and pooled into
+one metric —
 
-`depths=` needs no spelling out either, for either of those two vertical-axis
-cases: left unset, `compare()` reads the reference's own levels straight off the
-source — for a `timeSeriesProfile` station, the levels *that visit itself
-actually sampled*, not the whole record's ragged union of every visit's depths.
-A discrete-sample station visited repeatedly (bottle casts, not a continuously
-logging instrument) reads this way once its table is catalogued
-`featureType: timeSeriesProfile`: bare `compare()` draws it as a mooring-style
-series at its shallowest level, `select={"time": <one visit>}` draws one cast,
-and `times=[<visit>, <visit>, ...]` overlays several casts in one panel, same as
-a real profile source's own multi-cast overlay above. A bare `osk.field()` on the
-same station has no such default and keeps the whole record instead, which draws
-as a `time_depth` panel — see above.
+```python
+osk.compare(
+    reference="hvalfjordur_hv1", test="run_new", variables=[TEMPERATURE],
+).plot()                              # test | reference | difference, time on x, depth on y
+```
+
+— `family == "time_depth"`, drawn as a `test | reference | difference` row with
+time on x and depth on y (inverted, surface at top), the comparison counterpart
+of `osk.field()`'s own `time_depth` panel below. This is the right default for a
+ragged discrete-sample station (bottle casts at whatever depths that visit
+reached, not a mooring's fixed levels): its near-surface level alone is often
+sampled on only a handful of visits, too sparse to score well on its own, where
+every visited `(time, depth)` pair together gives a real sample. Narrow *both*
+axes (one instant *and* one depth) and there is nothing left to keep — that is
+the one shape `over=` still has to name explicitly.
+
+`depths=` needs no spelling out either, for any of these: left unset,
+`compare()` reads the reference's own levels straight off the source — for a
+`timeSeriesProfile` reference narrowed to one instant (scored over depth alone),
+the levels *that visit itself actually sampled*; for a bare call keeping both
+axes, every visit's own depths, together, since every sampled pair is what gets
+matched and pooled. A discrete-sample station visited repeatedly (bottle casts,
+not a continuously logging instrument) reads this way once its table is
+catalogued `featureType: timeSeriesProfile`: bare `compare()` pools the whole
+ragged record as above, `select={"time": <one visit>}` draws one cast, an
+explicit `depths=("surface",)` (or any `select={"depth": ...}`) falls back to
+the old mooring-at-a-depth series over whichever visits actually sampled near
+that level, and `times=[<visit>, <visit>, ...]` overlays several casts in one
+panel, same as a real profile source's own multi-cast overlay above. A bare
+`osk.field()` on the same station has no such default and keeps the whole
+record instead, which draws as a `time_depth` panel — see above.
 
 **A vertical slice through the model** — `select={"transect": {"<dim>": <index>}}`
 cuts along a named grid dimension instead of narrowing to one place, and draws as

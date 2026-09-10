@@ -91,12 +91,28 @@ def test_timeseriesprofile_with_time_aggregate_mean_implies_over_Z(monkeypatch):
     assert c.over == "Z"
 
 
-def test_timeseriesprofile_with_neither_axis_collapsed_is_ambiguous(monkeypatch):
-    """Both a depth list and a surviving time axis: genuinely ambiguous, left unset."""
+def test_timeseriesprofile_with_neither_axis_collapsed_keeps_both(monkeypatch):
+    """Both a depth list and a surviving time axis: neither is narrowed, so both
+    are kept standing (TIME_DEPTH_OVER) and pooled into one metric, rather than
+    left ambiguous -- see comparison.py's own timeSeriesProfile branch of
+    _implied_over.
+    """
+    from ocean_skill.align import TIME_DEPTH_OVER
+
     _feature(monkeypatch, "timeSeriesProfile")
     c = _comparison(select={"depth": [0.0, 25.0, 50.0]})
+    assert c.over == TIME_DEPTH_OVER
+    assert "pooled" in c.over_reason
+
+
+def test_timeseriesprofile_with_both_axes_narrowed_is_ambiguous(monkeypatch):
+    """A single instant *and* a single depth: nothing left to keep, genuinely
+    ambiguous -- distinct from neither being narrowed (just above), which keeps
+    both instead."""
+    _feature(monkeypatch, "timeSeriesProfile")
+    c = _comparison(select={"depth": 50.0, "time": "2015-06-15"})
     assert c.over is None
-    assert "ambiguous" in c.over_reason
+    assert "no axis left to keep" in c.over_reason
 
 
 def test_timeseriesprofile_column_request_also_survives(monkeypatch):

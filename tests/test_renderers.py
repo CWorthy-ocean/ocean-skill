@@ -1191,6 +1191,32 @@ def _section_row_item() -> dict:
     }
 
 
+def _time_depth_row_item() -> dict:
+    """One time_depth_row spec item: what a pooled ``timeSeriesProfile``
+    comparison's own ``as_item()`` builds (see
+    ``Comparison.is_time_depth``/``Comparison.plot``).
+
+    Reuses :func:`_time_depth_field`'s dense (time, depth) point shape for all
+    three lanes -- a real comparison's own pair keeps whatever raggedness the
+    station has, but a small dense fixture here is enough to draw all three
+    panels (and :func:`~ocean_skill.plot.time_depth.default_mark`'s own
+    "pcolormesh" choice) without also exercising the scatter branch, which the
+    dedicated ``tests/test_tsp_end_to_end.py`` plotting tests already check
+    against a genuinely ragged station.
+    """
+    test = _time_depth_field()
+    reference = test + 0.5
+    return {
+        "aligned": {"test": test, "reference": reference, "difference": test - reference},
+        "units": "mmol m-3",
+        "standard_name": "mole_concentration_of_nitrate_in_sea_water",
+        "depth": None,
+        "time": None,
+        "metrics": {"bias": 0.125, "rmse": 0.5, "corr": 0.98},
+        "labels": ("GOM_bgc", "woa23"),
+    }
+
+
 _INTERACTIVE_FAMILIES = {
     "field_row": lambda: [
         _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
@@ -1243,6 +1269,7 @@ _INTERACTIVE_FAMILIES = {
             "label": "GOM_bgc",
         }
     ],
+    "time_depth_row": lambda: [_time_depth_row_item()],
 }
 
 
@@ -1297,7 +1324,7 @@ _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 #: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
 #: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
 #: covers instead: warned and dropped, same as any other unusable option.
-_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth"}
+_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth", "time_depth_row"}
 
 
 def _hv_paths(obj) -> list:

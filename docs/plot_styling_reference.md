@@ -1777,6 +1777,73 @@ coloured by value. A `time_depth` panel has no map to outline, so `domain` is no
 option of it — the static renderer raises naming the reason, the interactive one
 warns and drops.
 
+## The `time_depth_row` family (a bare timeSeriesProfile pooled over time and depth)
+
+`time_depth`'s comparison counterpart: a bare `compare()` against a
+`timeSeriesProfile` reference whose `select`/`aggregate` narrows neither its time
+nor its depth axis pools both together into one metric, rather than picking one
+to draw and collapsing the other to a single level:
+
+```python
+osk.compare(
+    reference="hvalfjordur_hv1", test="run_new", variables=["sea_water_temperature"],
+).plot(renderer="both")
+```
+
+Three panels, `test | reference | difference`, colour = value, x = time, y = depth
+— exactly `section_row`'s own layout, with time substituted for along-path
+distance. `Comparison.family` reads `"time_depth"` — the same name a bare
+`osk.field()`'s own single `time_depth` panel carries above, since both draw the
+same *kind* of panel, just a row of three rather than one — and is translated to
+this distinct render family only where a plot is actually built (`.plot()`), the
+same split `section`/`section_row` makes for the analogous single-field-vs-
+comparison shapes. Naming a depth explicitly (`depths=("surface",)`, or any
+`select={"depth": ...}`) opts out and draws the ordinary mooring-at-a-depth
+`series` instead — this family is only ever what a *bare* call reaches.
+
+**Every lane lands on the same `(time, depth)` grid**: the reference's own visit
+times and its own sampled levels, the model matched onto each in turn — time
+first (nearest/nearest-mean/auto, the same coarser-wins rule any other kept time
+axis follows), then depth (`depth_method="nearest"` by default, snapping to the
+model's nearest real level; `"interp"` linearly interpolates instead) — composing
+the two existing 1-D matchers rather than inventing a 2-D one
+(`ocean_skill.align._match_time_and_depth`). A `(visit, level)` combination the
+station never actually sampled is simply `NaN` on every lane, the same way a
+ragged record already reads elsewhere in this package; it drops out of the
+pooled metric, not out of the grid.
+
+### Which mark it draws
+
+`mark` defaults exactly the way `time_depth`'s own panel does
+(`ocean_skill.plot.time_depth.default_mark`), read off the *reference* lane — the
+ragged, real-visits one — and then applied to all three panels alike, so test,
+reference and difference are never drawn two different ways in the same row.
+`mark="scatter"`/`mark="pcolormesh"` overrides it explicitly, same as `time_depth`.
+
+### Axis conventions and layout
+
+Exactly `time_depth`'s own: positive-down depth, y-axis inverted, a date-aware x
+axis with no 45° tilt (or a time `groupby`'s own dim, spelled the same way
+`time_depth`'s own note on this, above, describes). Test and reference share one
+colour scale (10th–90th percentile of the pair with `robust=True`); the
+difference panel is diverging and centred on zero; metrics go in the difference
+panel's corner box (statically) or fold into its title (interactively) —
+precisely as `section_row` draws its own row, just against time and depth
+instead of along-path distance and depth. The title carries any depth/time a
+`select=` collapsed (ordinarily neither, for this family), then the station's
+own place and visit period, standing in for `section_row`'s own path endpoints.
+
+There is no `domain`, `region` or `gridline_kwargs` — a `time_depth_row` has no
+map to outline. `metrics(weighted=False)` — cos-lat area weights mean nothing for
+a single station — and `pointwise_metrics()` is refused (both axes are already
+pooled into one number; there is no further axis to score over).
+
+A `time_depth_row` is never stacked into a grid: more than one in a
+`ComparisonSet.plot()` is refused (mirroring `section_row`'s own refusal — a
+follow-up would need a stacked family that does not exist yet), and
+`ComparisonSet.movie()` refuses a set containing one too, having no further axis
+left to step through as frames once both are already pooled.
+
 ## The `section_row` family (a section matched against a dataset)
 
 A comparison whose `select` cuts a transect draws `test | reference | difference`

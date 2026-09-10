@@ -30,6 +30,7 @@ from ocean_skill.cf import find_coord
 
 __all__ = [
     "ALONG_DIM",
+    "TIME_DEPTH_OVER",
     "NoValidData",
     "align",
     "axis_edges",
@@ -47,6 +48,18 @@ __all__ = [
     "subset_to_bbox",
     "subset_to_box",
 ]
+
+
+#: Sentinel ``over=`` value meaning "keep both the time and the depth axis standing"
+#: -- a bare ``timeSeriesProfile`` reference's own shape (see
+#: :func:`ocean_skill.comparison._implied_over`), distinct from ``None`` (which means
+#: "no axis is being scored, this is a single-map comparison" everywhere alignment
+#: and family logic check it) and from the ordinary single-axis spellings
+#: (``"time"``, ``"Z"``/``"vertical"``) :data:`~ocean_skill.operators._CF_AXES`
+#: resolves. Not itself a CF axis name -- deliberately absent from ``_CF_AXES`` --
+#: so :func:`match_axis` has to recognize it explicitly rather than accidentally
+#: resolving it as a literal dimension name.
+TIME_DEPTH_OVER = "TZ"
 
 
 class NoValidData(ValueError):
@@ -1606,6 +1619,78 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
     return matched, reference, report
 
 
+def _match_time_and_depth(
+    test,
+    reference,
+    *,
+    method: str = "auto",
+    depth_method: str = "nearest",
+    tolerance: float | None = None,
+    min_overlap: int = MIN_OVERLAP,
+    metadata: dict | None = None,
+    test_metadata: dict | None = None,
+    bin_anchor: str = "auto",
+):
+    """Compose a time match and a vertical match -- :data:`TIME_DEPTH_OVER`'s own step.
+
+    ``match_axis``'s ordinary contract is one axis at a time (see its own docstring);
+    a bare ``timeSeriesProfile`` reference needs both kept standing at once, but
+    there is no new 2-D interpolation to invent for that -- it is exactly the two
+    existing 1-D matchers, run in sequence, the same way a vertical section already
+    composes an along-path bin with fixed depths (see
+    :func:`ocean_skill.comparison.Comparison.align`'s transect route and
+    :func:`_align_along_path`). Time first: :func:`match_axis` itself, over the
+    ordinary ``"time"`` axis, with its usual coarser-wins nearest/mean/auto choice
+    (``method``/``tolerance``/``bin_anchor``/``metadata``/``test_metadata``). Then
+    depth: :func:`_match_vertical`, on whatever the time match left standing,
+    honouring ``depth_method`` (``"nearest"``, the default, or ``"interp"``/
+    ``"linear"``) exactly as a single ``over="Z"`` comparison would.
+
+    Both lanes land on ``(time, depth)``, named as the reference names each axis;
+    an unsampled ``(visit, level)`` combination the station never visited is simply
+    NaN on the reference (and so on the aligned pair), and drops out of a metric
+    computed with ``dim=None`` the same way any other NaN cell already does --
+    raggedness needs no special-casing here.
+
+    Returns ``(test, reference, report)`` like :func:`match_axis`, with
+    ``report["axis"]`` a ``[time_axis, depth_axis]`` pair (not a single name --
+    :func:`~ocean_skill.comparison.Comparison.align` reads that list to build a
+    two-element ``keep=`` rather than the ordinary one-element tuple) and both
+    inner reports folded in under ``time_``/``depth_`` prefixes, so nothing
+    collides with the flat keys a single-axis match would have written.
+    """
+    from ocean_skill.operators import resolve_dim
+
+    test, reference, time_report = match_axis(
+        test,
+        reference,
+        over="time",
+        method=method,
+        tolerance=tolerance,
+        min_overlap=min_overlap,
+        metadata=metadata,
+        test_metadata=test_metadata,
+        bin_anchor=bin_anchor,
+    )
+    tdim, rdim = resolve_dim(test, "Z"), resolve_dim(reference, "Z")
+    for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
+        if dim is None or dim not in lane.dims:
+            raise ValueError(
+                f"the {role} lane has no vertical axis to score over, once matched "
+                f"on time (its dimensions are {list(lane.dims)}) -- a time_depth "
+                "comparison needs both a time and a depth axis on both lanes."
+            )
+    test, reference, depth_report = _match_vertical(
+        test, reference, tdim, rdim, method=depth_method
+    )
+    report = {
+        "axis": [time_report["axis"], depth_report["axis"]],
+        **{f"time_{k}": v for k, v in time_report.items()},
+        **{f"depth_{k}": v for k, v in depth_report.items()},
+    }
+    return test, reference, report
+
+
 def match_axis(
     test,
     reference,
@@ -1631,9 +1716,13 @@ def match_axis(
     ``depth_method`` (``nearest``/``interp``) is its vertical counterpart, read only
     when ``over`` resolves to the vertical axis -- see :func:`_match_vertical`, which
     it is passed straight through to. The two are separate arguments, not one,
-    because they answer different questions: `over` is never both axes at once (a
-    vertical section over depth *and* along-path distance is `align`'s own, narrower
-    concern, not this function's).
+    because they answer different questions: `over` is ordinarily never both axes at
+    once -- except :data:`TIME_DEPTH_OVER`, the one sentinel that asks for exactly
+    that (a bare ``timeSeriesProfile`` reference's own shape), which this composes
+    from the two matchers below rather than inventing a 2-D interpolation for (see
+    :func:`_match_time_and_depth`); a vertical *section* (depth *and* along-path
+    distance) is a different, narrower concern of :func:`ocean_skill.comparison.
+    Comparison.align`'s own transect route, not this function's.
 
     Returns ``(test, reference, report)`` with both lanes on one axis, named as the
     reference names it; ``report["match_target"]`` says which lane's *stamps* the axis
@@ -1642,6 +1731,19 @@ def match_axis(
     index arithmetic and stay free even when the lanes are a year of daily maps.
     """
     from ocean_skill.operators import _CF_AXES, resolve_dim
+
+    if over == TIME_DEPTH_OVER:
+        return _match_time_and_depth(
+            test,
+            reference,
+            method=method,
+            depth_method=depth_method,
+            tolerance=tolerance,
+            min_overlap=min_overlap,
+            metadata=metadata,
+            test_metadata=test_metadata,
+            bin_anchor=bin_anchor,
+        )
 
     tdim, rdim = resolve_dim(test, over), resolve_dim(reference, over)
     for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
@@ -2389,6 +2491,12 @@ def align(
     from ocean_skill.operators import _CF_AXES
 
     is_vertical_over = _CF_AXES.get(over) == "vertical"
+    # TIME_DEPTH_OVER keeps *two* axes standing (see match_axis's own composed
+    # branch), so its post-match `over`/`keep` are a pair of dim names rather than
+    # the single one every other over= resolves to -- read once, before match_axis
+    # rewrites `over` to whatever it actually matched on, the same way
+    # is_vertical_over is.
+    is_time_depth_over = over == TIME_DEPTH_OVER
 
     if over is not None:
         test, reference, report = match_axis(
@@ -2403,9 +2511,13 @@ def align(
             test_metadata=test_metadata,
             bin_anchor=bin_anchor,
         )
-        over = str(report.pop("axis", over))
+        over = (
+            list(report.pop("axis"))
+            if is_time_depth_over
+            else str(report.pop("axis", over))
+        )
 
-    keep = () if over is None else (over,)
+    keep = () if over is None else (tuple(over) if is_time_depth_over else (over,))
     if is_vertical_over and not is_section:
         # A climatology (aggregate={"time": {"groupby"/"resample": ...}}) folds
         # the raw time axis into bins on *both* lanes alike -- a "month"/"season"
@@ -2586,7 +2698,7 @@ def _align_at_point(
     convention: str,
     test_name: str,
     reference_name: str,
-    over: str | None,
+    over: str | list[str] | None,
     report: dict[str, Any],
 ) -> xr.Dataset:
     """Pair a gridded test lane with a station reference, on the already-matched axis.
