@@ -213,6 +213,18 @@ def test_several_metrics_draw_small_multiples(comparisons):
     assert len(_images(fig)) == 3
 
 
+def test_titles_overrides_one_panel_and_keeps_the_others_auto(comparisons):
+    override = [None, "My Corr Panel", None]
+    fig = portrait(comparisons, metric_names=("bias", "corr", "crmsd"), titles=override)
+    titles = [ax.get_title() for ax in fig.axes if ax.get_images()]
+    assert titles == ["bias", "My Corr Panel", "crmsd"]
+
+
+def test_titles_wrong_length_lists_the_current_titles_to_copy(comparisons):
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        portrait(comparisons, metric_names=("bias", "corr"), titles=["only one"])
+
+
 def test_default_metrics_are_the_four_canonical_statistics(comparisons):
     from ocean_skill.metrics import DEFAULT_MAP_METRICS
 
@@ -331,6 +343,45 @@ def test_interactive_portrait_several_metrics_returns_a_layout(comparisons):
     import holoviews as hv
 
     assert isinstance(obj, hv.Layout)
+
+
+@pytest.mark.slow
+def test_interactive_titles_overrides_one_panel_and_keeps_the_others_auto(comparisons):
+    import holoviews as hv
+
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    items = _items(comparisons)
+    override = [None, "My Corr Panel", None]
+    obj = render(
+        PlotSpec(
+            family="portrait",
+            items=items,
+            options={"metric_names": ("bias", "corr", "crmsd"), "titles": override},
+        ),
+        renderer="holoviews",
+    )
+    heatmaps = obj.traverse(lambda x: x, [hv.HeatMap])
+    titles = {h.opts.get("plot").kwargs.get("title") for h in heatmaps}
+    assert titles == {"bias", "My Corr Panel", "crmsd"}
+
+
+@pytest.mark.slow
+def test_interactive_titles_wrong_length_lists_the_current_titles_to_copy(comparisons):
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    items = _items(comparisons)
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(
+                family="portrait",
+                items=items,
+                options={"metric_names": ("bias", "corr"), "titles": ["only one"]},
+            ),
+            renderer="holoviews",
+        )
 
 
 @pytest.mark.slow

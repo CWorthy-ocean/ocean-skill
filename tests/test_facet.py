@@ -957,6 +957,77 @@ def test_holoviews_draws_the_depth_by_month_grid_too(daily):
     assert "100 m — Jun 2012" in titles
 
 
+def test_titles_overrides_one_month_and_keeps_the_rest_auto(daily):
+    """One facet axis: ``titles=`` is one entry per panel, row-major."""
+    field = aggregate(daily, MONTHLY)
+    spec = PlotSpec(
+        family="field_facet",
+        items=[_item(field, "time")],
+        options={"titles": [None, "My Feb", None, None, None, None]},
+    )
+    static = _mpl_titles(render(spec, renderer="matplotlib"))
+    interactive = _hv_titles(render(spec, renderer="holoviews"))
+    assert static == [
+        "Jan 2012", "My Feb", "Mar 2012", "Apr 2012", "May 2012", "Jun 2012",
+    ]
+    assert "My Feb" in interactive
+    assert "Feb 2012" not in interactive
+
+
+def test_titles_wrong_length_lists_the_current_titles_to_copy(daily):
+    field = aggregate(daily, MONTHLY)
+    spec = PlotSpec(
+        family="field_facet", items=[_item(field, "time")], options={"titles": ["only one"]}
+    )
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(spec, renderer="matplotlib")
+
+
+def test_titles_with_a_row_dim_only_covers_the_top_row_statically(daily):
+    """Static: the top row's ``ncols`` months only, the rotated levels untouched."""
+    item = _item(_by_depth(daily), "time", "depth")
+    spec = PlotSpec(
+        family="field_facet",
+        items=[item],
+        options={"titles": [None, "My Feb", None, None, None, None]},
+    )
+    fig = render(spec, renderer="matplotlib")
+    titles = _mpl_titles(fig)
+    assert titles == [
+        "Jan 2012", "My Feb", "Mar 2012", "Apr 2012", "May 2012", "Jun 2012",
+    ]
+    labels = [
+        ax._osk_row_label.get_text()
+        for ax in fig.axes
+        if getattr(ax, "_osk_row_label", None) is not None
+    ]
+    assert labels == ["0 m", "50 m", "100 m"], "row labels are untouched by titles="
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(family="field_facet", items=[item], options={"titles": ["only one"]}),
+            renderer="matplotlib",
+        )
+
+
+def test_titles_with_a_row_dim_covers_every_panel_interactively(daily):
+    """Interactive: every panel carries its own title, so the list is 3x longer."""
+    item = _item(_by_depth(daily), "time", "depth")
+    override = [None] * 18
+    override[1] = "My Panel"
+    spec = PlotSpec(family="field_facet", items=[item], options={"titles": override})
+    titles = _hv_titles(render(spec, renderer="holoviews"))
+    assert len(titles) == 18
+    assert "My Panel" in titles
+    assert "0 m — Jan 2012" in titles  # untouched slot keeps its own title
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(family="field_facet", items=[item], options={"titles": ["only one"]}),
+            renderer="holoviews",
+        )
+
+
 def test_both_renderers_arrange_the_panels_the_same_way(daily):
     """A plot that rearranges itself when you switch renderer is not the same plot."""
     field = aggregate(daily, MONTHLY)

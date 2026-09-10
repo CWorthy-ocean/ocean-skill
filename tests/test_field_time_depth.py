@@ -359,6 +359,34 @@ def test_a_time_depth_set_draws_a_stacked_column(stub):
     assert len(obj) == 2
 
 
+def test_time_depth_grid_titles_overrides_one_panel_and_keeps_the_other_auto(stub):
+    stub(_point_time_depth())
+    auto = [
+        ax.get_title()
+        for ax in _make_set([NITRATE, "silicate"]).plot().axes
+        if ax.get_title()
+    ]
+    override = [None, "My Silicate Panel"]
+    static = [
+        ax.get_title()
+        for ax in _make_set([NITRATE, "silicate"]).plot(titles=override).axes
+        if ax.get_title()
+    ]
+    assert static == [auto[0], "My Silicate Panel"]
+
+    import holoviews as hv
+
+    obj = _make_set([NITRATE, "silicate"]).plot(renderer="holoviews", titles=override)
+    hv_titles = {
+        el.opts.get("plot").kwargs.get("title")
+        for el in obj.traverse(lambda x: x, [hv.QuadMesh])
+    }
+    assert hv_titles == {auto[0], "My Silicate Panel"}
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        _make_set([NITRATE, "silicate"]).plot(titles=["only one"])
+
+
 def test_a_time_depth_set_grid_layout_and_scale_options(stub):
     """``ncols=``/``nrows=`` wrap the panels; ``shared_limits=True`` warns once
     when the set's variables actually differ (:func:`ocean_skill.plot

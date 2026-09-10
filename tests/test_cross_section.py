@@ -425,6 +425,26 @@ def test_cross_through_land_renders_interactively(patched_read, roms_grid_with_l
     assert obj is not None
 
 
+def test_cross_plot_titles_overrides_one_panel_and_keeps_the_other_auto(
+    patched_read, roms_grid
+):
+    ds, _ = roms_grid
+    name = patched_read(ds)
+    c = osk.field(
+        name,
+        "chl",
+        select={"transect": {"cross": {"eta_rho": 10, "xi_rho": 7}, "half_width": 3}},
+        cache=False,
+    )
+    auto = [ax.get_title() for ax in c.plot().axes if ax.get_title()]
+    override = [None, "My Panel"]
+    titles = [ax.get_title() for ax in c.plot(titles=override).axes if ax.get_title()]
+    assert titles == [auto[0], "My Panel"]
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        c.plot(titles=["only one"])
+
+
 def test_cross_plot_rejects_a_bad_orientation(patched_read, roms_grid):
     ds, _ = roms_grid
     name = patched_read(ds)

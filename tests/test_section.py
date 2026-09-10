@@ -640,6 +640,30 @@ def test_section_row_labels_become_panel_titles():
     assert "difference" in titles
 
 
+def test_section_row_titles_overrides_by_hand_test_reference_difference():
+    override = [None, "My Reference", "My Diff"]
+    static = render(
+        PlotSpec(
+            family="section_row",
+            items=[_section_row_item()],
+            options={"labels": ("roms_run", "woa23"), "titles": override},
+        ),
+        renderer="matplotlib",
+    )
+    titles = [ax.get_title() for ax in static.axes if ax.get_title()]
+    assert titles == ["roms_run", "My Reference", "My Diff"]
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=[_section_row_item()],
+                options={"titles": ["only one"]},
+            ),
+            renderer="matplotlib",
+        )
+
+
 def test_section_row_suptitle_carries_the_path_note():
     fig = render(
         PlotSpec(family="section_row", items=[_section_row_item()]),
@@ -703,6 +727,37 @@ def test_section_row_metrics_fold_into_the_difference_title():
         for qm in obj.traverse(lambda x: x, [hv.QuadMesh])
     ]
     assert any("bias=0.125" in (t or "") for t in titles)
+
+
+def test_section_row_titles_overrides_interactively():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    override = [None, "My Reference", "My Diff"]
+    obj = render(
+        PlotSpec(
+            family="section_row",
+            items=[_section_row_item()],
+            options={"labels": ("roms_run", "woa23"), "titles": override},
+        ),
+        renderer="holoviews",
+    )
+    titles = {
+        qm.opts.get("plot").kwargs.get("title")
+        for qm in obj.traverse(lambda x: x, [hv.QuadMesh])
+    }
+    assert titles == {"roms_run", "My Reference", "My Diff"}
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=[_section_row_item()],
+                options={"titles": ["only one"]},
+            ),
+            renderer="holoviews",
+        )
 
 
 def test_section_row_shares_the_static_colour_limits_interactively():

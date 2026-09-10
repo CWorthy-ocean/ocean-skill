@@ -25,6 +25,7 @@ import numpy as np
 
 from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, norm_for
+from ocean_skill.plot import _titles
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
     is_gshhs,
@@ -715,6 +716,7 @@ def _draw_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -722,6 +724,11 @@ def _draw_row(
     how :func:`field_grid`'s ``shared_limits=True`` makes every row share one
     scale instead of each computing its own. ``robust`` means what it does in
     :func:`_limits`, and is ignored once ``seq_norm`` is given.
+
+    ``titles=`` overrides this row's three panel titles by hand -- test,
+    reference, difference, in that order -- with ``None`` at a position
+    keeping that panel's own (``labels``-derived, or ``"difference"``) title;
+    see :func:`ocean_skill.plot._titles.resolve_titles`.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only draws coordinate *labels* on the leftmost panel (latitude) and, if
@@ -756,10 +763,11 @@ def _draw_row(
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
         div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
 
+    resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
-        (t, tl, seq, seq_norm),
-        (r, rl, seq, seq_norm),
-        (d, "difference", div, div_norm),
+        (t, resolved_titles[0], seq, seq_norm),
+        (r, resolved_titles[1], seq, seq_norm),
+        (d, resolved_titles[2], div, div_norm),
     ]
     ims = []
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
@@ -819,6 +827,7 @@ def _draw_section_row(
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one test|reference|difference section row into three existing axes.
 
@@ -830,7 +839,10 @@ def _draw_section_row(
 
     ``values``/``geometry`` are :func:`ocean_skill.plot.section.prepare_section_row`'s
     own return, unpacked by the caller so this function stays a pure drawing step.
-    ``robust`` means what it does in :func:`_limits`.
+    ``robust`` means what it does in :func:`_limits`. ``titles=`` overrides this
+    row's three panel titles by hand -- test, reference, difference, in that
+    order -- with ``None`` at a position keeping that panel's own title; see
+    :func:`ocean_skill.plot._titles.resolve_titles`.
     """
     import matplotlib.colors as mcolors
 
@@ -846,10 +858,11 @@ def _draw_section_row(
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
     div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
 
+    resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
-        (t, tl, seq, seq_norm),
-        (r, rl, seq, seq_norm),
-        (d, "difference", div, div_norm),
+        (t, resolved_titles[0], seq, seq_norm),
+        (r, resolved_titles[1], seq, seq_norm),
+        (d, resolved_titles[2], div, div_norm),
     ]
     ims = []
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
@@ -1048,6 +1061,7 @@ def series(
     mark: str = "line",
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    titles: Sequence[str | None] | None = None,
     colors=None,
     ylim: tuple[float, float] | None = None,
     panel_aspect: float | None = None,
@@ -1098,8 +1112,10 @@ def series(
     already agree, and otherwise one key per panel in whichever corner the data leaves
     emptiest. ``line_labels=`` overrides the legend text itself, one string per unique
     line in first-appearance order -- pass the wrong count and the ``ValueError`` lists
-    the current labels, ready to copy and edit. ``colors=`` pins the auto colour cycle
-    to specific values instead; see :func:`ocean_skill.plot.style.resolve`.
+    the current labels, ready to copy and edit. ``titles=`` overrides each panel's own
+    title the same way, one string per panel with ``None`` keeping that panel's auto
+    title. ``colors=`` pins the auto colour cycle to specific values instead; see
+    :func:`ocean_skill.plot.style.resolve`.
 
     Each panel's statistics box prefixes its rows automatically with whichever
     field(s) actually distinguish them -- the variable when a panel holds several,
@@ -1164,6 +1180,7 @@ def series(
         metrics_labels=metrics_labels,
         legend=legend,
         line_labels=line_labels,
+        titles=titles,
         colors=colors,
         ncols=ncols,
         nrows=nrows,
@@ -1805,6 +1822,7 @@ def field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -1863,6 +1881,13 @@ def field_row(
     no left-edge row label to carry the variable (that is :func:`field_grid`'s doing,
     and only when it stacks several), so without this the figure said only *which
     sources*, never *what*. Pass ``title=""`` to drop it, or any string to replace it.
+
+    ``titles=`` overrides the three panel titles by hand -- test, reference,
+    difference, in that order -- with ``None`` at a position keeping that panel's
+    own (``labels=``-derived, or ``"difference"``) title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles. This is a different
+    knob from ``title``: ``title``/``suptitle_kwargs`` set the one figure-wide
+    suptitle above the row, ``titles=`` sets the three panels' own.
 
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
@@ -1938,6 +1963,7 @@ def field_row(
         coastline_resolution=coastline_resolution,
         land=land,
         robust=robust,
+        titles=titles,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2381,6 +2407,7 @@ def field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -2437,6 +2464,12 @@ def field_grid(
     :func:`grid_suptitle`; the part the rows *differ* in is already their left-edge row
     label, so it is left off the top title rather than repeated. A grid whose rows share
     nothing nameable draws no suptitle, as before. Pass ``title=""`` to drop it.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list (row 0's test/reference/difference, then row 1's, ...), so a
+    grid of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps
+    that panel's own title; the wrong count raises a copy-pasteable
+    ``ValueError`` listing the current titles.
 
     The ``*_kwargs`` parameters each merge onto their current defaults and map onto
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
@@ -2504,13 +2537,17 @@ def field_grid(
             comparisons, test_name, reference_name, robust=robust
         )
 
+    row_labels = [comp.get("labels") or labels or ("test", "reference") for comp in comparisons]
+    auto_titles = [t for tl, rl in row_labels for t in (tl, rl, "difference")]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
     for i, comp in enumerate(comparisons):
         ims, lab = _draw_row(
             axes[i],
             comp["aligned"],
             test_name=test_name,
             reference_name=reference_name,
-            labels=comp.get("labels") or labels or ("test", "reference"),
+            labels=row_labels[i],
             units=comp.get("units"),
             standard_name=comp.get("standard_name"),
             metrics=comp.get("metrics"),
@@ -2531,6 +2568,7 @@ def field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            titles=resolved_titles[i * 3 : i * 3 + 3],
         )
         _draw_colorbar(
             fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -2848,6 +2886,7 @@ def field_facet(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -2886,6 +2925,12 @@ def field_facet(
     :func:`field_grid` uses. The panels having said *when*, the suptitle says *what* the
     panels no longer do: it defaults to the variable, depth and (if collapsed to one
     instant) time (see :func:`field_suptitle`), and ``title=""`` drops it.
+
+    ``titles=`` overrides the drawn panel titles by hand, one string per *titled*
+    panel in row-major order -- every panel with one facet axis, only the top
+    row's ``ncols`` with two (the row labels down the left edge are untouched).
+    ``None`` at a position keeps that panel's own title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
 
     The ``*_kwargs`` parameters and ``font_scale`` mean exactly what they do in
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
@@ -3020,6 +3065,12 @@ def field_facet(
         facet_labels(field[row_dim])
         if row_dim and row_dim in field.coords
         else [None] * nrows
+    )
+    # Only the drawn (titled) panels take a titles= entry: every panel with one
+    # facet axis, or just the top row's ncols labels with two -- the row labels
+    # down the left edge are a separate thing (row_labels, above), untouched here.
+    labels = _titles.resolve_titles(
+        [lab if lab is not None else "" for lab in labels], titles
     )
 
     fig, axes = plt.subplots(
@@ -3316,6 +3367,7 @@ def cross(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw two vertical sections through one point, one along each grid direction.
 
@@ -3348,6 +3400,11 @@ def cross(
     ``rasterize``/``hover`` (interactive-only, see
     :func:`_warn_if_interactive_only`), ``robust`` -- means exactly what it does in
     :func:`section`, applied to the one scale the two panels share.
+
+    ``titles=`` overrides the two panel titles by hand, in ``items`` order --
+    ``None`` at a position keeps that panel's own (``label`` + ``path_note``)
+    title; the wrong count raises a copy-pasteable ``ValueError`` listing the
+    current titles.
     """
     import matplotlib.pyplot as plt
 
@@ -3409,8 +3466,17 @@ def cross(
         nrows, ncols, figsize=figsize, constrained_layout=True
     )
     axes = list(np.atleast_1d(axes_grid).ravel())
+    auto_titles = []
+    for item, (_, geometry) in zip(items, prepared, strict=True):
+        label = item.get("label") or ""
+        path_note = geometry.path_note
+        auto_titles.append(f"{label} — {path_note}" if label else path_note)
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
     ims = []
-    for ax, item, (values, geometry) in zip(axes, items, prepared, strict=True):
+    for ax, (values, geometry), panel_title in zip(
+        axes, prepared, resolved_titles, strict=True
+    ):
         ax.set_facecolor("0.85")  # section()'s below-bathymetry/off-domain grey
         draw = ax.contourf if mark == "contourf" else ax.pcolormesh
         kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
@@ -3426,9 +3492,6 @@ def cross(
         ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
         ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
         ax.tick_params(axis="both", labelsize=scale["tick_label"])
-        label = item.get("label") or ""
-        path_note = geometry.path_note
-        panel_title = f"{label} — {path_note}" if label else path_note
         t = ax.set_title(panel_title, **title_kwargs)
         t._osk_size_pinned = title_pinned
         ims.append(im)
@@ -3639,6 +3702,7 @@ def time_depth_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Stack several ``time_depth`` panels -- one per item -- in a single figure.
 
@@ -3692,6 +3756,11 @@ def time_depth_grid(
     ``robust`` means what it does in :func:`_limits`: each panel's (or, with
     ``shared_limits=True``, every panel's shared) colour scale spans the full data
     range by default, or its 10th–90th percentile with ``robust=True``.
+
+    ``titles=`` overrides each panel's own title by hand, one string per item in
+    ``items`` order (row-major, matching the panel grid) -- ``None`` at a
+    position keeps that panel's own title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     import matplotlib.pyplot as plt
 
@@ -3783,8 +3852,16 @@ def time_depth_grid(
             [np.asarray(values[geometry.y_name]) for values, geometry in prepared]
         )
 
-    for index, (item, (values, geometry), panel_mark) in enumerate(
-        zip(items, prepared, marks)
+    auto_titles = [
+        " · ".join(
+            p for p in (item.get("label"), geometry.place_note, geometry.period_note) if p
+        )
+        for item, (_, geometry) in zip(items, prepared)
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    for index, (item, (values, geometry), panel_mark, panel_title) in enumerate(
+        zip(items, prepared, marks, resolved_titles)
     ):
         ax = flat[index]
         if shared_limits:
@@ -3797,9 +3874,6 @@ def time_depth_grid(
         if shared_depth is not None:
             y_lo, y_hi = shared_depth
             ax.set_ylim(y_hi, y_lo)  # deep at the bottom, shallow at top
-        panel_title = " · ".join(
-            p for p in (item.get("label"), geometry.place_note, geometry.period_note) if p
-        )
         ax.set_title(panel_title, fontsize=scale["title"], **_without_font(title_kwargs))
         ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
         _x_axis(
@@ -3861,6 +3935,7 @@ def field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one map per item -- several *variables*, not one variable's own facet axis.
 
@@ -3891,6 +3966,11 @@ def field_map_grid(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
     set to each renderer (see :func:`_warn_if_interactive_only`) -- they are the
     interactive renderer's fix for a large mesh and do nothing here.
+
+    ``titles=`` overrides each panel's own title by hand, one string per item in
+    ``items`` order (row-major, matching the panel grid) -- ``None`` at a
+    position keeps that panel's own (:func:`field_title`) title; the wrong count
+    raises a copy-pasteable ``ValueError`` listing the current titles.
     """
     import warnings
 
@@ -3972,6 +4052,9 @@ def field_map_grid(
     )
     flat = list(axes.ravel())
 
+    auto_titles = [field_title(item.get("standard_name")) for item in items]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
     for i, item in enumerate(items):
         ax = flat[i]
         col = i % ncols
@@ -3983,7 +4066,7 @@ def field_map_grid(
         im = _draw_map(
             ax,
             field,
-            label=field_title(standard_name),
+            label=resolved_titles[i],
             cmap=cmap,
             norm=norm,
             mark=mark,
@@ -4052,6 +4135,7 @@ def section_row(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -4079,7 +4163,8 @@ def section_row(
     Everything else — sizing (``size``/``zoom``/``figsize``), ``font_scale``,
     ``fit_text``, ``align_colorbars``, ``metric_keys``, the ``*_kwargs`` dicts,
     ``rasterize``/``hover`` (interactive-only, see
-    :func:`_warn_if_interactive_only`) — means exactly what it does in
+    :func:`_warn_if_interactive_only`), ``titles=`` (the three panels' own
+    titles, ``None`` keeping a panel's own) — means exactly what it does in
     :func:`field_row`.
     """
     import matplotlib.pyplot as plt
@@ -4125,6 +4210,7 @@ def section_row(
         scale=scale,
         defaults=defaults,
         robust=robust,
+        titles=titles,
     )
     _draw_colorbar(
         fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
@@ -4258,6 +4344,7 @@ def skill_map(
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one map per skill metric: where the model agrees, metric by metric.
 
@@ -4331,6 +4418,13 @@ def skill_map(
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every panel — see :func:`field_row`'s docstring.
+
+    ``titles=`` overrides the drawn panel titles by hand, one string per titled
+    panel in row-major order -- every panel when there is one item, else only
+    the top row (one per metric with ``layout="rows"``, one per item with
+    ``layout="columns"``; the rotated edge label down the left is untouched).
+    ``None`` at a position keeps that panel's own title; the wrong count raises
+    a copy-pasteable ``ValueError`` listing the current titles.
     """
     import warnings
 
@@ -4354,7 +4448,7 @@ def skill_map(
 
     if layout not in ("rows", "columns"):
         raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
-    titles = metric_panel_titles(names)
+    metric_titles = metric_panel_titles(names)
     aspect = _aspect_of(items[0]["skill"][names[0]])
     canvas = resolve_canvas(size, zoom)
     stacked = len(items) > 1
@@ -4471,6 +4565,21 @@ def skill_map(
     panel_axes: dict[str, list[Any]] = {name: [] for name in names}
     panel_mappable: dict[str, Any] = {}
 
+    # Titled panels only -- the top row when stacked (every panel otherwise), the
+    # same condition both label branches below already use. The rotated edge label
+    # down the left (row_label/metric name) is a separate thing and untouched here.
+    titled_indices = [i for i in range(len(panels)) if not stacked or i // ncols == 0]
+    auto_titles = []
+    for i in titled_indices:
+        row_index, name = panels[i]
+        if layout == "columns" and stacked:
+            auto_titles.append(items[row_index].get("row_label") or "")
+        else:
+            auto_titles.append(metric_titles[names.index(name)])
+    resolved_by_index = dict(
+        zip(titled_indices, _titles.resolve_titles(auto_titles, titles), strict=True)
+    )
+
     for i, (row_index, name) in enumerate(panels):
         ax = flat[i]
         row, col = divmod(i, ncols)
@@ -4486,10 +4595,7 @@ def skill_map(
         # the label only needs to appear once: "rows" repeats metrics across columns,
         # so the metric title is shown on the top row only (row-label carries the
         # comparison down the left edge instead); "columns" transposes both roles.
-        if layout == "columns" and stacked:
-            label = item.get("row_label") if row == 0 else None
-        else:
-            label = titles[names.index(name)] if (not stacked or row == 0) else None
+        label = resolved_by_index.get(i)
         im = _draw_map(
             ax,
             item["skill"][name],
@@ -4532,7 +4638,7 @@ def skill_map(
         if label is not None:
             ax.title._osk_size_pinned = title_pinned
         edge_label = (
-            titles[names.index(name)]
+            metric_titles[names.index(name)]
             if (layout == "columns" and stacked)
             else item.get("row_label")
         )

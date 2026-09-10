@@ -544,6 +544,64 @@ def test_a_row_with_no_depth_or_time_titles_from_the_variable_alone():
     assert _mpl_row(depth=None, time=None)._suptitle.get_text() == "chlorophyll a"
 
 
+def test_field_row_titles_overrides_by_hand_test_reference_difference():
+    """``titles=`` is test/reference/difference, in order; ``None`` keeps the auto one."""
+    item = _row_item()
+    override = [None, "My Reference", "My Diff"]
+    static = _matplotlib_panel_titles(
+        render(PlotSpec(family="field_row", items=[item], options={"titles": override}))
+    )
+    interactive = _holoviews_panel_titles(
+        render(
+            PlotSpec(family="field_row", items=[item], options={"titles": override}),
+            renderer="holoviews",
+        )
+    )
+    assert static == ["test", "My Reference", "My Diff"]
+    assert set(interactive) == {"test", "My Reference", "My Diff"}
+
+
+def test_field_row_titles_wrong_length_lists_the_current_titles_to_copy():
+    item = _row_item()
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(family="field_row", items=[item], options={"titles": ["only one"]})
+        )
+
+
+def test_field_grid_titles_overrides_by_row_major_flat_list(two_rows):
+    """A grid of ``n`` rows takes ``3 * n`` entries, row 0's three then row 1's."""
+    override = [None, "My Nitrate Ref", None, None, "My Phosphate Ref", None]
+    static = _matplotlib_panel_titles(
+        render(PlotSpec(family="field_grid", items=two_rows, options={"titles": override}))
+    )
+    interactive = _holoviews_panel_titles(
+        render(
+            PlotSpec(family="field_grid", items=two_rows, options={"titles": override}),
+            renderer="holoviews",
+        )
+    )
+    assert static == [
+        "GOM_bgc", "My Nitrate Ref", "difference",
+        "GOM_bgc", "My Phosphate Ref", "difference",
+    ]
+    assert any(t == "My Nitrate Ref" for t in interactive)
+    assert any(t == "My Phosphate Ref" for t in interactive)
+    assert not any("woa23_nitrate" in t or "woa23_phosphate" in t for t in interactive)
+    # untouched slots keep their own auto title (row_label folded in, interactively)
+    assert any("nitrate — GOM_bgc" in t for t in interactive)
+    assert any("phosphate — GOM_bgc" in t for t in interactive)
+
+
+def test_field_grid_titles_wrong_length_lists_the_current_titles_to_copy(two_rows):
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(
+                family="field_grid", items=two_rows, options={"titles": ["only one"]}
+            )
+        )
+
+
 def test_a_grid_does_not_borrow_the_single_rows_auto_title(two_rows):
     """The auto suptitle is the *single* row's: a grid names its variable down each
     row's left edge and carries one title up top, so per-row titling must not leak in.
@@ -747,6 +805,23 @@ def test_skill_map_draws_a_single_metric_panel(skill_item):
         )
     )
     assert len(interactive) == 1
+
+
+def test_skill_map_titles_overrides_one_metric_and_keeps_others(skill_item):
+    """One item titles every panel, so ``titles=`` covers all of ``_SKILL_METRICS``."""
+    override = [None, "My CRMSD", None, None]
+    static = _matplotlib_panel_titles(render(_skill_spec(skill_item, titles=override)))
+    interactive = _holoviews_panel_titles(
+        render(_skill_spec(skill_item, titles=override), renderer="holoviews")
+    )
+    assert static == ["bias", "My CRMSD", "corr", "sigma_ratio"]
+    assert "My CRMSD" in interactive
+    assert any(t.startswith("bias (") for t in interactive), "untouched slots keep auto"
+
+
+def test_skill_map_titles_wrong_length_lists_the_current_titles_to_copy(skill_item):
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(_skill_spec(skill_item, titles=["only one"]))
 
 
 def test_the_overall_value_reaches_the_static_corner_box(skill_item):
