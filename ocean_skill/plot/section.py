@@ -141,6 +141,22 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     depth = (-depth_source).rename("depth")
     depth.attrs["units"] = "m"
 
+    # Native-s only: a land column's z_rho/z_w is NaN (roms.standardize masks the
+    # free surface zeta over land, and z_rho/z_w are built from it), which pcolormesh
+    # tolerates in the *data* it colours (that is how a below-bathymetry cell draws
+    # grey, see ax.set_facecolor("0.85") in both renderers) but refuses in the x/y
+    # coordinate arrays it meshes against. Filled here, in the coordinate only --
+    # `da`/`values` below still carry the real NaN, so the cell still draws grey --
+    # with the transect's own mean depth profile at that level: a finite, plausible
+    # seafloor for the mesh geometry at a column real data never reaches anyway.
+    # `fillna(0.0)` is the last resort for an all-land transect, where the profile
+    # itself has nothing finite to average. A fixed-depth section's 1-D "z" (no
+    # ALONG_DIM in its own dims) and an all-wet transect (no NaN at all) are both
+    # untouched.
+    if ALONG_DIM in depth.dims and bool(np.isnan(depth).any()):
+        profile = depth.mean(ALONG_DIM, skipna=True)
+        depth = depth.fillna(profile).fillna(0.0)
+
     distance = da[ALONG_DIM].rename("distance")
     distance.attrs["units"] = da[ALONG_DIM].attrs.get("units", "km")
 

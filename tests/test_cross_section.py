@@ -348,6 +348,75 @@ def test_cross_plot_orientation_horizontal(patched_read, roms_grid):
     assert len(fig.axes) == 3
 
 
+@pytest.fixture
+def roms_grid_with_land():
+    """Like ``roms_grid``, but with a land strip and a real free surface.
+
+    Reproduces ``roms.standardize``'s own masked-zeta chain (zeta masked over
+    land *before* ``add_depth_coord`` builds ``z_rho`` from it) -- the gap
+    ``roms_grid``'s zero-zeta, all-wet shape leaves untested. This is the exact
+    shape that reached real ROMS output (an ``esper`` run) as a bare
+    ``pcolormesh`` ``ValueError``: a native-s ``cross`` crossing land.
+    """
+    ny, nx = 21, 15
+    h = np.linspace(30.0, 3000.0, ny * nx).reshape(ny, nx)
+    mask = np.ones((ny, nx))
+    mask[:3, :3] = 0.0  # a land corner near the cross center below
+    sigma_r = (np.arange(1, N + 1) - N - 0.5) / N
+    sigma_w = np.linspace(-1, 0, N + 1)
+    lon_1d = np.linspace(-96.0, -92.0, nx)
+    lat_1d = np.linspace(20.0, 30.0, ny)
+    lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    ds = xr.Dataset(
+        {
+            "h": (("eta_rho", "xi_rho"), h),
+            "mask_rho": (("eta_rho", "xi_rho"), mask),
+            "sigma_r": (("s_rho",), sigma_r),
+            "Cs_r": (("s_rho",), _stretch(sigma_r)),
+            "sigma_w": (("s_w",), sigma_w),
+            "Cs_w": (("s_w",), _stretch(sigma_w)),
+        },
+        coords={
+            "lon": (("eta_rho", "xi_rho"), lon_2d),
+            "lat": (("eta_rho", "xi_rho"), lat_2d),
+        },
+    )
+    zeta = xr.zeros_like(ds["h"]).where(ds["mask_rho"] == 1)  # masked before z_rho
+    ds = ds.assign(zeta=zeta)
+    meta = {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}
+    ds = roms.add_depth_coord(ds, meta)
+    ds = ds.assign(chl=(20.0 + 0.002 * ds["z_rho"]).where(ds["mask_rho"] == 1))
+    return ds
+
+
+def test_cross_through_land_renders_statically(patched_read, roms_grid_with_land):
+    """The exact ``esper`` failure: a native-s cross whose window reaches land."""
+    name = patched_read(roms_grid_with_land)
+    c = osk.field(
+        name,
+        "chl",
+        select={"transect": {"cross": {"eta_rho": 2, "xi_rho": 2}, "half_width": 3}},
+        cache=False,
+    )
+    assert bool(np.isnan(c.along.data["z_rho"]).any())  # the fixture has real land
+    fig = c.plot()
+    assert len(fig.axes) == 3
+
+
+def test_cross_through_land_renders_interactively(patched_read, roms_grid_with_land):
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    name = patched_read(roms_grid_with_land)
+    c = osk.field(
+        name,
+        "chl",
+        select={"transect": {"cross": {"eta_rho": 2, "xi_rho": 2}, "half_width": 3}},
+        cache=False,
+    )
+    obj = c.plot(renderer="holoviews")
+    assert obj is not None
+
+
 def test_cross_plot_rejects_a_bad_orientation(patched_read, roms_grid):
     ds, _ = roms_grid
     name = patched_read(ds)
