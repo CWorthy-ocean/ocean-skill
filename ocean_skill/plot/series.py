@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from ocean_skill import _stacklevel
+from ocean_skill.plot import _titles
 from ocean_skill.plot import style as _style
 
 __all__ = [
@@ -915,6 +916,7 @@ def compose(
     metrics_labels: Sequence[str] | None = None,
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    titles: Sequence[str | None] | None = None,
     colors=None,
     ncols: int | None = None,
     nrows: int | None = None,
@@ -938,6 +940,12 @@ def compose(
     panel -- the wrong count raises a copy-pasteable ``ValueError`` listing the
     current auto labels, the same UX ``line_labels=`` gives (see
     :func:`_resolve_metrics_labels`).
+
+    ``titles=`` overrides each panel's auto-generated title by hand, one
+    string per panel in panel order -- ``None`` at a position keeps that
+    panel's auto title, so a partial override only needs to name the panels
+    it changes. The wrong count raises a copy-pasteable ``ValueError`` listing
+    the current titles (see :func:`ocean_skill.plot._titles.resolve_titles`).
 
     ``colors=`` pins the auto colour cycle to specific values instead; see
     :func:`ocean_skill.plot.style.resolve`.
@@ -1114,6 +1122,12 @@ def compose(
                 legend_corner=legend_at,
             )
         )
+
+    resolved_titles = _titles.resolve_titles([p.title for p in panels], titles)
+    panels = [
+        replace(p, title=t) if t != p.title else p
+        for p, t in zip(panels, resolved_titles, strict=True)
+    ]
 
     eff_nrows, eff_ncols = grid_shape(
         len(panels), as_columns=cols is not None, ncols=ncols, nrows=nrows

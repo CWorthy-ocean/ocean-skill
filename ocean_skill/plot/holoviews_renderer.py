@@ -424,6 +424,7 @@ def _field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -459,8 +460,13 @@ def _field_row(
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``field_row`` docstring.
+
+    ``titles=`` overrides the three panel titles by hand -- test, reference,
+    difference, in that order -- with ``None`` at a position keeping that
+    panel's own title; see :func:`ocean_skill.plot._titles.resolve_titles`.
     """
     from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
@@ -483,6 +489,9 @@ def _field_row(
     if summary:
         diff_title = f"difference ({summary})"
     test_title = f"{row_label} — {tl}" if row_label else str(tl)
+    test_title, ref_title, diff_title = _titles.resolve_titles(
+        [test_title, str(rl), diff_title], titles
+    )
 
     panels = [
         _quadmesh(
@@ -502,7 +511,7 @@ def _field_row(
         ),
         _quadmesh(
             r,
-            title=str(rl),
+            title=ref_title,
             cmap=seq,
             clim=(vmin, vmax),
             units=units,
@@ -556,6 +565,7 @@ def _field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -586,13 +596,35 @@ def _field_grid(
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
     can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
     same way, as does ``robust`` — each row's colour scale is its own.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list (row 0's test/reference/difference, then row 1's, ...), so a
+    grid of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps
+    that panel's own title; the wrong count raises a copy-pasteable
+    ``ValueError`` listing the current titles.
     """
+    from ocean_skill.plot import _titles
+
     hv = _extension()
     title = _default_grid_title(items, title)
+    row_labels = [it.get("labels") or labels for it in items]
+
+    def _row_auto_titles(it, tl, rl):
+        test_title = f"{it.get('row_label')} — {tl}" if it.get("row_label") else str(tl)
+        summary = _metrics_summary(it.get("metrics"), metric_keys)
+        diff_title = f"difference ({summary})" if summary else "difference"
+        return test_title, str(rl), diff_title
+
+    auto_titles = [
+        t
+        for it, (tl, rl) in zip(items, row_labels)
+        for t in _row_auto_titles(it, tl, rl)
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
     rows = [
         _field_row(
             it,
-            labels=it.get("labels") or labels,
+            labels=row_labels[i],
             geo=geo,
             shared_axes=shared_axes,
             metric_keys=metric_keys,
@@ -606,8 +638,9 @@ def _field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            titles=resolved_titles[i * 3 : i * 3 + 3],
         )
-        for it in items
+        for i, it in enumerate(items)
     ]
     layout = rows[0]
     for extra in rows[1:]:
@@ -646,6 +679,7 @@ def _field_facet(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -684,8 +718,18 @@ def _field_facet(
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``field_facet`` docstring.
+
+    ``titles=`` overrides the drawn panel titles by hand, one string per panel in
+    row-major order. Note this differs in length from the static renderer's own
+    ``titles=`` with a ``row_dim``: the static grid only titles its top row (the
+    level joins a rotated row label instead), while every panel here carries its
+    own title (bokeh has no rotated label, so the level is folded into it) --
+    ``nrows * ncols`` entries here against ``ncols`` there. ``None`` at a
+    position keeps that panel's own title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
         _limits,
@@ -758,18 +802,31 @@ def _field_facet(
         )
     ncols = max(int(ncols), 1)
 
-    def _panel(row, col):
+    width = ncols if row_dim is not None else n
+    coords = [(row, col) for row in range(nrows) for col in range(width)]
+
+    def _auto_title(row, col):
         if row_dim is not None:
-            sub = field.isel({row_dim: row, facet_dim: col})
             # bokeh has no rotated row label, so the level joins the panel's own
             # title -- the same move _field_row makes for a field grid's row_label
-            title = f"{row_labels[row]} — {labels[col]}"
-        else:
-            sub = field.isel({facet_dim: col}) if facet_dim else field
-            title = str(labels[col])
+            return f"{row_labels[row]} — {labels[col]}"
+        return str(labels[col])
+
+    resolved_titles = _titles.resolve_titles(
+        [_auto_title(row, col) for row, col in coords], titles
+    )
+
+    def _panel(row, col, panel_title):
+        sub = (
+            field.isel({row_dim: row, facet_dim: col})
+            if row_dim is not None
+            else field.isel({facet_dim: col})
+            if facet_dim
+            else field
+        )
         mesh = _quadmesh(
             sub,
-            title=title,
+            title=panel_title,
             cmap=seq,
             clim=clims[row],
             units=units,
@@ -785,9 +842,8 @@ def _field_facet(
         return mesh if outline is None else mesh * outline
 
     panels = [
-        _panel(row, col)
-        for row in range(nrows)
-        for col in range(ncols if row_dim is not None else n)
+        _panel(row, col, panel_title)
+        for (row, col), panel_title in zip(coords, resolved_titles, strict=True)
     ]
     if len(panels) == 1:
         # A lone panel is an Overlay, which has no .cols() -- and stays a plain
@@ -795,7 +851,7 @@ def _field_facet(
         # same choice a single frame of _facet_movie/_field_movie makes.
         single = panels[0]
         if title:
-            panel_label = labels[0] if (facet_dim and labels and labels[0]) else ""
+            panel_label = resolved_titles[0]
             text = f"{title} — {panel_label}" if panel_label else str(title)
             single = single.opts(title=text)
         return single
@@ -888,6 +944,7 @@ def _cross(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """Two interactive vertical sections through one point, one per grid direction.
@@ -906,6 +963,11 @@ def _cross(
     already gets its own from :func:`_section`, close enough for the same
     variable that a second pass to force them identical is not worth bokeh's
     own per-panel colorbar convention.
+
+    ``titles=`` overrides the two panel titles by hand, in ``items`` order --
+    ``None`` at a position keeps that panel's own (``label`` + ``path_note``)
+    title; the wrong count raises a copy-pasteable ``ValueError`` listing the
+    current titles.
     """
     hv = _extension()
 
@@ -920,14 +982,27 @@ def _cross(
             "default) or 'horizontal' (side by side)."
         )
 
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import suptitle_text
+    from ocean_skill.plot.section import prepare_section
 
     if title is None:
         title = suptitle_text(items[0].get("standard_name"), (items[0].get("depth"),))
 
+    auto_titles = [
+        suptitle_text(
+            item.get("standard_name"),
+            (item.get("depth"), prepare_section(item["field"])[1].path_note),
+            label=item.get("label"),
+        )
+        for item in items
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
     panels = [
         _section(
             item,
+            title=panel_title,
             font_scale=font_scale,
             size=size,
             zoom=zoom,
@@ -935,7 +1010,7 @@ def _cross(
             rasterize=rasterize,
             robust=robust,
         )
-        for item in items
+        for item, panel_title in zip(items, resolved_titles, strict=True)
     ]
     layout = (panels[0] + panels[1]).cols(1 if orientation == "vertical" else 2)
     layout = layout.opts(hv.opts.Layout(shared_axes=False))
@@ -1098,6 +1173,7 @@ def _time_depth_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """Stack several interactive ``time_depth`` panels -- one per item.
@@ -1130,9 +1206,15 @@ def _time_depth_grid(
     reach. ``sharey=True`` computes one shared depth range the same way
     (:func:`~ocean_skill.plot.series.value_span` again) and bakes it into every
     panel's own ``ylim``.
+
+    ``titles=`` overrides each panel's own title by hand, one string per item
+    in ``items`` order (row-major, matching the panel grid) -- ``None`` at a
+    position keeps that panel's own title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     hv = _extension()
 
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import _limits, grid_suptitle
     from ocean_skill.plot.series import grid_shape, time_values, value_span
     from ocean_skill.plot.time_depth import prepare_time_depth
@@ -1176,13 +1258,18 @@ def _time_depth_grid(
             [np.asarray(field[geometry.y_name]) for field, geometry in prepared]
         )
 
-    plots = []
-    for item, (_, geometry) in zip(items, prepared):
-        panel_title = " · ".join(
+    auto_titles = [
+        " · ".join(
             p
             for p in (item.get("label"), geometry.place_note, geometry.period_note)
             if p
         )
+        for item, (_, geometry) in zip(items, prepared)
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    plots = []
+    for item, panel_title in zip(items, resolved_titles):
         plots.append(
             _time_depth(
                 item,
@@ -1219,6 +1306,7 @@ def _field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """One interactive map per item -- several *variables*, not one facet axis.
@@ -1243,8 +1331,14 @@ def _field_map_grid(
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits`, applied to each panel's own scale -- see the static renderer's
     ``field_map_grid`` docstring.
+
+    ``titles=`` overrides each panel's own title by hand, one string per item
+    in ``items`` order (row-major, matching the panel grid) -- ``None`` at a
+    position keeps that panel's own (:func:`field_title`) title; the wrong
+    count raises a copy-pasteable ``ValueError`` listing the current titles.
     """
     from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
         _limits,
@@ -1264,8 +1358,12 @@ def _field_map_grid(
         )
     ncols = max(int(ncols), 1)
 
+    resolved_titles = _titles.resolve_titles(
+        [field_title(item.get("standard_name")) for item in items], titles
+    )
+
     panels = []
-    for item in items:
+    for item, panel_title in zip(items, resolved_titles, strict=True):
         field = item["field"]
         standard_name = item.get("standard_name")
         seq, _div = cmaps_for(standard_name)
@@ -1275,7 +1373,7 @@ def _field_map_grid(
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
             field,
-            title=field_title(standard_name),
+            title=panel_title,
             cmap=seq,
             clim=clim,
             units=item.get("units") or "",
@@ -1319,6 +1417,7 @@ def _section_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    titles=None,
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -1340,8 +1439,13 @@ def _section_row(
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``section_row`` docstring.
+
+    ``titles=`` overrides the three panel titles by hand -- test, reference,
+    difference, in that order -- with ``None`` at a position keeping that
+    panel's own title.
     """
     from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
     from ocean_skill.plot.section import prepare_section_row
     from ocean_skill.plot.typography import SECTION_ASPECT
@@ -1369,6 +1473,7 @@ def _section_row(
     summary = _metrics_summary(item.get("metrics"), metric_keys)
     if summary:
         diff_title = f"difference ({summary})"
+    tl, rl, diff_title = _titles.resolve_titles([str(tl), str(rl), diff_title], titles)
 
     section_opts = dict(
         geo=False,
@@ -1385,11 +1490,11 @@ def _section_row(
     )
     panels = [
         _quadmesh(
-            t, title=str(tl), cmap=seq, clim=(vmin, vmax), units=units, log=log,
+            t, title=tl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
             **section_opts,
         ),
         _quadmesh(
-            r, title=str(rl), cmap=seq, clim=(vmin, vmax), units=units, log=log,
+            r, title=rl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
             **section_opts,
         ),
         _quadmesh(
@@ -1467,6 +1572,7 @@ def _skill_map(
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    titles=None,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -1513,8 +1619,18 @@ def _skill_map(
 
     ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
     every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
+
+    ``titles=`` overrides the drawn panel titles by hand, one string per panel
+    in row-major (``order``) order -- the full displayed text, comparison
+    prefix and metric value suffix included. Note this differs in length from
+    the static renderer's own ``titles=``: every panel carries its own title
+    here (bokeh has no rotated row label, so the comparison joins it instead),
+    while the static grid only titles its top row/first column. ``None`` at a
+    position keeps that panel's own title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
         metric_arrays,
@@ -1539,7 +1655,7 @@ def _skill_map(
 
     if layout not in ("rows", "columns"):
         raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
-    titles = metric_panel_titles(names)
+    metric_titles = metric_panel_titles(names)
     stacked = len(items) > 1
     if stacked:
         ncols = len(items) if layout == "columns" else len(names)
@@ -1584,8 +1700,22 @@ def _skill_map(
         {"xlim": (box[0], box[1]), "ylim": (box[2], box[3])} if box else {}
     )
 
+    def _auto_title(row, name):
+        item = items[row]
+        base = metric_titles[names.index(name)]
+        # bokeh has no rotated row label, so the comparison joins the panel's own
+        # title -- the same move _field_row makes for a field grid's row_label
+        if stacked and item.get("row_label"):
+            base = f"{item['row_label']} — {base}"
+        value = metric_value_text(item.get("metrics"), name)
+        return f"{base} ({value})" if value else base
+
+    resolved_titles = _titles.resolve_titles(
+        [_auto_title(row, name) for row, name in order], titles
+    )
+
     panels = []
-    for row, name in order:
+    for (row, name), panel_title in zip(order, resolved_titles, strict=True):
         item = items[row]
         colors = (
             shared_colors[name]
@@ -1594,15 +1724,9 @@ def _skill_map(
                 name, arrays[row][name], standard_name=item.get("standard_name")
             )
         )
-        base = titles[names.index(name)]
-        # bokeh has no rotated row label, so the comparison joins the panel's own
-        # title -- the same move _field_row makes for a field grid's row_label
-        if stacked and item.get("row_label"):
-            base = f"{item['row_label']} — {base}"
-        value = metric_value_text(item.get("metrics"), name)
         mesh = _quadmesh(
             item["skill"][name],
-            title=f"{base} ({value})" if value else base,
+            title=panel_title,
             cmap=colors.cmap,
             clim=colors.clim(),
             units=str(item["skill"][name].attrs.get("units", "") or ""),
@@ -1653,6 +1777,7 @@ def _portrait(
     size=None,
     zoom: float = 1.0,
     hover: bool = True,
+    titles=None,
     **_,
 ):
     """Interactive portrait plot: hover a cell for its full metric record.
@@ -1673,10 +1798,16 @@ def _portrait(
     static grid draws it. The one cosmetic divergence: bokeh has no rotated top axis
     to match the static grid's column labels above the panel, so they sit at the
     bottom here instead — the cells, colours, and order are unaffected.
+
+    ``titles=`` overrides each panel's own title by hand, one string per metric
+    in ``names`` order -- ``None`` at a position keeps that panel's own title;
+    the wrong count raises a copy-pasteable ``ValueError`` listing the current
+    titles.
     """
     import pandas as pd
 
     from ocean_skill.colormaps import metric_colors
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import metric_panel_titles
     from ocean_skill.plot.portrait import (
         DEFAULT_MAP_METRICS,
@@ -1707,7 +1838,7 @@ def _portrait(
         recs, metric_names if metric_names is not None else DEFAULT_MAP_METRICS
     )
     standard_name = _shared_standard_name(recs) if row_by == "variable" else None
-    titles = metric_panel_titles(names)
+    resolved_titles = _titles.resolve_titles(metric_panel_titles(names), titles)
 
     # every grid shares one (row_by, col_by) pair, built from the same records, so one
     # cell aspect -- and therefore one panel size -- serves every metric
@@ -1731,7 +1862,7 @@ def _portrait(
     hover_cols = [c for c in recs[0] if c not in (row_by, col_by)]
 
     panels = []
-    for name, panel_title in zip(names, titles, strict=False):
+    for name, panel_title in zip(names, resolved_titles, strict=False):
         finite = [r for r in recs if np.isfinite(r.get(name, np.nan))]
         df = pd.DataFrame(
             [
@@ -2838,6 +2969,7 @@ def _series(
     metric_keys=DEFAULT_METRIC_KEYS,
     legend=True,
     line_labels=None,
+    titles=None,
     colors=None,
     ylim=None,
     panel_aspect=None,
@@ -2905,6 +3037,7 @@ def _series(
         metrics_labels=metrics_labels,
         legend=legend,
         line_labels=line_labels,
+        titles=titles,
         colors=colors,
         ncols=ncols,
         nrows=nrows,

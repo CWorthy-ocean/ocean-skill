@@ -23,12 +23,14 @@ without either one restating the colour policy.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ocean_skill.metrics import DEFAULT_MAP_METRICS
+from ocean_skill.plot import _titles
 
 __all__ = ["portrait"]
 
@@ -144,6 +146,7 @@ def portrait(
     save: str | Path | None = None,
     hover: bool | None = None,
     rasterize: bool | str | None = None,
+    titles: Sequence[str | None] | None = None,
 ):
     """Portrait plot: a heatmap scoreboard, one cell per ``(row_by, col_by)`` pair.
 
@@ -180,6 +183,11 @@ def portrait(
     :func:`ocean_skill.plot.matplotlib_renderer._warn_if_interactive_only` — and do
     nothing here; the interactive renderer's hover tooltip carries the full metric
     record already, with no extra option needed to ask for it.
+
+    ``titles=`` overrides each panel's own title by hand, one string per metric
+    in ``names`` order -- ``None`` at a position keeps that panel's own title;
+    the wrong count raises a copy-pasteable ``ValueError`` listing the current
+    titles.
     """
     import matplotlib.pyplot as plt
 
@@ -207,7 +215,7 @@ def portrait(
     names = _resolve_metric_names(recs, metric_names)
     grids = {name: _grid(recs, row_by, col_by, name) for name in names}
     standard_name = _shared_standard_name(recs) if row_by == "variable" else None
-    titles = metric_panel_titles(names)
+    resolved_titles = _titles.resolve_titles(metric_panel_titles(names), titles)
 
     # every grid shares one (row_by, col_by) pair, built from the same records, so one
     # cell aspect -- and therefore one panel layout -- serves every metric
@@ -241,7 +249,7 @@ def portrait(
     title_pad = merged_tick.get("size", scale["tick_label"]) * 3.2
     merged_title = _merged({**defaults["title_kwargs"], "pad": title_pad}, title_kwargs)
     merged_annot = _merged({"fontsize": scale["metrics"]}, annot_kwargs)
-    for ax, name, panel_title in zip(flat_axes, names, titles, strict=False):
+    for ax, name, panel_title in zip(flat_axes, names, resolved_titles, strict=False):
         row_levels, col_levels, matrix = grids[name]
         colors = metric_colors(name, matrix.compressed(), standard_name=standard_name)
         ax.set_facecolor(missing_color)

@@ -147,6 +147,33 @@ def test_each_panel_is_titled_by_its_own_variable(stub_by_variable):
     assert "silicate" in titles
 
 
+def test_titles_overrides_one_panel_and_keeps_the_other_auto(stub_by_variable):
+    stub_by_variable(
+        {"nitrate": _map("nitrate", 5.0), "silicate": _map("silicate", 20.0)}
+    )
+    override = [None, "My Silicate Panel"]
+    fig = _make_set([NITRATE, SILICATE]).plot(titles=override)
+    titles = {ax.get_title() for ax in fig.axes if ax.get_title()}
+    assert titles == {"nitrate", "My Silicate Panel"}
+
+    obj = _make_set([NITRATE, SILICATE]).plot(renderer="holoviews", titles=override)
+    import holoviews as hv
+
+    hv_titles = {
+        el.opts.get("plot").kwargs.get("title")
+        for el in obj.traverse(lambda x: x, [hv.QuadMesh])
+    }
+    assert hv_titles == {"nitrate", "My Silicate Panel"}
+
+
+def test_titles_wrong_length_lists_the_current_titles_to_copy(stub_by_variable):
+    stub_by_variable(
+        {"nitrate": _map("nitrate", 5.0), "silicate": _map("silicate", 20.0)}
+    )
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        _make_set([NITRATE, SILICATE]).plot(titles=["only one"])
+
+
 def test_suptitle_carries_only_what_the_set_shares_not_the_variable(stub_by_variable):
     """The variable rides on each panel's own title -- the suptitle carries only
     what every member shares (here, the ``depth`` a common ``select`` narrowed

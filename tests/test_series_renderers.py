@@ -201,6 +201,30 @@ def test_panel_titles_agree_and_carry_identity_only():
     assert static and all("bias" not in t and "rmse" not in t for t in static)
 
 
+def test_titles_overrides_one_panel_and_keeps_the_other_auto():
+    """``titles=`` is per-panel, and ``None`` keeps that panel's own title."""
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    auto = _matplotlib_titles(
+        render(_spec(items, secondary_y=False), renderer="matplotlib")
+    )
+    override = [None, "My Salinity Panel"]
+    static = _matplotlib_titles(
+        render(_spec(items, secondary_y=False, titles=override), renderer="matplotlib")
+    )
+    interactive = _holoviews_titles(
+        render(_spec(items, secondary_y=False, titles=override), renderer="holoviews")
+    )
+    assert static == interactive == [auto[0], "My Salinity Panel"]
+
+
+def test_titles_wrong_length_lists_the_current_titles_to_copy():
+    items = [_item(), _item(SALINITY, units="1e-3")]
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            _spec(items, secondary_y=False, titles=["only one"]), renderer="matplotlib"
+        )
+
+
 def test_axis_labels_carry_the_units_identically():
     """``hv.Dimension(unit=..)`` prints ``(degC)``; matplotlib prints ``[degC]``."""
     import holoviews as hv

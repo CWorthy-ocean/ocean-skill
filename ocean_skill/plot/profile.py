@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from ocean_skill import _stacklevel
+from ocean_skill.plot import _titles
 from ocean_skill.plot import series as _series_layout
 from ocean_skill.plot import style as _style
 
@@ -565,9 +566,11 @@ def compose(
     auto-promotes the station into its panel's title and drops it from that
     line's legend entry -- see :func:`panel_title` and
     :func:`_dropped_source_label`. ``titles=`` overrides the result by hand
-    afterward, one string per panel in panel order; the wrong count raises a
-    copy-pasteable ``ValueError`` listing the current titles, the same way
-    ``line_labels=``'s does.
+    afterward, one string per panel in panel order -- ``None`` at a position
+    keeps that panel's auto title, so a partial override only needs to name
+    the panels it changes; the wrong count raises a copy-pasteable
+    ``ValueError`` listing the current titles, the same way ``line_labels=``'s
+    does. See :func:`ocean_skill.plot._titles.resolve_titles`.
 
     Composition follows the same bounded rule :mod:`ocean_skill.plot.series` does
     for *one* facet, extended to two: ``rows=`` and ``cols=`` may each name a
@@ -836,18 +839,11 @@ def compose(
             )
         )
 
-    if titles is not None:
-        titles = list(titles)
-        if len(titles) != len(panels):
-            current_titles = "\n".join(
-                f"  {i + 1}. {panel.title!r}" for i, panel in enumerate(panels)
-            )
-            raise ValueError(
-                f"titles needs one entry per panel -- this figure draws "
-                f"{len(panels)}:\n{current_titles}\ngot {len(titles)}. Copy the "
-                "list above, edit the text, and pass it back in the same order."
-            )
-        panels = [replace(p, title=t) for p, t in zip(panels, titles, strict=True)]
+    resolved_titles = _titles.resolve_titles([p.title for p in panels], titles)
+    panels = [
+        replace(p, title=t) if t != p.title else p
+        for p, t in zip(panels, resolved_titles, strict=True)
+    ]
 
     if two_facets:
         # The shape is already fixed by how many distinct rows/columns exist
