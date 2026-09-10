@@ -15,6 +15,7 @@ and ``tests/test_compare_times.py``'s ``times=`` list-fan mocking.
 
 from __future__ import annotations
 
+import warnings
 from types import SimpleNamespace
 from unittest import mock
 
@@ -23,6 +24,7 @@ import pytest
 import xarray as xr
 
 from ocean_skill import comparison
+from ocean_skill.align import TIME_DEPTH_OVER
 from ocean_skill.comparison import _is_profile_reference
 
 TEMPERATURE = "sea_water_potential_temperature"
@@ -72,15 +74,53 @@ def stubbed_tsp_fan():
         yield formed
 
 
-def test_bare_compare_keeps_the_time_axis_unchanged(stubbed_tsp_fan):
-    """No select at all: depth defaults to SURFACE (collapsed), time survives --
-    the pre-existing timeSeriesProfile reading, untouched by this feature.
+def test_bare_compare_keeps_both_axes_standing(stubbed_tsp_fan):
+    """No select at all: neither axis is narrowed, so both are kept -- the SURFACE
+    collapse this used to reach is suppressed, and depth is filled from the
+    reference's own (ragged) union of levels, standing beside the time axis
+    rather than instead of it (over=TIME_DEPTH_OVER, the "keep both" sentinel).
     """
     comparison.compare(reference="hvalfjordur", test="his", variables=[TEMPERATURE])
     assert len(stubbed_tsp_fan) == 1
     over, select = stubbed_tsp_fan[0]
+    assert over == TIME_DEPTH_OVER
+    assert select == {"depth": [1.0, 10.0, 30.0]}
+
+
+def test_explicit_depths_still_suppress_both_axes_standing(stubbed_tsp_fan):
+    """A caller who explicitly passes depths=("surface",) -- the old bare default,
+    spelled out -- must still get today's collapsed behavior: both_standing is
+    keyed on `depths_was_explicit is False`, so naming a depth explicitly (even
+    the surface sentinel) opts out of the new "keep both axes" routing.
+    """
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        depths=("surface",),
+    )
+    assert len(stubbed_tsp_fan) == 1
+    over, select = stubbed_tsp_fan[0]
     assert over == "time"
     assert select == {"depth": "surface"}
+
+
+def test_scalar_depth_select_alone_still_keeps_time(stubbed_tsp_fan):
+    """A bare call except for select={"depth": ...}: depth is narrowed to one
+    value and time is not, so this is the pre-existing mooring-at-a-depth
+    reading (over="time") -- both_standing does not apply, since the reference's
+    own select already names a vertical key.
+    """
+    comparison.compare(
+        reference="hvalfjordur",
+        test="his",
+        variables=[TEMPERATURE],
+        select={"depth": 10},
+    )
+    assert len(stubbed_tsp_fan) == 1
+    over, select = stubbed_tsp_fan[0]
+    assert over == "time"
+    assert select == {"depth": 10}
 
 
 def test_time_pinned_by_select_reads_as_one_profile(stubbed_tsp_fan):
@@ -251,12 +291,39 @@ def test_is_profile_reference_needs_time_collapsed_true_for_tsp():
         assert not _is_profile_reference("tsp", "time", time_collapsed=True)  # opts out
 
 
+def test_is_profile_reference_both_standing_param_for_tsp():
+    """both_standing= is the new "keep both axes" routing _profile_depth_plan
+    computes for a genuinely bare call (neither axis narrowed, no explicit
+    depths=/select= of its own) -- distinct from time_collapsed/climatology, and
+    not implied merely by their absence (a caller with a real vertical select of
+    their own, say, still passes time_collapsed=False/climatology=False but is
+    not "both standing").
+    """
+    with mock.patch(
+        "ocean_skill.catalog.resolve",
+        lambda n: SimpleNamespace(metadata={"featureType": "timeSeriesProfile"}),
+    ):
+        assert not _is_profile_reference("tsp", None, both_standing=False)
+        assert _is_profile_reference("tsp", None, both_standing=True)
+        assert _is_profile_reference("tsp", "Z", both_standing=True)
+        # The TIME_DEPTH_OVER sentinel itself is vertical-compatible too, so an
+        # explicit over=TIME_DEPTH_OVER (asking to keep both axes) still opts in.
+        assert _is_profile_reference("tsp", TIME_DEPTH_OVER, both_standing=True)
+        # An explicit non-vertical, non-TIME_DEPTH_OVER over= still opts out, same
+        # as it does for time_collapsed/climatology.
+        assert not _is_profile_reference("tsp", "time", both_standing=True)
+
+
 def test_is_profile_reference_still_ignores_trajectoryprofile():
     with mock.patch(
         "ocean_skill.catalog.resolve",
         lambda n: SimpleNamespace(metadata={"featureType": "trajectoryProfile"}),
     ):
         assert not _is_profile_reference("traj", None, time_collapsed=True)
+        # both_standing doesn't resolve a trajectoryProfile either -- position
+        # varies too, so it still has more than one candidate axis even with
+        # neither time nor depth narrowed.
+        assert not _is_profile_reference("traj", None, both_standing=True)
 
 
 def test_is_profile_reference_climatology_param_for_tsp():
@@ -278,3 +345,81 @@ def test_is_profile_reference_still_ignores_trajectoryprofile_for_climatology():
         lambda n: SimpleNamespace(metadata={"featureType": "trajectoryProfile"}),
     ):
         assert not _is_profile_reference("traj", None, climatology=True)
+
+
+# -- Part 0: trajectory/trajectoryProfile consistency cleanup -------------------------
+
+
+def test_implied_over_gives_trajectory_its_own_reason(monkeypatch):
+    """_implied_over's fall-through used to say "the reference is gridded" for a
+    moving platform, which is simply wrong -- trajectory/trajectoryProfile get
+    their own reason text instead.
+    """
+    from ocean_skill.comparison import _implied_over
+
+    monkeypatch.setattr(comparison, "_feature_type", lambda source: "trajectory")
+    over, reason = _implied_over("traj", {}, None)
+    assert over is None
+    assert "moving platform" in reason
+    assert "gridded" not in reason
+
+
+def test_implied_over_gives_trajectoryprofile_its_own_reason(monkeypatch):
+    from ocean_skill.comparison import _implied_over
+
+    monkeypatch.setattr(comparison, "_feature_type", lambda source: "trajectoryProfile")
+    over, reason = _implied_over("traj_profile", {}, None)
+    assert over is None
+    assert "moving platform" in reason
+    assert "gridded" not in reason
+
+
+@pytest.fixture
+def stubbed_trajectoryprofile_fan():
+    """Record each fanned comparison's select/over against a trajectoryProfile ref."""
+    formed = []
+    declared = {
+        "glider": {"featureType": "trajectoryProfile", "variables": [TEMPERATURE]},
+        "his": {"variables": [TEMPERATURE]},
+    }
+    with (
+        mock.patch(
+            "ocean_skill.catalog.resolve",
+            lambda n: SimpleNamespace(metadata=declared[n]),
+        ),
+        mock.patch.object(
+            comparison.Comparison,
+            "align",
+            lambda self, refresh=False: formed.append((self.over, self.select)),
+        ),
+    ):
+        yield formed
+
+
+def test_bare_trajectoryprofile_warns_and_still_collapses_to_the_surface(
+    stubbed_trajectoryprofile_fan,
+):
+    """A moving platform with more than one candidate vertical reading has no
+    natural default -- unlike profile/timeSeriesProfile, this stays the old
+    surface-collapse-with-over-unresolved shape, but now says so.
+    """
+    with pytest.warns(UserWarning, match="trajectoryProfile"):
+        comparison.compare(reference="glider", test="his", variables=[TEMPERATURE])
+    assert len(stubbed_trajectoryprofile_fan) == 1
+    over, select = stubbed_trajectoryprofile_fan[0]
+    assert over is None
+    assert select == {"depth": "surface"}
+
+
+def test_explicit_depths_silence_the_trajectoryprofile_warning(
+    stubbed_trajectoryprofile_fan,
+):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        comparison.compare(
+            reference="glider", test="his", variables=[TEMPERATURE], depths=[10]
+        )
+    assert len(stubbed_trajectoryprofile_fan) == 1
+    over, select = stubbed_trajectoryprofile_fan[0]
+    assert over is None
+    assert select == {"depth": 10}

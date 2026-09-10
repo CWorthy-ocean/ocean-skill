@@ -1408,6 +1408,147 @@ def _section_row(
     return row
 
 
+def _time_depth_row(
+    item: dict[str, Any],
+    labels=("test", "reference"),
+    shared_axes: bool = True,
+    metric_keys=DEFAULT_METRIC_KEYS,
+    title: str | None = None,
+    mark: str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    robust: bool | float = False,
+    **_,
+):
+    """Test | reference | difference ``time_depth`` panels, as three linked
+    interactive maps.
+
+    The ``time_depth`` counterpart of :func:`_section_row`: the same shared-axes
+    linking and metrics-folded-into-the-difference-title convention, but drawn
+    through :func:`ocean_skill.plot.time_depth.prepare_time_depth_row` and each
+    panel's own scatter-or-mesh choice
+    (:func:`~ocean_skill.plot.time_depth.default_mark`) rather than
+    :func:`_section_row`'s always-a-mesh convention — a station's ragged
+    ``(time, depth)`` rectangle can need the scatter branch neither a section
+    nor a map ever does. ``mark`` is resolved once, from the *reference* lane
+    (the ragged, real-visits one), and applied to all three panels alike — the
+    same reasoning the static renderer's own ``time_depth_row`` gives; pass it
+    explicitly to override either way.
+
+    A comparison ``time_depth`` row is never stacked into a grid (see
+    :class:`~ocean_skill.comparison.ComparisonSet`'s own refusal on more than
+    one), so, like :func:`_section_row`, there is no ``row_label`` or
+    ``domain`` to thread through here.
+
+    ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
+    ._limits` — see the static renderer's ``time_depth_row`` docstring.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.time_depth import default_mark, prepare_time_depth_row
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    hv = _extension()
+    factor = _canvas_factor(size, zoom)
+    values, geometry = prepare_time_depth_row(item["aligned"])
+    t, r, d = values["test"], values["reference"], values["difference"]
+    if mark is None:
+        mark = default_mark(r)
+    units = item.get("units") or ""
+    standard_name = item.get("standard_name")
+    if title is None:
+        title = suptitle_text(
+            standard_name,
+            (
+                item.get("depth"),
+                item.get("time"),
+                geometry.place_note,
+                geometry.period_note,
+            ),
+        )
+    seq, div = cmaps_for(standard_name)
+    log = is_log(standard_name)
+    vmin, vmax = _limits(t, r, robust=robust)
+    if log:
+        vmin = max(vmin, 1e-6)
+    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    tl, rl = labels
+    raster = _should_rasterize(t, rasterize)
+
+    diff_title = "difference"
+    summary = _metrics_summary(item.get("metrics"), metric_keys)
+    if summary:
+        diff_title = f"difference ({summary})"
+
+    def _panel(field, panel_title: str, cmap, clim, panel_units: str, log_scale: bool):
+        if mark == "scatter":
+
+            frame = (
+                field.to_dataframe(name="value")
+                .reset_index()[[geometry.x_name, geometry.y_name, "value"]]
+                .dropna()
+            )
+            w, h = frame_px(SECTION_ASPECT, width_px=PANEL_WIDTH_PX * factor)
+            fontsize = bokeh_fontsize((w, h), font_scale=font_scale)
+            points = hv.Points(
+                frame, kdims=[geometry.x_name, geometry.y_name], vdims=["value"]
+            ).opts(
+                title=panel_title,
+                xlabel=geometry.x_label,
+                ylabel=geometry.y_label,
+                color="value",
+                cmap=cmap,
+                clim=clim,
+                logz=log_scale,
+                colorbar=True,
+                clabel=panel_units,
+                size=6,
+                line_color="white",
+                line_width=0.5,
+                tools=["hover"] if hover else [],
+                invert_yaxis=True,
+                frame_width=w,
+                frame_height=h,
+                fontsize=fontsize,
+            )
+            if geometry.x_ticks:
+                points = points.opts(xticks=list(geometry.x_ticks))
+            return points
+        return _quadmesh(
+            field,
+            title=panel_title,
+            cmap=cmap,
+            clim=clim,
+            units=panel_units,
+            geo=False,
+            log=log_scale,
+            font_scale=font_scale,
+            canvas_factor=factor,
+            hover=hover,
+            rasterize=raster,
+            x=geometry.x_name,
+            y=geometry.y_name,
+            aspect=SECTION_ASPECT,
+            invert_y=True,
+            bgcolor="#d9d9d9",
+            xticks=geometry.x_ticks,
+        )
+
+    panels = [
+        _panel(t, str(tl), seq, (vmin, vmax), units, log),
+        _panel(r, str(rl), seq, (vmin, vmax), units, log),
+        _panel(d, diff_title, div, (-dmax, dmax), f"test − reference {units}", False),
+    ]
+    row = panels[0] + panels[1] + panels[2]
+    row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        row = row.opts(title=str(title))
+    return row
+
+
 def _station_overlay(stations, name: str, colors, da, *, geo: bool):
     """Return one metric's station values as hoverable dots, or ``None``.
 
@@ -4110,10 +4251,11 @@ def render(spec, **kwargs: Any):
         # A line panel has no colormap, no map and no fixed axes, so the map-only drops
         # do not apply to it -- and `mark` and `metrics_kwargs` do.
         drops = [d for d in drops if d not in ("mark", "metrics")]
-    if family == "time_depth":
+    if family in ("time_depth", "time_depth_row"):
         # time_depth's own mark ("scatter"/"pcolormesh") is load-bearing here too --
         # unlike a map family, it genuinely changes which of two drawing calls this
-        # renderer makes, not just a matplotlib-only mark keyword.
+        # renderer makes, not just a matplotlib-only mark keyword. time_depth_row
+        # shares the same load-bearing mark, for the same reason, one row over.
         drops = [d for d in drops if d != "mark"]
     if family not in _MOVIES:
         # a movie is the only family with something to write here (a standalone HTML
@@ -4199,6 +4341,15 @@ def render(spec, **kwargs: Any):
         if len(spec.items) > 1:
             return _time_depth_grid(spec.items, **opts)
         return _time_depth(spec.single, **opts)
+    if family == "time_depth_row":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of time_depth_row -- a time_depth row "
+                "has no map to outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _time_depth_row(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)
     if family == "locations":

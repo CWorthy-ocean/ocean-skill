@@ -22,6 +22,7 @@ __all__ = [
     "TimeDepthGeometry",
     "default_mark",
     "prepare_time_depth",
+    "prepare_time_depth_row",
 ]
 
 #: Fraction of the (time, depth) rectangle that must be NaN, once all-NaN rows and
@@ -155,6 +156,40 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
         x_ticks=None if date_axis else groupby_ticks(tdim, da[tdim].values),
     )
     return result, geometry
+
+
+def prepare_time_depth_row(
+    aligned: dict[str, xr.DataArray] | xr.Dataset,
+) -> tuple[dict[str, xr.DataArray], TimeDepthGeometry]:
+    """Return ``(values, geometry)`` for a test | reference | difference row.
+
+    The ``time_depth`` counterpart of
+    :func:`ocean_skill.plot.section.prepare_section_row`, for a
+    :class:`~ocean_skill.comparison.Comparison` that pools a bare
+    ``timeSeriesProfile`` reference's own time *and* depth axes rather than
+    reducing to one of them (see
+    :attr:`~ocean_skill.comparison.Comparison.is_time_depth`). ``aligned`` is the
+    comparison's aligned trio -- indexed by ``"test"``, ``"reference"``,
+    ``"difference"`` -- exactly what :func:`prepare_section_row` takes, and each
+    lane is run through :func:`prepare_time_depth` independently, same as that
+    function runs each lane through :func:`~ocean_skill.plot.section
+    .prepare_section`.
+
+    Every lane is aligned by construction (see
+    :func:`ocean_skill.align._match_time_and_depth`): the same time axis, the
+    same depth axis (the reference's own levels, matched onto by the test
+    lane), and the same scalar lon/lat -- so the three geometries would agree
+    regardless; only the test lane's is returned, matching
+    :func:`prepare_section_row`'s single-geometry contract for a row of panels.
+    """
+    values: dict[str, xr.DataArray] = {}
+    geometry: TimeDepthGeometry | None = None
+    for lane in ("test", "reference", "difference"):
+        values[lane], lane_geometry = prepare_time_depth(aligned[lane])
+        if lane == "test":
+            geometry = lane_geometry
+    assert geometry is not None
+    return values, geometry
 
 
 def default_mark(values: xr.DataArray) -> str:

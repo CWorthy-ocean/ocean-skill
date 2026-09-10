@@ -43,6 +43,7 @@ FAMILIES = (
     "section_row",
     "cross",
     "time_depth",
+    "time_depth_row",
     "profile",
     "skill_map",
     "taylor",
@@ -167,9 +168,30 @@ class PlotSpec:
         .time_depth_grid` / :func:`ocean_skill.plot.holoviews_renderer
         ._time_depth_grid`. Built by :meth:`ocean_skill.field.Field
         ._time_depth_item` (one item) and :meth:`ocean_skill.field.FieldSet
-        ._time_depth_items` (the list); a comparison never reaches this family,
-        since :meth:`ocean_skill.comparison.Comparison._prepare_lane` always
-        narrows a bare vertical select to the surface first.
+        ._time_depth_items` (the list).
+
+        ``time_depth_row`` is that comparison counterpart: ``section_row``'s item
+        shape (``aligned`` carrying the ``test``/``reference``/``difference``
+        trio, plus ``metrics``/``units``/``standard_name``/``depth``/``time``/
+        ``labels``) but each lane two-dimensional on time and depth rather than
+        depth and along-path distance -- a bare ``timeSeriesProfile`` reference
+        pools both its own axes rather than reducing to one of them (see
+        :attr:`~ocean_skill.comparison.Comparison.is_time_depth`), the vertical
+        axis riding the reference's own levels the same way a profile's does,
+        both lanes time-matched onto the station's own visits first (see
+        :func:`ocean_skill.align._match_time_and_depth`). Built by
+        :meth:`ocean_skill.comparison.Comparison.as_item`, whose own ``family``
+        reads ``"time_depth"`` (:attr:`~ocean_skill.comparison.Comparison
+        .family`) — the same name the single-source item above uses, since it is
+        the same *kind* of panel, just a row of three rather than one — and is
+        translated to this family, a distinct one, only where a plot is actually
+        built (:meth:`~ocean_skill.comparison.Comparison.plot`,
+        :meth:`~ocean_skill.comparison.ComparisonSet.plot`), the same split
+        ``section``/``section_row`` already makes for the analogous single-source
+        vs. comparison shapes. Has no stacked-grid form of its own (``ComparisonSet``
+        refuses more than one, mirroring ``section_row``'s own refusal) — a set's
+        ``.movie()`` refuses it outright too, having no further axis left to step
+        through as frames once both are already pooled into one metric.
 
         ``profile`` carries ``field_grid``'s list, one item per station/cast, each
         ``aligned`` 1-D on the vertical axis (``z``, ``depth``, or ``sigma0`` for an
