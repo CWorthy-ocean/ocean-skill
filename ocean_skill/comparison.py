@@ -2974,6 +2974,81 @@ DEFAULT_MIN_PAIRS = 5
 class Comparison:
     """One reference↔test comparison for a single variable at a single depth.
 
+    Parameters
+    ----------
+    reference
+        Catalog source name for the reference (observations/climatology) lane.
+    test
+        Catalog source name for the test (model) lane.
+    variable
+        A vocabulary key/standard_name/alias (str), a combination spec
+        (``{"sum": [...], "standard_name": ...}``, see
+        :mod:`ocean_skill.operators`), or a pair-spec (``{"test": ...,
+        "reference": ...}``) naming a different recipe per lane.
+    select
+        Dict of axis -> selection, or a ``{"test": ..., "reference": ...}``
+        pair-spec giving each lane its own. ``None`` (default) selects
+        nothing. See :func:`compare`'s ``select=``.
+    aggregate
+        Dict of axis -> reduction, or the same pair-spec shape as ``select``.
+        ``None`` (default) reduces nothing. See :func:`compare`'s
+        ``aggregate=``.
+    method
+        Regrid/sampling method: one of ``"conservative_normed"`` (default),
+        ``"conservative"``, ``"bilinear"``/``"linear"``, or ``"nearest"``. See
+        :func:`compare`'s ``method=``.
+    over
+        Axis to keep and score cell by cell (``"time"``/``"Z"``), or ``None``
+        (default) to reduce to one map -- also inferred automatically in some
+        cases. See :func:`compare`'s ``over=``.
+    time_method
+        One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
+        ``"exact"``. See :func:`compare`'s ``time_method=``.
+    depth_method
+        One of ``"nearest"`` (default) or ``"interp"``/``"linear"``. See
+        :func:`compare`'s ``depth_method=``.
+    tolerance
+        Optional float widening a ``"nearest"`` match. ``None`` (default)
+        uses the matcher's own tolerance.
+    bin_anchor
+        One of ``"auto"`` (default), ``"center"``, ``"start"``, or ``"end"``.
+        See :func:`compare`'s ``bin_anchor=``.
+    min_coverage
+        Float in [0, 1] (default 0.5). See :func:`compare`'s
+        ``min_coverage=``.
+    min_pairs
+        Minimum int (default :data:`DEFAULT_MIN_PAIRS`) of matched steps a
+        cell needs before its pointwise metrics are reported.
+    metrics
+        Tuple of metric names to compute, or ``None`` (default,
+        :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
+    label
+        Optional str overriding this comparison's own label in a pooled
+        figure.
+    cache
+        ``None`` (default, follows the global :mod:`ocean_skill.cache`
+        setting), or an explicit ``True``/``False``.
+    qc
+        Per-source QC override: ``None`` (default), a dict, the string
+        ``"off"``, or a ``{"test": ..., "reference": ...}`` pair-spec. See
+        :func:`compare`'s ``qc=`` and :mod:`ocean_skill.qc`.
+    subtract_mean
+        ``False`` (default), ``True``, ``"test"``/``"reference"``, or a
+        ``{"test": bool, "reference": bool}`` dict. See :func:`compare`'s
+        ``subtract_mean=``.
+    detide
+        ``False`` (default), ``True``, ``"test"``/``"reference"``, or a
+        ``{"T": hours}``/``{"test": ..., "reference": ...}`` dict. See
+        :func:`compare`'s ``detide=``.
+    literal_depths
+        ``None`` (default, inferred from ``select``), or an explicit bool --
+        whether a profile-shaped reference's depth list was named by the
+        caller rather than auto-filled.
+    section_casts
+        Optional list of source names standing in for ``reference`` on a
+        ``select={"transect": {"from": "reference"}}`` section -- built by
+        :func:`compare`'s own fan-out; rarely passed directly.
+
     Ordinarily both sources are reduced to a single map and the comparison is that pair
     plus their difference. Naming an axis in ``over`` instead keeps that axis: the lanes
     are matched along it (:func:`ocean_skill.align.match_axis`), and every metric is
@@ -4930,6 +5005,14 @@ class Comparison:
     def pointwise_metrics(self, *names: str):
         """One 2-D field per metric, each computed cell by cell along ``over``.
 
+        Parameters
+        ----------
+        *names
+            Metric names to compute (any name registered in
+            :data:`ocean_skill.metrics.REGISTRY`). None given (the default)
+            uses this comparison's own ``metrics=`` or, failing that,
+            :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`.
+
         The pointwise counterpart of :meth:`metrics`: the same registry entries
         (:data:`ocean_skill.metrics.REGISTRY`), reduced over the scored axis alone
         instead of over everything, so ``bias`` becomes *where* the model is biased and
@@ -5032,6 +5115,13 @@ class Comparison:
 
     def metrics(self, **extra: Any) -> dict[str, Any]:
         """Compute (and cache) the metric record for this comparison.
+
+        Parameters
+        ----------
+        **extra
+            Additional key/value pairs merged into the returned record (e.g.
+            a custom label column) -- passed straight to
+            :func:`ocean_skill.metrics.compute`.
 
         Every dimension is reduced, so this is one number per metric for the whole
         comparison — and when an axis is being scored ``over``, that means *space and
@@ -5174,6 +5264,18 @@ class Comparison:
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render as a ``test | reference | difference`` row, or as metric maps.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive) -- goes through the same renderer registry either
+            way.
+        **kwargs
+            Plot options forwarded to the renderer: option families such as
+            ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
+            ``robust``, ``figsize``, ``save``, and the ``*_kwargs`` styling
+            dicts. See ``docs/plot_styling_reference.md`` for the full list.
+
         Which of the two follows from the comparison, not from an argument: a pair
         reduced to single maps has a test, a reference and a difference to show, while
         one scored ``over`` an axis has a map per metric and nothing to set beside it.
@@ -5209,6 +5311,18 @@ class Comparison:
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this comparison's data sits: the selection over the model domain.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to
+            :func:`ocean_skill.plot.map_locations.map_locations` --
+            ``domain``, ``extent``, ``title``, ``save``, ``tiles``,
+            ``legend``, and the rest. See ``docs/plot_styling_reference.md``
+            for the full list.
+
         From the request (``select``) and catalog metadata alone — nothing is
         opened, and this never aligns the comparison, so it costs the same
         whether :meth:`plot` has already run or not. Not :meth:`pointwise_metrics`,
@@ -5231,6 +5345,26 @@ class Comparison:
         **plot_kwargs: Any,
     ) -> dict[str, Path]:
         """Write this comparison's figure and metrics row under ``output/<project>/``.
+
+        Parameters
+        ----------
+        project
+            Output project slug/directory name. ``None`` (default) uses
+            ``"<test>_vs_<reference>"``.
+        stem
+            Base filename for the figure/metrics row. ``None`` (default)
+            uses a slug of the variable name.
+        figure
+            Bool (default ``True``) -- whether to render and write the
+            figure.
+        metrics
+            Bool (default ``True``) -- whether to write the metrics row.
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``.
+        **plot_kwargs
+            Forwarded to :meth:`plot` when ``figure=True``. See
+            ``docs/plot_styling_reference.md`` for the full styling-kwargs
+            list.
 
         The single-row counterpart of :meth:`ComparisonSet.save`; see there and
         :mod:`ocean_skill.outputs` for the layout and why deliverables are kept out
@@ -5563,6 +5697,19 @@ def _average_aligned(comps: list[Comparison]) -> Any:
 class ComparisonSet:
     """A set of comparisons: stacked rows in one figure, one tidy metrics table.
 
+    Parameters
+    ----------
+    comparisons
+        A :class:`Comparison`, any nesting of lists/tuples of them and/or
+        other :class:`ComparisonSet` objects (flattened internally), or a
+        ``{name: comparisons}`` dict whose keys become each member's label
+        (mutually exclusive with ``labels=``).
+    labels
+        Optional list of per-comparison label overrides, one per flattened
+        comparison, in order. ``None`` (default) uses each comparison's own
+        ``label``. Not allowed together with a ``comparisons`` dict, whose
+        keys already serve as labels.
+
     Also how comparisons you already have are pooled onto one summary diagram — the
     constructor takes any nesting of comparisons and sets, and ``+`` joins two sets:
 
@@ -5632,7 +5779,16 @@ class ComparisonSet:
         return pd.DataFrame([c.metrics() for c in self.comparisons])
 
     def write_metrics(self, out_dir: str | Path, stem: str = "metrics") -> Path:
-        """Write the tidy metrics table to ``<out_dir>/metrics/<stem>.csv``."""
+        """Write the tidy metrics table to ``<out_dir>/metrics/<stem>.csv``.
+
+        Parameters
+        ----------
+        out_dir
+            Directory (str or :class:`~pathlib.Path`) under which
+            ``metrics/<stem>.csv`` is written; created if missing.
+        stem
+            Base filename, without extension (default ``"metrics"``).
+        """
         from ocean_skill import metrics as _metrics
 
         return _metrics.write(
@@ -5710,6 +5866,17 @@ class ComparisonSet:
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render all comparisons as stacked rows in one figure.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to the renderer: option families such as
+            ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
+            ``robust``, ``figsize``, ``save``, and the ``*_kwargs`` styling
+            dicts. See ``docs/plot_styling_reference.md`` for the full list.
+
         A set whose comparisons were scored ``over`` an axis has metric maps rather than
         an aligned trio per row, so it draws the ``skill_map`` family instead: metrics
         across the columns, comparisons down the rows, exactly as ``field_grid`` stacks
@@ -5784,6 +5951,18 @@ class ComparisonSet:
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Play the set's comparisons as movie frames rather than stacking them as rows.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static ``.mp4``/``.gif``) or
+            ``"holoviews"`` (interactive, a slider).
+        **kwargs
+            Plot options forwarded to the renderer: ``save`` (filename; its
+            extension picks the format), plus the same option families as
+            :meth:`plot` (``labels``, ``title``, ``domain``, ``robust``,
+            ``figsize``, the ``*_kwargs`` styling dicts). See
+            ``docs/plot_styling_reference.md`` for the full list.
+
         The same items :meth:`plot` lays out down the page, animated instead: one
         ``test | reference | difference`` row, redrawn per comparison, with each
         comparison's own label as the frame label and its own metrics in the corner box.
@@ -5853,7 +6032,22 @@ class ComparisonSet:
         )
 
     def taylor(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Taylor diagram of the set (correlation + variability; blind to bias)."""
+        """Taylor diagram of the set (correlation + variability; blind to bias).
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to the renderer: ``color_by``,
+            ``marker_by``, ``labels``, ``title``, ``save``, and the
+            ``*_kwargs`` styling dicts; ``arrows`` (``True``, or a field name
+            such as ``"time"`` -- e.g. from :func:`compare`'s ``times=`` fan)
+            connects each run's time-ordered points with an arrow, hollow at
+            the start. See ``docs/plot_styling_reference.md`` for the full
+            list.
+        """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
@@ -5863,7 +6057,21 @@ class ComparisonSet:
         )
 
     def target(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Target diagram of the set (bias vs signed centred RMSD)."""
+        """Target diagram of the set (bias vs signed centred RMSD).
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to the renderer: ``color_by``,
+            ``marker_by``, ``labels``, ``title``, ``save``, and the
+            ``*_kwargs`` styling dicts; ``arrows`` (``True``, or a field name
+            such as ``"time"``) connects each run's time-ordered points with
+            an arrow, hollow at the start. See
+            ``docs/plot_styling_reference.md`` for the full list.
+        """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
@@ -5873,7 +6081,20 @@ class ComparisonSet:
         )
 
     def summary(self, *, renderer: str = "matplotlib", **kwargs: Any):
-        """Taylor and Target side by side for the whole set."""
+        """Taylor and Target side by side for the whole set.
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to the renderer, shared by both panels:
+            the same ``color_by``/``marker_by``/``labels``/``title``/
+            ``save``/``arrows``/``*_kwargs`` families as :meth:`taylor`/
+            :meth:`target`. See ``docs/plot_styling_reference.md`` for the
+            full list.
+        """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
@@ -5884,6 +6105,18 @@ class ComparisonSet:
 
     def portrait(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Heatmap scoreboard of the set's metrics.
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Forwarded to :func:`ocean_skill.plot.portrait.portrait`:
+            ``row_by``/``col_by`` (metric-record fields naming the axes,
+            default ``"variable"``/``"test"``), ``metric_names``,
+            ``annotate``, ``title``, ``save``, and the ``*_kwargs`` styling
+            dicts. See ``docs/plot_styling_reference.md`` for the full list.
 
         See :func:`ocean_skill.plot.portrait.portrait`. The scoreboard counterpart to
         :meth:`taylor`/:meth:`target`: rows and columns named by two metric-record
@@ -5902,6 +6135,19 @@ class ComparisonSet:
 
     def map_metrics(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Interpolate this set's per-station metrics onto a map, one panel each.
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Forwarded to :func:`ocean_skill.plot.map_metrics.map_metrics`:
+            ``metrics``, ``test``, ``grid`` (``"model"``/``"regular"``),
+            ``method`` (``"spline"``/``"nearest"``/``"knn"``/``"linear"``/
+            ``"cubic"``), ``block_spacing``, ``extent``, ``rows``, and the
+            rest -- see the bullet list below and
+            ``docs/plot_styling_reference.md``.
 
         Every comparison in the set should be a single-position station — a place
         through time (a mooring, :attr:`Comparison.is_series`) or through depth (a
@@ -5944,6 +6190,14 @@ class ComparisonSet:
 
     def average(self, by: str | list[str] = "variable") -> ComparisonSet:
         """Average comparisons across whatever ``by`` does not hold fixed.
+
+        Parameters
+        ----------
+        by
+            A dimension name, or list of them, naming what to group by before
+            averaging: one of ``"variable"`` (default), ``"depth"``,
+            ``"time"``, ``"test"``, ``"reference"``, ``"demeaned"``,
+            ``"detided"`` -- see :data:`_LABEL_DIMS`.
 
         ``compare(reference=["HV1", "HV5"], variables=[...])`` fans out one
         comparison per station per variable, kept independent so each station's own
@@ -6050,6 +6304,26 @@ def summary(
     **kwargs: Any,
 ):
     """Summarize comparisons you already have, on one whole-set skill overview.
+
+    Parameters
+    ----------
+    comparisons
+        A :class:`Comparison`, any nesting of lists/tuples of them and/or
+        :class:`ComparisonSet` objects, or a ``{name: comparisons}`` dict
+        whose keys become the point labels.
+    kind
+        One of ``"both"`` (default, Taylor and target side by side),
+        ``"taylor"``, ``"target"``, or ``"portrait"`` (the metrics
+        scoreboard heatmap) -- see :data:`_SUMMARY_KINDS`.
+    renderer
+        One of ``"matplotlib"`` (default, static), ``"holoviews"``
+        (interactive), or ``"both"`` (side by side).
+    **kwargs
+        Forwarded to the chosen overview: ``color_by``, ``marker_by``,
+        ``labels``, ``title``, ``save``, ... for Taylor/target/both;
+        ``row_by``, ``col_by``, ``metric_names``, ``annotate``, ... for
+        portrait. See :mod:`ocean_skill.plot.summary` and
+        :mod:`ocean_skill.plot.portrait`.
 
     The counterpart to :func:`compare`, for the case where the comparisons exist: a
     nutrients fan-out, a depth fan-out, a one-off pair, pooled onto a single overview
@@ -6853,6 +7127,109 @@ def compare(
     detide: Any = False,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
+
+    Parameters
+    ----------
+    reference
+        Catalog source name, or a list of names to fan over (one comparison
+        per name paired with each ``test``/variable/depth/time combination).
+    test
+        Catalog source name, or a list of names, matching ``reference``.
+    variables
+        List of variable requests: a vocabulary key/standard_name/alias
+        (str), a combination spec (``{"sum": [...], "standard_name":
+        ...}``), or a pair-spec (``{"test": ..., "reference": ...}``) naming
+        a different recipe per lane.
+    depths
+        Sequence of depth requests, fanned one comparison per entry --
+        ``None`` (default) means ``("surface",)``. Each entry is a literal
+        number (metres), ``"surface"``, ``"column"``, or a ``{"min": ...,
+        "max": ...}`` band. Not used for a ``profile``/``timeSeriesProfile``
+        reference, which keeps its own levels.
+    times
+        ``None`` (default, no time fan), a dict deriving bins from the
+        test's own time axis (``{"resample": ..., "reduce": ...}``,
+        ``{"groupby": "month"|"season", "reduce": ...}``), or an explicit
+        list/tuple/str of time values -- one comparison per bin or value, in
+        the same vocabulary ``aggregate={"time": ...}`` uses.
+    select
+        Dict of axis -> selection (e.g. ``{"time": "2012-01"}``), or a
+        ``{"test": ..., "reference": ...}`` pair-spec giving each lane its
+        own selection. ``None`` (default) selects nothing.
+    aggregate
+        Dict of axis -> reduction (e.g. ``{"time": "mean"}``), or the same
+        ``{"test": ..., "reference": ...}`` pair-spec shape as ``select``.
+        No default -- an axis left standing has to be either reduced here or
+        scored with ``over=``.
+    method
+        Regrid/sampling method, passed through to xESMF: one of
+        ``"conservative_normed"`` (default), ``"conservative"``,
+        ``"bilinear"``/``"linear"``, or ``"nearest"``. Against a station
+        reference this is reinterpreted as ``"nearest"`` unless
+        interpolation is asked for explicitly.
+    over
+        The axis to keep and score cell by cell (``"time"`` or ``"Z"``),
+        instead of collapsing to one map. ``None`` (default) reduces to a
+        single map; also inferred automatically for a station/mooring
+        reference or a select pinning both horizontal axes to one point.
+    time_method
+        One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
+        ``"exact"`` -- how the two lanes are matched along a kept time axis.
+        Doubles as the cast-matching knob against a repeat-visit station,
+        where ``"nearest"`` (the default there) keeps only the closest model
+        step to each cast and ``"interp"``/``"linear"`` interpolates onto
+        each cast time instead.
+    depth_method
+        One of ``"nearest"`` (default) or ``"interp"``/``"linear"`` -- how
+        the model is matched onto target depths: the nearest real level, or
+        linearly interpolated at every step.
+    tolerance
+        Optional float widening a ``"nearest"`` time/position match.
+        ``None`` (default) uses each matcher's own built-in tolerance.
+    bin_anchor
+        One of ``"auto"`` (default, inferred from the axis's own stamps),
+        ``"center"``, ``"start"``, or ``"end"`` -- whether each step marks
+        the middle or an edge of its bin when matching with
+        ``time_method="mean"``.
+    min_coverage
+        Float in [0, 1] (default 0.5) -- the minimum valid-data fraction a
+        regridded destination cell needs to be kept, rather than dropped as
+        under-covered.
+    min_pairs
+        Minimum int (default :data:`DEFAULT_MIN_PAIRS`, currently 5) of
+        matched steps a cell needs, under ``over=``, before its pointwise
+        metrics are reported.
+    metrics
+        Tuple of metric names to compute, or ``None`` (default,
+        :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`, currently
+        ``("bias", "crmsd", "corr", "sigma_ratio")``).
+    skip_missing
+        Bool (default ``True``) -- skip a pair whose variable is absent from
+        a source, or whose catalog extents never overlap, with a message,
+        rather than raising.
+    cache
+        ``None`` (default, follows the global :mod:`ocean_skill.cache`
+        setting), or an explicit ``True``/``False`` to force caching on/off
+        for this call.
+    refresh
+        Bool (default ``False``) -- recompute and overwrite a cached pair
+        instead of reusing it.
+    qc
+        Per-source QC override: ``None`` (default, uses each source's own
+        saved contract), a dict (e.g. ``{"keep": [...]}``), the string
+        ``"off"``, or a ``{"test": ..., "reference": ...}`` pair-spec for a
+        per-lane policy. See :mod:`ocean_skill.qc`.
+    subtract_mean
+        ``False`` (default, no demeaning), ``True`` (both lanes),
+        ``"test"``/``"reference"`` (one lane), or a ``{"test": bool,
+        "reference": bool}`` dict -- remove each lane's own scalar mean
+        before scoring.
+    detide
+        ``False`` (default, no filtering), ``True`` (PL33's own 33-hour
+        cutoff, both lanes), ``"test"``/``"reference"`` (one lane at the
+        default cutoff), or a ``{"T": hours}``/``{"test": ...,
+        "reference": ...}`` dict giving an explicit cutoff per lane -- a
+        low-pass filter applied to each lane before alignment.
 
     ``reference`` and ``test`` each take a source name or a list; ``variables`` is a
     list of anything :mod:`ocean_skill.vocabulary` recognizes — a short vocabulary key

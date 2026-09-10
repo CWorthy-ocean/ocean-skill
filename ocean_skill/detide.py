@@ -301,6 +301,26 @@ def detide(
 ):
     """Remove tides from a time series or timeSeriesProfile with the PL33 filter.
 
+    Parameters
+    ----------
+    obj
+        :class:`xarray.DataArray`, :class:`xarray.Dataset`, :class:`pandas.Series`,
+        or :class:`pandas.DataFrame` -- a plain time series or a repeat-visit
+        station with depth (``timeSeriesProfile``); the return type matches
+        ``obj``'s (a station DataFrame converted via ``meta=`` is the one
+        exception).
+    T
+        ``float``, the filter's half-amplitude period in hours (default ``33.0``,
+        the plain PL33 filter; ``T=72`` gives a 3-day low-pass that also removes
+        longer-period fluctuations near the tidal band).
+    component
+        One of ``"subtidal"``, ``"tidal"``, ``"both"`` (default ``"subtidal"`` --
+        see below for what each returns).
+    meta
+        ``dict`` (the catalog entry's metadata) or ``None`` (default). Give it
+        when ``obj`` is a station **DataFrame** so it converts through
+        :func:`ocean_skill.tabular.to_dataset` first; see below.
+
     ``obj`` is an :class:`xarray.DataArray`, :class:`xarray.Dataset`,
     :class:`pandas.Series`, or :class:`pandas.DataFrame` -- a plain time series or a
     repeat-visit station with depth (``timeSeriesProfile``) alike; the return type

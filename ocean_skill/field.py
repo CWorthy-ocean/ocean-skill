@@ -195,6 +195,45 @@ def _top_level(da, zdim: str, *, source: str):
 class Field:
     """One source reduced to a map, a series of maps over one axis, or a line.
 
+    Parameters
+    ----------
+    source
+        ``str`` -- one catalog entry name (or an already-open
+        :class:`~ocean_skill.catalog.SourceRef`). A list belongs to :func:`field`,
+        which fans it into a :class:`FieldSet` instead.
+    variable
+        ``str`` or ``dict`` -- one variable name, or a combination/``calculate``
+        spec (see :mod:`ocean_skill.operators`). Not a list (pass one to
+        :func:`field` instead) and not a ``{"test", "reference"}`` pair-spec -- a
+        ``Field`` has one source and nothing to give the other side to.
+    select
+        ``dict[str, Any] | None`` -- axis name -> selection, e.g. ``{"depth":
+        "surface"}``, ``{"lon": -144.25, "lat": 49.98}`` (see
+        :func:`ocean_skill.comparison.as_select`). ``None`` (default) selects
+        nothing. Not a ``{"test", "reference"}`` pair-spec.
+    aggregate
+        ``dict[str, Any] | None`` -- axis name -> reduction, e.g. ``{"time":
+        "mean"}``, ``{"time": {"resample": "1MS", "reduce": "mean"}}``, or
+        ``{"time": {"groupby": "month"}}``. A spec that fully collapses an axis
+        gives one panel; ``groupby``/``resample`` leave the axis standing as the
+        facet. ``None`` (default) aggregates nothing. Not a pair-spec.
+    label
+        ``str | None`` -- legend/title label override. ``None`` (default) uses
+        ``source``.
+    cache
+        ``bool | None`` -- whether to reuse an already-prepared result cached on
+        disk. ``None`` (default) follows :func:`ocean_skill.cache.enabled`.
+    qc
+        Per-call QC override forwarded to :func:`ocean_skill.sources.read` (see
+        its own ``qc`` parameter for the full spec): a dict such as ``{"keep":
+        ["GOOD", "SUSPECT"]}``, or the string ``"off"``. ``None`` (default) uses
+        the entry's own saved QC contract. Not a pair-spec.
+    detide
+        ``bool | dict | None`` -- ``False``/``None`` (default) leaves this field
+        untouched; ``True`` tidal-filters it at PL33's own default cutoff; a
+        ``{"T": hours}`` dict sets that cutoff explicitly. See
+        :func:`ocean_skill.comparison._normalize_detide_side`.
+
     Parameters mirror :class:`~ocean_skill.comparison.Comparison` where they mean the
     same thing, so moving between the two is a change of class rather than of grammar.
     ``aggregate`` is the one that matters here: a spec that fully collapses time gives
@@ -489,6 +528,12 @@ class Field:
 
     def extremum(self, kind: str = "max") -> Any:
         """Locate this field's min/max: value, lon/lat, grid indices, snapshot.
+
+        Parameters
+        ----------
+        kind
+            One of ``"max"`` or ``"min"`` (default ``"max"``) -- which extremum
+            to locate.
 
         Runs over every dim the prepared field still has, not just the horizontal
         ones -- a field faceted over time or depth reports the facet coordinate
@@ -1104,6 +1149,19 @@ class Field:
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive) -- goes through the same renderer registry either way.
+        **kwargs
+            Plot options forwarded to the renderer: option families such as
+            ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
+            ``robust``, ``figsize``, ``save``, and the ``*_kwargs`` styling
+            dicts (``title_kwargs``, ``colorbar_kwargs``, ``legend_kwargs``,
+            and the rest). See ``docs/plot_styling_reference.md`` for the full
+            list.
+
         Which of the five is decided by the prepared data's own shape, never an
         argument — see :attr:`family`. The one exception is a catalogued
         ``featureType: grid`` source with a bare vertical select, which is
@@ -1160,6 +1218,19 @@ class Field:
 
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Play :attr:`facet_dim` instead of laying it out: this field as a movie.
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static ``.mp4``/``.gif``) or
+            ``"holoviews"`` (interactive, a slider).
+        **kwargs
+            Plot options forwarded to the renderer: ``save`` (filename; its
+            extension picks the format), ``every`` (keep every Nth step), plus
+            the same option families as :meth:`plot` (``title``, ``domain``,
+            ``robust``, ``figsize``, the ``*_kwargs`` styling dicts, including
+            movie-only ``frame_label_kwargs``). See
+            ``docs/plot_styling_reference.md`` for the full list.
 
         The same axis :meth:`plot` turns into panels becomes the frames here, so the two
         are one field read two ways::
@@ -1243,6 +1314,15 @@ class Field:
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this field's data sits: the selection over the source's domain.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``.
+        **kwargs
+            Plot options forwarded to
+            :func:`ocean_skill.plot.map_locations.map_locations`. See
+            ``docs/plot_styling_reference.md`` for the general styling families.
+
         From the request (``select``) and catalog metadata alone — nothing is
         opened, so this costs the same whether :meth:`plot`/:meth:`movie` have
         already run or not. See
@@ -1261,6 +1341,22 @@ class Field:
         **plot_kwargs: Any,
     ) -> dict[str, Path]:
         """Write this field's figure under ``output/<project>/figures/``.
+
+        Parameters
+        ----------
+        project
+            ``str | None`` -- the output project name, used to build
+            ``output/<project>/figures/``. ``None`` (default) uses ``self.source``.
+        stem
+            ``str | None`` -- the figure's filename stem (before ``.png``).
+            ``None`` (default) uses this field's standard name, truncated to 24
+            characters.
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``, forwarded to
+            :meth:`plot`.
+        **plot_kwargs
+            Forwarded to :meth:`plot` -- see its own ``**kwargs`` entry and
+            ``docs/plot_styling_reference.md``.
 
         The same layout :meth:`ocean_skill.comparison.ComparisonSet.save` writes to,
         minus the metrics table — there is no reference here, so there is nothing to
@@ -1283,6 +1379,14 @@ class Field:
 
 class FieldSet:
     """Several fields -- variables and/or sources -- drawn together as one figure.
+
+    Parameters
+    ----------
+    fields
+        ``list[Field]`` -- the members to draw together. Built by :func:`field`
+        from a list ``source`` and/or ``variable``; constructing a ``FieldSet``
+        directly from hand-built :class:`Field` objects works the same way but
+        is not the ordinary path.
 
     ``osk.field()`` builds one :class:`Field` per entry whenever ``source`` and/or
     ``variable`` is a list, sharing the same ``select``/``aggregate``/``label``/
@@ -1360,6 +1464,19 @@ class FieldSet:
         :mod:`plot.profile`, one panel per member for ``time_depth``, or one map
         panel per member for a set of maps.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        **kwargs
+            Plot options forwarded to the renderer: option families such as
+            ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
+            ``robust``, ``figsize``, ``save``, ``secondary_y``/``secondary_x``,
+            ``encode`` (e.g. ``{"color": "source"}``), and the ``*_kwargs``
+            styling dicts. See ``docs/plot_styling_reference.md`` for the full
+            list.
+
         Every member has to draw the same way -- all a :attr:`Field.family` of
         ``"series"`` (a point over time), all ``"profile"`` (a point down depth,
         at one instant), all ``"time_depth"`` (depth against time, at one
@@ -1435,6 +1552,14 @@ class FieldSet:
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Refuse: a set of fields has nothing shared left to play as frames.
 
+        Parameters
+        ----------
+        renderer
+            Accepted for signature parity with :meth:`Field.movie` but never
+            consulted -- this always raises before drawing anything.
+        **kwargs
+            Accepted for the same reason; never consulted.
+
         Deliberately does not consult :attr:`Field.family` to tailor this to
         which shape the set happens to be -- that would force every member's
         full prepare just to word an error about not proceeding, the opposite
@@ -1458,6 +1583,15 @@ class FieldSet:
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this set's fields sit: each member's selection, deduped.
 
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``.
+        **kwargs
+            Plot options forwarded to
+            :func:`ocean_skill.plot.map_locations.map_locations`. See
+            ``docs/plot_styling_reference.md`` for the general styling families.
+
         From each member's request and catalog metadata alone — nothing is
         opened. Members sharing one point/region draw once, not once per
         member. See :func:`ocean_skill.plot.map_locations.map_locations`.
@@ -1475,6 +1609,23 @@ class FieldSet:
         **plot_kwargs: Any,
     ) -> dict[str, Path]:
         """Write this set's figure under ``output/<project>/figures/``.
+
+        Parameters
+        ----------
+        project
+            ``str | None`` -- the output project name, used to build
+            ``output/<project>/figures/``. ``None`` (default) uses the first
+            member's ``source``.
+        stem
+            ``str | None`` -- the figure's filename stem (before ``.png``).
+            ``None`` (default) joins the members' deduped variable labels (and
+            source labels, if more than one source), truncated to 24 characters.
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``, forwarded to
+            :meth:`plot`.
+        **plot_kwargs
+            Forwarded to :meth:`plot` -- see its own ``**kwargs`` entry and
+            ``docs/plot_styling_reference.md``.
 
         The same layout :meth:`Field.save` writes to, minus the metrics table -- there
         is no reference for any member here either.
@@ -1499,6 +1650,16 @@ class FieldSet:
 
 class Cross:
     """Two vertical sections through one point, one along each grid direction.
+
+    Parameters
+    ----------
+    along
+        :class:`Field` -- the section along ``eta_rho`` (``xi_rho`` held fixed).
+    across
+        :class:`Field` -- the section along ``xi_rho`` (``eta_rho`` held fixed).
+    labels
+        Keyword-only ``tuple[str, str]`` -- the two panels' labels, one per
+        direction, in ``(along, across)`` order.
 
     Built by :func:`field` from ``select={"transect": {"cross": ...}}`` (see
     :mod:`ocean_skill.transect`) -- the vertical structure either side of one
@@ -1531,6 +1692,20 @@ class Cross:
         **kwargs: Any,
     ):
         """Draw both sections on one figure: stacked (default), or side by side.
+
+        Parameters
+        ----------
+        renderer
+            One of ``"matplotlib"`` (default, static) or ``"holoviews"``
+            (interactive).
+        orientation
+            One of ``"vertical"`` (default, stacked column) or ``"horizontal"``
+            (side by side).
+        **kwargs
+            Plot options forwarded to the renderer: the same option families as
+            :meth:`Field.plot` (``title``, ``domain``, ``robust``, ``figsize``,
+            ``save``, the ``*_kwargs`` styling dicts). See
+            ``docs/plot_styling_reference.md`` for the full list.
 
         Each direction must itself already draw as a section (see
         :attr:`Field.family`) -- a ``select=``/``aggregate=`` that collapses
@@ -1565,6 +1740,23 @@ class Cross:
         **plot_kwargs: Any,
     ) -> dict[str, Path]:
         """Write this cross's figure under ``output/<project>/figures/``.
+
+        Parameters
+        ----------
+        project
+            ``str | None`` -- the output project name, used to build
+            ``output/<project>/figures/``. ``None`` (default) uses
+            ``self.along.source``.
+        stem
+            ``str | None`` -- the figure's filename stem (before ``.png``).
+            ``None`` (default) uses the ``along`` field's standard name (truncated
+            to 18 characters) with ``"_cross"`` appended.
+        renderer
+            One of ``"matplotlib"`` (default) or ``"holoviews"``, forwarded to
+            :meth:`plot`.
+        **plot_kwargs
+            Forwarded to :meth:`plot` -- see its own ``**kwargs`` entry and
+            ``docs/plot_styling_reference.md``.
 
         The same layout :meth:`Field.save` writes to, minus the metrics table --
         there is no reference for either direction here either.
@@ -1683,6 +1875,48 @@ def field(
     detide: Any = False,
 ) -> Field | FieldSet:
     """Build a :class:`Field`: one model source, no reference.
+
+    Parameters
+    ----------
+    source
+        ``str`` or a list of them -- one catalog entry name, or several to fan
+        into a :class:`FieldSet` (one :class:`Field` per source, sharing every
+        other argument here).
+    variable
+        ``str``, ``dict``, or a list of them -- one variable name or a
+        combination/``calculate`` spec, or several to fan into a
+        :class:`FieldSet`. Not a ``{"test", "reference"}`` pair-spec -- a
+        ``Field`` has one source and nothing to give the other side to.
+    select
+        ``dict[str, Any] | None`` -- axis name -> selection, e.g. ``{"depth":
+        "surface"}``, ``{"lon": ..., "lat": ...}``, or ``{"sigma0": ...}`` for an
+        isopycnal (ROMS sources only). ``select={"transect": {"cross": ...}}``
+        builds a :class:`Cross` instead (source and variable must each be a
+        single, non-list value for that). ``None`` (default) leaves the
+        vertical axis whole, unlike :func:`ocean_skill.comparison.compare`,
+        whose own default is ``"surface"``.
+    aggregate
+        ``dict[str, Any] | None`` -- axis name -> reduction, e.g. ``{"time":
+        "mean"}``, ``{"time": {"resample": "1MS", "reduce": "mean"}}``, or
+        ``{"time": {"groupby": "month"}}``. ``None`` (default) aggregates
+        nothing.
+    label
+        ``str | None`` -- legend/title label override, shared by every member
+        when ``source``/``variable`` fan out. ``None`` (default) uses each
+        member's own source name.
+    cache
+        ``bool | None`` -- whether to reuse an already-prepared result cached on
+        disk. ``None`` (default) follows :func:`ocean_skill.cache.enabled`.
+    qc
+        Per-call QC override forwarded to :func:`ocean_skill.sources.read` (see
+        its own ``qc`` parameter for the full spec): a dict such as ``{"keep":
+        ["GOOD", "SUSPECT"]}``, or the string ``"off"``. ``None`` (default) uses
+        each entry's own saved QC contract.
+    detide
+        ``bool | dict | None`` -- ``False``/``None`` (default) leaves every
+        member untouched; ``True`` tidal-filters all of them at PL33's own
+        default cutoff; a ``{"T": hours}`` dict sets that cutoff explicitly. See
+        :func:`ocean_skill.comparison._normalize_detide_side`.
 
     The counterpart of :func:`ocean_skill.comparison.compare` for the case where there
     is nothing to compare against — a run shown on its own, most usefully as a series

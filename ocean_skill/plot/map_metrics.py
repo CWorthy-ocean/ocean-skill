@@ -741,8 +741,8 @@ def map_metrics(
     (``docs/plot_styling_reference.md``). ``method``/``knn_k``/``block_spacing``/
     ``weights`` choose the interpolator (see :func:`interpolate_records`).
 
-    Options
-    -------
+    Parameters
+    ----------
     data
         A :class:`~ocean_skill.comparison.ComparisonSet` of single-position station
         comparisons — moorings (``is_series``) and/or CTD casts (``is_profile``),
@@ -813,9 +813,12 @@ def map_metrics(
     renderer
         ``"matplotlib"`` (default, static) or ``"holoviews"`` (interactive).
     mark
-        The map mark; default ``"contourf"``.
+        One of ``"contourf"`` (default, smooth filled contours) or
+        ``"pcolormesh"`` (raw grid cells, no smoothing).
     **plot_kwargs
-        Any other ``skill_map`` styling option, forwarded straight through — see
+        Other styling families forwarded straight through to ``skill_map``
+        (both renderers) — ``title``, ``domain``, ``robust``, ``figsize``,
+        ``cols``, ``save``, plus the ``*_kwargs`` styling dicts. See
         ``docs/plot_styling_reference.md``.
     """
     from ocean_skill.plot.registry import render
