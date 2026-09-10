@@ -1503,26 +1503,38 @@ def _sorted_on(da, axis: str):
     return da
 
 
-def _match_vertical(test, reference, tdim: str, rdim: str):
-    """Bring the test lane onto the reference's own vertical levels, by interpolation.
+def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nearest"):
+    """Bring the test lane onto the reference's own vertical levels.
 
     The vertical counterpart of the ``{mean, nearest, exact}`` choice
-    :func:`match_axis` makes for time -- but settled once here, not chosen: a water
-    column has no "composite vs instantaneous" question to answer the way a time
-    axis does (there is no such thing as a depth level that is itself an *average*
-    over a range of depths), so the test lane is always linearly interpolated onto
-    the reference's own levels rather than binned or nearest-matched. A level
-    outside the test's own vertical range comes back NaN (no extrapolation), the
+    :func:`match_axis` makes for time -- but narrower: a water column has no
+    "composite vs instantaneous" question the way a time axis does (there is no
+    such thing as a depth level that is itself an *average* over a range of
+    depths), so ``"mean"``/``"exact"`` have no vertical counterpart. What is left
+    is the same choice :func:`ocean_skill.roms.nearest_depth_levels`/``to_depth``
+    make for the model's own vertical transform, and it is made the same way here:
+    ``method="nearest"`` (the default) snaps each reference level to the test
+    lane's closest real level; ``"interp"`` (or ``"linear"``) linearly interpolates
+    the test lane onto the reference's own levels instead. A level outside the
+    test's own vertical range comes back NaN either way (no extrapolation), the
     same convention :func:`ocean_skill.roms.to_depth` uses for exactly the same
-    reason.
+    reason -- ``"nearest"`` enforces this with a tolerance (below) since a plain
+    nearest-neighbour lookup would otherwise always find *some* level, however far.
 
-    Sign conventions are reconciled before interpolating -- ROMS's own ``z``/
-    ``z_rho`` read negative-down, an observational product's own axis usually
-    already reads positive-down -- and the *reference's* convention is what
-    survives: the shared axis keeps the reference's own literal values, exactly as
-    :func:`match_axis` keeps the reference's own stamps for a time match. Always
-    lands on the reference (never the test), unlike time's coarser-wins rule:
-    a station reference has one water column and nothing coarser to defer to.
+    In the ordinary comparison flow this step is close to a no-op: the model lane
+    already arrived on the reference's own levels care of
+    :func:`ocean_skill.roms.nearest_depth_levels`/``to_depth`` (:class:`~ocean_skill.
+    comparison.Comparison` fills the model's own target depths from the reference's
+    when the caller names none). It matters in full when a caller hands
+    :func:`align` two columns whose levels were never reconciled upstream.
+
+    Sign conventions are reconciled before matching -- ROMS's own ``z``/``z_rho``
+    read negative-down, an observational product's own axis usually already reads
+    positive-down -- and the *reference's* convention is what survives: the shared
+    axis keeps the reference's own literal values, exactly as :func:`match_axis`
+    keeps the reference's own stamps for a time match. Always lands on the
+    reference (never the test), unlike time's coarser-wins rule: a station
+    reference has one water column and nothing coarser to defer to.
     """
     for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
         if dim not in lane.coords:
@@ -1541,14 +1553,42 @@ def _match_vertical(test, reference, tdim: str, rdim: str):
     test_pos = np.abs(test_vals)
     order = np.argsort(test_pos)
     test_sorted = test.isel({tdim: order}).assign_coords({tdim: test_pos[order]})
-    interpolated = test_sorted.interp({tdim: ref_pos}, method="linear")
-    if tdim != rdim:
-        interpolated = interpolated.rename({tdim: rdim})
-    interpolated = interpolated.assign_coords({rdim: (rdim, ref_vals)})
 
-    if not bool(np.isfinite(interpolated).any()):
+    if method == "nearest":
+        # Half the largest gap between the test lane's own levels -- the same
+        # tolerance rule ocean_skill.comparison._reindex_tolerance uses for the
+        # observational side of a literal-depths request: small enough that a
+        # reference level genuinely inside the test's range still snaps to its
+        # nearest real level, but not so wide that one clearly beyond the test's
+        # deepest level gets pulled in as though measured there.
+        sorted_pos = np.sort(test_pos)
+        tolerance = float(np.max(np.diff(sorted_pos)) / 2.0) if sorted_pos.size > 1 else 1.0
+        matched = test_sorted.reindex({tdim: ref_pos}, method="nearest", tolerance=tolerance)
+        match_reason = (
+            "a vertical axis is matched by snapping each reference level to the "
+            "test lane's nearest real level, not interpolated or binned the way "
+            "time can be"
+        )
+    elif method in ("interp", "linear"):
+        matched = test_sorted.interp({tdim: ref_pos}, method="linear")
+        match_reason = (
+            "a vertical axis is matched by linear interpolation of the test lane "
+            "onto the reference's own levels, not binned or nearest-matched the "
+            "way time is"
+        )
+    else:
+        raise ValueError(
+            f"unknown depth_method {method!r}; expected 'nearest' (the default) or "
+            "'interp' (or 'linear')"
+        )
+
+    if tdim != rdim:
+        matched = matched.rename({tdim: rdim})
+    matched = matched.assign_coords({rdim: (rdim, ref_vals)})
+
+    if not bool(np.isfinite(matched).any()):
         warnings.warn(
-            f"interpolating the test lane onto the reference's {rdim!r} levels "
+            f"matching the test lane onto the reference's {rdim!r} levels "
             f"({np.nanmin(ref_vals):g} to {np.nanmax(ref_vals):g}) leaves nothing "
             f"finite -- the test's own vertical range is "
             f"{np.nanmin(test_vals):g} to {np.nanmax(test_vals):g}. The two "
@@ -1557,17 +1597,13 @@ def _match_vertical(test, reference, tdim: str, rdim: str):
         )
 
     report = {
-        "match_method": "interp",
-        "match_reason": (
-            "a vertical axis is matched by linear interpolation of the test lane "
-            "onto the reference's own levels, not binned or nearest-matched the "
-            "way time is"
-        ),
+        "match_method": method,
+        "match_reason": match_reason,
         "match_target": "reference",
         "axis": rdim,
         "n_matched": int(reference.sizes[rdim]),
     }
-    return interpolated, reference, report
+    return matched, reference, report
 
 
 def match_axis(
@@ -1576,6 +1612,7 @@ def match_axis(
     *,
     over: str,
     method: str = "auto",
+    depth_method: str = "nearest",
     tolerance: float | None = None,
     min_overlap: int = MIN_OVERLAP,
     metadata: dict | None = None,
@@ -1589,6 +1626,14 @@ def match_axis(
     is done to the frame lane except that steps it ends up with no counterpart data for
     are dropped — an all-NaN step contributes nothing to a metric and would make the
     difference field say something untrue about it.
+
+    ``method`` is the time-matching choice (``mean``/``nearest``/``exact``/``auto``);
+    ``depth_method`` (``nearest``/``interp``) is its vertical counterpart, read only
+    when ``over`` resolves to the vertical axis -- see :func:`_match_vertical`, which
+    it is passed straight through to. The two are separate arguments, not one,
+    because they answer different questions: `over` is never both axes at once (a
+    vertical section over depth *and* along-path distance is `align`'s own, narrower
+    concern, not this function's).
 
     Returns ``(test, reference, report)`` with both lanes on one axis, named as the
     reference names it; ``report["match_target"]`` says which lane's *stamps* the axis
@@ -1610,8 +1655,9 @@ def match_axis(
     if _CF_AXES.get(over) == "vertical":
         # A water column has no "composite vs instantaneous" question the way a
         # time axis does, so there is nothing here to choose the way `method`
-        # chooses for time -- see _match_vertical for what happens instead.
-        return _match_vertical(test, reference, tdim, rdim)
+        # chooses for time -- see _match_vertical for what happens instead
+        # (depth_method= there is nearest/interp, not mean/nearest/exact/auto).
+        return _match_vertical(test, reference, tdim, rdim, method=depth_method)
 
     test, reference = _sorted_on(test, tdim), _sorted_on(reference, rdim)
     tf = _axis_floats(test, tdim, "test")
@@ -2231,6 +2277,7 @@ def align(
     reference_name: str = "reference",
     over: str | None = None,
     time_method: str = "auto",
+    depth_method: str = "nearest",
     tolerance: float | None = None,
     min_overlap: int = MIN_OVERLAP,
     metadata: dict | None = None,
@@ -2263,6 +2310,11 @@ def align(
     :func:`resolve_match_method`). ``time_method``/``tolerance``/``bin_anchor``/
     ``metadata``/``test_metadata`` are its arguments; what it decided, including which
     lane's stamps survived (``match_target``), is recorded in the result's attrs.
+    ``depth_method`` is ``match_axis``'s vertical counterpart to ``time_method``,
+    read only when ``over`` resolves to the vertical axis (see
+    :func:`_match_vertical`): ``"nearest"`` (the default) snaps to the test lane's
+    closest real level, ``"interp"``/``"linear"`` linearly interpolates onto the
+    reference's levels instead.
 
     A **station reference** — one position rather than a grid, as a mooring is — has no
     cells to regrid onto, so the test lane is *sampled* at its position instead
@@ -2344,6 +2396,7 @@ def align(
             reference,
             over=over,
             method=time_method,
+            depth_method=depth_method,
             tolerance=tolerance,
             min_overlap=min_overlap,
             metadata=metadata,

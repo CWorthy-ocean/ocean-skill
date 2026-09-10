@@ -26,6 +26,7 @@ __all__ = [
     "depth_average",
     "depth_band",
     "derived_geographic_velocities",
+    "nearest_depth_levels",
     "standardize",
     "surface",
     "to_depth",
@@ -714,6 +715,115 @@ def to_depth(
         warnings.warn(
             f"{where} entirely NaN: the target lies outside the model's "
             f"cell-centre range, so nothing can be interpolated;{hint}",
+            stacklevel=2,
+        )
+    return result
+
+
+def nearest_depth_levels(
+    ds: xr.Dataset, meta: dict[str, Any], d: float | list[float], *, ref_time: Any = None
+) -> xr.Dataset:
+    """Snap fixed target depth(s) ``d`` to the nearest native model level -- no interpolation.
+
+    The nearest-level counterpart of :func:`to_depth`: rather than linearly blending
+    two levels together, this looks up the closest ``s_rho`` cell centre (per column)
+    and reads its value directly, so what comes back is real model output, never an
+    average of two. Keeps the result lazy exactly as :func:`to_depth` does, except for
+    the tiny lookup itself (below).
+
+    A level's true depth still moves with the free surface, so "nearest" needs a
+    single reference profile to measure against -- built once, from ``ref_time`` (the
+    model's own time nearest it) or, absent that, simply the first step of ``ds``'s own
+    (already time-cropped) record. That lookup is then applied across **every** time
+    step as one static index, deliberately not re-matched per step: recomputing
+    ``z_rho`` (a function of the moving ``zeta``) at every one of a mooring's hourly
+    steps is exactly the per-timestep cost this function exists to avoid, and the
+    reference profile it uses instead is small enough to evaluate eagerly regardless
+    of how lazily the rest of ``ds`` is chunked.
+
+    A target outside the *reference* column's own [shallowest, deepest] cell-centre
+    range comes back NaN, the same no-extrapolation convention :func:`to_depth` uses
+    and for the same reason -- there is nothing there to snap to. ``d`` may be a
+    scalar or a list, exactly as in :func:`to_depth`; the result matches its shape and
+    coordinate conventions (a ``z`` axis in metres, stored negative-down to match
+    ``z_rho``) so the two are interchangeable to a caller. Non-``s_rho`` variables
+    drop, exactly as in :func:`to_depth`.
+    """
+    if "z_rho" not in ds.coords:
+        ds = add_depth_coord(ds, meta)
+    s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
+    depths = np.atleast_1d(np.asarray(d, dtype=float))
+    targets = xr.DataArray(-depths, dims="z", coords={"z": -depths})
+
+    z_rho = _contiguous_column(ds["z_rho"], s_dim)
+    if "time" in z_rho.dims:
+        z_profile = (
+            z_rho.sel(time=ref_time, method="nearest")
+            if ref_time is not None
+            else z_rho.isel(time=0)
+        )
+    else:
+        z_profile = z_rho
+    # Small (one time, one water column or a point-cropped window) and read once --
+    # loaded eagerly so the index built from it below is a plain array, never a lazy
+    # graph the per-time fields would otherwise be forced through to resolve it.
+    # The scalar `time` this leaves behind (a leftover coordinate, not a dimension
+    # any more) would otherwise conflict with the real, multi-step `time` on every
+    # field the index below is applied to -- dropped for exactly that reason.
+    z_profile = z_profile.load()
+    if "time" in z_profile.coords:
+        z_profile = z_profile.drop_vars("time")
+
+    diff = np.abs(z_profile - targets)
+    # fillna guards a masked (land) column: without it, argmin's tie-breaking on a
+    # NaN cell centre is undefined rather than simply "never nearest".
+    idx = diff.fillna(np.inf).argmin(s_dim)
+
+    h_dims = set(ds["lon"].dims) if "lon" in ds.coords else {"eta_rho", "xi_rho"}
+    out = {}
+    for var in ds.data_vars:
+        da = ds[var]
+        if s_dim in da.dims and h_dims <= set(da.dims):
+            selected = da.isel({s_dim: idx})
+            # Plain isel (unlike to_depth's xgcm transform) drags every coordinate
+            # sharing the indexed dim along for the ride -- z_rho chief among them,
+            # now itself indexed onto the picked levels. Dropped so this result
+            # carries exactly the coordinate set to_depth's does (lon/lat/z, no
+            # more), or a mixed ["surface", ...] request downstream (which
+            # concatenates this against roms.surface's own z_rho-free result) sees
+            # a coordinate mismatch between the two pieces.
+            selected = selected.reset_coords(drop=True)
+            selected.attrs = dict(da.attrs)
+            out[var] = selected
+    coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
+    if AREA_COORD in ds.coords:
+        coords[AREA_COORD] = ds[AREA_COORD]
+
+    # Reachability, exactly as to_depth checks it: a property of the reference
+    # column's geometry alone, not of any one variable's data.
+    col_min = z_profile.min(s_dim)
+    col_max = z_profile.max(s_dim)
+    other = [dim for dim in col_min.dims if dim != "z"]
+    reachable = (col_min <= targets) & (targets <= col_max)
+    for name in out:
+        out[name] = out[name].where(reachable)
+    result = xr.Dataset(out, coords=coords)
+    result.attrs.update(ds.attrs)
+    reachable_any = reachable.any(dim=other) if other else reachable
+    reachable_any = np.asarray(reachable_any)
+    nan_depths = [float(dd) for i, dd in enumerate(depths) if not bool(reachable_any[i])]
+    if nan_depths:
+        hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
+        if len(nan_depths) == 1:
+            where = f"target depth {nan_depths[0]:g} m is"
+        else:
+            where = (
+                f"{len(nan_depths)} target depths "
+                f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
+            )
+        warnings.warn(
+            f"{where} entirely NaN: the target lies outside the reference column's "
+            f"cell-centre range, so nothing can be snapped to;{hint}",
             stacklevel=2,
         )
     return result

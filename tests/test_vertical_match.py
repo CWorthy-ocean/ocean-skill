@@ -1,10 +1,11 @@
 """``align.match_axis(..., over="Z")``: bringing two lanes onto one vertical axis.
 
-The vertical twin of ``tests/test_axis_match.py``, and deliberately much simpler: a
+The vertical twin of ``tests/test_axis_match.py``, and deliberately narrower: a
 water column has no "composite vs instantaneous" question the way a time axis does
-(see ``ocean_skill.align._match_vertical``'s docstring), so there is one matching
-rule -- linear interpolation of the test lane onto the reference's own levels --
-rather than a choice between binning and nearest-matching.
+(see ``ocean_skill.align._match_vertical``'s docstring), so ``mean``/``exact`` have
+no vertical counterpart -- but a real choice remains between snapping the test lane
+to its nearest real level (``depth_method="nearest"``, the default) and linearly
+interpolating it onto the reference's own levels (``"interp"``/``"linear"``).
 """
 
 from __future__ import annotations
@@ -41,19 +42,39 @@ def _station_reference(depth, *, name="DEPTH", lon=-94.5, lat=25.5):
     ).assign_coords(lon=lon, lat=lat)
 
 
-# -- match_axis dispatches to interpolation for a vertical axis ------------------------
+# -- match_axis dispatches to nearest/interp, not binning, for a vertical axis ---------
 
 
-def test_over_Z_dispatches_to_interpolation_not_binning():
+def test_over_Z_dispatches_to_nearest_by_default_not_binning():
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])  # ROMS-style, negative-down
     depth = np.array([5.0, 20.0, 60.0])
     test, reference, report = A.match_axis(
         _gridded_test(z), _station_reference(depth), over="Z"
     )
-    assert report["match_method"] == "interp"
+    assert report["match_method"] == "nearest"
     assert report["match_target"] == "reference"
     assert report["axis"] == "DEPTH"
     assert list(test["DEPTH"].values) == list(depth)
+
+
+def test_over_Z_can_interpolate_explicitly():
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
+    depth = np.array([5.0, 20.0, 60.0])
+    test, reference, report = A.match_axis(
+        _gridded_test(z), _station_reference(depth), over="Z", depth_method="interp"
+    )
+    assert report["match_method"] == "interp"
+    assert report["match_target"] == "reference"
+    assert list(test["DEPTH"].values) == list(depth)
+
+
+def test_unknown_depth_method_is_refused():
+    z = -np.array([0.0, 10.0, 25.0])
+    depth = np.array([5.0, 20.0])
+    with pytest.raises(ValueError, match="unknown depth_method"):
+        A.match_axis(
+            _gridded_test(z), _station_reference(depth), over="Z", depth_method="bogus"
+        )
 
 
 def test_lowercase_z_and_depth_are_left_to_the_generic_axis_path():
@@ -71,16 +92,28 @@ def test_lowercase_z_and_depth_are_left_to_the_generic_axis_path():
     assert report["match_method"] in ("nearest", "mean")
 
 
-# -- sign conventions reconcile, values interpolate correctly --------------------------
+# -- sign conventions reconcile correctly, under either method -------------------------
 
 
-def test_negative_down_z_matches_positive_down_depth_by_value():
+def test_negative_down_z_matches_positive_down_depth_by_value_when_interpolating():
     z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
     depth = np.array([5.0, 20.0, 60.0])
     test, reference, _ = A.match_axis(
-        _gridded_test(z), _station_reference(depth), over="Z"
+        _gridded_test(z), _station_reference(depth), over="Z", depth_method="interp"
     )
     expected = 20.0 - 0.1 * depth
+    got = test.sel(lon=-94.0, lat=25.0).values
+    np.testing.assert_allclose(got, expected, atol=0.2)
+
+
+def test_negative_down_z_matches_positive_down_depth_by_value_when_nearest():
+    """Nearest must compare like-signed values -- not read 5 m against -5 m."""
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])  # test levels 0/10/25/50/100 m down
+    depth = np.array([3.0, 27.0, 90.0])  # closest to 0, 25, 100 m respectively
+    test, reference, _ = A.match_axis(
+        _gridded_test(z), _station_reference(depth), over="Z"
+    )
+    expected = 20.0 - 0.1 * np.array([0.0, 25.0, 100.0])  # the test's own snapped levels
     got = test.sel(lon=-94.0, lat=25.0).values
     np.testing.assert_allclose(got, expected, atol=0.2)
 
@@ -142,8 +175,21 @@ def test_align_over_Z_against_a_station_produces_a_profile_shaped_result():
     assert out["reference"].dims == ("DEPTH",)
     assert out["test"].dims == ("DEPTH",)
     assert out.attrs["scored_over"] == "DEPTH"
-    assert out.attrs["match_method"] == "interp"
+    assert out.attrs["match_method"] == "nearest"
     assert "station_lon" in out.attrs and "station_lat" in out.attrs
+
+
+def test_align_over_Z_can_interpolate_explicitly():
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
+    depth = np.array([5.0, 20.0, 60.0])
+    out = A.align(
+        _gridded_test(z),
+        _station_reference(depth),
+        over="Z",
+        method="nearest",
+        depth_method="interp",
+    )
+    assert out.attrs["match_method"] == "interp"
 
 
 def test_align_over_Z_does_not_warn_about_missing_depth():

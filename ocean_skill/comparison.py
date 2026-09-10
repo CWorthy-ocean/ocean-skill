@@ -1343,15 +1343,35 @@ def _as_named_dataset(da, name: str):
     return da.to_dataset(name=name)
 
 
-def _surface_and_levels(sub, meta, name: str, depths) -> Any:
-    """Assemble a ``z`` axis mixing the model's own surface with interpolated levels.
+def _to_depth_targets(sub, meta, targets, *, depth_method: str = "nearest"):
+    """Dispatch a fixed-level vertical request to interpolation or the nearest level.
+
+    The one place :func:`ocean_skill.roms.to_depth` (``depth_method="interp"``/
+    ``"linear"``) and :func:`ocean_skill.roms.nearest_depth_levels`
+    (``depth_method="nearest"``, the default) are chosen between, so every caller in
+    this module reads the same rule the same way.
+    """
+    from ocean_skill import roms
+
+    if depth_method == "nearest":
+        return roms.nearest_depth_levels(sub, meta, targets)
+    if depth_method in ("interp", "linear"):
+        return roms.to_depth(sub, meta, targets)
+    raise ValueError(
+        f"unknown depth_method {depth_method!r}; expected 'nearest' (the default) or "
+        "'interp' (or 'linear')"
+    )
+
+
+def _surface_and_levels(sub, meta, name: str, depths, *, depth_method: str = "nearest") -> Any:
+    """Assemble a ``z`` axis mixing the model's own surface with fixed levels.
 
     ``select={"depth": ["surface", 50, 100]}`` asks for levels no single vertical
     operation can produce: ``"surface"`` is the native top cell
     (:func:`ocean_skill.roms.surface` — interpolating to 0 m is NaN wherever the top
     cell centre sits deeper), while the numbers are fixed levels via
-    :func:`ocean_skill.roms.to_depth`. So the two are computed separately and
-    concatenated along ``z`` in the order asked for.
+    :func:`_to_depth_targets` (``depth_method``). So the two are computed separately
+    and concatenated along ``z`` in the order asked for.
 
     The surface layer sits at ``z=0.0`` — a coordinate value, not a claim it was
     interpolated there. The coordinate has to stay numeric (the lane cache is zarr,
@@ -1364,7 +1384,11 @@ def _surface_and_levels(sub, meta, name: str, depths) -> Any:
     from ocean_skill import roms
 
     numeric = [float(d) for d in depths if not is_surface_request(d)]
-    levels = roms.to_depth(sub, meta, numeric)[name] if numeric else None
+    levels = (
+        _to_depth_targets(sub, meta, numeric, depth_method=depth_method)[name]
+        if numeric
+        else None
+    )
     top = roms.surface(sub, meta)[name]
     if levels is not None:
         # expand_dims puts z first where the transform put it last; concat needs one
@@ -1651,6 +1675,7 @@ def _prepare(
     detide: dict[str, Any] | None = None,
     literal_depths: bool = False,
     point_window: bool = False,
+    depth_method: str = "nearest",
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -1697,6 +1722,16 @@ def _prepare(
     per-chunk explosion into a single numpy pass -- a pure performance change,
     never taken for a gridded/full-domain lane, where eagerly loading would risk
     exhausting memory instead of saving time.
+
+    ``depth_method`` picks how a fixed target depth (or list of them) is read off
+    the model's native levels -- see :func:`_to_depth_targets`, which this passes
+    straight through to. ``"nearest"`` (the default) snaps to the closest native
+    level, matched once against a single reference time rather than re-matched
+    every step (:func:`ocean_skill.roms.nearest_depth_levels`); ``"interp"`` (or
+    ``"linear"``) instead linearly interpolates every step onto the target depth
+    (:func:`ocean_skill.roms.to_depth`, this module's behaviour before this option
+    existed). The vertical counterpart of ``Comparison.time_method`` -- see that
+    attribute's own docstring for the matching choice along time.
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -1979,9 +2014,9 @@ def _prepare(
             ):
                 # "surface" beside numbers, e.g. ["surface", 50, 100]: no single
                 # vertical operation produces that, so the levels are assembled.
-                sub = _surface_and_levels(sub, meta, name, depth)
+                sub = _surface_and_levels(sub, meta, name, depth, depth_method=depth_method)
             else:
-                # A list interpolates to several levels in one field, which the vertical
+                # A list gives several levels in one field, which the vertical
                 # aggregation then collapses; a scalar gives one level and no axis.
                 try:
                     targets = (
@@ -1996,7 +2031,7 @@ def _prepare(
                         'metres and "surface" (["surface", 50, 100]).'
                     ) from None
                 sub = _materialize_point_column(sub, point_window)
-                sub = roms.to_depth(sub, meta, targets)
+                sub = _to_depth_targets(sub, meta, targets, depth_method=depth_method)
             da = sub[name]
             # Squeeze only a single interpolated level: a scalar depth
             # request collapses the axis by itself (as `.sel` does
@@ -2472,6 +2507,7 @@ def prepare_source(
     qc: Any = None,
     detide: dict[str, Any] | None = None,
     literal_depths: bool = False,
+    depth_method: str = "nearest",
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -2598,6 +2634,15 @@ def prepare_source(
     reads (a caller-named depth past the reference's own range is honored rather
     than clamped), so it joins the cache key below the same way ``detide`` does.
 
+    ``depth_method`` is likewise :func:`_prepare`'s own flag, passed straight
+    through -- see its docstring paragraph. Unlike ``literal_depths``, it always
+    joins the cache key below, whether or not it is the default: the default
+    itself just changed (from an implicit, un-named "interpolate" to
+    ``"nearest"``), so a lane cached before this option existed must never be
+    mistaken for one computed either way under the new default -- the ordinary
+    "re-key only a non-default choice" idiom the rest of this key follows would
+    let exactly that collision through.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -2667,6 +2712,10 @@ def prepare_source(
         # this feature existed (and every ordinary, non-literal lane today) keeps
         # its byte-identical key.
         key_select["_literal_depths"] = True
+    # Unconditional, unlike literal_depths= just above -- see depth_method='s own
+    # docstring paragraph. A lane cached before this option existed carries no
+    # such key at all, so it never collides with either value of this one.
+    key_select["_depth_method"] = depth_method
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -2849,6 +2898,7 @@ def prepare_source(
         detide=detide,
         literal_depths=literal_depths,
         point_window=point_window_applied,
+        depth_method=depth_method,
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
@@ -2929,6 +2979,7 @@ class Comparison:
         method: str = "conservative_normed",
         over: str | None = None,
         time_method: str = "auto",
+        depth_method: str = "nearest",
         tolerance: float | None = None,
         bin_anchor: str = "auto",
         min_coverage: float = 0.5,
@@ -3027,6 +3078,7 @@ class Comparison:
             self.over_reason = "over= as asked"
         self.over = over
         self.time_method = time_method
+        self.depth_method = depth_method
         self.tolerance = tolerance
         self.bin_anchor = bin_anchor
         self.min_coverage = min_coverage
@@ -3688,6 +3740,14 @@ class Comparison:
                 "_bin_anchor": self.bin_anchor,
             }
         )
+        # Unconditional, unlike the over-gated block above: depth_method also
+        # matters to a bare fixed-depth request with no over= at all (any select=
+        # {"depth": [...]}/depths= against a ROMS-shaped test lane goes through
+        # _prepare's ladder either way). Always present, the same reasoning as
+        # prepare_source's own unconditional `_depth_method` key -- the default
+        # itself just changed, so a pair cached before this option existed must
+        # never be mistaken for one built under the new default.
+        extra["_depth_method"] = self.depth_method
         if self._section_casts is not None:
             # reference_name is a joined display string here (see __init__), so
             # the real identity -- which casts, in which order -- has to be
@@ -3925,6 +3985,12 @@ class Comparison:
             # same way the profile-depth machinery elsewhere in this class treats
             # the reference as the one lane with "its own levels" to speak of.
             literal_depths=self.literal_depths and role == "reference",
+            # Unlike literal_depths=, passed for both roles unconditionally: it
+            # only ever changes anything for a ROMS-shaped (s_rho) lane going
+            # through _prepare's fixed-depth ladder, which an observational
+            # reference lane never reaches -- there is no role-scoping to get
+            # wrong here the way there is above.
+            depth_method=self.depth_method,
         )
 
     def _warn_on_pair_spec_mismatch(
@@ -4490,6 +4556,7 @@ class Comparison:
             reference_name="reference",
             over=self.over,
             time_method=match_time_method,
+            depth_method=self.depth_method,
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
             min_coverage=self.min_coverage,
@@ -5214,6 +5281,7 @@ def _identity(c) -> tuple:
         getattr(c, "method", None),
         getattr(c, "over", None),
         getattr(c, "time_method", None),
+        getattr(c, "depth_method", None),
         getattr(c, "tolerance", None),
         getattr(c, "bin_anchor", None),
         # A demeaned comparison and its raw twin must pool as two distinct points,
@@ -6756,6 +6824,7 @@ def compare(
     method: str = "conservative_normed",
     over: str | None = None,
     time_method: str = "auto",
+    depth_method: str = "nearest",
     tolerance: float | None = None,
     bin_anchor: str = "auto",
     min_coverage: float = 0.5,
@@ -6929,6 +6998,24 @@ def compare(
     onto each cast time, for a low-frequency model whose nearest step could sit
     meaningfully far from a cast. Inert everywhere else -- an ordinary ``over="time"``
     comparison still reads it as ``mean``/``nearest``/``exact``/``auto``, unaffected.
+
+    ``depth_method`` is the vertical twin of ``time_method``, and applies whenever a
+    depth-resolved lane is asked for -- an ADCP mooring or CTD profile
+    (``over="Z"``, above) most often, but also a plain fixed-depth ``select={"depth":
+    [...]}``/``depths=`` request against a ROMS-shaped model with no ``over`` at all.
+    ``"nearest"`` (the default) reads the real model level closest to each target
+    depth -- matched **once**, against a single reference time, rather than
+    re-matched at every step (see :func:`ocean_skill.roms.nearest_depth_levels`), so
+    the value reported is genuine model output, never a blend of two levels, and a
+    long point record (a mooring's thousands of hourly steps) costs one lookup, not
+    one per step. ``depth_method="interp"`` (or ``"linear"``) instead linearly
+    interpolates the model onto each target depth, at every time step
+    (:func:`ocean_skill.roms.to_depth`, this option's behaviour before ``"nearest"``
+    existed). Unlike lon/lat, which was already sampled at the nearest grid cell by
+    default (``method="nearest"`` at a station -- see :func:`ocean_skill.align.
+    _align_at_point`), depth had no such default until this option: the whole
+    comparison is now nearest-by-default in space as it is in the vertical, with
+    interpolation available in both wherever it is asked for explicitly.
 
     ``min_coverage`` (default 0.5) is the map-regrid counterpart of ``min_pairs``: when
     the finer lane (a model, most often) is regridded onto the coarser one's cells (a
@@ -7574,6 +7661,7 @@ def compare(
                     method=method,
                     over=over,
                     time_method=time_method,
+                    depth_method=depth_method,
                     tolerance=tolerance,
                     bin_anchor=bin_anchor,
                     min_coverage=min_coverage,
@@ -7734,6 +7822,7 @@ def compare(
                             method=method,
                             over=over,
                             time_method=time_method,
+                            depth_method=depth_method,
                             tolerance=tolerance,
                             bin_anchor=bin_anchor,
                             min_coverage=min_coverage,
