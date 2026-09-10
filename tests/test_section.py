@@ -144,7 +144,8 @@ def test_a_waypoint_transect_reaches_family_section(patched_read):
 
 def test_a_waypoint_transect_with_depths_matches_the_grid_aligned_shape(patched_read):
     """Same output contract as the grid-aligned pathway (Stage A) -- the plot layer
-    (built once, against that contract) needs no changes to draw either one."""
+    (built once, against that contract) needs no changes to draw either one.
+    """
     name = patched_read(_roms_run())
     f = osk.field(
         name,
@@ -296,6 +297,128 @@ def test_section_renders_interactively():
     obj = render(
         PlotSpec(family="section", items=[_section_item()]), renderer="holoviews"
     )
+    assert obj is not None
+
+
+# -- native-s land columns: prepare_section must not hand pcolormesh a NaN coord ----
+#
+# roms.standardize masks the free-surface zeta over land, and z_rho/z_w are built
+# from zeta -- so a native-s section's depth coordinate is NaN over every land
+# column, unlike the all-wet synthetic grid every other test in this file uses.
+# pcolormesh tolerates NaN in the *data* it colours (the below-bathymetry grey) but
+# raises on NaN in its x/y coordinate arrays -- this used to reach real ROMS output
+# (an `esper` run) as a bare ValueError with no synthetic-grid test to catch it.
+
+
+def _native_s_item_with_land():
+    """Build a (z_rho, along) section item whose westernmost column is land.
+
+    ``z_rho`` is NaN there, mirroring ``roms.standardize``'s masked-zeta chain --
+    the shape ``prepare_section`` must turn into a finite depth coordinate.
+    """
+    n_s, n_along = 6, 5
+    sigma = np.linspace(-0.95, -0.05, n_s)
+    h = np.linspace(30.0, 500.0, n_along)
+    z_rho = np.outer(sigma, h)  # (s, along), negative-down, deepest at sigma[0]
+    z_rho[:, 0] = np.nan  # one land column
+    da = xr.DataArray(
+        5.0 + np.linspace(0, 1, n_s * n_along).reshape(n_s, n_along),
+        dims=("s_rho", ALONG_DIM),
+        coords={
+            "z_rho": (("s_rho", ALONG_DIM), z_rho),
+            ALONG_DIM: np.linspace(0.0, 100.0, n_along),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -93.0, n_along)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 26.0, n_along)),
+        },
+    )
+    da[ALONG_DIM].attrs["units"] = "km"
+    da.values[:, 0] = np.nan  # the land column carries no data either
+    return da
+
+
+def test_prepare_section_fills_nan_depth_over_land_columns():
+    from ocean_skill.plot.section import prepare_section
+
+    da = _native_s_item_with_land()
+    assert bool(np.isnan(da["z_rho"]).any())  # the land column is genuinely NaN
+    values, geometry = prepare_section(da)
+    assert geometry.native_s
+    assert bool(np.isfinite(np.asarray(values["depth"])).all())
+    # the data itself is untouched -- the land column still draws grey
+    assert bool(np.isnan(np.asarray(values)).any())
+
+
+def test_prepare_section_land_fill_is_a_no_op_on_an_all_wet_section():
+    """Confirm the fill only ever engages on a genuine NaN.
+
+    An all-wet grid, or a fixed-depth section's 1-D z (no ALONG_DIM in its own
+    dims), draw unchanged.
+    """
+    from ocean_skill.plot.section import prepare_section
+
+    values, _ = prepare_section(_section_item()["field"])  # fixed-depth "z", all-wet
+    assert bool(np.isfinite(np.asarray(values["depth"])).all())
+
+
+def _roms_run_with_land() -> xr.Dataset:
+    """Build a run like :func:`_roms_run`, but with land and a real free surface.
+
+    Reproduces ``roms.standardize``'s own masked-zeta chain (zeta masked over land
+    *before* ``add_depth_coord`` builds z_rho from it), rather than the zero-zeta,
+    all-wet shape every other fixture in this file uses.
+    """
+    ny, nx = 5, 4
+    h = np.linspace(30.0, 2000.0, ny * nx).reshape(ny, nx)
+    mask = np.ones((ny, nx))
+    mask[:, 0] = 0.0  # one land column along xi
+    sigma_r = (np.arange(1, N + 1) - N - 0.5) / N
+    sigma_w = np.linspace(-1, 0, N + 1)
+    lon_1d = np.linspace(-95.0, -93.0, nx)
+    lat_1d = np.linspace(24.0, 28.0, ny)
+    lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    ds = xr.Dataset(
+        {
+            "h": (("eta_rho", "xi_rho"), h),
+            "mask_rho": (("eta_rho", "xi_rho"), mask),
+            "sigma_r": (("s_rho",), sigma_r),
+            "Cs_r": (("s_rho",), _stretch(sigma_r)),
+            "sigma_w": (("s_w",), sigma_w),
+            "Cs_w": (("s_w",), _stretch(sigma_w)),
+        },
+        coords={
+            "lon": (("eta_rho", "xi_rho"), lon_2d),
+            "lat": (("eta_rho", "xi_rho"), lat_2d),
+        },
+    )
+    zeta = xr.zeros_like(ds["h"]).where(ds["mask_rho"] == 1)  # masked before z_rho
+    ds = ds.assign(zeta=zeta)
+    meta = {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}
+    ds = roms.add_depth_coord(ds, meta)
+    temp = (20.0 + 0.002 * ds["z_rho"]).where(ds["mask_rho"] == 1)
+    ds = ds.assign({VAR: temp})
+    ds[VAR].attrs["units"] = "degC"
+    return ds
+
+
+def test_a_native_s_transect_through_land_renders_statically(patched_read):
+    """Pin the exact real-world failure.
+
+    A native-s section crossing land used to reach ``ax.pcolormesh`` with a
+    NaN depth coordinate and raise.
+    """
+    name = patched_read(_roms_run_with_land())
+    f = osk.field(name, VAR, select={"transect": {"eta_rho": 2}}, cache=False)
+    assert bool(np.isnan(f.data["z_rho"]).any())  # the fixture actually has land
+    fig = f.plot()
+    assert fig.axes
+
+
+def test_a_native_s_transect_through_land_renders_interactively(patched_read):
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    name = patched_read(_roms_run_with_land())
+    f = osk.field(name, VAR, select={"transect": {"eta_rho": 2}}, cache=False)
+    obj = f.plot(renderer="holoviews")
     assert obj is not None
 
 
