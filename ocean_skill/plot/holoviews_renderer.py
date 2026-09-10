@@ -3498,10 +3498,10 @@ def _target(
     ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points``/
     ``summary_weights``/``summary_split_markers`` also mean exactly what they do
     statically — see :func:`ocean_skill.plot.summary.taylor`'s docstring for the
-    full explanation. A centroid's marker is drawn as a bokeh ``"hex"`` here (the
-    static family's ``"h"`` translated to this renderer's own marker vocabulary),
-    unless ``summary_split_markers=True`` gives it its own group's marker instead;
-    everything else about the overlay layer is unchanged.
+    full explanation. A centroid's marker is drawn as its own group's bokeh marker
+    (this renderer's translation of the static family's marker vocabulary), just
+    like the base cloud beneath it; everything else about the overlay layer is
+    unchanged.
 
     ``normalize``/``circles``/``robust``/``lim`` mean exactly what they do in
     :func:`ocean_skill.plot.summary.target` — including the mixed-variable and
@@ -3797,7 +3797,7 @@ def _target(
             overlay_alpha=overlay_alpha,
         )
         overlay_elements = []
-        for (xi, yi, _rec, mk_override), col, mk, al, scl in zip(
+        for (xi, yi, _rec, _mk_override), col, mk, al, scl in zip(
             overlay_specs,
             overlay_styles.colors,
             overlay_styles.markers,
@@ -3805,7 +3805,9 @@ def _target(
             overlay_styles.scales,
             strict=True,
         ):
-            marker = "hex" if mk_override == "h" else mk
+            # An overlay/centroid always defers to its own group's resolved
+            # marker (mk) -- see _summary_point_specs and _resolve_overlay_style.
+            marker = mk
             alpha_opts = {} if al is None else {"fill_alpha": al, "line_alpha": al}
             overlay_elements.append(
                 hv.Scatter([(xi, yi)]).opts(

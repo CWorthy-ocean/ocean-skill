@@ -674,19 +674,29 @@ def _summary_point_specs(
     backed by more independent evidence pulls the summary point harder. A
     record missing the field is weighted 1 (warns once, naming how many); if
     *no* record carries it at all, that is almost always a typo, so it raises
-    instead of silently producing an unweighted star.
+    instead of silently producing an unweighted centroid.
+
+    Every returned ``marker`` is ``None`` — a centroid always defers to its own
+    group's individual marker (via :func:`_resolve_overlay_style`), the same shape
+    the cloud beneath it draws, and reads as "this group, but bigger and
+    black-edged" (the overlay layer's own emphasis) rather than a shape that has
+    to be separately learned.
 
     ``marker_field`` (a second grouping field, usually the cloud's ``marker_by``)
     splits the summary into one centroid per ``(style_field, marker_field)``
-    combination instead of one per ``style_field``, and each centroid then keeps
-    the marker its group draws in the cloud rather than the forced ``"h"`` — so a
-    diagram coloured by variable and marker-shaped by signal gets a centroid per
-    (variable, signal), each matching both its colour and its shape. Its spec
-    carries both fields so :func:`_resolve_overlay_style` resolves that colour and
-    marker; the returned ``marker`` slot is ``None`` (defer to the group marker).
-    When ``marker_field`` is None (or the same as ``style_field``) the centroid is
-    one per ``style_field`` with the forced ``"h"`` (hexagon — never the reference's
-    own ``"*"``), so it never reads as just another individual point — the default.
+    combination instead of one per ``style_field`` — so a diagram coloured by
+    variable and marker-shaped by signal gets a centroid per (variable, signal),
+    each matching both its colour and its shape. Its spec carries both fields so
+    :func:`_resolve_overlay_style` resolves that colour and marker. When
+    ``marker_field`` is None (or the same as ``style_field``) the centroid is one
+    per ``style_field`` instead — the default.
+
+    When ``style_field`` is ``"label"`` (no ``color_by``/``marker_by`` was given
+    upstream) grouping by it as usual would give one degenerate, one-point
+    "centroid" per comparison — a single point's median is itself. Instead every
+    record collapses into a single group and one centroid is drawn for the whole
+    set, keyed to the first record's own label so its colour resolves to the base
+    cloud's first cycle colour (or whatever ``colors=`` gave that first group).
     """
     key = "median" if summary_points is True else summary_points
     if key not in _SUMMARY_REDUCERS:
@@ -696,10 +706,21 @@ def _summary_point_specs(
         )
     reduce = _SUMMARY_REDUCERS[key]
     split = marker_field is not None and marker_field != style_field
+    # No color_by/marker_by: style_field is "label", one distinct value per record, so
+    # grouping by it as usual would give one degenerate one-point "centroid" per
+    # comparison (a single point's median is itself). Collapse to one centroid across
+    # every record instead, keyed to the first record's own label so it resolves to
+    # the base cloud's first cycle colour (see _resolve_overlay_style's color_lookup).
+    aggregate_all = not split and style_field == "label"
     groups: dict[Any, list[int]] = {}
-    for i, r in enumerate(recs):
-        key_i = (r.get(style_field), r.get(marker_field)) if split else r.get(style_field)
-        groups.setdefault(key_i, []).append(i)
+    if aggregate_all:
+        groups[recs[0].get("label")] = list(range(len(recs)))
+    else:
+        for i, r in enumerate(recs):
+            key_i = (
+                (r.get(style_field), r.get(marker_field)) if split else r.get(style_field)
+            )
+            groups.setdefault(key_i, []).append(i)
 
     weights = None
     if weights_field is not None:
@@ -738,9 +759,11 @@ def _summary_point_specs(
             specs.append((c1, c2, rec, None))
         else:
             label = pretty_level(style_field, level) if style_field != "label" else str(level)
-            # "h" (hexagon), never "*" -- the reference point owns the star, and
-            # _MARKERS itself no longer contains "*" so no group can collide with it.
-            specs.append((c1, c2, {style_field: level, "label": label}, "h"))
+            # marker=None: defer to the group's own individual marker (see
+            # _resolve_overlay_style), same as an individual point -- never a forced
+            # shape of its own, so the centroid always reads as "this group, but bigger
+            # and black-edged" rather than a shape that has to be separately learned.
+            specs.append((c1, c2, {style_field: level, "label": label}, None))
     return specs
 
 
@@ -750,8 +773,8 @@ def _overlay_point_specs(overlay, groups, coord1_of, coord2_of):
     argument does (comparisons, a ``ComparisonSet``, hand-built records), goes through
     the same :func:`_records`, and is drawn on top of the base cloud rather than
     replacing it. ``marker`` is always ``None`` here (draw with the group's own
-    marker, not a centroid's forced ``"h"``) — the two spec sources are concatenated
-    before styling, so they compose in one call.
+    marker) — the two spec sources are concatenated before styling, so they
+    compose in one call.
     """
     return [(coord1_of(r), coord2_of(r), r, None) for r in _records(overlay, groups)]
 
@@ -782,6 +805,13 @@ def _resolve_overlay_style(
     emphasis, not a group's colour — so they resolve independently
     (:func:`_resolve_per_level`) against whatever levels the overlay itself contains,
     defaulting to more opaque and larger than the base layer.
+
+    With no ``marker_by`` there is no per-group shape to look up, so every overlay
+    record falls back to the base cloud's own single marker (``base_styles.markers[0]``)
+    rather than a marker string of this module's own choosing — that keeps this
+    renderer-agnostic: the static caller's base markers are matplotlib names
+    (``"o"``), the interactive caller's are bokeh names (``"circle"``), and either
+    way the fallback already matches what the cloud beneath actually drew.
     """
     color_lookup = dict(zip((r.get(style_field) for r in base_recs), base_styles.colors))
     marker_lookup = (
@@ -789,6 +819,7 @@ def _resolve_overlay_style(
         if marker_by
         else {}
     )
+    default_marker = base_styles.markers[0] if base_styles.markers else "o"
     levels = list(dict.fromkeys(r.get(style_field) for r in overlay_recs))
     alphas = _resolve_per_level(
         overlay_alpha, levels, style_field, default=1.0, param="overlay_alpha"
@@ -799,9 +830,9 @@ def _resolve_overlay_style(
     return _Styles(
         colors=[color_lookup.get(r.get(style_field), "0.2") for r in overlay_recs],
         markers=(
-            [marker_lookup.get(r.get(marker_by), "o") for r in overlay_recs]
+            [marker_lookup.get(r.get(marker_by), default_marker) for r in overlay_recs]
             if marker_by
-            else ["o"] * len(overlay_recs)
+            else [default_marker] * len(overlay_recs)
         ),
         alphas=[alphas[r.get(style_field)] for r in overlay_recs],
         scales=[scales[r.get(style_field)] for r in overlay_recs],
@@ -1278,28 +1309,31 @@ def taylor(
     contrast starker. This is the general mechanism for two related things —
     highlighting specific points (pass the subset you want to point out) and
     ``summary_points=True`` (or ``"median"``/``"mean"``/``"signed_medabs"``), which
-    instead builds one hexagon-marked centroid per group internally, the reduced
-    (median by default) position of that group's own cloud — see
-    :func:`_summary_point_specs` for what each reduction spelling does. Both can be
-    given at once. Neither introduces a new legend entry — an overlay point's group
-    already has one from the base cloud.
+    instead builds one centroid per group internally, the reduced (median by
+    default) position of that group's own cloud, drawn with that group's own
+    marker shape — see :func:`_summary_point_specs` for what each reduction
+    spelling does. Both can be given at once. Neither introduces a new legend
+    entry — an overlay point's group already has one from the base cloud.
     ``overlay_marker_scale``/``overlay_alpha`` size and fade the overlay layer
     specifically (defaults 1.8x and fully opaque), independent of the base layer's own
     ``marker_scale``/``alpha`` — and accept the same ``{level: value}`` dict form.
     ``summary_weights`` names a field each comparison's record carries (e.g. an
     ``"n_eff"`` you attached yourself) to weight ``summary_points``' reduction — a
-    comparison backed by more independent evidence pulls its group's star harder.
-    It affects only the star; the base cloud and any ``overlay=`` points are
-    unweighted regardless.
+    comparison backed by more independent evidence pulls its group's centroid
+    harder. It affects only the centroid; the base cloud and any ``overlay=``
+    points are unweighted regardless.
 
-    ``summary_split_markers=True`` (needs both ``color_by`` and ``marker_by``)
-    gives one centroid per ``(color_by, marker_by)`` combination instead of one
-    per ``color_by`` group — e.g. a cloud coloured by variable and marker-shaped
-    by signal gets a star per (variable, signal) pair — and each centroid takes
-    on its group's own marker instead of the forced ``★``, so it reads as "the
-    typical point of this exact colour+shape group," matched to the cloud
-    beneath it. Ignored (with the usual single ``★``-per-``color_by``-group
-    behaviour) when ``marker_by`` is not also given.
+    A centroid is always drawn with its own group's marker shape, matching the
+    cloud beneath it — with neither ``color_by`` nor ``marker_by`` given, that's a
+    single centroid across every comparison (one point's own median is itself, so
+    grouping by comparison would be degenerate), coloured with the cloud's first
+    colour. ``summary_split_markers=True`` (needs both ``color_by`` and
+    ``marker_by``) instead gives one centroid per ``(color_by, marker_by)``
+    combination rather than one per ``color_by`` group — e.g. a cloud coloured by
+    variable and marker-shaped by signal gets a centroid per (variable, signal)
+    pair, each still taking on its own exact group's marker, so it reads as "the
+    typical point of this exact colour+shape group." Ignored (falling back to one
+    centroid per ``color_by`` group) when ``marker_by`` is not also given.
 
     ``arrows`` means exactly what it does in :func:`target` — connecting comparisons
     that agree on everything but the named field (``True``/``"time"`` for a
@@ -1599,9 +1633,9 @@ def target(
     ``overlay``/``overlay_marker_scale``/``overlay_alpha``/``summary_points``/
     ``summary_weights``/``summary_split_markers`` mean exactly what they do in
     :func:`taylor` — a second, emphasized layer (a highlighted subset, a per-group
-    hexagon centroid, or both) drawn on top of the base cloud, styled to match its
-    own group's colour rather than re-cycled independently. See its docstring for
-    the full explanation.
+    centroid, or both) drawn on top of the base cloud, styled to match its own
+    group's colour and marker rather than re-cycled independently. See its
+    docstring for the full explanation.
 
     ``arrows`` draws a run's drift over time: pass ``True`` (shorthand for
     ``"time"``) or the name of whichever metric-record field varies along a
