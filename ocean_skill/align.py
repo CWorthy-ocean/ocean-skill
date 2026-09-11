@@ -1753,6 +1753,20 @@ def match_axis(
                 f"are {list(lane.dims)}). For a comparison of single maps, leave over= "
                 "unset."
             )
+        if lane.sizes[dim] == 0:
+            # A fanned bin (times=, or a select/aggregate window) can leave a lane
+            # with the axis present but nothing on it -- e.g. one station's cast
+            # falls outside a given month. That is "no data for this bin", not a
+            # misconfiguration, so it is a NoValidData: compare(skip_missing=True)
+            # already catches that and skips the bin with a message, the same as
+            # any other non-overlapping pair, rather than reaching a downstream
+            # reduction (np.nanmin/nanmax on a zero-size array, in particular)
+            # that raises an unrelated, uncaught ValueError.
+            raise NoValidData(
+                f"the {role} lane's {over!r} axis is empty (0 points) after "
+                "selection/aggregation -- this fanned bin has no overlapping "
+                "data to score."
+            )
 
     if _CF_AXES.get(over) == "vertical":
         # A water column has no "composite vs instantaneous" question the way a

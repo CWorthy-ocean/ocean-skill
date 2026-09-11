@@ -150,6 +150,29 @@ def test_no_overlap_at_all_warns():
         A.match_axis(_gridded_test(z), _station_reference(depth), over="Z")
 
 
+# -- an axis present but empty (a fanned bin with no data) is skippable, not a crash ----
+
+
+def test_an_empty_reference_axis_raises_no_valid_data_not_a_bare_value_error():
+    """A fanned per-bin comparison (e.g. times= against a station with no cast that
+    month) can leave the axis present but with nothing on it. That must come back as
+    NoValidData -- which compare(skip_missing=True) already catches and skips -- not
+    reach _match_vertical's "nothing finite" warning, whose np.nanmin/nanmax on a
+    zero-size array raises an unrelated, uncaught ValueError.
+    """
+    z = -np.array([0.0, 10.0, 25.0])
+    depth = np.array([])  # no casts survived this bin
+    with pytest.raises(A.NoValidData, match="empty"):
+        A.match_axis(_gridded_test(z), _station_reference(depth), over="Z")
+
+
+def test_an_empty_test_axis_also_raises_no_valid_data():
+    z = np.array([])  # the test lane itself has nothing on this axis
+    depth = np.array([5.0, 20.0])
+    with pytest.raises(A.NoValidData, match="empty"):
+        A.match_axis(_gridded_test(z), _station_reference(depth), over="Z")
+
+
 # -- native s-coordinates (no metres coordinate) are refused with a clear hint ---------
 
 
