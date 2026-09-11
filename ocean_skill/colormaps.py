@@ -65,6 +65,11 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "sea_water_alkalinity_expressed_as_mole_equivalent": "cmo.matter",
     "surface_downward_mole_flux_of_carbon_dioxide": "cmo.balance",
     "mass_concentration_of_chlorophyll_a_in_sea_water": "cmo.algae",
+    "turbidity": "cmo.turbid",
+    "fluorescence": "cmo.algae",
+    # keyed by full standard_name: the resolved name has no "par" substring, so a
+    # short "par" key would never match re.search (unlike turbidity/fluorescence).
+    "downwelling_photosynthetic_photon_flux_in_sea_water": "cmo.solar",
 }
 
 #: Display range/log-scale — concerns xcmocean has no notion of at all, so they stay
