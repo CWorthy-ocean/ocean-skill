@@ -7371,6 +7371,16 @@ def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
     the data itself would. ``window`` narrows which part of the axis counts,
     mirroring how ``depths=`` can default from a select entry already present.
 
+    Reads via :func:`ocean_skill.sources.read_time_axis`, not the ordinary
+    :func:`~ocean_skill.sources.read`, precisely to keep that true for a ROMS test
+    lane: the coordinate-only claim above would otherwise be false the moment this
+    runs first in a fresh process (before any lane read has populated
+    :data:`ocean_skill.sources._READ_CACHE`) -- the ordinary read's
+    :func:`ocean_skill.roms.standardize` unconditionally derives geographic
+    velocity, a dask graph that scales with the whole history file's chunk count
+    and can cost tens of seconds to build, only to have this function throw the
+    result away except for the time axis.
+
     ``bin_last_value`` is each bin's own *realized* last timestamp, found by
     comparison (``searchsorted``) against the real coordinate values — never by
     adding an offset to a bin's start, which means something different for a
@@ -7381,9 +7391,9 @@ def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
     import xarray as xr
 
     from ocean_skill import operators
-    from ocean_skill.sources import read
+    from ocean_skill.sources import read_time_axis
 
-    obj = read(source)
+    obj = read_time_axis(source)
     dim = operators.resolve_dim(obj, "time")
     if dim is None:
         raise ValueError(
