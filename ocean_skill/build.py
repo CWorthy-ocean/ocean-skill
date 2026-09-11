@@ -383,6 +383,172 @@ def _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, path
         )
 
 
+def _source_file_for_position(
+    vds, concat_dim: str, data_vars: list[str], position: int
+):
+    """Return the source file path holding ``concat_dim`` position ``position``.
+
+    Reads it straight out of a data variable's own chunk manifest -- the cheapest
+    thing that can name a file, since every chunk in a :class:`ManifestArray`
+    already carries the path it came from. Tries each of ``data_vars`` in turn
+    (any one that varies along ``concat_dim`` will do) and returns ``None`` if
+    none of them yields a manifest entry, rather than raising — this is only ever
+    used to make an error message more useful, never to decide anything.
+    """
+    for name in data_vars:
+        arr = vds[name].data
+        manifest = getattr(arr, "manifest", None)
+        metadata = getattr(arr, "metadata", None)
+        if manifest is None or metadata is None:
+            continue
+        dims = vds[name].dims
+        if concat_dim not in dims:
+            continue
+        axis = dims.index(concat_dim)
+        chunk_shape = metadata.chunk_grid.chunk_shape
+        chunk_idx = position // chunk_shape[axis]
+        key = ".".join(str(chunk_idx) if i == axis else "0" for i in range(len(dims)))
+        entry = manifest.dict().get(key)
+        if entry and entry.get("path"):
+            return entry["path"]
+    return None
+
+
+def _dedup_concat_axis(
+    vds, concat_dim: str, loadable_variables: tuple[str, ...], paths
+):
+    """Collapse timestamps that repeat on ``concat_dim``, verified by value.
+
+    ``combine="nested"`` may join files whose own coverage overlaps: a restart
+    segment repeating the record it restarted from, or a rerun that restarted a
+    few days into a previous segment's coverage (both first surface as
+    :func:`_warn_if_concat_axis_is_disordered`'s "not strictly increasing"
+    warning, which still runs unconditionally before this).
+
+    A repeated timestamp is *usually* the same record twice, but that is not
+    something free to confirm: an uncompressed chunk's byte length is fixed by
+    its shape and dtype alone, identical whether the values inside are the same
+    or completely different (two different output streams — an averaged stream
+    and an instantaneous one, say — colliding on one stamp would pass a
+    byte-length check as readily as a genuine restart repeat). So this reads
+    back and compares the *actual values* of every variable that varies along
+    ``concat_dim`` — but only for the handful of records that repeat a
+    timestamp, via a throwaway in-memory kerchunk reference over the
+    still-virtual ``vds``, never the whole store: cost is proportional to the
+    overlap, not the record count.
+
+    A group whose members agree keeps the *last*-globbed one (a rerun/restart
+    supersedes what it restarted from) and, once collapsing is done, warns with
+    the total dropped. A group whose members disagree raises instead — naming
+    the timestamp and, where a chunk manifest can name one, the conflicting
+    files — the same "two streams accidentally combined" mistake
+    :func:`_warn_if_concat_axis_is_disordered` already flags, caught here before
+    it ships in a store that silently keeps one side and drops the other.
+
+    Rebuilding also sorts the whole axis: dropping duplicates and fixing order
+    happen together since a rerun that produces one usually produces the other
+    (see the module's own worked example). A no-op, returning ``vds`` unchanged,
+    when nothing repeats, or when no data variable actually varies along
+    ``concat_dim`` to compare (nothing to verify identity with, so nothing is
+    collapsed).
+    """
+    import numpy as np
+    import xarray as xr
+
+    values = None
+    for name in loadable_variables:
+        var = vds.variables.get(name)
+        if var is not None and var.dims == (concat_dim,) and var.size > 1:
+            values = np.asarray(var.values)
+            break
+    if values is None:
+        return vds
+
+    order = np.argsort(values, kind="stable")
+    sorted_values = values[order]
+    _, first, counts = np.unique(sorted_values, return_index=True, return_counts=True)
+    dup = counts > 1
+    if not dup.any():
+        return vds
+
+    groups = [
+        order[start : start + count].tolist()
+        for start, count in zip(first[dup], counts[dup])
+    ]
+
+    data_vars = [v for v in vds.data_vars if concat_dim in vds[v].dims]
+    if not data_vars:
+        return vds
+
+    refs = vds.vz.to_kerchunk(format="dict")
+    check = xr.open_dataset(refs, engine="kerchunk", chunks={}, decode_times=False)
+
+    def _values_equal(a, b):
+        try:
+            return np.array_equal(a, b, equal_nan=True)
+        except TypeError:
+            # equal_nan needs an inexact dtype; a non-numeric variable (rare, but
+            # not impossible in a data_var) just compares plainly instead.
+            return np.array_equal(a, b)
+
+    drop_positions: list[int] = []
+    for group in groups:
+        sub = check[data_vars].isel({concat_dim: group}).load()
+        kept_local = len(group) - 1  # keep the last-globbed record
+        conflicts = sorted(
+            v
+            for v in data_vars
+            if any(
+                not _values_equal(
+                    sub[v].isel({concat_dim: pos}).values,
+                    sub[v].isel({concat_dim: kept_local}).values,
+                )
+                for pos in range(kept_local)
+            )
+        )
+        if conflicts:
+            decoded = _decode_times(vds, vds.variables[name])
+            at = decoded[group[0]] if decoded is not None else values[group[0]]
+            files = sorted(
+                {
+                    p
+                    for p in (
+                        _source_file_for_position(vds, concat_dim, data_vars, pos)
+                        for pos in group
+                    )
+                    if p is not None
+                }
+            )
+            files_msg = f" ({'; '.join(files)})" if files else ""
+            raise ValueError(
+                f"{', '.join(conflicts)} disagree across {len(group)} records that "
+                f"all carry the same {concat_dim!r} timestamp ({at}){files_msg}. "
+                "This is the shape a wrong-files-combined mistake takes (see "
+                "build_kerchunk for building one reference per stream), not a "
+                "restart repeating its own last record, so nothing was collapsed "
+                "or dropped -- pass keep='all' if the repeat is expected and "
+                "every record should be kept as-is."
+            )
+        drop_positions.extend(group[:kept_local])
+
+    keep_mask = np.ones(values.shape, dtype=bool)
+    keep_mask[drop_positions] = False
+    kept = np.nonzero(keep_mask)[0]
+    kept = kept[np.argsort(values[kept], kind="stable")]
+
+    pieces = [vds.isel({concat_dim: slice(int(i), int(i) + 1)}) for i in kept]
+    vds = xr.concat(pieces, dim=concat_dim)
+
+    warnings.warn(
+        f"{len(drop_positions)} record(s) on {concat_dim!r} repeated a timestamp "
+        f"already seen across the {len(paths)} files concatenated -- kept the "
+        "last-globbed copy of each (verified identical by value) and dropped the "
+        "rest. Pass keep='all' to keep every record instead.",
+        stacklevel=3,
+    )
+    return vds
+
+
 def _keep_latest_per_file(concat_dim: str, loadable_variables: tuple[str, ...]):
     """Return a ``preprocess`` callable keeping only each file's latest record.
 
@@ -423,7 +589,7 @@ def make_kerchunk(
     grid: str | Path | None = None,
     concat_dim: str | None = None,
     loadable_variables: tuple[str, ...] | None = None,
-    keep: str = "all",
+    keep: str = "unique",
     fmt: str | None = None,
     tolerant_attrs: bool = True,
     subchunk: dict[str, int] | None = None,
@@ -446,15 +612,21 @@ def make_kerchunk(
         ``None`` — no per-model configuration. Pass them to override, e.g. for a
         model whose files should be joined along something other than time.
     keep
-        Which records to keep from each file before concatenating. ``"all"``
-        (default) keeps every record. ``"latest-per-file"`` keeps only the record
-        with the latest time value in each file — the fix for ROMS restart files,
-        which write more than one time record per file and, under cycling restarts,
-        do not always write the newest one last. Selection happens per file, before
-        concatenation, so :func:`_warn_if_concat_axis_is_disordered` still runs
-        afterward and will warn about any overlap *between* files (e.g. a restart
-        stream re-covering time an earlier run already wrote) — this only removes
-        the within-file duplication, not that.
+        Which records to keep after concatenating, when timestamps repeat.
+        ``"unique"`` (default) collapses a repeated timestamp to its
+        *last*-globbed record — after verifying, by comparing actual values, that
+        every record sharing that timestamp truly agrees; a group that disagrees
+        raises rather than guessing which one to keep (see
+        :func:`_dedup_concat_axis`). ``"all"`` keeps every record exactly as
+        concatenated, duplicates included — :func:`_warn_if_concat_axis_is_disordered`
+        still warns about them, it just is not repaired. ``"latest-per-file"``
+        keeps only the record with the latest time value in *each file* — the fix
+        for ROMS restart files, which write more than one time record per file
+        and, under cycling restarts, do not always write the newest one last.
+        This selection happens per file, before concatenation, so it removes only
+        the within-file duplication; any repeat *between* files still goes
+        through the ``"unique"``/``"all"`` choice above (default ``"unique"``, so
+        this combination collapses both).
     target_chunk_mb
         Automatic manifest subchunking, on by default: any *uncompressed* variable
         whose stored chunk exceeds this many megabytes is split (see
@@ -490,9 +662,9 @@ def make_kerchunk(
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr import open_virtual_dataset, open_virtual_mfdataset
 
-    if keep not in ("all", "latest-per-file"):
+    if keep not in ("all", "unique", "latest-per-file"):
         raise ValueError(
-            f"make_kerchunk: keep={keep!r} not recognized; use 'all' or "
+            f"make_kerchunk: keep={keep!r} not recognized; use 'all', 'unique' or "
             "'latest-per-file'"
         )
     # Deliberately not Path() for remote sources: Path collapses the "//" in a URL
@@ -532,6 +704,8 @@ def make_kerchunk(
             preprocess=preprocess,
         )
         _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
+        if keep != "all":
+            vds = _dedup_concat_axis(vds, concat_dim, loadable_variables, paths)
 
         if grid is not None:
             gurl, gstore = _store_for(grid)
