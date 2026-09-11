@@ -129,6 +129,56 @@ def test_unsupported_type_is_refused():
         detide([1, 2, 3])
 
 
+def test_dataarray_chunked_into_many_pieces_along_time_matches_numpy():
+    """A lazily-read lane (a ROMS history file, most often) is routinely chunked
+
+    one or a few steps at a time along time -- unlike every other test in this file,
+    which is numpy-backed. ``pl33tn``'s rolling window and ``interpolate_na`` both go
+    through ``apply_ufunc(dask="parallelized")``, which refuses a time axis split
+    across more than one chunk; see the module docstring's third worked-around
+    ``pl33tn`` quirk. The result, once computed, must be numerically identical to the
+    numpy-backed path -- rechunking time is a pure performance/compatibility change,
+    never a change in what gets computed.
+    """
+    pytest.importorskip("dask")
+    _, _, _, combined = _signal()
+    da = xr.DataArray(combined, dims=["time"], coords={"time": _index()}, name="zeta")
+    chunked = da.chunk({"time": 24})  # many small chunks along the core dim
+    assert len(chunked.chunks[0]) > 1  # actually multiple chunks, not one already
+
+    sub_numpy = detide(da)
+    sub_dask = detide(chunked).compute()
+
+    np.testing.assert_allclose(
+        sub_dask.values, sub_numpy.values, equal_nan=True, atol=1e-10
+    )
+
+
+def test_dataset_chunked_into_many_pieces_along_time_matches_numpy():
+    """The Dataset path (:func:`_detide_dataset`) calls the same per-variable
+
+    DataArray worker, so it needs the identical rechunk -- checked here on a
+    ``(time, depth)`` shape rather than re-testing the DataArray path alone.
+    """
+    pytest.importorskip("dask")
+    _, _, _, combined = _signal()
+    depths = [5.0, 10.0]
+    data = np.stack([combined + 0.01 * d for d in depths], axis=1)
+    ds = xr.Dataset(
+        {"temp": (["time", "depth"], data, {"units": "degC"})},
+        coords={"time": _index(), "depth": depths},
+    )
+    chunked = ds.chunk({"time": 24})
+    assert len(chunked.chunks["time"]) > 1
+
+    out_numpy = detide(ds)
+    out_dask = detide(chunked).compute()
+
+    np.testing.assert_allclose(
+        out_dask["temp"].values, out_numpy["temp"].values, equal_nan=True, atol=1e-10
+    )
+
+
 # -- Dataset, including a timeSeriesProfile (time x depth) shape ---------------------
 
 

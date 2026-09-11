@@ -113,6 +113,61 @@ def test_raw_and_detided_pool_as_two_distinct_points(tide_gauge_and_model):
     assert len(list(pooled)) == 2
 
 
+@pytest.fixture
+def tide_gauge_and_chunked_model(monkeypatch):
+    """Like ``tide_gauge_and_model``, but the "his" (test/model) lane is a
+
+    dask-chunked ``xr.Dataset`` -- one/a few time steps per chunk, the shape a
+    lazily-read ROMS history file actually has -- rather than a plain pandas
+    DataFrame. Reproduces the reported bug: ``detide=True`` against a real ADCP
+    comparison raised ``apply_ufunc ... consists of multiple chunks`` from inside
+    ``oceans.filters.pl33tn``, because the model lane arrives chunked along time
+    and nothing rechunked it before the PL33 filter ran (see
+    ``ocean_skill/detide.py::_pl33_dataarray``).
+    """
+    pytest.importorskip("dask")
+    import xarray as xr
+
+    import ocean_skill as osk
+    from ocean_skill import catalog, comparison
+
+    tide_gauge = _frame(0.0, seed=1)
+    his_frame = _frame(0.3, seed=2)
+    idx = pd.date_range("2020-01-01", periods=N, freq="h")
+    his_ds = xr.Dataset(
+        {ZETA: (["time"], his_frame["zeta (m)"].to_numpy())},
+        coords={"time": idx, "lon": -122.5, "lat": 45.0},
+    ).chunk({"time": 24})
+    assert len(his_ds.chunks["time"]) > 1  # actually multiple chunks, not one already
+
+    lanes = {"tide_gauge": tide_gauge, "his": his_ds}
+    metas = {"tide_gauge": {}, "his": {}}
+    monkeypatch.setattr(osk, "read", lambda name, **kw: lanes[name])
+    monkeypatch.setattr("ocean_skill.sources.read", lambda name, **kw: lanes[name])
+    monkeypatch.setattr(
+        catalog, "resolve", lambda name: SimpleNamespace(metadata=metas[name])
+    )
+    monkeypatch.setattr(comparison, "_domain_of", lambda name: None)
+    monkeypatch.setattr(comparison, "_outline_of", lambda name, convention=None: None)
+    return lanes
+
+
+def test_detide_true_survives_a_dask_chunked_test_lane(tide_gauge_and_chunked_model):
+    """The bug this regresses: a test lane chunked along time (a ROMS/model lane,
+
+    not the tide-gauge DataFrame every other test in this file uses) must not raise
+    when ``detide=True``, and the detided result must still show the tidal band
+    removed.
+    """
+    _, c, aligned = _compared(detide=True)
+    assert c.metrics()["detided"] == "detided"
+    interior = slice(EDGE, -EDGE)
+    _, _, raw_aligned = _compared()
+    raw_std = float(raw_aligned["test"].values[interior].std())
+    detided_std = float(aligned["test"].values[interior].std())
+    assert detided_std < 0.6 * raw_std
+
+
 def test_field_detide_true_reaches_the_pipeline(tide_gauge_and_model):
     from ocean_skill.field import field
 
