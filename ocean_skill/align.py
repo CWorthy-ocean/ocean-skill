@@ -563,13 +563,39 @@ def subset_to_time(obj, window):
     climatology or a static field legitimately shares no calendar span with the
     test, and the comparison's own time handling reports that far more precisely
     than a crop can.
-    """
-    from ocean_skill.operators import oriented_slice
 
+    Crops by a boolean value mask rather than a label ``.sel`` slice. A label
+    slice's bound resolution is index-dependent: on a plain monotonic
+    ``datetime64`` axis an out-of-range bound is tolerated (silently clipped to
+    the axis' own extent), but on a non-monotonic or duplicate-valued axis --
+    two overlapping source files concatenated without a clean dedupe, say --
+    the same out-of-range bound raises ``KeyError`` instead. ``window``'s
+    bounds routinely come from a *different* source's declared record (see
+    :meth:`ocean_skill.comparison.Comparison._reference_narrowing`, which crops
+    a test lane to a repeat-visit reference's catalog coverage) and so
+    routinely land past this object's own axis -- a comparison must not crash
+    just because the reference's record runs longer than the test's. A value
+    mask answers "which steps fall in ``window``" directly, for any axis shape
+    or order, and never raises.
+    """
     name = _time_name(obj)
     if name is None or window is None or name not in obj.dims:
         return obj
-    out = obj.sel({name: oriented_slice(obj, name, slice(window[0], window[1]))})
+    values = np.asarray(obj[name].values)
+    lo, hi = window
+    if lo is not None and hi is not None and lo > hi:
+        lo, hi = hi, lo  # written high-to-low; a range is a range either way
+    if values.dtype.kind == "M":
+        lo = np.datetime64(lo) if lo is not None else lo
+        hi = np.datetime64(hi) if hi is not None else hi
+    mask = np.ones(values.shape, dtype=bool)
+    if lo is not None:
+        mask &= values >= lo
+    if hi is not None:
+        mask &= values <= hi
+    if not mask.any():
+        return obj
+    out = obj.isel({name: mask})
     return obj if out.sizes.get(name, 0) == 0 else out
 
 
@@ -615,6 +641,14 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     scalar, or none at all), if ``targets`` is empty, if there are fewer than
     two steps to bracket with, or (``interp`` only) if every target fell
     outside the object's span -- there is nothing to prune or interpolate with.
+
+    Sorts ``obj`` along its time axis first if it is not already
+    non-decreasing -- a non-monotonic test lane (two source files
+    concatenated without a clean sort, a plausible ROMS multi-file artifact)
+    would otherwise raise ``ValueError`` out of ``pandas``' own nearest-step
+    lookup, which requires a sorted index. The values themselves are
+    unaffected, only their order along this one axis, so which reference cast
+    each step ends up nearest is unchanged.
     """
     name = _time_name(obj)
     if name is None or name not in obj.dims:
@@ -626,8 +660,14 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
         return obj
     import pandas as pd
 
-    targets = np.asarray(targets)
     idx = pd.Index(values)
+    if not idx.is_monotonic_increasing:
+        order = np.argsort(values, kind="stable")
+        obj = obj.isel({name: order})
+        values = values[order]
+        idx = pd.Index(values)
+
+    targets = np.asarray(targets)
     if method not in ("interp", "linear"):
         pos = idx.get_indexer(targets, method="nearest")
         pos = np.unique(pos[pos >= 0])
