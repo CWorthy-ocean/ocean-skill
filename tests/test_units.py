@@ -153,6 +153,57 @@ def test_to_units_leaves_unrelated_quantities_alone():
     assert out.attrs["units"] == "degC"
 
 
+# -- dissolved oxygen: a CTD's mL/L against a model's molar mmol/m3 -----------
+
+
+@pytest.mark.parametrize(
+    "spelling", ["mL/L", "ml/l", "ML/L", "ml.l-1", "ml*l-1", "ml l-1", "ml_per_l",
+                 "milliliter/liter", "milliliters per liter"],
+)
+def test_oxygen_volume_spellings_are_recognized(spelling):
+    assert u.compatible(spelling, "mmol/m^3") is True
+
+
+def test_oxygen_ml_per_l_converts_at_the_unesco_molar_volume():
+    out = u.convert_units(_field(1.0, "mL/L"))
+    assert float(out.mean()) == pytest.approx(u.O2_MMOL_PER_ML, rel=1e-6)
+    assert out.attrs["units"] == "mmol/m^3"
+
+
+def test_oxygen_ml_per_l_also_converts_to_per_mass_through_both_contexts():
+    """mL/L -> umol/kg composes the new oxygen unit with the existing seawater
+    density context -- the round trip a CTD-vs-WOA oxygen comparison needs."""
+    out = u.convert_units(_field(1.0, "mL/L"), target="umol/kg")
+    expected = u.O2_MMOL_PER_ML * 1000.0 / u.RHO_SEAWATER  # mmol/m3 -> umol/kg
+    assert float(out.mean()) == pytest.approx(expected, rel=1e-6)
+
+
+def test_oxygen_volume_stays_isolated_from_salinity():
+    """The collision this feature has to avoid: PSU is *also* bare dimensionless
+    to pint, so a generic "any dimensionless quantity is a convertible oxygen
+    reading" rule would wrongly treat a salinity field as compatible too."""
+    assert u.compatible("PSU", "mmol/m^3") is False
+    assert u.compatible("mL/L", "PSU") is False
+    assert u.compatible("psu", "mL/L") is False
+
+
+def test_align_converts_ctd_oxygen_against_a_molar_model():
+    """Regression: before this feature, a CTD's mL/L oxygen against a model's
+    molar mmol/m3 either raised "not the same physical quantity" (if the exact
+    recorded spellings genuinely parsed to incompatible pint dimensions) or, if
+    a units check upstream never ran at all, differenced the raw numbers
+    unconverted -- the ~349 "bias" a real mL/L-vs-mmol/m3 comparison showed
+    before this fix, an artifact of the ~44.6x scale mismatch, not a real
+    skill difference. The honest difference is small, at this factor."""
+    test, reference = _pair("mmol/m^3", "mL/L", value=1.0)
+    # test lane: 1.0 mL/L equivalent already in the model's own molar units,
+    # reference lane: a real CTD reading of 1.0 mL/L -- byte-identical readings,
+    # so the honest converted difference is ~0.
+    test = xr.full_like(test, u.O2_MMOL_PER_ML)
+    out = _align.align(test, reference, method="bilinear")
+    assert float(out["difference"].mean()) == pytest.approx(0.0, abs=1e-6)
+
+
 # -- the align() gap ----------------------------------------------------------
 
 

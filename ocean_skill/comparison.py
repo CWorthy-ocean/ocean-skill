@@ -1746,6 +1746,7 @@ def _prepare(
     literal_depths: bool = False,
     point_window: bool = False,
     depth_method: str = "nearest",
+    over: Any = None,
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -1802,6 +1803,14 @@ def _prepare(
     (:func:`ocean_skill.roms.to_depth`, this module's behaviour before this option
     existed). The vertical counterpart of ``Comparison.time_method`` -- see that
     attribute's own docstring for the matching choice along time.
+
+    ``over`` is the calling :class:`Comparison`'s own axis choice (``None`` for a
+    bare :class:`~ocean_skill.field.Field`, which never sets it) -- consulted only
+    by the singleton-``timeSeriesProfile``-time squeeze below, to tell "time is
+    being collapsed to one instant" (squeeze it, coordinate kept) apart from "time
+    is the axis this comparison is scoring over" (leave it standing, however few
+    steps survive narrowing -- a repeat-visit station left with exactly one cast
+    inside the model's record is still one point to score, not zero dimensions).
 
     Resolving the variable *first*, and bailing out when it is absent, is
     deliberate: falling through to the whole dataset is both wasteful and unsafe —
@@ -1935,6 +1944,9 @@ def _prepare(
         and _tsp_tdim in da.dims
         and da.sizes[_tsp_tdim] == 1
     ):
+        from ocean_skill.align import TIME_DEPTH_OVER
+        from ocean_skill.operators import _CF_AXES
+
         # A period string (e.g. "2024-06-11", one visit's day) narrows time by
         # *slicing*, not by an exact-instant match -- xarray's own partial-date
         # indexing leaves the time dim standing at length 1 even when only one
@@ -1950,7 +1962,19 @@ def _prepare(
         # literal "time" dim name) so a source whose time dim is spelled
         # differently -- SEANOE's ADCP moorings ship a `TIME` dim, say -- still
         # gets this treatment.
-        da = da.squeeze(_tsp_tdim, drop=False)
+        #
+        # Only when time is *not* the axis being scored, though: a repeat-visit
+        # station whose casts happen to narrow down to exactly one inside the
+        # test's own record (over="time", the mooring-at-a-depth reading, or
+        # TIME_DEPTH_OVER, which keeps both axes standing) still wants that one
+        # cast to reach match_axis as a genuine length-1 *dimension* -- squeezing
+        # it away here left the reference with no axis to score over at all
+        # (an uncaught ValueError out of match_axis, not the gentler NoValidData
+        # an empty-but-present axis gets), aborting the whole compare() batch
+        # instead of scoring this one station's single available point.
+        over_is_time = _CF_AXES.get(over) == "time" or over == TIME_DEPTH_OVER
+        if not over_is_time:
+            da = da.squeeze(_tsp_tdim, drop=False)
 
     if calculated:
         bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
@@ -2593,6 +2617,7 @@ def prepare_source(
     detide: dict[str, Any] | None = None,
     literal_depths: bool = False,
     depth_method: str = "nearest",
+    over: Any = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -2728,6 +2753,17 @@ def prepare_source(
     "re-key only a non-default choice" idiom the rest of this key follows would
     let exactly that collision through.
 
+    ``over`` is the calling :class:`Comparison`'s own axis choice, passed straight
+    through to :func:`_prepare` -- see its docstring paragraph for what it decides
+    (whether a ``timeSeriesProfile`` lane narrowed to one cast keeps that cast's
+    time dimension standing or gets squeezed to a scalar coordinate). ``None`` for
+    a bare :class:`~ocean_skill.field.Field`, which has no ``over`` to give. Folded
+    into the cache key above, but only when it actually changes the cached shape
+    (``over="time"``/``TIME_DEPTH_OVER`` against a ``timeSeriesProfile`` source)
+    -- the same "re-key only what changed" idiom ``literal_depths=`` follows.
+    Every lane cached before this option existed was necessarily squeezed, so it
+    is exactly the byte-identical, unre-keyed default this still produces.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -2801,6 +2837,26 @@ def prepare_source(
     # docstring paragraph. A lane cached before this option existed carries no
     # such key at all, so it never collides with either value of this one.
     key_select["_depth_method"] = depth_method
+    if str(meta.get("featureType") or "") == "timeSeriesProfile":
+        # Whether _prepare's own singleton-time squeeze fires depends on `over`
+        # (see its docstring paragraph) -- and unlike _require_reduced's squeeze,
+        # which is applied only on the way out (after this function's own cache
+        # write, so it never needs a key entry), this one runs *inside* _prepare,
+        # before the field below is cached. A lane cached by an over="time"/
+        # TIME_DEPTH_OVER caller (time left standing) must not be served on a
+        # hit to some other caller expecting the ordinary squeeze. Re-keyed only
+        # for that one case, the same "only re-key what actually changed" idiom
+        # literal_depths= follows just above -- every lane cached before this
+        # fix existed was necessarily squeezed (`over` never kept time standing
+        # yet), so it is exactly the untouched, still-squeezed default this
+        # omits a key for; only a *newly* over="time"/TIME_DEPTH_OVER lane gets
+        # a key of its own, landing in a fresh entry rather than colliding with
+        # -- or evicting -- every already-cached timeSeriesProfile lane.
+        from ocean_skill.align import TIME_DEPTH_OVER
+        from ocean_skill.operators import _CF_AXES
+
+        if _CF_AXES.get(over) == "time" or over == TIME_DEPTH_OVER:
+            key_select["_over_is_time"] = True
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
@@ -2984,6 +3040,7 @@ def prepare_source(
         literal_depths=literal_depths,
         point_window=point_window_applied,
         depth_method=depth_method,
+        over=over,
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
@@ -4158,6 +4215,7 @@ class Comparison:
             # reference lane never reaches -- there is no role-scoping to get
             # wrong here the way there is above.
             depth_method=self.depth_method,
+            over=self.over,
         )
 
     def _warn_on_pair_spec_mismatch(
