@@ -324,7 +324,9 @@ def add_geographic_velocity_windowed(ds: xr.Dataset, meta: dict[str, Any]) -> xr
     return ds
 
 
-def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
+def standardize(
+    ds: xr.Dataset, meta: dict[str, Any], *, derive_velocity: bool = True
+) -> xr.Dataset:
     """Return a CF-standardized ROMS Dataset (grid attached, renamed, masked, depth).
 
     Parameters
@@ -334,6 +336,14 @@ def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     meta
         The catalog entry ``metadata`` (``grid``, ``vertical``, ``standard_names``,
         ``reference_date``/``time_*``).
+    derive_velocity
+        Whether to derive true geographic east/north velocity from the staggered
+        grid-relative components (see :func:`_add_geographic_velocity`) -- a dask
+        task graph that scales with the whole file's chunk count and can cost tens
+        of seconds to *build*, well before anything is computed. Defaults to
+        ``True`` for the ordinary read path (:func:`ocean_skill.sources.read`);
+        pass ``False`` when the caller has no use for velocity at all -- see
+        :func:`ocean_skill.sources.read_time_axis`.
     """
     # the grid may be a separate file, or already merged into the output
     # (self_contained_grid, e.g. a combined ROMS file)
@@ -370,7 +380,8 @@ def standardize(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     # components + the grid angle, before the mask loop below so the new rho-dim
     # vars get land-masked with everything else. Lazy; a no-op when the source has
     # no velocity (or no angle to rotate it by) -- see _add_geographic_velocity.
-    ds = _add_geographic_velocity(ds)
+    if derive_velocity:
+        ds = _add_geographic_velocity(ds)
 
     # mask land on rho-point data variables (mask_rho: 1 ocean, 0 land)
     if "mask_rho" in ds.variables:

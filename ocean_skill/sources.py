@@ -15,7 +15,7 @@ from typing import Any
 
 from ocean_skill.catalog import SourceRef, resolve
 
-__all__ = ["erddap_constraints", "read"]
+__all__ = ["erddap_constraints", "read", "read_time_axis"]
 
 #: In-process memo of :func:`read`'s standardized result, keyed on source identity +
 #: catalog-file freshness + the call's own qc/kwargs (see ``_read_cache_key`` below).
@@ -203,6 +203,44 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         if decoded is not None:
             obj = obj.assign_coords({tname: decoded})
     return obj
+
+
+def read_time_axis(source: str | SourceRef):
+    """Open ``source`` and decode only its time axis -- for a caller (see
+    :func:`ocean_skill.comparison._time_bins`) that only needs the decoded time
+    coordinate to enumerate or window calendar bins, not the comparable fields
+    themselves.
+
+    The ordinary :func:`read` pays for far more than that on a ROMS entry: its
+    :func:`ocean_skill.roms.standardize` unconditionally derives true geographic
+    east/north velocity from the staggered grid-relative components
+    (:func:`ocean_skill.roms._add_geographic_velocity`) -- a dask task graph that
+    scales with the whole history file's chunk count and can cost tens of seconds to
+    *build*, well before anything is computed or even the requested variable is
+    known. None of that is needed just to read off ``time``, so a ROMS source is
+    standardized here with ``derive_velocity=False`` instead.
+
+    Not memoized in :data:`_READ_CACHE`: unlike :func:`read`, the object this
+    returns is missing the derived-velocity variables, and must never be handed
+    back in place of the genuine, fully-standardized result a later call to
+    :func:`read` for the same source is entitled to.
+
+    Falls back to the ordinary (memoized) :func:`read` for anything that is not a
+    ROMS source -- the eager cost this bypasses is ROMS-specific.
+    """
+    ref = source if isinstance(source, SourceRef) else resolve(source)
+    meta = ref.metadata
+    if meta.get("model") != "roms" and meta.get("loader") != "ocean_skill.roms":
+        return read(source)
+
+    import intake
+
+    from ocean_skill import roms
+
+    cat = intake.from_yaml_file(str(ref.path))
+    entry = cat[ref.name]
+    obj = entry.read()
+    return roms.standardize(obj, meta, derive_velocity=False)
 
 
 #: Keys naming the time axis in a ``select``, in any accepted spelling. An entry's own
