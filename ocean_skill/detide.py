@@ -19,7 +19,7 @@ convolution runs along the time axis and broadcasts over any other dimension (de
 say) for free, so a ``time x depth`` field is filtered independently at every depth
 with no special-casing here.
 
-Two version-sensitive details of ``pl33tn`` itself are worked around rather than
+Three version-sensitive details of ``pl33tn`` itself are worked around rather than
 inherited:
 
 - Its ``xr.DataArray`` branch finds the sample interval as
@@ -41,6 +41,14 @@ inherited:
   pipeline) and then stamped with ``standard_name="time"`` on the working copy, so
   ``pl33tn``'s own internal lookup resolves to the same coordinate regardless of what
   attrs the input actually carried.
+- Its rolling window and its ``interpolate_na`` both run through
+  ``apply_ufunc(dask="parallelized")`` along time, which refuses a time axis split
+  across more than one dask chunk -- a lazily-read lane (a ROMS history file, most
+  often, chunked one or a few steps at a time) hits this routinely. Worked around by
+  rechunking the working copy's time axis alone to one chunk
+  (``working.chunk({time_name: -1})``) before the call, when the input is dask-backed
+  at all; every other axis stays chunked as given, and a plain numpy-backed array
+  (``.chunks is None``) is untouched.
 
 Edges are NaN: ``pl33tn``'s centered rolling window has no full window near either end
 of the record (about ``T`` hours' worth of samples on each side), and that gap widens
@@ -122,6 +130,16 @@ def _pl33_dataarray(da, *, T: float):
         **working.coords[time_name].attrs,
         "standard_name": "time",
     }
+    if working.chunks is not None:
+        # pl33tn's centered rolling and its interpolate_na both go through
+        # apply_ufunc(dask="parallelized") along time, which requires the time core
+        # dim to be a *single* chunk -- a lazily-read lane (a ROMS history file, an
+        # ADCP mooring's model counterpart) is routinely chunked into many steps
+        # along time and would otherwise raise "consists of multiple chunks, but is
+        # also a core dimension". Rechunk time alone; every other axis (depth,
+        # eta/xi) stays chunked, so this only makes the time axis whole -- which a
+        # rolling tidal filter needs whole regardless -- never the whole field.
+        working = working.chunk({time_name: -1})
     low = filters.pl33tn(working, T=T)
     # pl33tn returns the coordinate it was given (now datetime64[ns], "standard_name"
     # stamped); the caller asked about `da`'s own coordinate, not this working copy's.
