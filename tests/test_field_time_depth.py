@@ -387,6 +387,79 @@ def test_time_depth_grid_titles_overrides_one_panel_and_keeps_the_other_auto(stu
         _make_set([NITRATE, "silicate"]).plot(titles=["only one"])
 
 
+def test_a_variable_fan_titles_each_panel_by_variable_in_both_renderers(stub):
+    """One station, several variables (``osk.field("ctd_station_HV1", ["temp",
+    "salt", ...])``) -- every panel used to carry the *identical* station ·
+    place · period title, with nothing anywhere naming which variable was
+    which. Each panel must now read its own variable, with the shared station
+    identity lifted into one suptitle instead (see
+    :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid_titles`).
+    """
+    import holoviews as hv
+
+    stub(_point_time_depth())
+    fs = _make_set([NITRATE, "silicate"])
+    fig = fs.plot()
+    titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+    assert titles == ["nitrate", "silicate"]
+    suptitle = fig._suptitle.get_text()
+    assert "stub" in suptitle
+    assert "50.0°N" in suptitle and "144.2°W" in suptitle
+    assert "nitrate" not in suptitle
+    assert "silicate" not in suptitle
+
+    obj = fs.plot(renderer="holoviews")
+    hv_titles = [
+        el.opts.get("plot").kwargs.get("title")
+        for el in obj.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert hv_titles == titles
+    assert obj.opts.get("plot").kwargs.get("title") == suptitle
+
+
+def test_a_station_fan_keeps_naming_the_shared_variable_up_top(monkeypatch):
+    """The opposite fan -- one variable, several stations
+    (``osk.field(osk.find(...), "temperature")``) -- must keep behaving as it
+    already did: the shared variable named once, in the suptitle, and each
+    panel titled by its own station identity (:func:`grid_suptitle`'s own
+    case, preserved by :func:`time_depth_grid_titles`).
+    """
+    import holoviews as hv
+
+    from ocean_skill import comparison
+    from ocean_skill.field import field as make_field
+
+    data = {
+        "station_a": _point_time_depth(),
+        "station_b": _point_time_depth().assign_coords(lon=-150.0, lat=55.0),
+    }
+
+    def fake_prepare_source(source, variable, *args, **kwargs):
+        return (data[source], None)
+
+    monkeypatch.setattr(comparison, "prepare_source", fake_prepare_source)
+    fs = make_field(["station_a", "station_b"], NITRATE)
+
+    fig = fs.plot()
+    titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+    assert titles == [
+        "station_a · 50.0°N 144.2°W",
+        "station_b · 55.0°N 150.0°W",
+    ]
+    suptitle = fig._suptitle.get_text()
+    assert "nitrate" in suptitle
+    assert "station_a" not in suptitle
+    assert "station_b" not in suptitle
+
+    obj = fs.plot(renderer="holoviews")
+    hv_titles = [
+        el.opts.get("plot").kwargs.get("title")
+        for el in obj.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert hv_titles == titles
+    assert obj.opts.get("plot").kwargs.get("title") == suptitle
+
+
 def test_a_time_depth_set_grid_layout_and_scale_options(stub):
     """``ncols=``/``nrows=`` wrap the panels; ``shared_limits=True`` warns once
     when the set's variables actually differ (:func:`ocean_skill.plot
