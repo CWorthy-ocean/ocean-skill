@@ -33,6 +33,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ocean_skill._docs import graft_plot_options
+
 __all__ = ["Cross", "Field", "FieldSet", "field"]
 
 
@@ -1146,6 +1148,7 @@ class Field:
             item = {**item, "field": field, "facet_dim": None, "row_dim": None}
         return item
 
+    @graft_plot_options()
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
 
@@ -1216,6 +1219,7 @@ class Field:
             )
         return render(spec, renderer=renderer)
 
+    @graft_plot_options()
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Play :attr:`facet_dim` instead of laying it out: this field as a movie.
 
@@ -1459,6 +1463,7 @@ class FieldSet:
         """
         return [f._map_item() for f in self.fields]
 
+    @graft_plot_options()
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Draw every member on one figure, laid out by :mod:`plot.series`,
         :mod:`plot.profile`, one panel per member for ``time_depth``, or one map

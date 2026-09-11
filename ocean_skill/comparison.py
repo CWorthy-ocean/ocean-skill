@@ -16,6 +16,8 @@ from typing import Any
 
 import numpy as np
 
+from ocean_skill._docs import graft_from, graft_plot_options
+
 __all__ = [
     "COLUMN",
     "SURFACE",
@@ -5484,6 +5486,7 @@ class Comparison:
             **common,
         }
 
+    @graft_plot_options()
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render as a ``test | reference | difference`` row, or as metric maps.
 
@@ -6162,6 +6165,7 @@ class ComparisonSet:
             items.append({"metrics": c.metrics(), "label": label, "units": units})
         return items
 
+    @graft_plot_options()
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Render all comparisons as stacked rows in one figure.
 
@@ -6268,6 +6272,7 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    @graft_plot_options()
     def movie(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Play the set's comparisons as movie frames rather than stacking them as rows.
 
@@ -6359,6 +6364,9 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    @graft_from(
+        "plot/summary.py", "taylor", label="ocean_skill.plot.summary.taylor"
+    )
     def taylor(
         self,
         *,
@@ -6399,6 +6407,9 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    @graft_from(
+        "plot/summary.py", "target", label="ocean_skill.plot.summary.target"
+    )
     def target(
         self,
         *,
@@ -6435,6 +6446,17 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    # `paired` (the function this forwards to) delegates its own prose to `taylor`
+    # for the options they share and adds only a little of its own -- so those two
+    # are the actual sources of truth for what a caller can pass here, not `paired`
+    # itself. Order matters: `target`'s docstring says "see taylor's docstring",
+    # so taylor's is grafted first.
+    @graft_from(
+        "plot/summary.py", "target", label="ocean_skill.plot.summary.target"
+    )
+    @graft_from(
+        "plot/summary.py", "taylor", label="ocean_skill.plot.summary.taylor"
+    )
     def summary(
         self,
         *,
@@ -6470,6 +6492,9 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    @graft_from(
+        "plot/portrait.py", "portrait", label="ocean_skill.plot.portrait.portrait"
+    )
     def portrait(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Heatmap scoreboard of the set's metrics.
 
@@ -6500,6 +6525,11 @@ class ComparisonSet:
             renderer=renderer,
         )
 
+    @graft_from(
+        "plot/map_metrics.py",
+        "map_metrics",
+        label="ocean_skill.plot.map_metrics.map_metrics",
+    )
     def map_metrics(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Interpolate this set's per-station metrics onto a map, one panel each.
 
@@ -6663,6 +6693,13 @@ _SUMMARY_KINDS = {
 }
 
 
+# `kind` picks which of these ends up drawn (see `_SUMMARY_KINDS` below), so the full
+# set of forwardable keywords spans all three: `taylor`/`target` for kind="both"/
+# "taylor"/"target" (paired's own docstring defers to taylor's for what they share --
+# see the note on `ComparisonSet.summary`), `portrait` for kind="portrait".
+@graft_from("plot/portrait.py", "portrait", label="ocean_skill.plot.portrait.portrait")
+@graft_from("plot/summary.py", "target", label="ocean_skill.plot.summary.target")
+@graft_from("plot/summary.py", "taylor", label="ocean_skill.plot.summary.taylor")
 def summary(
     comparisons: Any,
     *,
