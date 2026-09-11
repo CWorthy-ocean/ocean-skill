@@ -29,12 +29,12 @@ import numpy as np
 
 from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for
+from ocean_skill.plot import _weighting
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
     nearest_ne_resolution,
     normalize_coastline_resolution,
 )
-from ocean_skill.plot import _weighting
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
     metric_value_text,
@@ -3888,7 +3888,7 @@ def _target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None | Any = _weighting.AUTO,
+    summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
     **_,
@@ -3935,6 +3935,8 @@ def _target(
     from ocean_skill.plot.summary import (
         TARGET_FIGSIZE,
         _arrow_chains,
+        _column_levels,
+        _LevelMap,
         _overlay_point_specs,
         _resolve_arrows,
         _resolve_colors,
@@ -4018,9 +4020,13 @@ def _target(
     # (E-1006: non-matching data sources), which is exactly what color_by + marker_by
     # asks for. Explicit groups also pin the colours to COLOR_CYCLE by level index, so a
     # diagram keeps its colours when the same call is rendered statically.
-    color_levels = list(dict.fromkeys(df[color_dim]))
+    # _column_levels (list membership via `==`), not `dict.fromkeys` over the column:
+    # color_dim/marker_by can be "depth", whose value is a {"min", "max"} band for a
+    # band selection, which dict.fromkeys can't hash. Reads from `df`, not `recs` --
+    # color_dim can be the "group" column groups= synthesizes onto df alone.
+    color_levels = _column_levels(df[color_dim])
     grouped_by_marker = marker_by in df.columns
-    marker_levels = list(dict.fromkeys(df[marker_by])) if grouped_by_marker else []
+    marker_levels = _column_levels(df[marker_by]) if grouped_by_marker else []
 
     # Mirrors summary._group_styles exactly: colour/alpha/size style by color_dim, the
     # same field the points are already grouped and legended by, so a dict keys the
@@ -4186,13 +4192,15 @@ def _target(
         )
     overlay_layer = None
     if overlay_specs:
+        # _LevelMap, not plain dict: marker_by can be "depth", whose value is a
+        # {"min", "max"} band for a band selection -- see _LevelMap's docstring.
         marker_map = (
-            {
-                lev: _BOKEH_MARKERS[i % len(_BOKEH_MARKERS)]
+            _LevelMap(
+                (lev, _BOKEH_MARKERS[i % len(_BOKEH_MARKERS)])
                 for i, lev in enumerate(marker_levels)
-            }
+            )
             if grouped_by_marker
-            else {}
+            else _LevelMap()
         )
         base_styles = _Styles(
             colors=[level_colors[r.get(color_dim)] for r in recs],

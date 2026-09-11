@@ -139,6 +139,52 @@ def test_grid_refuses_two_comparisons_sharing_one_cell(comparisons):
         _grid(recs, "variable", "test", "bias")
 
 
+# --------------------------------------------------------------------------- #
+# band depth as row_by/col_by
+#
+# A band depth selection puts a {"min", "max"} dict, not a plain scalar, in each
+# record's "depth" field -- unhashable as a plain dict key, which used to crash
+# row_index/col_index and the duplicate-cell check below.
+# --------------------------------------------------------------------------- #
+
+
+def _band_depth_recs():
+    return [
+        {"variable": "sea_water_temperature", "depth": {"min": 0, "max": 5}, "bias": 0.1},
+        {"variable": "sea_water_salinity", "depth": {"min": 10, "max": 15}, "bias": -0.2},
+        {"variable": "sea_water_temperature", "depth": {"min": 10, "max": 15}, "bias": 0.3},
+    ]
+
+
+def test_grid_col_by_band_depth_does_not_crash():
+    recs = _band_depth_recs()
+    row_levels, col_levels, matrix = _grid(recs, "variable", "depth", "bias")
+    assert col_levels == [{"min": 0, "max": 5}, {"min": 10, "max": 15}]
+    i = row_levels.index("sea_water_temperature")
+    j = col_levels.index({"min": 0, "max": 5})
+    assert matrix[i, j] == pytest.approx(0.1)
+
+
+def test_grid_refuses_two_comparisons_sharing_one_band_depth_cell():
+    recs = [
+        {"variable": "sea_water_temperature", "depth": {"min": 0, "max": 5}, "bias": 0.1},
+        {"variable": "sea_water_temperature", "depth": {"min": 0, "max": 5}, "bias": 0.2},
+    ]
+    with pytest.raises(ValueError, match="more than one comparison"):
+        _grid(recs, "variable", "depth", "bias")
+
+
+def test_portrait_col_by_band_depth_does_not_crash():
+    comparisons = [
+        _FakeComparison(
+            f"c{i}", test="runA", variable=r["variable"], depth=r["depth"], bias=r["bias"]
+        )
+        for i, r in enumerate(_band_depth_recs())
+    ]
+    fig = portrait(comparisons, row_by="variable", col_by="depth", metric_names="bias")
+    assert fig.axes
+
+
 def test_resolve_metric_names_accepts_a_single_string(comparisons):
     from ocean_skill.plot.summary import _records
 

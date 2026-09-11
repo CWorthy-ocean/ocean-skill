@@ -226,6 +226,40 @@ def test_target_arrows_min_max_window_sorts_by_start(comparisons):
     assert arrow.xy[1] == pytest.approx(0.2)
 
 
+def test_target_arrows_field_is_itself_a_band_depth():
+    """``arrows="depth"`` (not the default ``"time"``) with band depths -- a guard
+    that widening dict-key normalization to color_by/marker_by/groups (see
+    test_summary_style.py's band-depth tests) hasn't disturbed this already-working
+    path, which ``_arrow_chains`` has routed through ``_hashable`` all along.
+
+    ``_arrow_sort_key`` tries each chain value as a ``{"min", "max"}`` *time* window
+    (built for a ``compare(times=...)`` fan-out); a depth band's ``min``/``max`` are
+    plain numbers, not parseable as a timestamp, so the chain falls back to input
+    order -- same as :func:`test_target_arrows_unsortable_values_keep_input_order`.
+    """
+    unsorted = [
+        _FakeComparison(
+            f"runA {d['min']}-{d['max']}",
+            corr=0.9,
+            std_test=1.0,
+            bias=b,
+            crmsd=0.1,
+            test="runA",
+            time="2020",
+            depth=d,
+        )
+        for d, b in [
+            ({"min": 10, "max": 15}, 0.4),
+            ({"min": 0, "max": 5}, 0.2),
+        ]
+    ]
+    fig = target(unsorted, arrows="depth", legend_style=None)
+    (arrow,) = _arrows(fig.axes[0])
+    # input order preserved: the 10-15 m band (bias 0.4) is first, 0-5 m (0.2) second
+    assert arrow.xyann[1] == pytest.approx(0.4)
+    assert arrow.xy[1] == pytest.approx(0.2)
+
+
 def test_target_arrows_unsortable_values_keep_input_order():
     unsortable = [
         _FakeComparison(
