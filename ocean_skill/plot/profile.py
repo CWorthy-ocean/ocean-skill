@@ -292,7 +292,12 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     """
     aligned = item["aligned"]
     variable = item.get("standard_name") or item.get("label")
-    time = _time_of(aligned)
+    # A comparison fanned per bin by compare(times=...) (and possibly pooled by
+    # average(by=[..., "time"])) carries no time/month/season coordinate on
+    # `aligned` at all -- the per-bin reduction is a plain mean -- so its only
+    # record of which bin it is is the item's own pre-formatted label (see
+    # _group_key's "time" case, above, for the matching facet-key fallback).
+    time = _time_of(aligned) or item.get("time")
     season = _series_layout.season_of(aligned)
     month = _series_layout.month_of(aligned)
     if _series_layout.item_roles(item) == ("value",):
@@ -376,7 +381,18 @@ def _group_key(item: dict[str, Any], by: str | None, index: int):
         month = _series_layout.month_of(item["aligned"])
         if month is not None:
             return month
-        return _series_layout.season_of(item["aligned"])
+        season = _series_layout.season_of(item["aligned"])
+        if season is not None:
+            return season
+        # A comparison already fanned per bin by compare(times=...) (then
+        # possibly pooled by average(by=[..., "time"])) carries none of the
+        # above: the per-bin reduction is a plain mean, so no time/month/
+        # season coordinate survives onto `aligned` at all -- the bin's
+        # identity lives only in the item's own pre-formatted label
+        # (Comparison.as_item, read off self.select). Falling back to it here
+        # is what lets rows="time" facet those pre-fanned comparisons the same
+        # way it already facets a fan_season-fanned standing axis.
+        return item.get("time")
     if by == "season":
         return _series_layout.season_of(item["aligned"])
     if by == "month":

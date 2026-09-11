@@ -374,6 +374,64 @@ def _month_profile_item(
     }
 
 
+def _time_fanned_profile_item(
+    variable: str = TEMPERATURE,
+    *,
+    test: str = "his",
+    reference: str = "stations",
+    units: str = "degC",
+    offset: float = 0.6,
+    time_label: str = "2024-04",
+    n: int = 8,
+    metrics: dict | None = "auto",
+) -> dict:
+    """One comparison item shaped as ``compare(times=...)`` (one comparison per
+    bin) then ``average(by=[..., "time"])`` leaves it: a plain ``(z,)`` aligned
+    pair with **no** time/month/season coordinate at all -- the per-bin
+    reduction is a plain ``reduce: "mean"``, which drops the time coordinate
+    outright rather than folding it into a marked standing axis the way
+    ``groupby``/``resample`` do (see ``_seasonal_profile_item``/
+    ``_resample_profile_item`` for that shape, and ``_month_profile_item`` for
+    the groupby-month twin). The bin's only identity is the item's own
+    pre-formatted ``"time"`` label, exactly as ``Comparison.as_item`` sets it
+    (read off ``self.select`` via ``_display_time``/``_time_label``).
+    """
+    depths = np.linspace(5.0, 150.0, n)
+    values = 20.0 - 0.08 * depths
+    reference_da = xr.DataArray(
+        values, coords={"z": -depths}, dims="z", attrs={"units": units}
+    ).assign_coords(lon=-144.245, lat=49.978)
+    aligned = xr.Dataset(
+        {
+            "reference": reference_da,
+            "test": reference_da + offset,
+            "difference": reference_da * 0 + offset,
+        }
+    )
+    aligned["reference"].attrs["units"] = units
+    if metrics == "auto":
+        metrics = {
+            "bias": offset,
+            "rmse": abs(offset) + 0.1,
+            "corr": 0.97,
+            "n": n,
+            "std_test": 2.8,
+            "std_reference": 2.8,
+            "crmsd": 0.1,
+            "sigma_ratio": 1.0,
+            "variable": variable,
+        }
+    return {
+        "aligned": aligned,
+        "metrics": metrics,
+        "units": units,
+        "standard_name": variable,
+        "label": None,
+        "labels": (test, reference),
+        "time": time_label,
+    }
+
+
 def _spec(items, **options) -> PlotSpec:
     return PlotSpec(
         family="profile",
@@ -752,6 +810,39 @@ def test_rows_time_is_an_alias_for_rows_month_on_a_groupby_climatology():
     by_month = render(_spec(items, rows="month", cols="variable"), renderer="matplotlib")
     by_time = render(_spec(items, rows="time", cols="variable"), renderer="matplotlib")
     assert _matplotlib_titles(by_month) == _matplotlib_titles(by_time)
+
+
+def test_rows_time_facets_pre_fanned_per_bin_comparisons_in_both_renderers():
+    """compare(times=...) fans one Comparison per bin up front (rather than
+    folding time into one comparison's standing groupby axis), and
+    average(by=[..., "time"]) then pools stations while keeping bin apart --
+    so these items arrive with no time/month/season coordinate on `aligned`
+    at all, only each item's own pre-formatted "time" label. rows="time" must
+    facet those exactly like the groupby-month standing axis above."""
+    months = ("2024-04", "2024-05", "2024-06", "2024-07")
+    items = [
+        item
+        for month in months
+        for item in (
+            _time_fanned_profile_item(TEMPERATURE, time_label=month),
+            _time_fanned_profile_item(SALINITY, units="1e-3", time_label=month),
+        )
+    ]
+    static = render(_spec(items, rows="time", cols="variable"), renderer="matplotlib")
+    interactive = render(_spec(items, rows="time", cols="variable"), renderer="holoviews")
+    assert len(static.axes) == len(months) * 2
+    assert all(ax.get_visible() for ax in static.axes)
+    titles = _matplotlib_titles(static)
+    assert titles == _holoviews_titles(interactive)
+    # Row-major: cell (r, c) at index r*ncols + c holds month r, variable c --
+    # rows appear in the bins' own chronological order, not sorted after the
+    # fact (facet_grid orders by first appearance; the fixture already fans
+    # calendar-ordered, as compare(times=...)/average() themselves do).
+    ncols = 2
+    for r, month in enumerate(months):
+        for c in range(ncols):
+            title = titles[r * ncols + c]
+            assert month in title
 
 
 def test_two_facet_legend_drops_the_faceted_fields_in_both_renderers():
