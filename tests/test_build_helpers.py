@@ -1034,7 +1034,14 @@ def test_a_well_ordered_series_says_nothing(tmp_path):
 
 
 def test_two_streams_in_one_reference_are_warned_about(tmp_path):
-    """The cdr + rst shape: a second stream repeating the first stream's times."""
+    """The cdr + rst shape: a second stream repeating the first stream's times.
+
+    ``keep="all"`` here, deliberately: it is the one setting that still leaves the
+    disorder untouched to check, since the default ``"unique"`` would otherwise
+    collapse these particular duplicates (the fixture gives every file the same
+    placeholder value, so nothing here disagrees for it to raise over) before this
+    test ever gets to see them.
+    """
     from ocean_skill.build import make_kerchunk
 
     files = [
@@ -1047,7 +1054,7 @@ def test_two_streams_in_one_reference_are_warned_about(tmp_path):
     ]
 
     with pytest.warns(UserWarning, match="not strictly increasing") as caught:
-        out = make_kerchunk(files, out=tmp_path / "r.json")
+        out = make_kerchunk(files, out=tmp_path / "r.json", keep="all")
 
     message = str(caught[0].message)
     assert "ocean_time" in message, "the offending variable must be named"
@@ -1057,6 +1064,72 @@ def test_two_streams_in_one_reference_are_warned_about(tmp_path):
     # Warned about, not repaired: every record is still there, in file order.
     ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
     assert ds.sizes["ocean_time"] == 8
+
+
+def test_unique_is_the_default_and_collapses_identical_duplicates(tmp_path):
+    """The same cdr + rst shape, but under the new default: collapsed, not kept.
+
+    Every file here carries the same placeholder value, so the duplicates truly
+    agree and ``keep="unique"`` (the default) collapses them without raising.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"cdr.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+    files += [
+        _roms_like(tmp_path / f"rst.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+
+    with pytest.warns(UserWarning, match="repeated a timestamp"):
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4
+    assert list(ds.ocean_time.values) == sorted(ds.ocean_time.values)
+
+
+def test_unique_raises_when_duplicates_actually_disagree(tmp_path):
+    """The dangerous case: two streams sharing a stamp but holding different data.
+
+    Byte length alone cannot tell this apart from a genuine restart repeat (an
+    uncompressed chunk's size is fixed by shape/dtype, not content) -- this is
+    exactly why the values themselves are read back and compared.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / "cdr.nc", "NETCDF4", value=1.0, t0=0.0),
+        _roms_like(tmp_path / "rst.nc", "NETCDF4", value=999.0, t0=0.0),
+    ]
+
+    with pytest.raises(ValueError, match="disagree") as excinfo:
+        make_kerchunk(files, out=tmp_path / "r.json")
+
+    message = str(excinfo.value)
+    assert "NO3" in message
+    assert "cdr.nc" in message and "rst.nc" in message
+    assert "build_kerchunk" in message, "say what to do about it"
+
+
+def test_unique_leaves_a_clean_series_alone(tmp_path):
+    """No repeats -> no warning, no change -- the default costs nothing here."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", t0=i * 86400.0) for i in range(3)
+    ]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    assert not caught
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 6
 
 
 def test_the_warning_names_a_date_not_a_raw_roms_time(tmp_path):
@@ -1174,6 +1247,31 @@ def test_keep_latest_per_file_works_on_netcdf3(tmp_path):
     ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
     assert ds.sizes["ocean_time"] == 2
     assert list(ds.NO3.isel(eta_rho=0, xi_rho=0).values) == [2.0, 12.0]
+
+
+def test_keep_latest_per_file_also_collapses_a_between_file_repeat(tmp_path):
+    """'latest-per-file' only removes within-file duplication, not between-file.
+
+    The between-file kind (a restart re-covering time the previous one already
+    wrote) still goes through the default cross-file dedup, since only
+    ``keep="all"`` opts out of it.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        # kept record here (latest in the file) is (43200.0, 2)
+        _roms_restart_like(tmp_path / "rst.0.nc", "NETCDF4", [(0.0, 1), (43200.0, 2)]),
+        # restarted from 43200.0, so its own kept record repeats it -- same value
+        _roms_restart_like(
+            tmp_path / "rst.1.nc", "NETCDF4", [(43200.0, 2), (86400.0, 3)]
+        ),
+    ]
+
+    out = make_kerchunk(files, out=tmp_path / "r.json", keep="latest-per-file")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 2
+    assert list(ds.ocean_time.values) == [43200.0, 86400.0]
 
 
 def test_keep_latest_per_file_via_build_kerchunk(tmp_path):
