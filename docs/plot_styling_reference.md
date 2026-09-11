@@ -663,23 +663,28 @@ instead (faceted, and only defined inside the stations' convex hull). `block_spa
 any method including `"spline"` — the fix for a dense cluster otherwise outvoting a
 sparser region.
 
-`weights` names a column (e.g. an effective-sample-size `"n"`/`"n_eff"` you attached
-yourself) giving each station's evidence weight. With `block_spacing`, a block's value
-is the weighted mean of its stations and its own weight is their **sum** — so a lone
-long mooring record in one block still outweighs a lone short cast in another. On
-`method="spline"` weights also feed the least-squares fit directly. `"nearest"`/
-`"knn"`/`"linear"`/`"cubic"` cannot use weights in the fit itself (verde ignores them
-there) — pairing `weights=` with one of those and no `block_spacing` warns, since the
-weights would then do nothing.
+`weights` names a column giving each station's evidence weight. With `block_spacing`,
+a block's value is the weighted mean of its stations and its own weight is their
+**sum** — so a lone long mooring record in one block still outweighs a lone short cast
+in another. On `method="spline"` weights also feed the least-squares fit directly.
+`"nearest"`/`"knn"`/`"linear"`/`"cubic"` cannot use weights in the fit itself (verde
+ignores them there) — pairing an explicit `weights=` with one of those and no
+`block_spacing` warns, since the weights would then do nothing.
 
 **Default:** `method="spline"`, `knn_k=5`, `block_spacing=None` (no pre-pooling),
-`weights=None` (every station counts equally)
+`weights=AUTO` — weight by effective sample size (`"n_eff"`, attached automatically to
+every comparison's `.metrics()`) whenever it's present *and* the chosen
+`method`/`block_spacing` would actually use it, warning once that it did; a method that
+would ignore weights resolves this to unweighted with no warning. `weights=None` opts
+out silently; name any other column (plain `"n"`, say) to weight by that instead.
 
 ```python
 mooring_set.map_metrics(method="nearest")
 mooring_set.map_metrics(method="knn", knn_k=8)
 mooring_set.map_metrics(method="nearest", block_spacing=15_000)
+mooring_set.map_metrics(method="knn", block_spacing=15_000)         # weights by n_eff, warns once
 mooring_set.map_metrics(method="knn", block_spacing=15_000, weights="n")
+mooring_set.map_metrics(method="knn", block_spacing=15_000, weights=None)  # unweighted
 ```
 
 ### `shared_limits`, `layout` (`skill_map`)
@@ -1150,8 +1155,19 @@ suite.taylor(
 Needs both `color_by` and `marker_by`; with only one (or `summary_split_markers=False`,
 the default) you get the usual single ★ per `color_by` group.
 
+`summary_weights` names a field to weight a centroid's reduction by — a comparison
+backed by more independent evidence pulls its group's star harder; it never affects the
+base cloud or `overlay=` points. Default `AUTO`: weight by effective sample size
+(`"n_eff"`, attached automatically to every comparison's `.metrics()`) whenever present,
+warning once that it did; `summary_weights=None` opts out silently.
+
+```python
+suite.taylor(color_by="region", summary_points=True)              # weights by n_eff, warns once
+suite.taylor(color_by="region", summary_points=True, summary_weights=None)  # unweighted
+```
+
 **Default:** `overlay=None`, `overlay_marker_scale=1.8`, `overlay_alpha=1.0`,
-`summary_points=False`, `summary_split_markers=False`
+`summary_points=False`, `summary_weights=AUTO`, `summary_split_markers=False`
 
 Honored by **both renderers** for `target` (`taylor`/`paired` are static-only, as
 `marker_scale`/`alpha` are above).

@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 
+from ocean_skill.plot import _weighting
 from ocean_skill.plot.typography import (
     MIN_PT,
     PAGE_W,
@@ -1226,7 +1227,7 @@ def taylor(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None = None,
+    summary_weights: str | None | Any = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):
@@ -1317,11 +1318,18 @@ def taylor(
     ``overlay_marker_scale``/``overlay_alpha`` size and fade the overlay layer
     specifically (defaults 1.8x and fully opaque), independent of the base layer's own
     ``marker_scale``/``alpha`` — and accept the same ``{level: value}`` dict form.
-    ``summary_weights`` names a field each comparison's record carries (e.g. an
-    ``"n_eff"`` you attached yourself) to weight ``summary_points``' reduction — a
-    comparison backed by more independent evidence pulls its group's centroid
-    harder. It affects only the centroid; the base cloud and any ``overlay=``
-    points are unweighted regardless.
+    ``summary_weights`` names a field each comparison's record carries to weight
+    ``summary_points``' reduction — a comparison backed by more independent
+    evidence pulls its group's centroid harder. It affects only the centroid; the
+    base cloud and any ``overlay=`` points are unweighted regardless. Left at its
+    default (:data:`~ocean_skill.plot._weighting.AUTO`), it weights by effective
+    sample size (``"n_eff"``, computed automatically by every comparison's
+    :meth:`~ocean_skill.comparison.Comparison.metrics` — see its docstring) when
+    the records carry it, and warns once that it did, since a long,
+    highly-autocorrelated record would otherwise pull a centroid exactly as hard
+    as a short, independent one purely by point count. Pass ``summary_weights=None``
+    to opt out and get a plain, unweighted centroid with no warning; name any
+    other column (e.g. plain ``"n"``) to weight by that instead.
 
     A centroid is always drawn with its own group's marker shape, matching the
     cloud beneath it — with neither ``color_by`` nor ``marker_by`` given, that's a
@@ -1461,7 +1469,11 @@ def taylor(
             [r["corr"] for r in recs],
             style_field,
             summary_points,
-            weights_field=summary_weights,
+            weights_field=_weighting.resolve(
+                any("n_eff" in r for r in recs),
+                summary_weights,
+                param_name="summary_weights",
+            ),
             marker_field=marker_by if summary_split_markers else None,
         )
     if overlay_specs:
@@ -1590,7 +1602,7 @@ def target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None = None,
+    summary_weights: str | None | Any = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):
@@ -1747,7 +1759,16 @@ def target(
         )
     if summary_points:
         overlay_specs += _summary_point_specs(
-            recs, x, y, style_field, summary_points, weights_field=summary_weights,
+            recs,
+            x,
+            y,
+            style_field,
+            summary_points,
+            weights_field=_weighting.resolve(
+                any("n_eff" in r for r in recs),
+                summary_weights,
+                param_name="summary_weights",
+            ),
             marker_field=marker_by if summary_split_markers else None,
         )
     if overlay_specs:

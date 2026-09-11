@@ -34,6 +34,7 @@ from ocean_skill.plot.coastline import (
     nearest_ne_resolution,
     normalize_coastline_resolution,
 )
+from ocean_skill.plot import _weighting
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
     metric_value_text,
@@ -3748,7 +3749,7 @@ def _target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None = None,
+    summary_weights: str | None | Any = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
     **_,
@@ -4037,7 +4038,11 @@ def _target(
             df["y"].to_numpy(),
             color_dim,
             summary_points,
-            weights_field=summary_weights,
+            weights_field=_weighting.resolve(
+                any("n_eff" in r for r in recs),
+                summary_weights,
+                param_name="summary_weights",
+            ),
             marker_field=marker_by if summary_split_markers else None,
         )
     overlay_layer = None
