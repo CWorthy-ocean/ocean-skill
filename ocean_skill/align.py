@@ -1588,18 +1588,41 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
     keeps the reference's own stamps for a time match. Always lands on the
     reference (never the test), unlike time's coarser-wins rule: a station
     reference has one water column and nothing coarser to defer to.
+
+    A lane's vertical dimension does not have to carry a same-named coordinate --
+    :func:`ocean_skill.operators.vertical_coord_on` is the vocab-backed lookup this
+    reuses (the same one :mod:`ocean_skill.field` already relies on): it also finds
+    a real 1-D metres coordinate riding under a *different* name (an ADCP's own
+    ``depth`` on a bare-index ``DEPTH`` dimension, say), and that coordinate is
+    promoted onto the dimension name below before matching. Only a genuine
+    native-s-coordinate column -- whose only vertical coordinate is a
+    multi-dimensional ``z_rho``, not a 1-D one -- comes back with nothing to
+    promote, which is what the "native s-coordinates" refusal below is for.
     """
-    for role, dim, lane in (("test", tdim, test), ("reference", rdim, reference)):
-        if dim not in lane.coords:
+    from ocean_skill.operators import vertical_coord_on
+
+    lanes = {"test": test, "reference": reference}
+    for role, dim in (("test", tdim), ("reference", rdim)):
+        lane = lanes[role]
+        coord = vertical_coord_on(lane, dim)
+        if coord is None:
             raise ValueError(
-                f"the {role} lane's {dim!r} axis has no coordinate of its own -- "
-                "still in native s-coordinates (ROMS ships no coordinate for a "
-                "bare s_rho index), which varies by grid column and so cannot be "
-                "matched against the reference's fixed levels before the test is "
-                'sampled at a point. Use select={"depth": [...]} (a list of '
-                "metres) to interpolate the test onto fixed levels first, rather "
-                'than select={"depth": "column"} or a band.'
+                f"the {role} lane's {dim!r} axis has no metres coordinate of its "
+                "own -- still in native s-coordinates (no 1-D coordinate for a "
+                "bare s_rho index, only a per-column z_rho), which varies by grid "
+                "column and so cannot be matched against the reference's fixed "
+                'levels before the test is sampled at a point. Use select='
+                '{"depth": [...]} (a list of metres) to interpolate the test onto '
+                'fixed levels first, rather than select={"depth": "column"} or a '
+                "band."
             )
+        if coord.name != dim:
+            # A real vertical coordinate riding on `dim` under another name --
+            # promote it onto the dimension so the reindex/interp below (which
+            # reads test[tdim]/reference[rdim]) sees a dimension coordinate.
+            lanes[role] = lane.assign_coords({dim: (dim, np.asarray(coord.values))})
+    test, reference = lanes["test"], lanes["reference"]
+
     ref_vals = np.asarray(reference[rdim].values, dtype="float64")
     test_vals = np.asarray(test[tdim].values, dtype="float64")
     ref_pos = np.abs(ref_vals)
