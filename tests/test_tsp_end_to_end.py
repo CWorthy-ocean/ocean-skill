@@ -407,17 +407,34 @@ def test_comparison_set_of_one_time_depth_comparison_plots(time_depth_comparison
     assert type(fig).__name__ == "Figure"
 
 
-def test_comparison_set_refuses_more_than_one_time_depth_row(time_depth_comparison):
+def test_comparison_set_stacks_more_than_one_time_depth_row(time_depth_comparison):
+    """More than one time_depth comparison stacks as a grid -- one test|reference|
+    difference row per station -- the same way more than one field_row comparison
+    stacks as field_grid, rather than raising (see time_depth_row_grid/
+    _time_depth_row_grid).
+    """
+    import holoviews as hv
+    import matplotlib
+
     from ocean_skill.comparison import ComparisonSet
 
+    matplotlib.use("Agg")
     # Two comparisons, not one repeated (ComparisonSet._flatten drops exact repeats
     # -- see tests/test_section_comparison.py's own >1-section_row test for the
     # analogous case) -- built directly rather than through _flatten's dedup.
     cs = ComparisonSet.__new__(ComparisonSet)
     cs.comparisons = [time_depth_comparison, time_depth_comparison]
     cs.labels = None
-    with pytest.raises(ValueError, match="stacked family"):
-        cs.plot(renderer="matplotlib")
+
+    fig = cs.plot(renderer="matplotlib")
+    assert type(fig).__name__ == "Figure"
+    # 2 rows x (3 panels + 2 colorbars), same shape a single row's own smoke test
+    # checks scaled up -- see test_matplotlib_plot_draws_a_time_depth_row.
+    assert len(fig.axes) == 10
+
+    out = cs.plot(renderer="holoviews")
+    assert isinstance(out, hv.Layout)
+    assert len(out) == 6  # 2 rows x (test, reference, difference)
 
 
 def test_comparison_set_movie_refuses_time_depth(time_depth_comparison):
