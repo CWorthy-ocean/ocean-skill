@@ -1,8 +1,10 @@
 """Unit handling, delegated to `pint <https://pint.readthedocs.io>`_.
 
 Models and climatologies express the same quantity differently: ROMS/MARBL carries
-nitrate as mmol m-3, while WOA and GLODAP carry umol kg-1. Reconciling that by hand in
-every script is the easiest way to publish a wrong number, so it lives here.
+nitrate as mmol m-3, while WOA and GLODAP carry umol kg-1 -- and a CTD's Winkler-
+titrated dissolved oxygen often ships as a gas volume, mL/L, against a model's molar
+mmol/m3. Reconciling that by hand in every script is the easiest way to publish a
+wrong number, so it lives here.
 
 This used to be three hand-maintained sets of unit *strings* and one hard-coded
 multiply. pint replaces the arithmetic and, more importantly, adds **dimensional
@@ -32,6 +34,7 @@ from ocean_skill import _stacklevel
 from ocean_skill.vocabulary import resolve_name
 
 __all__ = [
+    "O2_MMOL_PER_ML",
     "RHO_SEAWATER",
     "compatible",
     "convert_units",
@@ -46,6 +49,18 @@ __all__ = [
 #: is an approximation: true density varies with T/S/P by a few parts per thousand near
 #: the surface. Use ``gsw`` with in-situ T/S if that matters for your comparison.
 RHO_SEAWATER = 1025.0
+
+#: mmol of O2 per mL of O2 gas at standard temperature and pressure -- the UNESCO/WOCE
+#: molar volume (22.392 L per mole of O2, Garcia & Gordon 1992's own figure) most
+#: Winkler-titration and CTD oxygen sensor software already assumes when it reports
+#: dissolved oxygen as a gas volume (``mL/L``) rather than a molar concentration. A
+#: constant here for the same reason :data:`RHO_SEAWATER` is: real gas behavior shifts
+#: it a little with temperature and pressure, and a source whose own processing used a
+#: different figure should override this. Unlike :data:`RHO_SEAWATER`, though, this one
+#: is baked into a concrete pint unit definition (:func:`registry`) rather than read
+#: live by a context transformation, so a change after the registry has already been
+#: built needs ``units._registry = None`` before the next call picks it up.
+O2_MMOL_PER_ML = 1000.0 / 22.392  # ~44.661 mmol/m3 per mL/L
 
 #: Spellings no rule can recover, because they are mistakes or free text rather than a
 #: convention. Kept deliberately tiny — anything that *follows* a convention belongs in
@@ -76,6 +91,23 @@ _UDUNITS_EXPONENT = re.compile(r"(?<=[a-zA-Z])\s*(-?\d+)(?![0-9])")
 #: A bare number is a scale factor, not a unit — WOA writes salinity as ``1e-3``.
 _NUMERIC = re.compile(r"^[0-9.]+([eE][-+]?[0-9]+)?$")
 
+#: A dissolved-oxygen gas volume, in every spelling this package has seen
+#: (``mL/L``, ``ml.l-1``, ``ml*l-1``, ``milliliters per liter``, ...). To pint, ``mL/L``
+#: is bare dimensionless -- the same dimensionality :data:`practical_salinity_unit`
+#: (``PSU``) already occupies, so a generic "any dimensionless quantity converts to a
+#: molar concentration" rule (a context keyed on abstract dimensionality, the way the
+#: ``seawater`` per-mass/per-volume one is) would just as happily, and wrongly, treat a
+#: salinity field as a convertible oxygen reading — pint contexts dispatch on
+#: dimensionality, not on which named unit symbol got you there. Rewriting *this*
+#: specific spelling to its own concretely-dimensioned unit
+#: (``oxygen_ml_per_l``, :func:`registry`) sidesteps that collision entirely: PSU's own
+#: spellings never match this pattern, so nothing about it changes, and no context is
+#: needed at all -- the new unit's dimensionality already matches ``mmol/m3`` directly.
+_OXYGEN_ML_PER_L = re.compile(
+    r"^(?:ml|milli-?liters?)[\s_]*[/.*]?[\s_]*(?:per[\s_]+)?l(?:iters?)?(?:-1)?$",
+    re.IGNORECASE,
+)
+
 _registry = None
 
 
@@ -97,6 +129,12 @@ def registry():
     _define(ureg, "equivalent = mole = eq")  # alkalinity: 1 eq = 1 mol of charge
     _define(ureg, "practical_salinity_unit = [] = PSU = psu")
     _define(ureg, "@alias degree_Celsius = Celsius = degrees_celsius = degrees_C")
+    # A real [substance]/[length]**3 unit, not a bare dimensionless one -- see
+    # _OXYGEN_ML_PER_L's own comment for why that distinction is what keeps this from
+    # also matching PSU. Ordinary pint conversion handles the rest from here: no
+    # context needed, and it already interoperates with the seawater context below
+    # (a mL/L reading against a per-mass umol/kg one converts through both).
+    _define(ureg, f"oxygen_ml_per_l = {O2_MMOL_PER_ML} * millimole / meter ** 3")
 
     # Per-mass <-> per-volume is not a unit conversion: it needs a density, which is
     # physics, not arithmetic. A context is pint's way of saying "this transformation
@@ -135,10 +173,18 @@ def normalize(unit_string) -> str:
     become explicit (``kg**-1``, ``m**3``). Empty or purely numeric strings are
     dimensionless. Only :data:`_FIXED_SPELLINGS` is an enumeration, because a
     misspelling follows no rule.
+
+    A dissolved-oxygen gas-volume spelling (:data:`_OXYGEN_ML_PER_L`, checked
+    first since it would otherwise just read as bare dimensionless) rewrites to
+    ``oxygen_ml_per_l`` -- a real unit, not a lookup-table shortcut, since this
+    domain never reports anything else in ``mL/L``: see that pattern's own
+    comment for why a generic dimensionless-to-molar rule is not safe here.
     """
     text = str(unit_string or "").strip()
     if not text:
         return "dimensionless"
+    if _OXYGEN_ML_PER_L.match(text):
+        return "oxygen_ml_per_l"
     if text.lower() in _FIXED_SPELLINGS:
         return _FIXED_SPELLINGS[text.lower()]
     if _NUMERIC.match(text):
