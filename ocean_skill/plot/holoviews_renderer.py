@@ -1187,10 +1187,11 @@ def _time_depth_grid(
     them (warning once if the items' ``standard_name``s actually differ), and
     ``sharex`` sharing (or not) every panel's time axis -- see below.
 
-    Every panel draws through :func:`_time_depth` itself, given its own
-    identity-only title (the item's ``label`` plus place/period context) rather
-    than the standalone panel's own variable-naming default, since the variable
-    is already named once, in the ``Layout``'s own title.
+    Every panel draws through :func:`_time_depth` itself, given its own title
+    computed by :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid_titles`
+    rather than that function's own standalone variable-naming default -- whichever
+    of variable, ``label``, place, and period every panel shares moves up into the
+    ``Layout``'s own title instead, so nothing is named twice.
 
     Bokeh has no ``plt.subplots(sharex=)`` to link panels the way the static
     renderer does -- ``sharex=None`` (the default share-when-meaningful rule the
@@ -1216,17 +1217,19 @@ def _time_depth_grid(
     hv = _extension()
 
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, grid_suptitle
+    from ocean_skill.plot.matplotlib_renderer import _limits, time_depth_grid_titles
     from ocean_skill.plot.series import grid_shape, time_values, value_span
     from ocean_skill.plot.time_depth import prepare_time_depth
 
     n = len(items)
     grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)[1]
 
-    if title is None:
-        title = grid_suptitle(items)
-
     prepared = [prepare_time_depth(item["field"]) for item in items]
+    auto_suptitle, auto_titles = time_depth_grid_titles(
+        items, [geometry for _, geometry in prepared]
+    )
+    if title is None:
+        title = auto_suptitle
 
     shared_clim = None
     if shared_limits:
@@ -1259,14 +1262,6 @@ def _time_depth_grid(
             [np.asarray(field[geometry.y_name]) for field, geometry in prepared]
         )
 
-    auto_titles = [
-        " · ".join(
-            p
-            for p in (item.get("label"), geometry.place_note, geometry.period_note)
-            if p
-        )
-        for item, (_, geometry) in zip(items, prepared)
-    ]
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
 
     plots = []

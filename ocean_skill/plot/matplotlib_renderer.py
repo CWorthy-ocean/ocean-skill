@@ -2887,6 +2887,49 @@ def grid_suptitle(items) -> str:
     )
 
 
+def time_depth_grid_titles(items, geometries) -> tuple[str, list[str]]:
+    """Split a ``time_depth`` grid's per-panel identity into a suptitle and titles.
+
+    Each panel's full identity is, in order, its variable (:func:`field_title`), its
+    ``label`` (a station or source name), and its place/period
+    (:attr:`~ocean_skill.plot.time_depth.TimeDepthGeometry.place_note`/``period_note``).
+    A part every panel shares moves up into one suptitle -- exactly :func:`grid_suptitle`'s
+    own idea, generalized past ``standard_name`` alone -- so a set fanned over *variables*
+    (one station, several fields: temperature, salinity, ...) names the shared station once
+    and titles each panel by its own variable, while a set fanned over *stations* (one
+    field, several moorings) keeps naming the shared variable once and titles each panel by
+    its own station -- the case :func:`grid_suptitle` already covered on its own. A part
+    that varies stays on every panel's own title, in the same order, so nothing is ever
+    dropped -- only lifted to the one place it need be said once.
+    """
+    rows = [
+        (
+            field_title(item.get("standard_name")),
+            item.get("label"),
+            geometry.place_note,
+            geometry.period_note,
+        )
+        for item, geometry in zip(items, geometries, strict=True)
+    ]
+
+    def shared(column: int) -> str | None:
+        values = {row[column] for row in rows}
+        if len(values) != 1:
+            return None
+        (value,) = values
+        return value or None
+
+    shared_parts = [shared(i) for i in range(4)]
+    suptitle = " · ".join(_elide(p) for p in shared_parts if p)
+    panel_titles = [
+        " · ".join(
+            _elide(p) for i, p in enumerate(row) if p and shared_parts[i] is None
+        )
+        for row in rows
+    ]
+    return suptitle, panel_titles
+
+
 def field_facet(
     field,
     *,
@@ -3757,11 +3800,16 @@ def time_depth_grid(
     differ) across every panel instead -- :func:`field_grid`'s own convention, so the
     two grid families agree on what the option means.
 
-    ``title`` defaults to whatever identity every item shares (ordinarily the
-    variable) via :func:`grid_suptitle`; each panel's own title is its identity instead
-    -- the item's ``label`` (a mooring's source name, or whatever
-    :meth:`~ocean_skill.field.Field._time_depth_item` gave it), plus place/period
-    context only when no ``label`` says as much already.
+    ``title``/each panel's own title split the same way :func:`field_map_grid` does for
+    several *variables* over one map: whichever of variable, ``label`` (a mooring's
+    source name, or whatever :meth:`~ocean_skill.field.Field._time_depth_item` gave it),
+    place, and period every panel shares moves up into one suptitle; whichever of those
+    varies stays on each panel's own title (see :func:`time_depth_grid_titles`). A set
+    fanned over variables at one station (``osk.field("ctd_station_HV1", ["temp",
+    "salt"])``) titles each panel by its variable and names the shared station once up
+    top; a set fanned over stations for one variable
+    (``osk.field(osk.find(...), "temperature")``) keeps :func:`grid_suptitle`'s own
+    behaviour, naming the shared variable once and titling each panel by its station.
 
     ``sharex=None`` (the default) links every panel's time axis when they draw the
     same way -- the default single stacked column, every panel a real date axis or
@@ -3807,8 +3855,11 @@ def time_depth_grid(
     prepared = [prepare_time_depth(item["field"]) for item in items]
     marks = [mark or default_mark(values) for values, _ in prepared]
 
+    auto_suptitle, auto_titles = time_depth_grid_titles(
+        items, [geometry for _, geometry in prepared]
+    )
     if title is None:
-        title = grid_suptitle(items)
+        title = auto_suptitle
 
     grid_nrows, grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)
 
@@ -3885,12 +3936,6 @@ def time_depth_grid(
             [np.asarray(values[geometry.y_name]) for values, geometry in prepared]
         )
 
-    auto_titles = [
-        " · ".join(
-            p for p in (item.get("label"), geometry.place_note, geometry.period_note) if p
-        )
-        for item, (_, geometry) in zip(items, prepared)
-    ]
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
 
     for index, (item, (values, geometry), panel_mark, panel_title) in enumerate(
