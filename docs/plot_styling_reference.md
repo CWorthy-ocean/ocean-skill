@@ -40,7 +40,7 @@ want everything bigger or smaller.
 | [`colorbar_kwargs`](#colorbar_kwargs) | both colorbars (shape, label, ticks) | [`Figure.colorbar`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.colorbar.html) + [`Colorbar.set_label`](https://matplotlib.org/stable/api/_as_gen/matplotlib.colorbar.Colorbar.html) + [`Axes.tick_params`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.tick_params.html) |
 | [`gridline_kwargs`](#gridline_kwargs) | the lat/lon grid lines | [`GeoAxes.gridlines`](https://scitools.org.uk/cartopy/docs/latest/reference/generated/cartopy.mpl.geoaxes.GeoAxes.gridlines.html) |
 | [`tick_label_kwargs`](#tick_label_kwargs) | the lat/lon tick **labels** | [`Gridliner.xlabel_style`/`ylabel_style`](https://scitools.org.uk/cartopy/docs/latest/reference/generated/cartopy.mpl.gridliner.Gridliner.html) |
-| [`row_label_kwargs`](#row_label_kwargs) | the rotated variable name (field_grid only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`row_label_kwargs`](#row_label_kwargs) | the rotated variable name (field_grid/time_depth_row_grid only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`metrics_kwargs`](#metrics_kwargs) | the bias/rmse/corr corner box | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
@@ -277,7 +277,7 @@ c.plot(tick_label_kwargs={"size": 7, "color": "0.3"})
 
 ## `row_label_kwargs`
 
-`field_grid` only — draws the rotated variable name at the left edge of each row via
+`field_grid`/`time_depth_row_grid` only — draws the rotated variable name at the left edge of each row via
 [`Axes.text(-0.18, 0.5, row_label, **row_label_kwargs)`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html).
 Any `Text` property.
 
@@ -1879,11 +1879,20 @@ map to outline. `metrics(weighted=False)` — cos-lat area weights mean nothing 
 a single station — and `pointwise_metrics()` is refused (both axes are already
 pooled into one number; there is no further axis to score over).
 
-A `time_depth_row` is never stacked into a grid: more than one in a
-`ComparisonSet.plot()` is refused (mirroring `section_row`'s own refusal — a
-follow-up would need a stacked family that does not exist yet), and
-`ComparisonSet.movie()` refuses a set containing one too, having no further axis
-left to step through as frames once both are already pooled.
+More than one `time_depth_row` comparison in a `ComparisonSet.plot()` stacks as a
+grid — one `test | reference | difference` row per station — the same way more
+than one `field_row` comparison stacks as `field_grid` (`time_depth_row_grid`/
+`_time_depth_row_grid`; the render family name stays `"time_depth_row"`, the
+renderer itself branches on the item count, mirroring `time_depth`'s own
+single-panel/grid switch). Each row keeps its own colour scales, its own two
+colorbars, and its own column titles from its own `labels` by default;
+`shared_limits=True` puts every row on one shared scale instead — `field_grid`'s
+own convention. `section_row` has no such stacked family yet (`section_grid` is a
+follow-up); `time_depth_row` no longer shares that gap.
+
+`ComparisonSet.movie()` still refuses a set containing a `time_depth_row`
+comparison (stacked grid or not), having no further axis left to step through as
+frames once both time and depth are already pooled.
 
 ## The `section_row` family (a section matched against a dataset)
 

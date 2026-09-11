@@ -3998,14 +3998,19 @@ def _draw_time_depth_row(
     standard_name: str | None,
     metrics: dict[str, Any] | None,
     mark: str,
+    row_label: str | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     title_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    seq_norm: Any = None,
+    div_norm: Any = None,
     shared_axis_labels: bool = True,
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
 ):
     """Draw one test|reference|difference ``time_depth`` row into three existing axes.
 
@@ -4024,26 +4029,45 @@ def _draw_time_depth_row(
     is resolved once by the caller (see :func:`ocean_skill.plot.time_depth
     .default_mark`) and applied to every panel alike, so test, reference and
     difference are never drawn two different ways in the same row. ``robust``
-    means what it does in :func:`_limits`.
+    means what it does in :func:`_limits`, and is ignored once ``seq_norm`` is
+    given.
+
+    ``seq_norm``/``div_norm``, if given, override this row's own colour
+    limits -- how :func:`time_depth_row_grid`'s ``shared_limits=True`` makes
+    every row share one scale instead of each computing its own, the same
+    convention :func:`_draw_row` uses for :func:`field_grid`.
+
+    ``row_label``, if given, draws a rotated label down the leftmost panel's
+    edge -- a stacked grid's per-row identity, unused by the single-row caller.
+
+    ``titles=`` overrides this row's three panel titles by hand -- test,
+    reference, difference, in that order -- with ``None`` at a position
+    keeping that panel's own (``labels``-derived, or ``"difference"``) title;
+    see :func:`ocean_skill.plot._titles.resolve_titles`.
     """
     import matplotlib.colors as mcolors
 
     title_pinned = _pinned(title_kwargs, "title_kwargs")
+    row_label_pinned = _pinned(row_label_kwargs, "row_label_kwargs")
     title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    row_label_kwargs = _merged(defaults["row_label_kwargs"], row_label_kwargs)
     metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
 
     t, r, d = values["test"], values["reference"], values["difference"]
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
-    vmin, vmax = _limits(t, r, robust=robust)
-    seq_norm = norm_for(standard_name, vmin, vmax)
-    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-    div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
+    if seq_norm is None:
+        vmin, vmax = _limits(t, r, robust=robust)
+        seq_norm = norm_for(standard_name, vmin, vmax)
+    if div_norm is None:
+        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
 
+    resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
-        (t, tl, seq, seq_norm),
-        (r, rl, seq, seq_norm),
-        (d, "difference", div, div_norm),
+        (t, resolved_titles[0], seq, seq_norm),
+        (r, resolved_titles[1], seq, seq_norm),
+        (d, resolved_titles[2], div, div_norm),
     ]
     ims = []
     for j, (ax, (field, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
@@ -4062,6 +4086,9 @@ def _draw_time_depth_row(
         ax.title._osk_size_pinned = title_pinned
         ims.append(im)
 
+    if row_label:
+        _add_row_label(axes[0], row_label, row_label_kwargs)
+        axes[0]._osk_row_label._osk_size_pinned = row_label_pinned
     if metrics:
         axes[2]._osk_metrics_text = axes[2].text(
             0.02,
@@ -4214,6 +4241,184 @@ def time_depth_row(
     if fit_text:
         _fit_text_widths(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=list(axes))
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def time_depth_row_grid(
+    items: list[dict[str, Any]],
+    *,
+    labels: tuple[str, str] | None = None,
+    title: str | None = None,
+    mark: str | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_limits: bool = False,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+    robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
+):
+    """Stack one ``test | reference | difference`` ``time_depth`` row per comparison.
+
+    The ``time_depth_row`` counterpart of :func:`field_grid`: a ``compare()`` fan-out
+    across several stations (each its own :attr:`~ocean_skill.comparison.Comparison
+    .is_time_depth` comparison) stacks here instead of raising, one row per station,
+    the same way several map comparisons stack as :func:`field_grid` rows. Each item
+    is a dict with ``aligned`` and optionally ``row_label``, ``units``,
+    ``standard_name``, ``metrics`` and ``labels`` -- exactly :func:`field_grid`'s own
+    item shape, minus the map-only fields (``domain``, ``region``).
+
+    Every row gets its own colour scales, its own two colorbars (shared for
+    test/reference, separate for the difference), and its own column titles from its
+    own ``labels`` -- rows commonly come from *different* stations with different
+    ranges, so reusing one shared pair of titles or one shared scale for every row
+    would misrepresent all but the first. The top-level ``labels`` is only the
+    fallback for a row that doesn't carry its own. ``shared_limits=True`` reverses
+    that for the colour scale, exactly as it does in :func:`field_grid` -- meaningful
+    only when every row is the same variable, and warns if the rows'
+    ``standard_name``s actually differ.
+
+    There is no ``domain``, ``region`` or ``gridline_kwargs``: a ``time_depth`` row
+    has no map to outline or gridline, the same omission :func:`time_depth_row` makes
+    for its own single row.
+
+    Row height follows :func:`time_depth_row`'s own sizing (``SECTION_ASPECT``), just
+    for ``n`` rows instead of one -- see that function's docstring for ``size``/
+    ``zoom``/``font_scale``/``fit_text``/``align_colorbars``/``metric_keys``.
+
+    ``title`` defaults to whatever identity every row shares (ordinarily the
+    variable) via :func:`grid_suptitle`; the part the rows *differ* in is already
+    their left-edge row label, so it is left off the top title -- same convention as
+    :func:`field_grid`. Pass ``title=""`` to drop it.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list (row 0's test/reference/difference, then row 1's, ...), so a grid
+    of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps that panel's
+    own title; the wrong count raises a copy-pasteable ``ValueError`` listing the
+    current titles.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
+    option set to each renderer -- neither changes anything here.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.time_depth import default_mark, prepare_time_depth_row
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+
+    if title is None:
+        title = grid_suptitle(items)
+
+    n = len(items)
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=False,  # stacked rows: bars beside, height is scarce
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=n,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = _scale_for(figsize, nrows=n, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    fig, axes = plt.subplots(n, 3, figsize=figsize, constrained_layout=True, squeeze=False)
+
+    prepared = [
+        (item, *prepare_time_depth_row(item["aligned"])) for item in items
+    ]
+    marks = [mark or default_mark(values["reference"]) for _, values, _ in prepared]
+
+    shared_seq_norm = shared_div_norm = None
+    if shared_limits:
+        import warnings
+
+        names = {item.get("standard_name") for item in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but rows use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every row.",
+                stacklevel=2,
+            )
+        shared_seq_norm, shared_div_norm = _shared_norms(
+            items, "test", "reference", robust=robust
+        )
+
+    row_labels = [item.get("labels") or labels or ("test", "reference") for item in items]
+    auto_titles = [t for tl, rl in row_labels for t in (tl, rl, "difference")]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    for i, (item, values, geometry) in enumerate(prepared):
+        ims, lab = _draw_time_depth_row(
+            axes[i],
+            values,
+            geometry,
+            labels=row_labels[i],
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            metrics=item.get("metrics"),
+            mark=marks[i],
+            row_label=item.get("row_label"),
+            metric_keys=metric_keys,
+            title_kwargs=title_kwargs,
+            metrics_kwargs=metrics_kwargs,
+            tick_label_kwargs=tick_label_kwargs,
+            row_label_kwargs=row_label_kwargs,
+            seq_norm=shared_seq_norm,
+            div_norm=shared_div_norm,
+            shared_axis_labels=shared_axis_labels,
+            scale=scale,
+            defaults=defaults,
+            robust=robust,
+            titles=resolved_titles[i * 3 : i * 3 + 3],
+        )
+        _draw_colorbar(
+            fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        )
+        _draw_colorbar(
+            fig,
+            ims[2],
+            axes[i][2],
+            f"difference {lab}",
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+        )
+
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _fit_left_margin(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+        _clear_row_labels(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=n)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -6001,7 +6206,7 @@ def _render(spec, **kwargs: Any):
     elif family == "time_depth":
         _check_options(time_depth_grid if len(spec.items) > 1 else time_depth, opts)
     elif family == "time_depth_row":
-        _check_options(time_depth_row, opts)
+        _check_options(time_depth_row_grid if len(spec.items) > 1 else time_depth_row, opts)
     elif family == "profile":
         _check_options(profile, opts)
     elif family == "skill_map":
@@ -6096,6 +6301,8 @@ def _render(spec, **kwargs: Any):
             **opts,
         )
     if family == "time_depth_row":
+        if len(spec.items) > 1:
+            return time_depth_row_grid(spec.items, **opts)
         item = spec.single
         return time_depth_row(
             item["aligned"],

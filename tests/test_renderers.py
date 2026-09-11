@@ -1191,7 +1191,7 @@ def _section_row_item() -> dict:
     }
 
 
-def _time_depth_row_item() -> dict:
+def _time_depth_row_item(reference: str = "woa23", row_label: str | None = None) -> dict:
     """One time_depth_row spec item: what a pooled ``timeSeriesProfile``
     comparison's own ``as_item()`` builds (see
     ``Comparison.is_time_depth``/``Comparison.plot``).
@@ -1203,18 +1203,71 @@ def _time_depth_row_item() -> dict:
     "pcolormesh" choice) without also exercising the scatter branch, which the
     dedicated ``tests/test_tsp_end_to_end.py`` plotting tests already check
     against a genuinely ragged station.
+
+    ``reference``/``row_label`` are overridable so a two-item grid (see
+    ``two_time_depth_rows``) can build rows a test can tell apart -- a real
+    ``compare()`` fan-out across stations pairs each with its own reference name
+    and row label the same way :func:`_item` does for ``field_grid``'s rows.
     """
     test = _time_depth_field()
-    reference = test + 0.5
+    ref = test + 0.5
     return {
-        "aligned": {"test": test, "reference": reference, "difference": test - reference},
+        "aligned": {"test": test, "reference": ref, "difference": test - ref},
         "units": "mmol m-3",
         "standard_name": "mole_concentration_of_nitrate_in_sea_water",
         "depth": None,
         "time": None,
         "metrics": {"bias": 0.125, "rmse": 0.5, "corr": 0.98},
-        "labels": ("GOM_bgc", "woa23"),
+        "labels": ("GOM_bgc", reference),
+        "row_label": row_label,
     }
+
+
+@pytest.fixture
+def two_time_depth_rows():
+    """Two time_depth_row rows from *different* stations -- a real compare()
+    fan-out's shape (see ``two_rows``, the ``field_grid`` analogue)."""
+    return [
+        _time_depth_row_item("station_hv1", "HV1"),
+        _time_depth_row_item("station_hv2", "HV2"),
+    ]
+
+
+def test_matplotlib_time_depth_grid_labels_each_row_from_its_own_source(
+    two_time_depth_rows,
+):
+    fig = render(
+        PlotSpec(family="time_depth_row", items=two_time_depth_rows, options={}),
+    )
+    titles = _matplotlib_panel_titles(fig)
+    assert "station_hv1" in titles
+    assert "station_hv2" in titles
+
+
+def test_the_holoviews_time_depth_grid(two_time_depth_rows):
+    """The ``time_depth_row`` analogue of ``test_the_holoviews_grid``: per-row
+    reference names, row labels and metrics all have to survive stacking, the
+    same claims that regression guard makes for ``field_grid``.
+    """
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    out = render(
+        PlotSpec(family="time_depth_row", items=two_time_depth_rows, options={}),
+        renderer="holoviews",
+    )
+    titles = _holoviews_panel_titles(out)
+
+    assert any("station_hv1" in t for t in titles)
+    assert any("station_hv2" in t for t in titles), (
+        f"row 2 lost its own reference label; got {titles}"
+    )
+    assert any("HV1" in t for t in titles)
+    assert any("HV2" in t for t in titles)
+    assert any("bias=0.125" in t for t in titles)
+
+    figs = list(hv.render(out, backend="bokeh").select({"type": figure}))
+    assert len(figs) == 6
 
 
 _INTERACTIVE_FAMILIES = {

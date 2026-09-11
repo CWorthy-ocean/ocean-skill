@@ -1515,6 +1515,7 @@ def _time_depth_row(
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
+    row_label: str | None = None,
     mark: str | None = None,
     font_scale: float = 1.0,
     size=None,
@@ -1522,6 +1523,9 @@ def _time_depth_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    seq_clim: tuple[float, float] | None = None,
+    div_clim: tuple[float, float] | None = None,
+    titles=None,
     **_,
 ):
     """Test | reference | difference ``time_depth`` panels, as three linked
@@ -1539,15 +1543,27 @@ def _time_depth_row(
     same reasoning the static renderer's own ``time_depth_row`` gives; pass it
     explicitly to override either way.
 
-    A comparison ``time_depth`` row is never stacked into a grid (see
-    :class:`~ocean_skill.comparison.ComparisonSet`'s own refusal on more than
-    one), so, like :func:`_section_row`, there is no ``row_label`` or
-    ``domain`` to thread through here.
+    A lone comparison ``time_depth`` row draws with no ``row_label`` (bokeh has
+    no equivalent of the static renderer's rotated left-edge text; a stacked
+    grid folds it into the first panel's title instead, the same convention
+    :func:`_field_row` uses for its own ``row_label``) and no ``domain`` (a
+    ``time_depth`` panel has no map to outline).
+
+    ``seq_clim``/``div_clim``, if given, override this row's own colour
+    limits -- how :func:`_time_depth_row_grid`'s ``shared_limits=True`` makes
+    every row share one scale instead of each computing its own.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits` — see the static renderer's ``time_depth_row`` docstring.
+    ._limits` — see the static renderer's ``time_depth_row`` docstring, and is
+    ignored once ``seq_clim`` is given.
+
+    ``titles=`` overrides this row's three panel titles by hand -- test,
+    reference, difference, in that order -- with ``None`` at a position
+    keeping that panel's own title; see :func:`ocean_skill.plot._titles
+    .resolve_titles`.
     """
     from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth_row
     from ocean_skill.plot.typography import SECTION_ASPECT
@@ -1572,10 +1588,14 @@ def _time_depth_row(
         )
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(t, r, robust=robust)
-    if log:
-        vmin = max(vmin, 1e-6)
-    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    if seq_clim is None:
+        vmin, vmax = _limits(t, r, robust=robust)
+        if log:
+            vmin = max(vmin, 1e-6)
+        seq_clim = (vmin, vmax)
+    if div_clim is None:
+        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        div_clim = (-dmax, dmax)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -1583,6 +1603,10 @@ def _time_depth_row(
     summary = _metrics_summary(item.get("metrics"), metric_keys)
     if summary:
         diff_title = f"difference ({summary})"
+    test_title = f"{row_label} — {tl}" if row_label else str(tl)
+    test_title, ref_title, diff_title = _titles.resolve_titles(
+        [test_title, str(rl), diff_title], titles
+    )
 
     def _panel(field, panel_title: str, cmap, clim, panel_units: str, log_scale: bool):
         if mark == "scatter":
@@ -1639,15 +1663,135 @@ def _time_depth_row(
         )
 
     panels = [
-        _panel(t, str(tl), seq, (vmin, vmax), units, log),
-        _panel(r, str(rl), seq, (vmin, vmax), units, log),
-        _panel(d, diff_title, div, (-dmax, dmax), f"test − reference {units}", False),
+        _panel(t, test_title, seq, seq_clim, units, log),
+        _panel(r, ref_title, seq, seq_clim, units, log),
+        _panel(d, diff_title, div, div_clim, f"test − reference {units}", False),
     ]
     row = panels[0] + panels[1] + panels[2]
     row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         row = row.opts(title=str(title))
     return row
+
+
+def _time_depth_row_grid(
+    items,
+    labels=("test", "reference"),
+    shared_axes: bool = True,
+    metric_keys=DEFAULT_METRIC_KEYS,
+    title: str | None = None,
+    mark: str | None = None,
+    shared_limits: bool = False,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    robust: bool | float = False,
+    titles=None,
+    **_,
+):
+    """One interactive ``time_depth`` row per comparison, stacked.
+
+    The ``time_depth_row`` counterpart of :func:`_field_grid`: a ``compare()``
+    fan-out across several stations stacks here instead of raising, one linked
+    ``test | reference | difference`` row per station via :func:`_time_depth_row`,
+    laid out ``.cols(3)`` exactly as :func:`_field_grid` lays out its own rows.
+
+    Each row is titled from *its own* ``labels``, falling back to the top-level
+    ``labels`` only for a row that carries none — the same fallback
+    :func:`_field_grid` gives its rows, since a ``compare()`` fan-out's stations
+    can differ. ``shared_limits=True`` computes one shared colour scale (a
+    sequential range from every row's test+reference, a diverging range from
+    every row's difference) across all rows instead of each computing its own —
+    :func:`time_depth_row_grid`'s own convention, so the two renderers agree on
+    what the option means; warns once if the rows' ``standard_name``s differ.
+
+    ``title`` sets one overall title above the whole grid, defaulting to the
+    rows' shared identity (:func:`_default_grid_title`) the same as
+    :func:`_field_grid`; ``title=""`` drops it. ``shared_axes=True`` links
+    pan/zoom across every panel.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list (row 0's test/reference/difference, then row 1's, ...), so a
+    grid of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps
+    that panel's own title; the wrong count raises a copy-pasteable
+    ``ValueError`` listing the current titles.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
+    from ocean_skill.plot.matplotlib_renderer import _limits
+
+    hv = _extension()
+    title = _default_grid_title(items, title)
+    row_labels = [it.get("labels") or labels for it in items]
+
+    def _row_auto_titles(it, tl, rl):
+        test_title = f"{it.get('row_label')} — {tl}" if it.get("row_label") else str(tl)
+        summary = _metrics_summary(it.get("metrics"), metric_keys)
+        diff_title = f"difference ({summary})" if summary else "difference"
+        return test_title, str(rl), diff_title
+
+    auto_titles = [
+        t
+        for it, (tl, rl) in zip(items, row_labels)
+        for t in _row_auto_titles(it, tl, rl)
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    shared_seq_clim = shared_div_clim = None
+    if shared_limits:
+        import warnings
+
+        from ocean_skill.plot.time_depth import prepare_time_depth_row
+
+        names = {it.get("standard_name") for it in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but rows use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every row.",
+                stacklevel=2,
+            )
+        prepared = [prepare_time_depth_row(it["aligned"]) for it in items]
+        all_t = [values["test"] for values, _ in prepared]
+        all_r = [values["reference"] for values, _ in prepared]
+        all_d = [values["difference"] for values, _ in prepared]
+        vmin, vmax = _limits(*all_t, *all_r, robust=robust)
+        if is_log(items[0].get("standard_name")):
+            vmin = max(vmin, 1e-6)
+        shared_seq_clim = (vmin, vmax)
+        all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
+        dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
+        shared_div_clim = (-dmax, dmax)
+
+    rows = [
+        _time_depth_row(
+            it,
+            labels=row_labels[i],
+            shared_axes=shared_axes,
+            metric_keys=metric_keys,
+            row_label=it.get("row_label"),
+            mark=mark,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            hover=hover,
+            rasterize=rasterize,
+            robust=robust,
+            seq_clim=shared_seq_clim,
+            div_clim=shared_div_clim,
+            titles=resolved_titles[i * 3 : i * 3 + 3],
+        )
+        for i, it in enumerate(items)
+    ]
+    layout = rows[0]
+    for extra in rows[1:]:
+        layout = layout + extra
+    layout = layout.cols(3).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
 
 
 def _station_overlay(stations, name: str, colors, da, *, geo: bool):
@@ -4483,6 +4627,8 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
             opts.pop("domain", None)
+        if len(spec.items) > 1:
+            return _time_depth_row_grid(spec.items, **opts)
         return _time_depth_row(spec.single, **opts)
     if family == "skill_map":
         return _skill_map(spec.items, **opts)

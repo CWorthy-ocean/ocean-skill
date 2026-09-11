@@ -6250,22 +6250,21 @@ class ComparisonSet:
                 "need a section_grid family, which does not exist yet -- plot "
                 "each comparison separately."
             )
-        if family == "time_depth" and len(self.comparisons) > 1:
-            # Mirrors section_row's own refusal just above, for the same reason: a
-            # station's time_depth row has no stacked-grid family yet either.
-            raise ValueError(
-                f"{len(self.comparisons)} time_depth comparisons in one figure "
-                "would need a stacked family, which does not exist yet -- plot "
-                "each comparison separately."
-            )
+        # A set of more than one time_depth comparison stacks as a grid (one
+        # test | reference | difference row per station), the same way field_row
+        # stacks as field_grid -- the render family stays "time_depth_row" and the
+        # renderer dispatches on the item count, mirroring the single-source
+        # time_depth family's own single/grid switch. (section_row above still has
+        # no such stacked family, hence its refusal.)
         # field_row is one comparison's family; a set of *more than one* stacks as a
         # grid. A lone comparison keeps field_row and its single-row title.
         family = "field_grid" if family == "field_row" and not single_row else family
         # self.family (and so this set's shared family) reads "time_depth" for the
         # same reason Comparison.plot's own docstring gives -- translated to the
         # distinct "time_depth_row" render family only here, at the point a plot is
-        # actually built (the guard just above already limits this branch to exactly
-        # one comparison, so this is the same single-row shape Comparison.plot draws).
+        # actually built. One comparison draws the same single row Comparison.plot
+        # draws; more than one is stacked into a grid by the renderer itself (see
+        # the comment above), the same split field_row/field_grid makes.
         family = "time_depth_row" if family == "time_depth" else family
         return render(
             PlotSpec(family=family, items=items, options=kwargs),
