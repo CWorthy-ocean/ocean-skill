@@ -881,3 +881,117 @@ def test_interactive_target_summary_split_markers_matches_static_colours():
     assert len(centroids) == 4
     interactive_colors = {e.opts.get(group="style").kwargs["color"] for e in centroids}
     assert interactive_colors == static_colors
+
+
+# --------------------------------------------------------------- band-depth styling
+#
+# A band depth selection (``depths=[{"min": 0, "max": 5}, ...]``) puts a
+# ``{"min", "max"}`` dict, not a plain scalar, in each record's "depth" field -- the
+# one record value these diagrams must support as a full styling dimension
+# (``color_by``/``marker_by``/``legend_style="grid"``/``summary_points``) exactly like
+# any other level, even though a plain dict can't be a dict key or set member.
+# Regression coverage for ``TypeError: unhashable type: 'dict'`` raised from
+# ``.summary(marker_by="depth", summary_points=...)`` with band depths.
+
+
+def _band_comparisons():
+    """2 variables x 3 depth bands -- the shape a ``depths=[...]`` compare() run
+    produces for ``.average(by=["variable", "depth"])``.
+    """
+    bands = [{"min": 0, "max": 5}, {"min": 10, "max": 15}, {"min": 30, "max": 40}]
+    return [
+        _FakeComparison(
+            f"{var}-{i}",
+            0.8 + 0.02 * i,
+            1.0 + 0.05 * i,
+            0.1 * (i - 1),
+            0.2 + 0.01 * i,
+            var,
+            depth=band,
+        )
+        for var in ("sea_water_salinity", "sea_water_temperature")
+        for i, band in enumerate(bands)
+    ]
+
+
+def test_taylor_marker_by_band_depth_with_summary_points_does_not_crash():
+    """The exact reported crash: marker_by="depth" (band) + summary_points."""
+    fig = taylor(
+        _band_comparisons(),
+        color_by="variable",
+        marker_by="depth",
+        summary_points="median",
+        legend_style="legend",
+    )
+    lines = _taylor_lines(fig)
+    centroids = [ln for ln in lines if ln.get_zorder() == 10]
+    assert len(centroids) == 2, "one centroid per variable"
+
+
+def test_target_marker_by_band_depth_with_summary_points_does_not_crash():
+    fig = target(
+        _band_comparisons(), color_by="variable", marker_by="depth", summary_points="median"
+    )
+    ax = fig.axes[0]
+    assert len([c for c in ax.collections if c.get_zorder() == 10]) == 2
+
+
+def test_color_by_band_depth_does_not_crash():
+    """A band depth as the *colour* field (the base layer alone), not just marker_by."""
+    fig = taylor(_band_comparisons(), color_by="depth", legend_style="legend")
+    lines = _taylor_lines(fig)
+    samples = [ln for ln in lines if ln.get_zorder() == 2 and ln.get_marker() == "o"]
+    colors = {ln.get_markerfacecolor() for ln in samples}
+    assert len(colors) == 3, "one colour per depth band"
+
+
+def test_grid_legend_style_with_band_depth_marker_by_does_not_crash():
+    fig = target(
+        _band_comparisons(), color_by="variable", marker_by="depth", legend_style="grid"
+    )
+    assert fig.legends, "grid legend should still render"
+
+
+def test_interactive_target_marker_by_band_depth_with_summary_points_does_not_crash():
+    import holoviews as hv
+
+    recs = _band_comparisons()
+    items = [{"label": c.label, "metrics": c.metrics()} for c in recs]
+    obj = _interactive_target(
+        items, color_by="variable", marker_by="depth", summary_points="median"
+    )
+    centroids = [
+        e
+        for e in obj.traverse(lambda x: x)
+        if isinstance(e, hv.Scatter)
+        and e.opts.get(group="style").kwargs.get("color") != "black"
+    ]
+    assert len(centroids) == 2
+
+
+def test_both_renderers_agree_on_band_depth_marker_by():
+    """Band-depth marker_by (the reported crash's shape) assigns the same colour to
+    the same variable in both renderers.
+
+    Compared as ``{variable: colour}``, not per-record order: with ``marker_by`` set,
+    the interactive renderer batches records into one element per (marker, colour)
+    group -- an ordering that crosses ``marker_by`` before ``color_by`` -- rather than
+    drawing one element per record in the static renderer's record order.
+    """
+    recs = _band_comparisons()
+    items = [{"label": c.label, "metrics": c.metrics()} for c in recs]
+    kwargs = {"color_by": "variable", "marker_by": "depth"}
+
+    fig = target(recs, legend_style=None, **kwargs)
+    static_by_var = {
+        r.metrics()["variable"]: mcolors.to_hex(c.get_facecolor()[0])
+        for r, c in zip(recs, fig.axes[0].collections, strict=True)
+    }
+
+    obj = _interactive_target(items, **kwargs)
+    interactive_by_var = {
+        e.data["variable"].iloc[0]: mcolors.to_hex(e.opts.get("style").kwargs["color"])
+        for e in _points(obj)
+    }
+
+    assert static_by_var == interactive_by_var

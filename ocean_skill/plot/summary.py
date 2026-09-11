@@ -321,18 +321,29 @@ def _offset_labels(ax, xs, ys, labels, size, colors=None):
 _MARKERS = ("o", "^", "s", "D", "v", "P", "X")
 
 
+def _column_levels(values) -> list:
+    """Distinct values of ``values``, in order of first appearance.
+
+    List membership (``==``), not a ``set``/``dict.fromkeys`` — a band ``depth``
+    value is a ``{"min", "max"}`` dict, which those need to be hashable and a plain
+    dict isn't. Split out from :func:`_field_levels` so a caller with values already
+    in hand (a DataFrame column not every record carries, e.g. ``groups=``'s
+    synthesized ``"group"`` column) can dedupe them the same safe way.
+    """
+    seen = []
+    for v in values:
+        if v not in seen:
+            seen.append(v)
+    return seen
+
+
 def _field_levels(recs, field) -> list:
     """Distinct values of ``field`` across ``recs``, in order of first appearance.
 
     Module level (not just inside :func:`_group_styles`) because :func:`_grid_handles`
     needs the same level ordering to line points up with their legend cell.
     """
-    seen = []
-    for r in recs:
-        v = r.get(field)
-        if v not in seen:
-            seen.append(v)
-    return seen
+    return _column_levels(r.get(field) for r in recs)
 
 
 def pretty_level(field, value) -> str:
@@ -364,6 +375,42 @@ class _Styles(NamedTuple):
     handles: list
 
 
+class _LevelMap(dict):
+    """A ``dict`` keyed by :func:`_hashable` (level) instead of the raw level.
+
+    A style/level lookup (``color_by``/``marker_by``/``groups`` naming ``"depth"``) is
+    keyed by whatever value a record carries for that field — a plain string most of
+    the time, but a ``{"min", "max"}`` depth band for a band selection, which a plain
+    ``dict`` chokes on as a key. Every write and read here goes through the same
+    ``_hashable`` normalization :func:`_arrow_chains` already relies on, so callers
+    keep subscripting/``.get``/``in`` with the *raw* level (a real depth dict, not a
+    stringified stand-in) exactly as before — only the key's identity changes.
+
+    Iterating this mapping's own keys still yields the hashed form (rarely needed:
+    every caller here subscripts with a raw level drawn from the records or from
+    ``_field_levels``, never iterates ``.keys()``/``.items()``).
+    """
+
+    def __init__(self, items=()):
+        super().__init__()
+        if hasattr(items, "items"):
+            items = items.items()
+        for k, v in items:
+            self[k] = v
+
+    def __setitem__(self, key, value):
+        super().__setitem__(_hashable(key), value)
+
+    def __getitem__(self, key):
+        return super().__getitem__(_hashable(key))
+
+    def __contains__(self, key):
+        return super().__contains__(_hashable(key))
+
+    def get(self, key, default=None):
+        return super().get(_hashable(key), default)
+
+
 def _scalar_scale(marker_scale):
     """Reduce ``marker_scale`` to the one value used where there's no level to key on.
 
@@ -392,15 +439,24 @@ def _resolve_per_level(value, levels, field, *, default, param):
     here beats drawing a plot that silently ignores half of what was asked for. A level
     the dict doesn't mention falls back to ``default``, so a caller styling one group
     (the whole point of the layering use case) doesn't have to name every group.
+
+    Returns a :class:`_LevelMap`, not a plain ``dict`` — ``levels`` is drawn from the
+    records themselves and, for ``field="depth"``, may include a ``{"min", "max"}``
+    band, which only a hashable-keyed mapping can be looked up by.
     """
     if value is None:
-        return dict.fromkeys(levels, default)
+        return _LevelMap((lev, default) for lev in levels)
     if isinstance(value, dict):
-        unknown = set(value) - set(levels)
+        # `value` is the caller's own dict literal, so its keys are already
+        # hashable (Python couldn't have built it otherwise) — only `levels` needs
+        # normalizing.
+        hashable_levels = {_hashable(lev) for lev in levels}
+        unknown = [k for k in value if _hashable(k) not in hashable_levels]
         if unknown:
             raise ValueError(_unknown_level_error(unknown, levels, field, param))
-        return {lev: value.get(lev, default) for lev in levels}
-    return dict.fromkeys(levels, value)
+        value = _LevelMap(value)
+        return _LevelMap((lev, value.get(lev, default)) for lev in levels)
+    return _LevelMap((lev, value) for lev in levels)
 
 
 def _resolve_colors(colors, levels, field):
@@ -409,22 +465,26 @@ def _resolve_colors(colors, levels, field):
     Unlike :func:`_resolve_per_level`, an unset level's default isn't one fixed value —
     it's the next colour in :data:`~ocean_skill.plot.style.COLOR_CYCLE`, so a caller who
     names only a couple of levels still gets the other groups auto-coloured rather than
-    all sharing one placeholder.
+    all sharing one placeholder. Returns a :class:`_LevelMap` for the same reason
+    :func:`_resolve_per_level` does — ``levels`` may be a band ``depth`` dict.
     """
     from ocean_skill.plot.style import COLOR_CYCLE
 
     cycle = COLOR_CYCLE
     if colors is None:
-        return {lev: cycle[i % len(cycle)] for i, lev in enumerate(levels)}
+        return _LevelMap((lev, cycle[i % len(cycle)]) for i, lev in enumerate(levels))
     if isinstance(colors, str):
-        return dict.fromkeys(levels, colors)
+        return _LevelMap((lev, colors) for lev in levels)
     if isinstance(colors, dict):
-        unknown = set(colors) - set(levels)
+        hashable_levels = {_hashable(lev) for lev in levels}
+        unknown = [k for k in colors if _hashable(k) not in hashable_levels]
         if unknown:
             raise ValueError(_unknown_level_error(unknown, levels, field, "colors"))
-        return {
-            lev: colors.get(lev, cycle[i % len(cycle)]) for i, lev in enumerate(levels)
-        }
+        colors = _LevelMap(colors)
+        return _LevelMap(
+            (lev, colors.get(lev, cycle[i % len(cycle)]))
+            for i, lev in enumerate(levels)
+        )
     # A plain sequence: a palette assigned to levels in the order they first appear —
     # not one colour per point, so it composes with color_by/marker_by/groups instead
     # of being silently overridden by them.
@@ -436,7 +496,7 @@ def _resolve_colors(colors, levels, field):
             f"{field!r} levels ({pretty}) — give at least one colour per level, or "
             "pass a dict to style only some of them."
         )
-    return {lev: colors[i % len(colors)] for i, lev in enumerate(levels)}
+    return _LevelMap((lev, colors[i % len(colors)]) for i, lev in enumerate(levels))
 
 
 def _group_styles(
@@ -569,7 +629,9 @@ def _grid_handles(
     level_scales = _resolve_per_level(
         marker_scale, rows, color_by, default=1.0, param="marker_scale"
     )
-    present = {(r.get(color_by), r.get(marker_by)) for r in recs}
+    present = {
+        (_hashable(r.get(color_by)), _hashable(r.get(marker_by))) for r in recs
+    }
     header_size = 7 * _scalar_scale(marker_scale)
 
     def _blank(ms, label=""):
@@ -586,7 +648,7 @@ def _grid_handles(
         m = _MARKERS[j % len(_MARKERS)]
         for lev in rows:
             ms = 7 * level_scales[lev]
-            if (lev, mlev) in present:
+            if (_hashable(lev), _hashable(mlev)) in present:
                 c = level_colors[lev]
                 handles.append(
                     Line2D([], [], ls="", marker=m, mfc=c, mec=c, ms=ms, label="")
@@ -713,15 +775,28 @@ def _summary_point_specs(
     # every record instead, keyed to the first record's own label so it resolves to
     # the base cloud's first cycle colour (see _resolve_overlay_style's color_lookup).
     aggregate_all = not split and style_field == "label"
-    groups: dict[Any, list[int]] = {}
+    # Keyed by _hashable(level) rather than the raw level directly -- style_field can
+    # be "depth", whose value is a {"min", "max"} band for a band selection, which a
+    # plain dict can't key on. The raw level (needed for pretty_level and the spec's
+    # own rec below) rides alongside each group rather than being reconstructed from
+    # the hashed key.
+    groups: dict[Any, tuple[Any, list[int]]] = {}
     if aggregate_all:
-        groups[recs[0].get("label")] = list(range(len(recs)))
+        level = recs[0].get("label")
+        groups[_hashable(level)] = (level, list(range(len(recs))))
     else:
         for i, r in enumerate(recs):
-            key_i = (
-                (r.get(style_field), r.get(marker_field)) if split else r.get(style_field)
-            )
-            groups.setdefault(key_i, []).append(i)
+            style_val = r.get(style_field)
+            if split:
+                level = (style_val, r.get(marker_field))
+                hkey = (_hashable(level[0]), _hashable(level[1]))
+            else:
+                level = style_val
+                hkey = _hashable(level)
+            if hkey in groups:
+                groups[hkey][1].append(i)
+            else:
+                groups[hkey] = (level, [i])
 
     weights = None
     if weights_field is not None:
@@ -747,7 +822,7 @@ def _summary_point_specs(
             )
 
     specs = []
-    for level, idxs in groups.items():
+    for level, idxs in groups.values():
         w = [weights[i] for i in idxs] if weights is not None else None
         c1 = float(reduce([coord1[i] for i in idxs], w))
         c2 = float(reduce([coord2[i] for i in idxs], w))
@@ -814,14 +889,20 @@ def _resolve_overlay_style(
     (``"o"``), the interactive caller's are bokeh names (``"circle"``), and either
     way the fallback already matches what the cloud beneath actually drew.
     """
-    color_lookup = dict(zip((r.get(style_field) for r in base_recs), base_styles.colors))
+    # _LevelMap, not plain dict: style_field/marker_by can be "depth", whose value is
+    # a {"min", "max"} band for a band selection -- see _LevelMap's docstring.
+    color_lookup = _LevelMap(
+        zip((r.get(style_field) for r in base_recs), base_styles.colors)
+    )
     marker_lookup = (
-        dict(zip((r.get(marker_by) for r in base_recs), base_styles.markers))
+        _LevelMap(zip((r.get(marker_by) for r in base_recs), base_styles.markers))
         if marker_by
-        else {}
+        else _LevelMap()
     )
     default_marker = base_styles.markers[0] if base_styles.markers else "o"
-    levels = list(dict.fromkeys(r.get(style_field) for r in overlay_recs))
+    # _field_levels, not dict.fromkeys: order-preserving dedupe via `==`, which (unlike
+    # dict.fromkeys) never needs the values to be hashable.
+    levels = _field_levels(overlay_recs, style_field)
     alphas = _resolve_per_level(
         overlay_alpha, levels, style_field, default=1.0, param="overlay_alpha"
     )
@@ -1227,7 +1308,7 @@ def taylor(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None | Any = _weighting.AUTO,
+    summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):
@@ -1602,7 +1683,7 @@ def target(
     overlay_marker_scale: float | dict = 1.8,
     overlay_alpha: float | dict = 1.0,
     summary_points: bool | str = False,
-    summary_weights: str | None | Any = _weighting.AUTO,
+    summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
 ):

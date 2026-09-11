@@ -68,25 +68,34 @@ def _grid(recs: list[dict[str, Any]], row_by: str, col_by: str, name: str):
     Two records sharing one ``(row_by, col_by)`` cell is refused rather than silently
     keeping the last one seen — a scoreboard cell is one number, and averaging or
     overwriting would hide that the request needs a third grouping field to resolve.
+
+    ``row_by``/``col_by`` can name ``"depth"``, whose value is a ``{"min", "max"}``
+    band for a band selection — unhashable as a plain ``dict`` key, so every index
+    and the duplicate-cell check below goes through
+    :func:`~ocean_skill.plot.summary._hashable` (the same normalization
+    :func:`~ocean_skill.plot.summary._arrow_chains` already relies on).
+    ``row_levels``/``col_levels`` themselves stay the raw values — they're returned
+    for axis labels via ``pretty_level``, which expects the real dict.
     """
-    from ocean_skill.plot.summary import _field_levels
+    from ocean_skill.plot.summary import _field_levels, _hashable
 
     row_levels = _field_levels(recs, row_by)
     col_levels = _field_levels(recs, col_by)
-    row_index = {v: i for i, v in enumerate(row_levels)}
-    col_index = {v: i for i, v in enumerate(col_levels)}
+    row_index = {_hashable(v): i for i, v in enumerate(row_levels)}
+    col_index = {_hashable(v): i for i, v in enumerate(col_levels)}
     matrix = np.full((len(row_levels), len(col_levels)), np.nan)
     seen = set()
     for r in recs:
         key = (r.get(row_by), r.get(col_by))
-        if key in seen:
+        hkey = (_hashable(key[0]), _hashable(key[1]))
+        if hkey in seen:
             raise ValueError(
                 f"portrait: more than one comparison has {row_by}={key[0]!r}, "
                 f"{col_by}={key[1]!r} — a scoreboard cell is one number. Narrow the "
                 "comparisons, or choose a row_by/col_by pair that tells them apart."
             )
-        seen.add(key)
-        matrix[row_index[key[0]], col_index[key[1]]] = r.get(name, np.nan)
+        seen.add(hkey)
+        matrix[row_index[hkey[0]], col_index[hkey[1]]] = r.get(name, np.nan)
     return row_levels, col_levels, np.ma.masked_invalid(matrix)
 
 
