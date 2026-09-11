@@ -134,6 +134,34 @@ def test_nearest_vs_interp_give_different_depth_matches():
     assert interp_value == pytest.approx(expected_interp, abs=0.05)
 
 
+def test_both_axes_match_when_the_references_depth_coordinate_is_named_differently():
+    """A real ADCP mooring shape: the vertical *dimension* is ``DEPTH``, with no
+    same-named coordinate -- the real metres live in a coordinate named lowercase
+    ``depth`` riding on that dimension. This must still resolve, not be refused as
+    "native s-coordinates" -- see ``ocean_skill.operators.vertical_coord_on``.
+    """
+    z = -np.array([0.0, 5.0, 10.0, 20.0, 40.0, 60.0, 100.0])
+    model_times = pd.date_range("2024-01-01", periods=8, freq="MS")
+    test = _model_column(model_times, z)
+    depth = DEPTH
+    values = np.stack(
+        [20.0 - 0.1 * depth + 0.1 * i for i in range(len(TIMES))], axis=0
+    )
+    reference = (
+        xr.DataArray(values, dims=("time", "DEPTH"), coords={"time": TIMES})
+        .assign_coords(depth=("DEPTH", depth))
+        .assign_coords(lon=-94.01, lat=25.01)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        matched_test, matched_reference, report = A.match_axis(
+            test, reference, over=TIME_DEPTH_OVER
+        )
+    assert matched_test.dims == matched_reference.dims == ("time", "DEPTH")
+    assert list(matched_test["DEPTH"].values) == list(DEPTH)
+    assert report["axis"] == ["time", "DEPTH"]
+
+
 def test_a_lane_with_no_vertical_axis_after_the_time_match_is_refused():
     """A time_depth match needs a real vertical axis on both lanes -- a test lane
     with no depth/z coordinate at all fails clearly, the same way match_axis's

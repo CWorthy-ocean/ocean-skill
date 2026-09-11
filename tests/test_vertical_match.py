@@ -187,6 +187,52 @@ def test_native_s_levels_on_the_test_side_are_refused_with_a_hint():
         A.match_axis(bare, _station_reference(depth), over="Z")
 
 
+# -- a real metres coordinate under a different name than its dimension is still found -
+
+
+def _mismatched_name_reference(depth, *, lon=-94.5, lat=25.5):
+    """A station-shaped lane like an OceanSITES/EMODnet ADCP mooring: the vertical
+    *dimension* is ``DEPTH``, but it has no same-named coordinate -- the real
+    metres live in a coordinate named lowercase ``depth`` riding on that dimension
+    (``xarray`` reports this as "Dimensions without coordinates: DEPTH").
+    """
+    values = 20.0 - 0.1 * depth
+    return (
+        xr.DataArray(values, dims=("DEPTH",), attrs={"units": "degC"})
+        .assign_coords(depth=("DEPTH", depth))
+        .assign_coords(lon=lon, lat=lat)
+    )
+
+
+def test_a_metres_coordinate_under_a_different_name_than_its_dimension_still_matches():
+    """The vocab-backed lookup (``operators.vertical_coord_on``) finds a real 1-D
+    metres coordinate riding under a different name than its dimension -- it is
+    not refused as "native s-coordinates" the way a genuine s_rho column is.
+    """
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
+    depth = np.array([5.0, 20.0, 60.0])
+    matched_test, matched_reference, report = A.match_axis(
+        _gridded_test(z), _mismatched_name_reference(depth), over="Z"
+    )
+    assert matched_test.dims == ("DEPTH", "lat", "lon")
+    assert matched_reference.dims == ("DEPTH",)
+    assert list(matched_test["DEPTH"].values) == list(depth)
+    assert report["axis"] == "DEPTH"
+    assert report["match_method"] == "nearest"
+
+
+def test_a_metres_coordinate_under_a_different_name_can_interpolate_too():
+    z = -np.array([0.0, 10.0, 25.0, 50.0, 100.0])
+    depth = np.array([5.0, 20.0, 60.0])
+    _, _, report = A.match_axis(
+        _gridded_test(z),
+        _mismatched_name_reference(depth),
+        over="Z",
+        depth_method="interp",
+    )
+    assert report["match_method"] == "interp"
+
+
 # -- full align(), through the station branch -------------------------------------------
 
 
