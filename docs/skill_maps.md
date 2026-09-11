@@ -256,14 +256,22 @@ mooring_set.map_metrics(method="nearest", block_spacing=15_000)  # pool a 15 km 
 
 That fixes vote-counting *by station count*; it says nothing about which stations
 carry more actual evidence. That's what `weights=` is for — the direct answer to the
-uneven-record-length warning above (`n`'s spread): name a column (an
-effective-sample-size `"n_eff"` you've computed, or plain `"n"`) and stations combine
+uneven-record-length warning above (`n`'s spread): name a column and stations combine
 by their weighted mean within a block, with the block's own weight summed from
 theirs — so a decades-long mooring alone in its own block still outweighs a single
-short cast alone in its own block, not just when they happen to share a block:
+short cast alone in its own block, not just when they happen to share a block.
+`weights=` actually defaults to exactly this already: every comparison's
+`.metrics()` carries an `"n_eff"` column (an AR(1) effective-sample-size — how many
+of a record's `n` samples are worth as *independent* evidence, once its own
+autocorrelation is accounted for), and `map_metrics`/`interpolate_records` weight by
+it automatically whenever the chosen `method`/`block_spacing` would actually use it —
+warning once that it did. Pass `weights=None` for a plain, unweighted fit with no
+warning, or name any other column (plain `"n"`, say) to weight by that instead:
 
 ```python
-mooring_set.map_metrics(method="knn", block_spacing=15_000, weights="n")
+mooring_set.map_metrics(method="knn", block_spacing=15_000)         # weights by n_eff, warns once
+mooring_set.map_metrics(method="knn", block_spacing=15_000, weights="n")  # weight by n instead
+mooring_set.map_metrics(method="knn", block_spacing=15_000, weights=None)  # unweighted, no warning
 ```
 
 See [`ocean_skill/plot/map_metrics.py`](../ocean_skill/plot/map_metrics.py) for the

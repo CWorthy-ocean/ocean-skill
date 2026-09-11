@@ -46,6 +46,7 @@ import xarray as xr
 
 from ocean_skill import _stacklevel
 from ocean_skill.metrics import DEFAULT_MAP_METRICS, REGISTRY
+from ocean_skill.plot import _weighting
 
 __all__ = ["build_items", "interpolate_records", "map_metrics"]
 
@@ -376,7 +377,7 @@ def interpolate_records(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
-    weights: str | None = None,
+    weights: str | None | Any = _weighting.AUTO,
 ) -> xr.Dataset:
     """Interpolate scattered per-station metric values onto a map.
 
@@ -435,17 +436,27 @@ def interpolate_records(
     of the interpolator's own duplicate-position handling
     (:func:`_reduce_duplicates`, which only merges near-*identical* positions).
 
-    ``weights``, if given, names a column (e.g. an effective-sample-size ``"n_eff"``
-    you attached yourself) used as each station's evidence weight: with
+    ``weights`` names a column used as each station's evidence weight: with
     ``block_spacing``, stations merge into a block by their **weighted** mean
     rather than a plain one, and a block's own weight is the **sum** of its
     stations' weights (see :func:`_block_pool` for why not verde's own
     per-block weight); on ``method="spline"``, weights are also passed straight
     into the least-squares fit (:func:`_fit_spline`). ``"nearest"``/``"knn"``/
     ``"linear"``/``"cubic"`` cannot use weights in the fit itself (verde's
-    neighbor/triangulation gridders ignore them) — pairing ``weights=`` with one
-    of those and no ``block_spacing`` warns, since the weights would then do
-    nothing at all.
+    neighbor/triangulation gridders ignore them) — pairing an explicit ``weights=``
+    with one of those and no ``block_spacing`` warns, since the weights would
+    then do nothing at all. Left at its default
+    (:data:`~ocean_skill.plot._weighting.AUTO`), this weights by effective sample
+    size (``"n_eff"``, computed automatically by every comparison's
+    :meth:`~ocean_skill.comparison.Comparison.metrics`) whenever the records
+    carry it *and* the chosen ``method``/``block_spacing`` would actually use it
+    — warning once that it did, since a long mooring record would otherwise pool
+    exactly as heavily as a short CTD cast purely by station count. A method that
+    would ignore weights entirely resolves the default to unweighted with no
+    warning at all, rather than setting a column that would immediately trip the
+    "no effect" warning above. Pass ``weights=None`` to opt out and get a plain
+    fit with no warning; name any other column (e.g. plain ``"n"``) to weight by
+    that instead.
     """
     import pandas as pd
     import verde as vd
@@ -456,6 +467,15 @@ def interpolate_records(
     df = records if isinstance(records, pd.DataFrame) else pd.DataFrame(list(records))
     if df.empty:
         raise ValueError("no station records to interpolate")
+    # AUTO only ever resolves to "n_eff" when weights will actually reach the fit
+    # (a spline, or any method with block_spacing= pooling first) -- resolving it
+    # for a method that ignores weights entirely would immediately trip the "no
+    # effect" warning just below over a column the caller never asked to set.
+    weights = _weighting.resolve(
+        (method == "spline" or bool(block_spacing)) and "n_eff" in df.columns,
+        weights,
+        param_name="weights",
+    )
     lon_key, lat_key = _position_columns(df.columns)
     missing_pos = df[lon_key].isna() | df[lat_key].isna()
     if missing_pos.any():
@@ -594,7 +614,7 @@ def build_items(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
-    weights: str | None = None,
+    weights: str | None | Any = _weighting.AUTO,
     rows: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ``skill_map`` family's items: one interpolated row per entry.
@@ -706,7 +726,7 @@ def map_metrics(
     method: str = "spline",
     knn_k: int = 5,
     block_spacing: float | None = None,
-    weights: str | None = None,
+    weights: str | None | Any = _weighting.AUTO,
     rows: Mapping[str, Any] | None = None,
     renderer: str = "matplotlib",
     mark: str = "contourf",
@@ -789,14 +809,17 @@ def map_metrics(
         keeps a dense cluster (a repeat survey, say) from dominating a sparser
         region purely by outnumbering it.
     weights
-        Name a column (e.g. an effective-sample-size ``"n_eff"`` you attached
-        yourself) used as each station's evidence weight: with ``block_spacing``,
-        stations merge into a block by their weighted mean rather than a plain
-        one; on ``method="spline"``, weights are also passed straight into the
-        least-squares fit. ``"nearest"``/``"knn"``/``"linear"``/``"cubic"`` cannot
-        use weights in the fit itself (verde's neighbour/triangulation gridders
-        ignore them) — pairing ``weights=`` with one of those and no
-        ``block_spacing`` warns, since the weights would then do nothing.
+        Name a column used as each station's evidence weight: with
+        ``block_spacing``, stations merge into a block by their weighted mean
+        rather than a plain one; on ``method="spline"``, weights are also passed
+        straight into the least-squares fit. ``"nearest"``/``"knn"``/``"linear"``/
+        ``"cubic"`` cannot use weights in the fit itself (verde's
+        neighbour/triangulation gridders ignore them) — pairing an explicit
+        ``weights=`` with one of those and no ``block_spacing`` warns, since the
+        weights would then do nothing. Default (:data:`~ocean_skill.plot._weighting.AUTO`):
+        weight by effective sample size (``"n_eff"``, attached automatically to
+        every comparison's metrics) when present and the method would actually
+        use it, warning once; ``weights=None`` opts out silently.
     rows
         ``{label: data, ...}`` draws one row per entry instead of one figure — a
         seasonal or per-era facet. Pool each period's comparisons (or table) apart

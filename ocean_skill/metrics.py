@@ -35,7 +35,11 @@ __all__ = [
     "Metric",
     "area_weights",
     "compute",
+    "effective_n",
+    "effective_n_2d",
     "evaluate",
+    "lag1_autocorr",
+    "lag1_autocorr_along_index",
     "register",
     "write",
 ]
@@ -263,6 +267,96 @@ def area_weights(da) -> xr.DataArray | None:
         return None
     w = np.cos(np.deg2rad(lat_coord))
     return w.where(np.isfinite(da), 0.0).fillna(0.0)
+
+
+def lag1_autocorr(times, values, good) -> float | None:
+    """Lag-1 autocorrelation of ``values`` at ``good`` positions, counting only
+    pairs that are actually adjacent in time (one modal time-step apart).
+
+    ``good`` (typically "both test and reference are finite") compacts any gaps out
+    of a plain masked array, so a naive lag-1 on ``values[good]`` alone would
+    silently treat a multi-day gap the same as one real time step. This instead
+    checks each surviving pair's true time delta against the series' own modal
+    spacing before counting it -- which also makes it safe to call on a narrowed
+    slice (a seasonal subset's jump from one season's last step to the next
+    season's first is correctly excluded, not mistaken for a single step). Returns
+    ``None`` when there aren't enough genuinely-adjacent pairs, or the series is
+    constant, to estimate anything.
+    """
+    idx = np.where(good)[0]
+    if idx.size < 3:
+        return None
+    t_sec = np.asarray(times, dtype="datetime64[s]").astype("float64")[idx]
+    dt = np.diff(t_sec)
+    modal_dt = np.median(dt)
+    if not modal_dt:
+        return None
+    adjacent = np.isclose(dt, modal_dt, rtol=0.01, atol=1e-6)
+    if adjacent.sum() < 3:
+        return None
+    v = np.asarray(values)[idx]
+    a, b = v[:-1][adjacent], v[1:][adjacent]
+    if np.std(a) == 0 or np.std(b) == 0:
+        return None
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def lag1_autocorr_along_index(values) -> float | None:
+    """Lag-1 autocorrelation of ``values`` taken in the order given -- the no-time-axis
+    sibling of :func:`lag1_autocorr`, for a sequence whose order is itself meaningful
+    (depth order within a profile, or grid-index order along one axis) rather than a
+    calendar. Returns ``None`` when fewer than four finite points survive, or the
+    series is constant.
+    """
+    v = np.asarray(values, dtype="float64")
+    v = v[np.isfinite(v)]
+    if v.size < 4:
+        return None
+    a, b = v[:-1], v[1:]
+    if np.std(a) == 0 or np.std(b) == 0:
+        return None
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _ar1_factor(r1: float | None) -> float:
+    """The Bretherton et al. (1999) AR(1) deflation factor ``(1 - r1) / (1 + r1)``,
+    or ``1.0`` (no deflation) when ``r1`` is unavailable. ``r1`` is clipped to
+    ``[-0.99, 0.99]`` first so a pathological near -1 estimate cannot blow the factor
+    up unboundedly -- shared by :func:`effective_n` (one axis) and
+    :func:`effective_n_2d` (two axes multiplied together), so both stay consistent.
+    """
+    if r1 is None or not np.isfinite(r1):
+        return 1.0
+    r1 = float(np.clip(r1, -0.99, 0.99))
+    return (1 - r1) / (1 + r1)
+
+
+def effective_n(n: int, r1: float | None) -> float:
+    """AR(1) effective-sample-size deflation: ``n * (1 - r1) / (1 + r1)`` (Bretherton
+    et al. 1999) -- how many *independent* observations ``n`` correlated samples are
+    worth, for weighting one dataset's evidence fairly against a less-autocorrelated
+    (or shorter) one rather than by raw sample count alone.
+
+    Falls back to the raw ``n`` when ``r1`` itself couldn't be estimated (see
+    :func:`lag1_autocorr`/:func:`lag1_autocorr_along_index`), and is clipped to
+    ``[1, n]`` regardless of how close a pathological ``r1`` gets to -1.
+    """
+    if n <= 0:
+        return 0.0
+    return float(np.clip(n * _ar1_factor(r1), 1.0, n))
+
+
+def effective_n_2d(n: int, r_x: float | None, r_y: float | None) -> float:
+    """Separable 2-D generalization of :func:`effective_n`, for a gridded field:
+    ``n * f(r_x) * f(r_y)`` where ``f`` is the same AR(1) deflation factor applied
+    along each horizontal grid axis in turn (:func:`_ar1_factor`), rather than fitting
+    a spatial decorrelation length/variogram. A missing axis estimate contributes a
+    factor of 1 (no deflation on that axis alone), and the result is clipped to
+    ``[1, n]`` just like the 1-D case.
+    """
+    if n <= 0:
+        return 0.0
+    return float(np.clip(n * _ar1_factor(r_x) * _ar1_factor(r_y), 1.0, n))
 
 
 def _single_chunk(obj, dims):

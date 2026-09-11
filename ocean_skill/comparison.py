@@ -5328,7 +5328,100 @@ class Comparison:
                 },
                 **extra,
             )
+            n_eff = self._n_eff(aligned)
+            if n_eff is not None:
+                self._metrics["n_eff"] = n_eff
         return self._metrics
+
+    def _n_eff(self, aligned) -> float | None:
+        """Effective-sample-size weight for this comparison's record (see
+        :func:`ocean_skill.metrics.effective_n`/:func:`~ocean_skill.metrics.effective_n_2d`):
+        how many of the record's ``n`` samples are worth as *independent* evidence,
+        once the reference's own autocorrelation is accounted for. Consumed
+        opt-in-by-default via ``summary_weights=``/``weights=`` on
+        :mod:`ocean_skill.plot.summary`/:mod:`ocean_skill.plot.map_metrics`, so a
+        long, highly-autocorrelated mooring record doesn't outweigh a short,
+        less-correlated one -- or a handful of independent CTD casts -- purely by
+        raw sample count.
+
+        Feature-type specific, mirroring the branches in :meth:`metrics`:
+
+        * :attr:`is_series` -- the reference's own gap-aware lag-1 autocorrelation
+          in time (:func:`~ocean_skill.metrics.lag1_autocorr`), matching the
+          station-mooring recipe this generalizes.
+        * :attr:`is_profile` -- lag-1 autocorrelation along depth order
+          (:func:`~ocean_skill.metrics.lag1_autocorr_along_index`).
+        * :attr:`is_time_depth` -- the same depth-order estimator applied along the
+          *time* axis at each depth level, averaged across levels -- a station's
+          repeat visits are what carries independent evidence here, not depth
+          order.
+        * the grid case (neither series, profile, time_depth, nor section -- see
+          :attr:`family`) -- a separable 2-D estimate
+          (:func:`~ocean_skill.metrics.effective_n_2d`): lag-1 along each
+          horizontal grid dimension, each averaged across the other.
+        * :attr:`is_section` -- ``None``, left to the caller (the CTD-transect
+          along-line cast-repartitioning recipe this deliberately does not
+          replace).
+
+        Returns ``None`` when ``n`` itself is missing/zero, no coordinate can be
+        found to order by, or too few finite points survive to estimate any
+        autocorrelation from (see the metrics helpers' own thresholds) --
+        :meth:`metrics` then simply omits ``n_eff`` from the record, the same way
+        an unweighted record behaved before this existed.
+        """
+        from ocean_skill import metrics as _metrics
+        from ocean_skill.cf import find_coord
+
+        n = self._metrics.get("n")
+        if not n:
+            return None
+        reference = aligned["reference"]
+
+        if self.is_series:
+            time_coord = find_coord(aligned, "time")
+            if time_coord is None:
+                return None
+            test = aligned["test"]
+            good = np.isfinite(test) & np.isfinite(reference)
+            r1 = _metrics.lag1_autocorr(
+                time_coord.values, reference.values, good.values
+            )
+            return _metrics.effective_n(n, r1)
+
+        if self.is_profile:
+            z_coord = find_coord(aligned, "vertical")
+            if z_coord is None:
+                return None
+            order = np.argsort(z_coord.values)
+            r1 = _metrics.lag1_autocorr_along_index(reference.values[order])
+            return _metrics.effective_n(n, r1)
+
+        if self.is_time_depth:
+            time_coord = find_coord(aligned, "time")
+            if time_coord is None or time_coord.name not in reference.dims:
+                return None
+            r1 = _mean_lag1_along_dim(reference, time_coord.name)
+            return _metrics.effective_n(n, r1)
+
+        if self.is_section:
+            return None
+
+        # The grid case: neither series, profile, time_depth, nor section (see
+        # `family`) -- a full field, or a pair of fields scored `over` some axis.
+        lon_coord = find_coord(reference, "longitude")
+        lat_coord = find_coord(reference, "latitude")
+        dims: list[str] = []
+        for coord in (lon_coord, lat_coord):
+            if coord is None:
+                continue
+            for d in coord.dims:
+                if d in reference.dims and d not in dims:
+                    dims.append(d)
+        if len(dims) < 2:
+            return None
+        r_x = _mean_lag1_along_dim(reference, dims[0])
+        r_y = _mean_lag1_along_dim(reference, dims[1])
+        return _metrics.effective_n_2d(n, r_x, r_y)
 
     def difference(self):
         """Return the ``test − reference`` field on the aligned (coarser) grid."""
@@ -5648,6 +5741,49 @@ def _flatten(objs: Any) -> list[Comparison]:
     if dropped:
         print(f"  pooled: dropped {dropped} duplicate comparison(s)")
     return out
+
+
+#: Cap on how many "other-axis" slices :func:`_mean_lag1_along_dim` estimates a
+#: lag-1 autocorrelation from -- a dense curvilinear grid can have hundreds of
+#: thousands of rows/columns, and an n_eff weight only needs a representative
+#: estimate, not every one of them. Slices are taken evenly spaced across the
+#: full range so a subsample still represents the whole field, not one corner.
+_MAX_LAG1_SLICES = 2000
+
+
+def _mean_lag1_along_dim(da, dim: str) -> float | None:
+    """Mean lag-1 autocorrelation of ``da`` along ``dim``, averaged across every
+    other dimension it has -- e.g. a station's per-depth-level time lag-1, or a
+    field's per-row along-longitude lag-1, each estimated once per "other axis"
+    slice and reduced to one representative number.
+
+    Used by :meth:`Comparison._n_eff` for the ``is_time_depth`` and grid
+    branches, where a single ordered axis alone
+    (:func:`~ocean_skill.metrics.lag1_autocorr_along_index`) isn't the whole
+    story -- the estimate should reflect the whole field, not one arbitrary
+    slice of it. Returns ``None`` when ``dim`` isn't one of ``da``'s dimensions,
+    or no slice yields a finite estimate (see
+    :func:`~ocean_skill.metrics.lag1_autocorr_along_index`'s own thresholds).
+    """
+    from ocean_skill import metrics as _metrics
+
+    if dim not in da.dims:
+        return None
+    other = [d for d in da.dims if d != dim]
+    values = da.transpose(dim, *other).values if other else da.transpose(dim).values
+    flat = values.reshape(values.shape[0], -1)
+    n_slices = flat.shape[1]
+    idx = (
+        np.unique(np.linspace(0, n_slices - 1, _MAX_LAG1_SLICES).astype(int))
+        if n_slices > _MAX_LAG1_SLICES
+        else range(n_slices)
+    )
+    estimates = [
+        r
+        for j in idx
+        if (r := _metrics.lag1_autocorr_along_index(flat[:, j])) is not None
+    ]
+    return float(np.mean(estimates)) if estimates else None
 
 
 def _demean_label(spec: dict[str, bool] | None) -> str:
