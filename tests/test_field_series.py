@@ -9,6 +9,8 @@ a line instead of map panels (see :attr:`Field.family`).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -494,6 +496,55 @@ def test_duplicate_variables_are_dropped(stub, capsys):
     fs = _make_set([NITRATE, NITRATE])
     assert len(fs) == 1
     assert "duplicate" in capsys.readouterr().out
+
+
+# -- variable="all" (every variable a source declares) -----------------------------------
+
+
+def _resolve_stub(monkeypatch, variables):
+    """Mock ``catalog.resolve("stub")`` to declare ``variables`` in its metadata."""
+    from ocean_skill import catalog
+
+    def resolve(source):
+        if source == "stub":
+            return SimpleNamespace(metadata={"variables": list(variables)})
+        raise KeyError(source)
+
+    monkeypatch.setattr(catalog, "resolve", resolve, raising=True)
+
+
+def test_variable_all_expands_to_every_declared_variable(stub, monkeypatch):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    _resolve_stub(monkeypatch, [NITRATE, SILICATE, "oxygen"])
+    fs = _make_set("all")
+    assert isinstance(fs, FieldSet)
+    assert len(fs) == 3
+    assert {f.standard_name for f in fs} == {
+        f.standard_name for f in _make_set([NITRATE, SILICATE, "oxygen"])
+    }
+
+
+def test_variable_all_deduplicates_aliases(stub, monkeypatch, capsys):
+    stub(_point_series())
+    _resolve_stub(monkeypatch, [NITRATE, "nitrate"])
+    fs = _make_set("all")
+    assert len(fs) == 1
+    assert "duplicate" in capsys.readouterr().out
+
+
+def test_variable_all_with_a_source_list_is_refused():
+    from ocean_skill.field import field as make_field
+
+    with pytest.raises(ValueError, match='variable="all"'):
+        make_field(["stub_a", "stub_b"], "all")
+
+
+def test_variable_all_on_a_source_with_no_declared_variables(monkeypatch):
+    _resolve_stub(monkeypatch, [])
+    with pytest.raises(ValueError, match="declares no variables"):
+        _make_set("all")
 
 
 def test_map_shaped_members_still_faceted_over_time_refuse_the_set_plot(stub):

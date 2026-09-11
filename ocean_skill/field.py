@@ -1998,6 +1998,18 @@ def field(
     rather than drawn twice. A single-element list still returns a ``FieldSet``, for
     the same reason ``compare(variables=[v])`` still returns a set.
 
+    ``variable="all"`` expands to every variable ``source`` declares in its catalog
+    metadata (the same list :func:`ocean_skill.describe` prints), then fans out exactly
+    like an explicit list above::
+
+        osk.field("ctd_station_HV1", "all").plot()
+
+    Three or more variables lay out as one profile panel each automatically (see
+    :func:`ocean_skill.plot.profile.compose`); ``.plot(cols="variable")`` forces the
+    same one-panel-per-variable layout for one or two. ``"all"`` only expands a single
+    ``source`` — pass one source name (not a list) when using it, since different
+    sources in a list can declare different variables.
+
     A ``select`` that keeps a horizontal extent standing (a map, not a point) composes
     the same way -- several variables become several map panels side by side, each with
     its own colour scale and colorbar, since different variables carry unrelated units
@@ -2041,6 +2053,25 @@ def field(
             'dict), or a list of them -- osk.field(src, ["temperature", '
             '"salinity"]).'
         )
+    if isinstance(variable, str) and variable == "all":
+        if source_is_list:
+            raise ValueError(
+                'variable="all" expands one source\'s declared variables; a '
+                "list of sources may each declare different ones. Call "
+                "osk.field() once per source, or pass the explicit variable "
+                "names you want."
+            )
+        from ocean_skill import catalog
+
+        names = list(catalog.resolve(source).metadata.get("variables") or [])
+        if not names:
+            raise ValueError(
+                f'{source!r} declares no variables to expand for variable='
+                f'"all" -- check osk.describe({source!r}), or pass explicit '
+                "names."
+            )
+        variable = names
+        variable_is_list = True
     transect = select.get("transect") if isinstance(select, dict) else None
     is_cross = isinstance(transect, dict) and "cross" in transect
     if is_cross and (source_is_list or variable_is_list):
