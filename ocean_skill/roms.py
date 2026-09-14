@@ -325,7 +325,7 @@ def add_geographic_velocity_windowed(ds: xr.Dataset, meta: dict[str, Any]) -> xr
 
 
 def standardize(
-    ds: xr.Dataset, meta: dict[str, Any], *, derive_velocity: bool = True
+    ds: xr.Dataset, meta: dict[str, Any], *, derive_velocity: bool = False
 ) -> xr.Dataset:
     """Return a CF-standardized ROMS Dataset (grid attached, renamed, masked, depth).
 
@@ -338,12 +338,19 @@ def standardize(
         ``reference_date``/``time_*``).
     derive_velocity
         Whether to derive true geographic east/north velocity from the staggered
-        grid-relative components (see :func:`_add_geographic_velocity`) -- a dask
-        task graph that scales with the whole file's chunk count and can cost tens
-        of seconds to *build*, well before anything is computed. Defaults to
-        ``True`` for the ordinary read path (:func:`ocean_skill.sources.read`);
-        pass ``False`` when the caller has no use for velocity at all -- see
-        :func:`ocean_skill.sources.read_time_axis`.
+        grid-relative components (see :func:`_add_geographic_velocity`) here, up
+        front. Defaults to ``False``: the derivation is a dask task graph that
+        scales with the whole file's chunk count and can cost tens of seconds to
+        *build*, well before anything is computed or even the requested variable
+        is known -- doing it unconditionally, for every read of a ROMS source
+        regardless of what a caller actually wants, is the exact cost this default
+        avoids. :func:`ocean_skill.sources.read` (the ordinary read path) always
+        uses this default; a real caller derives velocity itself, on demand, only
+        once a request actually names it -- see :func:`ocean_skill.comparison
+        .prepare_source` (full-domain or windowed, whichever its crop resolved to)
+        and :func:`ocean_skill.comparison._variable_available` (a cheap check,
+        with no graph built at all). Pass ``True`` only for a caller -- direct or
+        test-only -- that wants the older, simpler all-in-one shape.
     """
     # the grid may be a separate file, or already merged into the output
     # (self_contained_grid, e.g. a combined ROMS file)
@@ -380,6 +387,9 @@ def standardize(
     # components + the grid angle, before the mask loop below so the new rho-dim
     # vars get land-masked with everything else. Lazy; a no-op when the source has
     # no velocity (or no angle to rotate it by) -- see _add_geographic_velocity.
+    # Off by default (derive_velocity=False, see this function's own docstring): a
+    # real caller derives on demand instead, once it actually knows a request
+    # names velocity, rather than paying for this on every read regardless.
     if derive_velocity:
         ds = _add_geographic_velocity(ds)
 
