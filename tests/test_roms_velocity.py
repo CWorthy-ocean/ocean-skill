@@ -4,11 +4,15 @@ Regression coverage for the bug where ``osk.compare(test="his", variables=
 ["eastward_sea_water_velocity"], ...)`` skipped every pair with `"No variable named
 'sea_water_x_velocity'"`: ROMS' own ``u``/``v`` are grid-relative and staggered, and
 ``roms.to_depth`` deliberately drops any variable not already on rho points (see that
-function's own comment). ``roms.standardize`` now derives true eastward/northward
+function's own comment). ``roms.standardize`` can derive true eastward/northward
 velocity by averaging ``u``/``v`` onto rho points and rotating by the grid ``angle``
 (:func:`ocean_skill.roms._add_geographic_velocity`), which reaches rho points and so
 survives ``to_depth`` -- see the end-to-end section below for the direct regression
-check.
+check. That derivation is off by default now (``derive_velocity=False``): a real
+caller derives on demand instead, only once a request actually names velocity -- see
+``ocean_skill.comparison.prepare_source``'s and ``_variable_available``'s own sections
+further down.
+
 
 Synthetic throughout, like ``tests/test_roms_chunking.py``: unlike ``test_roms.py``
 this needs no local roms-tools example output.
@@ -385,17 +389,37 @@ def test_add_geographic_velocity_windowed_is_a_noop_without_velocity():
 
 
 def test_standardize_masks_derived_velocity_on_land():
+    """``derive_velocity=True`` explicitly: standardize()'s own default is now
+    ``False`` (velocity is derived on demand elsewhere -- see its docstring), so
+    this opts back into the all-in-one shape to test the derivation + masking
+    mechanics directly.
+    """
     ds, meta = _roms_like(land_at=(1, 2), raw_names=True)
-    out = roms.standardize(ds, meta)
+    out = roms.standardize(ds, meta, derive_velocity=True)
     east = out["eastward_sea_water_velocity"]
     assert np.isnan(east.isel(eta_rho=1, xi_rho=2).values).all()
     assert np.isfinite(east.isel(eta_rho=0, xi_rho=0).values).all()
 
 
-def test_standardize_skips_geographic_velocity_without_v():
-    """Only u present (a build that never wired v): no derived velocity, no crash."""
-    ds, meta = _roms_like(with_v=False, raw_names=True)
+def test_standardize_does_not_derive_velocity_by_default():
+    """The new default: an ordinary ``standardize()`` call leaves the raw staggered
+    components alone and never builds the derived pair, even though the source
+    carries everything (``u``, ``v``, ``angle``) needed to.
+    """
+    ds, meta = _roms_like(raw_names=True)
     out = roms.standardize(ds, meta)
+    assert "eastward_sea_water_velocity" not in out
+    assert "northward_sea_water_velocity" not in out
+    assert "sea_water_x_velocity" in out
+    assert "sea_water_y_velocity" in out
+
+
+def test_standardize_skips_geographic_velocity_without_v():
+    """Only u present (a build that never wired v): no derived velocity, no crash --
+    even with ``derive_velocity=True`` explicitly requested.
+    """
+    ds, meta = _roms_like(with_v=False, raw_names=True)
+    out = roms.standardize(ds, meta, derive_velocity=True)
     assert "eastward_sea_water_velocity" not in out
     assert "sea_water_x_velocity" in out
 
@@ -409,7 +433,7 @@ def test_to_depth_includes_derived_velocity_but_still_skips_staggered_components
     is responsible for that).
     """
     ds, meta = _roms_like(angle=np.pi / 6, raw_names=True)
-    standardized = roms.standardize(ds, meta)
+    standardized = roms.standardize(ds, meta, derive_velocity=True)
 
     at_depth = roms.to_depth(standardized, meta, 50.0)
 
@@ -603,6 +627,93 @@ def test_prepare_source_temperature_point_does_not_take_the_velocity_path(monkey
     )
     assert not calls, "the velocity fast path engaged for a non-velocity variable"
     assert da is not None
+
+
+def test_prepare_source_derives_velocity_full_domain_for_a_gridded_request(monkeypatch):
+    """A gridded ROMS velocity request (no bbox at all, unlike the point tests
+    above) derives geographic velocity on demand too, full-domain rather than
+    windowed -- the raw components `_rotated_grid` builds have no pre-existing
+    east/north pair to drop (unlike `_standardized_rotated_grid`, which already
+    ran ``_add_geographic_velocity``): this is exactly the shape a real
+    ``osk.read`` of a ROMS source now hands back, since ``standardize()`` no
+    longer derives it eagerly (see its own ``derive_velocity=``).
+    """
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import prepare_source
+
+    ds, meta = _rotated_grid()
+    meta = {**meta, "model": "roms", "standard_names": {}}
+
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
+
+    calls = []
+    real_full = roms._add_geographic_velocity
+
+    def spy(ds_):
+        calls.append(ds_)
+        return real_full(ds_)
+
+    monkeypatch.setattr(roms, "_add_geographic_velocity", spy)
+    monkeypatch.setattr(
+        roms,
+        "add_geographic_velocity_windowed",
+        lambda ds_, meta_: pytest.fail("the windowed path engaged for a gridded request"),
+    )
+
+    da, _ = prepare_source(
+        "his",
+        "eastward_sea_water_velocity",
+        {"depth": "surface"},
+        None,
+        use_cache=False,
+    )
+
+    assert len(calls) == 1, "the full-domain on-demand derive did not engage"
+    # No pre-existing pair for it to have dropped first -- there was never one.
+    assert "eastward_sea_water_velocity" not in calls[0].variables
+    assert da is not None
+
+    expected = roms._add_geographic_velocity(ds)["eastward_sea_water_velocity"].isel(
+        s_rho=-1
+    )
+    xr.testing.assert_allclose(da.squeeze(drop=True), expected.squeeze(drop=True))
+
+
+def test_variable_available_reports_roms_velocity_without_deriving_it(monkeypatch):
+    """``_variable_available`` answers yes for a ROMS source's derivable geographic
+    velocity without ever calling the (expensive) derivation itself -- deriving
+    just to check would rebuild the very task graph this cheap probe exists to
+    let a caller avoid paying for on a lane that may turn out unusable anyway
+    (see the function's own comment).
+    """
+    from types import SimpleNamespace
+
+    import ocean_skill as osk
+    from ocean_skill import catalog
+    from ocean_skill.comparison import _variable_available, clear_availability_memo
+
+    clear_availability_memo()
+    ds, meta = _rotated_grid()
+    meta = {**meta, "model": "roms", "standard_names": {}}
+
+    monkeypatch.setattr(osk, "read", lambda name, **kw: ds)
+    monkeypatch.setattr(catalog, "resolve", lambda name: SimpleNamespace(metadata=meta))
+    monkeypatch.setattr(
+        roms, "_add_geographic_velocity", lambda ds_: pytest.fail("derived instead of checked")
+    )
+
+    assert _variable_available("his", "eastward_sea_water_velocity") is True
+
+    # And the ordinary, already-carried case is unaffected: a plain raw variable
+    # is still found the same way it always was, with no ROMS-specific detour.
+    clear_availability_memo()
+    assert _variable_available("his", "sea_water_x_velocity") is True
+    clear_availability_memo()
+    assert _variable_available("his", "sea_water_potential_temperature") is False
 
 
 # -- end-to-end: a grid constant requested directly (_prepare's own regression) -----

@@ -999,13 +999,16 @@ def _names_geographic_velocity(spec: Any) -> bool:
     """Report whether ``spec`` (a plain name, alias, or combination) names either of
     :data:`ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES`.
 
-    Used to gate ``prepare_source``'s ROMS point-lane fast path -- see its own
-    comment -- onto exactly the request that fast path exists for. Goes through
-    :func:`ocean_skill.operators.spec_names` (the same read-free name-resolution
-    :func:`compare`'s own catalog pre-filtering uses) rather than a bare string
-    check, so an alias (``"east_velocity"``) or a combination naming east/north as
-    one of its components is caught too, not just the already-canonical spelling
-    ``compare()`` itself resolves a bare ``variables=[...]`` entry to.
+    Used to gate ``prepare_source``'s on-demand geographic-velocity derivation
+    (windowed for a point/station lane, full-domain otherwise -- see its own
+    comment) onto exactly the request that derivation exists for, and by
+    ``_variable_available`` to answer the same question without deriving
+    anything at all. Goes through :func:`ocean_skill.operators.spec_names` (the
+    same read-free name-resolution :func:`compare`'s own catalog pre-filtering
+    uses) rather than a bare string check, so an alias (``"east_velocity"``) or a
+    combination naming east/north as one of its components is caught too, not
+    just the already-canonical spelling ``compare()`` itself resolves a bare
+    ``variables=[...]`` entry to.
     """
     from ocean_skill.operators import spec_names
     from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
@@ -1195,17 +1198,18 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             except Exception:
                 pass
 
-        # Drop the pre-derived east/north before ever cropping+loading: they are a
-        # lazy expression over the WHOLE domain (roms.standardize's own
-        # _add_geographic_velocity), and cropping that graph down to even a small
-        # window does not remove the per-time-step task overhead building it left
-        # behind (the exact cost prepare_source's own velocity fast path exists to
-        # route around, see its comment) -- so any slab that kept them would pay
-        # that cost right here regardless of which variable this call actually
-        # wants. Harmless to drop unconditionally: a velocity request re-derives
-        # from the raw components this keeps (errors="ignore" makes
-        # prepare_source's own drop of these a no-op), and a non-velocity request
-        # never looked at them anyway.
+        # Drop any pre-derived east/north before ever cropping+loading, defensively:
+        # osk.read no longer carries them by default (roms.standardize's own
+        # derive_velocity=, default False -- see prepare_source's comment for where
+        # they get derived on demand instead), so this is ordinarily a no-op, but a
+        # caller that explicitly asked for the old derive_velocity=True shape would
+        # otherwise have this slab hold a lazy expression over the WHOLE domain, and
+        # cropping that graph down to even a small window does not remove the
+        # per-time-step task overhead building it left behind -- so any slab that
+        # kept them would pay that cost right here regardless of which variable this
+        # call actually wants. errors="ignore" makes prepare_source's own drop of
+        # these a no-op too either way, and a non-velocity request never looked at
+        # them regardless.
         sub = sub.drop_vars(list(GEOGRAPHIC_VELOCITY_NAMES), errors="ignore")
 
         try:
@@ -2496,6 +2500,24 @@ def _variable_available(
             if tabular.is_frame(obj):
                 obj = tabular.to_dataset(obj, meta)
             available = operators.resolve_variable(obj, variable) is not None
+            # A ROMS source's geographic velocity is derived on demand now (see
+            # prepare_source's own comment and roms.standardize's derive_velocity=,
+            # default False), so `obj` here never carries it directly -- resolve_variable
+            # above always misses it, exactly as it would for any variable this source
+            # simply doesn't have. Answered the same way _offers'/catalog.find's own
+            # metadata-level pre-filter does (roms.derived_geographic_velocities), on the
+            # raw variable names this actual read came back with, rather than deriving
+            # anything: deriving here to check would rebuild the very task graph this
+            # probe exists to let the caller avoid paying for on a lane that turns out
+            # to be unusable anyway.
+            if (
+                not available
+                and meta.get("model") == "roms"
+                and _names_geographic_velocity(variable)
+            ):
+                from ocean_skill.roms import derived_geographic_velocities
+
+                available = bool(derived_geographic_velocities(obj.variables))
     except Exception:
         return True
 
@@ -2893,31 +2915,41 @@ def prepare_source(
     # .coords yet) -- the tabular collapses_time special case just below
     # still gets its one, separate, pre-_prepare crop.
     pre_crop_time = not is_frame
-    # A ROMS point/station comparison asking for the derived geographic velocity
-    # (see ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES) is the one lane where the
-    # crop below is not enough on its own: standardize() already baked east/north
-    # into `obj` over the WHOLE domain and every time step (roms.py's
-    # _add_geographic_velocity, run once at read time), and for a ROMS history
-    # file chunked one step per chunk that graph scales into the millions --
-    # culling it down to a single water column does not remove the per-step task
-    # overhead the average/rotate built into it, which is what turns one mooring's
-    # `over="time"` comparison into a multi-minute hang. Dropping the pre-derived
-    # pair here, before the crop, means _point_window's own halo (see its
-    # docstring) crops the *raw* staggered components instead, and
-    # roms.add_geographic_velocity_windowed below re-derives on just that small,
-    # already time-cropped window -- byte-identical, at a fraction of the graph.
-    # Every other consumer of a ROMS read (a direct osk.read, Field, a map, a
-    # gridded/regional comparison) never takes this branch (point_window_cells is
-    # only ever set once align() has already resolved to a nearest-neighbour point
-    # sample), so this changes nothing about them.
+    # A ROMS lane asking for the derived geographic velocity (see
+    # ocean_skill.roms.GEOGRAPHIC_VELOCITY_NAMES) is never carrying it yet:
+    # standardize() no longer bakes east/north in eagerly (roms.py's own
+    # derive_velocity=, default False -- see its docstring for why unconditional
+    # derivation, for every ROMS read regardless of what variable a caller
+    # actually wants, does not pay for itself). So this derives it here instead,
+    # on demand, in whichever of two shapes the crop below resolves to:
+    #
+    # - A point/station lane (bbox is a single point): drop any pre-derived pair
+    #   this object might still be carrying (a caller-supplied `obj` built the
+    #   old way, or one that explicitly asked standardize() for
+    #   derive_velocity=True) before the crop, so _point_window's own halo (see
+    #   its docstring) crops the *raw* staggered components instead, then
+    #   re-derive on that small, already time-cropped window with
+    #   roms.add_geographic_velocity_windowed below -- byte-identical to
+    #   deriving full-domain first, at a fraction of the graph. This is the
+    #   shape that matters most: a ROMS history file chunked one step per chunk
+    #   builds a task graph that scales into the millions over the full domain,
+    #   which is what used to turn one mooring's `over="time"` comparison into a
+    #   multi-minute hang.
+    # - Anything else this lane resolves to -- a genuine region, a transect
+    #   (which needs the whole grid here, before apply_transect's own slicing
+    #   inside _prepare runs; is_frame is always False for ROMS, so pre_crop is
+    #   False only for a transect), or no bbox/time crop at all (a bare
+    #   osk.read/Field, or a gridded/regional comparison lane): derive
+    #   full-domain (or on whatever `obj` the bbox/time crop below already
+    #   narrowed it to, when there was one) with the plain, un-windowed
+    #   roms._add_geographic_velocity.
     from ocean_skill.align import _is_point_bbox
 
+    roms_velocity_requested = meta.get("model") == "roms" and _names_geographic_velocity(
+        variable
+    )
     roms_velocity_point = (
-        pre_crop
-        and bbox is not None
-        and _is_point_bbox(bbox)
-        and meta.get("model") == "roms"
-        and _names_geographic_velocity(variable)
+        roms_velocity_requested and pre_crop and bbox is not None and _is_point_bbox(bbox)
     )
     if roms_velocity_point:
         from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
@@ -2939,11 +2971,19 @@ def prepare_source(
         # Re-derive now, after every space/time crop above -- the raw staggered
         # components this re-derives from are already narrowed to (a small halo
         # around one water column) x (only the kept time steps), so the graph this
-        # builds is bounded by that, never the full domain/record the dropped
-        # pair above was built over.
+        # builds is bounded by that, never the full domain/record a pre-derived
+        # pair (if this object happened to carry one) would have been built over.
         from ocean_skill import roms as _roms
 
         obj = _roms.add_geographic_velocity_windowed(obj, meta)
+    elif roms_velocity_requested:
+        # Not narrowed to a point column above: derive on whatever `obj` this
+        # lane ended up with -- a region bbox/time crop already applied it above
+        # when there was one, the full domain otherwise. See the comment above
+        # for why standardize() no longer does this unconditionally.
+        from ocean_skill import roms as _roms
+
+        obj = _roms._add_geographic_velocity(obj)
     if (
         not pre_crop_time
         and time_window is not None
@@ -7370,16 +7410,11 @@ def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
     form against a lazily-opened, multi-file model run costs nothing like opening
     the data itself would. ``window`` narrows which part of the axis counts,
     mirroring how ``depths=`` can default from a select entry already present.
-
-    Reads via :func:`ocean_skill.sources.read_time_axis`, not the ordinary
-    :func:`~ocean_skill.sources.read`, precisely to keep that true for a ROMS test
-    lane: the coordinate-only claim above would otherwise be false the moment this
-    runs first in a fresh process (before any lane read has populated
-    :data:`ocean_skill.sources._READ_CACHE`) -- the ordinary read's
-    :func:`ocean_skill.roms.standardize` unconditionally derives geographic
-    velocity, a dask graph that scales with the whole history file's chunk count
-    and can cost tens of seconds to build, only to have this function throw the
-    result away except for the time axis.
+    True of the ordinary :func:`~ocean_skill.sources.read` here too, including for
+    a ROMS test lane: :func:`ocean_skill.roms.standardize` no longer derives
+    geographic velocity eagerly (see its own ``derive_velocity=``, default
+    ``False``), so this pays only for the open, never for a dask graph this
+    function would immediately throw away except for the time axis.
 
     ``bin_last_value`` is each bin's own *realized* last timestamp, found by
     comparison (``searchsorted``) against the real coordinate values — never by
@@ -7391,9 +7426,9 @@ def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
     import xarray as xr
 
     from ocean_skill import operators
-    from ocean_skill.sources import read_time_axis
+    from ocean_skill.sources import read
 
-    obj = read_time_axis(source)
+    obj = read(source)
     dim = operators.resolve_dim(obj, "time")
     if dim is None:
         raise ValueError(
