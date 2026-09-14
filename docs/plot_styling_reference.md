@@ -590,6 +590,31 @@ re-derived per frame would make the ruler move with the field, which is unreadab
 than merely inconsistent — see
 [Movies](movies.md#one-colour-scale-for-the-whole-movie).
 
+#### `shared_limits="variable"`/`"source"` (`time_depth_grid`, `field_map_grid`)
+
+These two grid families (a `FieldSet` of several `time_depth` panels, or of several
+maps) draw items that can differ by *both* variable and source at once — `True`'s
+all-or-nothing share is often wrong there (different variables pooled onto one scale
+is meaningless), but a per-panel scale throws away the one case sharing *is* right: a
+column built by `cols="variable"` is one variable, every station, and pooling just
+that column onto one scale makes those panels genuinely comparable.
+
+`shared_limits=` on these two families additionally accepts the same vocabulary
+`rows=`/`cols=` do — `"variable"` (alias `"standard_name"`) or `"source"` — pooling
+only the panels sharing that one fact onto one scale, independent of how (or whether)
+the grid itself is arranged:
+
+```python
+stations.plot(cols="variable", shared_limits="variable")
+# each column (one variable, every station) pooled onto its own shared scale,
+# columns independent of each other
+```
+
+`"variable"` can never warn (a group's key *is* that fact, so it can never mix
+variables); `"source"` warns the same way `True` does, but only for a group that
+actually mixes variables, naming which one. Per-panel colorbars are unaffected either
+way — a shared scale still draws one bar per panel, just with matching ranges.
+
 ### Movie-only parameters
 
 `field_movie` and `facet_movie` add `save`, `fps`, `dpi`, `every`, `frame_label`,
@@ -710,7 +735,7 @@ mooring_set.map_metrics(rows={"CIOFS3": ciofs3_set, "Hindcast": hindcast_set},
                          shared_limits=True, layout="columns")
 ```
 
-### `ncols` (`field_facet`, `skill_map`, `series` and `profile`)
+### `ncols` (`field_facet`, `skill_map`, `series`, `profile`, `time_depth_grid` and `field_map_grid`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
 [`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
@@ -759,14 +784,16 @@ would arrange is the one it plays instead. A field with *two* facet axes therefo
 be a movie — one of them would have to become panels, which is what `field_facet` is
 for — and is refused rather than quietly animated along one axis.
 
-#### `ncols`/`nrows` on `series` and `profile`
+#### `ncols`/`nrows` on `series`, `profile` and `time_depth_grid`
 
 Unlike the map families, a line family's default layout is never auto-solved from an
 aspect ratio — it is always a strict single row (`cols=`, or `profile`'s implicit
 columns-per-variable default) or single column (the default otherwise, or `rows=`).
-Leaving both `ncols` and `nrows` unset reproduces that exactly. Passing either wraps
-the panels into a rectangular grid instead, row-major, with any leftover cells left
-blank rather than stretched to fill the grid — the same shape `cs.plot(cols="comparison",
+`time_depth_grid` (a `FieldSet` of several `time_depth` items) takes the same two
+options the same way — a single stacked column by default. Leaving both `ncols` and
+`nrows` unset reproduces that exactly. Passing either wraps the panels into a
+rectangular grid instead, row-major, with any leftover cells left blank rather than
+stretched to fill the grid — the same shape `cs.plot(cols="comparison",
 ncols=4)` gives twelve station profiles instead of squeezing them into one row:
 
 ```python
@@ -777,12 +804,32 @@ cs.plot(encode={"color": "source"}, cols="comparison", ncols=4)   # a 3x4 grid
 rows `ncols` needs, so passing both never charges for a row left entirely blank
 (`ncols=4, nrows=3` for 10 panels draws 3 rows, not 4). Passing both together only
 raises when they can't hold every panel between them. `ncols`/`nrows` are orthogonal to
-`rows=`/`cols=`: the facet decides what goes in each panel, the grid kwargs only decide
-how the resulting panels are arranged.
+a single `rows=`/`cols=` facet: the facet decides what goes in each panel, the grid
+kwargs only decide how the resulting panels are arranged — **except** when `rows=`
+*and* `cols=` are both given: the two facets already fix the grid's shape (one panel
+per (row, column) combination — see below), so `ncols`/`nrows` are refused rather than
+silently ignored.
 
 `series`' `residual=True` strip runs under each panel, so it only stacks in a single
-column — asking for `residual=True` together with a grid wider than one column is
-refused, the same way a facet conflict is.
+column — asking for `residual=True` together with a grid wider than one column
+(whether from `ncols=`/`nrows=` or from `rows=`+`cols=` together) is refused, the same
+way a facet conflict is.
+
+#### `rows=` and `cols=` together: a genuine two-axis grid (`series` and `profile`)
+
+Both families accept `rows=` and `cols=` together, not just one or the other: the grid
+is then the cross-product of the two facets, one panel per `(row, col)` combination,
+row-major (`facet_grid`). A combination nothing matched — a variable missing one of the
+sources another one has, say — draws as a hidden blank panel rather than shifting every
+later cell out of place:
+
+```python
+cs.plot(rows="variable", cols="source")   # one row per variable, one column per source
+```
+
+Faceting on `variable` still drops it from every legend entry the same way a single
+`rows="variable"`/`cols="variable"` facet does — the panel title already names it —
+whichever axis it landed on.
 
 A wrapped `profile` grid also stops repeating its axis **labels** on every panel —
 tick *numbers* stay per-panel regardless (see [`sharex`/`sharey`](#sharex--sharey-series-and-profile)).
@@ -806,12 +853,15 @@ ctdprofiles_all = osk.field(
     ["temp", "salt", "oxygen", "turbidity", "fluorescence", "par"],
 )
 ctdprofiles_all.sel(variable="temp").plot(rows="source")   # one temp profile per station
+ctdprofiles_all.sel(variable=["salt", "temp"]).plot(cols="variable")   # stations x variables
 ```
 
 `variable` (alias `standard_name`) matches through the vocabulary, so `"temp"`,
 `"temperature"` and the CF standard_name all pick out the same members. `source`
 matches a `Field`'s own label, falling back to its source name — the same identity
 `rows="source"`/`cols="source"` groups by. A value may be one spec or a list of them.
+The second example above is the `time_depth` family's own two-axis grid — see
+[Several stations, several variables](#several-stations-several-variables--rowscols).
 
 `ComparisonSet.sel()` mirrors this, with the lane vocabulary `rows=`/`cols=` already
 use: `source`/`test` (synonyms) match the **test** lane; `reference` matches the
@@ -830,11 +880,37 @@ ctdprofiles_comp_all.sel(variable="temp").plot(rows="reference")
 
 Every `Comparison` in a `ComparisonSet` is already aligned by the time `compare()`
 returns it, so `.sel()` there is a cheap filter over cached results. A bare `Field`
-loads lazily instead (see [`ncols`](#ncols-field_facet-skill_map-series-and-profile)
+loads lazily instead (see [`ncols`](#ncols-field_facet-skill_map-series-profile-time_depth_grid-and-field_map_grid)
 above) — narrowing with `.sel()` before `.plot()` means a dropped variable or source
 is never loaded at all, not merely left out of the figure.
 
 Raises if a filter key isn't recognized, or if nothing matches.
+
+### `rows=`/`cols=` on a `FieldSet` of maps (`field_map_grid`)
+
+A `FieldSet` of several already-reduced-to-one-instant maps (`osk.field([sources],
+[variables])`, every member drawing as a map — one panel each, own colour scale, own
+colorbar, via `field_map_grid`) accepts the same `rows=`/`cols=` vocabulary and
+implied-complement rule the `time_depth` family's own two-axis grid does — every map
+item here also carries exactly two identity facts, its variable and its source:
+
+```python
+runs = osk.field(["run_a", "run_b"], ["temperature", "salinity"])
+runs.plot(rows="variable", cols="source")   # one row per variable, one column per source
+```
+
+Unfaceted, the grid is free (`ncols=` alone, defaulting from the domain's aspect
+ratio) — these panels have no inherent order. Faceted, `ncols=` is refused instead:
+the two facets already fix the shape (there is no `nrows=` here to combine it with,
+unlike `time_depth_grid` — the unfaceted map grid is always `ncols`-driven, never a
+stacked column). A (row, column) combination nothing matched draws as a hidden blank
+panel; two members landing in the same cell is refused, there being no second channel
+to overlay them onto.
+
+Titling and `shared_limits=`'s own `"variable"`/`"source"` vocabulary work exactly as
+the `time_depth` family's own section describes — each panel still gets its own
+colour scale and colorbar by default either way; `title`/the suptitle
+(`grid_suptitle`) is unaffected by faceting.
 
 ### `shared_axis_labels`
 
@@ -1458,9 +1534,12 @@ osk.field(
 | one | one panel, every source overlaid |
 | two | one panel, the second variable on a right-hand y axis |
 | three or more | one row per variable |
+| both `rows=` and `cols=` | a genuine grid, one panel per (row, column) combination |
 
-`secondary_y=False` stacks the two-variable case instead. `rows=` or `cols=` (one, not
-both) facet on `variable`, `source`, `reference`, `depth` or `comparison`.
+`secondary_y=False` stacks the two-variable case instead. `rows=`/`cols=` facet on
+`variable`, `source`, `reference`, `depth` or `comparison` — either alone, or both
+together for the two-axis grid above (see [`rows=` and `cols=`
+together](#rows-and-cols-together-a-genuine-two-axis-grid-series-and-profile)).
 
 On a two-variable panel, each y-axis label — and its tick numbers — take the colour of
 the lines drawn against that axis, so the left and right scales stay identifiable
@@ -1571,11 +1650,14 @@ already draws against.
 | one | one panel, every source/cast overlaid |
 | two | one panel, the second variable on a top x axis |
 | three or more | one column per variable, sharing the depth axis |
+| both `rows=` and `cols=` | a genuine grid, one panel per (row, column) combination |
 
 `secondary_x=False` gives the two-variable case its own column each instead — the
-classic CTD layout — sharing the one depth axis. `rows=`/`cols=` (one, not both)
-facet on `variable`, `source`, `reference`, `time` or `comparison`, and a facet
-wins over `secondary_x` when both apply.
+classic CTD layout — sharing the one depth axis. `rows=`/`cols=` facet on `variable`,
+`source`, `reference`, `time`, `season`, `month` or `comparison` — either alone, or
+both together for the two-axis grid above (see [`rows=` and `cols=`
+together](#rows-and-cols-together-a-genuine-two-axis-grid-series-and-profile)) — and a
+facet wins over `secondary_x` when both apply.
 
 **A surviving `season`, or an explicitly month-listed `month`, axis fans into one
 line per value instead of a panel of its own.** `aggregate={"time": {"groupby":
@@ -1861,6 +1943,63 @@ Both draw the same mark, colour scale and axis conventions — a mesh through
 coloured by value. A `time_depth` panel has no map to outline, so `domain` is not an
 option of it — the static renderer raises naming the reason, the interactive one
 warns and drops.
+
+### Several stations, several variables — `rows=`/`cols=`
+
+A `FieldSet` of several `time_depth` items (`ncols=`/`nrows=` above wraps them, panel by
+panel, into a plain rectangular grid). A set fanned over both stations *and* variables
+gets that shape only by accident of the set's own fan order — `rows=`/`cols=` instead
+facet the grid on purpose, on `variable` (alias `standard_name`) or `source`:
+
+```python
+ctdprofiles_all = osk.field(
+    osk.find(catalog="Iceland CTD repeat-visit stations"),
+    ["temp", "salt", "oxygen", "turbidity", "fluorescence", "par"],
+)
+ctdprofiles_all.sel(variable=["salt", "temp"]).plot(cols="variable")
+# one column per variable, one row per station
+```
+
+Naming only one axis implies the other: every `time_depth` item carries exactly two
+identity facts (its variable, its source), and a mesh panel can only ever draw one item
+— so `cols="variable"` alone already fixes the grid's other axis (`rows="source"`) too,
+there being nothing else it could be. Naming `rows=`/`cols=` together to the *same*
+fact (`rows="variable", cols="standard_name"`) is refused instead, there being no second
+fact left to give the grid's other axis. `time`/`depth` are refused with the same
+message `profile`'s own facet gives them: they are the axes every panel already draws
+against, not facts to split panels on.
+
+Combining `rows=`/`cols=` with an explicit `ncols=`/`nrows=` is refused — the two facets
+already fix the grid's shape. A (station, variable) combination nothing matched draws
+as a hidden blank panel rather than shifting every later cell out of place; two members
+landing in the *same* cell (a duplicate variable at one station) is refused instead,
+there being no second channel — the way a line's colour carries a second source — to
+overlay them onto.
+
+Titling generalizes the flat, unfaceted rule above (variable, station `label`, place,
+period — whichever every panel shares lifts to one suptitle) to a grid: whichever of
+those four instead reads the same down every column (or across every row) names only
+that column's (row's) own first drawn panel — the top row heads each column with its
+variable, the left column heads each row with its station — and anything left stays on
+every drawn panel. The one cell neither an edge (the bottom-right corner of a 2x2 grid,
+say) reads `""`: its identity is already unambiguous from its row and column position.
+A degenerate one-row or one-column facet grid (one station, several variables; or one
+variable, several stations) reproduces the flat rule's own output exactly. `titles=`
+then takes one entry per *grid cell*, row-major, blanks included — not one per item,
+since a blank cell has no item to draw a title for.
+
+`sharex=None`'s auto rule extends the same way: a genuine two-axis grid shares only
+within whichever axis holds one station's own several panels (its several variables
+sharing one deployment window), never *across* different stations, which may have
+disjoint deployment windows.
+
+`shared_limits=` gains the same `"variable"`/`"source"` vocabulary — see
+[`shared_limits`](#shared_limits) below.
+
+The `time_depth_row` family (next) keeps its own fixed shape (the comparison fan down
+the rows, `test | reference | difference` across the columns) — there is no free axis
+left there to facet; narrowing *which* comparisons appear as rows is
+`ComparisonSet.sel()`'s job instead (`variable`/`source`/`test`/`reference`).
 
 ## The `time_depth_row` family (a bare timeSeriesProfile pooled over time and depth)
 

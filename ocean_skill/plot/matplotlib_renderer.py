@@ -1098,11 +1098,14 @@ def series(
     variable overlays in a single panel, two put the second on a right-hand y axis
     (``secondary_y=False`` to stack them instead), three or more become one row each.
     ``rows=``/``cols=`` facet on ``variable``/``source``/``depth``/``comparison``
-    instead; one or the other, not both. Faceting on ``variable`` also drops it from
-    every legend entry -- the panel title already says it. ``ncols=``/``nrows=`` wrap
-    the panels into a rectangular grid instead of the default single row/column --
-    orthogonal to the facet choice, and refused together with ``residual=True``,
-    whose strip only stacks in a single column.
+    instead -- either alone, or both together for a genuine grid, one panel per
+    (row, column) combination, with any combination nothing matched left as a hidden
+    blank panel. Faceting on ``variable`` also drops it from every legend entry --
+    the panel title already says it. ``ncols=``/``nrows=`` wrap the panels into a
+    rectangular grid instead of the default single row/column -- orthogonal to a
+    single facet, but refused together with two facets at once (the grid's shape is
+    already fixed by how many distinct rows/columns exist) and with
+    ``residual=True``, whose strip only ever stacks in a single column.
 
     ``legend=`` is ``True``/``False`` for the usual auto/off, or a string for something
     more specific: ``"below"``/``"right"`` force one combined key outside the axes
@@ -1248,6 +1251,15 @@ def series(
     per_panel: list[tuple[Any, list]] = []
     for index, panel in enumerate(layout.panels):
         ax = flat[index * (2 if residual else 1)]
+        if panel.blank:
+            # An empty cell in a two-axis rows=/cols= grid (see Panel.blank) --
+            # hidden exactly like a trailing cell past the panel count below,
+            # just interior rather than trailing. residual=True is refused
+            # together with two facets (compose()), so this index*2 stride
+            # never has to coexist with a blank cell.
+            ax.set_visible(False)
+            per_panel.append((ax, []))
+            continue
         handles = _draw_series_lines(ax, panel.lines, line_kwargs, mark=mark)
         per_panel.append((ax, handles))
         ax.set_title(
@@ -1293,13 +1305,18 @@ def series(
     else:
         # A wrapped grid's bottom row is ragged when n_panels does not fill it, so
         # "is there a panel below me?" is the question, not "am I in the last
-        # row?" -- field_facet's own rule for the same situation. sharex=True
-        # otherwise hides tick labels on every row but the last, which would
-        # leave a panel sitting above a hidden blank cell with no dates at all.
-        for index, ax in enumerate(flat[:n_panels]):
-            if index + layout.ncols >= n_panels:
-                ax.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
-                ax.xaxis.set_tick_params(labelbottom=True)
+        # row?" -- field_facet's own rule for the same situation, extended here to
+        # an *interior* blank too (a two-axis rows=/cols= grid's own hidden cell,
+        # see Panel.blank): sharex=True otherwise hides tick labels on every row
+        # but the last, which would leave a panel sitting above a hidden blank
+        # cell with no dates at all.
+        for index, panel in enumerate(layout.panels):
+            if panel.blank:
+                continue
+            below = index + layout.ncols
+            if below >= n_panels or layout.panels[below].blank:
+                flat[index].set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+                flat[index].xaxis.set_tick_params(labelbottom=True)
         for ax in flat[n_panels:]:
             ax.set_visible(False)
     if title:
@@ -3759,10 +3776,12 @@ def time_depth_grid(
     *,
     title: str | None = None,
     mark: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
     ncols: int | None = None,
     nrows: int | None = None,
-    shared_limits: bool = False,
-    sharex: bool | None = None,
+    shared_limits: bool | str = False,
+    sharex: bool | str | None = None,
     sharey: bool = False,
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
@@ -3788,17 +3807,38 @@ def time_depth_grid(
     one panel per item rather than any overlay -- a mesh or scatter has no second
     channel (colour) free to carry a second source the way a line's colour does.
 
-    Panels stack in a single column by default (``ncols=None``, ``nrows=None``), time
-    on a shared x-axis, matching the layout :func:`~ocean_skill.plot.series.grid_shape`
-    gives every other line family for the same shape. ``ncols=``/``nrows=`` wrap the
-    panels into a rectangular grid instead -- shared with :func:`series`/:func:`profile`
-    so the three families cannot pick different wraps.
+    Panels stack in a single column by default (``ncols=None``, ``nrows=None``, no
+    ``rows=``/``cols=``), time on a shared x-axis, matching the layout
+    :func:`~ocean_skill.plot.series.grid_shape` gives every other line family for the
+    same shape. ``ncols=``/``nrows=`` wrap the panels into a rectangular grid instead --
+    shared with :func:`series`/:func:`profile` so the three families cannot pick
+    different wraps.
+
+    ``rows=``/``cols=`` facet on ``variable`` or ``source`` instead -- either alone (its
+    complement is implied: every item here carries exactly these two identity facts, see
+    :func:`~ocean_skill.plot.matplotlib_renderer.field_map_grid`'s identical vocabulary
+    and :mod:`ocean_skill.plot._facets`), or both together naming the same two facts a
+    second way. ``cols="variable"`` on a set of several stations x several variables
+    (``ctdprofiles.sel(variable=[...]).plot(cols="variable")``) draws one column per
+    variable, one row per station -- the arrangement the plain ``ncols=`` wrap above
+    only reaches by accident of the set's own fan order, with no row/column headings
+    and ``sharex`` always off. A (row, column) combination nothing matched (a variable
+    missing at one station) draws as a hidden blank panel rather than shifting every
+    later cell out of place; two members landing in the same cell (a duplicate variable
+    at one station) is refused instead, there being no second channel to overlay them
+    onto. Combining ``rows=``/``cols=`` with an explicit ``ncols=``/``nrows=`` is
+    refused too -- the two facets already fix the grid's shape.
 
     Each panel gets its own colour scale and colorbar by default (different moorings,
     different depths, different ranges); ``shared_limits=True`` computes one shared
     ``vmin``/``vmax`` (and a single warning if the items' ``standard_name``s actually
     differ) across every panel instead -- :func:`field_grid`'s own convention, so the
-    two grid families agree on what the option means.
+    two grid families agree on what the option means. ``shared_limits="variable"``/
+    ``"source"`` instead pools only the panels sharing that one fact onto one scale --
+    with ``cols="variable"``, ``shared_limits="variable"`` gives each column (one
+    variable, every station) its own shared scale, independent of the others, with no
+    warning possible (a "variable" group can never mix variables) -- see
+    :func:`~ocean_skill.plot._facets.resolve_limit_groups`.
 
     ``title``/each panel's own title split the same way :func:`field_map_grid` does for
     several *variables* over one map: whichever of variable, ``label`` (a mooring's
@@ -3810,6 +3850,16 @@ def time_depth_grid(
     top; a set fanned over stations for one variable
     (``osk.field(osk.find(...), "temperature")``) keeps :func:`grid_suptitle`'s own
     behaviour, naming the shared variable once and titling each panel by its station.
+    Faceted with ``rows=``/``cols=``, the same four parts classify the same way, but
+    against the *whole grid* rather than a flat list: a part shared everywhere still
+    lifts to one suptitle, a part constant down every column (or across every row)
+    instead names only that column's (row's) own first drawn panel, and anything left
+    stays on every drawn panel -- see
+    :func:`~ocean_skill.plot._facets.facet_grid_titles`, whose classification
+    reproduces this function's own flat rule exactly whenever the facet grid happens
+    to be a single row or column. ``titles=`` then takes one entry per *grid cell*,
+    row-major, blanks included -- not one per item, since a blank has no item of its
+    own to draw a title for.
 
     ``sharex=None`` (the default) links every panel's time axis when they draw the
     same way -- the default single stacked column, every panel a real date axis or
@@ -3820,7 +3870,12 @@ def time_depth_grid(
     data under that default; pass ``sharex=False`` to autoscale each panel to its own
     window instead, with its own date ticks -- the same option :func:`series` exposes,
     given here rather than defaulted the other way, since sharing is meaningful far
-    more often than not for this family's own stacked-column shape.
+    more often than not for this family's own stacked-column shape. Faceted into a
+    genuine two-axis grid, the same auto default instead shares only within whichever
+    axis holds one station's own several panels (``sharex="row"`` when ``source`` landed
+    on rows -- the ``cols="variable"`` case, one station's several variables sharing one
+    deployment window; ``sharex="col"`` when transposed) -- different stations, with
+    potentially disjoint windows, are never auto-shared together.
 
     ``sharey=False`` (the default) leaves each panel's depth axis to its own
     instrument's range -- moorings at very different depths (22m vs 64m, say) each
@@ -3835,33 +3890,91 @@ def time_depth_grid(
     anything here.
 
     ``robust`` means what it does in :func:`_limits`: each panel's (or, with
-    ``shared_limits=True``, every panel's shared) colour scale spans the full data
-    range by default, or its 10th–90th percentile with ``robust=True``.
+    ``shared_limits=True``/``"variable"``/``"source"``, that group's shared) colour
+    scale spans the full data range by default, or its 10th–90th percentile with
+    ``robust=True``.
 
-    ``titles=`` overrides each panel's own title by hand, one string per item in
-    ``items`` order (row-major, matching the panel grid) -- ``None`` at a
-    position keeps that panel's own title; the wrong count raises a
+    ``titles=`` overrides each panel's own title by hand: one string per item in
+    ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
+    ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included (see above).
+    ``None`` at a position keeps that panel's own title; the wrong count raises a
     copy-pasteable ``ValueError`` listing the current titles.
     """
     import matplotlib.pyplot as plt
 
+    from ocean_skill.plot._facets import (
+        facet_grid_titles,
+        one_item_cells,
+        resolve_facets,
+        resolve_limit_groups,
+    )
     from ocean_skill.plot.series import grid_shape, value_span
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
     from ocean_skill.plot.typography import SECTION_ASPECT
 
     _warn_if_interactive_only(rasterize, hover)
 
-    n = len(items)
-    prepared = [prepare_time_depth(item["field"]) for item in items]
-    marks = [mark or default_mark(values) for values, _ in prepared]
+    faceted = rows is not None or cols is not None
+    if faceted and (ncols is not None or nrows is not None):
+        raise ValueError(
+            f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- "
+            "ncols=/nrows= (for wrapping the unfaceted stacked column) do not "
+            "also apply. Drop ncols=/nrows=."
+        )
 
-    auto_suptitle, auto_titles = time_depth_grid_titles(
-        items, [geometry for _, geometry in prepared]
-    )
+    n = len(items)
+    eff_rows: str | None = None
+    if faceted:
+        cells, row_values, col_values, eff_rows, _ = resolve_facets(
+            items, rows, cols, family="a time_depth grid", axis_hint=True
+        )
+        cell_items: list[dict[str, Any] | None] = one_item_cells(
+            cells, row_values, col_values, family="a time_depth grid"
+        )
+        grid_nrows, grid_ncols = len(row_values), len(col_values)
+    else:
+        grid_nrows, grid_ncols = grid_shape(
+            n, as_columns=False, ncols=ncols, nrows=nrows
+        )
+        cell_items = list(items)
+        cell_items += [None] * (grid_nrows * grid_ncols - len(cell_items))
+
+    # (grid index, item) for every drawn cell, in row-major order -- a plain stacked
+    # or wrapped grid never has an interior blank, only trailing padding, so this is
+    # `list(enumerate(items))` there; a faceted grid's own blanks (see
+    # ocean_skill.plot._facets.one_item_cells) are simply absent from it.
+    drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
+    prepared: dict[int, tuple[Any, Any]] = {
+        i: prepare_time_depth(item["field"]) for i, item in drawn
+    }
+    marks: dict[int, str] = {
+        i: mark or default_mark(values) for i, (values, _) in prepared.items()
+    }
+
+    if faceted:
+        components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
+        for i, item in drawn:
+            _, geometry = prepared[i]
+            components[i] = (
+                field_title(item.get("standard_name")),
+                item.get("label") or "",
+                geometry.place_note,
+                geometry.period_note,
+            )
+        auto_suptitle, cell_titles = facet_grid_titles(
+            components, grid_nrows, grid_ncols
+        )
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    else:
+        auto_suptitle, drawn_titles = time_depth_grid_titles(
+            [item for _, item in drawn], [prepared[i][1] for i, _ in drawn]
+        )
+        resolved_drawn = _titles.resolve_titles(drawn_titles, titles)
+        resolved_full = [""] * len(cell_items)
+        for (i, _), t in zip(drawn, resolved_drawn, strict=True):
+            resolved_full[i] = t
     if title is None:
         title = auto_suptitle
-
-    grid_nrows, grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)
 
     canvas = resolve_canvas(size, zoom)
     horizontal = colorbar_is_horizontal(
@@ -3889,11 +4002,30 @@ def time_depth_grid(
     title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
+    date_axis_kinds = {prepared[i][1].date_axis for i, _ in drawn}
     if sharex is None:
-        # auto: share only where it is physically meaningful -- one stacked column,
-        # every panel's x axis the same kind (all real dates, or all the same
-        # groupby index) -- see TimeDepthGeometry.date_axis.
-        sharex = grid_ncols == 1 and len({g.date_axis for _, g in prepared}) == 1
+        if grid_ncols == 1 or grid_nrows == 1:
+            # A single stacked column or single row -- every panel a real date
+            # axis or every panel the same groupby kind (see
+            # TimeDepthGeometry.date_axis) -- shares exactly as the plain,
+            # unfaceted grid always has.
+            sharex = len(date_axis_kinds) == 1
+        elif faceted:
+            # A genuine two-axis facet grid: share only within whichever axis
+            # holds one station's own several panels -- the axis a station's
+            # variables (or, transposed, a variable's stations) actually
+            # deploy along -- so different stations, with potentially
+            # disjoint deployment windows, are never auto-shared together.
+            sharex = (
+                ("row" if eff_rows == "source" else "col")
+                if len(date_axis_kinds) == 1
+                else False
+            )
+        else:
+            # An unfaceted numeric ncols=/nrows= wrap with more than one row
+            # and column has no row/column identity to share along -- unchanged
+            # from before rows=/cols= existed: never auto-shared.
+            sharex = False
     fig, axes = plt.subplots(
         grid_nrows,
         grid_ncols,
@@ -3905,22 +4037,20 @@ def time_depth_grid(
     )
     flat = list(axes.ravel())
 
-    shared_cmap = shared_norm = None
-    if shared_limits:
-        import warnings
-
-        names = {item.get("standard_name") for item in items}
-        if len(names) > 1:
-            warnings.warn(
-                f"shared_limits=True but panels use different variables "
-                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every panel.",
-                stacklevel=_stacklevel.find(),
+    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    panel_scale: dict[int, tuple[Any, Any]] = {}
+    if limit_groups is not None:
+        drawn_indices = [i for i, _ in drawn]
+        for group in limit_groups:
+            group_indices = [drawn_indices[g] for g in group]
+            standard_name = cell_items[group_indices[0]].get("standard_name")
+            cmap, _ = cmaps_for(standard_name)
+            vmin, vmax = _limits(
+                *(prepared[i][0] for i in group_indices), robust=robust
             )
-        standard_name = items[0].get("standard_name")
-        shared_cmap, _ = cmaps_for(standard_name)
-        vmin, vmax = _limits(*(values for values, _ in prepared), robust=robust)
-        shared_norm = norm_for(standard_name, vmin, vmax)
+            norm = norm_for(standard_name, vmin, vmax)
+            for i in group_indices:
+                panel_scale[i] = (cmap, norm)
 
     # One depth range for the whole figure when sharey -- explicit set_ylim on every
     # panel rather than relying on invert_yaxis()'s toggle state (_draw_time_depth's
@@ -3933,26 +4063,30 @@ def time_depth_grid(
     shared_depth = None
     if sharey:
         shared_depth = value_span(
-            [np.asarray(values[geometry.y_name]) for values, geometry in prepared]
+            [np.asarray(prepared[i][0][prepared[i][1].y_name]) for i, _ in drawn]
         )
 
-    resolved_titles = _titles.resolve_titles(auto_titles, titles)
-
-    for index, (item, (values, geometry), panel_mark, panel_title) in enumerate(
-        zip(items, prepared, marks, resolved_titles)
-    ):
-        ax = flat[index]
-        if shared_limits:
-            cmap, norm = shared_cmap, shared_norm
+    for grid_index, item in drawn:
+        values, geometry = prepared[grid_index]
+        panel_mark = marks[grid_index]
+        ax = flat[grid_index]
+        if grid_index in panel_scale:
+            cmap, norm = panel_scale[grid_index]
         else:
             cmap, _ = cmaps_for(item.get("standard_name"))
             vmin, vmax = _limits(values, robust=robust)
             norm = norm_for(item.get("standard_name"), vmin, vmax)
-        im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark)
+        im = _draw_time_depth(
+            ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark
+        )
         if shared_depth is not None:
             y_lo, y_hi = shared_depth
             ax.set_ylim(y_hi, y_lo)  # deep at the bottom, shallow at top
-        ax.set_title(panel_title, fontsize=scale["title"], **_without_font(title_kwargs))
+        ax.set_title(
+            resolved_full[grid_index],
+            fontsize=scale["title"],
+            **_without_font(title_kwargs),
+        )
         ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
         _x_axis(
             ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
@@ -3960,18 +4094,28 @@ def time_depth_grid(
         lab = item.get("units") or ""
         _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
 
-    if grid_ncols == 1 or (grid_nrows == 1 and grid_ncols == n):
-        flat[-1].set_xlabel(prepared[-1][1].x_label, fontsize=scale["axes_label"])
+    total_cells = grid_nrows * grid_ncols
+    if grid_ncols == 1 or (grid_nrows == 1 and grid_ncols == len(drawn)):
+        last_index = drawn[-1][0]
+        flat[last_index].set_xlabel(
+            prepared[last_index][1].x_label, fontsize=scale["axes_label"]
+        )
     else:
-        # A wrapped grid's bottom row is ragged when n does not fill it, so "is there
-        # a panel below me?" is the question, not "am I in the last row?" -- the same
-        # rule series()'s own wrapped grid uses for the same situation.
-        for index, ax in enumerate(flat[:n]):
-            if index + grid_ncols >= n:
-                ax.set_xlabel(prepared[index][1].x_label, fontsize=scale["axes_label"])
-                ax.xaxis.set_tick_params(labelbottom=True)
-        for ax in flat[n:]:
-            ax.set_visible(False)
+        # A wrapped (or faceted) grid's bottom row is ragged when the last row does
+        # not fill it, so "is there a panel below me?" is the question, not "am I
+        # in the last row?" -- the same rule series()'s own wrapped grid uses,
+        # extended here to a facet's own *interior* blanks (see
+        # ocean_skill.plot._facets.one_item_cells), not just trailing ones.
+        for index in range(total_cells):
+            if cell_items[index] is None:
+                flat[index].set_visible(False)
+                continue
+            below = index + grid_ncols
+            if below >= total_cells or cell_items[below] is None:
+                flat[index].set_xlabel(
+                    prepared[index][1].x_label, fontsize=scale["axes_label"]
+                )
+                flat[index].xaxis.set_tick_params(labelbottom=True)
 
     if title:
         sup = fig.suptitle(title, **suptitle_kwargs)
@@ -3980,7 +4124,9 @@ def time_depth_grid(
         _align_colorbars(fig)
     if fit_text:
         _fit_text_widths(fig)
-    _warn_if_cramped(fig, canvas=canvas, nrows=grid_nrows, panels=flat[:n])
+    _warn_if_cramped(
+        fig, canvas=canvas, nrows=grid_nrows, panels=[flat[i] for i, _ in drawn]
+    )
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -4431,6 +4577,8 @@ def field_map_grid(
     *,
     title: str | None = None,
     mark: str = "pcolormesh",
+    rows: str | None = None,
+    cols: str | None = None,
     ncols: int | None = None,
     domain: tuple[float, float, float, float] | np.ndarray | None = None,
     save: str | Path | None = None,
@@ -4451,6 +4599,7 @@ def field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    shared_limits: bool | str = False,
     titles: Sequence[str | None] | None = None,
 ):
     """Draw one map per item -- several *variables*, not one variable's own facet axis.
@@ -4458,45 +4607,79 @@ def field_map_grid(
     The ``field_facet`` counterpart for a :class:`~ocean_skill.field.FieldSet` of
     several maps (see :meth:`ocean_skill.field.Field._map_item`): each item is a single,
     already-reduced-to-one-instant field, so unlike :func:`field_facet` there is no
-    facet coordinate ordering the panels and nothing shared for them to share a colour
-    scale over. Each panel gets **its own** colour scale and **its own** colorbar --
-    :func:`skill_map`'s convention, not :func:`field_facet`'s -- since different
-    variables carry different units and unrelated ranges; a shared bar across nitrate
-    and temperature would be meaningless on both ends.
+    facet coordinate ordering the panels. Each panel gets **its own** colour scale and
+    **its own** colorbar by default -- :func:`skill_map`'s convention, not
+    :func:`field_facet`'s -- since different variables carry different units and
+    unrelated ranges; a shared bar across nitrate and temperature would be meaningless
+    on both ends. ``shared_limits=True``/``"variable"``/``"source"`` pools some or all
+    of them onto one shared scale instead, the same vocabulary
+    :func:`time_depth_grid` accepts -- see
+    :func:`~ocean_skill.plot._facets.resolve_limit_groups`.
 
-    The grid is free (these panels have no inherent order): ``ncols`` defaults to
-    :func:`~ocean_skill.plot.typography.facet_layout`, which reads the orientation off
-    the domain's own aspect ratio, the same rule :func:`field_facet`'s one-facet-axis
-    case and :func:`skill_map`'s single-item case use.
+    The grid is free (these panels have no inherent order) unfaceted: ``ncols``
+    defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads the
+    orientation off the domain's own aspect ratio, the same rule :func:`field_facet`'s
+    one-facet-axis case and :func:`skill_map`'s single-item case use.
 
-    Each panel is titled by its own **variable** (:func:`field_title`) -- the inverse of
-    :func:`field_facet`, where the panels say *when* and the variable rides in the
-    suptitle, because here the panels are exactly what differs and the suptitle is
-    whatever the whole set shares instead (``title`` defaults to :func:`grid_suptitle`,
-    which composes only the depth/time/region every item has in common, dropping the
-    variable since the items' ``standard_name``s differ by construction).
+    ``rows=``/``cols=`` facet the grid on purpose instead, on ``variable`` (alias
+    ``standard_name``) or ``source`` -- the same vocabulary and implied-complement rule
+    :func:`time_depth_grid` accepts (every item here carries exactly those two identity
+    facts too, see :meth:`ocean_skill.field.Field._map_item`; see
+    :mod:`ocean_skill.plot._facets`). A (row, column) combination nothing matched draws
+    as a hidden blank panel; two members landing in the same cell is refused instead,
+    there being no second channel to overlay them onto. ``ncols=`` is then refused --
+    the two facets already fix the grid's shape (there is no ``nrows=`` here to combine
+    it with, unlike :func:`time_depth_grid`; the unfaceted grid is always ncols-driven).
+
+    Each panel is titled by its own **variable** (:func:`field_title`) unfaceted -- the
+    inverse of :func:`field_facet`, where the panels say *when* and the variable rides
+    in the suptitle, because here the panels are exactly what differs and the suptitle
+    is whatever the whole set shares instead (``title`` defaults to
+    :func:`grid_suptitle`, which composes only the depth/time/region every item has in
+    common, dropping the variable since the items' ``standard_name``s differ by
+    construction). Faceted, the same variable/source identity instead classifies the
+    same way :func:`time_depth_grid`'s own faceted titling does: whichever reads the
+    same down every column (or across every row) names only that column's (row's) own
+    first drawn panel, and anything left stays on every drawn panel -- see
+    :func:`~ocean_skill.plot._facets.facet_grid_titles`. ``title``/the suptitle is
+    unaffected either way.
 
     Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`,
-    including ``robust`` (see :func:`_limits`) -- each panel's own colour scale spans
-    its full data range by default, or its 10th–90th percentile with ``robust=True``.
-    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
-    set to each renderer (see :func:`_warn_if_interactive_only`) -- they are the
-    interactive renderer's fix for a large mesh and do nothing here.
+    including ``robust`` (see :func:`_limits`) -- each panel's (or, with
+    ``shared_limits=``, that group's shared) colour scale spans the full data range by
+    default, or its 10th–90th percentile with ``robust=True``. ``rasterize``/``hover``
+    are accepted only so ``renderer="both"`` can pass one option set to each renderer
+    (see :func:`_warn_if_interactive_only`) -- they are the interactive renderer's fix
+    for a large mesh and do nothing here.
 
-    ``titles=`` overrides each panel's own title by hand, one string per item in
-    ``items`` order (row-major, matching the panel grid) -- ``None`` at a
-    position keeps that panel's own (:func:`field_title`) title; the wrong count
-    raises a copy-pasteable ``ValueError`` listing the current titles.
+    ``titles=`` overrides each panel's own title by hand: one string per item in
+    ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
+    ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included. ``None`` at
+    a position keeps that panel's own auto title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     import warnings
 
     import matplotlib.pyplot as plt
 
+    from ocean_skill.plot._facets import (
+        facet_grid_titles,
+        one_item_cells,
+        resolve_facets,
+        resolve_limit_groups,
+    )
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
     _warn_if_interactive_only(rasterize, hover)
     if not items:
         raise ValueError("field_map_grid needs at least one field, got none")
+
+    faceted = rows is not None or cols is not None
+    if faceted and ncols is not None:
+        raise ValueError(
+            f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- ncols= "
+            "(for wrapping the unfaceted grid) does not also apply. Drop ncols=."
+        )
 
     n = len(items)
     aspect = _aspect_of(items[0]["field"])
@@ -4504,11 +4687,26 @@ def field_map_grid(
     if title is None:
         title = grid_suptitle(items)
 
-    if ncols is None:
-        ncols, nrows = facet_layout(n, aspect, canvas=canvas)
+    if faceted:
+        cells, row_values, col_values, _, _ = resolve_facets(
+            items, rows, cols, family="a set of maps"
+        )
+        cell_items: list[dict[str, Any] | None] = one_item_cells(
+            cells, row_values, col_values, family="a set of maps"
+        )
+        nrows, ncols = len(row_values), len(col_values)
     else:
-        ncols = max(int(ncols), 1)
-        nrows = -(-n // ncols)
+        if ncols is None:
+            ncols, nrows = facet_layout(n, aspect, canvas=canvas)
+        else:
+            ncols = max(int(ncols), 1)
+            nrows = -(-n // ncols)
+        cell_items = list(items)
+        cell_items += [None] * (nrows * ncols - len(cell_items))
+
+    # (grid index, item) for every drawn cell, row-major -- see the identical
+    # comment in matplotlib_renderer.time_depth_grid, which this mirrors.
+    drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
 
     # Vertical, one per panel -- see skill_map's identical choice:
     # colorbar_is_horizontal forces horizontal above a wide-domain aspect,
@@ -4568,21 +4766,61 @@ def field_map_grid(
     )
     flat = list(axes.ravel())
 
-    auto_titles = [field_title(item.get("standard_name")) for item in items]
-    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+    if faceted:
+        components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
+        for i, item in drawn:
+            components[i] = (
+                field_title(item.get("standard_name")),
+                item.get("label") or "",
+            )
+        _, cell_titles = facet_grid_titles(components, nrows, ncols)
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    else:
+        drawn_titles = [field_title(item.get("standard_name")) for _, item in drawn]
+        resolved_drawn = _titles.resolve_titles(drawn_titles, titles)
+        resolved_full = [""] * len(cell_items)
+        for (i, _), t in zip(drawn, resolved_drawn, strict=True):
+            resolved_full[i] = t
 
-    for i, item in enumerate(items):
-        ax = flat[i]
-        col = i % ncols
+    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    panel_scale: dict[int, tuple[Any, Any]] = {}
+    if limit_groups is not None:
+        drawn_indices = [i for i, _ in drawn]
+        for group in limit_groups:
+            group_indices = [drawn_indices[g] for g in group]
+            standard_name = cell_items[group_indices[0]].get("standard_name")
+            cmap, _ = cmaps_for(standard_name)
+            vmin, vmax = _limits(
+                *(cell_items[i]["field"] for i in group_indices), robust=robust
+            )
+            norm = norm_for(standard_name, vmin, vmax)
+            for i in group_indices:
+                panel_scale[i] = (cmap, norm)
+
+    total_cells = nrows * ncols
+    for index, item in drawn:
+        ax = flat[index]
         field = item["field"]
         standard_name = item.get("standard_name")
-        cmap, _ = cmaps_for(standard_name)
-        vmin, vmax = _limits(field, robust=robust)
-        norm = norm_for(standard_name, vmin, vmax)
+        if index in panel_scale:
+            cmap, norm = panel_scale[index]
+        else:
+            cmap, _ = cmaps_for(standard_name)
+            vmin, vmax = _limits(field, robust=robust)
+            norm = norm_for(standard_name, vmin, vmax)
+        # No drawn cell to my left in this row (the grid's own edge, or an
+        # interior/trailing blank standing in for one) keeps the latitude
+        # labels; no drawn cell below me in this column keeps the longitude
+        # ones -- "is there a panel below/left of me?", not "am I in the
+        # last row/first column?", the same rule the ragged-wrap case below
+        # already needed and a facet's own interior blanks now share.
+        left = index % ncols == 0 or cell_items[index - 1] is None
+        below = index + ncols
+        bottom = below >= total_cells or cell_items[below] is None
         im = _draw_map(
             ax,
             field,
-            label=resolved_titles[i],
+            label=resolved_full[index],
             cmap=cmap,
             norm=norm,
             mark=mark,
@@ -4590,10 +4828,8 @@ def field_map_grid(
             gridline_kwargs=merged_gridline,
             tick_label_kwargs=merged_tick,
             title_kwargs=merged_title,
-            left_labels=(col == 0) if shared_axis_labels else None,
-            # The bottom row is ragged when n does not fill the grid, so the question
-            # is "is there a panel below me?", not "am I in the last row?".
-            bottom_labels=(i + ncols >= n) if shared_axis_labels else None,
+            left_labels=left if shared_axis_labels else None,
+            bottom_labels=bottom if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
             land=land,
         )
@@ -4603,11 +4839,14 @@ def field_map_grid(
             fig, im, ax, bar_label, colorbar_kwargs, defaults["colorbar_kwargs"]
         )
 
-    # Cells past the last panel carry no map and so no label artists -- hidden
-    # rather than deleted, which keeps the drawn panels on the grid they were
-    # sized for instead of letting the layout engine expand them into the gap.
-    for ax in flat[n:]:
-        ax.set_visible(False)
+    # A blank cell (past the last panel, unfaceted; or a facet combination
+    # nothing matched) carries no map and so no label artists -- hidden
+    # rather than deleted, which keeps the drawn panels on the grid they
+    # were sized for instead of letting the layout engine expand them into
+    # the gap.
+    for index in range(total_cells):
+        if cell_items[index] is None:
+            flat[index].set_visible(False)
 
     if title:
         sup = fig.suptitle(title, **merged_suptitle)
@@ -6111,6 +6350,15 @@ def _check_options(fn, opts) -> None:
             lines.append(
                 "  'secondary_y' is not an option of profile() -- a profile's "
                 "value axis is x (depth is y), so its twin is secondary_x"
+            )
+        elif key in ("rows", "cols") and fn.__name__ == "time_depth":
+            # rows=/cols= are real options -- of time_depth_grid, not the
+            # single-panel time_depth this spec resolved to -- so there is
+            # nothing to facet: a lone panel has no other panels to arrange
+            # into a grid.
+            lines.append(
+                f"  {key!r} needs several panels to facet -- this FieldSet has "
+                "a single time_depth panel, so there is no grid to arrange"
             )
         elif owner:
             lines.append(

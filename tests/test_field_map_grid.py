@@ -204,6 +204,162 @@ def test_ncols_wraps_the_panels(stub_by_variable):
     assert fig.axes[0].get_gridspec().ncols == 1
 
 
+# -- rows=/cols= facet the grid on variable x source -------------------------------------
+
+
+def _map_item(source, variable, value, *, units="mmol m-3"):
+    return {
+        "field": _map(variable, value, units=units),
+        "units": units,
+        "standard_name": variable,
+        "label": source,
+    }
+
+
+def _spec(items, **options):
+    from ocean_skill.plot.spec import PlotSpec
+
+    return PlotSpec(family="field_map_grid", items=items, options=options)
+
+
+def test_rows_variable_cols_source_builds_the_grid_in_both_renderers():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_b", NITRATE, 6.0),
+        _map_item("run_a", SILICATE, 20.0),
+        _map_item("run_b", SILICATE, 21.0),
+    ]
+    static = render(_spec(items, cols="variable"), renderer="matplotlib")
+    gridspec = static.axes[0].get_gridspec()
+    assert (gridspec.nrows, gridspec.ncols) == (2, 2)
+    static_titles = [ax.get_title() for ax in static.axes[:4]]
+
+    import holoviews as hv
+
+    interactive = render(_spec(items, cols="variable"), renderer="holoviews")
+    hv_titles = [
+        el.opts.get("plot").kwargs.get("title")
+        for el in interactive.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert static_titles == hv_titles
+    # Row-major: cell (r, c) at index r*2+c holds source r, variable c -- the
+    # top row heads each column with its variable, the left column heads each
+    # row with its source.
+    assert "nitrate" in static_titles[0] and "run_a" in static_titles[0]
+    assert static_titles[1] == "silicate"
+    assert "run_b" in static_titles[2]
+    assert static_titles[3] == ""
+
+
+def test_transposing_rows_and_cols_transposes_the_grid():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_b", NITRATE, 6.0),
+        _map_item("run_a", SILICATE, 20.0),
+        _map_item("run_b", SILICATE, 21.0),
+    ]
+    by_variable = render(_spec(items, cols="variable"), renderer="matplotlib")
+    by_source = render(_spec(items, cols="source"), renderer="matplotlib")
+    titles_a = [ax.get_title() for ax in by_variable.axes[:4]]
+    titles_b = [ax.get_title() for ax in by_source.axes[:4]]
+    assert "run_a" in titles_b[0] and "nitrate" in titles_b[0]
+    assert "run_b" in titles_b[1]
+    assert "silicate" in titles_b[2]
+    assert titles_a != titles_b
+
+
+def test_a_sparse_variable_source_product_hides_the_missing_cell():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_a", SILICATE, 20.0),
+        _map_item("run_b", NITRATE, 6.0),
+        # no run_b silicate
+    ]
+    static = render(_spec(items, cols="variable"), renderer="matplotlib")
+    # 4 panel axes (the blank one included) + one colorbar per drawn panel.
+    assert len(static.axes) == 4 + 3
+    panel_axes = static.axes[:4]
+    blank_index = 1 * 2 + 1  # row=run_b (index 1), col=silicate (index 1)
+    for i, ax in enumerate(panel_axes):
+        assert ax.get_visible() == (i != blank_index)
+
+    import holoviews as hv
+
+    interactive = render(_spec(items, cols="variable"), renderer="holoviews")
+    hv_elements = list(interactive)
+    assert isinstance(hv_elements[blank_index], hv.Empty)
+
+
+def test_a_single_facet_stacks_one_row_per_variable():
+    """``rows="variable"`` alone implies ``cols="source"`` -- a set with
+    uneven member counts per variable pads the ragged row with a hidden
+    blank, and each drawn cell titles by its own source.
+    """
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_b", NITRATE, 6.0),
+        _map_item("run_a", SILICATE, 20.0),
+    ]
+    static = render(_spec(items, rows="variable"), renderer="matplotlib")
+    gridspec = static.axes[0].get_gridspec()
+    assert (gridspec.nrows, gridspec.ncols) == (2, 2)
+    titles = [ax.get_title() for ax in static.axes[:4]]
+    assert "run_a" in titles[0]
+    assert "run_b" in titles[1]
+    assert "silicate" in titles[2]
+
+
+def test_ncols_with_a_facet_is_refused():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_b", SILICATE, 20.0),
+    ]
+    with pytest.raises(ValueError, match="already fix this grid's shape"):
+        render(_spec(items, cols="variable", ncols=2), renderer="matplotlib")
+
+
+def test_faceting_a_map_grid_by_an_unknown_key_says_what_is_allowed():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        _map_item("run_a", NITRATE, 5.0),
+        _map_item("run_b", SILICATE, 20.0),
+    ]
+    with pytest.raises(ValueError, match="expected one of variable, source"):
+        render(_spec(items, cols="platform"), renderer="matplotlib")
+
+
+def test_a_duplicate_variable_source_pair_in_a_map_grid_is_refused():
+    from ocean_skill.plot.matplotlib_renderer import field_map_grid
+
+    item = _map_item("run_a", NITRATE, 5.0)
+    with pytest.raises(ValueError, match="land in the same cell"):
+        field_map_grid([item, item], cols="variable")
+
+
+def test_shared_depth_still_lifts_to_the_suptitle_when_faceted():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        {**_map_item("run_a", NITRATE, 5.0), "depth": "surface"},
+        {**_map_item("run_b", NITRATE, 6.0), "depth": "surface"},
+        {**_map_item("run_a", SILICATE, 20.0), "depth": "surface"},
+        {**_map_item("run_b", SILICATE, 21.0), "depth": "surface"},
+    ]
+    static = render(_spec(items, cols="variable"), renderer="matplotlib")
+    assert static._suptitle.get_text() == "surface"
+
+
 # -- a member still faceted over time refuses -------------------------------------------
 
 

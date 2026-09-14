@@ -12,7 +12,10 @@ and forwards that same ``robust`` keyword, in both renderers.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
@@ -168,6 +171,188 @@ def test_field_map_grid_robust_clips_the_outlier_panel_only():
         for ax in fig.axes[:2]
     ]
     assert meshes[0].norm.vmax < 100.0
+
+
+# --- shared_limits="variable"/"source": per-group pooling, not all-or-nothing ---------
+
+SILICATE = "mole_concentration_of_silicate_in_sea_water"
+
+
+def _grouped_map_items():
+    """2 variables x 2 sources; one nitrate panel carries the outlier -- pooling
+    by ``"variable"`` should lift *both* nitrate panels to it and leave the
+    silicate pair untouched.
+    """
+    return [
+        {
+            "field": _outlier_map(outlier=100.0),
+            "units": "mmol m-3",
+            "standard_name": NITRATE,
+            "label": "run_a",
+        },
+        {
+            "field": _outlier_map(outlier=6.0),
+            "units": "mmol m-3",
+            "standard_name": NITRATE,
+            "label": "run_b",
+        },
+        {
+            "field": _outlier_map(outlier=8.0),
+            "units": "mmol m-3",
+            "standard_name": SILICATE,
+            "label": "run_a",
+        },
+        {
+            "field": _outlier_map(outlier=9.0),
+            "units": "mmol m-3",
+            "standard_name": SILICATE,
+            "label": "run_b",
+        },
+    ]
+
+
+def test_field_map_grid_shared_limits_variable_pools_each_column_independently():
+    from matplotlib.collections import QuadMesh
+
+    items = _grouped_map_items()
+    fig = render(
+        PlotSpec(
+            family="field_map_grid",
+            items=items,
+            options={"cols": "variable", "shared_limits": "variable"},
+        )
+    )
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes[:4]
+    ]
+    # cell (r, c) at index r*2+c: nitrate (col 0) pools onto the outlier's
+    # 100.0; silicate (col 1) pools onto 9.0, independent of nitrate's scale.
+    assert meshes[0].norm.vmax == meshes[2].norm.vmax == pytest.approx(100.0)
+    assert meshes[1].norm.vmax == meshes[3].norm.vmax == pytest.approx(9.0)
+    assert meshes[0].norm.vmax != meshes[1].norm.vmax
+
+
+def test_field_map_grid_shared_limits_variable_matches_in_both_renderers():
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    items = _grouped_map_items()
+    obj = render(
+        PlotSpec(
+            family="field_map_grid",
+            items=items,
+            options={"cols": "variable", "shared_limits": "variable"},
+        ),
+        renderer="holoviews",
+    )
+    meshes = list(obj.traverse(lambda x: x, [hv.QuadMesh]))
+    highs = [mesh.range(mesh.vdims[0].name)[1] for mesh in meshes]
+    assert highs[0] == highs[2] == pytest.approx(100.0)
+    assert highs[1] == highs[3] == pytest.approx(9.0)
+
+
+def test_field_map_grid_shared_limits_true_still_warns_the_old_way():
+    items = _grouped_map_items()
+    with pytest.warns(UserWarning, match="shared_limits=True but panels use"):
+        render(
+            PlotSpec(family="field_map_grid", items=items, options={"shared_limits": True}),
+        )
+
+
+def test_field_map_grid_shared_limits_variable_never_warns():
+    items = _grouped_map_items()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", category=UserWarning)
+        render(
+            PlotSpec(
+                family="field_map_grid",
+                items=items,
+                options={"shared_limits": "variable"},
+            )
+        )
+
+
+def test_field_map_grid_shared_limits_source_warns_naming_the_mixed_label():
+    items = _grouped_map_items()  # run_a mixes nitrate + silicate
+    with pytest.warns(UserWarning, match="'run_a' group mixes variables"):
+        render(
+            PlotSpec(
+                family="field_map_grid",
+                items=items,
+                options={"shared_limits": "source"},
+            )
+        )
+
+
+def test_field_map_grid_shared_limits_unknown_string_is_refused():
+    items = _grouped_map_items()
+    with pytest.raises(ValueError, match='"variable".*"source"'):
+        render(
+            PlotSpec(
+                family="field_map_grid", items=items, options={"shared_limits": "col"}
+            )
+        )
+
+
+def test_field_map_grid_shared_limits_robust_still_clips_within_the_group():
+    from matplotlib.collections import QuadMesh
+
+    items = _grouped_map_items()
+    fig = render(
+        PlotSpec(
+            family="field_map_grid",
+            items=items,
+            options={"cols": "variable", "shared_limits": "variable", "robust": True},
+        )
+    )
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes[:4]
+    ]
+    assert meshes[0].norm.vmax < 100.0
+
+
+def test_time_depth_grid_shared_limits_variable_pools_each_variable():
+    from matplotlib.collections import QuadMesh
+
+    def item(source, variable, outlier):
+        time = pd.date_range("2020-01-01", periods=6, freq="MS")
+        depth = np.array([5.0, 10.0])
+        vals = np.full((depth.size, time.size), 5.0)
+        vals[0, 0] = outlier
+        field = xr.DataArray(
+            vals,
+            dims=("depth", "time"),
+            coords={"depth": depth, "time": time},
+            attrs={"units": "mmol m-3"},
+        ).assign_coords(lon=-144.245, lat=49.978)
+        return {
+            "field": field,
+            "units": "mmol m-3",
+            "standard_name": variable,
+            "label": source,
+        }
+
+    items = [
+        item("station_a", NITRATE, 100.0),
+        item("station_b", NITRATE, 6.0),
+        item("station_a", SILICATE, 8.0),
+        item("station_b", SILICATE, 9.0),
+    ]
+    fig = render(
+        PlotSpec(
+            family="time_depth",
+            items=items,
+            options={"cols": "variable", "shared_limits": "variable"},
+        )
+    )
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes[:4]
+    ]
+    assert meshes[0].norm.vmax == meshes[2].norm.vmax == pytest.approx(100.0)
+    assert meshes[1].norm.vmax == meshes[3].norm.vmax == pytest.approx(9.0)
 
 
 # --- the same two families, interactively -- the two renderers must not disagree ------

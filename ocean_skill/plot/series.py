@@ -7,14 +7,15 @@ axis labels say, what the statistics box reads and which corner it goes in. A re
 then walks :class:`Layout` and draws.
 
 Composition follows the bounded rule the plot taxonomy fixed: an *intrinsic* overlay
-(the lanes of a comparison share one panel — that is what a line comparison is), plus at
-most one user facet (``rows=`` or ``cols=``), plus at most one ``secondary_y``. The
-defaults resolve the common cases without being asked:
+(the lanes of a comparison share one panel — that is what a line comparison is), plus
+``rows=``/``cols=`` (either, or both together for a genuine grid), plus at most one
+``secondary_y``. The defaults resolve the common cases without being asked:
 
 ===================  ==================================================================
 one variable         one panel, every source overlaid
 two variables        one panel, the second on a right-hand y axis (``secondary_y``)
 three or more        one row per variable, sources overlaid within each
+both rows= and cols=  a genuine grid, one panel per (row, column) combination
 ===================  ==================================================================
 """
 
@@ -954,15 +955,33 @@ def compose(
     today's single row (``cols=``) or single column (default/``rows=``); see
     :func:`grid_shape`. ``residual=True`` only stacks (its strip runs under each
     panel), so it refuses a grid wider than one column.
+
+    ``rows=`` and ``cols=`` together build the grid's cross-product
+    (:func:`facet_grid`) rather than refusing the second facet -- the
+    :mod:`ocean_skill.plot.profile` twin of this function grew that first;
+    see its own docstring for the composition table. A (row, column)
+    combination nothing matched draws as a hidden blank panel rather than
+    shifting every later cell out of place. Combining an explicit
+    ``ncols=``/``nrows=`` with a two-axis facet is refused instead -- the
+    grid's shape is already fixed by how many distinct rows/columns exist --
+    and so is ``residual=True``, which only ever lays out in a single column.
     """
     items = list(items)
     if not items:
         raise ValueError("a series needs at least one comparison to draw")
-    if rows is not None and cols is not None:
+    two_facets = rows is not None and cols is not None
+    if two_facets and (ncols is not None or nrows is not None):
         raise ValueError(
-            f"a series takes one facet, not two: rows={rows!r} and cols={cols!r} were "
-            "both given. Overlaying the lanes of each comparison is already one axis; "
-            "pick rows= or cols= for the other."
+            f"rows={rows!r} and cols={cols!r} already fix the grid's shape -- "
+            "ncols=/nrows= (for wrapping a single facet) do not also apply on "
+            "top of a two-axis one. Drop ncols=/nrows=."
+        )
+    if two_facets and residual:
+        raise ValueError(
+            "residual=True draws a test − reference strip under each panel, which "
+            f"only lays out in a single column; rows={rows!r} and cols={cols!r} "
+            "build a two-axis grid instead. Drop residual=True, or facet on one "
+            "axis only."
         )
     if residual and any(item_roles(item) == ("value",) for item in items):
         raise ValueError(
@@ -972,7 +991,7 @@ def compose(
             "or drop residual=True."
         )
 
-    facet = rows or cols
+    facet = rows if two_facets else (rows or cols)
     all_specs = [s for i, item in enumerate(items) for s in line_specs(item, i)]
     styled = {
         (line.spec.item, line.spec.role): line
@@ -986,8 +1005,10 @@ def compose(
     # (variable still "varied" figure-wide) and so never qualify for the combined
     # legend below. Other facets (source, depth, season, ...) get no such reprieve:
     # nothing else on the figure names *their* value, so dropping it from the legend
-    # would make a panel unidentifiable rather than merely less repetitive.
-    if facet in ("variable", "standard_name"):
+    # would make a panel unidentifiable rather than merely less repetitive. With two
+    # facets, either axis (not just whichever `facet` happens to alias) can name it.
+    facet_axes = {rows, cols} if two_facets else {facet}
+    if facet_axes & {"variable", "standard_name"}:
         label_varying = varying - {"variable"}
         ambiguous = _style.ambiguous_sources(all_specs)
         styled = {
@@ -1025,9 +1046,17 @@ def compose(
         key = _group_key(item, "variable", 0)
         if key not in variables:
             variables.append(key)
-    use_secondary = facet is None and secondary_y and len(variables) == 2
+    use_secondary = not two_facets and facet is None and secondary_y and len(variables) == 2
 
-    if facet is not None:
+    row_values: list[Any] = []
+    col_values: list[Any] = []
+    if two_facets:
+        grouped, row_values, col_values = facet_grid(
+            indexed,
+            lambda n, item: _group_key(item, rows, n),
+            lambda n, item: _group_key(item, cols, n),
+        )
+    elif facet is not None:
         groups: dict[Any, list[tuple[int, dict]]] = {}
         for index, item in indexed:
             groups.setdefault(_group_key(item, facet, index), []).append((index, item))
@@ -1053,6 +1082,12 @@ def compose(
     )
     panels = []
     for group, label_slice in zip(grouped, metrics_label_slices, strict=True):
+        if not group:
+            # A two-axis grid's cell nothing matched (facet_grid's own empty
+            # list) -- a blank panel, hidden by the renderer rather than
+            # shifting every later cell out of the (row, col) it belongs in.
+            panels.append(Panel(title="", ylabel="", lines=(), blank=True))
+            continue
         primary_items, secondary_items = group, []
         if use_secondary:
             primary_items = [
@@ -1129,16 +1164,22 @@ def compose(
         for p, t in zip(panels, resolved_titles, strict=True)
     ]
 
-    eff_nrows, eff_ncols = grid_shape(
-        len(panels), as_columns=cols is not None, ncols=ncols, nrows=nrows
-    )
+    if two_facets:
+        # The shape is already fixed by how many distinct rows/columns exist --
+        # facet_grid built `panels` to match, row-major -- so grid_shape's own
+        # count-wrap (a single facet's concern) does not apply here.
+        eff_nrows, eff_ncols = len(row_values), len(col_values)
+    else:
+        eff_nrows, eff_ncols = grid_shape(
+            len(panels), as_columns=cols is not None, ncols=ncols, nrows=nrows
+        )
     if residual and eff_ncols > 1:
         raise ValueError(
             "residual=True draws a test − reference strip under each panel, which "
             f"only lays out in a single column; this figure would have {eff_ncols}. "
             "Drop residual=True, or leave ncols/nrows unset (or ncols=1)."
         )
-    wrapped = ncols is not None or nrows is not None
+    wrapped = two_facets or ncols is not None or nrows is not None
     cap_count = eff_nrows if wrapped else len(panels)
     if cap_count > PANEL_CAP:
         warnings.warn(
@@ -1162,8 +1203,11 @@ def compose(
         for line in panel.lines + panel.secondary:
             if line.label not in labels:
                 labels.append(line.label)
+    # A blank grid cell carries no lines at all -- excluded here so its empty label
+    # set does not, on its own, make an otherwise shared legend read as unshared.
+    drawn = [p for p in panels if not p.blank]
     shared = (
-        len({tuple(line.label for line in p.lines + p.secondary) for p in panels}) == 1
+        len({tuple(line.label for line in p.lines + p.secondary) for p in drawn}) <= 1
     )
     return Layout(
         panels=tuple(panels),

@@ -157,6 +157,30 @@ def _make_set(variables, **kwargs):
     return make_field("stub", variables, **kwargs)
 
 
+def _station_grid(monkeypatch, stations, variables=(NITRATE, "silicate")):
+    """Monkeypatch ``comparison.prepare_source`` to a station x variable grid --
+    one :func:`_point_time_depth` field per (station, variable), each station
+    its own lon/lat -- the shape ``osk.field([stations...], [variables...])``
+    fans, used by the ``rows=``/``cols=`` facet tests below.
+    """
+    from ocean_skill import comparison
+
+    lon_lat = {"station_a": (-144.245, 49.978), "station_b": (-150.0, 55.0)}
+    data = {
+        (station, variable): _point_time_depth().assign_coords(
+            lon=lon_lat[station][0], lat=lon_lat[station][1]
+        )
+        for station in stations
+        for variable in variables
+    }
+
+    def fake_prepare_source(source, variable, *args, **kwargs):
+        matched = next(v for v in variables if v in variable)
+        return (data[(source, matched)], None)
+
+    monkeypatch.setattr(comparison, "prepare_source", fake_prepare_source)
+
+
 # -- family inference -------------------------------------------------------------------
 
 
@@ -566,6 +590,259 @@ def test_a_mixed_time_depth_and_series_set_refuses_to_plot(monkeypatch):
     fs = make_field("stub", [NITRATE, "silicate"])
     with pytest.raises(ValueError, match="some fields draw as depth against time"):
         fs.plot()
+
+
+# -- rows=/cols= facet time_depth_grid into a genuine two-axis grid --------------------
+
+
+def test_the_reported_bug_cols_variable_on_several_stations_now_facets(monkeypatch):
+    """``ctdprofiles_all.sel(variable=[...]).plot(cols="variable")`` on several
+    stations x several variables used to raise ``TypeError: 'cols' is not an
+    option of time_depth_grid()``. It now draws a genuine grid: one column per
+    variable, one row per station, in both renderers.
+    """
+    from ocean_skill.field import field as make_field
+
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+
+    static = fs.plot(cols="variable")
+    gridspec = static.axes[0].get_gridspec()
+    assert (gridspec.nrows, gridspec.ncols) == (2, 2)
+    # Every panel is drawn (a dense product, no missing combination), so
+    # every one of the first 4 axes (before their own colorbars) is a real
+    # panel -- not `if ax.get_title()`, which would also drop the one drawn
+    # panel whose own computed title happens to be "" (see below).
+    static_titles = [ax.get_title() for ax in static.axes[:4]]
+
+    import holoviews as hv
+
+    interactive = fs.plot(cols="variable", renderer="holoviews")
+    assert len(interactive) == 4
+    hv_titles = [
+        el.opts.get("plot").kwargs.get("title")
+        for el in interactive.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert static_titles == hv_titles
+    # Row-major: cell (r, c) at index r*2+c holds station r, variable c -- the
+    # top row heads each column with its variable, the left column heads each
+    # row with its station; the one cell neither heads reads "" (its identity
+    # is already unambiguous from its row + column position).
+    assert "nitrate" in static_titles[0] and "station_a" in static_titles[0]
+    assert static_titles[1] == "silicate"
+    assert "station_b" in static_titles[2]
+    assert static_titles[3] == ""
+
+
+def test_a_single_station_cols_variable_reproduces_the_flat_titling(stub):
+    """A degenerate 1-row facet grid (one station, several variables) must
+    read exactly like the unfaceted default -- see
+    ``test_a_variable_fan_titles_each_panel_by_variable_in_both_renderers``,
+    which this reproduces via an explicit ``cols="variable"`` instead.
+    """
+    stub(_point_time_depth())
+    fs = _make_set([NITRATE, "silicate"])
+
+    auto = fs.plot()
+    faceted = fs.plot(cols="variable")
+    assert [ax.get_title() for ax in faceted.axes if ax.get_title()] == [
+        ax.get_title() for ax in auto.axes if ax.get_title()
+    ]
+    assert faceted._suptitle.get_text() == auto._suptitle.get_text()
+
+
+def test_a_single_variable_rows_source_reproduces_the_flat_titling(monkeypatch):
+    """A degenerate 1-column facet grid (one variable, several stations) must
+    read exactly like the unfaceted default -- see
+    ``test_a_station_fan_keeps_naming_the_shared_variable_up_top``, which this
+    reproduces via an explicit ``rows="source"`` instead.
+    """
+    from ocean_skill.field import field as make_field
+
+    _station_grid(monkeypatch, ["station_a", "station_b"], variables=(NITRATE,))
+    fs = make_field(["station_a", "station_b"], NITRATE)
+
+    auto = fs.plot()
+    faceted = fs.plot(rows="source")
+    assert [ax.get_title() for ax in faceted.axes if ax.get_title()] == [
+        ax.get_title() for ax in auto.axes if ax.get_title()
+    ]
+    assert faceted._suptitle.get_text() == auto._suptitle.get_text()
+
+
+def test_cols_source_transposes_the_grid(monkeypatch):
+    from ocean_skill.field import field as make_field
+
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+
+    by_variable = fs.plot(cols="variable")
+    by_source = fs.plot(cols="source")
+    assert by_variable.axes[0].get_gridspec().ncols == 2
+    assert by_source.axes[0].get_gridspec().ncols == 2
+    # a station-per-column grid is the transpose (2 rows x 2 cols either way,
+    # but which fact heads the rows vs. the columns swaps).
+    titles_by_variable = [ax.get_title() for ax in by_variable.axes if ax.get_title()]
+    titles_by_source = [ax.get_title() for ax in by_source.axes if ax.get_title()]
+    assert "station_a" in titles_by_source[0] and "nitrate" in titles_by_source[0]
+    assert "station_b" in titles_by_source[1]
+    assert "silicate" in titles_by_source[2]
+    assert titles_by_variable != titles_by_source
+
+
+def _time_depth_item(station, variable, lon, lat):
+    return {
+        "field": _point_time_depth().assign_coords(lon=lon, lat=lat),
+        "units": "mmol m-3",
+        "standard_name": variable,
+        "label": station,
+    }
+
+
+def test_a_sparse_station_variable_product_hides_the_missing_cell():
+    """A station missing one of the variables another one has draws a hidden
+    blank panel in that cell, rather than shifting every later cell out of
+    place. Built as hand-crafted items (rather than through ``osk.field()``,
+    which fans the *full* cross product eagerly and so cannot leave a hole)
+    -- the same idiom ``tests/test_profile_renderers.py``'s own ragged-grid
+    test uses.
+    """
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    items = [
+        _time_depth_item("station_a", NITRATE, -144.245, 49.978),
+        _time_depth_item("station_a", "silicate", -144.245, 49.978),
+        _time_depth_item("station_b", NITRATE, -150.0, 55.0),
+        # no station_b silicate
+    ]
+
+    static = render(
+        PlotSpec(family="time_depth", items=items, options={"cols": "variable"}),
+        renderer="matplotlib",
+    )
+    # 4 panel axes (the blank one included) + one colorbar per *drawn* panel
+    # only -- the blank cell is never drawn, so it earns no colorbar.
+    assert len(static.axes) == 4 + 3
+    panel_axes = static.axes[:4]
+    blank_index = 1 * 2 + 1  # row=station_b (index 1), col=silicate (index 1)
+    for i, ax in enumerate(panel_axes):
+        assert ax.get_visible() == (i != blank_index)
+
+    import holoviews as hv
+
+    interactive = render(
+        PlotSpec(family="time_depth", items=items, options={"cols": "variable"}),
+        renderer="holoviews",
+    )
+    hv_elements = list(interactive)
+    assert isinstance(hv_elements[blank_index], hv.Empty)
+
+
+def test_two_facet_ncols_is_refused(monkeypatch):
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    from ocean_skill.field import field as make_field
+
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+    with pytest.raises(ValueError, match="already fix this grid's shape"):
+        fs.plot(cols="variable", ncols=2)
+
+
+def test_faceting_a_time_depth_grid_by_an_unknown_key_says_what_is_allowed(
+    monkeypatch,
+):
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    from ocean_skill.field import field as make_field
+
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+    with pytest.raises(ValueError, match="expected one of variable, source"):
+        fs.plot(cols="platform")
+
+
+def test_faceting_a_time_depth_grid_by_depth_or_time_is_refused(monkeypatch):
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    from ocean_skill.field import field as make_field
+
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+    with pytest.raises(ValueError, match="axis every panel already draws against"):
+        fs.plot(rows="depth")
+    with pytest.raises(ValueError, match="axis every panel already draws against"):
+        fs.plot(rows="time")
+
+
+def test_rows_and_cols_naming_the_same_fact_is_refused(monkeypatch):
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    from ocean_skill.field import field as make_field
+
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+    with pytest.raises(ValueError, match="both name the same fact"):
+        fs.plot(rows="variable", cols="standard_name")
+
+
+def test_a_duplicate_variable_source_pair_is_refused():
+    """Two members landing in the same (variable, source) cell can't be drawn
+    -- a mesh panel has no second channel to overlay them onto, the way a
+    line's colour would.
+    """
+    from ocean_skill.plot.matplotlib_renderer import time_depth_grid
+
+    item = {
+        "field": _point_time_depth(),
+        "units": "mmol m-3",
+        "standard_name": NITRATE,
+        "label": "station_a",
+    }
+    with pytest.raises(ValueError, match="land in the same cell"):
+        time_depth_grid([item, item], cols="variable")
+
+
+def test_a_single_panel_facet_is_refused_in_matplotlib_and_dropped_in_holoviews(stub):
+    stub(_point_time_depth())
+    with pytest.raises(TypeError, match="needs several panels to facet"):
+        _make().plot(cols="variable")
+
+    with pytest.warns(UserWarning, match="need several panels to facet"):
+        obj = _make().plot(cols="variable", renderer="holoviews")
+    import holoviews as hv
+
+    assert isinstance(obj, hv.QuadMesh | hv.Overlay)
+
+
+def test_facet_titles_override_in_row_major_grid_cell_order(monkeypatch):
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    from ocean_skill.field import field as make_field
+
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+    override = [None, "My Panel", None, "Blank Cell Override"]
+    static = fs.plot(cols="variable", titles=override)
+    titles = [ax.get_title() for ax in static.axes if ax.get_title()]
+    assert titles[1] == "My Panel"
+    assert "Blank Cell Override" in titles
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        fs.plot(cols="variable", titles=["only one"])
+
+
+def test_cols_variable_shares_the_x_axis_within_each_station_row(monkeypatch):
+    """``sharex`` auto-shares within one station's own row (its several
+    variables share one deployment window) but not across different stations
+    -- which may have disjoint deployment windows -- see
+    ``test_a_time_depth_set_sharex_option`` for the single-axis precedent.
+    """
+    from ocean_skill.field import field as make_field
+
+    _station_grid(monkeypatch, ["station_a", "station_b"])
+    fs = make_field(["station_a", "station_b"], [NITRATE, "silicate"])
+
+    static = fs.plot(cols="variable")
+    panel_axes = static.axes[:4]
+    # row 0: station_a's two variable panels (indices 0, 1) share one x axis
+    assert panel_axes[0].get_shared_x_axes().joined(panel_axes[0], panel_axes[1])
+    # different stations (row 0 vs row 1) are not auto-shared
+    assert not panel_axes[0].get_shared_x_axes().joined(panel_axes[0], panel_axes[2])
+
+    obj = fs.plot(cols="variable", renderer="holoviews")
+    assert len(obj) == 4
 
 
 # -- save() --------------------------------------------------------------------------------
