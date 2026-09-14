@@ -792,6 +792,50 @@ question, matching the map families' own `shared_axis_labels` rule, so a ragged
 last row still labels its own bottom-most panel rather than only the visually
 last row.
 
+### `.sel()` — narrowing a `FieldSet`/`ComparisonSet` before you facet it
+
+`osk.field()` and `osk.compare()` both fan a list `source`/`test`/`reference` and/or
+`variables` out into one set (a `FieldSet`, a `ComparisonSet`) holding every member —
+so a single, possibly expensive call can feed many different figures. `.sel(**filters)`
+narrows that set down to the members you want for one figure, without recomputing
+anything, and returns a new set — `rows=`/`cols=` above then facets *within* what's left.
+
+```python
+ctdprofiles_all = osk.field(
+    osk.find(catalog="Iceland CTD repeat-visit stations"),
+    ["temp", "salt", "oxygen", "turbidity", "fluorescence", "par"],
+)
+ctdprofiles_all.sel(variable="temp").plot(rows="source")   # one temp profile per station
+```
+
+`variable` (alias `standard_name`) matches through the vocabulary, so `"temp"`,
+`"temperature"` and the CF standard_name all pick out the same members. `source`
+matches a `Field`'s own label, falling back to its source name — the same identity
+`rows="source"`/`cols="source"` groups by. A value may be one spec or a list of them.
+
+`ComparisonSet.sel()` mirrors this, with the lane vocabulary `rows=`/`cols=` already
+use: `source`/`test` (synonyms) match the **test** lane; `reference` matches the
+**reference/obs** lane. In `osk.compare(reference=osk.find(...), test="his", ...)`
+the stations are the *reference* lane and `test="his"` is one constant model, so
+narrowing to one station is `.sel(reference=...)`, not `source=`:
+
+```python
+ctdprofiles_comp_all = osk.compare(
+    reference=osk.find(catalog="Iceland CTD repeat-visit stations"),
+    test="his",
+    variables=["temp", "salt", "oxygen", "turbidity", "fluorescence", "par"],
+)
+ctdprofiles_comp_all.sel(variable="temp").plot(rows="reference")
+```
+
+Every `Comparison` in a `ComparisonSet` is already aligned by the time `compare()`
+returns it, so `.sel()` there is a cheap filter over cached results. A bare `Field`
+loads lazily instead (see [`ncols`](#ncols-field_facet-skill_map-series-and-profile)
+above) — narrowing with `.sel()` before `.plot()` means a dropped variable or source
+is never loaded at all, not merely left out of the figure.
+
+Raises if a filter key isn't recognized, or if nothing matches.
+
 ### `shared_axis_labels`
 
 Draws grid lines on every panel either way, but controls whether coordinate

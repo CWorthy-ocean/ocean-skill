@@ -1446,6 +1446,74 @@ class FieldSet:
     def __repr__(self) -> str:
         return f"FieldSet({self.fields!r})"
 
+    #: Filter keys :meth:`sel` accepts.
+    _SEL_KEYS = ("variable", "standard_name", "source")
+
+    def sel(self, **filters: Any) -> FieldSet:
+        """Narrow this set to members matching every filter, returning a new set.
+
+        ``variable`` (alias ``standard_name``) matches through the vocabulary, so
+        ``"temp"``, ``"temperature"`` and the CF standard_name all pick out the same
+        members (see :func:`ocean_skill.comparison._variable_matches`). ``source``
+        matches a member's own label, falling back to its source name -- the same
+        identity :meth:`plot`'s ``rows="source"``/``cols="source"`` groups by (see
+        :func:`ocean_skill.plot.series._group_key`). A value may be one spec or a
+        list of them, matched as membership.
+
+        Reads only each member's own request, never its data: :func:`field` builds
+        every member lazily, loading only on first access to :attr:`Field.data`
+        (:meth:`Field.prepare`, called at plot time) -- so narrowing before
+        :meth:`plot` means a dropped variable or source is never loaded at all, not
+        merely hidden from the figure.
+
+        Raises ``ValueError`` for an unrecognized filter key, or when nothing
+        matches -- never returns an empty set, which would fail obscurely in
+        :meth:`plot` instead of here.
+        """
+        from ocean_skill.comparison import _variable_matches
+
+        for key in filters:
+            if key not in self._SEL_KEYS:
+                raise ValueError(
+                    f"FieldSet.sel() does not know {key!r} -- pass one of "
+                    f"{', '.join(self._SEL_KEYS)}."
+                )
+
+        def matches(f: Field) -> bool:
+            for key, wanted in filters.items():
+                choices = (
+                    wanted if isinstance(wanted, (list, tuple, set)) else (wanted,)
+                )
+                if key in ("variable", "standard_name"):
+                    if not any(
+                        _variable_matches(f.standard_name, f.variable, w)
+                        for w in choices
+                    ):
+                        return False
+                elif (f.label or f.source) not in choices:
+                    return False
+            return True
+
+        kept = [f for f in self.fields if matches(f)]
+        if not kept:
+            present = {
+                "variable": sorted(
+                    {f.standard_name or str(f.variable) for f in self.fields}
+                ),
+                "source": sorted({f.label or f.source for f in self.fields}),
+            }
+            group_of = {
+                "variable": "variable",
+                "standard_name": "variable",
+                "source": "source",
+            }
+            detail = "; ".join(
+                f"{k}={v!r} (have: {', '.join(present[group_of[k]])})"
+                for k, v in filters.items()
+            )
+            raise ValueError(f"no fields match {detail}")
+        return FieldSet(kept)
+
     def _items(self) -> list[dict[str, Any]]:
         """Every member's items (series or profile), concatenated into one figure."""
         if self.fields and self.fields[0].family == "profile":
