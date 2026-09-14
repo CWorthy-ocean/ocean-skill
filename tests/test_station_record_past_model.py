@@ -31,6 +31,14 @@ crop function. This module instead exercises the full
 ``Comparison.align``/``compare()`` path so a regression here is caught even
 if some other layer starts relying on either crop's old behavior.
 
+A third fixture below (``_bgc_grid_with_duplicate``) additionally repeats one
+timestamp -- sorting alone does not make an index *unique*, and a real model
+lane can fail both at once (a multi-file/kerchunk concat seam). That shape
+raised ``InvalidIndexError: Reindexing only valid with uniquely valued Index
+objects`` even after the non-monotonic-only fix above landed, aborting the
+whole ``compare()`` batch the same way the original ``KeyError``/``ValueError``
+did (``InvalidIndexError`` isn't caught by ``skip_missing`` either).
+
 Companion to ``tests/test_collapsed_time_record_crop.py``, which covers the
 same "reference record outruns the test's" question for the *other* branch
 (a time aggregate that collapses the axis, ``over`` unset/not time) --
@@ -194,3 +202,94 @@ def test_a_pair_spec_variable_is_not_dropped_either(monkeypatch):
     )
     aligned = c.align()  # must not raise
     assert pd.to_datetime(aligned["time"].values).max() <= pd.Timestamp("2024-11-29")
+
+
+# -- a duplicated model timestamp: the real Hvalfjörður bgc dataset's own shape --
+
+
+def _bgc_grid_with_duplicate() -> xr.Dataset:
+    """The real bug's exact shape: non-monotonic *and* a repeated timestamp --
+    a multi-file/kerchunk concat with an overlapping seam, plausibly. Fixing
+    ``subset_to_time``/``subset_to_time_targets`` for a merely out-of-order
+    axis (``_bgc_grid`` above) was not enough: ``pandas``' own nearest-step
+    lookup also requires a *unique* index, and this one raised
+    ``InvalidIndexError: Reindexing only valid with uniquely valued Index
+    objects`` even after that first fix landed -- the live crash this guards
+    against, on 'ctd_station_HV1' vs 'bgc'.
+    """
+    lon = np.array([STATION_LON - 0.05, STATION_LON, STATION_LON + 0.05])
+    lat = np.array([STATION_LAT - 0.05, STATION_LAT, STATION_LAT + 0.05])
+    time = pd.to_datetime(
+        [
+            "2024-02-01",
+            "2024-07-10",
+            "2024-04-20",  # out of order relative to the previous step
+            "2024-11-29",
+            "2024-11-29",  # repeated -- a concat seam, not just out of order
+        ]
+    )
+    values = (
+        BASE_BY_DEPTH[None, :, None, None]
+        + np.zeros((time.size, 1, lat.size, lon.size))
+    )
+    da = xr.DataArray(
+        values,
+        dims=("time", "depth", "lat", "lon"),
+        coords={"time": time, "depth": DEPTHS, "lat": lat, "lon": lon},
+        name="TEMP",
+        attrs={"units": "degC"},
+    )
+    return da.to_dataset()
+
+
+def _install_with_duplicate(monkeypatch):
+    import ocean_skill as osk
+    from ocean_skill import catalog
+
+    lanes = {"ctd_station": _station_dataset(), "bgc": _bgc_grid_with_duplicate()}
+    metas = {
+        "ctd_station": {
+            "featureType": "timeSeriesProfile",
+            "axes": {"T": "time", "Z": "depth"},
+            "standard_names": {"TEMP": TEMPERATURE},
+            "geospatial_lon_min": STATION_LON,
+            "geospatial_lon_max": STATION_LON,
+            "geospatial_lat_min": STATION_LAT,
+            "geospatial_lat_max": STATION_LAT,
+            "time_coverage_start": "2024-04-04",
+            "time_coverage_end": "2025-04-28",
+        },
+        "bgc": {
+            "standard_names": {"TEMP": TEMPERATURE},
+            "geospatial_lon_min": STATION_LON - 0.05,
+            "geospatial_lon_max": STATION_LON + 0.05,
+            "geospatial_lat_min": STATION_LAT - 0.05,
+            "geospatial_lat_max": STATION_LAT + 0.05,
+            "time_coverage_start": "2024-02-01",
+            "time_coverage_end": "2024-11-29",
+        },
+    }
+    monkeypatch.setattr(osk, "read", lambda name, **kw: lanes[name])
+    monkeypatch.setattr(
+        catalog, "resolve", lambda name: SimpleNamespace(metadata=metas[name])
+    )
+    return lanes
+
+
+def test_a_duplicated_model_timestamp_does_not_crash_the_whole_batch(
+    monkeypatch, capsys
+):
+    from ocean_skill import comparison
+
+    _install_with_duplicate(monkeypatch)
+    out = comparison.compare(
+        reference="ctd_station",
+        test="bgc",
+        variables=[TEMPERATURE],
+        depths=[{"min": 0, "max": 5}],
+        aggregate={"Z": "mean"},
+        cache=False,
+    )
+    assert len(out) == 1  # not skipped, and the batch was not aborted
+    printed = capsys.readouterr().out
+    assert "0 skipped" in printed
