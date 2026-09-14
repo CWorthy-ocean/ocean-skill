@@ -415,9 +415,9 @@ def _source_file_for_position(
 
 
 def _dedup_concat_axis(
-    vds, concat_dim: str, loadable_variables: tuple[str, ...], paths
+    vds, concat_dim: str, loadable_variables: tuple[str, ...], paths, mode: str
 ):
-    """Collapse timestamps that repeat on ``concat_dim``, verified by value.
+    """Collapse timestamps that repeat on ``concat_dim``, checked by value.
 
     ``combine="nested"`` may join files whose own coverage overlaps: a restart
     segment repeating the record it restarted from, or a rerun that restarted a
@@ -430,20 +430,31 @@ def _dedup_concat_axis(
     its shape and dtype alone, identical whether the values inside are the same
     or completely different (two different output streams — an averaged stream
     and an instantaneous one, say — colliding on one stamp would pass a
-    byte-length check as readily as a genuine restart repeat). So this reads
-    back and compares the *actual values* of every variable that varies along
-    ``concat_dim`` — but only for the handful of records that repeat a
-    timestamp, via a throwaway in-memory kerchunk reference over the
+    byte-length check as readily as a genuine restart repeat, and so, on a real
+    run, can two rerun segments that are not actually bit-reproducible). So
+    this reads back and compares the *actual values* of every variable that
+    varies along ``concat_dim`` — but only for the handful of records that
+    repeat a timestamp, via a throwaway in-memory kerchunk reference over the
     still-virtual ``vds``, never the whole store: cost is proportional to the
     overlap, not the record count.
 
-    A group whose members agree keeps the *last*-globbed one (a rerun/restart
-    supersedes what it restarted from) and, once collapsing is done, warns with
-    the total dropped. A group whose members disagree raises instead — naming
-    the timestamp and, where a chunk manifest can name one, the conflicting
-    files — the same "two streams accidentally combined" mistake
-    :func:`_warn_if_concat_axis_is_disordered` already flags, caught here before
-    it ships in a store that silently keeps one side and drops the other.
+    ``mode`` decides which record a group keeps and what happens if the
+    others disagree with it:
+
+    - ``"last"``: keep the last-globbed record (a rerun/restart supersedes
+      what it restarted from). Never raises — a group that disagrees still
+      collapses, but with a loud warning naming the timestamp, files, and
+      variables, since that shape is as consistent with two streams
+      accidentally combined as with an ordinary diverging rerun and is worth
+      a human's eyes either way.
+    - ``"first"``: the same, keeping the first-globbed record instead.
+    - ``"verify"``: keep the last-globbed record, but *raise* the moment any
+      group disagrees, naming the timestamp and (via
+      :func:`_source_file_for_position`) the conflicting files — the strict
+      choice, for a build that should refuse to guess.
+
+    A group whose members all agree is collapsed the same way under every
+    mode, and only ever produces the quiet "N duplicates collapsed" warning.
 
     Rebuilding also sorts the whole axis: dropping duplicates and fixing order
     happen together since a rerun that produces one usually produces the other
@@ -491,19 +502,23 @@ def _dedup_concat_axis(
             # not impossible in a data_var) just compares plainly instead.
             return np.array_equal(a, b)
 
+    which = "first" if mode == "first" else "last"
     drop_positions: list[int] = []
+    identical_dropped = 0
+    conflicts_seen: list[tuple] = []  # (at, files, variables) per disagreeing group
     for group in groups:
         sub = check[data_vars].isel({concat_dim: group}).load()
-        kept_local = len(group) - 1  # keep the last-globbed record
+        kept_local = 0 if mode == "first" else len(group) - 1
+        other_locals = [i for i in range(len(group)) if i != kept_local]
         conflicts = sorted(
             v
             for v in data_vars
             if any(
                 not _values_equal(
-                    sub[v].isel({concat_dim: pos}).values,
+                    sub[v].isel({concat_dim: other}).values,
                     sub[v].isel({concat_dim: kept_local}).values,
                 )
-                for pos in range(kept_local)
+                for other in other_locals
             )
         )
         if conflicts:
@@ -519,17 +534,22 @@ def _dedup_concat_axis(
                     if p is not None
                 }
             )
-            files_msg = f" ({'; '.join(files)})" if files else ""
-            raise ValueError(
-                f"{', '.join(conflicts)} disagree across {len(group)} records that "
-                f"all carry the same {concat_dim!r} timestamp ({at}){files_msg}. "
-                "This is the shape a wrong-files-combined mistake takes (see "
-                "build_kerchunk for building one reference per stream), not a "
-                "restart repeating its own last record, so nothing was collapsed "
-                "or dropped -- pass keep='all' if the repeat is expected and "
-                "every record should be kept as-is."
-            )
-        drop_positions.extend(group[:kept_local])
+            if mode == "verify":
+                files_msg = f" ({'; '.join(files)})" if files else ""
+                raise ValueError(
+                    f"{', '.join(conflicts)} disagree across {len(group)} records "
+                    f"that all carry the same {concat_dim!r} timestamp "
+                    f"({at}){files_msg}. This is the shape a wrong-files-combined "
+                    "mistake takes (see build_kerchunk for building one reference "
+                    "per stream), not a restart repeating its own last record, so "
+                    "nothing was collapsed or dropped -- pass keep='last' (or "
+                    "'first') if the divergence is expected, or keep='all' to keep "
+                    "every record as-is."
+                )
+            conflicts_seen.append((at, files, conflicts))
+        else:
+            identical_dropped += len(other_locals)
+        drop_positions.extend(group[i] for i in other_locals)
 
     keep_mask = np.ones(values.shape, dtype=bool)
     keep_mask[drop_positions] = False
@@ -539,13 +559,37 @@ def _dedup_concat_axis(
     pieces = [vds.isel({concat_dim: slice(int(i), int(i) + 1)}) for i in kept]
     vds = xr.concat(pieces, dim=concat_dim)
 
-    warnings.warn(
-        f"{len(drop_positions)} record(s) on {concat_dim!r} repeated a timestamp "
-        f"already seen across the {len(paths)} files concatenated -- kept the "
-        "last-globbed copy of each (verified identical by value) and dropped the "
-        "rest. Pass keep='all' to keep every record instead.",
-        stacklevel=3,
-    )
+    if identical_dropped:
+        warnings.warn(
+            f"{identical_dropped} record(s) on {concat_dim!r} repeated a "
+            f"timestamp already seen across the {len(paths)} files concatenated "
+            f"-- kept the {which}-globbed copy of each (verified identical by "
+            "value) and dropped the rest. Pass keep='all' to keep every record "
+            "instead.",
+            stacklevel=3,
+        )
+    if conflicts_seen:
+        shown = conflicts_seen[:5]
+        lines = "\n".join(
+            f"  {at}: {', '.join(v)}" + (f" ({'; '.join(files)})" if files else "")
+            for at, files, v in shown
+        )
+        more = (
+            f" (+{len(conflicts_seen) - len(shown)} more not shown)"
+            if len(conflicts_seen) > len(shown)
+            else ""
+        )
+        warnings.warn(
+            f"{len(conflicts_seen)} timestamp(s) on {concat_dim!r} repeat across "
+            f"files but the records DISAGREE -- kept the {which}-globbed copy of "
+            f"each anyway (keep={mode!r}){more}:\n{lines}\n"
+            "This is the shape a wrong-files-combined mistake takes (see "
+            "build_kerchunk for building one reference per stream) as much as it "
+            "is an ordinary restart/rerun that is not bit-reproducible -- confirm "
+            "which this is before trusting the result. Pass keep='unique' to "
+            "raise instead of guessing, or keep='all' to keep every record.",
+            stacklevel=3,
+        )
     return vds
 
 
@@ -589,7 +633,7 @@ def make_kerchunk(
     grid: str | Path | None = None,
     concat_dim: str | None = None,
     loadable_variables: tuple[str, ...] | None = None,
-    keep: str = "unique",
+    keep: str = "last",
     fmt: str | None = None,
     tolerant_attrs: bool = True,
     subchunk: dict[str, int] | None = None,
@@ -613,20 +657,33 @@ def make_kerchunk(
         model whose files should be joined along something other than time.
     keep
         Which records to keep after concatenating, when timestamps repeat.
-        ``"unique"`` (default) collapses a repeated timestamp to its
-        *last*-globbed record — after verifying, by comparing actual values, that
-        every record sharing that timestamp truly agrees; a group that disagrees
-        raises rather than guessing which one to keep (see
-        :func:`_dedup_concat_axis`). ``"all"`` keeps every record exactly as
-        concatenated, duplicates included — :func:`_warn_if_concat_axis_is_disordered`
-        still warns about them, it just is not repaired. ``"latest-per-file"``
-        keeps only the record with the latest time value in *each file* — the fix
-        for ROMS restart files, which write more than one time record per file
-        and, under cycling restarts, do not always write the newest one last.
-        This selection happens per file, before concatenation, so it removes only
-        the within-file duplication; any repeat *between* files still goes
-        through the ``"unique"``/``"all"`` choice above (default ``"unique"``, so
-        this combination collapses both).
+        Every choice below except ``"all"`` first reads back and compares the
+        *actual values* of the repeating records — not just a byte-length check,
+        which cannot tell an identical restart repeat from two genuinely
+        different records (see :func:`_dedup_concat_axis`).
+
+        - ``"last"`` (default) collapses a repeated timestamp to its
+          *last*-globbed record — a rerun/restart supersedes what it restarted
+          from. Never raises: a group whose records actually disagree still
+          collapses to the last-globbed one, but with a loud warning naming the
+          timestamp, files, and variables, since that shape is as consistent
+          with two streams accidentally combined as with an ordinary rerun that
+          is not bit-reproducible.
+        - ``"first"`` is the same, keeping the *first*-globbed record of a
+          disagreeing group instead.
+        - ``"unique"`` also keeps the last-globbed record, but *raises* the
+          moment any group disagrees rather than guessing — the strict choice,
+          for a build that should refuse silently-questionable data.
+        - ``"all"`` keeps every record exactly as concatenated, duplicates
+          included — :func:`_warn_if_concat_axis_is_disordered` still warns
+          about them, it just is not repaired.
+        - ``"latest-per-file"`` keeps only the record with the latest time
+          value in *each file* — the fix for ROMS restart files, which write
+          more than one time record per file and, under cycling restarts, do
+          not always write the newest one last. This selection happens per
+          file, before concatenation, so it removes only the within-file
+          duplication; any repeat *between* files still goes through
+          ``"last"``'s own rule afterward (so this combination collapses both).
     target_chunk_mb
         Automatic manifest subchunking, on by default: any *uncompressed* variable
         whose stored chunk exceeds this many megabytes is split (see
@@ -662,10 +719,10 @@ def make_kerchunk(
     from obspec_utils.registry import ObjectStoreRegistry
     from virtualizarr import open_virtual_dataset, open_virtual_mfdataset
 
-    if keep not in ("all", "unique", "latest-per-file"):
+    _KEEP_MODES = ("all", "last", "first", "unique", "latest-per-file")
+    if keep not in _KEEP_MODES:
         raise ValueError(
-            f"make_kerchunk: keep={keep!r} not recognized; use 'all', 'unique' or "
-            "'latest-per-file'"
+            f"make_kerchunk: keep={keep!r} not recognized; use one of {_KEEP_MODES}"
         )
     # Deliberately not Path() for remote sources: Path collapses the "//" in a URL
     # to "/", so http://host/f.nc becomes http:/host/f.nc and every downstream check
@@ -705,7 +762,18 @@ def make_kerchunk(
         )
         _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
         if keep != "all":
-            vds = _dedup_concat_axis(vds, concat_dim, loadable_variables, paths)
+            # "latest-per-file" only handles the within-file case (its preprocess=,
+            # above); the between-file dedup below still applies to it, with "last"
+            # semantics -- a restart stream's between-file overlap collapses too.
+            if keep == "unique":
+                dedup_mode = "verify"
+            elif keep == "first":
+                dedup_mode = "first"
+            else:
+                dedup_mode = "last"
+            vds = _dedup_concat_axis(
+                vds, concat_dim, loadable_variables, paths, mode=dedup_mode
+            )
 
         if grid is not None:
             gurl, gstore = _store_for(grid)
