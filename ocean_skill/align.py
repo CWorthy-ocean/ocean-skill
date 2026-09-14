@@ -642,31 +642,31 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     two steps to bracket with, or (``interp`` only) if every target fell
     outside the object's span -- there is nothing to prune or interpolate with.
 
-    Sorts ``obj`` along its time axis first if it is not already
-    non-decreasing -- a non-monotonic test lane (two source files
-    concatenated without a clean sort, a plausible ROMS multi-file artifact)
-    would otherwise raise ``ValueError`` out of ``pandas``' own nearest-step
-    lookup, which requires a sorted index. The values themselves are
-    unaffected, only their order along this one axis, so which reference cast
-    each step ends up nearest is unchanged.
+    Sorted and de-duplicated on its time axis first, via :func:`_sorted_unique_on`,
+    if it is not already both -- a real model lane can fail either requirement
+    (two source files concatenated without a clean sort/dedupe, a plausible
+    ROMS/kerchunk multi-file artifact): out of order raises ``ValueError`` out of
+    ``pandas``' own nearest-step lookup, which requires a sorted index; a repeated
+    timestamp at a concat seam raises ``InvalidIndexError`` instead, since that
+    same lookup also requires a *unique* one. See that function's own docstring
+    for what "first occurrence" means for a genuine duplicate. Everything else
+    below is unaffected: reordering/de-duplicating this one axis does not change
+    which step ends up nearest any given target.
     """
     name = _time_name(obj)
     if name is None or name not in obj.dims:
         return obj
     if targets is None or len(targets) == 0:
         return obj
+    if obj.sizes[name] <= 1:
+        return obj
+    obj = _sorted_unique_on(obj, name)
     values = np.asarray(obj[name].values)
     if values.size <= 1:
         return obj
     import pandas as pd
 
     idx = pd.Index(values)
-    if not idx.is_monotonic_increasing:
-        order = np.argsort(values, kind="stable")
-        obj = obj.isel({name: order})
-        values = values[order]
-        idx = pd.Index(values)
-
     targets = np.asarray(targets)
     if method not in ("interp", "linear"):
         pos = idx.get_indexer(targets, method="nearest")
@@ -1548,12 +1548,44 @@ def _pandas_freq(seconds: float) -> str:
     return f"{max(round(seconds / 3600.0), 1)}h"
 
 
-def _sorted_on(da, axis: str):
-    """Return ``da`` with ``axis`` ascending: every step below assumes that order."""
+def _sorted_unique_on(da, axis: str):
+    """Return ``da`` with ``axis`` strictly ascending *and* unique.
+
+    Everything downstream of this (:func:`_match_by_nearest`/``_match_by_mean``/
+    ``_match_exactly``, and :func:`subset_to_time_targets`'s own identical guard)
+    eventually builds a ``pandas.Index`` over this axis and calls
+    ``get_indexer``/``reindex`` on it -- both of which require a **sorted and
+    unique** index, not merely a sorted one. A real model lane can fail either
+    requirement: two source files concatenated without a clean sort leave the
+    axis out of order (not just reversed), and an overlapping seam between them
+    can also repeat a timestamp -- a plausible ROMS/kerchunk multi-file
+    artifact either way. A reversed-but-otherwise-clean axis used to be handled
+    here by a plain ``sortby``; a genuinely out-of-order or duplicated one
+    passed straight through and reached ``get_indexer`` unsorted/non-unique,
+    raising ``ValueError: index must be monotonic...`` or (for duplicates)
+    ``InvalidIndexError: Reindexing only valid with uniquely valued Index
+    objects``.
+
+    ``np.unique(values, return_index=True)`` does both steps in one pass: its
+    return is already sorted, and for a duplicated timestamp its index points
+    at that value's *first* occurrence in ``da``'s own original order -- an
+    arbitrary but deterministic tie-break, since a genuine duplicate shares the
+    same value by construction; which of two files' overlapping copies of a
+    boundary snapshot is kept is not something the timestamps alone can decide.
+    A no-op (returns ``da`` unchanged) when the axis is already strictly
+    increasing and unique, so an ordinary, well-formed lane never rebuilds a
+    pandas Index or re-selects for nothing.
+    """
     values = np.asarray(da[axis].values)
-    if values.size > 1 and values[0] > values[-1]:
-        return da.sortby(axis)
-    return da
+    if values.size <= 1:
+        return da
+    import pandas as pd
+
+    idx = pd.Index(values)
+    if idx.is_monotonic_increasing and idx.is_unique:
+        return da
+    _, first = np.unique(values, return_index=True)
+    return da.isel({axis: first})
 
 
 def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nearest"):
@@ -1838,7 +1870,7 @@ def match_axis(
         # (depth_method= there is nearest/interp, not mean/nearest/exact/auto).
         return _match_vertical(test, reference, tdim, rdim, method=depth_method)
 
-    test, reference = _sorted_on(test, tdim), _sorted_on(reference, rdim)
+    test, reference = _sorted_unique_on(test, tdim), _sorted_unique_on(reference, rdim)
     tf = _axis_floats(test, tdim, "test")
     rf = _axis_floats(reference, rdim, "reference")
     # captured before matching: a failure to match empties the lanes, and the spans are

@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from ocean_skill.align import subset_to_time, subset_to_time_targets
+from ocean_skill.align import _sorted_unique_on, subset_to_time, subset_to_time_targets
 
 
 def _dataset(times) -> xr.Dataset:
@@ -149,3 +149,82 @@ def test_targets_none_or_empty_or_no_time_dim_is_a_no_op():
     assert subset_to_time_targets(ds, []) is ds
     static = xr.Dataset({"x": (("lat",), [1.0, 2.0])}, coords={"lat": [0.0, 1.0]})
     assert subset_to_time_targets(static, [np.datetime64("2024-01-01")]) is static
+
+
+# -- _sorted_unique_on / duplicate timestamps: the real Hvalfjörður bgc shape --
+#
+# Sorting alone (test_targets_on_a_non_monotonic_axis_does_not_raise_and_matches_by_value,
+# above) is not the whole story: a real model lane can *also* repeat a
+# timestamp at a multi-file/kerchunk concat seam, which pandas' nearest-step
+# lookup rejects for a different reason (non-uniqueness, not disorder) --
+# `InvalidIndexError: Reindexing only valid with uniquely valued Index
+# objects`, the exact error a live compare() against the real bgc dataset hit
+# even after the sort-only fix above landed.
+
+
+def test_sorted_unique_on_dedupes_a_monotonic_but_repeated_axis():
+    ds = _dataset(["2024-01-01", "2024-06-01", "2024-06-01", "2024-11-29"])
+    out = _sorted_unique_on(ds, "time")
+    assert sorted(pd.Timestamp(t) for t in out.time.values) == [
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-06-01"),
+        pd.Timestamp("2024-11-29"),
+    ]
+
+
+def test_sorted_unique_on_sorts_and_dedupes_together():
+    ds = _dataset(["2024-02-01", "2024-07-10", "2024-04-20", "2024-11-29", "2024-11-29"])
+    with pytest.raises(Exception):
+        pd.Index(ds.time.values).get_indexer(
+            [np.datetime64("2024-04-20")], method="nearest"
+        )
+    out = _sorted_unique_on(ds, "time")
+    idx = pd.Index(out.time.values)
+    assert idx.is_monotonic_increasing
+    assert idx.is_unique
+    assert sorted(pd.Timestamp(t) for t in out.time.values) == [
+        pd.Timestamp("2024-02-01"),
+        pd.Timestamp("2024-04-20"),
+        pd.Timestamp("2024-07-10"),
+        pd.Timestamp("2024-11-29"),
+    ]
+
+
+def test_sorted_unique_on_is_a_no_op_when_already_sorted_and_unique():
+    ds = _dataset(pd.date_range("2024-01-01", "2024-03-01", freq="7D"))
+    assert _sorted_unique_on(ds, "time") is ds
+
+
+def test_targets_on_a_duplicate_and_non_monotonic_axis_does_not_raise():
+    """The exact shape reported live: duplicate + out-of-order model steps,
+    which pandas rejects with InvalidIndexError (not the plain sort fix's
+    ValueError) -- and 'ctd_station_HV1' vs 'bgc' crashed the whole
+    compare() batch on it, since InvalidIndexError isn't caught by
+    skip_missing."""
+    ds = _dataset(
+        ["2024-02-01", "2024-07-10", "2024-04-20", "2024-11-29", "2024-11-29"]
+    )
+    with pytest.raises(Exception, match="[Uu]nique"):
+        pd.Index(ds.time.values).get_indexer(
+            [np.datetime64("2024-04-20")], method="nearest"
+        )
+
+    targets = np.array([np.datetime64("2024-04-21"), np.datetime64("2024-10-09")])
+    out = subset_to_time_targets(ds, targets)
+    # 04-21's nearest is 04-20; 10-09's nearest is 11-29 (the duplicate collapses
+    # to one entry, ~51 days away vs. ~91 for 07-10) -- no 10-08 in this fixture.
+    assert sorted(pd.Timestamp(t) for t in out.time.values) == [
+        pd.Timestamp("2024-04-20"),
+        pd.Timestamp("2024-11-29"),
+    ]
+
+
+def test_targets_interp_on_a_duplicate_and_non_monotonic_axis_does_not_raise():
+    ds = _dataset(
+        ["2024-02-01", "2024-07-10", "2024-04-20", "2024-11-29", "2024-11-29"]
+    )
+    out = subset_to_time_targets(
+        ds, np.array([np.datetime64("2024-05-01")]), method="interp"
+    )
+    assert out.sizes["time"] == 1
+    assert pd.Timestamp(out.time.values[0]) == pd.Timestamp("2024-05-01")
