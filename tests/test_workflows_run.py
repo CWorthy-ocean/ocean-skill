@@ -34,14 +34,14 @@ def test_no_keep_key_still_collapses_a_restart_boundary(tmp_path):
             {
                 "name": "GOM_bgc",
                 "files": str(tmp_path / "out.*.nc"),
-                "ref": str(tmp_path / "refs" / "gom_bgc.parquet"),
+                "ref": str(tmp_path / "refs" / "gom_bgc.json"),
             }
         ],
         tmp_path / "catalog.yaml",
     )
 
     ds = xr.open_dataset(
-        str(tmp_path / "refs" / "gom_bgc.parquet"),
+        str(tmp_path / "refs" / "gom_bgc.json"),
         engine="kerchunk",
         chunks={},
         decode_times=False,
@@ -60,7 +60,7 @@ def test_an_explicit_keep_key_is_still_forwarded(tmp_path):
             {
                 "name": "GOM_bgc",
                 "files": str(tmp_path / "out.*.nc"),
-                "ref": str(tmp_path / "refs" / "gom_bgc.parquet"),
+                "ref": str(tmp_path / "refs" / "gom_bgc.json"),
                 "keep": "all",
             }
         ],
@@ -68,7 +68,7 @@ def test_an_explicit_keep_key_is_still_forwarded(tmp_path):
     )
 
     ds = xr.open_dataset(
-        str(tmp_path / "refs" / "gom_bgc.parquet"),
+        str(tmp_path / "refs" / "gom_bgc.json"),
         engine="kerchunk",
         chunks={},
         decode_times=False,
@@ -76,12 +76,42 @@ def test_an_explicit_keep_key_is_still_forwarded(tmp_path):
     assert ds.sizes["ocean_time"] == 4, "keep='all' must still keep every record"
 
 
-def test_no_keep_key_still_raises_on_a_genuine_conflict(tmp_path):
-    """The safety net applies here too.
+def test_no_keep_key_collapses_a_genuine_disagreement_without_raising(tmp_path):
+    """A real overlapping rerun that is not bit-reproducible must not block a build.
 
-    A suite that names no ``keep:`` at all still gets the mixed-stream tripwire,
-    not a silent merge.
+    A suite that names no ``keep:`` at all gets the ``"last"`` default: the newer
+    segment wins and a loud warning names the divergence, but the refresh
+    completes -- this is the exact shape that first surfaced as the Anvil/Iceland
+    build raising on a legitimate rerun.
     """
+    _segment(tmp_path / "cdr.nc", 0.0, 1.0)
+    _segment(tmp_path / "rst.nc", 0.0, 999.0)  # same stamps, different data
+
+    with pytest.warns(UserWarning, match="DISAGREE"):
+        _refresh_sources(
+            [
+                {
+                    "name": "GOM_bgc",
+                    "files": str(tmp_path / "*.nc"),
+                    "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+                }
+            ],
+            tmp_path / "catalog.yaml",
+        )
+
+    ds = xr.open_dataset(
+        str(tmp_path / "refs" / "gom_bgc.json"),
+        engine="kerchunk",
+        chunks={},
+        decode_times=False,
+    )
+    assert float(ds.NO3.isel(ocean_time=0, eta_rho=0, xi_rho=0)) == 999.0, (
+        "the last-globbed (rst) record must win"
+    )
+
+
+def test_a_suite_can_opt_into_the_strict_raise(tmp_path):
+    """``keep: unique`` in the suite YAML still gets the mixed-stream tripwire."""
     _segment(tmp_path / "cdr.nc", 0.0, 1.0)
     _segment(tmp_path / "rst.nc", 0.0, 999.0)  # same stamps, different data
 
@@ -91,7 +121,8 @@ def test_no_keep_key_still_raises_on_a_genuine_conflict(tmp_path):
                 {
                     "name": "GOM_bgc",
                     "files": str(tmp_path / "*.nc"),
-                    "ref": str(tmp_path / "refs" / "gom_bgc.parquet"),
+                    "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+                    "keep": "unique",
                 }
             ],
             tmp_path / "catalog.yaml",

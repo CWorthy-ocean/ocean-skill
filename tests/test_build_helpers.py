@@ -1066,11 +1066,11 @@ def test_two_streams_in_one_reference_are_warned_about(tmp_path):
     assert ds.sizes["ocean_time"] == 8
 
 
-def test_unique_is_the_default_and_collapses_identical_duplicates(tmp_path):
+def test_last_is_the_default_and_collapses_identical_duplicates(tmp_path):
     """The same cdr + rst shape, but under the new default: collapsed, not kept.
 
     Every file here carries the same placeholder value, so the duplicates truly
-    agree and ``keep="unique"`` (the default) collapses them without raising.
+    agree and ``keep="last"`` (the default) collapses them quietly.
     """
     from ocean_skill.build import make_kerchunk
 
@@ -1091,8 +1091,57 @@ def test_unique_is_the_default_and_collapses_identical_duplicates(tmp_path):
     assert list(ds.ocean_time.values) == sorted(ds.ocean_time.values)
 
 
+def test_last_collapses_a_genuine_disagreement_with_a_loud_warning(tmp_path):
+    """A rerun that is not bit-reproducible: same stamp, different values.
+
+    The default must not block a legitimate rerun the way ``keep="unique"``
+    would -- it keeps the last-globbed (newer) record and says loudly that the
+    two disagreed, rather than raising or staying silent.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / "cdr.nc", "NETCDF4", value=1.0, t0=0.0),
+        _roms_like(tmp_path / "rst.nc", "NETCDF4", value=999.0, t0=0.0),
+    ]
+
+    # The disorder warning fires first (unconditionally, before dedup runs), so
+    # the DISAGREE warning this test cares about is not necessarily caught[0].
+    with pytest.warns(UserWarning, match="DISAGREE") as caught:
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    message = next(str(w.message) for w in caught if "DISAGREE" in str(w.message))
+    assert "NO3" in message
+    assert "cdr.nc" in message and "rst.nc" in message
+    assert "build_kerchunk" in message, "say what to do about it"
+    assert "keep='unique'" in message, "say how to get strict behavior instead"
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert float(ds.NO3.isel(ocean_time=0, eta_rho=0, xi_rho=0)) == 999.0, (
+        "the last-globbed (rst) record must win"
+    )
+
+
+def test_first_keeps_the_earlier_globbed_record(tmp_path):
+    """The mirror of the default: ``keep="first"`` keeps cdr's value, not rst's."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / "cdr.nc", "NETCDF4", value=1.0, t0=0.0),
+        _roms_like(tmp_path / "rst.nc", "NETCDF4", value=999.0, t0=0.0),
+    ]
+
+    with pytest.warns(UserWarning, match="DISAGREE"):
+        out = make_kerchunk(files, out=tmp_path / "r.json", keep="first")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert float(ds.NO3.isel(ocean_time=0, eta_rho=0, xi_rho=0)) == 1.0, (
+        "the first-globbed (cdr) record must win"
+    )
+
+
 def test_unique_raises_when_duplicates_actually_disagree(tmp_path):
-    """The dangerous case: two streams sharing a stamp but holding different data.
+    """The strict opt-in: refuse to guess, rather than pick a winner.
 
     Byte length alone cannot tell this apart from a genuine restart repeat (an
     uncompressed chunk's size is fixed by shape/dtype, not content) -- this is
@@ -1106,7 +1155,7 @@ def test_unique_raises_when_duplicates_actually_disagree(tmp_path):
     ]
 
     with pytest.raises(ValueError, match="disagree") as excinfo:
-        make_kerchunk(files, out=tmp_path / "r.json")
+        make_kerchunk(files, out=tmp_path / "r.json", keep="unique")
 
     message = str(excinfo.value)
     assert "NO3" in message
@@ -1114,22 +1163,24 @@ def test_unique_raises_when_duplicates_actually_disagree(tmp_path):
     assert "build_kerchunk" in message, "say what to do about it"
 
 
-def test_unique_leaves_a_clean_series_alone(tmp_path):
-    """No repeats -> no warning, no change -- the default costs nothing here."""
+def test_a_clean_series_is_left_alone_under_every_dedup_mode(tmp_path):
+    """No repeats -> no warning, no change -- dedup costs nothing here."""
     from ocean_skill.build import make_kerchunk
 
-    files = [
-        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", t0=i * 86400.0) for i in range(3)
-    ]
+    for keep in ("last", "first", "unique"):
+        files = [
+            _roms_like(tmp_path / f"o.{keep}.{i}.nc", "NETCDF4", t0=i * 86400.0)
+            for i in range(3)
+        ]
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = make_kerchunk(files, out=tmp_path / "r.json")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = make_kerchunk(files, out=tmp_path / f"r_{keep}.json", keep=keep)
 
-    assert not caught
+        assert not caught, f"keep={keep!r} warned on a clean series"
 
-    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
-    assert ds.sizes["ocean_time"] == 6
+        ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+        assert ds.sizes["ocean_time"] == 6
 
 
 def test_the_warning_names_a_date_not_a_raw_roms_time(tmp_path):

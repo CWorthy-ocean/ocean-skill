@@ -33,8 +33,9 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     :func:`ocean_skill.build.make_kerchunk` — a restart stream that is still being
     refreshed against a live run declares ``keep: latest-per-file`` to drop each
     file's earlier, superseded record. Left unset, ``make_kerchunk``'s own default
-    (``"unique"``) applies, so an ordinary stream's restart-boundary overlaps are
-    collapsed on every refresh without the suite having to say so.
+    (``"last"``) applies, so an ordinary stream's restart-boundary overlaps are
+    collapsed on every refresh without the suite having to say so -- newer segment
+    wins, with a loud warning (not a raise) if the overlap actually disagrees.
     """
     import glob as _glob
 
