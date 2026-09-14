@@ -1163,10 +1163,12 @@ def _time_depth_grid(
     items: list[dict[str, Any]],
     title: str | None = None,
     mark: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
     ncols: int | None = None,
     nrows: int | None = None,
-    shared_limits: bool = False,
-    sharex: bool | None = None,
+    shared_limits: bool | str = False,
+    sharex: bool | str | None = None,
     sharey: bool = False,
     font_scale: float = 1.0,
     size=None,
@@ -1182,23 +1184,33 @@ def _time_depth_grid(
     The interactive twin of
     :func:`ocean_skill.plot.matplotlib_renderer.time_depth_grid` -- see its
     docstring for the composition this mirrors: a single stacked column by
-    default (``ncols=``/``nrows=`` to wrap instead), each panel its own colour
-    scale unless ``shared_limits=True`` computes one shared range across all of
-    them (warning once if the items' ``standard_name``s actually differ), and
-    ``sharex`` sharing (or not) every panel's time axis -- see below.
+    default (``ncols=``/``nrows=`` to wrap instead, ``rows=``/``cols=`` to facet
+    into a genuine two-axis grid on ``variable``/``source`` instead), each panel
+    its own colour scale unless ``shared_limits=True``/``"variable"``/``"source"``
+    pools some or all of them onto one shared range (warning once per group that
+    would mix variables), and ``sharex`` sharing (or not) every panel's time axis
+    -- see below.
 
     Every panel draws through :func:`_time_depth` itself, given its own title
     computed by :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid_titles`
+    (unfaceted) or :func:`~ocean_skill.plot._facets.facet_grid_titles` (faceted)
     rather than that function's own standalone variable-naming default -- whichever
-    of variable, ``label``, place, and period every panel shares moves up into the
-    ``Layout``'s own title instead, so nothing is named twice.
+    of variable, ``label``, place, and period every panel (or, faceted, every
+    panel in one row/column) shares moves up into the ``Layout``'s own title (or
+    that row's/column's own first drawn panel) instead, so nothing is named
+    twice. A blank grid cell (a facet combination nothing matched) draws as
+    ``hv.Empty()``, the same placeholder :func:`_profile` uses for its own
+    two-axis facet's blanks.
 
     Bokeh has no ``plt.subplots(sharex=)`` to link panels the way the static
     renderer does -- ``sharex=None`` (the default share-when-meaningful rule the
-    static ``time_depth_grid`` applies) instead computes one shared time range
+    static ``time_depth_grid`` applies) instead computes a shared time range
     (:func:`~ocean_skill.plot.series.value_span`, the same helper :func:`_series`
     shares its own x with) and bakes it into every panel's own ``xlim``, exactly
-    as :func:`_series` does. ``sharex=False`` leaves each panel to its own data
+    as :func:`_series` does -- one range for the whole grid unfaceted, or, faceted
+    into a genuine two-axis grid, one range per row (or column, whichever holds
+    one station's own several panels) instead, matching the static renderer's own
+    ``sharex="row"``/``"col"``. ``sharex=False`` leaves each panel to its own data
     range instead -- the disjoint-deployment case :func:`time_depth_grid`'s own
     docstring describes.
 
@@ -1209,70 +1221,169 @@ def _time_depth_grid(
     (:func:`~ocean_skill.plot.series.value_span` again) and bakes it into every
     panel's own ``ylim``.
 
-    ``titles=`` overrides each panel's own title by hand, one string per item
-    in ``items`` order (row-major, matching the panel grid) -- ``None`` at a
-    position keeps that panel's own title; the wrong count raises a
-    copy-pasteable ``ValueError`` listing the current titles.
+    ``titles=`` overrides each panel's own title by hand: one string per item
+    in ``items`` order (row-major, matching the panel grid) unfaceted, or --
+    faceted with ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks
+    included. ``None`` at a position keeps that panel's own title; the wrong
+    count raises a copy-pasteable ``ValueError`` listing the current titles.
     """
     hv = _extension()
 
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, time_depth_grid_titles
+    from ocean_skill.plot._facets import (
+        facet_grid_titles,
+        one_item_cells,
+        resolve_facets,
+        resolve_limit_groups,
+    )
+    from ocean_skill.plot.matplotlib_renderer import (
+        _limits,
+        field_title,
+        time_depth_grid_titles,
+    )
     from ocean_skill.plot.series import grid_shape, time_values, value_span
     from ocean_skill.plot.time_depth import prepare_time_depth
 
-    n = len(items)
-    grid_ncols = grid_shape(n, as_columns=False, ncols=ncols, nrows=nrows)[1]
+    faceted = rows is not None or cols is not None
+    if faceted and (ncols is not None or nrows is not None):
+        raise ValueError(
+            f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- "
+            "ncols=/nrows= (for wrapping the unfaceted stacked column) do not "
+            "also apply. Drop ncols=/nrows=."
+        )
 
-    prepared = [prepare_time_depth(item["field"]) for item in items]
-    auto_suptitle, auto_titles = time_depth_grid_titles(
-        items, [geometry for _, geometry in prepared]
-    )
+    n = len(items)
+    eff_rows: str | None = None
+    if faceted:
+        cells, row_values, col_values, eff_rows, _ = resolve_facets(
+            items, rows, cols, family="a time_depth grid", axis_hint=True
+        )
+        cell_items: list[dict[str, Any] | None] = one_item_cells(
+            cells, row_values, col_values, family="a time_depth grid"
+        )
+        grid_nrows, grid_ncols = len(row_values), len(col_values)
+    else:
+        # No padding here (unlike the static renderer's plt.subplots, which always
+        # needs a full rectangle to hide trailing cells of): holoviews already
+        # lays out a ragged last row on its own, and always has -- padding it
+        # with hv.Empty() would add real (if invisible) Layout entries where
+        # none existed before, changing len(obj) for a plain ncols= wrap that
+        # never asked for a facet.
+        grid_nrows, grid_ncols = grid_shape(
+            n, as_columns=False, ncols=ncols, nrows=nrows
+        )
+        cell_items = list(items)
+
+    # (grid index, item) for every drawn cell, row-major -- see the identical
+    # comment in matplotlib_renderer.time_depth_grid, which this mirrors.
+    drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
+    prepared: dict[int, tuple[Any, Any]] = {
+        i: prepare_time_depth(item["field"]) for i, item in drawn
+    }
+
+    if faceted:
+        components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
+        for i, item in drawn:
+            _, geometry = prepared[i]
+            components[i] = (
+                field_title(item.get("standard_name")),
+                item.get("label") or "",
+                geometry.place_note,
+                geometry.period_note,
+            )
+        auto_suptitle, cell_titles = facet_grid_titles(
+            components, grid_nrows, grid_ncols
+        )
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    else:
+        auto_suptitle, drawn_titles = time_depth_grid_titles(
+            [item for _, item in drawn], [prepared[i][1] for i, _ in drawn]
+        )
+        resolved_full = _titles.resolve_titles(drawn_titles, titles)
     if title is None:
         title = auto_suptitle
 
-    shared_clim = None
-    if shared_limits:
-        import warnings
+    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    clims: dict[int, tuple[float, float] | None] = {}
+    if limit_groups is not None:
+        drawn_indices = [i for i, _ in drawn]
+        for group in limit_groups:
+            group_indices = [drawn_indices[g] for g in group]
+            span = _limits(*(prepared[i][0] for i in group_indices), robust=robust)
+            for i in group_indices:
+                clims[i] = span
 
-        names = {item.get("standard_name") for item in items}
-        if len(names) > 1:
-            warnings.warn(
-                f"shared_limits=True but panels use different variables "
-                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every panel.",
-                stacklevel=2,
-            )
-        shared_clim = _limits(*(field for field, _ in prepared), robust=robust)
-
+    date_axis_kinds = {prepared[i][1].date_axis for i, _ in drawn}
     if sharex is None:
-        # the same auto rule time_depth_grid applies: one stacked column, every
-        # panel the same x-axis kind (all real dates, or all one groupby index)
-        sharex = grid_ncols == 1 and len({g.date_axis for _, g in prepared}) == 1
-    shared_xlim = None
-    if sharex and prepared[0][1].date_axis:
-        # a groupby's integer axis (month/year/...) already aligns across panels
-        # with no range to share; only a real date axis needs one computed.
-        shared_xlim = value_span(
-            [time_values(field[geometry.x_name]) for field, geometry in prepared]
-        )
+        if grid_ncols == 1 or grid_nrows == 1:
+            sharex = len(date_axis_kinds) == 1
+        elif faceted:
+            # A genuine two-axis facet grid: share only within whichever axis
+            # holds one station's own several panels -- see the identical
+            # rule (and rationale) in matplotlib_renderer.time_depth_grid.
+            sharex = (
+                ("row" if eff_rows == "source" else "col")
+                if len(date_axis_kinds) == 1
+                else False
+            )
+        else:
+            # An unfaceted numeric ncols=/nrows= wrap with more than one row
+            # and column has no row/column identity to share along -- unchanged
+            # from before rows=/cols= existed: never auto-shared.
+            sharex = False
+    xlims: dict[int, tuple[float, float] | None] = {}
+    if sharex in ("row", "col"):
+        groups_by_key: dict[int, list[int]] = {}
+        for i, _ in drawn:
+            r, c = divmod(i, grid_ncols)
+            key = r if sharex == "row" else c
+            groups_by_key.setdefault(key, []).append(i)
+        for group_indices in groups_by_key.values():
+            span = None
+            if prepared[group_indices[0]][1].date_axis:
+                # a groupby's integer axis (month/year/...) already aligns
+                # across panels with no range to share; only a real date
+                # axis needs one computed.
+                span = value_span(
+                    [
+                        time_values(prepared[i][0][prepared[i][1].x_name])
+                        for i in group_indices
+                    ]
+                )
+            for i in group_indices:
+                xlims[i] = span
+    elif sharex:
+        span = None
+        if drawn and prepared[drawn[0][0]][1].date_axis:
+            span = value_span(
+                [time_values(prepared[i][0][prepared[i][1].x_name]) for i, _ in drawn]
+            )
+        for i, _ in drawn:
+            xlims[i] = span
     shared_ylim = None
     if sharey:
         shared_ylim = value_span(
-            [np.asarray(field[geometry.y_name]) for field, geometry in prepared]
+            [np.asarray(prepared[i][0][prepared[i][1].y_name]) for i, _ in drawn]
         )
 
-    resolved_titles = _titles.resolve_titles(auto_titles, titles)
-
-    plots = []
-    for item, panel_title in zip(items, resolved_titles):
+    plots: list[Any] = []
+    for i in range(len(cell_items)):
+        item = cell_items[i]
+        if item is None:
+            # An empty cell in a two-axis rows=/cols= grid (see
+            # ocean_skill.plot._facets.one_item_cells) -- holoviews' own
+            # explicit "nothing here" placeholder for a Layout cell, matching
+            # the static renderer's hidden (but present) axes for the same
+            # cell.
+            plots.append(hv.Empty())
+            continue
         plots.append(
             _time_depth(
                 item,
-                title=panel_title,
+                title=resolved_full[i],
                 mark=mark,
-                clim=shared_clim,
-                xlim=shared_xlim,
+                clim=clims.get(i),
+                xlim=xlims.get(i),
                 ylim=shared_ylim,
                 font_scale=font_scale,
                 size=size,
@@ -1290,6 +1401,8 @@ def _time_depth_grid(
 def _field_map_grid(
     items: list[dict[str, Any]],
     title: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
     ncols: int | None = None,
     shared_axes: bool = True,
     domain=None,
@@ -1302,6 +1415,7 @@ def _field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    shared_limits: bool | str = False,
     titles=None,
     **_,
 ):
@@ -1313,28 +1427,42 @@ def _field_map_grid(
     :meth:`ocean_skill.field.Field._map_item`) is already a single, reduced-to-one-
     instant field, so unlike :func:`_field_facet` there is no facet coordinate
     ordering the panels: each gets its own colour scale, drawn through the same
-    :func:`_quadmesh` every geographic family shares, and its own title is its
-    variable (:func:`~ocean_skill.plot.matplotlib_renderer.field_title`) rather than
-    a facet label. ``title`` defaults to whatever the whole set shares
-    (:func:`~ocean_skill.plot.matplotlib_renderer.grid_suptitle`), the same as the
-    static renderer.
+    :func:`_quadmesh` every geographic family shares, unless ``shared_limits=True``/
+    ``"variable"``/``"source"`` pools some or all of them onto one shared range
+    instead. Its own title is its variable (:func:`~ocean_skill.plot
+    .matplotlib_renderer.field_title`) rather than a facet label, unfaceted -- faceted
+    with ``rows=``/``cols=`` (the same vocabulary and implied-complement rule
+    :func:`~ocean_skill.plot.matplotlib_renderer.time_depth_grid` accepts), the same
+    identity instead classifies the same way that function's own faceted titling
+    does (:func:`~ocean_skill.plot._facets.facet_grid_titles`) and a combination
+    nothing matched draws as ``hv.Empty()``. ``title`` defaults to whatever the whole
+    set shares (:func:`~ocean_skill.plot.matplotlib_renderer.grid_suptitle`), the
+    same as the static renderer, either way.
 
     The column count comes from the shared
-    :func:`~ocean_skill.plot.typography.facet_layout`, so the two renderers arrange
-    the same panels the same way -- the grid is free here too, these panels having
-    no inherent order either.
+    :func:`~ocean_skill.plot.typography.facet_layout` unfaceted, so the two renderers
+    arrange the same panels the same way -- the grid is free here too, these panels
+    having no inherent order either. Faceted, the shape is the facets' own -- ``ncols=``
+    is then refused, matching the static renderer.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits`, applied to each panel's own scale -- see the static renderer's
-    ``field_map_grid`` docstring.
+    ._limits`, applied to each panel's (or, with ``shared_limits=``, that group's
+    shared) own scale -- see the static renderer's ``field_map_grid`` docstring.
 
-    ``titles=`` overrides each panel's own title by hand, one string per item
-    in ``items`` order (row-major, matching the panel grid) -- ``None`` at a
-    position keeps that panel's own (:func:`field_title`) title; the wrong
-    count raises a copy-pasteable ``ValueError`` listing the current titles.
+    ``titles=`` overrides each panel's own title by hand: one string per item in
+    ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
+    ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included. ``None`` at
+    a position keeps that panel's own auto title; the wrong count raises a
+    copy-pasteable ``ValueError`` listing the current titles.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
+    from ocean_skill.plot._facets import (
+        facet_grid_titles,
+        one_item_cells,
+        resolve_facets,
+        resolve_limit_groups,
+    )
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
         _limits,
@@ -1345,31 +1473,83 @@ def _field_map_grid(
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
+
+    faceted = rows is not None or cols is not None
+    if faceted and ncols is not None:
+        raise ValueError(
+            f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- ncols= "
+            "(for wrapping the unfaceted grid) does not also apply. Drop ncols=."
+        )
+
     n = len(items)
     if title is None:
         title = grid_suptitle(items)
-    if ncols is None:
-        ncols, _nrows = facet_layout(
-            n, _aspect_of(items[0]["field"]), canvas=resolve_canvas(size, zoom)
+
+    if faceted:
+        cells, row_values, col_values, _, _ = resolve_facets(
+            items, rows, cols, family="a set of maps"
         )
-    ncols = max(int(ncols), 1)
+        cell_items: list[dict[str, Any] | None] = one_item_cells(
+            cells, row_values, col_values, family="a set of maps"
+        )
+        nrows, ncols = len(row_values), len(col_values)
+    else:
+        if ncols is None:
+            ncols, _nrows = facet_layout(
+                n, _aspect_of(items[0]["field"]), canvas=resolve_canvas(size, zoom)
+            )
+        ncols = max(int(ncols), 1)
+        nrows = -(-n // ncols)
+        cell_items = list(items)
 
-    resolved_titles = _titles.resolve_titles(
-        [field_title(item.get("standard_name")) for item in items], titles
-    )
+    drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
 
-    panels = []
-    for item, panel_title in zip(items, resolved_titles, strict=True):
+    if faceted:
+        components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
+        for i, item in drawn:
+            components[i] = (
+                field_title(item.get("standard_name")),
+                item.get("label") or "",
+            )
+        _, cell_titles = facet_grid_titles(components, nrows, ncols)
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    else:
+        drawn_titles = [field_title(item.get("standard_name")) for _, item in drawn]
+        resolved_full = _titles.resolve_titles(drawn_titles, titles)
+
+    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    clims: dict[int, tuple[float, float]] = {}
+    if limit_groups is not None:
+        drawn_indices = [i for i, _ in drawn]
+        for group in limit_groups:
+            group_indices = [drawn_indices[g] for g in group]
+            span = _limits(
+                *(cell_items[i]["field"] for i in group_indices), robust=robust
+            )
+            for i in group_indices:
+                clims[i] = span
+
+    panels: list[Any] = []
+    for i in range(len(cell_items)):
+        item = cell_items[i]
+        if item is None:
+            # An empty cell in a two-axis rows=/cols= grid (see
+            # ocean_skill.plot._facets.one_item_cells) -- holoviews' own
+            # explicit "nothing here" placeholder for a Layout cell, matching
+            # the static renderer's hidden (but present) axes for the same
+            # cell.
+            panels.append(hv.Empty())
+            continue
         field = item["field"]
         standard_name = item.get("standard_name")
         seq, _div = cmaps_for(standard_name)
         log = is_log(standard_name)
-        lo, hi = _limits(field, robust=robust)
+        lo, hi = clims.get(i) or _limits(field, robust=robust)
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
             field,
-            title=panel_title,
+            title=resolved_full[i],
             cmap=seq,
             clim=clim,
             units=item.get("units") or "",
@@ -3359,6 +3539,13 @@ def _series(
 
     plots = []
     for panel in layout.panels:
+        if panel.blank:
+            # An empty cell in a two-axis rows=/cols= grid (see Panel.blank) --
+            # holoviews' own explicit "nothing here" placeholder for a Layout
+            # cell, matching the static renderer's hidden (but present, so the
+            # grid keeps its shape) axes for the same cell.
+            plots.append(hv.Empty())
+            continue
         x_dim = hv.Dimension(layout.xlabel, label=layout.xlabel)
         # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
         # "name [unit]", and the two renderers must print one axis label, not two.
@@ -4626,6 +4813,19 @@ def render(spec, **kwargs: Any):
             opts.pop("domain", None)
         if len(spec.items) > 1:
             return _time_depth_grid(spec.items, **opts)
+        if "rows" in opts or "cols" in opts:
+            # rows=/cols= are real options -- of time_depth_grid, not this
+            # single panel -- so there is nothing to facet; warn and drop
+            # rather than raise, matching this renderer's own convention for
+            # an option a smaller shape has no use for (see 'domain' above).
+            warnings.warn(
+                "rows=/cols= need several panels to facet -- this FieldSet has "
+                "a single time_depth panel, so there is no grid to arrange. "
+                "Ignoring them.",
+                stacklevel=2,
+            )
+            opts.pop("rows", None)
+            opts.pop("cols", None)
         return _time_depth(spec.single, **opts)
     if family == "time_depth_row":
         if "domain" in opts:

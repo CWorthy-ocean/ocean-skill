@@ -514,14 +514,122 @@ def test_three_variables_become_three_rows():
     assert len(_holoviews_titles(render(_spec(items), renderer="holoviews"))) == 3
 
 
-def test_rows_and_cols_together_are_refused():
-    with pytest.raises(ValueError, match="one facet, not two"):
-        render(_spec([_item()], rows="variable", cols="source"), renderer="matplotlib")
-
-
 def test_faceting_on_an_unknown_field_says_what_is_allowed():
     with pytest.raises(ValueError, match="expected one of variable"):
         render(_spec([_item()], rows="platform"), renderer="matplotlib")
+
+
+# -- a genuine 2-D rows=x cols= grid: variable x source ---------------------------------
+
+
+def test_rows_variable_cols_source_builds_the_full_grid_in_both_renderers():
+    items = [
+        _item(TEMPERATURE, test="modelA"),
+        _item(TEMPERATURE, test="modelB"),
+        _item(SALINITY, units="1e-3", test="modelA"),
+        _item(SALINITY, units="1e-3", test="modelB"),
+    ]
+    static = render(_spec(items, rows="variable", cols="source"), renderer="matplotlib")
+    interactive = render(
+        _spec(items, rows="variable", cols="source"), renderer="holoviews"
+    )
+    assert len(static.axes) == 4
+    assert all(ax.get_visible() for ax in static.axes)
+    titles = _matplotlib_titles(static)
+    assert titles == _holoviews_titles(interactive)
+    # Row-major: cell (r, c) at index r*ncols + c holds variable r, source c.
+    ncols = 2
+    for r, variable in enumerate((TEMPERATURE, SALINITY)):
+        for c in range(ncols):
+            title = titles[r * ncols + c]
+            assert ("temperature" if variable == TEMPERATURE else "salinity") in title
+
+
+def test_two_facet_ncols_is_refused():
+    with pytest.raises(ValueError, match="already fix the grid's shape"):
+        render(
+            _spec([_item()], rows="variable", cols="source", ncols=2),
+            renderer="matplotlib",
+        )
+
+
+def test_a_ragged_series_grid_renders_a_hidden_blank():
+    """A source missing one of the variables another one has draws a hidden
+    blank panel in that cell, rather than shifting every later cell out of
+    place.
+    """
+    items = [
+        _item(TEMPERATURE, test="modelA"),
+        _item(TEMPERATURE, test="modelB"),
+        _item(SALINITY, units="1e-3", test="modelA"),
+        # no modelB salinity
+    ]
+    static = render(_spec(items, rows="variable", cols="source"), renderer="matplotlib")
+    interactive = render(
+        _spec(items, rows="variable", cols="source"), renderer="holoviews"
+    )
+    assert len(static.axes) == 4  # the full grid shape, blank cell included
+    ncols = 2
+    blank_index = 1 * ncols + 1  # row=salinity (index 1), col=modelB (index 1)
+    for i, ax in enumerate(static.axes):
+        assert ax.get_visible() == (i != blank_index)
+    import holoviews as hv
+
+    hv_elements = list(interactive)
+    assert isinstance(hv_elements[blank_index], hv.Empty)
+
+
+def test_two_facet_variable_axis_drops_variable_from_legend_entries():
+    items = [
+        _item(TEMPERATURE, test="modelA"),
+        _item(TEMPERATURE, test="modelB"),
+        _item(SALINITY, units="1e-3", test="modelA"),
+        _item(SALINITY, units="1e-3", test="modelB"),
+    ]
+    static = render(_spec(items, rows="variable", cols="source"), renderer="matplotlib")
+    interactive = render(
+        _spec(items, rows="variable", cols="source"), renderer="holoviews"
+    )
+    static_labels = {label for label, *_ in _matplotlib_lines(static)}
+    interactive_labels = {label for label, *_ in _holoviews_lines(interactive)}
+    assert static_labels == interactive_labels
+    for label in static_labels:
+        assert "temperature" not in label.lower()
+        assert "salinity" not in label.lower()
+
+
+def test_residual_with_two_facets_is_refused():
+    with pytest.raises(ValueError, match="only lays out in a single column"):
+        render(
+            _spec(
+                [_item(TEMPERATURE, test="modelA"), _item(SALINITY, units="1e-3")],
+                rows="variable",
+                cols="source",
+                residual=True,
+            ),
+            renderer="matplotlib",
+        )
+
+
+def test_a_blank_bottom_cell_still_dates_the_panel_above():
+    """A blank cell in the bottom row must not leave the panel above it with
+    sharex=True's inner tick labels hidden -- the same "is there a panel
+    below me?" rule field_facet and profile already apply, extended to an
+    interior blank.
+    """
+    items = [
+        _item(TEMPERATURE, test="modelA"),
+        _item(TEMPERATURE, test="modelB"),
+        _item(SALINITY, units="1e-3", test="modelA"),
+        # no modelB salinity -- the bottom-right cell is blank
+    ]
+    static = render(_spec(items, rows="variable", cols="source"), renderer="matplotlib")
+    ncols = 2
+    above_blank_index = 0 * ncols + 1  # row=temperature, col=modelB
+    ax = static.axes[above_blank_index]
+    assert ax.get_xlabel() or any(
+        label.get_visible() for label in ax.get_xticklabels()
+    )
 
 
 # -- the statistics box ----------------------------------------------------------------
@@ -619,7 +727,8 @@ def test_the_box_prefixes_by_depth_when_only_depth_varies():
 def test_the_box_still_prefixes_by_variable_when_only_variable_varies():
     """Regression guard: today's behaviour is unchanged when variable is what
     actually distinguishes the rows (the common case -- two variables sharing one
-    twin-axis panel, say)."""
+    twin-axis panel, say).
+    """
     items = [_item(), _item(SALINITY, units="1e-3")]
     layout = _series.compose(items, metric_keys=("bias",))
     lines = layout.panels[0].metrics_text.split("\n")
@@ -643,7 +752,8 @@ def test_the_box_joins_variable_and_depth_when_both_vary():
 
 def test_a_single_comparisons_box_still_draws_no_prefix():
     """Nothing to distinguish with only one row -- unchanged from before this
-    feature (``prefix=len(group) > 1`` still gates it off)."""
+    feature (``prefix=len(group) > 1`` still gates it off).
+    """
     layout = _series.compose([_item()], metric_keys=("bias",))
     box = layout.panels[0].metrics_text
     assert box.count("\n") == 0
