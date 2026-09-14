@@ -9,6 +9,7 @@ a line instead of map panels (see :attr:`Field.family`).
 
 from __future__ import annotations
 
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
@@ -795,3 +796,66 @@ def test_sel_then_plot_rows_by_source(stub):
     fs = make_field(["stub_a", "stub_b"], [NITRATE, SILICATE])
     fig = fs.sel(variable=NITRATE).plot(rows="source")
     assert len(fig.axes) == 2
+
+
+# -- a member whose source doesn't actually carry the requested variable ----------------
+#
+# Regression for `osk.field([...], "alkalinity").plot()` raising a bare KeyError when
+# one station's source never carried the variable at all (`.sel()` matches by the
+# *requested* name only, never touching data -- see FieldSet.sel's own docstring --
+# so a station like that survives narrowing and only fails at .plot() time). Mirrors
+# `compare()`'s own `skip_missing` precedent (tests/test_availability_probe.py) via
+# the same `comparison._variable_available` probe.
+
+
+@pytest.fixture
+def unavailable_on(monkeypatch):
+    """Report the given sources as not carrying whatever variable is asked for."""
+    from ocean_skill import comparison
+
+    def use(*missing_sources: str):
+        real = comparison._variable_available
+
+        def fake(source, variable, **kwargs):
+            if source in missing_sources:
+                return False
+            return real(source, variable, **kwargs)
+
+        monkeypatch.setattr(comparison, "_variable_available", fake)
+
+    return use
+
+
+def test_plot_skips_a_member_whose_source_lacks_the_variable(stub, unavailable_on):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    unavailable_on("stub_b")
+    fs = make_field(["stub_a", "stub_b"], NITRATE)
+    with pytest.warns(UserWarning, match="stub_b"):
+        fig = fs.plot()
+    # only the surviving member (stub_a) drew -- one line, not two
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 1
+
+
+def test_plot_raises_a_clear_error_when_nothing_is_available(stub, unavailable_on):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    unavailable_on("stub_a", "stub_b")
+    fs = make_field(["stub_a", "stub_b"], NITRATE)
+    with pytest.raises(ValueError, match="none of this set's members"):
+        fs.plot()
+
+
+def test_plot_is_unchanged_and_silent_when_every_member_is_available(stub, unavailable_on):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    fs = make_field(["stub_a", "stub_b"], NITRATE)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fig = fs.plot()
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 2

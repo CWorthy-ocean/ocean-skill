@@ -1558,10 +1558,49 @@ class FieldSet:
         each with its own colour scale -- see :meth:`_map_items`) -- for that to
         mean anything. A set that mixes any of those has no single figure that
         is all of them, so this refuses rather than picking one arbitrarily.
+
+        A member whose source doesn't actually carry its requested variable is
+        dropped with a warning rather than failing the whole figure -- checked
+        cheaply up front with :func:`ocean_skill.comparison._variable_available`,
+        the same probe :func:`ocean_skill.comparison.compare`'s own
+        ``skip_missing`` uses, since a :class:`FieldSet` built with
+        ``variable="all"`` or a source list routinely mixes sources that don't
+        all offer everything asked for. Raises ``ValueError`` only when *none*
+        of the members are usable.
         """
-        from ocean_skill.comparison import _short_variable_label
+        from ocean_skill.comparison import _short_variable_label, _variable_available
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
+
+        usable = [
+            f
+            for f in self.fields
+            if _variable_available(f.source, f.variable, select=f.select, qc=f.qc)
+        ]
+        if len(usable) < len(self.fields):
+            missing = [f for f in self.fields if f not in usable]
+            if not usable:
+                detail = "; ".join(
+                    f"{f.source} {_short_variable_label(f.variable)}" for f in missing
+                )
+                raise ValueError(
+                    f"none of this set's members carry their requested variable -- "
+                    f"{detail}. Check osk.describe(source) for what each source "
+                    "actually offers."
+                )
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            detail = "; ".join(
+                f"{f.source} {_short_variable_label(f.variable)}" for f in missing
+            )
+            warnings.warn(
+                f"skipping {len(missing)} field(s) whose source doesn't carry the "
+                f"requested variable: {detail}",
+                stacklevel=_stacklevel.find(),
+            )
+            return FieldSet(usable).plot(renderer=renderer, **kwargs)
 
         time_depth = [f for f in self.fields if f.family == "time_depth"]
         if time_depth and len(time_depth) < len(self.fields):
