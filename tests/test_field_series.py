@@ -699,3 +699,99 @@ def test_the_vocabulary_warning_fires_once_across_many_sources(stub):
         _make_source_set(["stub_a", "stub_b", "stub_c"])
     hits = [r for r in record if "resolved to standard_name" in str(r.message)]
     assert len(hits) == 1
+
+
+# -- FieldSet.sel() -- narrowing a set built once, without recomputing -------------------
+
+
+def test_sel_by_variable_narrows_to_matching_members(stub):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    narrowed = fs.sel(variable=NITRATE)
+    assert isinstance(narrowed, FieldSet)
+    assert len(narrowed) == 1
+    assert narrowed[0].standard_name == fs[0].standard_name
+
+
+def test_sel_by_variable_matches_through_vocabulary_aliases(stub):
+    """``.sel(variable="temp")`` matches a member built from ``"temperature"``, and
+    vice versa -- both resolve to the same standard_name."""
+    stub(_point_series())
+    fs = _make_set(["temp", "salt"])
+    assert len(fs.sel(variable="temperature")) == 1
+    assert fs.sel(variable="temperature")[0].variable == fs[0].variable
+
+
+def test_sel_by_variable_accepts_a_list(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    narrowed = fs.sel(variable=[NITRATE, SILICATE])
+    assert len(narrowed) == 2
+
+
+def test_sel_by_source_narrows_to_one_station(stub):
+    stub(_point_series())
+    fs = _make_source_set(["stub_a", "stub_b", "stub_c"])
+    narrowed = fs.sel(source="stub_b")
+    assert len(narrowed) == 1
+    assert narrowed[0].source == "stub_b"
+
+
+def test_sel_combines_variable_and_source(stub):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    fs = make_field(["stub_a", "stub_b"], [NITRATE, SILICATE])
+    narrowed = fs.sel(variable=NITRATE, source="stub_a")
+    assert len(narrowed) == 1
+    assert narrowed[0].source == "stub_a"
+    assert narrowed[0].standard_name == fs.sel(variable=NITRATE)[0].standard_name
+
+
+def test_sel_with_no_match_raises_and_lists_whats_present(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    with pytest.raises(ValueError, match="no fields match"):
+        fs.sel(variable="phosphate")
+
+
+def test_sel_with_unknown_key_raises(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    with pytest.raises(ValueError, match="does not know"):
+        fs.sel(depth="surface")
+
+
+def test_sel_never_touches_data(stub, monkeypatch):
+    """.sel() reads only construction-time metadata -- narrowing a set never loads
+    the members it drops (or the ones it keeps)."""
+    from ocean_skill import comparison
+
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+
+    def boom(*a, **k):
+        raise AssertionError(".sel() must not call prepare_source")
+
+    monkeypatch.setattr(comparison, "prepare_source", boom)
+    narrowed = fs.sel(variable=NITRATE)
+    assert len(narrowed) == 1
+
+
+def test_sel_then_plot_renders_only_the_selected_variable(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    fig = fs.sel(variable=NITRATE).plot()
+    assert len(fig.axes) == 1
+    assert len(fig.axes[0].lines) == 1
+
+
+def test_sel_then_plot_rows_by_source(stub):
+    from ocean_skill.field import field as make_field
+
+    stub(_point_series())
+    fs = make_field(["stub_a", "stub_b"], [NITRATE, SILICATE])
+    fig = fs.sel(variable=NITRATE).plot(rows="source")
+    assert len(fig.axes) == 2

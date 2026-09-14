@@ -1286,6 +1286,27 @@ def _short_variable_label(spec: Any) -> str:
     return f"{base} ({method})" if method else base
 
 
+def _variable_matches(standard_name: str | None, variable: Any, wanted: Any) -> bool:
+    """Whether a field/comparison's variable matches one ``.sel(variable=...)`` value.
+
+    Resolves both sides through :func:`ocean_skill.vocabulary.resolve_name` so a short
+    name, an alias, and the CF standard_name itself all pick out the same member --
+    ``"temp"``, ``"temperature"`` and ``"sea_water_temperature"`` all match. A
+    combination/pair-spec ``wanted`` (anything not a plain string) has no vocabulary
+    entry to resolve through, so it falls back to matching the raw variable spec by
+    equality. Shared by :meth:`FieldSet.sel` and :meth:`ComparisonSet.sel` so the two
+    cannot drift apart on what "the same variable" means.
+    """
+    from ocean_skill.vocabulary import resolve_name
+
+    if not isinstance(wanted, str):
+        return variable == wanted
+    resolved = resolve_name(wanted)
+    if standard_name is not None and resolve_name(standard_name) == resolved:
+        return True
+    return isinstance(variable, str) and resolve_name(variable) == resolved
+
+
 #: Keys naming the vertical axis in a `select`, in any accepted spelling.
 _VERTICAL_KEYS = frozenset({"depth", "Z", "vertical", "z"})
 
@@ -6088,6 +6109,86 @@ class ComparisonSet:
 
     def __getitem__(self, i):
         return self.comparisons[i]
+
+    #: Filter keys :meth:`sel` accepts.
+    _SEL_KEYS = ("variable", "standard_name", "source", "test", "reference")
+
+    def sel(self, **filters: Any) -> ComparisonSet:
+        """Narrow this set to members matching every filter, returning a new set.
+
+        ``variable`` (alias ``standard_name``) matches through the vocabulary, so
+        ``"temp"``, ``"temperature"`` and the CF standard_name all pick out the same
+        comparisons (see :func:`_variable_matches`). ``source``/``test`` (synonyms)
+        match the **test** lane (:attr:`Comparison.test_name`); ``reference`` matches
+        the **reference/obs** lane (:attr:`Comparison.reference_name`) -- the same
+        lanes :meth:`plot`'s ``rows=``/``cols=`` facets by (see
+        :func:`ocean_skill.plot.series._group_key`). A value may be one spec or a
+        list of them, matched as membership.
+
+        In ``osk.compare(reference=osk.find(...), test="his", variables=[...])`` the
+        stations are the *reference* lane and ``test`` is one constant model, so
+        narrowing to one station is ``.sel(reference="HV1")`` -- ``source="HV1"``
+        would look for it among the (single) test names and match nothing.
+
+        Every :class:`Comparison` in a :class:`ComparisonSet` is already aligned
+        (:func:`compare` calls :meth:`Comparison.align` while fanning out), so this
+        is a cheap filter over cached results, never a recomputation.
+
+        Raises ``ValueError`` for an unrecognized filter key, or when nothing
+        matches -- never returns an empty set, which would fail obscurely in
+        :meth:`plot` instead of here.
+        """
+        for key in filters:
+            if key not in self._SEL_KEYS:
+                raise ValueError(
+                    f"ComparisonSet.sel() does not know {key!r} -- pass one of "
+                    f"{', '.join(self._SEL_KEYS)}."
+                )
+
+        def matches(c: Comparison) -> bool:
+            for key, wanted in filters.items():
+                choices = (
+                    wanted if isinstance(wanted, (list, tuple, set)) else (wanted,)
+                )
+                if key in ("variable", "standard_name"):
+                    if not any(
+                        _variable_matches(c.standard_name, c.variable, w)
+                        for w in choices
+                    ):
+                        return False
+                elif key in ("source", "test"):
+                    if c.test_name not in choices:
+                        return False
+                elif c.reference_name not in choices:
+                    return False
+            return True
+
+        kept_idx = [i for i, c in enumerate(self.comparisons) if matches(c)]
+        if not kept_idx:
+            present = {
+                "variable": sorted(
+                    {c.standard_name or str(c.variable) for c in self.comparisons}
+                ),
+                "source": sorted({c.test_name for c in self.comparisons}),
+                "reference": sorted({c.reference_name for c in self.comparisons}),
+            }
+            group_of = {
+                "variable": "variable",
+                "standard_name": "variable",
+                "source": "source",
+                "test": "source",
+                "reference": "reference",
+            }
+            detail = "; ".join(
+                f"{k}={v!r} (have: {', '.join(present[group_of[k]])})"
+                for k, v in filters.items()
+            )
+            raise ValueError(f"no comparisons match {detail}")
+        kept = [self.comparisons[i] for i in kept_idx]
+        new_labels = (
+            [self.labels[i] for i in kept_idx] if self.labels is not None else None
+        )
+        return ComparisonSet(kept, labels=new_labels)
 
     def __add__(self, other: Any) -> ComparisonSet:
         """Pool two sets into one, relabelled by what varies across the pool.

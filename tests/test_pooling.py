@@ -47,6 +47,7 @@ class _FakeComparison:
         aggregate=None,
     ):
         self.variable = variable
+        self.standard_name = variable if isinstance(variable, str) else None
         self.select = {"depth": depth}
         self.test_name = test
         self.reference_name = reference
@@ -366,3 +367,101 @@ def test_summary_of_named_groups_draws_the_keys():
     )
     texts = {t.get_text() for t in fig.findobj(plt.Text)}
     assert {"hindcast", "forecast"} <= texts
+
+
+# --- ComparisonSet.sel() -- narrowing a set built once, without recomputing --------
+
+
+def _station_set(stations, *, test="his", variable=NO3):
+    """A compare(reference=stations, test="his", ...)-shaped set: one comparison
+    per station, all sharing the same (single) test source -- the CTD repeat-visit
+    scenario, where the stations are the *reference* lane.
+    """
+    return ComparisonSet(
+        [
+            _FakeComparison(variable=variable, test=test, reference=s, label=s)
+            for s in stations
+        ]
+    )
+
+
+def test_sel_by_variable_narrows_to_matching_comparisons():
+    cs = ComparisonSet([_FakeComparison(variable=NO3), _FakeComparison(variable=PO4)])
+    narrowed = cs.sel(variable=NO3)
+    assert isinstance(narrowed, ComparisonSet)
+    assert len(narrowed) == 1
+    assert narrowed[0].variable == NO3
+
+
+def test_sel_by_reference_narrows_to_one_station():
+    cs = _station_set(["HV1", "HV2", "HV3"])
+    narrowed = cs.sel(reference="HV2")
+    assert len(narrowed) == 1
+    assert narrowed[0].reference_name == "HV2"
+
+
+def test_sel_by_source_matches_the_test_lane_not_the_stations():
+    """The stations live in the *reference* lane here (test="his" is the one
+    constant model) -- .sel(source=...)/.sel(test=...) matches the model, and
+    narrowing by station is .sel(reference=...) instead.
+    """
+    cs = _station_set(["HV1", "HV2"], test="his")
+    assert len(cs.sel(source="his")) == 2  # every comparison shares the one model
+    with pytest.raises(ValueError, match="no comparisons match"):
+        cs.sel(source="HV1")  # HV1 is a station, not a test/source name here
+
+
+def test_sel_source_and_test_are_synonyms():
+    cs = _station_set(["HV1", "HV2"], test="his")
+    assert len(cs.sel(source="his")) == len(cs.sel(test="his")) == 2
+
+
+def test_sel_by_variable_accepts_a_list():
+    cs = ComparisonSet([_FakeComparison(variable=NO3), _FakeComparison(variable=PO4)])
+    assert len(cs.sel(variable=[NO3, PO4])) == 2
+
+
+def test_sel_combines_variable_and_reference():
+    cs = ComparisonSet(
+        [
+            _FakeComparison(variable=NO3, reference="HV1", label="a"),
+            _FakeComparison(variable=NO3, reference="HV2", label="b"),
+            _FakeComparison(variable=PO4, reference="HV1", label="c"),
+        ]
+    )
+    narrowed = cs.sel(variable=NO3, reference="HV1")
+    assert len(narrowed) == 1
+    assert narrowed[0].label == "a"
+
+
+def test_sel_with_no_match_raises_and_lists_whats_present():
+    cs = ComparisonSet([_FakeComparison(variable=NO3), _FakeComparison(variable=PO4)])
+    with pytest.raises(ValueError, match="no comparisons match"):
+        cs.sel(variable="mole_concentration_of_silicate_in_sea_water")
+
+
+def test_sel_with_unknown_key_raises():
+    cs = ComparisonSet([_FakeComparison()])
+    with pytest.raises(ValueError, match="does not know"):
+        cs.sel(depth="surface")
+
+
+def test_sel_never_touches_aligned_data():
+    """.sel() reads only each comparison's own specification -- never `.aligned`
+    (which _FakeComparison does not even define), so narrowing an already-aligned
+    set never recomputes or re-reads anything.
+    """
+    cs = _station_set(["HV1", "HV2"])
+    narrowed = cs.sel(reference="HV1")
+    assert len(narrowed) == 1
+    assert not hasattr(narrowed[0], "aligned")
+
+
+def test_sel_preserves_label_overrides():
+    a = _FakeComparison(variable=NO3, reference="HV1")
+    b = _FakeComparison(variable=PO4, reference="HV1")
+    c = _FakeComparison(variable=NO3, reference="HV2")
+    cs = ComparisonSet([a, b, c], labels=["A", "B", "C"])
+    narrowed = cs.sel(variable=NO3)
+    assert len(narrowed) == 2
+    assert narrowed.labels == ["A", "C"]
