@@ -4848,6 +4848,12 @@ class Comparison:
             min_coverage=self.min_coverage,
             metadata=self._reference_metadata(),
             test_metadata=self._test_metadata(),
+            # literal_depths= means the reference was deliberately left NaN past
+            # its own observed range (see _prepare's literal_depths= paragraph) so
+            # a caller who explicitly named a depth past the data can see the
+            # model's own value there -- align()'s ordinary "restrict the model to
+            # the reference's finite cells" default would defeat exactly that.
+            mask_to_reference=not self.literal_depths,
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
