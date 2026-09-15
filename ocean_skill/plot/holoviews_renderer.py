@@ -4123,6 +4123,7 @@ def _target(
         TARGET_FIGSIZE,
         _arrow_chains,
         _column_levels,
+        _drop_unplottable,
         _LevelMap,
         _overlay_point_specs,
         _resolve_arrows,
@@ -4168,6 +4169,7 @@ def _target(
         dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
         for i in items
     ]
+    recs = _drop_unplottable(recs, family="target", normalize=normalize)
     df = pd.DataFrame(recs)
     if groups:
         # Mirrors summary._records: keyed by each record's own reference (its
