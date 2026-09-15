@@ -635,6 +635,99 @@ def test_select_still_refuses_an_empty_period(two_months):
         select(two_months, {"time": "2013-01"})
 
 
+
+# -- selection by index, alongside selection by coordinate value --------------
+
+
+@pytest.fixture
+def bare_dim():
+    """A ROMS-shaped field: ``s_rho`` carries no coordinate, only a size."""
+    return xr.DataArray(
+        np.arange(5.0)[:, None, None] * np.ones((1, 2, 2)),
+        dims=("s_rho", "lat", "lon"),
+        coords={"lat": [1.0, 2.0], "lon": [1.0, 2.0]},
+    )
+
+
+@pytest.fixture
+def curvilinear():
+    """A ROMS-shaped grid: 2-D lon_rho/lat_rho riding on (eta_rho, xi_rho)."""
+    nx, ny, lon0, lat0 = 6, 5, -150.5, 45.5
+    lon_2d, lat_2d = np.meshgrid(
+        np.arange(lon0, lon0 + nx), np.arange(lat0, lat0 + ny)
+    )
+    return xr.DataArray(
+        np.arange(ny * nx, dtype=float).reshape(ny, nx),
+        dims=("eta_rho", "xi_rho"),
+        coords={
+            "lon_rho": (("eta_rho", "xi_rho"), lon_2d),
+            "lat_rho": (("eta_rho", "xi_rho"), lat_2d),
+        },
+    )
+
+
+def test_select_by_index_range_on_a_bare_dim(bare_dim):
+    """The case a coordinate range refuses -- see the next test -- now has an
+    in-spec answer: an explicit ``{"index": ...}`` says positions are meant.
+    """
+    got = select(bare_dim, {"s_rho": {"index": {"min": 0, "max": 3}}})
+    assert got.sizes["s_rho"] == 3
+    assert list(got.isel(lat=0, lon=0).values) == [0.0, 1.0, 2.0]
+
+
+def test_select_by_index_scalar_on_a_bare_dim(bare_dim):
+    got = select(bare_dim, {"s_rho": {"index": 1}})
+    assert "s_rho" not in got.dims
+    assert float(got.isel(lat=0, lon=0)) == 1.0
+
+
+def test_select_by_index_list_on_a_bare_dim(bare_dim):
+    got = select(bare_dim, {"s_rho": {"index": [0, 2, 4]}})
+    assert got.sizes["s_rho"] == 3
+
+
+def test_a_coordinate_range_on_a_bare_dim_is_still_refused(bare_dim):
+    """The guardrail this feature grew out of stays in force: a coordinate-value
+    range against a dimension with no coordinate is still a wrong-answer risk,
+    not something the new ``{"index": ...}`` spelling silently reinterprets.
+    """
+    with pytest.raises(ValueError, match="no coordinate values"):
+        select(bare_dim, {"s_rho": {"min": 0, "max": 3}})
+
+
+def test_select_by_index_range_on_a_curvilinear_grid_dim(curvilinear):
+    """A curvilinear grid's own dimensions (not its 2-D lon/lat) index cleanly,
+    with no interaction with the point/box lon-lat routing.
+    """
+    got = select(
+        curvilinear,
+        {
+            "eta_rho": {"index": {"min": 0, "max": 3}},
+            "xi_rho": {"index": {"min": 0, "max": 4}},
+        },
+    )
+    assert got.sizes == {"eta_rho": 3, "xi_rho": 4}
+
+
+def test_select_mixes_index_and_coordinate_axes_in_one_spec(two_months):
+    """Index and coordinate selection are chosen per axis, so one spec can use
+    either spelling on different dimensions of the same object.
+    """
+    got = select(
+        two_months, {"time": "2012-01", "lat": {"index": {"min": 0, "max": 1}}}
+    )
+    assert got.sizes["time"] == 31
+    assert got.sizes["lat"] == 1
+
+
+def test_select_by_index_skips_a_dimension_the_field_does_not_have(two_months):
+    """Shared-spec behavior is unchanged: an ``{"index": ...}`` key naming an axis
+    this object lacks is skipped, not an error.
+    """
+    got = select(two_months, {"depth": {"index": {"min": 0, "max": 1}}})
+    assert got.sizes == two_months.sizes
+
+
 def test_a_day_of_hourly_data_is_a_period_not_an_instant():
     """On hourly data a bare date names twenty-four steps; when the record skips
     the day entirely, snapping to a neighbouring day would misrepresent.

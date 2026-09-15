@@ -684,9 +684,13 @@ def _require_coordinate(obj, dim: str, asked: str) -> None:
     A scalar is deliberately left alone. There the fallback is at least *arguably* what
     was meant (``{"s_rho": 0}`` reading as "the first level" is how xarray behaves
     everywhere), and narrowing that is a separate decision from refusing a range.
+
+    ``{asked: {"index": ...}}`` is the in-spec way to ask for what this refuses —
+    see :func:`_index_spec` — so the error names it as the fix.
     """
     if dim in obj.coords:
         return
+    example = {asked: {"index": {"min": "...", "max": "..."}}}
     raise ValueError(
         f"cannot select a range along {asked!r}: {dim!r} is a dimension of size "
         f"{obj.sizes[dim]} with no coordinate values, so there is nothing for a "
@@ -694,8 +698,28 @@ def _require_coordinate(obj, dim: str, asked: str) -> None:
         "indexing and hand back the first few *indices* instead. Give the axis a "
         "coordinate first (for a ROMS run, a catalog reference_date decodes time, and "
         "the vertical is reached with select={'depth': ...} rather than by s-level), "
-        "or index by position yourself with .isel() on the data."
+        f"or select by position instead with select={example}, or index it "
+        "yourself with .isel() on the data."
     )
+
+
+def _index_spec(value: Any) -> Any:
+    """Return ``value`` as an ``.isel``-ready selector, or ``None`` if it isn't one.
+
+    ``{"index": ...}`` is the one dict spelling :func:`select` treats positionally
+    rather than as a coordinate range: ``{"index": {"min": 0, "max": 100}}`` (the
+    YAML-friendly slice, same convention as a coordinate range's own ``min``/``max``)
+    or ``{"index": slice(0, 100)}`` both become ``slice(0, 100)``; ``{"index": 5}`` or
+    ``{"index": [0, 5, 10]}`` pass their scalar/list straight through. Anything else —
+    including a plain ``{"min": .., "max": ..}`` with no ``"index"`` key — returns
+    ``None``, so the ordinary coordinate-value path in :func:`select` still owns it.
+    """
+    if not (isinstance(value, dict) and set(value) == {"index"}):
+        return None
+    inner = value["index"]
+    if isinstance(inner, dict):
+        return slice(inner.get("min"), inner.get("max"))
+    return inner
 
 
 def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
@@ -717,7 +741,28 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
       slice, since YAML has no slice literal;
     - a list — an explicit set of values;
     - a scalar — exact if present, otherwise the nearest value, because a float
-      coordinate almost never matches exactly and failing on that is unhelpful.
+      coordinate almost never matches exactly and failing on that is unhelpful;
+    - ``{"index": ...}`` — position rather than value, for when there is no
+      coordinate to name one by (see the paragraph below).
+
+    **``{"index": ...}`` selects by position** (``.isel``) instead of by coordinate
+    value (``.sel``) — ``{"eta_rho": {"index": {"min": 0, "max": 100}}}`` is rows 0
+    through 99, regardless of whatever ``eta_rho`` does or does not carry as a
+    coordinate. This is the in-spec answer to what :func:`_require_coordinate`'s own
+    error points at: a curvilinear grid's ``eta_rho``/``xi_rho`` and ROMS's bare
+    ``s_rho`` have no coordinate values, so a *range* against them as an ordinary
+    ``{"min": .., "max": ..}`` is refused rather than silently misread as indices —
+    ``{"index": ...}`` says outright that indices are what is meant. It takes the same
+    inner shapes as a coordinate value (a ``{"min","max"}`` dict, a ``slice``, a
+    scalar, or a list), always applied positionally: no nearest-match fallback, no
+    :func:`oriented_slice` reordering (a position has no direction to flip), and no
+    :func:`_require_coordinate` guard (nothing to require). It works the same whether
+    or not the axis happens to carry a coordinate — asking a *coordinate-bearing* axis
+    for ``{"index": {"min": 0, "max": 10}}`` is "the first ten steps", same as
+    unlabeled ``eta_rho``. Names a **dimension**, not a 2-D coordinate: a curvilinear
+    grid's ``lon``/``lat`` are 2-D fields with no dimension of their own to index, so
+    reach the grid's horizontal extent through its dimension names (``eta_rho``,
+    ``xi_rho``) rather than through ``lon``/``lat``.
 
     **Both horizontal axes as scalars is a point**, not two independent nearest
     selections: ``{"lon": -144.25, "lat": 49.98}`` is routed through
@@ -770,9 +815,11 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     satellite product is where it bites.
 
     Dimensions absent from ``obj`` are skipped, so one spec can be shared across
-    variables that do not all carry the same axes. A dimension that is *present* but
-    carries no coordinate is a different case and a range against it is refused — see
-    :func:`_require_coordinate`.
+    variables that do not all carry the same axes — including one whose ``{"index":
+    ...}`` names a dimension a particular variable does not have. A dimension that is
+    *present* but carries no coordinate is a different case and a coordinate-value
+    range against it is refused — see :func:`_require_coordinate`, whose own error
+    points at ``{"index": ...}`` as the fix.
 
     A key naming an axis that only exists *after* :func:`aggregate` runs — a groupby
     renames its dim to the grouping key, ``time`` becoming ``month`` — is skipped here
@@ -815,6 +862,10 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
                     "nearest step on its own.",
                     stacklevel=2,
                 )
+            continue
+        index_value = _index_spec(value)
+        if index_value is not None:
+            obj = obj.isel({dim: index_value})
             continue
         if isinstance(value, dict):
             value = slice(value.get("min"), value.get("max"))
