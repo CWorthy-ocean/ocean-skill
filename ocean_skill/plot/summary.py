@@ -110,6 +110,59 @@ def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str
     return out
 
 
+def _drop_unplottable(
+    recs: list[dict[str, Any]], *, family: str, normalize: bool
+) -> list[dict[str, Any]]:
+    """Drop comparisons whose Taylor/Target geometry is undefined, warning once.
+
+    A comparison scored from too few matched samples can leave ``std_reference``
+    exactly ``0.0`` and ``corr`` (and, for Target, ``crmsd``/``bias``) as ``nan`` — not
+    merely noisy (that's the "weakly constrained" warning already raised by
+    :func:`ocean_skill.metrics.compute` when a comparison has few but more than one
+    matched sample) but genuinely undefined: there is no correlation angle or standard
+    deviation ratio to place on a Taylor diagram, no signed centred RMSD to place on a
+    Target diagram. Such records are dropped here instead of raising (dividing by that
+    zero) or drawing a point at a made-up location, with one warning naming which
+    comparisons were skipped and why. A record that is merely weakly constrained but
+    still finite is left alone.
+    """
+    if not recs:
+        return recs
+
+    def _plottable(rec: dict[str, Any]) -> bool:
+        if family == "target":
+            x, y = _target_xy(rec, normalize)
+            return np.isfinite(x) and np.isfinite(y)
+        # taylor/paired: a finite radial coordinate and a finite angle (correlation).
+        if not normalize:
+            radial = rec["std_test"]
+        elif rec["std_reference"] == 0:
+            radial = np.nan
+        else:
+            radial = rec["std_test"] / rec["std_reference"]
+        return np.isfinite(radial) and np.isfinite(rec["corr"])
+
+    kept = [r for r in recs if _plottable(r)]
+    dropped = [r for r in recs if not _plottable(r)]
+    if dropped:
+        names = ", ".join(
+            f"{r['label']!r} ({r['n']} pairs)" if "n" in r else repr(r["label"])
+            for r in dropped
+        )
+        warnings.warn(
+            f"{family}(): dropping {len(dropped)} of {len(recs)} comparisons whose "
+            "metrics are undefined — too few matched samples to define a standard "
+            f"deviation or correlation, not merely weakly constrained: {names}.",
+            stacklevel=3,
+        )
+    if not kept:
+        raise ValueError(
+            f"{family}(): every comparison's metrics are undefined (too few matched "
+            "samples); nothing left to plot."
+        )
+    return kept
+
+
 def _uniform_reference_std(recs, *, rtol: float = 1e-3) -> float | None:
     """The reference standard deviation every record shares, or ``None`` if they differ.
 
@@ -169,8 +222,16 @@ def _target_xy(rec, normalize: bool) -> tuple[float, float]:
     both by the record's own reference standard deviation (Jolliff et al. 2009's
     convention, so comparisons in different units share one diagram); ``False`` leaves
     them in the variable's native units.
+
+    A reference standard deviation of exactly zero (a comparison scored from a single
+    matched sample, say) makes both coordinates undefined rather than merely large —
+    this returns ``nan`` for each instead of raising, so a caller that hasn't already
+    filtered such a record out gets an unplottable point rather than a crash. See
+    :func:`_drop_unplottable`, which is how ``target()`` actually avoids drawing it.
     """
     denom = rec["std_reference"] if normalize else 1.0
+    if denom == 0:
+        return np.nan, np.nan
     sign = np.sign(rec["std_test"] - rec["std_reference"])
     return (rec["crmsd"] / denom) * sign, rec["bias"] / denom
 
@@ -1438,6 +1499,7 @@ def taylor(
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    recs = _drop_unplottable(recs, family="taylor", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
     legend_style = _fallback_grid_without_both_channels(legend_style, color_by, marker_by)
@@ -1748,6 +1810,7 @@ def target(
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    recs = _drop_unplottable(recs, family="target", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
     labels_mode = _fallback_grid_without_both_channels(labels_mode, color_by, marker_by)
