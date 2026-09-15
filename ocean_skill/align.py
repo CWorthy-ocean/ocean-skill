@@ -2452,6 +2452,40 @@ def _split_spread(test, reference):
     return test, reference, attach
 
 
+def _mask_test_to_reference(test, reference, *, mask_to_reference: bool = True):
+    """Restrict the model (test) lane to the reference's finite cells.
+
+    The axis matchers land the test lane on the full outer product of the
+    matched axes -- every ``(visit, level)`` for a station's time+depth match,
+    most visibly -- while the reference is ragged: NaN wherever an observation
+    was never taken. A metric already drops those extra cells as NaN (a
+    ``dim=None`` reduction ignores them the same as any other missing value),
+    but a scatter renderer draws one marker per finite cell *per lane*, so the
+    model panel would otherwise show many more markers than the data ever
+    could -- markers with no observation to compare against. Masking test to
+    where reference is finite makes test/reference/difference share one
+    finite mask, so every panel of every renderer draws the same points.
+
+    ``mask_to_reference=False`` skips this -- the escape hatch
+    :func:`~ocean_skill.comparison.Comparison.align` reaches for exactly when
+    ``literal_depths`` is set: there the reference is *deliberately* NaN past
+    its own observed range (see ``ocean_skill.comparison``'s
+    ``literal_depths=`` paragraph and ``_reindex_onto_literal_depths``) so a
+    caller who explicitly named a depth past the data can see the model's own
+    value there -- masking that back out would defeat the feature. Only that
+    intentional case should ever pass ``False``; the ordinary ragged-station
+    case above is what the default is for.
+
+    ``.where`` drops attrs, so they are copied back for callers that read
+    ``test.attrs`` afterward.
+    """
+    if not mask_to_reference:
+        return test
+    masked = test.where(reference.notnull())
+    masked.attrs = dict(test.attrs)
+    return masked
+
+
 def _drop_spread_before_regrid(lane, role: str):
     """Drop a spread coordinate from a lane about to be horizontally regridded.
 
@@ -2494,6 +2528,7 @@ def align(
     metadata: dict | None = None,
     test_metadata: dict | None = None,
     bin_anchor: str = "auto",
+    mask_to_reference: bool = True,
 ) -> xr.Dataset:
     """Regrid the pair onto one grid — the coarser one — plus their difference.
 
@@ -2561,6 +2596,17 @@ def align(
     most domains, 0-360 for one that straddles the antimeridian, as a Pacific model
     does. The resolved choice is recorded as ``lon_convention`` in the result's
     attrs; pass ``"0-360"`` or ``"-180-180"`` to force one instead.
+
+    ``mask_to_reference`` (default ``True``) restricts the test lane to the
+    reference's own finite cells before ``difference`` is computed — see
+    :func:`_mask_test_to_reference`. Matching axes (time, depth) can still leave
+    the test lane denser than a ragged reference (a station visited fewer
+    times than it has depth levels, most visibly), which used to mean a plot's
+    model panel showed more points than the data ever could. Pass ``False``
+    only for the one case that wants the opposite — a caller who deliberately
+    named a depth past the reference's own observed range and wants to see the
+    model there anyway (:class:`~ocean_skill.comparison.Comparison`'s own
+    ``literal_depths=``).
     """
     # Matched *before* the regrid: the binning is what decides how many fields there are
     # to regrid, so doing it after would pay for every step of the finer lane and then
@@ -2686,6 +2732,7 @@ def align(
             convention=convention,
             test_name=test_name,
             reference_name=reference_name,
+            mask_to_reference=mask_to_reference,
         )
 
     # A point reference has no grid to regrid onto: the test lane is *sampled* at the
@@ -2704,6 +2751,7 @@ def align(
             reference_name=reference_name,
             over=over,
             report=report,
+            mask_to_reference=mask_to_reference,
         )
 
     # regrid over the overlap, not the reference's full (often global) grid — the
@@ -2765,6 +2813,9 @@ def align(
             (tgt, regridded) if target == "test" else (regridded, tgt)
         )
     test_out, reference_out, _attach_spread = _split_spread(test_out, reference_out)
+    test_out = _mask_test_to_reference(
+        test_out, reference_out, mask_to_reference=mask_to_reference
+    )
     out = xr.Dataset(
         {
             test_name: test_out,
@@ -2809,6 +2860,7 @@ def _align_at_point(
     reference_name: str,
     over: str | list[str] | None,
     report: dict[str, Any],
+    mask_to_reference: bool = True,
 ) -> xr.Dataset:
     """Pair a gridded test lane with a station reference, on the already-matched axis.
 
@@ -2874,6 +2926,7 @@ def _align_at_point(
     # the plain names, the comparison being at the station.
     test = _rename_position(test, test_name)
     test, reference, _attach_spread = _split_spread(test, reference)
+    test = _mask_test_to_reference(test, reference, mask_to_reference=mask_to_reference)
     out = xr.Dataset(
         {
             test_name: test,
@@ -3002,7 +3055,13 @@ def _bin_into_frame(frame, moving, *, frame_lon: str, frame_lat: str):
 
 
 def _align_along_path(
-    test, reference, *, convention: str, test_name: str, reference_name: str
+    test,
+    reference,
+    *,
+    convention: str,
+    test_name: str,
+    reference_name: str,
+    mask_to_reference: bool = True,
 ) -> xr.Dataset:
     """Pair a model section with a reference sampled along the same path.
 
@@ -3106,6 +3165,7 @@ def _align_along_path(
     # already carry the frame's own lon/lat/along (see _bin_into_frame), so the
     # Dataset below merges them as the same coordinate, not a conflicting one.
     test, reference, _attach_spread = _split_spread(test, reference)
+    test = _mask_test_to_reference(test, reference, mask_to_reference=mask_to_reference)
     out = xr.Dataset(
         {test_name: test, reference_name: reference, "difference": test - reference}
     )
