@@ -61,9 +61,20 @@ class SourceRef:
     """
 
     name: str
+    #: The catalog's **name**: its file stem (e.g. ``"ooi_papa"``), the unique,
+    #: space-free identifier used by :func:`find`'s ``catalog=``, :func:`resolve`'s
+    #: qualified ``"catalog:source"`` form, and every "Known catalogs:" message. Not
+    #: the freeform ``title``/``description`` below, which are for reading and
+    #: prose search, not identity.
     catalog: str
     path: Path
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Freeform catalog-level ``metadata["title"]``, if the catalog set one — may
+    #: contain spaces. Searchable individually via :func:`find`'s ``title=``.
+    catalog_title: str = ""
+    #: Freeform catalog-level ``metadata["description"]``, if the catalog set one.
+    #: Searchable individually via :func:`find`'s ``description=``.
+    catalog_description: str = ""
     #: Set by :func:`discover` when another, lower-precedence catalog declares the
     #: same bare name — carried on the ref rather than warned about immediately, so
     #: only an actual *bare* lookup of this specific name ever surfaces it (see
@@ -236,7 +247,14 @@ def discover() -> dict[str, SourceRef]:
                 stacklevel=2,
             )
             continue
-        catalog_name = (getattr(cat, "metadata", {}) or {}).get("title") or path.stem
+        # The catalog's identity is always its file stem -- unique and space-free by
+        # construction (ocean_skill.build validates this on save). title/description
+        # are separate, freeform metadata carried alongside for reading and prose
+        # search, never for identity.
+        cat_meta = getattr(cat, "metadata", {}) or {}
+        catalog_name = path.stem
+        catalog_title = cat_meta.get("title") or ""
+        catalog_description = cat_meta.get("description") or ""
         # list(cat) reads `aliases`, which is empty unless the builder set it; fall back
         # to the entry keys so catalogs built without aliases are still discoverable.
         names = list(cat) or list(getattr(cat, "entries", {}))
@@ -248,6 +266,8 @@ def discover() -> dict[str, SourceRef]:
                 catalog=catalog_name,
                 path=path,
                 metadata=_entry_metadata(cat, name),
+                catalog_title=catalog_title,
+                catalog_description=catalog_description,
                 shadowed_path=shadowed,
             )
     _discover_cache = (fingerprint, index)
@@ -451,14 +471,14 @@ def _matches_range(value, spec, aliases: dict[str, float] | None = None) -> bool
 def _haystack(source: str, ref) -> str:
     """Everything about a source that is worth matching free text against.
 
-    Its name, its catalog's name, and every string in its metadata — title, summary,
-    institution, period, declared variables. Catalogs describe themselves unevenly:
-    one records ``climatology: True``, another writes ``period:
+    Its name, its catalog's name/title/description, and every string in its
+    metadata — summary, institution, period, declared variables. Catalogs describe
+    themselves unevenly: one records ``climatology: True``, another writes ``period:
     monthly_climatology``, a third says it only in the source name. Free text spans
     all of it so a search does not depend on knowing which convention a given
     catalog happened to use.
     """
-    parts = [source, ref.catalog]
+    parts = [source, ref.catalog, ref.catalog_title, ref.catalog_description]
     stack = list((ref.metadata or {}).items())
     while stack:
         key, value = stack.pop()
@@ -678,6 +698,8 @@ def find(
     text: str | list[str] | None = None,
     name: str | None = None,
     catalog: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
     climatology: bool | str | None = None,
     variable: str | None = None,
     featureType: str | None = None,
@@ -693,15 +715,24 @@ def find(
     ----------
     text
         Free-text query: ``str`` or list of terms, all ANDed. Matches anywhere in
-        a source's name, its catalog's name, or its metadata (title, summary,
-        institution, period, declared variables). ``None`` (default) skips this
-        filter.
+        a source's name, its catalog's name/title/description, or its metadata
+        (summary, institution, period, declared variables). ``None`` (default)
+        skips this filter.
     name
         Substring or glob (case-insensitive), matched against a source's own name
-        **or its catalog's**. ``None`` (default) skips this filter.
+        **or its catalog's name**. ``None`` (default) skips this filter.
     catalog
-        Substring or glob (case-insensitive), matched only against the catalog
-        name. ``None`` (default) skips this filter.
+        Substring or glob (case-insensitive), matched only against the catalog's
+        **name** — its saved file stem (e.g. ``"ooi_papa"``), never its title or
+        description. ``None`` (default) skips this filter.
+    title
+        Substring or glob (case-insensitive), matched against the catalog's
+        freeform ``title`` metadata, if it has one. ``None`` (default) skips this
+        filter.
+    description
+        Substring or glob (case-insensitive), matched against the catalog's
+        freeform ``description`` metadata, if it has one. ``None`` (default) skips
+        this filter.
     climatology
         ``True``/``False`` to include or exclude climatologies, or a period string
         (``"January"``, ``"jan"``, ``"01"``, ``"month01"``) to match a specific
@@ -740,7 +771,10 @@ def find(
         osk.find(name="papa")                        # substring, case-insensitive
         osk.find(name="woa23_nitrate_month*")        # glob
         osk.find(name="papa", featureType="timeSeries")
-        osk.find(catalog="OOI*")                     # by catalog rather than source
+        osk.find(catalog="ooi_papa")                 # by catalog name (file stem)
+        osk.find(catalog="ooi*")                     # by catalog rather than source
+        osk.find(title="Station Papa")               # by the catalog's freeform title
+        osk.find(description="climatology")          # by the catalog's description
         osk.find(climatology=True)                   # any climatology
         osk.find(climatology="January")              # climatologies of Januaries
         osk.find(climatology=False)                  # exclude climatologies
@@ -751,12 +785,12 @@ def find(
         osk.find(vertical=True)                      # has a depth axis
 
     ``text`` is the catch-all: each whitespace-separated term must appear somewhere
-    in the source's name, its catalog's name, or any of its metadata — title,
-    summary, institution, period, declared variables. Terms are ANDed, so
-    ``text="modis chl jan"`` narrows rather than widens. Reach for it when catalogs
-    describe the same idea differently (one records ``climatology: True``, another
-    ``period: monthly_climatology``) and a structured filter would miss half of
-    them; reach for the structured filters when you want a guarantee.
+    in the source's name, its catalog's name/title/description, or any of its
+    metadata — summary, institution, period, declared variables. Terms are ANDed,
+    so ``text="modis chl jan"`` narrows rather than widens. Reach for it when
+    catalogs describe the same idea differently (one records ``climatology:
+    True``, another ``period: monthly_climatology``) and a structured filter would
+    miss half of them; reach for the structured filters when you want a guarantee.
 
     ``variable`` accepts anything :mod:`ocean_skill.vocabulary` knows — a short key
     (``"nitrate"``), a canonical CF standard_name, or any alias, in any case — and
@@ -765,12 +799,14 @@ def find(
     GLODAP declare it per unit *volume*, so searching one exact standard_name finds
     two sources and silently misses the thirteen you would actually compare against.
 
-    ``name`` matches a source name **or its catalog's**, because the useful handle is
-    often on the catalog: OOI's sources are opaque dataset ids
-    (``ooi-gp02hypm-rim01-02-ctdmog039``) sitting in a catalog called "OOI Station
-    Papa", so a ``name="papa"`` that searched only source names would find nothing
-    for the one word a person actually knows. Use ``catalog=`` to match only the
-    catalog.
+    ``name`` matches a source name **or its catalog's name**, because the useful
+    handle is often on the catalog: OOI's sources are opaque dataset ids
+    (``ooi-gp02hypm-rim01-02-ctdmog039``) sitting in a catalog named ``ooi_papa``,
+    so a ``name="papa"`` that searched only source names would find nothing for the
+    one word a person actually knows. Use ``catalog=`` to match only the catalog
+    name, or ``title=``/``description=`` to search the catalog's freeform prose
+    (its title and description are independent of its name and may contain spaces
+    the name can't).
 
     ``bbox`` is ``(lon_min, lat_min, lon_max, lat_max)`` and both it and ``time``
     test for *overlap*, not containment — a global climatology matches a regional
@@ -824,6 +860,10 @@ def find(
         ):
             continue
         if catalog and not _matches_name(ref.catalog, catalog):
+            continue
+        if title and not _matches_name(ref.catalog_title, title):
+            continue
+        if description and not _matches_name(ref.catalog_description, description):
             continue
         if climatology is not None:
             is_clim = bool(meta.get("climatology"))
@@ -882,7 +922,13 @@ def find(
 
 
 def catalog_names() -> list[str]:
-    """Sorted names of all discovered catalogs (each ``SourceRef``'s ``catalog``)."""
+    """Sorted names of all discovered catalogs (each ``SourceRef``'s ``catalog``).
+
+    A catalog's name is its saved file stem (e.g. ``"ooi_papa"``) — the unique,
+    space-free identifier, as opposed to its optional freeform ``title``/
+    ``description`` (see :func:`catalog_metadata`, and :func:`find`'s
+    ``title=``/``description=`` filters).
+    """
     return sorted({ref.catalog for ref in discover().values()})
 
 
@@ -1197,11 +1243,15 @@ class _CatalogRegistry:
     def __repr__(self) -> str:
         idx = self._index()
         by_cat: dict[str, list[str]] = {}
+        titles: dict[str, str] = {}
         for ref in idx.values():
             by_cat.setdefault(ref.catalog, []).append(ref.name)
+            if ref.catalog_title:
+                titles[ref.catalog] = ref.catalog_title
         lines = [f"<ocean_skill.catalogs: {len(idx)} sources>"]
         for cat, srcs in sorted(by_cat.items()):
-            lines.append(f"  {cat}: {', '.join(sorted(srcs))}")
+            label = f"{cat} ({titles[cat]})" if cat in titles else cat
+            lines.append(f"  {label}: {', '.join(sorted(srcs))}")
         return "\n".join(lines)
 
 

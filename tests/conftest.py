@@ -144,6 +144,11 @@ def isolated_catalogs(tmp_path, monkeypatch):
     ``$OCEAN_SKILL_CATALOGS`` to the temp dir, and chdirs away from the repo's own
     ``./catalogs``. The entry has metadata but is never read. Returns the temp dir.
 
+    Saved as ``example.yaml``, so the catalog's **name** (its file stem, per
+    :func:`ocean_skill.catalog.discover`) is ``"example"`` -- deliberately
+    different from its freeform ``title`` metadata, ``"example catalog"``, so a
+    test can tell the two apart.
+
     Discovery's search path also always includes the packaged reference catalogs
     (``ocean_skill/catalogs/``, unconditionally, so they resolve regardless of
     cwd) -- not something env/cwd can steer away from, unlike the other tiers. A
@@ -172,7 +177,7 @@ def isolated_catalogs(tmp_path, monkeypatch):
     cat = intake.entry.Catalog(metadata={"title": "example catalog"})
     cat["foo"] = reader
     cat.aliases["foo"] = "foo"
-    cat.to_yaml_file(str(cats / "example.catalog.yaml"))
+    cat.to_yaml_file(str(cats / "example.yaml"))
 
     monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(cats))
     monkeypatch.chdir(tmp_path)

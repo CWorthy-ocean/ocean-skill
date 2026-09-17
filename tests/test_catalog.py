@@ -31,7 +31,7 @@ def test_resolve_unknown_raises(isolated_catalogs):
 
 def test_resolve_qualified_miss_suggests_within_that_catalog(isolated_catalogs):
     with pytest.raises(KeyError) as exc:
-        catalog.resolve("example catalog:fo")
+        catalog.resolve("example:fo")
     message = exc.value.args[0]
     assert "Did you mean: foo?" in message
     assert "osk.find(" in message
@@ -54,6 +54,14 @@ def test_catalogs_registry_membership(isolated_catalogs):
 
     assert "foo" in catalogs
     assert "foo" in catalogs.names()
+
+
+def test_catalogs_registry_repr_shows_name_and_title(isolated_catalogs):
+    from ocean_skill import catalogs
+
+    text = repr(catalogs)
+    assert "example" in text  # the catalog's name (file stem)
+    assert "example catalog" in text  # its freeform title, alongside the name
 
 
 # -- discover() caching --------------------------------------------------------
@@ -89,7 +97,7 @@ def test_discover_invalidates_on_catalog_rewrite(isolated_catalogs, tmp_path):
     cat = intake.entry.Catalog(metadata={"title": "example catalog"})
     cat["foo"] = reader
     cat.aliases["foo"] = "foo"
-    cat.to_yaml_file(str(isolated_catalogs / "example.catalog.yaml"))
+    cat.to_yaml_file(str(isolated_catalogs / "example.yaml"))
 
     idx2 = catalog.discover()
     assert idx2["foo"].metadata["featureType"] == "timeSeries"
@@ -133,7 +141,7 @@ def test_discover_does_not_instantiate_readers(isolated_catalogs):
     ``cat[name]`` would import and instantiate the reader class (network-capable
     for ERDDAP entries); reading straight off ``cat.entries`` never does.
     """
-    path = isolated_catalogs / "example.catalog.yaml"
+    path = isolated_catalogs / "example.yaml"
     text = path.read_text()
     assert "reader: intake.readers.readers:XArrayDatasetReader" in text
     text = text.replace(
@@ -149,8 +157,15 @@ def test_discover_does_not_instantiate_readers(isolated_catalogs):
 # -- search-path tiers ---------------------------------------------------------
 
 
-def _write_catalog(directory, *, title, name, featureType="grid", filename=None):
-    """Write a one-entry intake v2 catalog into ``directory``; returns its path."""
+def _write_catalog(
+    directory, *, title, name, featureType="grid", filename=None, description=None
+):
+    """Write a one-entry intake v2 catalog into ``directory``; returns its path.
+
+    ``filename`` -- and so the catalog's **name**, its file stem -- defaults to
+    ``f"{name}.catalog.yaml"``, independent of ``title``/``description``: pass it
+    explicitly whenever a test needs a name distinct from that default.
+    """
     import intake
     from intake.readers import datatypes, readers
 
@@ -160,7 +175,10 @@ def _write_catalog(directory, *, title, name, featureType="grid", filename=None)
     reader.metadata.update(
         {"featureType": featureType, "variables": ["sea_water_temperature"]}
     )
-    cat = intake.entry.Catalog(metadata={"title": title})
+    meta = {"title": title}
+    if description is not None:
+        meta["description"] = description
+    cat = intake.entry.Catalog(metadata=meta)
     cat[name] = reader
     cat.aliases[name] = name
     path = directory / (filename or f"{name}.catalog.yaml")
@@ -254,9 +272,45 @@ def test_add_search_path_takes_effect_without_cache_reset(isolated_catalogs, tmp
     assert "bar" in catalog.discover()
 
 
+def test_catalog_name_is_the_file_stem_not_the_title(isolated_catalogs, tmp_path):
+    """A catalog's identity comes from its saved file name, independent of title."""
+    extra = tmp_path / "extra"
+    _write_catalog(
+        extra,
+        title="OOI Station Papa",
+        description="A subarctic Pacific mooring array.",
+        name="ooi-source-1",
+        filename="ooi_papa.yaml",
+    )
+    catalog.add_search_path(extra)
+
+    ref = catalog.discover()["ooi-source-1"]
+    assert ref.catalog == "ooi_papa"
+    assert ref.catalog_title == "OOI Station Papa"
+    assert ref.catalog_description == "A subarctic Pacific mooring array."
+    assert "ooi_papa" in catalog.catalog_names()
+    assert "OOI Station Papa" not in catalog.catalog_names()
+
+    # find(catalog=...) matches the name; find(title=...)/find(description=...)
+    # reach the freeform fields it deliberately does not.
+    assert "ooi-source-1" in catalog.find(catalog="ooi_papa")
+    assert "ooi-source-1" in catalog.find(catalog="ooi")  # partial name match
+    assert catalog.find(catalog="Station Papa") == []
+    assert "ooi-source-1" in catalog.find(title="Station Papa")
+    assert "ooi-source-1" in catalog.find(description="subarctic")
+    assert "ooi-source-1" in catalog.find(text="ooi_papa")
+    assert "ooi-source-1" in catalog.find(text="subarctic")
+
+
 def test_user_dotdir_shadows_shared_env_dir(isolated_catalogs, tmp_path):
     user_dir = tmp_path / "user-catalogs"  # isolated_catalogs redirects _user_dir here
-    _write_catalog(user_dir, title="user catalog", name="foo", featureType="timeSeries")
+    _write_catalog(
+        user_dir,
+        title="user catalog",
+        name="foo",
+        featureType="timeSeries",
+        filename="user_catalog.yaml",
+    )
 
     idx = catalog.discover()
     assert idx["foo"].metadata["featureType"] == "timeSeries"
@@ -266,7 +320,7 @@ def test_user_dotdir_shadows_shared_env_dir(isolated_catalogs, tmp_path):
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        catalog.resolve("user catalog:foo")  # qualified lookup never warns
+        catalog.resolve("user_catalog:foo")  # qualified lookup (by name) never warns
 
 
 def test_project_local_shadows_user_dir(isolated_catalogs, tmp_path):
@@ -371,13 +425,27 @@ def test_full_tier_precedence_end_to_end(isolated_catalogs, tmp_path):
 
 
 def _fake_index(monkeypatch, entries):
-    """Point discover() at a hand-built index so find() is tested in isolation."""
+    """Point discover() at a hand-built index so find() is tested in isolation.
+
+    Each entry is ``name: (catalog, metadata)``, or ``name: (catalog, metadata,
+    extra)`` where ``extra`` is a dict of additional ``SourceRef`` fields
+    (``catalog_title``, ``catalog_description``, ``path``) for tests that need
+    the catalog's name to differ from its freeform title/description.
+    """
     from ocean_skill import catalog
 
-    refs = {
-        name: catalog.SourceRef(name=name, catalog=cat, path=None, metadata=meta)
-        for name, (cat, meta) in entries.items()
-    }
+    refs = {}
+    for name, spec in entries.items():
+        cat, meta, *rest = spec
+        extra = rest[0] if rest else {}
+        refs[name] = catalog.SourceRef(
+            name=name,
+            catalog=cat,
+            path=extra.get("path"),
+            metadata=meta,
+            catalog_title=extra.get("catalog_title", ""),
+            catalog_description=extra.get("catalog_description", ""),
+        )
     monkeypatch.setattr(catalog, "discover", lambda *a, **k: refs)
     return catalog
 
@@ -447,6 +515,69 @@ def test_filters_combine(index):
         "ooi-gp02hypm-rim01-02-ctdmog039"
     ]
     assert index.find(name="papa", featureType="grid") == []
+
+
+# -- catalog name vs. title vs. description ------------------------------------
+
+
+@pytest.fixture
+def name_title_description(monkeypatch):
+    """A catalog whose name, title, and description each carry a different word.
+
+    Models the real split :func:`ocean_skill.catalog.discover` makes: ``catalog``
+    is the file stem (unique, no spaces), ``catalog_title``/``catalog_description``
+    are separate, optional, freeform fields.
+    """
+    return _fake_index(
+        monkeypatch,
+        {
+            "ooi-gp02hypm-rim01-02-ctdmog039": (
+                "ooi_papa",
+                {"featureType": "timeSeries"},
+                {
+                    "catalog_title": "OOI Station Papa",
+                    "catalog_description": "A subarctic Pacific mooring array.",
+                },
+            ),
+        },
+    )
+
+
+def test_catalog_matches_the_name_not_the_title_or_description(
+    name_title_description,
+):
+    idx = name_title_description
+    assert idx.find(catalog="ooi_papa") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert idx.find(catalog="ooi") == ["ooi-gp02hypm-rim01-02-ctdmog039"]  # partial
+    assert idx.find(catalog="Station Papa") == []  # that's the title, not the name
+    assert idx.find(catalog="subarctic") == []  # that's the description
+
+
+def test_title_matches_only_the_title(name_title_description):
+    idx = name_title_description
+    assert idx.find(title="Station Papa") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert idx.find(title="papa") == ["ooi-gp02hypm-rim01-02-ctdmog039"]  # partial
+    assert idx.find(title="subarctic") == []  # that's the description, not the title
+    assert idx.find(title="ooi_papa") == []  # that's the name, not the title
+
+
+def test_description_matches_only_the_description(name_title_description):
+    idx = name_title_description
+    assert idx.find(description="subarctic") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert idx.find(description="Station Papa") == []  # that's the title
+
+
+def test_text_spans_name_title_and_description(name_title_description):
+    idx = name_title_description
+    assert idx.find(text="ooi_papa") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert idx.find(text="station papa") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert idx.find(text="subarctic") == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+
+
+def test_title_and_description_default_to_empty(index):
+    """A catalog with neither set simply never matches these two filters."""
+    assert index.find(title="anything") == []
+    assert index.find(description="anything") == []
 
 
 def test_bbox_tests_overlap_not_containment(index):
@@ -876,7 +1007,7 @@ def test_match_report_unknown_name_raises_like_describe(match_report_sources):
 
 def test_describe_catalog_includes_a_vocabulary_section(isolated_catalogs):
     """"foo" declares sea_water_temperature -- a plain alias of "temperature"."""
-    text = catalog.describe("example catalog")
+    text = catalog.describe("example")  # the catalog's name (file stem), not its title
     assert "vocabulary:" in text
     assert "temperature" in text
     assert "sea_water_temperature" in text

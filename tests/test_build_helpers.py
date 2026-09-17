@@ -67,6 +67,41 @@ def test_build_catalog_writes_every_entry(netcdfs, tmp_path):
     assert cat.metadata["title"] == "MODIS Aqua"
 
 
+def test_build_catalog_writes_a_description_too(netcdfs, tmp_path):
+    description = "Monthly chlorophyll climatology from MODIS Aqua L3."
+    out = build_catalog(
+        {"January": netcdfs["jan"]},
+        tmp_path / "modis.yaml",
+        title="MODIS Aqua",
+        description=description,
+    )
+    cat = intake.from_yaml_file(str(out))
+    assert cat.metadata["description"] == description
+
+
+def test_build_catalog_needs_neither_title_nor_description(netcdfs, tmp_path):
+    """The catalog's identity is its file name; title/description are optional."""
+    out = build_catalog({"January": netcdfs["jan"]}, tmp_path / "modis.yaml")
+    cat = intake.from_yaml_file(str(out))
+    assert "title" not in cat.metadata
+    assert "description" not in cat.metadata
+
+
+def test_build_catalog_rejects_a_spaced_file_name(netcdfs, tmp_path):
+    """A catalog's name -- its file stem -- is its unique identifier: no spaces."""
+    with pytest.raises(ValueError, match="whitespace"):
+        build_catalog({"January": netcdfs["jan"]}, tmp_path / "modis aqua.yaml")
+    assert not (tmp_path / "modis aqua.yaml").exists()  # fails before any I/O
+
+
+def test_save_rejects_a_spaced_file_name(tmp_path):
+    from ocean_skill.build import new_catalog, save
+
+    cat = new_catalog(title="Whatever")
+    with pytest.raises(ValueError, match="whitespace"):
+        save(cat, tmp_path / "my catalog.yaml")
+
+
 def test_save_prints_a_vocabulary_match_summary_not_a_persisted_map(
     tmp_path, capsys
 ):

@@ -1451,9 +1451,37 @@ def new_catalog(**metadata: Any):
     return intake.entry.Catalog(metadata=metadata)
 
 
+def _validate_catalog_name(stem: str, path: str | Path) -> None:
+    """Raise if a catalog's file stem -- its unique ``name`` -- has whitespace in it.
+
+    ``ocean_skill.catalog.discover`` uses a catalog's file stem, unqualified, as
+    its identity: it's what ``find(catalog=...)``, the ``"catalog:source"``
+    qualifier, and every "Known catalogs:" message key off. A space there would
+    make those handles impossible to type without quoting, defeating the point of
+    using the file name as a clean identifier. A human-readable, space-friendly
+    label belongs in ``title=``/``description=`` instead -- both are independent
+    of the name and freely searchable via :func:`ocean_skill.find`'s own
+    ``title=``/``description=`` filters.
+    """
+    if any(ch.isspace() for ch in stem):
+        raise ValueError(
+            f"Catalog file {Path(path).name!r} would have the name {stem!r}, which "
+            "contains whitespace. A catalog's name (its file stem) is its unique "
+            "identifier and must not contain spaces -- rename the file, and put "
+            "any human-readable label in title= (e.g. title='MODIS Aqua') instead."
+        )
+
+
 def save(cat, path: str | Path) -> Path:
-    """Write ``cat`` to ``path`` (intake v2 YAML), updating catalog-level extents."""
+    """Write ``cat`` to ``path`` (intake v2 YAML), updating catalog-level extents.
+
+    ``path``'s stem becomes the catalog's ``name`` (see
+    :func:`ocean_skill.catalog.discover`) and must not contain whitespace --
+    raises :class:`ValueError` otherwise. See :func:`build_catalog` for
+    ``title=``/``description=``, the freeform fields that may contain spaces.
+    """
     path = Path(path).expanduser()
+    _validate_catalog_name(path.stem, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _rollup_metadata(cat)
     cat.to_yaml_file(str(path))
@@ -2319,6 +2347,7 @@ def build_catalog(
     out: str | Path,
     *,
     title: str | None = None,
+    description: str | None = None,
     skip_errors: bool = False,
     catalog_metadata: dict[str, Any] | None = None,
     **shared: Any,
@@ -2336,20 +2365,38 @@ def build_catalog(
             },
             "catalogs/modis_aqua.yaml",
             title="MODIS Aqua",
+            description="Monthly chlorophyll climatology from MODIS Aqua L3.",
             storage_options={"simplecache": {"same_names": True}},
         )
 
     replacing :func:`new_catalog`, a run of :func:`add_source` calls each repeating
     the same options, and :func:`save`. See :func:`add_sources` for per-source
     overrides and ``skip_errors``; ``catalog_metadata`` adds catalog-level keys
-    beyond ``title``.
+    beyond ``title``/``description``.
+
+    The catalog's **name** -- its unique identifier, used by
+    ``ocean_skill.find(catalog=...)`` and every "Known catalogs:" message -- is
+    always ``out``'s file stem (e.g. ``"modis_aqua.yaml"`` -> ``"modis_aqua"``) and
+    must not contain whitespace; :func:`save` raises :class:`ValueError`
+    otherwise. ``title`` and ``description`` are separate, optional, freeform
+    fields -- unlike the name, they may contain spaces, and are searched
+    individually via ``ocean_skill.find``'s own ``title=``/``description=``
+    filters (and together via ``text=``).
 
     Probing already re-attempts a transient read (see :data:`PROBE_RETRIES`), so a
     plain ``build_catalog(discovered, out, probe=True)`` rides out a flaky server's
     hiccups with nothing extra at the call site. Pair it with ``skip_errors=True``
     when a live sweep may still contain a few entries that never open at all.
     """
-    cat = new_catalog(title=title or Path(out).stem, **(catalog_metadata or {}))
+    out = Path(out)
+    _validate_catalog_name(out.stem, out)  # fail before any (possibly slow) probing
+    meta: dict[str, Any] = {}
+    if title is not None:
+        meta["title"] = title
+    if description is not None:
+        meta["description"] = description
+    meta.update(catalog_metadata or {})
+    cat = new_catalog(**meta)
     add_sources(cat, sources, skip_errors=skip_errors, **shared)
     return save(cat, out)
 

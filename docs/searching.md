@@ -19,8 +19,10 @@ Every filter you pass is ANDed; every one you omit is skipped.
 | Filter | Matches |
 |---|---|
 | `text` | free text over everything — all terms must match |
-| `name` | source name **or its catalog's** — substring, or glob if wildcarded |
-| `catalog` | catalog name only |
+| `name` | source name **or its catalog's name** — substring, or glob if wildcarded |
+| `catalog` | catalog **name** only (its file stem, e.g. `"ooi_papa"` — never spaces) |
+| `title` | the catalog's freeform `title`, if it has one |
+| `description` | the catalog's freeform `description`, if it has one |
 | `variable` | a variable, in any spelling the vocabulary knows |
 | `featureType` | `grid`, `timeSeries`, `profile`, `trajectory`, … |
 | `bbox` | `(lon_min, lat_min, lon_max, lat_max)` — tests **overlap** |
@@ -31,7 +33,7 @@ Every filter you pass is ANDed; every one you omit is skipped.
 
 The catch-all, and usually the fastest way to narrow a list you're staring at.
 Every whitespace-separated term must appear somewhere in the source's name, its
-catalog's name, or any of its metadata:
+catalog's name/title/description, or any of its metadata:
 
 ```python
 osk.find(name="modis", variable="chlorophyll")   # 14 — too many
@@ -64,17 +66,41 @@ guarantee about *what* matched.
 
 ## By name
 
+A catalog's **name** is its saved file stem — `ooi_papa.yaml` is named `ooi_papa`,
+`modis_aqua.yaml` is named `modis_aqua`. Names are the unique, space-free
+identifier `find(catalog=...)` and `find(name=...)` match against; a catalog's
+optional `title`/`description` are separate freeform fields for reading, searched
+individually (below) or together via `text=`.
+
 ```python
 osk.find(name="papa")                       # 41  substring, case-insensitive
 osk.find(name="GOM")                        #  3
 osk.find(name="woa23_nitrate_month*")       # 12  glob
-osk.find(catalog="OOI*")                    # 41  catalog only
+osk.find(catalog="ooi_papa")                # 41  by the catalog's exact name
+osk.find(catalog="ooi")                     # 41  partial name also matches
+osk.find(catalog="ooi*")                    # 41  or a glob
 ```
 
-`name` deliberately matches the **catalog** too. OOI's sources are opaque dataset
-ids (`ooi-gp02hypm-rim01-02-ctdmog039`) inside a catalog called *OOI Station Papa*,
+`name` deliberately matches the **catalog's name** too. OOI's sources are opaque
+dataset ids (`ooi-gp02hypm-rim01-02-ctdmog039`) inside a catalog named `ooi_papa`,
 so a `name="papa"` that searched only source names would find nothing for the one
-word you actually know. Use `catalog=` when you want to match only the catalog.
+word you actually know. Use `catalog=` when you want to match only the catalog
+name.
+
+## By title and description
+
+A catalog's `title`/`description` are optional, freeform, and may contain spaces
+the name can't — search them individually when you know a word from one but not
+the other:
+
+```python
+osk.find(title="Station Papa")              # 41  matches only the title
+osk.find(description="mooring")             # matches only the description
+```
+
+Neither is required — a catalog with no `title`/`description` set simply never
+matches these filters (`find(text=...)` and the map's popup hover also fall back
+gracefully when one is missing).
 
 ## By variable and type
 
@@ -180,7 +206,7 @@ opened or read:
 ```python
 osk.find(variable="nitrate").map()          # where every match is, on one map
 osk.map_locations()                         # everything discoverable
-osk.map_locations(catalog="OOI*")           # one catalog
+osk.map_locations(catalog="ooi_papa")       # one catalog, by name
 osk.find(name="papa").map(renderer="holoviews")  # interactive
 ```
 
