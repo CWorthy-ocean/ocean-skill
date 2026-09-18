@@ -81,7 +81,12 @@ __all__ = [
 __all__ += ["PAGE_H", "PAGE_W"]
 
 
-def _limits(*arrays, robust: bool | float = False) -> tuple[float, float]:
+def _limits(
+    *arrays,
+    robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> tuple[float, float]:
     """Shared colour limits across all arrays.
 
     Default is the full finite range (min, max), so a colourbar's top always
@@ -90,22 +95,30 @@ def _limits(*arrays, robust: bool | float = False) -> tuple[float, float]:
     clips to the 10th/90th percentile instead (the classic xarray-style "robust
     to outliers" scaling); a float ``q`` in ``(0, 1)`` clips to the central
     fraction ``q`` of the data (``q=0.8`` is the same as ``robust=True``).
+
+    ``vmin``/``vmax`` pin either end exactly, overriding whatever ``robust`` would
+    otherwise compute for that end — pass one to pin just that end, or both for an
+    exact range regardless of the data.
     """
+    if vmin is not None and vmax is not None and vmin >= vmax:
+        raise ValueError(f"vmin={vmin!r} must be less than vmax={vmax!r}")
     vals = np.concatenate([np.asarray(a).ravel() for a in arrays])
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
-        return 0.0, 1.0
-    if robust is False or robust is None:
-        return float(np.min(vals)), float(np.max(vals))
-    q = 0.8 if robust is True else float(robust)
-    if not 0.0 < q < 1.0:
-        raise ValueError(
-            f"robust={robust!r} is not True/False or a central fraction in (0, 1) "
-            "— pass the fraction itself (robust=0.8 for the 10th-90th percentile, "
-            "same as robust=True), or robust=False for the plain min/max."
-        )
-    lo, hi = (1 - q) / 2 * 100, (1 + q) / 2 * 100
-    return float(np.percentile(vals, lo)), float(np.percentile(vals, hi))
+        lo, hi = 0.0, 1.0
+    elif robust is False or robust is None:
+        lo, hi = float(np.min(vals)), float(np.max(vals))
+    else:
+        q = 0.8 if robust is True else float(robust)
+        if not 0.0 < q < 1.0:
+            raise ValueError(
+                f"robust={robust!r} is not True/False or a central fraction in (0, 1) "
+                "— pass the fraction itself (robust=0.8 for the 10th-90th percentile, "
+                "same as robust=True), or robust=False for the plain min/max."
+            )
+        lo_pct, hi_pct = (1 - q) / 2 * 100, (1 + q) / 2 * 100
+        lo, hi = float(np.percentile(vals, lo_pct)), float(np.percentile(vals, hi_pct))
+    return (vmin if vmin is not None else lo, vmax if vmax is not None else hi)
 
 
 def _contour_levels(norm, n: int = 21):
@@ -2979,6 +2992,8 @@ def field_facet(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
@@ -3038,7 +3053,9 @@ def field_facet(
 
     ``robust`` means what it does in :func:`_limits`: each row's colour scale spans
     the full range of its own data by default, or its 10th–90th percentile with
-    ``robust=True``.
+    ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead — applied to
+    every row alike — and override ``robust`` and a variable's own declared display
+    range wherever either end is given.
     """
     import matplotlib.pyplot as plt
 
@@ -3139,8 +3156,8 @@ def field_facet(
     cmap, _ = cmaps_for(standard_name)
 
     def _norm_of(sub):
-        vmin, vmax = _limits(sub, robust=robust)
-        return norm_for(standard_name, vmin, vmax)
+        lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
+        return norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
 
     # Computed before drawing so each panel is drawn against its scale rather than
     # corrected afterwards. One norm per row, unless there is only one scale to have.
@@ -3338,6 +3355,8 @@ def section(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Draw one vertical section: depth against along-path distance.
 
@@ -3368,7 +3387,9 @@ def section(
 
     ``robust`` means what it does in :func:`_limits`: the colour scale spans the
     full range of the section by default, or its 10th–90th percentile with
-    ``robust=True``.
+    ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead, overriding
+    ``robust`` and a variable's own declared display range wherever either end is
+    given.
     """
     import matplotlib.pyplot as plt
 
@@ -3402,8 +3423,8 @@ def section(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(values, robust=robust)
-    norm = norm_for(standard_name, vmin, vmax)
+    lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     ax.set_facecolor("0.85")  # the map families' land grey, doing the same job here:
@@ -3460,6 +3481,8 @@ def cross(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Draw two vertical sections through one point, one along each grid direction.
@@ -3491,8 +3514,8 @@ def cross(
     Everything else -- sizing (``size``/``zoom``/``figsize``), ``font_scale``,
     ``fit_text``, ``align_colorbars``, the ``*_kwargs`` dicts,
     ``rasterize``/``hover`` (interactive-only, see
-    :func:`_warn_if_interactive_only`), ``robust`` -- means exactly what it does in
-    :func:`section`, applied to the one scale the two panels share.
+    :func:`_warn_if_interactive_only`), ``robust``/``vmin``/``vmax`` -- means exactly
+    what it does in :func:`section`, applied to the one scale the two panels share.
 
     ``titles=`` overrides the two panel titles by hand, in ``items`` order --
     ``None`` at a position keeps that panel's own (``label`` + ``path_note``)
@@ -3552,8 +3575,10 @@ def cross(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(*(values for values, _ in prepared), robust=robust)
-    norm = norm_for(standard_name, vmin, vmax)
+    lo, hi = _limits(
+        *(values for values, _ in prepared), robust=robust, vmin=vmin, vmax=vmax
+    )
+    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
 
     fig, axes_grid = plt.subplots(
         nrows, ncols, figsize=figsize, constrained_layout=True
@@ -3669,6 +3694,8 @@ def time_depth(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Draw one ``time_depth`` panel: depth against time, at one place.
 
@@ -3704,7 +3731,9 @@ def time_depth(
 
     ``robust`` means what it does in :func:`_limits`: the colour scale spans the
     full range of the panel by default, or its 10th–90th percentile with
-    ``robust=True``.
+    ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead, overriding
+    ``robust`` and a variable's own declared display range wherever either end is
+    given.
     """
     import matplotlib.pyplot as plt
 
@@ -3742,8 +3771,8 @@ def time_depth(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
-    vmin, vmax = _limits(values, robust=robust)
-    norm = norm_for(standard_name, vmin, vmax)
+    lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=mark)
@@ -3797,6 +3826,8 @@ def time_depth_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Stack several ``time_depth`` panels -- one per item -- in a single figure.
@@ -3892,7 +3923,9 @@ def time_depth_grid(
     ``robust`` means what it does in :func:`_limits`: each panel's (or, with
     ``shared_limits=True``/``"variable"``/``"source"``, that group's shared) colour
     scale spans the full data range by default, or its 10th–90th percentile with
-    ``robust=True``.
+    ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead -- applied to
+    every panel/group alike -- and override ``robust`` and a variable's own declared
+    display range wherever either end is given.
 
     ``titles=`` overrides each panel's own title by hand: one string per item in
     ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
@@ -4045,10 +4078,13 @@ def time_depth_grid(
             group_indices = [drawn_indices[g] for g in group]
             standard_name = cell_items[group_indices[0]].get("standard_name")
             cmap, _ = cmaps_for(standard_name)
-            vmin, vmax = _limits(
-                *(prepared[i][0] for i in group_indices), robust=robust
+            lo, hi = _limits(
+                *(prepared[i][0] for i in group_indices),
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
             )
-            norm = norm_for(standard_name, vmin, vmax)
+            norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
             for i in group_indices:
                 panel_scale[i] = (cmap, norm)
 
@@ -4074,8 +4110,10 @@ def time_depth_grid(
             cmap, norm = panel_scale[grid_index]
         else:
             cmap, _ = cmaps_for(item.get("standard_name"))
-            vmin, vmax = _limits(values, robust=robust)
-            norm = norm_for(item.get("standard_name"), vmin, vmax)
+            lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+            norm = norm_for(
+                item.get("standard_name"), lo, hi, user_vmin=vmin, user_vmax=vmax
+            )
         im = _draw_time_depth(
             ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark
         )
@@ -5922,6 +5960,8 @@ def facet_movie(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Play one source's facet axis instead of laying it out: a movie of one field.
 
@@ -5950,6 +5990,9 @@ def facet_movie(
     would need one to become the panels — which is what :func:`field_facet` is for.
     Every other parameter means what it does there, or in :func:`field_movie` for the
     movie-specific ones (``save``, ``fps``, ``dpi``, ``every``, ``frame_label``).
+    ``vmin``/``vmax`` pin an exact colour range for the whole movie, overriding
+    ``robust`` and a variable's own declared display range wherever either end is
+    given.
     """
     import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
@@ -5986,8 +6029,8 @@ def facet_movie(
     # spirit either way: a scale re-derived per frame would make the ruler move with the
     # field. field_facet shares one scale across its panels for the same reason.
     scope = field if shared_limits else field.isel({facet_dim: indices[0]})
-    vmin, vmax = _limits(scope, robust=robust)
-    norm = norm_for(standard_name, vmin, vmax)
+    lo, hi = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
+    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
     cmap, _ = cmaps_for(standard_name)
 
     fig, ax = plt.subplots(

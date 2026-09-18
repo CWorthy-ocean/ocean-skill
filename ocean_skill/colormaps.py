@@ -157,7 +157,14 @@ def is_log(standard_name: str | None) -> bool:
     return _RANGES.get(resolve_name(standard_name or ""), (None, None, False))[2]
 
 
-def norm_for(standard_name: str | None, vmin: float, vmax: float) -> Any:
+def norm_for(
+    standard_name: str | None,
+    vmin: float,
+    vmax: float,
+    *,
+    user_vmin: float | None = None,
+    user_vmax: float | None = None,
+) -> Any:
     """Return a matplotlib ``Normalize`` for a variable's sequential panels.
 
     Uses :class:`~matplotlib.colors.LogNorm` when :data:`_RANGES` marks
@@ -166,6 +173,12 @@ def norm_for(standard_name: str | None, vmin: float, vmax: float) -> Any:
     the percentile-derived ones when it declares them. Purely a range/scale concern —
     xcmocean has no equivalent, so nothing here duplicates it. Accepts any spelling
     :func:`ocean_skill.vocabulary.resolve_name` recognizes, same as :func:`cmaps_for`.
+
+    ``user_vmin``/``user_vmax`` are a caller's own explicit limits (``Field.plot(vmin=,
+    vmax=)``) and outrank everything else, including a variable's declared
+    :data:`_RANGES` — a user who names a number gets that number, not the package's
+    default display range. The scale itself (log vs linear) is unaffected; only its
+    limits move.
     """
     import matplotlib.colors as mcolors
 
@@ -173,8 +186,8 @@ def norm_for(standard_name: str | None, vmin: float, vmax: float) -> Any:
 
     standard_name = resolve_name(standard_name or "")
     r_vmin, r_vmax, _ = _RANGES.get(standard_name, (None, None, False))
-    lo = r_vmin if r_vmin is not None else vmin
-    hi = r_vmax if r_vmax is not None else vmax
+    lo = user_vmin if user_vmin is not None else r_vmin if r_vmin is not None else vmin
+    hi = user_vmax if user_vmax is not None else r_vmax if r_vmax is not None else vmax
     if is_log(standard_name):
         lo = max(lo, 1e-6)  # LogNorm rejects vmin <= 0
         return mcolors.LogNorm(vmin=lo, vmax=hi)

@@ -560,6 +560,29 @@ regions and independent zooming makes more sense.
 physics.plot(renderer="holoviews", shared_axes=False)   # each row zooms independently
 ```
 
+### `vmin`/`vmax`
+
+`field_facet`, `section`, `cross`, `time_depth` (and its `time_depth_grid`/movie
+forms) — the single-field colour-scale families. Pin an exact colourbar range instead
+of the data-derived default: pass one to pin just that end (the other still comes from
+the plain range, or `robust`), or both for an exact range regardless of the data.
+Given together with `robust=`, `robust` only fills whichever end `vmin`/`vmax` left
+unset.
+
+**Default:** `None` for both (the data's own range, optionally clipped by `robust=`)
+
+```python
+osk.field(run, "salinity", select={"time": "2012-01", "transect": {"cross": pt}}
+          ).plot(vmin=30, vmax=36)
+```
+
+Outranks a variable's own built-in display range too (chlorophyll's fixed log-scale
+limits, say) — a `vmin`/`vmax` you name always wins; only the log-vs-linear scale
+itself is unaffected. Not available on the comparison families (`field_row`,
+`field_grid`, `field_map_grid`, `skill_map`, and their movie/row forms) — a test/
+reference pair's shared scale and a difference panel's own symmetric one are a
+different question, unaddressed here.
+
 ### `shared_limits`
 
 `field_grid` and a two-axis `field_facet`. Makes every row's colour scale — and, in

@@ -680,6 +680,8 @@ def _field_facet(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles=None,
     **_,
 ):
@@ -718,7 +720,9 @@ def _field_facet(
     every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits` — see the static renderer's ``field_facet`` docstring.
+    ._limits` — see the static renderer's ``field_facet`` docstring. ``vmin``/``vmax``
+    pin an exact colour range instead — applied to every row alike — and override
+    ``robust`` wherever either end is given.
 
     ``titles=`` overrides the drawn panel titles by hand, one string per panel in
     row-major order. Note this differs in length from the static renderer's own
@@ -774,7 +778,7 @@ def _field_facet(
     raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
-        lo, hi = _limits(sub, robust=robust)
+        lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
         return (max(lo, 1e-6) if log else lo, hi)
 
     # One scale per row when the rows are levels, matching the static renderer: depths
@@ -875,6 +879,8 @@ def _section(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -889,7 +895,9 @@ def _section(
     non-geographic options (``aspect``, ``invert_y``, ``bgcolor``) instead.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits` — see the static renderer's ``section`` docstring.
+    ._limits` — see the static renderer's ``section`` docstring. ``vmin``/``vmax``
+    pin an exact colour range instead, overriding ``robust`` wherever either end is
+    given.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -908,16 +916,16 @@ def _section(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = _limits(field, robust=robust)
+    lo, hi = _limits(field, robust=robust, vmin=vmin, vmax=vmax)
     if log:
-        vmin = max(vmin, 1e-6)
+        lo = max(lo, 1e-6)
     raster = _should_rasterize(field, rasterize)
 
     return _quadmesh(
         field,
         title=title,
         cmap=seq,
-        clim=(vmin, vmax),
+        clim=(lo, hi),
         units=units,
         geo=False,
         log=log,
@@ -945,6 +953,8 @@ def _cross(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles=None,
     **_,
 ):
@@ -969,6 +979,10 @@ def _cross(
     ``None`` at a position keeps that panel's own (``label`` + ``path_note``)
     title; the wrong count raises a copy-pasteable ``ValueError`` listing the
     current titles.
+
+    ``vmin``/``vmax`` pin an exact colour range, passed through to both panels'
+    own :func:`_section` call -- overriding ``robust`` wherever either end is given
+    and, unlike the plain data-derived default, genuinely shared between them.
     """
     hv = _extension()
 
@@ -1010,6 +1024,8 @@ def _cross(
             hover=hover,
             rasterize=rasterize,
             robust=robust,
+            vmin=vmin,
+            vmax=vmax,
         )
         for item, panel_title in zip(items, resolved_titles, strict=True)
     ]
@@ -1033,6 +1049,8 @@ def _time_depth(
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     **_,
 ):
     """One interactive ``time_depth`` panel: depth against time, at one place.
@@ -1061,6 +1079,10 @@ def _time_depth(
     ``ylim`` is given ascending (``(shallow, deep)``) like any other holoviews
     range -- ``invert_yaxis=True`` below still flips it to read shallow-at-top the
     same way it flips the unset, autoscaled range.
+
+    ``vmin``/``vmax`` pin an exact colour range for this panel alone, overriding
+    ``robust`` wherever either end is given; ``clim`` (the grid's own shared-scale
+    plumbing) still wins over both when given.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -1082,9 +1104,13 @@ def _time_depth(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    vmin, vmax = clim if clim is not None else _limits(field, robust=robust)
+    lo, hi = (
+        clim
+        if clim is not None
+        else _limits(field, robust=robust, vmin=vmin, vmax=vmax)
+    )
     if log:
-        vmin = max(vmin, 1e-6)
+        lo = max(lo, 1e-6)
 
     if mark == "scatter":
         import holoviews as hv
@@ -1105,7 +1131,7 @@ def _time_depth(
             ylabel=geometry.y_label,
             color="value",
             cmap=seq,
-            clim=(vmin, vmax),
+            clim=(lo, hi),
             logz=log,
             colorbar=True,
             clabel=units,
@@ -1131,7 +1157,7 @@ def _time_depth(
         field,
         title=title,
         cmap=seq,
-        clim=(vmin, vmax),
+        clim=(lo, hi),
         units=units,
         geo=False,
         log=log,
@@ -1176,6 +1202,8 @@ def _time_depth_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles=None,
     **_,
 ):
@@ -1220,6 +1248,9 @@ def _time_depth_grid(
     reach. ``sharey=True`` computes one shared depth range the same way
     (:func:`~ocean_skill.plot.series.value_span` again) and bakes it into every
     panel's own ``ylim``.
+
+    ``vmin``/``vmax`` pin an exact colour range instead of ``robust`` -- applied to
+    every panel/group alike -- wherever either end is given.
 
     ``titles=`` overrides each panel's own title by hand: one string per item
     in ``items`` order (row-major, matching the panel grid) unfaceted, or --
@@ -1309,7 +1340,12 @@ def _time_depth_grid(
         drawn_indices = [i for i, _ in drawn]
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
-            span = _limits(*(prepared[i][0] for i in group_indices), robust=robust)
+            span = _limits(
+                *(prepared[i][0] for i in group_indices),
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
+            )
             for i in group_indices:
                 clims[i] = span
 
@@ -1391,6 +1427,8 @@ def _time_depth_grid(
                 hover=hover,
                 rasterize=rasterize,
                 robust=robust,
+                vmin=vmin,
+                vmax=vmax,
             )
         )
 
@@ -2809,6 +2847,8 @@ def _facet_movie(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     **_,
 ):
     """One source's facet axis on a slider: the interactive twin of ``facet_movie``.
@@ -2853,7 +2893,8 @@ def _facet_movie(
     One colour scale for the whole movie, as statically, and for the same reason — a
     scale that moved with the slider would make a change in the ruler look like a change
     in the field. ``robust`` means what it does in
-    :func:`~ocean_skill.plot.matplotlib_renderer._limits`.
+    :func:`~ocean_skill.plot.matplotlib_renderer._limits`. ``vmin``/``vmax`` pin an
+    exact colour range instead, overriding ``robust`` wherever either end is given.
 
     What the movie is *of* joins each frame's title (``GOM_bgc: alkalinity, surface —
     2013-01-16``) rather than sitting above it as the static suptitle does: bokeh's only
@@ -2897,7 +2938,7 @@ def _facet_movie(
         scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
     else:
         scope = frames_da.isel({facet_dim: 0})
-    vmin, vmax = _limits(scope, robust=robust)
+    vmin, vmax = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
     if log:
         vmin = max(vmin, 1e-6)
     raster = _should_rasterize(frames_da.isel({facet_dim: 0}), rasterize)
