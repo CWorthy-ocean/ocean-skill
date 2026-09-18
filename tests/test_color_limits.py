@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from ocean_skill.align import ALONG_DIM
 from ocean_skill.plot.matplotlib_renderer import _limits
 from ocean_skill.plot.registry import render
 from ocean_skill.plot.spec import PlotSpec
@@ -82,6 +83,64 @@ def test_several_arrays_are_pooled_before_taking_the_range():
     assert _limits(a, b) == (0.0, 100.0)
 
 
+# --- vmin/vmax: exact pinned limits, overriding both the plain range and robust -------
+
+
+def test_vmin_pins_the_low_end_only():
+    vals = np.array([2.0, 4.0, 6.0])
+    assert _limits(vals, vmin=-10.0) == (-10.0, 6.0)
+
+
+def test_vmax_pins_the_high_end_only():
+    vals = np.array([2.0, 4.0, 6.0])
+    assert _limits(vals, vmax=100.0) == (2.0, 100.0)
+
+
+def test_vmin_and_vmax_together_ignore_the_data_entirely():
+    vals = np.array([2.0, 4.0, 6.0])
+    assert _limits(vals, vmin=0.0, vmax=1.0) == (0.0, 1.0)
+
+
+def test_vmin_vmax_override_robust_only_for_the_end_they_pin():
+    vals = np.linspace(0.0, 100.0, 101)
+    lo, hi = _limits(vals, robust=True, vmin=-5.0)
+    assert lo == -5.0
+    assert hi == pytest.approx(90.0)  # the unpinned end still comes from robust
+
+
+def test_vmin_applies_even_when_the_data_is_empty():
+    assert _limits(np.array([]), vmin=2.0, vmax=3.0) == (2.0, 3.0)
+
+
+def test_vmin_not_less_than_vmax_is_refused():
+    with pytest.raises(ValueError, match="vmin"):
+        _limits(np.array([1.0, 2.0]), vmin=5.0, vmax=1.0)
+
+
+# --- norm_for: user vmin/vmax outrank a variable's own declared display range ---------
+
+CHLOROPHYLL = "mass_concentration_of_chlorophyll_a_in_sea_water"
+
+
+def test_norm_for_defaults_to_a_variables_declared_range():
+    from ocean_skill.colormaps import norm_for
+
+    norm = norm_for(CHLOROPHYLL, 1.0, 2.0)
+    assert norm.vmin == pytest.approx(0.01)
+    assert norm.vmax == pytest.approx(10.0)
+
+
+def test_norm_for_user_limits_override_the_declared_range_but_keep_the_log_scale():
+    import matplotlib.colors as mcolors
+
+    from ocean_skill.colormaps import norm_for
+
+    norm = norm_for(CHLOROPHYLL, 1.0, 2.0, user_vmin=0.5, user_vmax=50.0)
+    assert isinstance(norm, mcolors.LogNorm)
+    assert norm.vmin == pytest.approx(0.5)
+    assert norm.vmax == pytest.approx(50.0)
+
+
 # --- field_facet (matplotlib): the single-map path the bug report used ----------------
 
 
@@ -133,6 +192,51 @@ def test_field_facet_robust_true_clips_the_outlier_below_its_true_value():
 
     mesh = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadMesh))
     assert mesh.norm.vmax < 100.0
+
+
+def test_field_facet_vmin_vmax_pin_the_colourbar_exactly():
+    field = _outlier_map()
+    fig = render(
+        PlotSpec(family="field_facet", items=[_facet_item(field)]),
+        vmin=0.0,
+        vmax=20.0,
+    )
+    from matplotlib.collections import QuadMesh
+
+    mesh = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadMesh))
+    assert mesh.norm.vmin == pytest.approx(0.0)
+    assert mesh.norm.vmax == pytest.approx(20.0)
+
+
+def test_field_facet_vmax_combines_with_robust_filling_the_unpinned_end():
+    field = _outlier_map()
+    fig = render(
+        PlotSpec(family="field_facet", items=[_facet_item(field)]),
+        robust=True,
+        vmax=20.0,
+    )
+    from matplotlib.collections import QuadMesh
+
+    mesh = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadMesh))
+    assert mesh.norm.vmax == pytest.approx(20.0)
+    assert mesh.norm.vmin == pytest.approx(5.0)  # robust's own 10th percentile here
+
+
+def test_field_facet_holoviews_vmin_vmax_pin_the_colourbar_exactly():
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    field = _outlier_map()
+    obj = render(
+        PlotSpec(family="field_facet", items=[_facet_item(field)]),
+        renderer="holoviews",
+        vmin=0.0,
+        vmax=20.0,
+    )
+    mesh = next(iter(obj.traverse(lambda x: x, [hv.QuadMesh])))
+    lo, hi = mesh.range(mesh.vdims[0].name)
+    assert lo == pytest.approx(0.0)
+    assert hi == pytest.approx(20.0)
 
 
 # --- field_map_grid (matplotlib): the mapview path in the bug report ------------------
@@ -385,3 +489,144 @@ def test_field_facet_holoviews_robust_clips_the_outlier_too():
     mesh = next(iter(obj.traverse(lambda x: x, [hv.QuadMesh])))
     _lo, hi = mesh.range(mesh.vdims[0].name)
     assert hi < 100.0
+
+
+# --- section/cross/time_depth: vmin/vmax on the other single-field colorbar families --
+
+
+def _outlier_section(base: float = 5.0, outlier: float = 100.0):
+    n_along, n_z = 8, 6
+    values = np.full((n_z, n_along), base)
+    values[0, 0] = outlier
+    return xr.DataArray(
+        values,
+        dims=("z", ALONG_DIM),
+        coords={
+            "z": -np.array([0.0, 10.0, 25.0, 50.0, 100.0, 200.0]),
+            ALONG_DIM: np.linspace(0.0, 150.0, n_along),
+            "lon": (ALONG_DIM, np.linspace(-95.0, -93.0, n_along)),
+            "lat": (ALONG_DIM, np.linspace(24.0, 26.0, n_along)),
+        },
+    )
+
+
+def _section_item(field=None, **overrides):
+    return {
+        "field": field if field is not None else _outlier_section(),
+        "units": "mmol m-3",
+        "standard_name": None,
+        "depth": None,
+        "label": "roms_run",
+        **overrides,
+    }
+
+
+def test_section_vmin_vmax_pin_the_colourbar_exactly():
+    from matplotlib.collections import QuadMesh
+
+    fig = render(
+        PlotSpec(family="section", items=[_section_item()]), vmin=0.0, vmax=20.0
+    )
+    mesh = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadMesh))
+    assert mesh.norm.vmin == pytest.approx(0.0)
+    assert mesh.norm.vmax == pytest.approx(20.0)
+
+
+def test_section_holoviews_vmin_vmax_pin_the_colourbar_exactly():
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    obj = render(
+        PlotSpec(family="section", items=[_section_item()]),
+        renderer="holoviews",
+        vmin=0.0,
+        vmax=20.0,
+    )
+    mesh = next(iter(obj.traverse(lambda x: x, [hv.QuadMesh])))
+    lo, hi = mesh.range(mesh.vdims[0].name)
+    assert lo == pytest.approx(0.0)
+    assert hi == pytest.approx(20.0)
+
+
+def test_cross_vmin_vmax_pin_the_shared_colourbar():
+    from matplotlib.collections import QuadMesh
+
+    items = [
+        _section_item(label="lon fixed"),
+        _section_item(label="lat fixed"),
+    ]
+    fig = render(PlotSpec(family="cross", items=items), vmin=0.0, vmax=20.0)
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes[:2]
+    ]
+    for mesh in meshes:
+        assert mesh.norm.vmin == pytest.approx(0.0)
+        assert mesh.norm.vmax == pytest.approx(20.0)
+
+
+def _outlier_time_depth(base: float = 5.0, outlier: float = 100.0):
+    time = pd.date_range("2020-01-01", periods=6, freq="MS")
+    depth = np.array([0.0, 10.0, 25.0])
+    vals = np.full((time.size, depth.size), base)
+    vals[0, 0] = outlier
+    return xr.DataArray(
+        vals,
+        dims=("time", "depth"),
+        coords={"time": time, "depth": depth, "lon": -144.0, "lat": 50.0},
+        attrs={"units": "mmol m-3"},
+    )
+
+
+def _time_depth_item(field=None, **overrides):
+    return {
+        "field": field if field is not None else _outlier_time_depth(),
+        "units": "mmol m-3",
+        "standard_name": NITRATE,
+        "label": "GOM_bgc",
+        **overrides,
+    }
+
+
+def test_time_depth_vmin_vmax_pin_the_colourbar_exactly():
+    from matplotlib.collections import QuadMesh
+
+    fig = render(
+        PlotSpec(family="time_depth", items=[_time_depth_item()]), vmin=0.0, vmax=20.0
+    )
+    mesh = next(c for ax in fig.axes for c in ax.collections if isinstance(c, QuadMesh))
+    assert mesh.norm.vmin == pytest.approx(0.0)
+    assert mesh.norm.vmax == pytest.approx(20.0)
+
+
+def test_time_depth_holoviews_vmin_vmax_pin_the_colourbar_exactly():
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    obj = render(
+        PlotSpec(family="time_depth", items=[_time_depth_item()]),
+        renderer="holoviews",
+        vmin=0.0,
+        vmax=20.0,
+    )
+    mesh = next(iter(obj.traverse(lambda x: x, [hv.QuadMesh])))
+    lo, hi = mesh.range(mesh.vdims[0].name)
+    assert lo == pytest.approx(0.0)
+    assert hi == pytest.approx(20.0)
+
+
+def test_time_depth_grid_vmin_vmax_pin_every_panel_even_without_shared_limits():
+    from matplotlib.collections import QuadMesh
+
+    items = [
+        _time_depth_item(_outlier_time_depth(outlier=100.0), label="station_a"),
+        _time_depth_item(_outlier_time_depth(outlier=6.0), label="station_b"),
+    ]
+    fig = render(PlotSpec(family="time_depth", items=items), vmin=0.0, vmax=20.0)
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes[:2]
+    ]
+    for mesh in meshes:
+        assert mesh.norm.vmin == pytest.approx(0.0)
+        assert mesh.norm.vmax == pytest.approx(20.0)

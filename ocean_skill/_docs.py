@@ -111,6 +111,8 @@ Forwarded to whichever renderer family the data selects (``field_row``,
 accepted varies with the data rather than with this method. Option families
 shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``title``, ``domain`` (map extent), ``robust`` (colour-limit clipping),
+``vmin``/``vmax`` (exact colour limits -- single-field families only:
+``field_facet``, ``section``, ``cross``, ``time_depth``),
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
 ``nrows`` (grid layout), ``shared_limits``/``shared_axes``, and the
 ``*_kwargs`` styling dicts (``title_kwargs``, ``colorbar_kwargs``,
