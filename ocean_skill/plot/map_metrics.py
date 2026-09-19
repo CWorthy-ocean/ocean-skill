@@ -96,23 +96,30 @@ def _records_from(data):
 
     Accepts a :class:`~ocean_skill.comparison.ComparisonSet` (only its *single-position*
     comparisons contribute — a place through time (:attr:`~ocean_skill.comparison.
-    Comparison.is_series`) or a place through depth, i.e. a CTD cast
-    (:attr:`~ocean_skill.comparison.Comparison.is_profile`); anything else is skipped
-    with one warning naming how many), a :class:`pandas.DataFrame`, or a plain iterable
-    of dicts.
+    Comparison.is_series`), a place through depth, i.e. a CTD cast
+    (:attr:`~ocean_skill.comparison.Comparison.is_profile`), or a place through both
+    time and depth, i.e. a ``timeSeriesProfile`` mooring pooled to one number per
+    metric (:attr:`~ocean_skill.comparison.Comparison.is_time_depth`); anything else
+    (a gridded field or a section, which have no single position) is skipped with one
+    warning naming how many), a :class:`pandas.DataFrame`, or a plain iterable of
+    dicts.
     """
     import pandas as pd
 
     from ocean_skill.comparison import ComparisonSet
 
     if isinstance(data, ComparisonSet):
-        stations = [c for c in data.comparisons if c.is_series or c.is_profile]
+        stations = [
+            c for c in data.comparisons
+            if c.is_series or c.is_profile or c.is_time_depth
+        ]
         skipped = len(data.comparisons) - len(stations)
         if skipped:
             warnings.warn(
                 f"{skipped} of {len(data.comparisons)} comparisons are not a "
-                "single-position station (a place through time or through depth) "
-                "and were skipped — map_metrics only maps stations.",
+                "single-position station (a place through time, through depth, or "
+                "through both) and were skipped — map_metrics only maps stations, "
+                "not gridded fields or sections.",
                 stacklevel=_stacklevel.find(),
             )
         if not stations:
@@ -765,10 +772,12 @@ def map_metrics(
     ----------
     data
         A :class:`~ocean_skill.comparison.ComparisonSet` of single-position station
-        comparisons — moorings (``is_series``) and/or CTD casts (``is_profile``),
-        which may be mixed — or a plain table (:class:`~pandas.DataFrame` or list of
-        dicts) carrying a position and metric columns, such as an existing report's
-        metrics CSV. ``None`` is only valid alongside ``rows=``.
+        comparisons — moorings (``is_series``), CTD casts (``is_profile``), and/or
+        ``timeSeriesProfile`` moorings pooled over both time and depth
+        (``is_time_depth``), any of which may be mixed — or a plain table
+        (:class:`~pandas.DataFrame` or list of dicts) carrying a position and metric
+        columns, such as an existing report's metrics CSV. ``None`` is only valid
+        alongside ``rows=``.
     metrics
         Which registered metrics to draw, one panel each. Default
         :data:`DEFAULT_MAP_METRICS` — ``("bias", "crmsd", "corr", "sigma_ratio")``,

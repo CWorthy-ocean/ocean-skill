@@ -5478,10 +5478,13 @@ class Comparison:
           station-mooring recipe this generalizes.
         * :attr:`is_profile` -- lag-1 autocorrelation along depth order
           (:func:`~ocean_skill.metrics.lag1_autocorr_along_index`).
-        * :attr:`is_time_depth` -- the same depth-order estimator applied along the
-          *time* axis at each depth level, averaged across levels -- a station's
-          repeat visits are what carries independent evidence here, not depth
-          order.
+        * :attr:`is_time_depth` -- a separable 2-D estimate
+          (:func:`~ocean_skill.metrics.effective_n_2d`), the same recipe the grid
+          case below uses: lag-1 autocorrelation along the *time* axis (averaged
+          across depth levels) and along the *depth* axis (averaged across time
+          steps), each axis deflating the raw ``n`` in turn -- a mooring's repeat
+          visits and its depth levels can both carry redundant, not independent,
+          evidence, so neither axis is left uncounted.
         * the grid case (neither series, profile, time_depth, nor section -- see
           :attr:`family`) -- a separable 2-D estimate
           (:func:`~ocean_skill.metrics.effective_n_2d`): lag-1 along each
@@ -5527,8 +5530,19 @@ class Comparison:
             time_coord = find_coord(aligned, "time")
             if time_coord is None or time_coord.name not in reference.dims:
                 return None
-            r1 = _mean_lag1_along_dim(reference, time_coord.name)
-            return _metrics.effective_n(n, r1)
+            r_t = _mean_lag1_along_dim(reference, time_coord.name)
+            # Depth axis: prefer the CF vertical coord (as is_profile does); fall
+            # back to the sole remaining reference dim, since a time_depth point
+            # has exactly (time, depth) and real mooring data may carry thin CF
+            # attrs on its vertical coordinate.
+            z_coord = find_coord(aligned, "vertical")
+            z_dim = (
+                z_coord.name
+                if z_coord is not None and z_coord.name in reference.dims
+                else next((d for d in reference.dims if d != time_coord.name), None)
+            )
+            r_z = _mean_lag1_along_dim(reference, z_dim) if z_dim is not None else None
+            return _metrics.effective_n_2d(n, r_t, r_z)
 
         if self.is_section:
             return None
@@ -6751,9 +6765,11 @@ class ComparisonSet:
             ``docs/plot_styling_reference.md``.
 
         Every comparison in the set should be a single-position station — a place
-        through time (a mooring, :attr:`Comparison.is_series`) or through depth (a
-        CTD cast, :attr:`Comparison.is_profile`, scored full-column to one number
-        per metric) — anything else is skipped with a warning, since it has no
+        through time (a mooring, :attr:`Comparison.is_series`), through depth (a
+        CTD cast, :attr:`Comparison.is_profile`), or through both (a
+        ``timeSeriesProfile`` mooring, :attr:`Comparison.is_time_depth`), each
+        scored full-column/full-record to one number per metric — anything else
+        (a gridded field or a section) is skipped with a warning, since it has no
         single position to plot.
 
         ``renderer`` and ``**kwargs`` are forwarded to
