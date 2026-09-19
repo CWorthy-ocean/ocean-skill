@@ -219,19 +219,42 @@ def test_metrics_emits_n_eff_for_a_profile():
     assert 1.0 <= rec["n_eff"] <= rec["n"]
 
 
-def test_metrics_n_eff_for_time_depth_uses_time_axis_averaged_over_levels():
-    nt, nz = 80, 8
+def _time_depth_comparison_with(
+    nt: int = 80,
+    nz: int = 8,
+    phi_t: float = 0.8,
+    phi_z: float | None = None,
+    seed: int = 30,
+):
+    """A ``timeSeriesProfile`` point: an AR(1) time signal at every level, plus
+    (when ``phi_z`` is given) an AR(1) depth signal shared across every time step --
+    the separable construction :func:`_mean_lag1_along_dim` is meant to recover,
+    letting the time and depth autocorrelations be set independently.
+    """
+    from ocean_skill.align import TIME_DEPTH_OVER
+
     times = np.array("2020-01-01", dtype="datetime64[D]") + np.arange(nt)
-    ref = np.zeros((nt, nz))
-    for z in range(nz):
-        ref[:, z] = _ar1(nt, 0.8, seed=30 + z)
+    depth = np.linspace(5.0, 100.0, nz)
+    if phi_z is None:
+        # Depth levels mutually independent (each its own AR(1)-in-time draw) --
+        # the original fixture's shape, r1_depth ~ 0.
+        ref = np.zeros((nt, nz))
+        for z in range(nz):
+            ref[:, z] = _ar1(nt, phi_t, seed=seed + z)
+    else:
+        time_component = _ar1(nt, phi_t, seed=seed)
+        depth_component = _ar1(nz, phi_z, seed=seed + 1)
+        ref = time_component[:, None] + depth_component[None, :]
+        ref += np.random.default_rng(seed + 2).normal(scale=0.02, size=(nt, nz))
     ref += 20.0
-    test = ref + np.random.default_rng(99).normal(scale=0.05, size=(nt, nz))
-    reference = xr.DataArray(ref, dims=("time", "z"), coords={"time": times}).assign_coords(
-        lon=-158.0, lat=22.75
-    )
+    test = ref + np.random.default_rng(seed + 3).normal(scale=0.05, size=(nt, nz))
+    reference = xr.DataArray(
+        ref, dims=("time", "DEPTH"), coords={"time": times, "DEPTH": depth}
+    ).assign_coords(lon=-158.0, lat=22.75)
     reference.attrs["units"] = "degC"
-    testda = xr.DataArray(test, dims=("time", "z"), coords={"time": times})
+    testda = xr.DataArray(
+        test, dims=("time", "DEPTH"), coords={"time": times, "DEPTH": depth}
+    )
     aligned = xr.Dataset(
         {
             "test": testda.rename("test"),
@@ -240,14 +263,20 @@ def test_metrics_n_eff_for_time_depth_uses_time_axis_averaged_over_levels():
         },
         attrs={"station_lon": -158.0, "station_lat": 22.75},
     )
-    from ocean_skill.align import TIME_DEPTH_OVER
-
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         c = Comparison(
             reference="a", test="b", variable=TEMPERATURE, over=TIME_DEPTH_OVER
         )
     c._aligned = aligned
+    return c, reference
+
+
+def test_metrics_n_eff_for_time_depth_with_independent_levels_uses_time_only():
+    """With mutually-independent depth levels (r1_depth ~ 0), the 2-D estimate's
+    depth factor contributes ~1, so this collapses to the time-only deflation.
+    """
+    c, _ = _time_depth_comparison_with(nt=80, nz=8, phi_t=0.8)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         rec = c.metrics()
@@ -255,6 +284,31 @@ def test_metrics_n_eff_for_time_depth_uses_time_axis_averaged_over_levels():
     assert "n_eff" in rec
     assert 1.0 <= rec["n_eff"] <= rec["n"]
     assert rec["n_eff"] < 0.6 * rec["n"]
+
+
+def test_metrics_n_eff_for_time_depth_also_deflates_for_correlated_depth():
+    """Depth levels that are themselves autocorrelated (a real mooring's water
+    column, not independent draws) should deflate ``n_eff`` further than the
+    time axis alone would -- the redundancy across depth is real evidence lost,
+    the same way it already is for a lone profile cast.
+    """
+    from ocean_skill import metrics as m
+    from ocean_skill.comparison import _mean_lag1_along_dim
+
+    c, reference = _time_depth_comparison_with(nt=80, nz=8, phi_t=0.8, phi_z=0.85)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rec = c.metrics()
+    assert c.is_time_depth
+    assert "n_eff" in rec
+    assert 1.0 <= rec["n_eff"] <= rec["n"]
+
+    r_t = _mean_lag1_along_dim(reference, "time")
+    time_only_n_eff = m.effective_n(rec["n"], r_t)
+    assert rec["n_eff"] < 0.9 * time_only_n_eff, (
+        "correlated depth levels should deflate n_eff below what discounting time "
+        "correlation alone would give"
+    )
 
 
 def test_metrics_n_eff_for_a_gridded_field_is_spatial_and_bounded():

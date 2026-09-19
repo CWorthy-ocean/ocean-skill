@@ -859,3 +859,102 @@ def test_mixed_moorings_and_casts_all_map(mooring_set, profile_set):
     assert scatters and all(c.get_offsets().shape == (6, 2) for c in scatters), (
         "all three moorings and all three casts should reach the surface"
     )
+
+
+# --- timeSeriesProfile (mooring through both time and depth) stations ----------------
+#
+# A place through *both* time and depth, pooled to one number per metric -- built by
+# hand and injected as ``Comparison._aligned``, mirroring ``_profile_pair`` above and
+# ``tests/test_n_eff.py``'s own time_depth fixture.
+
+
+def _time_depth_pair(
+    lon: float, lat: float, offset: float, nt: int = 40, nz: int = 6
+) -> xr.Dataset:
+    time = pd.date_range("2015-01-01", periods=nt, freq="6h")
+    depth = np.linspace(5.0, 60.0, nz)
+    base = 12.0 - 0.05 * depth[None, :] + 0.3 * np.sin(np.arange(nt) / 9.0)[:, None]
+    reference = xr.DataArray(
+        base, dims=("time", "DEPTH"), coords={"time": time, "DEPTH": depth}
+    ).assign_coords(lon=lon, lat=lat)
+    reference.attrs["units"] = "degC"
+    test = reference + offset
+    return xr.Dataset(
+        {
+            "test": test.rename("test"),
+            "reference": reference.rename("reference"),
+            "difference": (test - reference).rename("difference"),
+        },
+        attrs={"station_lon": lon, "station_lat": lat},
+    )
+
+
+#: name, lon, lat, model bias offset -- distinct positions from _STATIONS/_CASTS above,
+#: so a mixed set has genuinely separate stations rather than coincidental overlaps.
+_TIME_DEPTH_STATIONS = (
+    ("tdp_a", -153.6, 58.9, 0.15),
+    ("tdp_b", -152.2, 59.6, -0.2),
+    ("tdp_c", -151.3, 60.1, 0.1),
+)
+
+
+@pytest.fixture
+def time_depth_set():
+    """Build a :class:`ComparisonSet` of three ``timeSeriesProfile`` (``is_time_depth``)
+    moorings, each pooling both a time and a depth axis into one metric record.
+    """
+    from ocean_skill.align import TIME_DEPTH_OVER
+    from ocean_skill.comparison import Comparison, ComparisonSet
+
+    comparisons = []
+    for name, lon, lat, offset in _TIME_DEPTH_STATIONS:
+        c = Comparison(
+            reference=name,
+            test=f"{name}_model",
+            variable="sea_water_temperature",
+            over=TIME_DEPTH_OVER,
+            cache=False,
+        )
+        c._aligned = _time_depth_pair(lon, lat, offset)
+        comparisons.append(c)
+    return ComparisonSet(comparisons)
+
+
+def test_time_depth_moorings_are_recognized_as_stations(time_depth_set):
+    for c in time_depth_set.comparisons:
+        assert c.is_time_depth
+        assert not c.is_series
+        assert not c.is_profile
+
+
+def test_comparisonset_map_metrics_draws_every_time_depth_mooring(time_depth_set):
+    """TimeSeriesProfile moorings (a place through time *and* depth) map like any
+    other single-position station -- this is the case that used to be skipped.
+    """
+    fig = time_depth_set.map_metrics(grid="regular", metrics=("bias",))
+
+    scatters = [c for ax in fig.axes for c in _scatter_collections(ax)]
+    assert scatters and all(c.get_offsets().shape == (3, 2) for c in scatters)
+
+
+def test_mixed_moorings_casts_and_time_depth_all_map(
+    mooring_set, profile_set, time_depth_set
+):
+    """A set mixing all three single-position families maps every one of them."""
+    from ocean_skill.comparison import ComparisonSet
+
+    mixed = ComparisonSet(
+        [
+            *mooring_set.comparisons,
+            *profile_set.comparisons,
+            *time_depth_set.comparisons,
+        ]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fig = mixed.map_metrics(grid="regular", metrics=("bias",))
+
+    scatters = [c for ax in fig.axes for c in _scatter_collections(ax)]
+    assert scatters and all(c.get_offsets().shape == (9, 2) for c in scatters), (
+        "all three moorings, casts, and time-depth stations should reach the surface"
+    )
