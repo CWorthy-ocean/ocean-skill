@@ -571,6 +571,44 @@ def test_source_names_is_still_a_plain_list(two_ooi_catalogs):
     assert manual.by_catalog() == {}
 
 
+# -- find_catalogs() -------------------------------------------------------------
+
+
+def test_find_catalogs_returns_catalog_names_not_sources(two_ooi_catalogs):
+    result = two_ooi_catalogs.find_catalogs(name="ooi")
+    assert result == ["ooi_endurance", "ooi_papa"]
+    assert isinstance(result, list)
+
+
+def test_find_catalogs_is_falsy_on_no_match(two_ooi_catalogs):
+    result = two_ooi_catalogs.find_catalogs(name="nope")
+    assert result == []
+    assert not result
+
+
+def test_find_catalogs_name_is_catalog_only_not_source(index):
+    """Unlike find(name=...), find_catalogs(name=...) ignores source names."""
+    # "month01" is a source name (in the WOA23 catalog) but appears in no
+    # catalog name -- find() reaches it via the source, find_catalogs() must not.
+    assert index.find(name="month01") == ["woa23_nitrate_month01"]
+    assert index.find_catalogs(name="month01") == []
+
+
+def test_find_catalogs_other_filters_are_an_existence_test(index):
+    """A catalog is kept if *any* source in it matches, not if every source does."""
+    assert index.find_catalogs(featureType="timeSeries") == ["OOI Station Papa"]
+
+
+def test_find_catalogs_with_no_filters_matches_catalog_names(index):
+    assert index.find_catalogs() == catalog.catalog_names()
+
+
+def test_find_catalogs_importable_from_package_root():
+    import ocean_skill as osk
+
+    assert osk.find_catalogs is catalog.find_catalogs
+
+
 # -- catalog name vs. title vs. description ------------------------------------
 
 

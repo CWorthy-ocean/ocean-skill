@@ -11,6 +11,7 @@ The public API is intentionally small:
     osk.catalogs                 # discovered catalogs / sources
     osk.find(variable=...)       # search sources across catalogs
     osk.find(variable=...).map() # ... and map where the matches are
+    osk.find_catalogs(name=...)  # search catalogs themselves (existence checks)
     osk.map_locations()          # map every discovered dataset (metadata only)
     osk.describe("glodap")       # metadata for one source, or one whole catalog --
                                  # including which declared variables the vocabulary
@@ -49,6 +50,7 @@ from ocean_skill.catalog import (
     coord_report,
     describe,
     find,
+    find_catalogs,
     match_report,
     overlap,
 )
@@ -81,6 +83,7 @@ __all__ = [
     "detide",
     "field",
     "find",
+    "find_catalogs",
     "map_locations",
     "map_metrics",
     "match_report",

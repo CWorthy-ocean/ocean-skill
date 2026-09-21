@@ -43,6 +43,7 @@ __all__ = [
     "describe",
     "discover",
     "find",
+    "find_catalogs",
     "match_report",
     "overlap",
     "resolve",
@@ -848,6 +849,10 @@ def find(
     (its title and description are independent of its name and may contain spaces
     the name can't).
 
+    Asking "does a catalog matching X exist at all" is a different question from
+    "which sources match" -- :func:`find_catalogs` answers it directly, returning
+    catalog names rather than a pool of sources from however many catalogs matched.
+
     ``bbox`` is ``(lon_min, lat_min, lon_max, lat_max)`` and both it and ``time``
     test for *overlap*, not containment — a global climatology matches a regional
     box.
@@ -962,13 +967,89 @@ def find(
     return out
 
 
+def find_catalogs(
+    *,
+    name: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    text: str | list[str] | None = None,
+    climatology: bool | str | None = None,
+    variable: str | None = None,
+    featureType: str | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+    time: tuple[str, str] | None = None,
+    resolution: float | tuple[float | None, float | None] | None = None,
+    cadence: str | float | tuple[float | None, float | None] | None = None,
+    vertical: bool | None = None,
+) -> list[str]:
+    """Search discovered *catalogs* (not sources); return matching catalog names.
+
+    The catalog-level counterpart to :func:`find`: where ``find(catalog="ooi")``
+    returns every source pooled from however many catalogs matched "ooi",
+    ``find_catalogs(name="ooi")`` answers the question directly -- which catalog(s)
+    matched -- as a plain list of names. That makes it the natural existence
+    check::
+
+        if osk.find_catalogs(name="ooi"):
+            ...   # at least one OOI catalog is discoverable
+
+    Parameters
+    ----------
+    name
+        Substring or glob (case-insensitive) against the catalog's **name** --
+        its saved file stem, e.g. ``"ooi_papa"`` -- same rule as :func:`find`'s
+        ``catalog=``. Unlike :func:`find`'s ``name=``, this does **not** also
+        match source names: "find catalogs named X" should not be satisfied by
+        a source named X sitting in a differently-named catalog. ``None``
+        (default) skips this filter.
+    title, description, text
+        Same as :func:`find` -- freeform catalog prose, or free text over
+        everything.
+    climatology, variable, featureType, bbox, time, resolution, cadence, vertical
+        Same as :func:`find`, but as an *existence* test on the catalog: a
+        catalog is kept when **at least one** of its sources satisfies the
+        filter. ``find_catalogs(variable="nitrate")`` means "which catalogs
+        have any nitrate", not "every source in this catalog has nitrate".
+
+    Returns a sorted, deduplicated list of catalog names -- built from
+    :func:`find`'s own result via its ``.catalogs`` accessor, so the matching
+    logic lives in exactly one place. A catalog with zero sources is invisible
+    to :func:`discover` and so invisible here too, same as :func:`catalog_names`.
+
+    For an *exact* name rather than a substring/glob, skip searching entirely::
+
+        "ooi_papa" in osk.catalog_names()
+
+    ::
+
+        osk.find_catalogs(name="ooi")           # ['ooi_endurance', 'ooi_papa']
+        osk.find_catalogs(variable="nitrate")   # catalogs holding any nitrate
+        osk.find_catalogs()                     # every discovered catalog
+    """
+    return find(
+        catalog=name,
+        title=title,
+        description=description,
+        text=text,
+        climatology=climatology,
+        variable=variable,
+        featureType=featureType,
+        bbox=bbox,
+        time=time,
+        resolution=resolution,
+        cadence=cadence,
+        vertical=vertical,
+    ).catalogs
+
+
 def catalog_names() -> list[str]:
     """Sorted names of all discovered catalogs (each ``SourceRef``'s ``catalog``).
 
     A catalog's name is its saved file stem (e.g. ``"ooi_papa"``) — the unique,
     space-free identifier, as opposed to its optional freeform ``title``/
     ``description`` (see :func:`catalog_metadata`, and :func:`find`'s
-    ``title=``/``description=`` filters).
+    ``title=``/``description=`` filters). For a filtered, substring/glob search
+    over catalog names, see :func:`find_catalogs`.
     """
     return sorted({ref.catalog for ref in discover().values()})
 

@@ -98,6 +98,39 @@ osk.find(catalog="ooi").catalogs        # ['ooi_endurance', 'ooi_papa']
 osk.find(name="papa").by_catalog()      # {'ooi_papa': [...]}
 ```
 
+## Finding catalogs
+
+`find()` always returns *sources*, even when you're really asking about a
+catalog. For the catalog-level question — "which catalogs match X", or "does a
+catalog like this even exist" — use `find_catalogs()` instead:
+
+```python
+osk.find_catalogs(name="ooi")           # ['ooi_endurance', 'ooi_papa']
+osk.find_catalogs(variable="nitrate")   # catalogs holding any nitrate
+osk.find_catalogs()                     # every discovered catalog
+```
+
+This is the natural existence check:
+
+```python
+if osk.find_catalogs(name="ooi"):
+    ...   # at least one OOI catalog is discoverable
+```
+
+`name=` here matches only the catalog's **name** (substring or glob) — unlike
+`find`'s `name=`, it does *not* also match source names, since "find catalogs
+named X" shouldn't be satisfied by a source named X sitting in some other
+catalog. `title=`, `description=`, and `text=` behave as in `find`. Every other
+filter (`variable=`, `featureType=`, `bbox=`, `time=`, `climatology=`, ...) is an
+existence test on the catalog: it's kept if **at least one** of its sources
+matches, not if every source does.
+
+For an *exact* catalog name, skip searching entirely:
+
+```python
+"ooi_papa" in osk.catalog_names()
+```
+
 ## By title and description
 
 A catalog's `title`/`description` are optional, freeform, and may contain spaces
@@ -250,5 +283,6 @@ name.** If you just want "contains", leave the wildcards out.
 ## Related
 
 - `osk.catalogs` — the discovered catalogs
+- `osk.find_catalogs(...)` — search catalogs themselves; a natural existence check
 - `osk.describe(name)` — full metadata for one source or catalog
 - `osk.read(name)` — open a source
