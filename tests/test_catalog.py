@@ -517,6 +517,60 @@ def test_filters_combine(index):
     assert index.find(name="papa", featureType="grid") == []
 
 
+# -- SourceNames.catalogs / .by_catalog() ---------------------------------------
+
+
+@pytest.fixture
+def two_ooi_catalogs(monkeypatch):
+    """Two catalogs sharing the substring "ooi", one source each, plus a third."""
+    return _fake_index(
+        monkeypatch,
+        {
+            "ooi-gp02hypm-rim01-02-ctdmog039": ("ooi_papa", {}),
+            "ooi-ce02shsm-rid27-04-ctdbpc040": ("ooi_endurance", {}),
+            "woa23_nitrate_month01": ("WOA23", GLOBAL),
+        },
+    )
+
+
+def test_catalog_substring_can_pool_several_catalogs(two_ooi_catalogs):
+    """A partial catalog= match can hit more than one catalog at once."""
+    idx = two_ooi_catalogs
+    result = idx.find(catalog="ooi")
+    assert sorted(result) == [
+        "ooi-ce02shsm-rid27-04-ctdbpc040",
+        "ooi-gp02hypm-rim01-02-ctdmog039",
+    ]
+    assert result.catalogs == ["ooi_endurance", "ooi_papa"]
+    assert result.by_catalog() == {
+        "ooi_endurance": ["ooi-ce02shsm-rid27-04-ctdbpc040"],
+        "ooi_papa": ["ooi-gp02hypm-rim01-02-ctdmog039"],
+    }
+
+
+def test_name_match_reports_catalog(two_ooi_catalogs):
+    result = two_ooi_catalogs.find(name="papa")
+    assert result == ["ooi-gp02hypm-rim01-02-ctdmog039"]
+    assert result.catalogs == ["ooi_papa"]
+
+
+def test_source_names_is_still_a_plain_list(two_ooi_catalogs):
+    from ocean_skill.catalog import SourceNames
+
+    empty = two_ooi_catalogs.find(name="does-not-exist")
+    assert empty == []
+    assert isinstance(empty, list)
+    assert empty.catalogs == []
+    assert empty.by_catalog() == {}
+
+    # A SourceNames built some way other than find() has no catalog to report,
+    # but is still every bit a list.
+    manual = SourceNames(["foo", "bar"])
+    assert manual == ["foo", "bar"]
+    assert manual.catalogs == []
+    assert manual.by_catalog() == {}
+
+
 # -- catalog name vs. title vs. description ------------------------------------
 
 

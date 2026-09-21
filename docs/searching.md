@@ -87,6 +87,17 @@ so a `name="papa"` that searched only source names would find nothing for the on
 word you actually know. Use `catalog=` when you want to match only the catalog
 name.
 
+Both `catalog=` and `name=` are substring/glob matches, so more than one catalog
+can satisfy a single query — `catalog="ooi"` matches every catalog whose name
+contains "ooi", and their sources are pooled into one flat list. `.catalogs` and
+`.by_catalog()` tell you which catalog(s) actually matched, without a second
+lookup:
+
+```python
+osk.find(catalog="ooi").catalogs        # ['ooi_endurance', 'ooi_papa']
+osk.find(name="papa").by_catalog()      # {'ooi_papa': [...]}
+```
+
 ## By title and description
 
 A catalog's `title`/`description` are optional, freeform, and may contain spaces

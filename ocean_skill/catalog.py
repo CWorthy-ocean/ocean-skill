@@ -672,7 +672,47 @@ class SourceNames(list):
     For the cases with no query to hang a method on ("map everything", "map this
     catalog"), :func:`ocean_skill.plot.map_locations.map_locations` is the same
     map as a standalone call.
+
+    ``catalog=``/``name=`` match by substring or glob, so more than one catalog
+    can satisfy a single query (``catalog="ooi"`` matches both ``ooi_papa`` and
+    ``ooi_endurance``) and their sources are pooled into this one flat list --
+    nothing about a bare name says which catalog it came from. ``.catalogs`` and
+    ``.by_catalog()`` answer that without a second lookup::
+
+        osk.find(catalog="ooi").catalogs        # ['ooi_endurance', 'ooi_papa']
+        osk.find(name="papa").by_catalog()      # {'ooi_papa': [...]}
     """
+
+    def __init__(self, names=(), catalog_of: dict[str, str] | None = None):
+        super().__init__(names)
+        #: Source name -> catalog name, for every source :func:`find` placed
+        #: here. Not necessarily complete: a name added by other means (e.g.
+        #: ``SourceNames(["foo"])`` or a plain ``.append``) has no entry, and
+        #: ``.catalogs``/``.by_catalog()`` simply skip it.
+        self._catalog_of: dict[str, str] = dict(catalog_of) if catalog_of else {}
+
+    def _add(self, source: str, catalog: str) -> None:
+        """Append ``source`` and record which catalog it came from."""
+        self._catalog_of[source] = catalog
+        self.append(source)
+
+    @property
+    def catalogs(self) -> list[str]:
+        """Sorted, deduplicated names of the catalogs these sources came from."""
+        return sorted({self._catalog_of[s] for s in self if s in self._catalog_of})
+
+    def by_catalog(self) -> dict[str, list[str]]:
+        """These source names grouped by catalog, in catalog-name order.
+
+        A source with no recorded catalog (added some way other than
+        :func:`find`) is omitted -- there is nothing to group it under.
+        """
+        out: dict[str, list[str]] = {}
+        for source in self:
+            cat = self._catalog_of.get(source)
+            if cat is not None:
+                out.setdefault(cat, []).append(source)
+        return {cat: out[cat] for cat in sorted(out)}
 
     def map(self, **kwargs):
         """Map where these sources are.
@@ -838,7 +878,8 @@ def find(
 
     The result is a :class:`SourceNames` — a plain list of names that additionally
     offers ``.map()``, drawing where the matches are on a map from their catalog
-    metadata alone.
+    metadata alone, and ``.catalogs``/``.by_catalog()`` to see which catalog(s)
+    a ``catalog=``/``name=`` substring or glob actually matched.
     """
     terms = _as_terms(text) if text is not None else None
     # Only pull in vocabulary (imports cf_xarray, runs its criteria refresh) and
@@ -917,7 +958,7 @@ def find(
                 continue
             if _time_overlaps(meta, time) is False:
                 continue
-        out.append(source)
+        out._add(source, ref.catalog)
     return out
 
 
