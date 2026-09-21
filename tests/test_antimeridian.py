@@ -674,6 +674,45 @@ def test_a_non_straddling_facet_movie_keeps_tiles_without_a_warning():
     assert "WMTS" in kinds, kinds
 
 
+def test_a_straddling_field_facet_drops_tiles_for_a_coastline():
+    """A still map gets the same seam protection a movie already has.
+
+    Tiles are on by default here too (see :func:`_field_facet`), so the downgrade
+    matters just as much for a single frame as for every frame of a movie.
+    """
+    pytest.importorskip("geoviews")
+    pytest.importorskip("cartopy.feature")
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    item = _facet_item(150.0, 250.0)
+    with pytest.warns(UserWarning, match="Web Mercator"):
+        obj = render(
+            PlotSpec(family="field_facet", items=[item], options={"domain": None}),
+            renderer="holoviews",
+        )
+    kinds = [type(n).__name__ for n in obj.traverse()]
+    assert "WMTS" not in kinds, kinds
+    assert "Feature" in kinds, kinds
+
+
+def test_a_non_straddling_field_facet_keeps_tiles_without_a_warning():
+    pytest.importorskip("geoviews")
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    item = _facet_item(-98.0, -80.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        obj = render(
+            PlotSpec(family="field_facet", items=[item], options={"domain": None}),
+            renderer="holoviews",
+        )
+    assert not any("Web Mercator" in str(w.message) for w in caught)
+    kinds = [type(n).__name__ for n in obj.traverse()]
+    assert "WMTS" in kinds, kinds
+
+
 # --- an arbitrary-path transect across the dateline -----------------------------------
 #
 # The transect grammar (ocean_skill.transect) reuses this module's own machinery --

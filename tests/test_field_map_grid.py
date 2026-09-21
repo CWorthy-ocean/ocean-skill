@@ -404,6 +404,37 @@ def test_a_size_one_facet_axis_is_not_a_refusal(stub_by_variable):
     )
 
 
+# -- tiles: a web basemap per panel, on by default (see _field_map_grid) ---------------
+
+
+def test_gets_a_basemap_on_every_panel_by_default_interactively():
+    from ocean_skill.plot.registry import render
+
+    items = [_map_item("run_a", NITRATE, 5.0), _map_item("run_a", SILICATE, 20.0)]
+    obj = render(_spec(items), renderer="holoviews")
+    kinds = [type(n).__name__ for n in obj.traverse()]
+    assert kinds.count("WMTS") == 2, kinds
+    assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+
+
+def test_tiles_false_is_the_offline_coastline_interactively():
+    from ocean_skill.plot.registry import render
+
+    items = [_map_item("run_a", NITRATE, 5.0), _map_item("run_a", SILICATE, 20.0)]
+    obj = render(_spec(items, tiles=False), renderer="holoviews")
+    kinds = [type(n).__name__ for n in obj.traverse()]
+    assert "WMTS" not in kinds, kinds
+    assert kinds.count("Feature") == 2, kinds
+
+
+def test_static_accepts_tiles_with_a_warning():
+    from ocean_skill.plot.registry import render
+
+    items = [_map_item("run_a", NITRATE, 5.0)]
+    with pytest.warns(UserWarning, match="only affect the interactive renderer"):
+        render(_spec(items, tiles=True), renderer="matplotlib")
+
+
 # -- movie() refuses, map-aware ----------------------------------------------------------
 
 

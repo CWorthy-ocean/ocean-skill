@@ -322,7 +322,13 @@ def _quadmesh(
             from ocean_skill.plot.proj_check import warn_projection_skew
 
             warn_projection_skew()
-        if coastline and land is not False:
+        # resolved here, ahead of the coastline decision below, so a basemap and its
+        # redundant offline coastline are never drawn together. Movie callers already
+        # downgrade via _tiles_for before reaching here (a no-op resolving it again
+        # below); a caller that hands tiles straight to _quadmesh still gets the same
+        # seam protection rather than a silently broken map.
+        tiles = _tiles_for(tiles, da)
+        if coastline and land is not False and not tiles:
             # hvplot's coastline is a geoviews Feature, which the plot re-projects
             # from scratch every time it renders a frame. Fine for the single draw
             # every other family does; ruinous for an embedded movie, which renders
@@ -333,6 +339,11 @@ def _quadmesh(
             # this panel's own lon/lat extent and a GSHHS request falls back to its
             # nearest Natural Earth scale (with a warning) — see
             # ocean_skill.plot.coastline.
+            #
+            # Skipped outright once tiles are on: the basemap already draws the
+            # coast (see docs/movies.md), so a second, offline outline on top of it
+            # would be redundant — the same reasoning movie callers already act on
+            # explicitly via coastline=False.
             opts["coastline"] = nearest_ne_resolution(
                 normalize_coastline_resolution(coastline_resolution),
                 extent=_lonlat_extent(da),
@@ -350,10 +361,6 @@ def _quadmesh(
             # centre-0 layout the 180-centred frame was chosen to avoid. Projecting
             # the mesh vertices once keeps it one contiguous piece.
             opts["project"] = True
-        # movie callers already downgrade via _tiles_for before reaching here (so this
-        # is a no-op for them); a caller that hands tiles straight to _quadmesh still
-        # gets the same seam protection rather than a silently broken map.
-        tiles = _tiles_for(tiles, da)
         if tiles:
             # a basemap gives the eye real coastline and terrain where the field is
             # masked, which the 50m outline cannot. On by default for a movie, since a
@@ -422,6 +429,7 @@ def _field_row(
     domain=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -455,6 +463,12 @@ def _field_row(
     three panels rasterize together, same as :func:`_field_movie` decides once for every
     frame. Pass ``rasterize=False`` for a field small enough to zoom into sharply.
 
+    ``tiles`` puts a web basemap under all three panels, on by default here as it is
+    for a movie (see :func:`_field_movie`) — see :func:`_field_facet`'s docstring for
+    what it accepts and :func:`_tiles_for` for the antimeridian downgrade. Resolved
+    from ``t``/``r`` together, since a comparison's test and reference commonly come
+    from different sources whose domains could disagree.
+
     ``coastline_resolution`` picks the coastline dataset for every panel — see
     :mod:`ocean_skill.plot.coastline` and the static renderer's ``field_row`` docstring.
     ``land`` is honored the same way as :func:`_quadmesh` — see there.
@@ -474,6 +488,7 @@ def _field_row(
     factor = _canvas_factor(size, zoom)
     aligned = item["aligned"]
     t, r, d = aligned["test"], aligned["reference"], aligned["difference"]
+    tiles = _tiles_for(_check_tiles(tiles), t, r)
     units = item.get("units") or ""
     standard_name = item.get("standard_name")
     seq, div = cmaps_for(standard_name)
@@ -507,6 +522,7 @@ def _field_row(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
         ),
@@ -522,6 +538,7 @@ def _field_row(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
         ),
@@ -536,11 +553,12 @@ def _field_row(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
         ),
     ]
-    outline = _domain_overlay(domain, t, geo=geo)
+    outline = _domain_overlay(domain, t, geo=geo, tiles=tiles)
     if outline is not None:
         panels = [p * outline for p in panels]
     row = panels[0] + panels[1] + panels[2]
@@ -563,6 +581,7 @@ def _field_grid(
     domain=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -596,7 +615,9 @@ def _field_grid(
     ``rasterize`` and ``hover`` pass straight through to every row (see
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
     can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
-    same way, as does ``robust`` — each row's colour scale is its own.
+    same way, as does ``robust`` — each row's colour scale is its own. So does
+    ``tiles`` (on by default) — each row resolves its own antimeridian/source check
+    independently, appropriate since rows commonly carry different reference domains.
 
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list (row 0's test/reference/difference, then row 1's, ...), so a
@@ -636,6 +657,7 @@ def _field_grid(
             domain=domain,
             hover=hover,
             rasterize=rasterize,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
@@ -677,6 +699,7 @@ def _field_facet(
     domain=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -716,6 +739,15 @@ def _field_facet(
     mesh — the fix for the same per-cell Python loop :func:`_field_row` avoids, since a
     facet grid draws just as many curvilinear panels as it has frames.
 
+    ``tiles`` puts a web basemap under every panel, on by default here as it is for a
+    movie (see :func:`_facet_movie`) — a still map benefits from the same real
+    coastline and terrain where the field is masked, and a notebook reading one
+    interactively is already on the web. Pass a source name (``"EsriOceanBase"``,
+    ``"EsriTerrain"``, any :mod:`geoviews.tile_sources` entry) or ``tiles=False`` for
+    the offline Natural Earth coastline instead — see :func:`_quadmesh` and
+    :func:`_tiles_for` for when a domain straddling the antimeridian downgrades to the
+    coastline regardless.
+
     ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
     every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
 
@@ -753,6 +785,9 @@ def _field_facet(
             raise ValueError(
                 f"{name} {value!r} is not a dimension of the field ({list(field.dims)})"
             )
+    # resolved once for the whole facet -- every panel shares the same grid, so one
+    # antimeridian/source check covers them all (see _tiles_for/_check_tiles)
+    tiles = _tiles_for(_check_tiles(tiles), field)
     n = int(field.sizes[facet_dim]) if facet_dim else 1
     nrows = int(field.sizes[row_dim]) if row_dim else 1
     units = item.get("units") or ""
@@ -771,7 +806,7 @@ def _field_facet(
     )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
-    outline = _domain_overlay(domain, field, geo=geo)
+    outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
     # one panel's worth of cells, not the whole faceted field, which would overcount by
     # the number of panels and rasterize a grid whose individual maps are small
     one_panel = field.isel({d: 0 for d in (facet_dim, row_dim) if d})
@@ -841,6 +876,7 @@ def _field_facet(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
         )
@@ -1450,6 +1486,7 @@ def _field_map_grid(
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -1482,6 +1519,11 @@ def _field_map_grid(
     arrange the same panels the same way -- the grid is free here too, these panels
     having no inherent order either. Faceted, the shape is the facets' own -- ``ncols=``
     is then refused, matching the static renderer.
+
+    ``tiles`` puts a web basemap under every panel, on by default -- see
+    :func:`_field_facet`'s docstring for what it accepts. Resolved once across every
+    item's field, since a straddling domain on any one variable would tear the same
+    way on its own panel -- see :func:`_tiles_for`.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits`, applied to each panel's (or, with ``shared_limits=``, that group's
@@ -1520,6 +1562,9 @@ def _field_map_grid(
         )
 
     n = len(items)
+    # resolved once across every item's field -- a straddling domain on any one of
+    # them would tear the same way on its own panel (see _tiles_for)
+    tiles = _tiles_for(_check_tiles(tiles), *(it["field"] for it in items))
     if title is None:
         title = grid_suptitle(items)
 
@@ -1597,10 +1642,11 @@ def _field_map_grid(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
         )
-        outline = _domain_overlay(domain, field, geo=geo)
+        outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
         panels.append(mesh if outline is None else mesh * outline)
 
     if len(panels) == 1:

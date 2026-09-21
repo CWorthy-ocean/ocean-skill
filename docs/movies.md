@@ -263,9 +263,11 @@ for one long enough that thinning isn't enough.
 
 ### Looks
 
-`tiles=True` (the default) puts a basemap under the field — a notebook watching a movie
-is already on the web, so there's nothing offline about fetching a few map tiles too.
-Pass a source name — `tiles="EsriTerrain"`, `"EsriOceanBase"`, or any [geoviews tile
+`tiles=True` (the default here, and for every interactive map family — see
+[`tiles`](plot_styling_reference.md#tiles-holoviews-only)) puts a basemap under the
+field — a notebook watching a movie is already on the web, so there's nothing offline
+about fetching a few map tiles too. Pass a source name — `tiles="EsriTerrain"`,
+`"EsriOceanBase"`, or any [geoviews tile
 source](https://geoviews.org/user_guide/Working_with_Bokeh.html) — for a different map,
 or `tiles=False` for a notebook that genuinely has to work offline. Avoid the Carto
 sources (`"CartoLight"`, etc.): they now require an API key geoviews has no way to

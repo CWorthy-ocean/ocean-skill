@@ -967,7 +967,8 @@ def test_shared_limits_pools_one_scale_per_metric_across_rows():
 
 def test_shared_limits_defaults_to_off_and_leaves_a_single_item_unaffected(skill_item):
     """The default (independent scales) is exactly ``test_several_comparisons_...``'s
-    behaviour; a single item has no other row to share with either way."""
+    behaviour; a single item has no other row to share with either way.
+    """
     fig = render(_skill_spec(skill_item, shared_limits=True))
     assert len(_colorbar_axes(fig)) == len(_SKILL_METRICS)
     assert all(len(parents) == 1 for _, parents in _colorbar_axes(fig))
@@ -1154,7 +1155,8 @@ def _section_field() -> xr.DataArray:
 def _time_depth_field() -> xr.DataArray:
     """Build a small, dense (time, depth) point field -- the payload the
     time_depth family takes; dense enough that default_mark picks "pcolormesh",
-    the mesh path shared with every other geographic family via _quadmesh."""
+    the mesh path shared with every other geographic family via _quadmesh.
+    """
     time = xr.date_range("2020-01-01", periods=5, freq="MS")
     depth = np.array([0.0, 10.0, 25.0])
     values = 5.0 + np.linspace(0, 1, time.size * depth.size).reshape(
@@ -1226,7 +1228,8 @@ def _time_depth_row_item(reference: str = "woa23", row_label: str | None = None)
 @pytest.fixture
 def two_time_depth_rows():
     """Two time_depth_row rows from *different* stations -- a real compare()
-    fan-out's shape (see ``two_rows``, the ``field_grid`` analogue)."""
+    fan-out's shape (see ``two_rows``, the ``field_grid`` analogue).
+    """
     return [
         _time_depth_row_item("station_hv1", "HV1"),
         _time_depth_row_item("station_hv2", "HV2"),
@@ -1697,20 +1700,24 @@ def _coastline_scale(row):
 
 
 def test_coastline_resolution_auto_resolves_by_extent_interactively():
-    """``"auto"`` reaches the interactive renderer too, not just the static one."""
-    row = _hv_row(_row_item())  # 8 x 10 degree domain: under both NE thresholds
+    """``"auto"`` reaches the interactive renderer too, not just the static one.
+
+    ``tiles=False``: tiles are on by default now and draw the coast themselves
+    (see :func:`_quadmesh`), which would leave no offline ``Feature`` to inspect.
+    """
+    row = _hv_row(_row_item(), tiles=False)  # 8x10 deg: under both NE thresholds
     assert _coastline_scale(row) == "10m"
 
 
 def test_coastline_resolution_accepts_a_fixed_natural_earth_scale_interactively():
-    row = _hv_row(_row_item(), coastline_resolution="50m")
+    row = _hv_row(_row_item(), coastline_resolution="50m", tiles=False)
     assert _coastline_scale(row) == "50m"
 
 
 def test_coastline_resolution_gshhs_falls_back_to_natural_earth_interactively():
     """GSHHS has no interactive renderer support, so it degrades -- loudly."""
     with pytest.warns(UserWarning, match="GSHHS"):
-        row = _hv_row(_row_item(), coastline_resolution="full")
+        row = _hv_row(_row_item(), coastline_resolution="full", tiles=False)
     assert _coastline_scale(row) == "10m"
 
 
@@ -1798,10 +1805,14 @@ def test_land_accepted_by_every_map_family(family, build_spec):
 
 
 def test_land_false_drops_the_coastline_interactively():
-    """Interactively there is no fill to hide -- ``land=False`` drops the outline too."""
+    """Interactively there is no fill to hide -- ``land=False`` drops the outline too.
+
+    ``tiles=False``: with tiles on (the default) there would be no ``Feature``
+    either way, which would pass for the wrong reason -- see :func:`_quadmesh`.
+    """
     import holoviews as hv
 
-    row = _hv_row(_row_item(), land=False)
+    row = _hv_row(_row_item(), land=False, tiles=False)
     assert not any(
         isinstance(el, hv.Element) and type(el).__name__ == "Feature"
         for el in row.traverse()
@@ -1809,5 +1820,72 @@ def test_land_false_drops_the_coastline_interactively():
 
 
 def test_land_true_keeps_the_coastline_interactively():
-    row = _hv_row(_row_item())
+    row = _hv_row(_row_item(), tiles=False)
     assert _coastline_scale(row) == "10m"
+
+
+# ---------------------------------------------------------------------------
+# tiles: a web basemap under a still map, on by default here as it already is
+# for a movie (see test_movie.py's own basemap tests) -- see _quadmesh/_tiles_for
+# for the antimeridian downgrade and _check_tiles for source validation.
+# ---------------------------------------------------------------------------
+
+
+def test_field_row_gets_a_basemap_by_default_interactively():
+    row = _hv_row(_row_item())
+    kinds = _element_kinds(row)
+    assert kinds.count("WMTS") == 3, kinds  # test, reference, difference
+    assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+
+
+def test_field_row_named_tile_source_interactively():
+    row = _hv_row(_row_item(), tiles="EsriTerrain")
+    tile = next(n for n in row.traverse() if type(n).__name__ == "WMTS")
+    assert "arcgisonline" in tile.data, tile.data
+
+
+def test_field_row_tiles_false_is_the_offline_coastline_interactively():
+    row = _hv_row(_row_item(), tiles=False)
+    kinds = _element_kinds(row)
+    assert "WMTS" not in kinds, kinds
+    assert kinds.count("Feature") == 3, kinds
+
+
+def test_static_field_row_accepts_tiles_with_a_warning():
+    """``renderer="both"`` can hand ``tiles=`` to each renderer.
+
+    The static side must not raise, since it is a real option there too, just not
+    this one's.
+    """
+    spec = PlotSpec(family="field_row", items=[_row_item()], options={"tiles": True})
+    with pytest.warns(UserWarning, match="only affect the interactive renderer"):
+        render(spec, renderer="matplotlib")
+
+
+def test_static_field_row_tiles_false_is_the_default_and_silent():
+    """``tiles=False`` (the default) must not warn, unlike a truthy ``tiles``.
+
+    It asked for exactly the offline coastline this renderer already draws.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spec = PlotSpec(family="field_row", items=[_row_item()])
+        render(spec, renderer="matplotlib")
+    msg = "only affect the interactive renderer"
+    assert not any(msg in str(w.message) for w in caught)
+
+
+def test_field_grid_gets_a_basemap_on_every_row_by_default_interactively():
+    two_rows = [_row_item(), _row_item()]
+    grid = render(
+        PlotSpec(family="field_grid", items=two_rows), renderer="holoviews"
+    )
+    kinds = [type(n).__name__ for n in grid.traverse()]
+    assert kinds.count("WMTS") == 6, kinds  # 2 rows x 3 panels
+
+
+def test_static_field_grid_accepts_tiles_with_a_warning():
+    two_rows = [_row_item(), _row_item()]
+    spec = PlotSpec(family="field_grid", items=two_rows, options={"tiles": True})
+    with pytest.warns(UserWarning, match="only affect the interactive renderer"):
+        render(spec, renderer="matplotlib")

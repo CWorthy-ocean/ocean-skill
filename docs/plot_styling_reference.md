@@ -10,8 +10,9 @@ so any keyword that call accepts works, not just a hand-picked subset. An eighth
 no per-frame label on a still, and a ninth, [`annot_kwargs`](#the-portrait-family-metrics-scoreboard),
 belongs to `portrait` alone, styling its cell-value text. A few more parameters aren't styling dicts at all
 (`title`, `metric_keys`, `metric_names`, [`coastline_resolution`](#coastline_resolution),
-[`land`](#land), `shared_limits`, `shared_axis_labels`, `shared_axes`) — see
-[Other parameters](#other-parameters-not-styling-dicts) at the end of this doc.
+[`land`](#land), [`tiles`](#tiles-holoviews-only), `shared_limits`, `shared_axis_labels`,
+`shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
+of this doc.
 
 > **The `*_kwargs` dicts are `renderer="matplotlib"` only.** Each maps onto a
 > matplotlib or cartopy call, so none of them do anything with `renderer="holoviews"`
@@ -544,6 +545,42 @@ and `land=False` is bare in both.
 
 **Default:** `True`
 
+### `tiles` (holoviews only)
+
+A web basemap under the field, on every interactive map family — `field_facet`,
+`field_row`, `field_grid`, `field_map_grid`, `field_movie`/`facet_movie`, and
+`locations` (which picks its own default; see [its own
+parameters](#locations-only-parameters)). On by default: a notebook rendering
+interactively is already on the web, so there's nothing offline about fetching a
+few map tiles too, and a basemap gives the eye real coastline and terrain where the
+field is masked, which the 50m outline cannot.
+
+```python
+physics.plot(renderer="holoviews")                       # basemap on by default
+physics.plot(renderer="holoviews", tiles="EsriTerrain")   # a different basemap
+physics.plot(renderer="holoviews", tiles=False)           # offline coastline instead
+```
+
+Pass a source name — `"EsriOceanBase"`, `"EsriTerrain"`, or any [geoviews tile
+source](https://geoviews.org/user_guide/Working_with_Bokeh.html) — for a different
+map, or `tiles=False` for a notebook that genuinely has to work offline. Avoid the
+Carto sources (`"CartoLight"`, etc.): they now require an API key geoviews has no
+way to supply, and render watermarked with "API KEY REQUIRED" without one.
+
+With tiles on there is no separate coastline outline — the basemap *is* the
+coastline; `tiles=False` brings back a Natural Earth outline, clipped to the
+domain, at `coastline_resolution` (see [`coastline_resolution`](#coastline_resolution)
+above). A domain that straddles the antimeridian downgrades to that offline outline
+regardless of `tiles`, with a warning (a web basemap is fixed in Web Mercator's
+±180 frame, which would split such a domain at the seam) — pass `tiles=False`
+yourself to silence it.
+
+The static renderer accepts `tiles=` too (so `renderer="both"` can share one option
+set) but only warns and draws its usual coastline — a web basemap is the
+interactive renderer's alone.
+
+**Default:** `True` for every map family above except `locations` (`"EsriOceanBase"`)
+
 ### `shared_axes` (holoviews only)
 
 The interactive analog of `shared_axis_labels` below, but for *pan/zoom linking*
@@ -642,9 +679,10 @@ way — a shared scale still draws one bar per panel, just with matching ranges.
 
 `field_movie` and `facet_movie` add `save`, `fps`, `dpi`, `every`, `frame_label`,
 `frame_label_kwargs`, `widget`/`player` (interactive), `progress`, and — interactively
-only — `hover`, `rasterize` and `tiles` (on by default; see [Movies](movies.md)). They
-are documented together in [Movies](movies.md), since they only mean anything once
-there is more than one frame.
+only — `hover` and `rasterize`. They are documented together in [Movies](movies.md),
+since they only mean anything once there is more than one frame. `tiles` is not
+movie-only: every interactive map family defaults it on now — see
+[`tiles`](#tiles-holoviews-only) above.
 
 ### `metric_names` (`skill_map` only)
 
