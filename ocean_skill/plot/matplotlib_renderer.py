@@ -1794,21 +1794,32 @@ def _metrics_text(metrics: dict[str, Any] | None, metric_keys) -> str:
     )
 
 
-def _warn_if_interactive_only(rasterize, hover) -> None:
-    """Warn that ``rasterize``/``hover`` are the interactive renderer's, not this one.
+def _warn_if_interactive_only(rasterize, hover, tiles=None) -> None:
+    """Warn that ``rasterize``/``hover``/``tiles`` are the interactive renderer's.
 
-    Accepted here only so ``renderer="both"`` can pass one option set to each renderer
-    — the same accommodation :func:`locations` makes for ``tiles``. Bokeh needs
-    ``rasterize`` to avoid a per-cell Python loop on a large curvilinear mesh and
-    ``hover`` to draw a readout tool; matplotlib's ``pcolormesh`` is vectorized
-    regardless of mesh size and has no interactive readout to switch on, so neither
-    option has anything to do here. To shrink a static figure's draw time, thin the
-    data itself (``every=``, a coarser ``aggregate=``) rather than the mesh's rendering.
+    Accepted here only so ``renderer="both"`` can pass one option set to each
+    renderer. Bokeh needs ``rasterize`` to avoid a per-cell Python loop on a large
+    curvilinear mesh and ``hover`` to draw a readout tool; matplotlib's
+    ``pcolormesh`` is vectorized regardless of mesh size and has no interactive
+    readout to switch on, so neither option has anything to do here. To shrink a
+    static figure's draw time, thin the data itself (``every=``, a coarser
+    ``aggregate=``) rather than the mesh's rendering.
+
+    ``tiles`` only warns when truthy — ``tiles=False`` (the default for every
+    caller here) asked for exactly the offline coastline this renderer always
+    draws, so there is nothing to say; ``rasterize``/``hover`` warn on any
+    explicit value, ``False`` included, since that is still a real interactive
+    choice with no equivalent here. This is the one accommodation :func:`locations`
+    has always made for ``tiles``, folded in here rather than duplicated once
+    :func:`field_facet`/:func:`field_row`/:func:`field_grid`/:func:`field_map_grid`
+    needed the same warning for it.
     """
     import warnings
 
     given = (("rasterize", rasterize), ("hover", hover))
     passed = [name for name, value in given if value is not None]
+    if tiles:
+        passed.append("tiles")
     if passed:
         warnings.warn(
             f"{passed} only affect the interactive renderer and have no effect here "
@@ -1849,6 +1860,7 @@ def field_row(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    tiles: str | bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -1919,9 +1931,11 @@ def field_row(
     knob from ``title``: ``title``/``suptitle_kwargs`` set the one figure-wide
     suptitle above the row, ``titles=`` sets the three panels' own.
 
-    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
-    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
-    interactive renderer's fix for a large mesh and do nothing here.
+    ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can
+    pass one option set to each renderer (see :func:`_warn_if_interactive_only`) —
+    ``rasterize``/``hover`` are the interactive renderer's fix for a large mesh, and
+    a web basemap (``tiles``) is drawn only there too; this renderer always draws
+    the offline coastline instead, so a truthy ``tiles`` warns.
 
     ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`) picks the
     coastline/land dataset — ``"auto"`` (the default) scales Natural Earth to each
@@ -1942,7 +1956,7 @@ def field_row(
     """
     import matplotlib.pyplot as plt
 
-    _warn_if_interactive_only(rasterize, hover)
+    _warn_if_interactive_only(rasterize, hover, tiles)
     if title is None:
         title = suptitle_text(standard_name, (depth, time, region))
 
@@ -2434,6 +2448,7 @@ def field_grid(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    tiles: str | bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -2505,16 +2520,17 @@ def field_grid(
     one matplotlib/cartopy call — see :func:`field_row`'s docstring for the full
     list; the same names mean the same thing here, applied per row.
 
-    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
-    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
-    interactive renderer's fix for a large mesh and do nothing here.
+    ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can
+    pass one option set to each renderer (see :func:`_warn_if_interactive_only`) —
+    see :func:`field_row`'s docstring for what each does there and why a truthy
+    ``tiles`` warns here.
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every row — see :func:`field_row`'s docstring.
     """
     import matplotlib.pyplot as plt
 
-    _warn_if_interactive_only(rasterize, hover)
+    _warn_if_interactive_only(rasterize, hover, tiles)
 
     if title is None:
         title = grid_suptitle(comparisons)
@@ -2989,6 +3005,7 @@ def field_facet(
     zoom: float = 1.0,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    tiles: str | bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -3044,9 +3061,10 @@ def field_facet(
     :func:`field_row`; ``metrics_kwargs`` has no counterpart here, there being no
     metrics, and ``row_label_kwargs`` applies only when there is a ``row_dim``.
 
-    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
-    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
-    interactive renderer's fix for a large mesh and do nothing here.
+    ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can
+    pass one option set to each renderer (see :func:`_warn_if_interactive_only`) —
+    see :func:`field_row`'s docstring for what each does there and why a truthy
+    ``tiles`` warns here.
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every panel — see :func:`field_row`'s docstring.
@@ -3061,7 +3079,7 @@ def field_facet(
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
-    _warn_if_interactive_only(rasterize, hover)
+    _warn_if_interactive_only(rasterize, hover, tiles)
     canvas = resolve_canvas(size, zoom)
     title = (
         field_suptitle(
@@ -4634,6 +4652,7 @@ def field_map_grid(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    tiles: str | bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
@@ -4685,10 +4704,11 @@ def field_map_grid(
     Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`,
     including ``robust`` (see :func:`_limits`) -- each panel's (or, with
     ``shared_limits=``, that group's shared) colour scale spans the full data range by
-    default, or its 10th–90th percentile with ``robust=True``. ``rasterize``/``hover``
-    are accepted only so ``renderer="both"`` can pass one option set to each renderer
-    (see :func:`_warn_if_interactive_only`) -- they are the interactive renderer's fix
-    for a large mesh and do nothing here.
+    default, or its 10th–90th percentile with ``robust=True``.
+    ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can
+    pass one option set to each renderer (see :func:`_warn_if_interactive_only`) --
+    see :func:`field_row`'s docstring for what each does there and why a truthy
+    ``tiles`` warns here.
 
     ``titles=`` overrides each panel's own title by hand: one string per item in
     ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
@@ -4708,7 +4728,7 @@ def field_map_grid(
     )
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
-    _warn_if_interactive_only(rasterize, hover)
+    _warn_if_interactive_only(rasterize, hover, tiles)
     if not items:
         raise ValueError("field_map_grid needs at least one field, got none")
 
@@ -6147,8 +6167,6 @@ def locations(
     ``coastline_resolution``/``land`` pick that basemap's coastline/land dataset and
     the land fill's visibility — see :func:`field_row`'s docstring.
     """
-    import warnings
-
     import cartopy.crs as ccrs
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -6158,12 +6176,7 @@ def locations(
     from ocean_skill.plot.summary import _MARKERS
 
     warn_projection_skew()
-    if tiles:
-        warnings.warn(
-            "tiles= only affects the interactive renderer; the static map draws "
-            "coastlines. Pass renderer='holoviews' for a web basemap.",
-            stacklevel=_stacklevel.find(),
-        )
+    _warn_if_interactive_only(None, None, tiles)
 
     if extent is None:
         from ocean_skill.plot.locations import _default_extent
