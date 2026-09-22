@@ -36,6 +36,17 @@ silently unclear what happened. If the compatible schemes disagree on any observ
 value, nothing is adopted: the flag column is still recognized, paired, and kept in
 the output, but not applied, with a warning naming the candidates and exactly how
 they disagree.
+
+**Declared metadata, above consensus.** A provider that ships CF ``flag_values``/
+``flag_meanings`` (and often a ``conventions`` string, e.g. "OceanSITES reference
+table 2") on its flag variable has already said what every value means, so nothing
+needs guessing from the values that happen to be observed.
+:func:`spec_from_declared_flags` turns that declaration into a spec -- by the
+conventions string, else by the declared value set matching exactly one
+registered scheme, else by reading each meaning onto QARTOD -- and a builder that
+can reach such metadata (:func:`ocean_skill.build.add_erddap_source`, via
+ERDDAP's ``/info`` document) hands it to :func:`resolve_contract` in place of an
+empty ``qc=``. An explicit ``qc=`` still wins, key by key.
 """
 
 from __future__ import annotations
@@ -47,6 +58,7 @@ from typing import Any
 from ocean_skill import _stacklevel
 
 __all__ = [
+    "CONVENTION_SCHEMES",
     "QARTOD_FLAGS",
     "SCHEMES",
     "apply",
@@ -57,6 +69,7 @@ __all__ = [
     "mask_fill_values",
     "pair_flags",
     "resolve_contract",
+    "spec_from_declared_flags",
 ]
 
 #: The one canonical scale every provider scheme's ``flag_to_qartod`` maps onto,
@@ -216,6 +229,48 @@ _FLAG_NAME = re.compile(
 #: Tokens :func:`_strip_flag_token` removes from a flag column's base before
 #: pairing it to a data column, in the same "whole word" sense as _FLAG_NAME.
 _FLAG_TOKENS = frozenset({"flag", "flags", "qc", "qartod"})
+
+#: Provider ``conventions`` strings, as declared on a flag variable (CF/OceanSITES
+#: ``conventions = "OceanSITES reference table 2"``), that name a registered scheme
+#: outright -- keyed by the lowercase substring to look for. Kept to what is certain:
+#: the OceanSITES/Argo reference table 2 *is* the ``"argo"`` scale value-for-value,
+#: and SeaDataNet's L20 vocabulary is ``"seadatanet"``. Consulted first by
+#: :func:`spec_from_declared_flags`, before any matching on the values themselves.
+CONVENTION_SCHEMES: dict[str, str] = {
+    "oceansites reference table 2": "argo",
+    "argo reference table 2": "argo",
+    "seadatanet l20": "seadatanet",
+}
+
+#: Last-resort reading of one declared ``flag_meanings`` token onto
+#: :data:`QARTOD_FLAGS`, used by :func:`spec_from_declared_flags` only when neither a
+#: ``conventions`` string nor the declared ``flag_values`` identify a registered
+#: scheme. Checked in order and the first keyword found in the (lowercased,
+#: underscore-joined) meaning wins, so the more specific ``probably_good``/
+#: ``probably_bad``/``potentially_correctable`` rows sit above plain ``good``/``bad``.
+#: Judgment calls, kept visible here beside SCHEMES for the same reason those are.
+_MEANING_TO_QARTOD: tuple[tuple[str, str], ...] = (
+    ("probably_good", "GOOD"),
+    ("probably_bad", "SUSPECT"),
+    ("potentially_correctable", "SUSPECT"),
+    ("no_qc", "UNKNOWN"),
+    ("not_evaluated", "UNKNOWN"),
+    ("not_assigned", "UNKNOWN"),
+    ("unknown", "UNKNOWN"),
+    ("not_sampled", "MISSING"),
+    ("not_reported", "MISSING"),
+    ("missing", "MISSING"),
+    ("questionable", "SUSPECT"),
+    ("suspect", "SUSPECT"),
+    ("uncertain", "SUSPECT"),
+    ("interpolated", "SUSPECT"),
+    ("changed", "SUSPECT"),
+    ("despiked", "SUSPECT"),
+    ("nominal", "GOOD"),
+    ("fail", "FAIL"),
+    ("bad", "FAIL"),
+    ("good", "GOOD"),
+)
 
 
 def _normalize_flag_value(v: Any) -> Any:
@@ -489,6 +544,171 @@ def _consensus(values: set) -> tuple[dict[Any, str] | None, list[str], str]:
         "another name from qc.SCHEMES) or qc={'flag_to_qartod': {...}} yourself."
     )
     return None, candidates, message
+
+
+def _declared_values(raw: Any) -> list:
+    """Normalize a declared ``flag_values`` attribute to a list of values.
+
+    Accepts a list, or ERDDAP's ``"0, 1, 2"`` comma string (a ``byte``-typed
+    attribute is not list-parsed by intake_erddap); each value goes through
+    :func:`_normalize_flag_value`, declaration order kept.
+    """
+    if raw is None:
+        return []
+    items = str(raw).split(",") if isinstance(raw, str) else list(raw)
+    out: list = []
+    for v in items:
+        n = _normalize_flag_value(v)
+        if n is not None:
+            out.append(n)
+    return out
+
+
+def _declared_meanings(raw: Any) -> list[str]:
+    """Normalize CF's space-separated ``flag_meanings`` string to a list."""
+    if raw is None:
+        return []
+    return str(raw).split() if isinstance(raw, str) else [str(m) for m in raw]
+
+
+def _qartod_for_meaning(meaning: str) -> str | None:
+    """Read one declared meaning onto QARTOD via :data:`_MEANING_TO_QARTOD`."""
+    low = re.sub(r"[\s\-]+", "_", str(meaning).strip().casefold())
+    for needle, qartod in _MEANING_TO_QARTOD:
+        if needle in low:
+            return qartod
+    return None
+
+
+def spec_from_declared_flags(
+    declared: dict[str, dict[str, Any]], *, subject: str = "this source"
+) -> dict[str, Any] | None:
+    """Build a ``qc`` spec from the flag metadata a *provider* declared, or ``None``.
+
+    ``declared`` maps a flag column to the CF attributes its variable carries --
+    ``flag_values`` (a list, or ERDDAP's ``"0, 1, 2"`` comma string), ``flag_meanings``
+    (space-separated, positionally aligned with ``flag_values``) and, optionally, a
+    ``conventions`` string naming the scale. This is the tier *above* the consensus
+    rule (module docstring): where consensus has to guess from the values that happen
+    to be observed, the declaration says outright what every value means -- so a
+    dataset whose observed values are ambiguous under the registry (Station Papa's
+    ``{1, 2, 9}``, read SUSPECT/GOOD/MISSING by WOCE-CTD but GOOD/GOOD/MISSING by argo)
+    still resolves. Source-agnostic on purpose: the ERDDAP builder feeds it from the
+    ``/info`` document, and a Dataset's own attrs could feed it the same way.
+
+    Resolution, each step precise before the next is tried:
+
+    1. ``conventions`` names a registered scheme (:data:`CONVENTION_SCHEMES`).
+    2. The declared ``flag_values`` set equals exactly one registered scheme's
+       ``flag_definitions`` keys (``"qartod"`` excluded, as :func:`compatible_schemes`
+       excludes it -- it is the output scale, not a provider convention).
+    3. Each ``flag_meanings`` token is read onto QARTOD via :data:`_MEANING_TO_QARTOD`,
+       giving a custom mapping recorded as ``scheme: "declared"`` -- adopted *loudly*,
+       like a consensus adoption, since it is a reading rather than a match. Values
+       whose meaning matches nothing are left unmapped (and so unmasked at read time;
+       see :func:`_warn_declared_scheme_mismatch`).
+
+    The returned spec is what :func:`resolve_contract` takes: ``scheme`` from step 1/2
+    (:func:`expand_scheme` then fills the registry mapping), or ``scheme: "declared"``
+    plus ``flag_to_qartod`` from step 3; in every case ``flag_definitions`` -- the
+    provider's verbatim ``{value: meaning}``, which wins over the registry's wording
+    value by value -- and a ``scheme_source`` saying which step decided. Flag columns
+    that declare *different* conventions or value sets return ``None`` with a warning:
+    one contract carries one mapping, and guessing between them is exactly what this
+    tier exists to avoid. Nothing usable at all returns ``None`` silently, and the
+    caller falls through to today's behaviour.
+    """
+    parsed: dict[str, tuple[frozenset, dict[Any, str], str | None]] = {}
+    for col, attrs in (declared or {}).items():
+        attrs = attrs or {}
+        values = _declared_values(attrs.get("flag_values"))
+        if not values:
+            continue
+        meanings = _declared_meanings(attrs.get("flag_meanings"))
+        definitions = (
+            dict(zip(values, meanings)) if len(meanings) == len(values) else {}
+        )
+        conventions = attrs.get("conventions")
+        parsed[str(col)] = (
+            frozenset(values),
+            definitions,
+            str(conventions).strip() if conventions else None,
+        )
+    if not parsed:
+        return None
+
+    if len({p[0] for p in parsed.values()}) > 1 or len(
+        {p[2] for p in parsed.values() if p[2]}
+    ) > 1:
+        described = "; ".join(
+            f"{col}: {conv or sorted(vals, key=str)}"
+            for col, (vals, _defs, conv) in parsed.items()
+        )
+        warnings.warn(
+            f"{subject}: flag columns declare different flag conventions "
+            f"({described}) -- no declared mapping was adopted, since one "
+            "contract carries one mapping. Pass qc={'scheme': ...} or "
+            "qc={'flag_to_qartod': {...}} to choose.",
+            stacklevel=_stacklevel.find(),
+        )
+        return None
+
+    values, definitions, conventions = next(iter(parsed.values()))
+    spec: dict[str, Any] = {}
+    if definitions:
+        spec["flag_definitions"] = definitions
+
+    # 1. a conventions string that names a registered scheme outright
+    if conventions:
+        low = conventions.casefold()
+        for needle, scheme in CONVENTION_SCHEMES.items():
+            if needle in low:
+                spec["scheme"] = scheme
+                spec["scheme_source"] = f"declared: conventions {conventions!r}"
+                return spec
+
+    # 2. the declared value set is exactly one registered scheme's
+    value_set = set(values)
+    matches = [
+        name
+        for name, registry in SCHEMES.items()
+        if name != "qartod"
+        and {_normalize_flag_value(k) for k in registry["flag_definitions"]}
+        == value_set
+    ]
+    if len(matches) == 1:
+        spec["scheme"] = matches[0]
+        spec["scheme_source"] = (
+            f"declared: flag_values {sorted(values, key=str)} "
+            f"match scheme {matches[0]!r}"
+        )
+        return spec
+
+    # 3. read each declared meaning onto QARTOD -- a reading, so say so out loud
+    if definitions:
+        mapping = {
+            v: qartod
+            for v, meaning in definitions.items()
+            if (qartod := _qartod_for_meaning(meaning)) is not None
+        }
+        if mapping:
+            readable = ", ".join(
+                f"{v}: {q}"
+                for v, q in sorted(mapping.items(), key=lambda kv: str(kv[0]))
+            )
+            warnings.warn(
+                f"{subject}: adopted flag mapping {{{readable}}} by reading the "
+                "declared flag_meanings onto QARTOD (no conventions string or "
+                "exact flag_values match named a registered scheme); pass "
+                "qc={'scheme': ...} or qc={'flag_to_qartod': {...}} to pin it "
+                "down instead.",
+                stacklevel=_stacklevel.find(),
+            )
+            spec["scheme"] = "declared"
+            spec["flag_to_qartod"] = mapping
+            spec["scheme_source"] = "declared: flag_meanings read onto QARTOD"
+            return spec
+    return None
 
 
 def _warn_declared_scheme_mismatch(

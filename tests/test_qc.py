@@ -8,12 +8,13 @@ folding in :mod:`ocean_skill.comparison`.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from ocean_skill import qc
-
 
 # -- detect_flag_columns ----------------------------------------------------------
 
@@ -117,7 +118,7 @@ def test_compatible_schemes_includes_woce_bottle_for_good_and_missing():
 
 
 def test_qartod_itself_is_never_a_compatible_scheme_candidate():
-    """qartod is the canonical *output* scale, not a provider convention to guess."""
+    """Qartod is the canonical *output* scale, not a provider convention to guess."""
     assert "qartod" not in qc.compatible_schemes({1, 2, 3, 4, 9})
 
 
@@ -189,6 +190,97 @@ def test_a_declared_scheme_warns_about_out_of_scheme_observed_values():
     )
     with pytest.warns(UserWarning, match="not covered by scheme"):
         qc.resolve_contract({"scheme": "woce_bottle"}, df)
+
+
+# -- spec_from_declared_flags (declared metadata, above consensus) -------------------
+
+#: Station Papa's own OceanSITES attrs, as declared at
+#: https://data.pmel.noaa.gov/pmel/erddap/info/papa_hourly_temp/index.csv -- the
+#: motivating case: {1, 2, 9} alone is ambiguous under the registry (woce_ctd reads
+#: 1 as SUSPECT; argo/seadatanet read it GOOD), but the full declared set identifies
+#: the scheme outright.
+_PAPA_MEANINGS = (
+    "no_qc_performed good_data probably_good_data "
+    "bad_data_that_are_potentially_correctable bad_data value_changed nominal_value "
+    "interpolated_value missing_value"
+)
+
+
+def test_a_named_conventions_string_is_matched_first_and_does_not_warn():
+    declared = {
+        "TEMP_QC": {
+            "flag_values": [0, 1, 2, 3, 4, 5, 7, 8, 9],
+            "flag_meanings": _PAPA_MEANINGS,
+            "conventions": "OceanSITES reference table 2",
+        }
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # an exact conventions match needs no guess
+        spec = qc.spec_from_declared_flags(declared, subject="papa_hourly_temp")
+    assert spec["scheme"] == "argo"
+    assert "conventions" in spec["scheme_source"]
+    # the provider's own wording is kept verbatim, not the registry's paraphrase
+    assert spec["flag_definitions"][1] == "good_data"
+
+
+def test_a_declared_flag_values_set_that_exactly_matches_one_scheme_is_adopted():
+    """No conventions string at all -- the value set alone is unique to argo."""
+    declared = {
+        "TEMP_QC": {
+            "flag_values": "0, 1, 2, 3, 4, 5, 7, 8, 9",  # ERDDAP's comma-string form
+            "flag_meanings": _PAPA_MEANINGS,
+        }
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        spec = qc.spec_from_declared_flags(declared)
+    assert spec["scheme"] == "argo"
+    assert "flag_values" in spec["scheme_source"]
+
+
+def test_flag_meanings_are_read_onto_qartod_as_a_last_resort_and_warn():
+    """{1, 2, 9} alone matches no registered scheme's key set exactly.
+
+    Neither tier 1 nor tier 2 fires, so the declared wording itself is read,
+    loudly.
+    """
+    declared = {
+        "TEMP_QC": {
+            "flag_values": [1, 2, 9],
+            "flag_meanings": "good_data probably_good_data missing_value",
+        }
+    }
+    with pytest.warns(UserWarning, match="declared flag_meanings"):
+        spec = qc.spec_from_declared_flags(declared, subject="some_dataset")
+    assert spec["scheme"] == "declared"
+    assert spec["flag_to_qartod"] == {1: "GOOD", 2: "GOOD", 9: "MISSING"}
+    assert spec["scheme_source"] == "declared: flag_meanings read onto QARTOD"
+
+
+def test_conflicting_declarations_across_flag_columns_adopt_nothing():
+    declared = {
+        "TEMP_QC": {
+            "flag_values": [0, 1, 2, 3, 4, 5, 7, 8, 9],
+            "flag_meanings": _PAPA_MEANINGS,
+            "conventions": "OceanSITES reference table 2",
+        },
+        "OTHER_QC": {
+            "flag_values": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "A"],
+            "flag_meanings": "no_qc good probably_good probably_bad bad changed "
+            "below_detection in_excess interpolated missing uncertain",
+            "conventions": "SeaDataNet L20",
+        },
+    }
+    with pytest.warns(UserWarning, match="different flag conventions"):
+        spec = qc.spec_from_declared_flags(declared, subject="mixed_dataset")
+    assert spec is None
+
+
+def test_no_declared_flag_metadata_at_all_returns_none_silently():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert qc.spec_from_declared_flags({}) is None
+        assert qc.spec_from_declared_flags({"TEMP_QC": {}}) is None
 
 
 # -- apply ------------------------------------------------------------------------
@@ -520,3 +612,254 @@ def test_to_dataset_carries_flag_attrs_and_encodes_letter_codes():
 
     assert ds["Salinity"].attrs["ancillary_variables"] == "Salinity_qc"
     assert "qc_policy" in ds["Salinity"].attrs
+
+
+# -- add_erddap_source: qc= threading and declared-flag auto-resolution --------------
+#
+# All network-free: intake_erddap.erddap.TableDAPReader is monkeypatched to a factory
+# that returns a real PandasCSV reader over an on-disk fixture (the same reader kind
+# tests/test_qc.py's own flagged_source fixture builds by hand), with
+# _get_dataset_metadata monkeypatched onto that instance to stand in for the
+# GET /info/<dataset_id>/index.json request add_erddap_source's own qc= resolution
+# makes. Header/value shapes mirror the live PMEL Station Papa tables this was built
+# against: a bare "<NAME>_QC" flag column (no units suffix -- a quality flag has none)
+# paired to "<NAME> (<units>)", flags drawn from {1, 2, 9} -- exactly the set the
+# registry disagrees about (woce_ctd reads 1 as SUSPECT; argo/seadatanet read it GOOD),
+# so consensus alone cannot resolve it and these tests are not vacuous.
+
+_PAPA_TEMP_VARIABLE_ATTRS = {
+    "TEMP_QC": {
+        "flag_values": [0, 1, 2, 3, 4, 5, 7, 8, 9],
+        "flag_meanings": _PAPA_MEANINGS,
+        "conventions": "OceanSITES reference table 2",
+    }
+}
+
+
+def _papa_shaped_csv(tmp_path):
+    csv = tmp_path / "papa_temp.csv"
+    csv.write_text(
+        "time (UTC),latitude (degrees_north),longitude (degrees_east),depth (m),"
+        "TEMP (degree_Celsius),TEMP_QC\n"
+        "2010-01-15T00:00:00Z,50.1,-144.9,1.0,6.401,1\n"
+        "2010-01-15T01:00:00Z,50.1,-144.9,1.0,6.398,1\n"
+        "2010-01-15T02:00:00Z,50.1,-144.9,1.0,6.395,2\n"
+        "2010-01-15T03:00:00Z,50.1,-144.9,5.0,,9\n"
+        "2010-01-15T04:00:00Z,50.1,-144.9,1.0,6.402,1\n"
+        "2010-01-15T05:00:00Z,50.1,-144.9,1.0,6.400,2\n"
+    )
+    return csv
+
+
+def _papa_two_flag_columns_csv(tmp_path):
+    """Two data variables, each with its own QC column.
+
+    For the conflicting-conventions case, which needs both flag columns
+    actually present in the frame (detect_flag_columns only sees what the
+    table carries).
+    """
+    csv = tmp_path / "papa_temp_psal.csv"
+    csv.write_text(
+        "time (UTC),latitude (degrees_north),longitude (degrees_east),depth (m),"
+        "TEMP (degree_Celsius),TEMP_QC,PSAL (1e-3),PSAL_QC\n"
+        "2010-01-15T00:00:00Z,50.1,-144.9,1.0,6.401,1,32.50,1\n"
+        "2010-01-15T01:00:00Z,50.1,-144.9,1.0,6.398,2,32.50,2\n"
+        "2010-01-15T02:00:00Z,50.1,-144.9,1.0,6.395,9,32.51,9\n"
+    )
+    return csv
+
+
+def _fake_table_dap_reader_factory(csv_path, get_dataset_metadata):
+    """Build a stand-in for ``intake_erddap.erddap.TableDAPReader``.
+
+    Same call signature, but backed by an on-disk CSV and a caller-supplied
+    ``_get_dataset_metadata`` (a plain callable, not necessarily a working
+    ERDDAP client) rather than a live ERDDAP server.
+    """
+    from intake.readers import datatypes, readers
+
+    def factory(
+        server, dataset_id, *, variables=None, mask_failed_qartod=True, **kwargs
+    ):
+        reader = readers.PandasCSV(datatypes.CSV(url=str(csv_path)))
+        reader._get_dataset_metadata = get_dataset_metadata
+        return reader
+
+    return factory
+
+
+def _add_papa_temp(
+    monkeypatch,
+    tmp_path,
+    *,
+    variable_attrs=None,
+    get_metadata=None,
+    csv_factory=_papa_shaped_csv,
+    **kw,
+):
+    """Call add_erddap_source against a Papa-shaped fixture.
+
+    intake_erddap.erddap.TableDAPReader is swapped for the fake factory above.
+    Exactly one of ``variable_attrs`` (the normal case: a plain {var: attrs}
+    dict) or ``get_metadata`` (a custom callable, e.g. one that raises) may be
+    given.
+    """
+    import intake
+
+    from ocean_skill.build import add_erddap_source
+
+    assert (variable_attrs is None) != (get_metadata is None)
+    if get_metadata is None:
+        variable_attrs = dict(variable_attrs)
+        get_metadata = lambda server, dataset_id: {"variables": variable_attrs}  # noqa: E731
+
+    csv = csv_factory(tmp_path)
+    monkeypatch.setattr(
+        "intake_erddap.erddap.TableDAPReader",
+        _fake_table_dap_reader_factory(csv, get_metadata),
+    )
+    cat = intake.entry.Catalog()
+    reader = add_erddap_source(
+        cat,
+        "papa_temp",
+        server="https://data.pmel.noaa.gov/pmel/erddap",
+        dataset_id="papa_hourly_temp",
+        featureType="timeSeriesProfile",
+        mask_failed_qartod=False,
+        **kw,
+    )
+    return reader.metadata
+
+
+def _no_warning_mentions(records, *needles) -> bool:
+    return not any(
+        all(n.casefold() in str(r.message).casefold() for n in needles)
+        for r in records
+    )
+
+
+def test_an_explicit_scheme_is_applied_and_skips_the_info_request(
+    monkeypatch, tmp_path
+):
+    def _must_not_be_called(server, dataset_id):
+        raise AssertionError(
+            "declared-flag lookup must be skipped when qc names a scheme"
+        )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        md = _add_papa_temp(
+            monkeypatch,
+            tmp_path,
+            get_metadata=_must_not_be_called,
+            qc={"scheme": "argo"},
+        )
+    assert md["qc"]["scheme"] == "argo"
+    assert md["qc"]["flag_to_qartod"][1] == "GOOD"
+    assert md["qc"]["flag_to_qartod"][2] == "GOOD"
+    assert md["qc"]["flag_to_qartod"][9] == "MISSING"
+    assert md["qc"]["keep"] == ["GOOD"]
+    assert _no_warning_mentions(caught, "scheme")
+    assert _no_warning_mentions(caught, "flag")
+
+
+def test_declared_papa_attrs_are_auto_resolved_with_no_qc_argument(
+    monkeypatch, tmp_path
+):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        md = _add_papa_temp(
+            monkeypatch, tmp_path, variable_attrs=_PAPA_TEMP_VARIABLE_ATTRS, qc=None
+        )
+    assert md["qc"]["scheme"] == "argo"
+    assert "conventions" in md["qc"]["scheme_source"]
+    assert md["qc"]["flag_to_qartod"][1] == "GOOD"
+    assert md["qc"]["flag_to_qartod"][9] == "MISSING"
+    assert md["qc"]["keep"] == ["GOOD"]
+    assert _no_warning_mentions(caught, "scheme")
+    assert _no_warning_mentions(caught, "flag")
+
+
+def test_with_no_declared_attrs_the_old_consensus_fallback_still_applies(
+    monkeypatch, tmp_path
+):
+    """Today's behaviour, unchanged.
+
+    ERDDAP declares nothing usable, the flags are still detected and paired,
+    but {1, 2, 9} defeats consensus.
+    """
+    with pytest.warns(UserWarning, match="disagree"):
+        md = _add_papa_temp(monkeypatch, tmp_path, variable_attrs={}, qc=None)
+    assert md["qc"]["flags"] == {"TEMP_QC": "TEMP (degree_Celsius)"}
+    assert "scheme" not in md["qc"]
+    assert "flag_to_qartod" not in md["qc"]
+
+
+def test_an_explicit_qc_argument_wins_over_declared_attrs(monkeypatch, tmp_path):
+    """The declared attrs alone would resolve to argo.
+
+    An explicit, different scheme still overrides them, same as
+    expand_scheme's own override rule.
+    """
+    md = _add_papa_temp(
+        monkeypatch,
+        tmp_path,
+        variable_attrs=_PAPA_TEMP_VARIABLE_ATTRS,
+        qc={"scheme": "woce_ctd"},
+    )
+    assert md["qc"]["scheme"] == "woce_ctd"
+
+
+def test_a_failed_info_request_warns_and_falls_back_without_failing_the_entry(
+    monkeypatch, tmp_path
+):
+    def _broken(server, dataset_id):
+        raise ConnectionError("no route to host")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        md = _add_papa_temp(monkeypatch, tmp_path, get_metadata=_broken, qc=None)
+    assert any(
+        "could not read erddap" in str(r.message).casefold()
+        and "declared flag" in str(r.message).casefold()
+        for r in caught
+    )
+    # the entry itself is still usable, and the flag column still recognized
+    assert md["featureType"] == "timeSeriesProfile"
+    assert md["qc"]["flags"] == {"TEMP_QC": "TEMP (degree_Celsius)"}
+    assert "scheme" not in md["qc"]
+
+
+def test_flag_columns_declaring_conflicting_conventions_synthesize_nothing(
+    monkeypatch, tmp_path
+):
+    """Two data variables in one table, each with its own QC column.
+
+    Each declares a different convention -- the builder-level counterpart of
+    test_conflicting_declarations_across_flag_columns_adopt_nothing above: no
+    synthesized scheme is handed to resolve_contract, and the conflict is
+    still named in a warning even when reached through add_erddap_source.
+    """
+    variable_attrs = {
+        "TEMP_QC": _PAPA_TEMP_VARIABLE_ATTRS["TEMP_QC"],
+        "PSAL_QC": {
+            "flag_values": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "A"],
+            "flag_meanings": "no_qc good probably_good probably_bad bad changed "
+            "below_detection in_excess interpolated missing uncertain",
+            "conventions": "SeaDataNet L20",
+        },
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        md = _add_papa_temp(
+            monkeypatch,
+            tmp_path,
+            variable_attrs=variable_attrs,
+            qc=None,
+            csv_factory=_papa_two_flag_columns_csv,
+        )
+    assert any(
+        "different flag conventions" in str(r.message).casefold() for r in caught
+    )
+    assert "TEMP_QC" in md["qc"]["flags"]
+    assert "PSAL_QC" in md["qc"]["flags"]
