@@ -1271,6 +1271,24 @@ def test_overlap_handles_an_antimeridian_straddling_domain(monkeypatch):
     assert cat.overlap("straddling", "outside").space is False
 
 
+def test_overlap_true_for_a_globe_spanning_0_360_climatology(monkeypatch):
+    """GLODAP declares geospatial_lon_min/max as 20.5/379.5 -- 0-360 cell centers
+    one grid cell past a full wrap. _domain_of must recognize this as globe-spanning
+    (span >= 359) rather than wrap each endpoint independently, which collapsed it to
+    a near-zero-width sliver near 20E that overlapped no model domain -- the reason
+    the shipped/local GLODAP entry was never recognized as overlapping any model.
+    """
+    glodap = {
+        "geospatial_lon_min": 20.5,
+        "geospatial_lon_max": 379.5,
+        "geospatial_lat_min": -89.5,
+        "geospatial_lat_max": 89.5,
+        "climatology": True,
+    }
+    cat = _fake_index(monkeypatch, {"glodap": ("C", glodap), "gom": ("C", GULF)})
+    assert cat.overlap("gom", "glodap").space is True
+
+
 def test_overlap_repr_and_bool():
     from ocean_skill.catalog import Overlap
 

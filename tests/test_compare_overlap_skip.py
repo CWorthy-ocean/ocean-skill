@@ -146,6 +146,29 @@ def test_a_climatology_is_exempt_from_the_time_skip(capsys):
     assert "no declared overlap" not in capsys.readouterr().out
 
 
+def test_a_global_0_360_climatology_is_not_skipped_in_space(capsys):
+    """The motivating real-world case: a GLODAP-like gridded climatology declares
+    geospatial_lon_min/max as 20.5/379.5 (0-360 cell centers, one grid cell past a
+    full wrap). Before _domain_of preserved the longitude span instead of wrapping
+    each endpoint independently, this collapsed to a near-zero-width box near 20E
+    that overlapped no model domain, so every pairing against it was silently
+    skipped as space-disjoint.
+    """
+    glodap = {
+        "variables": [TEMPERATURE],
+        "climatology": True,
+        "geospatial_lon_min": 20.5,
+        "geospatial_lon_max": 379.5,
+        "geospatial_lat_min": -89.5,
+        "geospatial_lat_max": 89.5,
+    }
+    declared = {"his": HIS, "glodap": glodap}
+    with _fan_recorded(declared) as formed:
+        comparison.compare(reference="glodap", test="his", variables=[TEMPERATURE])
+    assert formed == [("his", "glodap")]
+    assert "no declared overlap" not in capsys.readouterr().out
+
+
 def test_a_space_disjoint_climatology_is_still_skipped(capsys):
     clim = {**_SPACE_DISJOINT, "climatology": True}
     declared = {"his": HIS, "clim": clim}

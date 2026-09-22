@@ -11,10 +11,25 @@ entries:
       url: https://www.nodc.noaa.gov/archive/arc0107/0162565/2.2/data/0-data/mapped/GLODAPv2.2016b_MappedClimatologies.tar.gz
       var_from_filename: true
     metadata:
+      axes:
+        X: lon
+        Y: lat
+        Z: Depth
       climatology: true
       depth_coord: depth_surface
       featureType: grid
+      featureType_source: inferred
+      geospatial_lat_max: 89.5
+      geospatial_lat_min: -89.5
+      geospatial_lon_max: 379.5
+      geospatial_lon_min: 20.5
+      geospatial_vertical_max: 5500.0
+      geospatial_vertical_min: 0.0
+      grid_regular: true
+      grid_resolution_deg: 1.0
+      grid_resolution_km: 111.195
       institution: NOAA NCEI / GLODAPv2
+      lon_convention: 0-360
       nominal_resolution_km: 111
       notes: 'Open-ocean product: marginal seas are largely masked (~8% coverage in
         the Gulf of Mexico).'
@@ -38,10 +53,19 @@ entries:
       - sea_water_alkalinity_expressed_as_mole_equivalent
       - sea_water_potential_temperature
       - sea_water_practical_salinity
+      vertical_levels: 33
     output_instance: xarray:Dataset
     reader: ocean_skill.readers:PoochTarNetCDF
     user_parameters: {}
 metadata:
+  featureTypes:
+  - grid
+  geospatial_lat_max: 89.5
+  geospatial_lat_min: -89.5
+  geospatial_lon_max: 379.5
+  geospatial_lon_min: 20.5
+  geospatial_vertical_max: 5500.0
+  geospatial_vertical_min: 0.0
   institution: NOAA NCEI
   title: GLODAPv2.2016b Mapped Climatologies
 user_parameters: {}
