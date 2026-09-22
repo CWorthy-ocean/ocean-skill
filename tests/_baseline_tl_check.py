@@ -204,31 +204,6 @@ def test_default_extent_includes_ring_and_line_paths():
     assert lat1 >= 60.0 - 1e-9  # line's northern end is included
 
 
-def test_default_extent_ignores_a_frame_false_item_when_others_exist():
-    regional = {
-        "kind": "line",
-        "paths": [np.array([[-150.0, 50.0], [-140.0, 55.0]])],
-    }
-    global_footprint = {
-        "kind": "extent",
-        "bboxes": [(-179.5, -77.0, 179.5, 89.0)],
-        "frame": False,
-    }
-    lon0, _lat0, lon1, _lat1 = _default_extent([regional, global_footprint])
-    assert lon0 > -170.0
-    assert lon1 < 170.0
-
-
-def test_default_extent_uses_a_frame_false_item_when_it_is_the_only_one():
-    global_footprint = {
-        "kind": "extent",
-        "bboxes": [(-179.5, -77.0, 179.5, 89.0)],
-        "frame": False,
-    }
-    extent = _default_extent([global_footprint])
-    assert extent == (-180.0, -90.0, 180.0, 90.0)
-
-
 # -- item building ------------------------------------------------------------------
 
 

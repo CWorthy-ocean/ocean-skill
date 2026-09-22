@@ -2242,12 +2242,21 @@ comparisons.map_locations()                     # a crimson star at the requeste
 comparisons.map_locations(renderer="holoviews") # the same, interactive
 ```
 
-Every lane draws once: its **requested** selection (a point, a region box, or a
-lone-lon/lat slice as a solid line) when `select` pins one, else its own **catalog
-footprint** — the same marker/box `osk.map_locations("that_source")` would draw —
-so a comparison with no horizontal select still places both the test and the
-reference. A `ComparisonSet`/`FieldSet` fan that shares one point or region (ten
-variables at one mooring, say) draws it once, not once per member.
+Every lane draws once: its **requested** selection (a point, a region box, a
+lone-lon/lat slice as a solid line, or a transect's waypoint path as a solid
+polyline) when `select` pins one, else its own **catalog footprint** — the same
+marker/box `osk.map_locations("that_source")` would draw — so a comparison with
+no horizontal select still places both the test and the reference. A
+`select={"transect": {"xi_rho": ...}}` (grid-aligned), `{"cross": ...}`, or
+`{"from_reference": ...}` transect names no lon/lat without opening a dataset,
+so it falls back to a footprint too, just like an unselected lane. A
+`ComparisonSet`/`FieldSet` fan that shares one point, region or transect (ten
+variables along one section, say) draws it once, not once per member.
+
+A catalog footprint drawn only because a lane's select pinned nothing never
+drives the map's frame when it spans most of the globe (a climatology's
+near-global extent, say) — it still draws, it just doesn't blow a regional
+selection's own extent out to the whole world for sharing the figure.
 
 This never opens a dataset and never aligns a comparison — it reads only the
 *request* (`select`) and catalog metadata, so it costs the same whether `.plot()`
@@ -2264,8 +2273,9 @@ The domain ring is on by default (one per distinct test source); pass `domain=No
 to suppress it, or a `(lon_min, lat_min, lon_max, lat_max)` bbox / `(N, 2)` ring to
 override it — the same spelling `.plot()`'s own `domain=` takes. The ring/line paths
 carry no hover record in the interactive renderer (there is nothing per-glyph on a
-path to report); the selection point/box still hovers with the same fields a
+path to report); the selection point/box/path still hovers with the same fields a
 catalog item does, `title` holding a plain-language description ("point at (-144.30,
-50.07)", "meridional slice at -150.00°", ...).
+50.07)", "meridional slice at -150.00°", "transect 55.0°N, 150.0°W → 55.0°N,
+140.0°W (3 waypoints)", ...).
 
 All the `locations`-only parameters above apply here too.

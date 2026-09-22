@@ -140,9 +140,7 @@ def test_straddling_region_band_splits_at_the_seam():
             "lon": {"min": 170.0, "max": 200.0},
         },
     )
-    with patch(
-        "ocean_skill.catalog.resolve", _resolver({"test_src": STRADDLING_META})
-    ):
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": STRADDLING_META})):
         items = build_map_items(c)
     extent = next(it for it in items if it["kind"] == "extent")
     assert extent["bboxes"] == [
@@ -167,9 +165,7 @@ def test_lone_lon_draws_a_meridian_line_spanning_the_domain():
 
 def test_lone_lat_across_a_straddling_domain_splits_into_two_segments():
     c = _comparison(meta=STRADDLING_META, select={"lat": 0.0})
-    with patch(
-        "ocean_skill.catalog.resolve", _resolver({"test_src": STRADDLING_META})
-    ):
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": STRADDLING_META})):
         items = build_map_items(c)
     line = next(it for it in items if it["kind"] == "line")
     assert len(line["paths"]) == 2
@@ -196,9 +192,12 @@ def test_no_horizontal_select_falls_back_to_each_sources_footprint():
         name="grid_src", catalog="stub", path=None, metadata=PLAIN_META
     )
     resolver = _resolver({"grid_src": PLAIN_META, "papa": papa_meta})
-    with patch("ocean_skill.catalog.resolve", resolver), patch(
-        "ocean_skill.catalog.discover",
-        lambda: {"grid_src": grid_ref, "papa": papa_ref},
+    with (
+        patch("ocean_skill.catalog.resolve", resolver),
+        patch(
+            "ocean_skill.catalog.discover",
+            lambda: {"grid_src": grid_ref, "papa": papa_ref},
+        ),
     ):
         items = build_map_items(c)
     names = {it["name"] for it in items if it["kind"] in ("point", "extent")}
@@ -220,6 +219,189 @@ def test_footprint_item_warns_and_returns_none_for_an_extentless_source():
     with patch("ocean_skill.catalog.discover", lambda: {"bare": ref}):
         with pytest.warns(UserWarning, match="no declared geospatial extent"):
             assert footprint_item("bare") is None
+
+
+# -- transect select: waypoints/points draw a path, lon/lat lines clamp, ------------
+# -- grid/cross/from_reference fall back to the footprint ---------------------------
+
+
+def test_waypoints_transect_draws_the_requested_path():
+    waypoints = [[-150.0, 55.0], [-145.0, 55.0], [-140.0, 55.0]]
+    c = _comparison(
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]}, cache=False
+    )
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        items = build_map_items(c)
+    kinds = {it["kind"] for it in items}
+    assert kinds == {"line", "ring"}
+    line = next(it for it in items if it["kind"] == "line")
+    assert line["featureType"] == "selection"
+    (path,) = line["paths"]
+    assert path.tolist() == waypoints
+    assert line["title"].startswith("transect ")
+    assert "3 waypoints" in line["title"]
+
+
+def test_waypoints_transect_never_triggers_alignment():
+    waypoints = [[-150.0, 55.0], [-145.0, 55.0]]
+    c = _comparison(
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]}, cache=False
+    )
+    with (
+        patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})),
+        patch(
+            "ocean_skill.align.align",
+            side_effect=AssertionError("align() must never be called"),
+        ),
+    ):
+        build_map_items(c)
+    assert c._aligned is None
+
+
+def test_points_transect_draws_the_requested_path():
+    points = [[-150.0, 55.0], [-148.0, 56.5], [-145.0, 55.0]]
+    c = _comparison(
+        select={"transect": {"points": points}, "depth": [0, 50]}, cache=False
+    )
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        items = build_map_items(c)
+    line = next(it for it in items if it["kind"] == "line")
+    (path,) = line["paths"]
+    assert path.tolist() == points
+
+
+def test_waypoints_crossing_the_antimeridian_split_at_the_seam():
+    waypoints = [[170.0, 0.0], [-170.0, 5.0]]
+    c = _comparison(
+        meta=STRADDLING_META,
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]},
+        cache=False,
+    )
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": STRADDLING_META})):
+        items = build_map_items(c)
+    line = next(it for it in items if it["kind"] == "line")
+    assert len(line["paths"]) == 2
+    all_lons = [lon for path in line["paths"] for lon in path[:, 0]]
+    assert all(-180.0 <= lon <= 180.0 for lon in all_lons)
+    assert any(abs(lon - 180.0) < 1e-9 for lon in all_lons)
+    assert any(abs(lon + 180.0) < 1e-9 for lon in all_lons)
+
+
+def test_lon_line_transect_clamps_to_the_domain():
+    c = _comparison(select={"transect": {"lon": -150.0}, "depth": [0, 50]}, cache=False)
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        items = build_map_items(c)
+    line = next(it for it in items if it["kind"] == "line")
+    (path,) = line["paths"]
+    assert path[:, 0].tolist() == [-150.0, -150.0]
+    assert sorted(path[:, 1].tolist()) == [
+        PLAIN_META["geospatial_lat_min"],
+        PLAIN_META["geospatial_lat_max"],
+    ]
+
+
+def test_lat_line_transect_clamps_to_the_domain():
+    c = _comparison(select={"transect": {"lat": 45.0}, "depth": [0, 50]}, cache=False)
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        items = build_map_items(c)
+    line = next(it for it in items if it["kind"] == "line")
+    (path,) = line["paths"]
+    assert path[:, 1].tolist() == [45.0, 45.0]
+    assert sorted(path[:, 0].tolist()) == [
+        PLAIN_META["geospatial_lon_min"],
+        PLAIN_META["geospatial_lon_max"],
+    ]
+
+
+def test_grid_transect_falls_back_to_the_footprint():
+    c = _comparison(select={"transect": {"xi_rho": 30}, "depth": [0, 50]}, cache=False)
+    grid_ref = catalog.SourceRef(
+        name="test_src", catalog="stub", path=None, metadata=PLAIN_META
+    )
+    with (
+        patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})),
+        patch("ocean_skill.catalog.discover", lambda: {"test_src": grid_ref}),
+        pytest.warns(UserWarning, match="not a known catalog source"),
+    ):
+        items = build_map_items(c)
+    kinds = {it["kind"] for it in items}
+    assert kinds == {"extent", "ring"}
+
+
+def test_comparisonset_of_two_variables_on_one_transect_dedupes_the_path():
+    waypoints = [[-150.0, 55.0], [-145.0, 55.0]]
+    c1 = _comparison(
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]}, cache=False
+    )
+    c2 = Comparison(
+        reference="unresolvable_ref",
+        test="test_src",
+        variable="salinity",
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]},
+        cache=False,
+    )
+    cs = ComparisonSet([c1, c2])
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        items = build_map_items(cs)
+    assert len([it for it in items if it["kind"] == "line"]) == 1
+    assert len([it for it in items if it["kind"] == "ring"]) == 1
+
+
+def test_transect_comparison_renders_both_backends():
+    from matplotlib.figure import Figure
+
+    waypoints = [[-150.0, 55.0], [-145.0, 55.0], [-140.0, 55.0]]
+    c = _comparison(
+        select={"transect": {"waypoints": waypoints}, "depth": [0, 50]}, cache=False
+    )
+    with patch("ocean_skill.catalog.resolve", _resolver({"test_src": PLAIN_META})):
+        fig = map_locations(c)
+        assert isinstance(fig, Figure)
+        obj = map_locations(c, renderer="holoviews")
+    import holoviews as hv
+
+    rendered = hv.render(obj, backend="bokeh")
+    legend_labels = {it.label["value"] for it in rendered.legend[0].items}
+    assert legend_labels == {"selection", "domain"}
+
+
+# -- a global reference footprint never drives the frame -----------------------------
+
+
+def test_global_reference_footprint_is_marked_non_framing():
+    global_meta = {
+        "featureType": "grid",
+        "geospatial_lon_min": -179.5,
+        "geospatial_lon_max": 179.5,
+        "geospatial_lat_min": -77.0,
+        "geospatial_lat_max": 89.0,
+    }
+    c = _comparison(select={"time": "2012-01"})
+    c.reference_name = "woa_like"
+    woa_ref = catalog.SourceRef(
+        name="woa_like", catalog="stub", path=None, metadata=global_meta
+    )
+    grid_ref = catalog.SourceRef(
+        name="test_src", catalog="stub", path=None, metadata=PLAIN_META
+    )
+    resolver = _resolver({"test_src": PLAIN_META, "woa_like": global_meta})
+    with (
+        patch("ocean_skill.catalog.resolve", resolver),
+        patch(
+            "ocean_skill.catalog.discover",
+            lambda: {"test_src": grid_ref, "woa_like": woa_ref},
+        ),
+    ):
+        items = build_map_items(c)
+    woa_item = next(it for it in items if it.get("name") == "woa_like")
+    assert woa_item["frame"] is False
+    test_item = next(it for it in items if it.get("name") == "test_src")
+    assert test_item.get("frame", True) is True
+
+    from ocean_skill.plot.locations import _default_extent
+
+    extent = _default_extent(items)
+    assert extent[0] > -180.0 or extent[2] < 180.0  # not a whole-world frame
 
 
 # -- domain ring: default, suppressed, overridden ------------------------------------
