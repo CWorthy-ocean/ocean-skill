@@ -6,8 +6,9 @@ catalog datasets" from metadata alone. This module answers the sibling question 
 :class:`~ocean_skill.comparison.Comparison`, :class:`~ocean_skill.comparison.
 ComparisonSet`, :class:`~ocean_skill.field.Field` or
 :class:`~ocean_skill.field.FieldSet`: the selected point, region or slice line the
-object's ``select`` asks for, or — when the select pins nothing — each source's own
-declared position, drawn over the test source's domain outline for context.
+object's ``select`` asks for -- a point, a region box, a lone-lon/lat slice, or
+a transect's waypoint path -- or, when the select pins nothing, each source's
+own declared position, drawn over the test source's domain outline for context.
 
 Like the catalog path, this never opens a dataset and never aligns a comparison:
 everything here comes from the *request* (``select``) and catalog metadata alone, so
@@ -146,23 +147,96 @@ def _clamp_box(
     return (-180.0, -90.0, 180.0, 90.0)
 
 
+def _transect_geometry(
+    spec: Any, clamp: tuple[float, float, float, float]
+) -> dict[str, Any] | None:
+    """Return the path a ``select={"transect": ...}`` request draws, or ``None``.
+
+    ``waypoints``/``points`` draw as the *requested* path, unchanged -- the same
+    read-free contract every other shape here keeps (the snapped cells
+    :func:`ocean_skill.transect.sample_along` actually samples are never drawn,
+    only warned about, exactly like a point's own snapped-vs-requested offset).
+    A fixed ``lon``/``lat`` line clamps its open bound to ``clamp``, the same as
+    a top-level lone-lon/lat select. A grid-aligned, ``cross``, or
+    reference-derived transect names no lon/lat without opening a dataset --
+    ``None`` here falls back to each source's catalog footprint, which for
+    ``from_reference`` is exactly where the section runs.
+    """
+    from ocean_skill.transect import as_transect
+
+    parsed = as_transect(spec)
+    kind = parsed["kind"]
+    if kind in ("waypoints", "points"):
+        pairs = parsed[kind]
+        return {
+            "shape": "path",
+            "lons": tuple(p[0] for p in pairs),
+            "lats": tuple(p[1] for p in pairs),
+        }
+
+    clamp_lo, clamp_la, clamp_hi, clamp_ha = clamp
+    if kind == "lon_line":
+        lat_lo, lat_hi = parsed["lat_bounds"]
+        lat_lo = clamp_la if lat_lo is None else lat_lo
+        lat_hi = clamp_ha if lat_hi is None else lat_hi
+        lon = parsed["lon"]
+        return {
+            "shape": "line",
+            "lon0": lon,
+            "lat0": lat_lo,
+            "lon1": lon,
+            "lat1": lat_hi,
+        }
+    if kind == "lat_line":
+        lon_lo, lon_hi = parsed["lon_bounds"]
+        lon_lo = clamp_lo if lon_lo is None else lon_lo
+        lon_hi = clamp_hi if lon_hi is None else lon_hi
+        lat = parsed["lat"]
+        return {
+            "shape": "line",
+            "lon0": lon_lo,
+            "lat0": lat,
+            "lon1": lon_hi,
+            "lat1": lat,
+        }
+    # "grid", "cross", "from_reference": no lon/lat knowable without opening a
+    # dataset (a grid index, a cross-section pivot, or the reference's own
+    # casts) -- the caller falls back to the source's catalog footprint.
+    return None
+
+
+def _fmt_pos(lon: float, lat: float) -> str:
+    """Format one lon/lat pair as ``"55.0°N, 150.0°W"``.
+
+    Matches :func:`ocean_skill.plot.section._path_note`'s own endpoint formatting.
+    """
+    lat_hemi = "N" if lat >= 0 else "S"
+    lon_hemi = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.1f}°{lat_hemi}, {abs(lon):.1f}°{lon_hemi}"
+
+
 def _selection_geometry(
     select: dict[str, Any], clamp: tuple[float, float, float, float]
 ) -> dict[str, Any] | None:
     """The drawable shape one lane's ``select`` asks for, or ``None`` for none.
 
     A scalar on both horizontal axes is a point
-    (:func:`~ocean_skill.operators.point_in_spec`). A ranged value on either
-    axis makes a region box, its open bound(s) — and its other axis, when that
-    one names nothing at all — clamped to ``clamp``. A scalar on exactly one
-    axis with the other unselected or itself ranged is a slice line, fixed on
-    the scalar axis and spanning the other axis's own range (the whole
-    ``clamp`` box when that axis names nothing — a lone-lon/lat select).
-    ``None`` when neither axis names anything this reads geometrically — the
-    caller falls back to the source's catalog footprint then.
+    (:func:`~ocean_skill.operators.point_in_spec`). A ``"transect"`` key draws
+    the requested path (see :func:`_transect_geometry`). A ranged value on
+    either axis makes a region box, its open bound(s) — and its other axis,
+    when that one names nothing at all — clamped to ``clamp``. A scalar on
+    exactly one axis with the other unselected or itself ranged is a slice
+    line, fixed on the scalar axis and spanning the other axis's own range
+    (the whole ``clamp`` box when that axis names nothing — a lone-lon/lat
+    select). ``None`` when neither axis names anything this reads
+    geometrically — the caller falls back to the source's catalog footprint
+    then.
     """
     from ocean_skill.operators import _POINT_LAT_KEYS, _POINT_LON_KEYS, point_in_spec
     from ocean_skill.plot.locations import _wrap
+
+    if "transect" in select:
+        return _transect_geometry(select["transect"], clamp)
 
     hit = point_in_spec(select)
     if hit is not None:
@@ -204,6 +278,10 @@ def _selection_title(geo: dict[str, Any]) -> str:
             f"lat {geo['lat_min']:.2f}–{geo['lat_max']:.2f}, "
             f"lon {geo['lon_min']:.2f}–{geo['lon_max']:.2f}"
         )
+    if shape == "path":
+        lons, lats = geo["lons"], geo["lats"]
+        start, end = _fmt_pos(lons[0], lats[0]), _fmt_pos(lons[-1], lats[-1])
+        return f"transect {start} → {end} ({len(lons)} waypoints)"
     if geo["lon0"] == geo["lon1"]:
         return f"meridional slice at {geo['lon0']:.2f}°"
     return f"zonal slice at {geo['lat0']:.2f}°"
@@ -240,22 +318,29 @@ def _warn_if_outside_domain(geo: dict[str, Any], source: str) -> None:
     )
 
 
+def _round_geo_value(v: Any) -> Any:
+    """Round a scalar, or every element of a tuple/list, to 6 decimal places."""
+    if isinstance(v, int | float):
+        return round(v, 6)
+    if isinstance(v, tuple | list):
+        return tuple(_round_geo_value(x) for x in v)
+    return v
+
+
 def _geo_key(geo: dict[str, Any]) -> tuple:
     """A hashable, rounded key for deduping identical selection geometry.
 
     Rounded so two lanes computing the same requested position through
     different floating-point paths still collapse to one marker — a
-    ``compare()`` fan of ten variables at one mooring draws one point, not ten.
+    ``compare()`` fan of ten variables at one mooring draws one point (or, for
+    a shared transect, one path), not ten.
     """
-    return tuple(
-        (k, round(v, 6) if isinstance(v, int | float) else v)
-        for k, v in sorted(geo.items())
-    )
+    return tuple((k, _round_geo_value(v)) for k, v in sorted(geo.items()))
 
 
 def _selection_item(geo: dict[str, Any], hover: dict[str, str]) -> dict[str, Any]:
     """One ``locations``-family item for a lane's selection geometry."""
-    from ocean_skill.plot.locations import _split_bbox
+    from ocean_skill.plot.locations import _seam_split, _split_bbox
 
     shape = geo["shape"]
     if shape == "point":
@@ -271,6 +356,13 @@ def _selection_item(geo: dict[str, Any], hover: dict[str, str]) -> dict[str, Any
             geo["lon_min"], geo["lat_min"], geo["lon_max"], geo["lat_max"]
         )
         return {"kind": "extent", "featureType": "selection", "bboxes": bboxes, **hover}
+    if shape == "path":
+        # A transect's requested waypoints: walked vertex to vertex, exactly
+        # like a real domain perimeter, since the path -- unlike a box's
+        # declared bounds -- isn't straight, so only walking it edge by edge
+        # can tell where it actually crosses the seam.
+        paths = _seam_split(geo["lons"], geo["lats"])
+        return {"kind": "line", "featureType": "selection", "paths": paths, **hover}
     # "line": the same declared-bounds splitting a box uses, since a lone-lon/lat
     # span is a degenerate box (zero width or height) with exactly the same
     # antimeridian ambiguity — only the bounds themselves say whether it goes the
@@ -290,13 +382,32 @@ def footprint_item(source: str) -> dict[str, Any] | None:
     draw for the same source. ``None`` when the source is unresolvable or
     declares no geospatial extent, with one warning naming it either way.
     """
-    from ocean_skill.plot.locations import build_items
+    from ocean_skill.plot.locations import (
+        _NEAR_GLOBAL_LAT,
+        _NEAR_GLOBAL_LON,
+        build_items,
+    )
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             items, _ = build_items([source])
-        return items[0]
+        item = items[0]
+        if item["kind"] == "extent":
+            lons = [v for lo, _la, hi, _ha in item["bboxes"] for v in (lo, hi)]
+            lats = [v for _lo, la, _hi, ha in item["bboxes"] for v in (la, ha)]
+            if (
+                max(lons) - min(lons) >= _NEAR_GLOBAL_LON
+                or max(lats) - min(lats) >= _NEAR_GLOBAL_LAT
+            ):
+                # A footprint this wide is only ever a "nothing selected"
+                # fallback's second, un-plotted-on source (see
+                # _comparison_items/_field_items) -- true for it, but letting
+                # it drive _default_extent would blow a regional selection's
+                # own frame out to the whole world. It still draws; it just
+                # doesn't get a vote on the frame.
+                item["frame"] = False
+        return item
     except ValueError:
         warnings.warn(
             f"{source!r} has no declared geospatial extent, so its position "
@@ -500,8 +611,11 @@ def build_map_items(obj: Any, *, domain: Any = _AUTO) -> list[dict[str, Any]]:
     :class:`~ocean_skill.comparison.ComparisonSet`,
     :class:`~ocean_skill.field.Field` or :class:`~ocean_skill.field.FieldSet`.
     Every lane appears once — its requested selection geometry (a point, a
-    region box, a lone-lon/lat slice line) when its ``select`` pins one, else
-    its declared catalog footprint — over the test source's domain outline.
+    region box, a lone-lon/lat slice line, or a transect's waypoint path) when
+    its ``select`` pins one, else its declared catalog footprint — over the
+    test source's domain outline. A grid-aligned, ``cross``, or
+    reference-derived transect names no lon/lat without opening a dataset, so
+    it falls back to its source's footprint like an unselected lane does.
     Built from the *request* and catalog metadata alone: nothing is opened, and
     no comparison is aligned, so calling this costs the same whether the
     comparison has already run or not.

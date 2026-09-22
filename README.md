@@ -556,7 +556,10 @@ osk.compare(
 ```
 
 Every transect form above works here too, and the reference can be another model
-run just as well as a climatology.
+run just as well as a climatology. `comparison.map_locations()` draws the
+requested waypoint path (or fixed lon/lat line) over the model's domain outline;
+a grid-aligned/`cross`/reference-derived transect draws each source's own
+footprint instead, since those name no lon/lat without opening a dataset.
 
 **Where is the hot spot, and how did it get there?** — a map naturally raises that
 question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid

@@ -244,16 +244,18 @@ class PlotSpec:
         so drawing the map never opens a dataset. Two further kinds carry a path
         instead of a position: ``"ring"`` (a dashed model-domain outline) and
         ``"line"`` (a solid selection slice — a lone-lon/lat select drawn as a
-        meridian or parallel), each with ``paths``: a list of ``(M, 2)`` ``[lon,
-        lat]`` arrays, every longitude pre-wrapped to −180..180 and already split
+        meridian or parallel, or a transect's requested waypoint path), each with
+        ``paths``: a list of ``(M, 2)`` ``[lon, lat]`` arrays, every longitude
+        pre-wrapped to −180..180 and already split
         at the antimeridian where the path crosses it, so a renderer only ever
         draws segments, never decides where to cut one. Built alongside the
         catalog-metadata items by
         :func:`ocean_skill.plot.map_locations.build_map_items`, which turns a
         :class:`~ocean_skill.comparison.Comparison` (or ``ComparisonSet``,
         ``Field``, ``FieldSet``) — really, its *request* — into the same item
-        shape: the requested point/box/slice, plus the source's domain outline as
-        context. Style is fixed rather than index-based for these two groups (see
+        shape: the requested point/box/slice/path, plus the source's domain
+        outline as context. Style is fixed rather than index-based for these
+        two groups (see
         :data:`ocean_skill.plot.locations.GROUP_STYLES`), so a selection can never
         collide with a catalog featureType's colour, and every ``locations`` map
         agrees on what a model footprint looks like.

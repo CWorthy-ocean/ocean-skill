@@ -360,7 +360,16 @@ def _default_extent(
     padded by 5% of the span (at least 2°) per side, held to a minimum span so a
     lone mooring maps to a region rather than a point, and snapped to the whole
     world once the union is effectively global anyway.
+
+    An item marked ``frame: False`` (see
+    :func:`ocean_skill.plot.map_locations.footprint_item`: a globe-spanning
+    catalog footprint drawn only because a lane's select pinned nothing) is
+    skipped here, unless every item is one -- a lone global footprint still
+    maps the globe, but it never drags a regional selection's own frame out to
+    the whole world just for sharing the figure.
     """
+    framed = [item for item in items if item.get("frame", True)]
+    items = framed or items
     lons: list[float] = []
     lats: list[float] = []
     for item in items:
