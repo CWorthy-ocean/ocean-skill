@@ -816,8 +816,12 @@ def compose(
         # Row count, not item count: a fanned season axis puts several items in
         # one group that all share one comparison's metrics, deduped to one row
         # by _metrics_text -- counting items here would drop a box that, once
-        # deduped, easily fits.
-        row_count = box.count("\n") + 1 if box else 0
+        # deduped, easily fits. Also not a newline count on `box`: metrics_stacked=True
+        # keeps one newline *per metric* inside a single comparison's own row, so text
+        # lines overcount comparisons the moment more than one metric key is stacked.
+        # _metrics_rows is the one place that already dedupes to "one entry per
+        # distinct comparison" -- reuse its length instead of re-deriving it from text.
+        row_count = len(_series_layout._metrics_rows([i for _, i in group], metric_keys))
         if row_count > _series_layout.METRICS_BOX_MAX_ROWS:
             warnings.warn(
                 f"{row_count} distinct stats rows would share one panel, which "
