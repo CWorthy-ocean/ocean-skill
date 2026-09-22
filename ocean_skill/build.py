@@ -2519,6 +2519,82 @@ def add_catalog(
     )
 
 
+def _erddap_variable_attrs(
+    reader, server: str, dataset_id: str
+) -> dict[str, dict[str, Any]]:
+    """Per-variable attributes ERDDAP declares for ``dataset_id``: ``{var: {attr: v}}``.
+
+    Reuses ``intake_erddap``'s own ``TableDAPReader._get_dataset_metadata`` -- one
+    ``GET /info/<dataset_id>/index.json``, with ``int``-typed lists such as
+    ``flag_values`` already parsed. intake_erddap calls it inside ``_read()`` only to
+    validate the requested ``variables`` and then discards the result (nothing lands
+    on ``reader.metadata``), so the builder has to ask again: a small second request
+    that only happens when no explicit ``qc`` scheme was given. One helper, so a test
+    can stand in for the network and so an upstream change (or a public accessor,
+    which would also remove the duplicate request) has a single place to land.
+    """
+    return dict(reader._get_dataset_metadata(server, dataset_id).get("variables") or {})
+
+
+def _declared_qc_spec(reader, server: str, dataset_id: str, df, qc):
+    """Build the ``qc`` spec :func:`add_erddap_source` hands to :func:`_probe`.
+
+    The caller's own spec, filled in from the dataset's declared flag metadata
+    where the caller said nothing. An explicit ``scheme`` or ``flag_to_qartod``
+    settles the contract and skips the ``/info`` request entirely. Otherwise the
+    flag columns actually in ``df`` (the caller's ``flags`` if given, else
+    :func:`ocean_skill.qc.detect_flag_columns`) are looked up in ERDDAP's
+    declared attributes and :func:`ocean_skill.qc.spec_from_declared_flags`
+    reads them; whatever it derives goes *under* the caller's keys
+    (``{**derived, **qc}`` -- explicit wins value by value, as
+    :func:`ocean_skill.qc.expand_scheme` does). A failure to fetch or parse that
+    side-channel metadata warns and derives nothing: it must never fail the
+    entry, which still reads fine and then behaves exactly as before this tier
+    existed (consensus rule, or recorded-not-applied).
+    """
+    spec = dict(qc or {})
+    if spec.get("scheme") or spec.get("flag_to_qartod"):
+        return spec
+    from ocean_skill import qc as _qc
+    from ocean_skill.tabular import split_units
+
+    try:
+        attrs = _erddap_variable_attrs(reader, server, dataset_id)
+    except Exception as exc:
+        warnings.warn(
+            f"{dataset_id!r}: could not read ERDDAP's declared flag metadata ({exc}); "
+            "falling back to the observed flag values.",
+            stacklevel=3,
+        )
+        attrs = {}
+    flags_input = spec.get("flags")
+    flag_cols = (
+        {str(c) for c in flags_input}
+        if flags_input is not None
+        else set(_qc.detect_flag_columns(df))
+    )
+    # ERDDAP names the variable bare ("TEMP_QC"); intake_erddap may spell the column
+    # with units appended -- match on the units-stripped base, as the probe does.
+    by_base = {
+        split_units(str(c))[0]: str(c) for c in df.columns if str(c) in flag_cols
+    }
+    declared = {
+        by_base[var]: a
+        for var, a in attrs.items()
+        if var in by_base
+        and isinstance(a, dict)
+        and a.get("flag_values") is not None
+        and a.get("flag_meanings") is not None
+    }
+    derived = (
+        _qc.spec_from_declared_flags(declared, subject=str(dataset_id))
+        if declared
+        else None
+    )
+    merged = {**(derived or {}), **spec}
+    return merged or None
+
+
 def add_erddap_source(
     cat,
     name: str,
@@ -2529,6 +2605,7 @@ def add_erddap_source(
     mask_failed_qartod: bool = True,
     probe: bool = True,
     reader_kwargs: dict[str, Any] | None = None,
+    qc: dict[str, Any] | None = None,
     **metadata: Any,
 ):
     """Add one ERDDAP dataset (a *known* ``dataset_id``) to ``cat``.
@@ -2551,6 +2628,23 @@ def add_erddap_source(
     mask_failed_qartod
         Apply OOI's own QARTOD aggregate flags on read (the default): failed
         observations come back as NaN instead of needing separate QC downstream.
+    qc
+        Provider QC flags for the tabular source -- see :mod:`ocean_skill.qc` (its
+        module docstring is the spec) and :func:`add_source`. Threaded to
+        :func:`_probe` separately from ``**metadata`` for the reason :func:`_attach`
+        gives: the *resolved* contract is what belongs in the saved entry, not the
+        raw spec clobbering it afterwards. Only meaningful with ``probe=True``.
+
+        Where ``qc`` declares no ``scheme``/``flag_to_qartod``, the dataset's own
+        declared flag metadata is consulted first: ERDDAP publishes each variable's
+        ``flag_values``/``flag_meanings``/``conventions`` at ``/info/<dataset_id>``,
+        and :func:`ocean_skill.qc.spec_from_declared_flags` reads them (OceanSITES
+        reference table 2, for instance, *is* the ``"argo"`` scale). That fills in
+        what the caller left unsaid -- an explicit ``qc`` still wins key by key --
+        and turns the consensus rule's "recorded but NOT applied" into an applied
+        contract for a dataset whose observed values alone were ambiguous.
+        ``qc={"scheme": ...}`` (or ``flag_to_qartod``) pins it outright and skips
+        the extra ``/info`` request.
     """
     from intake_erddap.erddap import TableDAPReader
 
@@ -2563,7 +2657,10 @@ def add_erddap_source(
     )
     md: dict[str, Any] = {"server": server, "dataset_id": dataset_id}
     if probe:
-        md.update(_probe(reader.read(), None))
+        # Read once; the frame serves both the declared-flag lookup and the probe.
+        df = reader.read()
+        resolved_qc = _declared_qc_spec(reader, server, dataset_id, df, qc)
+        md.update(_probe(df, None, qc=resolved_qc))
     md.update(metadata)
     reader.metadata.update(md)
     cat[name] = reader
