@@ -381,6 +381,81 @@ def test_a_dual_lon_test_lane_does_not_collide_with_the_stations_own_lon():
     assert "lon_rho" not in out.coords and "lat_rho" not in out.coords
 
 
+# -- _as_xesmf: the map/regrid path's own dual-longitude collision --------------------
+#
+# _rename_position (above) guards the point path; _as_xesmf is the map/regrid path's
+# analogous rename and was never given the same guard -- a ROMS lane's leftover plain
+# ``lon``/``lat`` alias collides with the rename of ``lon_rho``/``lat_rho`` onto those
+# same bare names, raising ``ValueError: the new name 'lon' conflicts``.
+
+
+def test_as_xesmf_drops_the_leftover_alias_a_dual_lon_lane_carries():
+    da = curvilinear_with_lon_alias()
+    out = align._as_xesmf(da)
+    assert set(out.coords) & {"lon", "lat"} == {"lon", "lat"}
+    assert "lon_rho" not in out.coords and "lat_rho" not in out.coords
+
+
+def test_as_xesmf_drops_a_bare_unattributed_lon_beside_a_cf_attributed_longitude():
+    """The other layout that collides: a CF-attributed ``longitude`` (what
+    ``_lon_name`` resolves) beside a plain, attribute-less ``lon`` that some upstream
+    step left behind without dropping (see :func:`ocean_skill.sources`, which skips a
+    rename whose destination already exists)."""
+    grid = monthly_grid().isel(time=0)
+    da = grid.rename(lon="longitude", lat="latitude")
+    da["longitude"].attrs["units"] = "degrees_east"
+    da["latitude"].attrs["units"] = "degrees_north"
+    # attach a bare, attribute-less lon/lat alongside the CF-attributed longitude/latitude
+    da = da.assign_coords(
+        lon=("longitude", da["longitude"].values),
+        lat=("latitude", da["latitude"].values),
+    )
+    out = align._as_xesmf(da)
+    assert set(out.coords) & {"lon", "lat"} == {"lon", "lat"}
+    assert "longitude" not in out.coords and "latitude" not in out.coords
+
+
+def test_as_xesmf_is_a_no_op_on_an_already_plain_lon_lat_lane():
+    """No dual coordinates to begin with -- nothing should be dropped or renamed."""
+    grid = monthly_grid().isel(time=0)
+    out = align._as_xesmf(grid)
+    xr.testing.assert_identical(out, grid)
+
+
+@pytest.mark.filterwarnings("ignore")
+def test_a_dual_lon_test_lane_does_not_collide_on_the_map_regrid_path():
+    """The end-to-end regression for the map path: a ROMS-shaped test lane (plain
+    ``lon`` *and* ``lon_rho``) regridded against a coarser reference grid used to raise
+    ``ValueError: the new name 'lon' conflicts`` inside :func:`ocean_skill.align._as_xesmf`
+    -- the same dual-coordinate hazard :func:`_rename_position` guards on the point
+    path, but this is the map/regrid path, which was never given the same guard.
+
+    Requires xesmf (skipped where it is not installed).
+    """
+    pytest.importorskip("xesmf")
+    test = curvilinear_with_lon_alias()
+    reference = monthly_grid().isel(time=0)
+    out = align.align(test, reference, method="bilinear")
+    assert set(out.data_vars) >= {"test", "reference"}
+    assert "lon_rho" not in out.coords and "lat_rho" not in out.coords
+
+
+@pytest.mark.filterwarnings("ignore")
+def test_a_dual_lon_test_lane_does_not_collide_on_the_bilinear_point_path():
+    """The point-path regression the earlier ``method="nearest"`` test stepped around:
+    ``method="bilinear"`` at a station reaches :func:`ocean_skill.align._interp_curvilinear`,
+    which also calls :func:`ocean_skill.align._as_xesmf`.
+
+    Requires xesmf (skipped where it is not installed).
+    """
+    pytest.importorskip("xesmf")
+    test = curvilinear_with_lon_alias()
+    reference = monthly_station().isel(time=0)
+    out = align.align(test, reference, method="bilinear")
+    assert set(out.data_vars) >= {"test", "reference"}
+    assert "lon_rho" not in out.coords and "lat_rho" not in out.coords
+
+
 # -- the Comparison surface: featureType chooses, and says so --------------------------
 
 
