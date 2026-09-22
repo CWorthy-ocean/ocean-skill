@@ -784,8 +784,29 @@ def perimeter_of(lon, lat, *, max_points: int = 400) -> np.ndarray | None:
 
 
 def _as_xesmf(obj):
-    """Return ``obj`` with coords named ``lon``/``lat`` as xesmf expects."""
+    """Return ``obj`` with coords named ``lon``/``lat`` as xesmf expects.
+
+    A ROMS lane carries *two* longitude coordinates -- the native ``lon_rho`` and a
+    plain ``lon`` alias (:func:`ocean_skill.roms.standardize` assigns the plain names
+    on top of the rho ones without dropping either) -- and :func:`_lon_name`/
+    :func:`_lat_name` resolve only one of each pair (CF-first, so the rho name, per
+    :data:`ocean_skill.vocabulary.COORD_FALLBACKS`). Renaming that resolved name
+    straight onto ``"lon"``/``"lat"`` then collides with the plain alias already
+    sitting there -- ``ValueError: the new name 'lon' conflicts``. Every leftover
+    fallback spelling is therefore dropped first, before the rename, excluding
+    whichever one :func:`_lon_name`/:func:`_lat_name` actually resolved (that one is
+    what gets renamed *onto* ``lon``/``lat``, not a redundant alias to discard).
+    """
+    from ocean_skill.vocabulary import COORD_FALLBACKS
+
     lon, lat = _lon_name(obj), _lat_name(obj)
+    leftover = [
+        name
+        for name in (*COORD_FALLBACKS["longitude"], *COORD_FALLBACKS["latitude"])
+        if name in obj.coords and name not in (lon, lat)
+    ]
+    if leftover:
+        obj = obj.drop_vars(leftover)
     ren = {}
     if lon and lon != "lon":
         ren[lon] = "lon"
