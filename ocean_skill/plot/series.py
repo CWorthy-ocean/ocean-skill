@@ -1119,8 +1119,12 @@ def compose(
         # Row count, not item count: several items can share one comparison's
         # metrics (a fanned season axis, most concretely) and dedup to one row
         # in _metrics_text -- counting items here would drop a box that, once
-        # deduped, easily fits.
-        row_count = box.count("\n") + 1 if box else 0
+        # deduped, easily fits. Also not a newline count on `box`: series has no
+        # metrics_stacked of its own, so today a text line is always one comparison
+        # here -- but profile's twin composer (see profile.compose) does stack, where
+        # counting newlines overcounts. Kept in step with that twin by reusing
+        # _metrics_rows' own dedup instead of re-deriving the count from text.
+        row_count = len(_metrics_rows([i for _, i in group], metric_keys))
         if row_count > METRICS_BOX_MAX_ROWS:
             warnings.warn(
                 f"{row_count} distinct stats rows would share one panel, which "

@@ -9,6 +9,8 @@ without going through ``compare()``.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -1931,6 +1933,57 @@ def test_metrics_stacked_draws_in_both_renderers():
 
     texts = obj.traverse(lambda x: x, [hv.Text])
     assert texts and "\n" in texts[0].data[2]
+
+
+def test_metrics_stacked_two_variables_is_still_only_two_rows():
+    """Regression: two comparisons stacked to 3 metric lines each is 6 *text* lines,
+    but only 2 distinct comparisons -- well under ``METRICS_BOX_MAX_ROWS`` (3). The
+    cap must count comparisons, not newlines, or a stacked two-variable panel (this
+    family's default twin-axis merge for two variables, ``secondary_x=True``) is
+    dropped for a box that easily fits.
+    """
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        layout = _profile.compose(
+            items, metric_keys=("bias", "rmse", "corr"), metrics_stacked=True
+        )
+    text = layout.panels[0].metrics_text
+    assert text
+    assert text.count("\n") + 1 == 6
+
+
+def test_metrics_stacked_still_caps_at_too_many_comparisons():
+    """The cap itself must still fire when stacked, counting comparisons (4) rather
+    than the 12 text lines 4 comparisons x 3 stacked metrics would produce.
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(4)]
+    with pytest.warns(UserWarning, match="4 distinct stats rows"):
+        layout = _profile.compose(
+            items, metric_keys=("bias", "rmse", "corr"), metrics_stacked=True
+        )
+    assert layout.panels[0].metrics_text == ""
+
+
+def test_metrics_stacked_two_variables_draws_in_both_renderers():
+    items = [_profile_item(), _profile_item(SALINITY, units="1e-3")]
+
+    fig = render(
+        _spec(items, metric_keys=("bias", "rmse", "corr"), metrics_stacked=True),
+        renderer="matplotlib",
+    )
+    static_text = fig.axes[0]._osk_metrics_text.get_text()
+    assert static_text.count("\n") + 1 == 6
+
+    import holoviews as hv
+
+    obj = render(
+        _spec(items, metric_keys=("bias", "rmse", "corr"), metrics_stacked=True),
+        renderer="holoviews",
+    )
+    texts = obj.traverse(lambda x: x, [hv.Text])
+    assert texts
+    assert texts[0].data[2].count("\n") + 1 == 6
 
 
 def test_profile_metrics_labels_overrides_the_prefix_in_both_renderers():
