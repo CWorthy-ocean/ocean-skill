@@ -440,16 +440,29 @@ def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     lon_min, lat_min, lon_max, lat_max = (meta.get(k) for k in keys)
     if None in (lon_min, lat_min, lon_max, lat_max):
         return None
-    # Catalogs may declare 0-360 (ROMS' native convention); maps are usually drawn in
-    # ±180, so normalize — unless the domain straddles the antimeridian, where ±180
-    # endpoints read backwards (lon_min > lon_max) and would draw as two stray
-    # verticals. Such a box stays in 0-360, matching the convention align() resolves
-    # for the same domain's data (see ocean_skill.align.natural_convention).
-    wrapped = tuple(((lo + 180) % 360) - 180 for lo in (lon_min, lon_max))
-    if wrapped[0] <= wrapped[1]:
-        lon_min, lon_max = wrapped
+    lon_min, lon_max = float(lon_min), float(lon_max)
+    # Catalogs may declare 0-360 (ROMS' native convention, and a gridded climatology
+    # like GLODAP's 20.5..379.5 cell centers); maps are usually drawn in ±180, so
+    # normalize — but wrapping each endpoint independently only works when the span
+    # itself survives the wrap. A globe-spanning source (span >= 359, same threshold
+    # ocean_skill.catalog._bbox_overlaps and plot.locations._normalized_geometry use)
+    # wraps to a near-zero-width sliver instead of the whole world, so it is
+    # short-circuited here first. Otherwise the span is preserved explicitly — shift
+    # lon_min into ±180 and add the original span back on — rather than wrapping
+    # lon_max on its own, which is what silently collapsed the globe-spanning case
+    # and is the same trap _bbox_overlaps' docstring warns about. A box that still
+    # straddles the antimeridian after that (lon_min > 180 - span, i.e. the shifted
+    # upper bound would exceed 180) stays in 0-360 instead, matching the convention
+    # align() resolves for the same domain's data (see
+    # ocean_skill.align.natural_convention).
+    span = lon_max - lon_min
+    if span >= 359.0:
+        lon_min, lon_max = -180.0, 180.0
     else:
-        lon_min, lon_max = (lo % 360 for lo in (lon_min, lon_max))
+        lo = ((lon_min + 180.0) % 360.0) - 180.0
+        if lo + span > 180.0:
+            lo = lon_min % 360.0
+        lon_min, lon_max = lo, lo + span
     return lon_min, lat_min, lon_max, lat_max
 
 

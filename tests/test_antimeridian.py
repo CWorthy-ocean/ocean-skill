@@ -175,6 +175,29 @@ def test_domain_box_still_normalizes_a_non_straddling_domain(monkeypatch):
     assert (lon_min, lon_max) == (-100.0, -80.0)
 
 
+def test_domain_box_of_a_globe_spanning_0_360_grid_is_the_whole_globe(monkeypatch):
+    """GLODAP declares cell centers 20.5..379.5 (0-360, one grid cell past a full
+    wrap). Wrapping each endpoint independently collapses this to a near-zero-width
+    sliver near 20E that overlaps no model domain -- the bug this guards against.
+    """
+    from ocean_skill import comparison
+
+    _fake_entry(monkeypatch, 20.5, -89.5, 379.5, 89.5)
+    lon_min, _, lon_max, _ = comparison._domain_of("glodap")
+    assert lon_min < lon_max, "box endpoints must stay ordered"
+    assert (lon_min, lon_max) == (-180.0, 180.0)
+
+
+def test_domain_box_of_a_near_global_180_grid_is_the_whole_globe(monkeypatch):
+    """WOA-style ±180 declaration (-179.5..179.5) is the same globe-spanning case,
+    just already expressed in the ±180 convention."""
+    from ocean_skill import comparison
+
+    _fake_entry(monkeypatch, -179.5, -89.5, 179.5, 89.5)
+    lon_min, _, lon_max, _ = comparison._domain_of("woa")
+    assert (lon_min, lon_max) == (-180.0, 180.0)
+
+
 # -- perimeter_of: the true grid-edge ring, not a bounding box -----------------------
 
 
