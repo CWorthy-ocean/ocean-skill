@@ -127,3 +127,64 @@ def test_a_suite_can_opt_into_the_strict_raise(tmp_path):
             ],
             tmp_path / "catalog.yaml",
         )
+
+
+def test_a_file_still_being_written_is_skipped_and_the_refresh_still_completes(
+    tmp_path,
+):
+    """The exact case this exists for: refreshing against a run still writing output."""
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    bad = tmp_path / "out.1.nc"
+    _segment(bad, 43200.0, 1.0)
+    data = bad.read_bytes()
+    bad.write_bytes(data[: len(data) // 2])  # looks like it, mid-write
+
+    _refresh_sources(
+        [
+            {
+                "name": "GOM_bgc",
+                "files": str(tmp_path / "out.*.nc"),
+                "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+            }
+        ],
+        tmp_path / "catalog.yaml",
+    )
+
+    ds = xr.open_dataset(
+        str(tmp_path / "refs" / "gom_bgc.json"),
+        engine="kerchunk",
+        chunks={},
+        decode_times=False,
+    )
+    assert ds.sizes["ocean_time"] == 2  # only out.0.nc's records
+
+
+def test_a_stream_matching_only_unfinished_files_keeps_its_existing_entry(tmp_path):
+    """Distinct from a real failure: a live run between output steps is routine.
+
+    An entry whose only matched file currently looks unfinished must be treated the
+    same as one whose glob matched nothing at all -- keep whatever the catalog
+    already has for it, don't raise, and don't touch other entries.
+    """
+    import intake
+
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    catalog_path = tmp_path / "catalog.yaml"
+    spec = [
+        {
+            "name": "GOM_bgc",
+            "files": str(tmp_path / "out.*.nc"),
+            "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+        }
+    ]
+    _refresh_sources(spec, catalog_path)
+    before = intake.from_yaml_file(str(catalog_path))["GOM_bgc"].read()
+
+    # the run has moved on to a new segment that isn't finished yet
+    bad = tmp_path / "out.0.nc"
+    data = bad.read_bytes()
+    bad.write_bytes(data[: len(data) // 2])
+
+    _refresh_sources(spec, catalog_path)  # must not raise
+    after = intake.from_yaml_file(str(catalog_path))["GOM_bgc"].read()
+    xr.testing.assert_identical(before, after)
