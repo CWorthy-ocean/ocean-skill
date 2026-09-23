@@ -36,12 +36,26 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     (``"last"``) applies, so an ordinary stream's restart-boundary overlaps are
     collapsed on every refresh without the suite having to say so -- newer segment
     wins, with a loud warning (not a raise) if the overlap actually disagrees.
+
+    Files that match the glob but look unfinished (still being written, or never
+    completed -- see :func:`ocean_skill.build._partition_unfinished`) are filtered out
+    here, before the rebuild: a stream whose only matched file is the one currently
+    being written is treated the same as a stream that matched nothing, keeping its
+    existing entry rather than raising, since that is an ordinary state for a suite
+    refreshed against a live run rather than a failure. An entry's ``min_age`` key,
+    when given, is forwarded to both the filter and ``make_kerchunk``.
     """
     import glob as _glob
 
     import intake
 
-    from ocean_skill.build import add_source, make_kerchunk, new_catalog, save
+    from ocean_skill.build import (
+        _partition_unfinished,
+        add_source,
+        make_kerchunk,
+        new_catalog,
+        save,
+    )
 
     catalog_path = Path(catalog_path).expanduser()
     cat = None
@@ -63,13 +77,24 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         if not files:
             skipped.append(entry["name"])
             continue
+        min_age = entry.get("min_age", 0.0)
+        ready, unfinished = _partition_unfinished(
+            [Path(f) for f in files], min_age=min_age
+        )
+        for p, why in unfinished.items():
+            print(f"  refresh: {entry['name']}: skipping {p} ({why})")
+        if not ready:
+            skipped.append(entry["name"])
+            continue
         # Left out entirely (not defaulted to "all") when the suite doesn't name one,
         # so make_kerchunk's own default -- "unique" -- takes effect here too.
         kwargs = {"keep": entry["keep"]} if "keep" in entry else {}
-        ref = make_kerchunk(files, entry["ref"], grid=entry.get("grid"), **kwargs)
+        ref = make_kerchunk(
+            ready, entry["ref"], grid=entry.get("grid"), min_age=min_age, **kwargs
+        )
         add_source(cat, entry["name"], ref)
         rebuilt.append(entry["name"])
-        print(f"  refresh: {entry['name']} <- {len(files)} files")
+        print(f"  refresh: {entry['name']} <- {len(ready)} files")
 
     if skipped:
         print(f"  refresh: no files matched for {skipped}; kept their existing entries")

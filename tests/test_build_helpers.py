@@ -1455,6 +1455,304 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
     assert built.is_relative_to(fake_home / "refs")
 
 
+# ------------------------------------------------------ skipping unfinished files
+#
+# A file still being written by a live model run typically looks either empty
+# (created but nothing flushed yet) or truncated (the header promises more bytes
+# than have landed on disk) -- both are what h5py raises on for real, not a
+# simulation of the failure mode.
+
+
+# Read back via make_kerchunk's own .json output rather than build_kerchunk's default
+# .parquet, per test_build_kerchunk_accepts_tilde_for_every_path's note above: the
+# parquet reference reader is intermittently broken upstream ("boolean value of NA is
+# ambiguous"), for reasons that have nothing to do with what's under test here.
+
+
+def test_a_truncated_file_is_skipped_with_a_warning(tmp_path):
+    """The build succeeds from whatever's readable, naming what it skipped."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"his.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+    bad = _roms_like(tmp_path / "his.2.nc", "NETCDF4", t0=2 * 86400.0)
+    data = bad.read_bytes()
+    bad.write_bytes(data[: len(data) // 2])
+    files.append(bad)
+
+    with pytest.warns(UserWarning, match="his.2.nc"):
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4  # the two intact files, 2 records each
+
+
+def test_an_empty_file_is_skipped_with_a_warning(tmp_path):
+    """A file created but not yet written to (0 bytes) is the same kind of gap."""
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"his.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(2)
+    ]
+    files.append(tmp_path / "his.2.nc")
+    files[-1].touch()
+
+    with pytest.warns(UserWarning, match="empty"):
+        out = make_kerchunk(files, out=tmp_path / "r.json")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4
+
+
+def test_min_age_also_excludes_recently_modified_files(tmp_path):
+    """min_age=0 (default) only rules out files that fail to open.
+
+    Raising it is the stricter guard for a model that doesn't flush mid-record.
+    """
+    import os
+    import time
+
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"his.{i}.nc", "NETCDF4", t0=i * 86400.0)
+        for i in range(3)
+    ]
+    old = time.time() - 3600
+    for p in files[:2]:
+        os.utime(p, (old, old))
+
+    out = make_kerchunk(files, out=tmp_path / "r_default.json")
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 6  # nothing excluded by age alone
+
+    with pytest.warns(UserWarning, match="min_age"):
+        out = make_kerchunk(files, out=tmp_path / "r_strict.json", min_age=600)
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4  # the untouched (newest) file excluded
+
+
+def test_every_matched_file_looking_unfinished_raises(tmp_path):
+    """Distinct from 'no files matched' -- name that every match is unfinished."""
+    (tmp_path / "his.0.nc").touch()
+    with pytest.raises(FileNotFoundError, match="unfinished"):
+        build_kerchunk({"his": "his.*.nc"}, root=tmp_path, out_dir=tmp_path / "refs")
+
+
+def test_the_grid_file_is_never_probed_for_unfinished(tmp_path):
+    """The unfinished-file skip applies only to the stream's own files, not ``grid=``.
+
+    A broken grid is a real error the caller needs to see, not something to
+    silently drop.
+    """
+    from ocean_skill.build import make_kerchunk
+
+    his = _roms_like(tmp_path / "his.0.nc", "NETCDF4")
+    bad_grid = _grid(tmp_path / "grid.nc", "NETCDF4")
+    data = bad_grid.read_bytes()
+    bad_grid.write_bytes(data[: len(data) // 2])
+
+    # h5py's own message, surfacing unchanged -- proof the grid file was actually
+    # opened (and failed there) rather than silently dropped by the unfinished-file
+    # filter, which never even looks at bytes beyond a magic-number sniff for it.
+    with pytest.raises(OSError, match="truncated file"):
+        make_kerchunk(files=[his], out=tmp_path / "r.json", grid=bad_grid)
+
+
+# ---------------------------------------------- _netcdf3_expected_size (CDF-1/2/5)
+#
+# netCDF-3-family files keep no on-disk field recording their true size the way HDF5
+# does -- opening one with netCDF4, or even reading a variable's full data back,
+# raises nothing for a truncated file; the missing tail just reads as zeros. These
+# check the header-derived size computation directly against real
+# netCDF4-python-written files (the same three classic-format versions ROMS or its
+# grid file can use), byte-for-byte, before trusting it inside _unfinished_reason.
+
+
+def _classic_nc(path, fmt, *, lone=False, fixed_only=False, nrec=4, attrs=True, t0=0.0):
+    """Write a classic-format file exercising fixed vars, record vars, and padding.
+
+    ``eta_rho``/``xi_rho`` = 3x5 = 15 elements, chosen so an ``i2`` slab (30 bytes)
+    needs padding (to 32) and an ``i1`` slab (15 bytes) does too (to 16) -- both
+    exercise ceil-to-4 rounding, and ``lone`` isolates netCDF-C's one exception to it
+    (a single record variable is packed with no per-record padding at all). ``t0``
+    matters when several of these are concatenated: real output files continue the
+    series rather than restarting it (see ``_roms_like``'s own note on this).
+    """
+    from netCDF4 import Dataset
+
+    nc = Dataset(path, "w", format=fmt)
+    if attrs:
+        nc.setncattr("title", "test file")
+        nc.setncattr("version", 1.5)
+    if not fixed_only:
+        nc.createDimension("ocean_time", None)
+    nc.createDimension("eta_rho", 3)
+    nc.createDimension("xi_rho", 5)
+    if lone:
+        v = nc.createVariable("flag", "i2", ("ocean_time", "eta_rho", "xi_rho"))
+        for i in range(nrec):
+            v[i] = i
+        nc.close()
+        return path
+    h = nc.createVariable("h", "f8", ("eta_rho", "xi_rho"))
+    if attrs:
+        h.setncattr("units", "m")
+        h.setncattr("scale_factor", 2.0)
+    h[:] = 100.0
+    nc.createVariable("mask", "i2", ("eta_rho", "xi_rho"))[:] = 1
+    if fixed_only:
+        nc.close()
+        return path
+    t = nc.createVariable("ocean_time", "f8", ("ocean_time",))
+    n = nc.createVariable("NO3", "f8", ("ocean_time", "eta_rho", "xi_rho"))
+    f = nc.createVariable("flag", "i1", ("ocean_time", "eta_rho", "xi_rho"))
+    for i in range(nrec):
+        t[i] = t0 + i * 43200.0
+        n[i] = float(i + 1)
+        f[i] = i
+    nc.close()
+    return path
+
+
+_CLASSIC_FORMATS = ["NETCDF3_CLASSIC", "NETCDF3_64BIT_OFFSET", "NETCDF3_64BIT_DATA"]
+
+
+@pytest.mark.parametrize("fmt", _CLASSIC_FORMATS)
+@pytest.mark.parametrize(
+    "kind, kw",
+    [
+        ("mixed", {}),
+        ("mixed-no-attrs", {"attrs": False}),
+        ("lone-record-var", {"lone": True}),
+        ("fixed-only", {"fixed_only": True}),
+        ("zero-records", {"nrec": 0}),
+    ],
+)
+def test_expected_size_matches_a_finished_file(tmp_path, fmt, kind, kw):
+    from ocean_skill.build import _netcdf3_expected_size
+
+    path = _classic_nc(tmp_path / f"{fmt}_{kind}.nc", fmt, **kw)
+    assert _netcdf3_expected_size(path) == path.stat().st_size
+
+
+@pytest.mark.parametrize("fmt", _CLASSIC_FORMATS)
+@pytest.mark.parametrize("cut", [8, 40, 80, 160, 168])
+def test_a_truncated_data_section_is_caught(tmp_path, fmt, cut):
+    """The exact cuts a real ``netCDF4.Dataset`` open lets through silently.
+
+    Runs across a lone-record-var's own unpadded layout too.
+    """
+    from ocean_skill.build import _unfinished_reason
+
+    path = _classic_nc(tmp_path / f"{fmt}.nc", fmt)
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) - cut])
+
+    reason = _unfinished_reason(path, min_age=0.0, now=0.0)
+    assert reason is not None and "truncated netCDF-3" in reason
+
+
+def test_a_header_region_cut_is_caught(tmp_path):
+    """A short header always raises, unlike the netCDF4-open check this replaces.
+
+    The parser demands every structural field be fully present, no exceptions.
+    """
+    from ocean_skill.build import _unfinished_reason
+
+    path = _classic_nc(tmp_path / "g.nc", "NETCDF3_64BIT_DATA")
+    data = path.read_bytes()
+    path.write_bytes(data[:100])  # well inside the header
+
+    reason = _unfinished_reason(path, min_age=0.0, now=0.0)
+    assert reason is not None and "unreadable netCDF-3 header" in reason
+
+
+def test_extra_trailing_bytes_are_not_flagged(tmp_path):
+    """A new record being appended (numrecs not yet bumped) is not a broken file."""
+    from ocean_skill.build import _unfinished_reason
+
+    path = _classic_nc(tmp_path / "g.nc", "NETCDF3_64BIT_DATA")
+    path.write_bytes(path.read_bytes() + b"\x00" * 100)
+
+    assert _unfinished_reason(path, min_age=0.0, now=0.0) is None
+
+
+def test_the_streaming_numrecs_sentinel_is_not_flagged(tmp_path):
+    """``numrecs`` with every bit set means "unknown, streaming".
+
+    Nothing to size the record section against, so this can't call the file
+    truncated either way.
+    """
+    import struct
+
+    from ocean_skill.build import _unfinished_reason
+
+    path = _classic_nc(tmp_path / "g.nc", "NETCDF3_64BIT_DATA")
+    data = bytearray(path.read_bytes())
+    data[4:12] = struct.pack(">Q", 0xFFFFFFFFFFFFFFFF)  # numrecs, 8 bytes for CDF-5
+    path.write_bytes(data)
+
+    assert _unfinished_reason(path, min_age=0.0, now=0.0) is None
+
+
+def test_a_truncated_file_with_no_record_dimension_is_caught(tmp_path):
+    """The grid-file shape: fixed variables only, no unlimited dimension at all."""
+    from ocean_skill.build import _unfinished_reason
+
+    path = _classic_nc(tmp_path / "g.nc", "NETCDF3_64BIT_DATA", fixed_only=True)
+    path.write_bytes(path.read_bytes()[:-8])
+
+    reason = _unfinished_reason(path, min_age=0.0, now=0.0)
+    assert reason is not None and "truncated netCDF-3" in reason
+
+
+def test_a_truncated_classic_file_is_skipped_via_make_kerchunk(tmp_path):
+    """End to end: readable by the scipy-backed parser this virtualizarr ships with."""
+    from ocean_skill.build import make_kerchunk
+
+    good = [
+        _classic_nc(tmp_path / f"o.{i}.nc", "NETCDF3_CLASSIC", nrec=2, t0=i * 86400.0)
+        for i in range(2)
+    ]
+    bad = _classic_nc(tmp_path / "o.2.nc", "NETCDF3_CLASSIC", nrec=2, t0=2 * 86400.0)
+    bad.write_bytes(bad.read_bytes()[:-40])
+
+    with pytest.warns(UserWarning, match="o.2.nc"):
+        out = make_kerchunk([*good, bad], out=tmp_path / "r.json")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4  # the two intact files only
+
+
+@pytest.mark.skipif(
+    not _reads_cdf5(), reason="needs virtualizarr's native netCDF3 parser"
+)
+def test_a_truncated_cdf5_file_is_skipped_via_make_kerchunk(tmp_path):
+    """The user's actual case: ROMS output written as CDF-5."""
+    from ocean_skill.build import make_kerchunk
+
+    good = [
+        _classic_nc(
+            tmp_path / f"o.{i}.nc", "NETCDF3_64BIT_DATA", nrec=2, t0=i * 86400.0
+        )
+        for i in range(2)
+    ]
+    bad = _classic_nc(
+        tmp_path / "o.2.nc", "NETCDF3_64BIT_DATA", nrec=2, t0=2 * 86400.0
+    )
+    bad.write_bytes(bad.read_bytes()[:-40])
+
+    with pytest.warns(UserWarning, match="o.2.nc"):
+        out = make_kerchunk([*good, bad], out=tmp_path / "r.json")
+
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    assert ds.sizes["ocean_time"] == 4  # the two intact files only
+
+
 # --------------------------------------------------------------- discover_opendap_files
 #
 # The two THREDDS families place data differently: a true THREDDS Data Server (TDS,

@@ -54,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib
+import struct
 import warnings
 from pathlib import Path
 from typing import Any
@@ -249,6 +250,230 @@ def _file_format(target) -> str | None:
     except OSError:
         return None
     return _MAGIC.get(head)
+
+
+#: Byte width of one value of each classic-format ``nc_type`` code (the enum is fixed
+#: across CDF-1/2/5; only how *counts* and *offsets* are encoded changes with version).
+_NC3_ITEMSIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 8, 7: 1, 8: 2, 9: 4, 10: 8, 11: 8}
+
+
+def _netcdf3_expected_size(path: Path) -> int | None:
+    """Compute the byte size ``path``'s own classic-format header says it should be.
+
+    Unlike HDF5, netCDF-3/64-bit-offset/CDF-5 keep no field recording the file's true
+    total size, so ``netCDF4.Dataset`` (and even a full read of a variable's data)
+    opens a truncated file without error -- confirmed empirically: cutting anywhere
+    from 8 bytes to a whole record off the end of a real CDF-5 file still opens and
+    reads clean, the missing tail coming back silently zero-filled. This walks the
+    header by hand (the same information netCDF-C's own ``NC_begins`` derives it from)
+    and computes the size the file needs to actually be, so the caller can compare it
+    against ``path.stat().st_size`` itself.
+
+    Reimplements enough of the classic header layout to do this -- there is no
+    virtualizarr/scipy/netCDF4 call that exposes it, and scipy's own classic-netCDF
+    reader (``kerchunk``'s ``NetCDF3Parser`` when it isn't the native one) cannot even
+    open CDF-5 to begin with. CDF-1 (classic), CDF-2 (64-bit offset), and CDF-5
+    (64-bit data) share one layout; only the widths of list/name/dimension-length
+    counts (4 bytes for CDF-1/2, 8 for CDF-5) and of a variable's ``begin`` offset
+    (4 bytes for CDF-1, 8 for CDF-2/5) differ, both handled via ``version`` below.
+    Verified byte-for-byte against ``netCDF4``-python-written CDF-1/2/5 files across
+    fixed-only, record, single-unpadded-record-variable, and zero-record shapes.
+
+    Returns ``None`` when the record count is the "streaming" sentinel (all bits set)
+    -- a shape used by some writers that means "unknown, check the file" and gives no
+    number to size the record section against; the caller then falls back to
+    considering the file ready (nothing here says otherwise).
+    """
+    with open(path, "rb") as fh:
+
+        def read(n: int) -> bytes:
+            chunk = fh.read(n)
+            if len(chunk) != n:
+                raise EOFError(f"header ends after {fh.tell()} byte(s)")
+            return chunk
+
+        def int32() -> int:
+            return struct.unpack(">i", read(4))[0]
+
+        def ceil4(n: int) -> int:
+            return (n + 3) & ~3
+
+        magic = read(4)
+        if magic[:3] != b"CDF" or magic[3] not in (1, 2, 5):
+            raise ValueError(f"not a netCDF classic-format header: {magic!r}")
+        version = magic[3]
+
+        # NON_NEG: a count, name length, or dimension length -- 8 bytes in CDF-5,
+        # 4 bytes (the usual case) in CDF-1/CDF-2.
+        def nonneg() -> int:
+            return struct.unpack(">q", read(8))[0] if version == 5 else int32()
+
+        # OFFSET: where a variable's data begins -- 8 bytes from CDF-2 onward (large
+        # files were the reason 64-bit-offset exists at all), 4 bytes in CDF-1 only.
+        def offset() -> int:
+            return struct.unpack(">q", read(8))[0] if version >= 2 else int32()
+
+        def name() -> None:
+            read(ceil4(nonneg()))  # length-prefixed, then padded; bytes unused here
+
+        def skip_attr_list() -> None:
+            tag = int32()
+            n = nonneg()
+            if tag == 0 and n == 0:
+                return  # ABSENT
+            if tag != 0x0C:
+                raise ValueError(f"bad attribute-list tag {tag:#x}")
+            for _ in range(n):
+                name()
+                nc_type = int32()
+                nelems = nonneg()
+                read(ceil4(nelems * _NC3_ITEMSIZE[nc_type]))
+
+        numrecs = nonneg()
+        streaming = -1  # the sentinel (all bits set) reads back as -1 either width
+        if numrecs == streaming:
+            numrecs = None
+
+        tag = int32()
+        ndims = nonneg()
+        if not (tag == 0x0A or (tag == 0 and ndims == 0)):
+            raise ValueError(f"bad dimension-list tag {tag:#x}")
+        dim_lengths = []
+        for _ in range(ndims):
+            name()
+            dim_lengths.append(nonneg())  # 0 marks the one unlimited/record dim
+
+        skip_attr_list()  # global attributes
+
+        tag = int32()
+        nvars = nonneg()
+        if not (tag == 0x0B or (tag == 0 and nvars == 0)):
+            raise ValueError(f"bad variable-list tag {tag:#x}")
+        max_fixed_end = 0
+        record_vars = []  # [(begin, padded_slab_bytes), ...]
+        for _ in range(nvars):
+            name()
+            ndims_v = nonneg()
+            dimids = [nonneg() for _ in range(ndims_v)]
+            skip_attr_list()  # this variable's attributes
+            nc_type = int32()
+            nonneg()  # vsize: redundant (derivable from the shape+type above), unused
+            begin = offset()
+            is_record_var = ndims_v > 0 and dim_lengths[dimids[0]] == 0
+            slab = _NC3_ITEMSIZE[nc_type]
+            for d in dimids[1:] if is_record_var else dimids:
+                slab *= dim_lengths[d]
+            padded = ceil4(slab)
+            if is_record_var:
+                record_vars.append((begin, padded, slab))
+            else:
+                max_fixed_end = max(max_fixed_end, begin + padded)
+
+        expected = max(fh.tell(), max_fixed_end)
+        if record_vars:
+            if numrecs is None:
+                return None
+            # netCDF-C packs a *lone* record variable back-to-back with no per-record
+            # padding (nothing to align it to, since there's no sibling record slab
+            # after it) -- every other case sums each variable's own padded slab into
+            # one interleaved per-record stride.
+            recsize = (
+                record_vars[0][2]
+                if len(record_vars) == 1
+                else sum(p for _, p, _ in record_vars)
+            )
+            begin_rec = min(b for b, _, _ in record_vars)
+            expected = max(expected, begin_rec + numrecs * recsize)
+        return expected
+
+
+def _unfinished_reason(path: Path, *, min_age: float, now: float) -> str | None:
+    """Why ``path`` looks unfinished (still being written), or ``None`` if it is ready.
+
+    Read-only and lock-free (``h5py.File(..., locking=False)``): safe to run against a
+    file a model is actively writing. Checked, in order, cheapest first:
+
+    1. it vanished between globbing and here (a glob/stat race);
+    2. it is zero bytes (created but nothing written yet);
+    3. it was modified more recently than ``min_age`` seconds ago, when that guard is
+       enabled (``min_age > 0``);
+    4. its first four bytes don't match a known netCDF-3/HDF5 header (the header
+       hasn't landed yet, or it isn't a netCDF file at all);
+    5. for HDF5 (netCDF-4), it doesn't actually open -- this is what catches h5py's
+       "truncated file: eof = ... stored_eof = ..." for a file whose header claims
+       more bytes than exist on disk;
+    6. for netCDF-3/64-bit-offset/CDF-5, the file is shorter than its own header says
+       it must be (see :func:`_netcdf3_expected_size`) -- the equivalent check, since
+       these formats keep no on-disk field recording the true file size the way HDF5
+       does: ``netCDF4.Dataset`` opens a truncated one without error and even a full
+       variable read comes back silently zero-filled for the missing tail, so the
+       header has to be walked by hand to tell a truncated file from a finished one.
+
+    A file that opens cleanly is kept even if it is still growing: ROMS syncs each
+    record as it is written, so a partially-written-but-flushed file is internally
+    consistent and its available records are worth having. Only a header/data section
+    that is actually broken -- the ordinary state of the file currently being
+    appended to -- gets skipped here. A file *larger* than its header implies is also
+    kept: that is a new record being appended whose ``numrecs`` hasn't been bumped
+    yet, not a broken one, and the records already counted are all complete.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return "vanished after globbing"
+    if st.st_size == 0:
+        return "empty (0 bytes)"
+    if min_age > 0 and (age := now - st.st_mtime) < min_age:
+        return f"modified {age:.0f}s ago (min_age={min_age:g}s)"
+    fmt = _file_format(path)
+    if fmt is None:
+        return "header is not netCDF-3 or HDF5"
+    if fmt == "hdf5":
+        import h5py
+
+        try:
+            with h5py.File(path, "r", locking=False):
+                pass
+        except OSError as exc:
+            return f"unreadable HDF5: {exc}"
+    else:  # "netcdf3" or "cdf5": classic format keeps no EOF marker; derive it instead
+        try:
+            expected = _netcdf3_expected_size(path)
+        except (EOFError, ValueError) as exc:
+            return f"unreadable netCDF-3 header: {exc}"
+        # +3: netCDF-C can omit a lone record variable's final padding bytes (see
+        # _netcdf3_expected_size); a real truncation is never that small.
+        if expected is not None and st.st_size + 3 < expected:
+            return (
+                f"truncated netCDF-3: {st.st_size} byte(s) on disk, header implies "
+                f"at least {expected}"
+            )
+    return None
+
+
+def _partition_unfinished(
+    paths: list, *, min_age: float
+) -> tuple[list, dict[Path, str]]:
+    """Split ``paths`` into (ready, {path: reason}) via :func:`_unfinished_reason`.
+
+    Remote paths (strings, not :class:`~pathlib.Path`) are never probed -- there is no
+    cheap local stat/open for them -- and always count as ready.
+    """
+    import time
+
+    now = time.time()
+    ready: list = []
+    skipped: dict[Path, str] = {}
+    for p in paths:
+        if not isinstance(p, Path):
+            ready.append(p)
+            continue
+        reason = _unfinished_reason(p, min_age=min_age, now=now)
+        if reason is None:
+            ready.append(p)
+        else:
+            skipped[p] = reason
+    return ready, skipped
 
 
 @functools.cache
@@ -638,6 +863,7 @@ def make_kerchunk(
     tolerant_attrs: bool = True,
     subchunk: dict[str, int] | None = None,
     target_chunk_mb: float | None = 128.0,
+    min_age: float = 0.0,
 ) -> Path:
     """Build a kerchunk reference over ``files``, optionally merging in a grid file.
 
@@ -708,6 +934,23 @@ def make_kerchunk(
         unlike a compressed variable, a bad request is something the caller can
         fix. Values are byte-identical to an unsplit build either way; only the
         read granularity changes.
+    min_age
+        Seconds a local file must have gone untouched before it is considered ready.
+        ``0`` (default) skips only files that fail to open at all -- empty, a header
+        that hasn't fully landed, or (for HDF5) an end-of-file marker that doesn't
+        match the actual size -- which is what a file being actively written by ROMS
+        usually looks like (ROMS flushes each record as it writes it, so a
+        growing-but-consistent file opens fine and is kept). For netCDF-3,
+        64-bit-offset, and CDF-5 -- formats with no such on-disk size field --
+        truncation is instead caught by comparing the file against the size its own
+        header implies (see :func:`_netcdf3_expected_size`), so ``0`` catches it there
+        too, including a ROMS CDF-5 output file. Set ``min_age`` above ``0`` for a
+        stricter guard beyond either check, e.g. for a model that does not flush
+        per record and so can produce a growing-but-structurally-valid file mid-record.
+
+        Every file skipped is named in a warning; the reference is still built from
+        whatever remains, and only raises if nothing does. Remote files are never
+        probed and are always considered ready.
 
     Notes
     -----
@@ -730,6 +973,21 @@ def make_kerchunk(
     paths = [str(f) if _is_remote(f) else Path(f).expanduser() for f in files]
     if not paths:
         raise ValueError("make_kerchunk: no files given")
+    paths, unfinished = _partition_unfinished(paths, min_age=min_age)
+    if unfinished:
+        warnings.warn(
+            f"make_kerchunk: skipping {len(unfinished)} file(s) that look "
+            "unfinished (still being written, or never completed):\n"
+            + "\n".join(f"  {p}: {why}" for p, why in unfinished.items())
+            + "\nRebuild once the run has moved on; nothing else was changed.",
+            stacklevel=3,
+        )
+    if not paths:
+        raise FileNotFoundError(
+            f"make_kerchunk: every one of the {len(unfinished)} matched file(s) "
+            "looks unfinished (still being written, or never completed):\n"
+            + "\n".join(f"  {p}: {why}" for p, why in unfinished.items())
+        )
     if concat_dim is None or loadable_variables is None:
         detected_dim, detected_loadable = detect_concat(paths[0])
         concat_dim = detected_dim if concat_dim is None else concat_dim
@@ -2437,6 +2695,12 @@ def build_kerchunk(
     rebuilding a single reference — and ``refs | {"woa": opendap_url}`` mixes
     virtual stores and remote URLs in one catalog with no special path.
 
+    Safe to point at a run that is still writing output: a file that fails to open —
+    empty, truncated, or a header that hasn't fully landed — is skipped with a warning
+    naming it, and the reference is built from whatever files are actually readable.
+    Pass ``min_age=`` (seconds, forwarded via ``**kerchunk_kwargs``) for a stricter
+    guard that also excludes anything modified in the last ``min_age`` seconds.
+
     Parameters
     ----------
     streams
@@ -2454,7 +2718,8 @@ def build_kerchunk(
         (which is why they do not live in :mod:`ocean_skill.cache`).
     **kerchunk_kwargs
         Forwarded to :func:`make_kerchunk` (``concat_dim``, ``loadable_variables``,
-        ``keep``, ``fmt``, ``tolerant_attrs``, ``target_chunk_mb``, ``subchunk``).
+        ``keep``, ``fmt``, ``tolerant_attrs``, ``target_chunk_mb``, ``subchunk``,
+        ``min_age``).
         Model differences belong here, as arguments — the defaults are detected per
         file, so nothing needs to know a model by name. Applied to every stream in
         this call, so a restart stream needing ``keep="latest-per-file"`` goes in
