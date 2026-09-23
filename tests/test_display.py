@@ -8,7 +8,7 @@ only reads properly once wrapped in ``print()``.
 from __future__ import annotations
 
 import ocean_skill as osk
-from ocean_skill._display import Text
+from ocean_skill._display import Description, Text
 
 
 def _a_source() -> str:
@@ -40,6 +40,20 @@ def test_print_still_works_unchanged(capsys):
     out = capsys.readouterr().out
     assert out.startswith("source:")
     assert "\\n" not in out
+
+
+def test_describe_carries_its_fields():
+    """``osk.describe(name).catalog_path`` -- structured access, not just text."""
+    described = osk.describe(_a_source())
+
+    assert isinstance(described, Description)
+    assert isinstance(described, Text)
+    assert isinstance(described, str)
+    assert repr(described) == str(described)
+    assert described.kind == "source"
+    assert described.catalog_path.suffix == ".yaml"
+    assert described.catalog_path.exists()
+    assert described.catalog_paths[-1] == described.catalog_path
 
 
 def test_the_info_helpers_display_the_same_way():

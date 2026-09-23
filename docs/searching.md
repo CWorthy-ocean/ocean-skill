@@ -284,5 +284,6 @@ name.** If you just want "contains", leave the wildcards out.
 
 - `osk.catalogs` — the discovered catalogs
 - `osk.find_catalogs(...)` — search catalogs themselves; a natural existence check
-- `osk.describe(name)` — full metadata for one source or catalog
+- `osk.describe(name)` — full metadata for one source or catalog, plus the
+  catalog file it was found in (`.catalog_path`)
 - `osk.read(name)` — open a source
