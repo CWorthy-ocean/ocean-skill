@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ocean_skill import _stacklevel
-from ocean_skill._display import Text
+from ocean_skill._display import Description, Text
 
 __all__ = [
     "Overlap",
@@ -176,6 +176,18 @@ def _iter_catalog_files() -> list[Path]:
         if d.is_dir():
             files.extend(sorted(d.glob(_CATALOG_GLOB)))
     return files
+
+
+def _precedence_rank(paths: set[Path] | list[Path]) -> list[Path]:
+    """Sort catalog file paths low precedence to high, per :func:`_iter_catalog_files`.
+
+    A path that isn't among the currently discovered files (e.g. one supplied by a
+    test's fake index) sorts last rather than raising, since it can't be placed
+    relative to real files anyway.
+    """
+    order = _iter_catalog_files()
+    rank = {p: i for i, p in enumerate(order)}
+    return sorted(paths, key=lambda p: rank.get(p, len(order)))
 
 
 def _entry_metadata(cat, name: str) -> dict[str, Any]:
@@ -1058,15 +1070,18 @@ def catalog_metadata(catalog: str) -> dict[str, Any]:
     """Return catalog-level metadata for a discovered catalog.
 
     Title/description/extents — as opposed to :func:`resolve`, which returns one
-    *entry's* metadata.
+    *entry's* metadata. When two search-path tiers each hold a file with this
+    catalog's name, reads the highest-precedence one -- the file whose entries
+    actually win on a name collision (see :func:`discover`).
     """
     import intake
 
-    for ref in discover().values():
-        if ref.catalog == catalog:
-            cat = intake.from_yaml_file(str(ref.path))
-            return dict(getattr(cat, "metadata", {}) or {})
-    raise KeyError(f"Unknown catalog {catalog!r}. Known: {catalog_names()}")
+    paths = {ref.path for ref in discover().values() if ref.catalog == catalog}
+    if not paths:
+        raise KeyError(f"Unknown catalog {catalog!r}. Known: {catalog_names()}")
+    winner = _precedence_rank(paths)[-1]
+    cat = intake.from_yaml_file(str(winner))
+    return dict(getattr(cat, "metadata", {}) or {})
 
 
 def _declared_variables(name: str, index: dict[str, SourceRef]) -> list[str]:
@@ -1172,7 +1187,7 @@ def _coord_staleness_notes(name: str, index: dict[str, SourceRef]) -> list[str]:
     return notes
 
 
-def describe(name: str) -> Text:
+def describe(name: str) -> Description:
     """Human-readable summary of a source or a catalog — whichever ``name`` is.
 
     Parameters
@@ -1181,17 +1196,27 @@ def describe(name: str) -> Text:
         A discovered source name or catalog name (``str``); which one determines
         which summary is produced.
 
-    For a source: its catalog, path, and full entry metadata (featureType,
+    For a source: its catalog path and full entry metadata (featureType,
     standard_names, extents, ...), followed by a live vocabulary match report over
     its declared variables, then a live coordinate report over its declared
     columns (which of T/X/Y/Z are recognized, and as which column). For a catalog:
-    its title/description/extents plus the sources it contains, followed by the
-    same two reports over the union of every source's columns. Meant for
-    interactive use, e.g. ``osk.describe(name)``. See :func:`match_report` and
-    :func:`coord_report` for either report alone, and
+    its title/description/extents, the catalog file(s) it is read from, and the
+    sources it contains, followed by the same two reports over the union of every
+    source's columns. Meant for interactive use, e.g. ``osk.describe(name)``. See
+    :func:`match_report` and :func:`coord_report` for either report alone, and
     :class:`ocean_skill.vocabulary.MatchReport`/:class:`~ocean_skill.vocabulary.
     CoordReport` for why neither is ever cached or stored: both always reflect the
     vocabulary as it stands right now.
+
+    Returns
+    -------
+    Description
+        A ``str`` (so anything expecting text keeps working) that also carries the
+        summary's structured fields as attributes: ``kind`` (``"source"`` or
+        ``"catalog"``), ``catalog``, ``catalog_path`` (the file currently winning
+        for this name), ``catalog_paths`` (every file contributing to it, low to
+        high precedence), ``metadata``, and ``sources``. e.g.
+        ``osk.describe("glodap").catalog_path``.
     """
     from ocean_skill.vocabulary import coord_report as _vocab_coord_report
     from ocean_skill.vocabulary import match_report as _vocab_match_report
@@ -1199,16 +1224,37 @@ def describe(name: str) -> Text:
     index = discover()
     if name in index:
         ref = index[name]
-        lines = [f"source: {ref.qualified}", f"  path: {ref.path}"]
+        lines = [f"source: {ref.qualified}", f"  catalog path: {ref.path}"]
         for k, v in sorted(ref.metadata.items()):
             lines.append(f"  {k}: {v}")
+        fields = {
+            "kind": "source",
+            "name": ref.name,
+            "catalog": ref.catalog,
+            "catalog_path": ref.path,
+            "catalog_paths": (ref.path,),
+            "metadata": dict(ref.metadata),
+            "sources": (ref.name,),
+        }
     elif name in catalog_names():
         md = catalog_metadata(name)
         srcs = sorted(ref.name for ref in index.values() if ref.catalog == name)
+        cat_paths = {ref.path for ref in index.values() if ref.catalog == name}
+        paths = tuple(_precedence_rank(cat_paths))
         lines = [f"catalog: {name}"]
+        lines.extend(f"  catalog path: {p}" for p in paths)
         for k, v in sorted(md.items()):
             lines.append(f"  {k}: {v}")
         lines.append(f"  sources ({len(srcs)}): {', '.join(srcs)}")
+        fields = {
+            "kind": "catalog",
+            "name": name,
+            "catalog": name,
+            "catalog_path": paths[-1],
+            "catalog_paths": paths,
+            "metadata": dict(md),
+            "sources": tuple(srcs),
+        }
     else:
         raise KeyError(
             f"{name!r} is neither a known source nor catalog."
@@ -1222,7 +1268,7 @@ def describe(name: str) -> Text:
     lines.append("  coordinates:")
     lines.extend(f"    {line}" for line in str(coords).splitlines())
     lines.extend(f"    note: {note}" for note in _coord_staleness_notes(name, index))
-    return Text("\n".join(lines))
+    return Description("\n".join(lines), **fields)
 
 
 def match_report(name: str) -> Text:
@@ -1350,7 +1396,7 @@ class _CatalogRegistry:
         """Sorted list of all discovered catalog names (not source names)."""
         return catalog_names()
 
-    def describe(self, name: str) -> Text:
+    def describe(self, name: str) -> Description:
         """Human-readable summary of a source or catalog (whichever ``name`` is)."""
         return describe(name)
 

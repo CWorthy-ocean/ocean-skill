@@ -16,6 +16,7 @@ The public API is intentionally small:
     osk.describe("glodap")       # metadata for one source, or one whole catalog --
                                  # including which declared variables the vocabulary
                                  # recognizes (and as what), and which it doesn't
+    osk.describe("glodap").catalog_path  # ... the catalog file it was found in
     osk.match_report("glodap")   # ... that vocabulary section alone, any time
     osk.coord_report("glodap")   # ... and which of T/X/Y/Z it recognizes, as what
     osk.overlap("his", "glodap") # do these two sources even share space/time? (read-free)

@@ -1105,6 +1105,67 @@ def test_describe_catalog_includes_a_vocabulary_section(isolated_catalogs):
     assert "sea_water_temperature" in text
 
 
+def test_describe_catalog_shows_its_file(isolated_catalogs):
+    text = catalog.describe("example")
+    expected_path = isolated_catalogs / "example.yaml"
+
+    assert f"catalog path: {expected_path}" in text
+    assert text.kind == "catalog"
+    assert text.name == "example"
+    assert text.catalog == "example"
+    assert text.catalog_path == expected_path
+    assert text.catalog_paths == (expected_path,)
+    assert text.sources == ("foo",)
+    assert text.metadata["title"] == "example catalog"
+
+
+def test_describe_source_labels_the_catalog_file(isolated_catalogs):
+    """The old, ambiguous ``path:`` label is gone.
+
+    A source's file is unmistakably the catalog it came from, not the data itself.
+    """
+    text = catalog.describe("foo")
+    expected_path = isolated_catalogs / "example.yaml"
+
+    assert f"catalog path: {expected_path}" in text
+    assert "\n  path:" not in text
+    assert text.kind == "source"
+    assert text.name == "foo"
+    assert text.catalog == "example"
+    assert text.catalog_path == expected_path
+    assert text.catalog_paths == (expected_path,)
+    assert text.sources == ("foo",)
+    assert text.metadata["featureType"] == "grid"
+
+
+def test_describe_catalog_lists_every_file_it_spans(isolated_catalogs, tmp_path):
+    """Two search-path tiers each hold an ``example.yaml``.
+
+    Distinct entries, so both survive -- meaning the catalog spans both files,
+    lower precedence first.
+    """
+    env_path = isolated_catalogs / "example.yaml"
+    user_path = _write_catalog(
+        tmp_path / "user-catalogs",
+        title="example catalog v2",
+        name="bar",
+        filename="example.yaml",
+    )
+
+    text = catalog.describe("example")
+    path_lines = [line for line in text.splitlines() if "catalog path:" in line]
+
+    assert path_lines == [
+        f"  catalog path: {env_path}",
+        f"  catalog path: {user_path}",
+    ]
+    assert text.catalog_paths == (env_path, user_path)
+    assert text.catalog_path == user_path  # highest precedence: the user tier
+    assert sorted(text.sources) == ["bar", "foo"]
+    # catalog-level metadata comes from the winning (user-tier) file too
+    assert text.metadata["title"] == "example catalog v2"
+
+
 # -- coordinate report ---------------------------------------------------------
 
 
