@@ -1,14 +1,13 @@
 # Surface nutrients & oxygen: GOM offline ROMS vs WOA23 January climatology.
 #
 # Run on demand, from cron, or after each model checkpoint:
-#     python -m ocean_skill.workflows.run suites/gom_nutrients.yaml
+#     ocean-skill-run suites/gom_nutrients.yaml
 #
 # `refresh` rebuilds the model's kerchunk reference from whatever output exists right
 # now, so this stays correct against a run that is still writing.
 
 name: gom_surface_nutrients
-project: gom_nutrients
-output_dir: output/suites/gom_nutrients
+output_dir: output/gom_nutrients
 
 refresh:
   catalog: catalogs/gom_offline.yaml
@@ -18,28 +17,26 @@ refresh:
       grid: /Users/kthyng/cstar-forge-data/cstar-blueprint-run/cson_roms-marbl_v0.1_GOM-Offline_noPIO_6procs/input/input_datasets/cson_roms-marbl_v0_1_GOM-Offline_noPIO_6procs_grid.nc
       ref: refs/gom_bgc.parquet
 
-test: GOM_bgc
-reference:
-  - woa23_nitrate_month01
-  - woa23_phosphate_month01
-  - woa23_silicate_month01
-  - woa23_oxygen_month01
+defaults:
+  test: GOM_bgc
 
-variables:
-  - mole_concentration_of_nitrate_in_sea_water
-  - mole_concentration_of_phosphate_in_sea_water
-  - mole_concentration_of_silicate_in_sea_water
-  - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
-
-depths: [0]
-regrid: conservative_normed
-
-# How the model's time axis collapses to the single map a comparison compares. Required:
-# there is no default reduction, so a suite that omits this fails naming the axis rather
-# than quietly averaging the whole run.
-aggregate:
-  time: mean
-
-plot:
-  title: Surface nutrients & oxygen — GOM vs WOA23
-  filename: surface_nutrients.png
+pages:
+  - title: "Surface nutrients & oxygen — GOM vs WOA23"
+    compare:
+      reference:
+        - woa23_nitrate_month01
+        - woa23_phosphate_month01
+        - woa23_silicate_month01
+        - woa23_oxygen_month01
+      variables:
+        - mole_concentration_of_nitrate_in_sea_water
+        - mole_concentration_of_phosphate_in_sea_water
+        - mole_concentration_of_silicate_in_sea_water
+        - mole_concentration_of_dissolved_molecular_oxygen_in_sea_water
+      depths: [0]
+      method: conservative_normed
+      # How the model's time axis collapses to the single map a comparison compares.
+      # Required: there is no default reduction, so a suite that omits this fails
+      # naming the axis rather than quietly averaging the whole run.
+      aggregate:
+        time: mean

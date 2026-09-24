@@ -1,21 +1,26 @@
-"""Run a comparison suite: ``python -m ocean_skill.workflows.run suite.yaml``.
+"""Run a suite: ``ocean-skill-run suite.yaml`` (see ``docs/suites.md`` for the grammar).
 
-A suite is a YAML file describing which sources to compare, over which variables and
-depths, and what to draw — the same objects :func:`ocean_skill.compare` builds, just
-declared instead of coded. That makes the regular-run case (cron, CI, a during-run hook)
-a single command with no Python to edit, while ad-hoc work still uses the API directly.
+A suite (``ocean_skill.config.SuiteConfig``) is a YAML file listing pages -- each
+one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call -- plus shared
+defaults and output settings. Running it draws every page, writes a PNG per figure,
+collects them into one PDF (unless ``pdf: false``), and writes a metrics CSV and a
+``manifest.json`` recording exactly what was drawn. See ``docs/suites.md``.
 
-Optionally the suite can refresh a model's kerchunk reference before comparing, which is
-what makes it usable against a run that is still writing output.
+Optionally the suite can refresh a model's kerchunk reference before running, which
+is what makes it usable against a run that is still writing output.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
+import warnings
+from dataclasses import dataclass
+from dataclasses import field as _dc_field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 __all__ = ["main", "run_suite"]
 
@@ -103,64 +108,234 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     save(cat, catalog_path)
 
 
-def run_suite(suite_path: str | Path):
-    """Load and execute a suite YAML; return the resulting :class:`ComparisonSet`."""
-    import ocean_skill as osk
+@dataclass
+class SuiteResult:
+    """What :func:`run_suite` produced."""
 
-    suite = yaml.safe_load(Path(suite_path).expanduser().read_text())
-    out_dir = Path(suite.get("output_dir", f"output/{suite.get('project', 'suite')}"))
+    pages: list[Any] = _dc_field(default_factory=list)
+    report_dir: Path | None = None
+    pdf: Path | None = None
+    figures: list[Path] = _dc_field(default_factory=list)
+    metrics: Path | None = None
+    manifest: Path | None = None
 
-    if refresh := suite.get("refresh"):
-        _refresh_sources(refresh["sources"], refresh["catalog"])
+    @property
+    def exit_code(self) -> int:
+        if not self.pages:
+            return 1
+        statuses = {p.status for p in self.pages}
+        if statuses == {"ok"}:
+            return 0
+        if "ok" not in statuses:
+            return 1
+        return 3
 
-    results = osk.compare(
-        reference=suite["reference"],
-        test=suite["test"],
-        variables=suite["variables"],
-        # `None` (not a (SURFACE,) default) when the suite names no `depths:` --
-        # compare() then falls back to its own default, which honours a sigma0 (or
-        # any other vertical) key already sitting in `select:` instead of a bare
-        # `depths=("surface",)` colliding with it.
-        depths=tuple(suite["depths"]) if "depths" in suite else None,
-        # `times:` is a dict (the bin-derivation form) or a list, same shapes YAML
-        # already gives either way -- passed straight through with no reshaping.
-        times=suite.get("times"),
-        method=suite.get("regrid", "conservative_normed"),
-        # A suite has to be able to say this, and until now could not: `aggregate` was
-        # simply not forwarded, so every suite silently got the old implicit time mean.
-        # With no default reduction a suite omitting it would fail on its own model
-        # output, so it is both forwarded and required in the YAML — see
-        # _require_reduced.
-        aggregate=suite.get("aggregate"),
-        select=suite.get("select"),
-        # Forwarded explicitly, like every other compare() knob a suite might name --
-        # see the aggregate comment above for what happens when one is forgotten here.
-        subtract_mean=suite.get("subtract_mean", False),
+
+def _report_dir_name(name: str, test_source: str, index: Any) -> str:
+    import uuid
+
+    from ocean_skill import outputs
+
+    t0 = str(index[0].date()) if hasattr(index[0], "date") else str(index[0])
+    t1 = str(index[-1].date()) if hasattr(index[-1], "date") else str(index[-1])
+    now = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    # A short random suffix guarantees two runs invoked within the same second --
+    # a test, or a scheduler re-firing quickly -- still land in different
+    # directories; the timestamp above stays the human-readable part of the name.
+    suffix = uuid.uuid4().hex[:6]
+    return outputs.slug(f"{name}_{test_source}_{t0}_to_{t1}_{now}_{suffix}")
+
+
+def _write_manifest(
+    path: Path, *, suite: Any, pages: list[Any], report_dir: Path
+) -> None:
+    import ocean_skill
+
+    payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "ocean_skill_version": getattr(ocean_skill, "__version__", None),
+        "name": suite.name,
+        "output_dir": str(report_dir),
+        "pages": [
+            {
+                **p.as_dict(),
+                "status": p.status,
+                "reason": p.reason,
+            }
+            for p in pages
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _title_text(suite: Any, pages: list[Any], *, test_source: str, index: Any) -> str:
+    lines = [
+        f"suite: {suite.name}",
+        f"test source: {test_source}",
+        f"run coverage: {index[0]} .. {index[-1]}  ({len(index)} steps)",
+        f"generated: {datetime.now(UTC).isoformat()}",
+        f"pages planned: {len(pages)}",
+        "",
+    ]
+    for p in pages:
+        lines.append(f"  - {p.title}")
+    return "\n".join(lines)
+
+
+def _log_text(pages: list[Any], metrics_csv: Path | None) -> str:
+    lines = ["run log", ""]
+    for p in pages:
+        mark = "ok" if p.status == "ok" else "SKIPPED"
+        lines.append(f"  [{mark}] {p.title}")
+        if p.reason:
+            lines.append(f"          {p.reason}")
+    lines.append("")
+    lines.append(
+        f"metrics: {metrics_csv}" if metrics_csv else "metrics: (none written)"
     )
-    if not len(results):
-        print("no comparisons produced; check the suite's sources and variables")
-        return results
+    return "\n".join(lines)
 
-    plot = suite.get("plot", {})
-    results.plot(
-        title=plot.get("title", suite.get("name", "comparison")),
-        save=out_dir / "figures" / plot.get("filename", "comparison.png"),
+
+def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
+    """Load, expand, and draw a suite YAML; return a :class:`SuiteResult`.
+
+    ``list_only=True`` validates the schema, resolves every ``latest``/``month:
+    run``/``for_each`` and the literal time windows, and prints the resolved page
+    list without drawing or writing anything.
+    """
+    import yaml
+
+    from ocean_skill import extrema, outputs
+    from ocean_skill.config import SuiteConfig
+    from ocean_skill.workflows import pages as _pages
+
+    path = Path(path).expanduser()
+    raw = yaml.safe_load(path.read_text())
+    suite = SuiteConfig.model_validate(raw)
+
+    if suite.refresh is not None:
+        _refresh_sources(
+            [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
+            suite.refresh.catalog,
+        )
+
+    expanded = _pages.expand(suite)
+
+    test_source = suite.defaults.get("test")
+    index = extrema._native_time_index(test_source) if test_source else None
+
+    if list_only:
+        for i, p in enumerate(expanded, 1):
+            cache_note = "cache" if p.cache else "no-cache (open window)"
+            print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note})")
+        return SuiteResult(pages=expanded)
+
+    output_dir = (
+        Path(suite.output_dir).expanduser() if suite.output_dir else outputs.base_dir()
     )
-    csv = results.write_metrics(out_dir, stem=suite.get("name", "metrics"))
-    print(f"{len(results)} comparisons -> {out_dir}/figures/, {csv}")
-    return results
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = output_dir / _report_dir_name(
+        suite.name, test_source or "model", index
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "suite.yaml").write_text(path.read_text())
+
+    manifest_path = report_dir / "manifest.json"
+    _write_manifest(manifest_path, suite=suite, pages=expanded, report_dir=report_dir)
+
+    pdf_path = (report_dir / "report.pdf") if suite.pdf else None
+    pooled_records: list[dict[str, Any]] = []
+
+    from ocean_skill.workflows.report import PdfReport
+
+    with PdfReport(pdf_path, report_dir / "figures") as report:
+        report.title_page(
+            _title_text(suite, expanded, test_source=test_source, index=index)
+        )
+
+        for page in expanded:
+            try:
+                results = _pages.build(page, pooled_records=pooled_records)
+            except Exception as exc:
+                page.status = "skipped"
+                page.reason = f"{type(exc).__name__}: {exc}"
+                warnings.warn(f"skipping page {page.title!r}: {exc}", stacklevel=2)
+                continue
+            page.status = "ok"
+            for suffix, fig in results:
+                report.emit(fig, outputs.slug(page.title) + suffix)
+            pooled_records.extend(page.metrics_records)
+
+        metrics_csv = None
+        if pooled_records:
+            from ocean_skill import metrics as _metrics
+
+            metrics_csv = _metrics.write(pooled_records, report_dir, stem=suite.name)
+
+        report.log_page(_log_text(expanded, metrics_csv))
+
+    _write_manifest(manifest_path, suite=suite, pages=expanded, report_dir=report_dir)
+
+    latest_path = output_dir / "latest.txt"
+    latest_path.write_text(str(report_dir))
+    latest_link = output_dir / "latest"
+    try:
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        latest_link.symlink_to(report_dir.name)
+    except OSError:
+        pass  # best-effort only; latest.txt is the real contract
+
+    result = SuiteResult(
+        pages=expanded,
+        report_dir=report_dir,
+        pdf=pdf_path if pdf_path and pdf_path.exists() else None,
+        figures=report.png_paths,
+        metrics=metrics_csv,
+        manifest=manifest_path,
+    )
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point."""
+    """CLI entry point: ``ocean-skill-run suite.yaml [--list]``."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    parser = argparse.ArgumentParser(
+        prog="ocean-skill-run",
+        description="Run a suite YAML: draw every page, write PNGs and a PDF.",
+    )
+    parser.add_argument("suite", help="path to the suite YAML")
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print the expanded page list and exit without drawing anything",
+    )
     argv = argv if argv is not None else sys.argv[1:]
-    if not argv:
-        print(
-            "usage: python -m ocean_skill.workflows.run <suite.yaml>", file=sys.stderr
-        )
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
+
+    try:
+        result = run_suite(args.suite, list_only=args.list)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
-    run_suite(argv[0])
-    return 0
+
+    if args.list:
+        return 0
+
+    n_ok = sum(1 for p in result.pages if p.status == "ok")
+    n_skipped = len(result.pages) - n_ok
+    print(f"{n_ok} page(s) drawn, {n_skipped} skipped -> {result.report_dir}")
+    if result.pdf:
+        print(f"  report: {result.pdf}")
+    if result.metrics:
+        print(f"  metrics: {result.metrics}")
+    return result.exit_code
 
 
 if __name__ == "__main__":
