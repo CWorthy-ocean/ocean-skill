@@ -39,6 +39,9 @@ dependencies = [
     "pint-pandas",
 ]
 
+[project.scripts]
+ocean-skill-run = "ocean_skill.workflows.run:main"
+
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-xdist"]
 

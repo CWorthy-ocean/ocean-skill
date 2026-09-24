@@ -602,6 +602,24 @@ A field already reduced to one place (see `Field.family`) has nothing left to se
 spatially, and `.extremum()` says so rather than returning the one value `.plot()`
 already shows.
 
+## Suites: run a whole diagnostic from one YAML
+
+A suite is a YAML file listing **pages** — each one a single `osk.field`, `osk.compare`,
+or `osk.summary` call — plus shared defaults. One command draws every page and writes
+PNGs, a PDF, and a metrics CSV, with no Python required:
+
+```bash
+ocean-skill-run suites/roms_marbl_diagnostic.yaml
+```
+
+Every run writes its own report directory (nothing is ever overwritten), named after
+the model and the run's own time range, plus when the command was run. See
+[docs/suites.md](docs/suites.md) for the full grammar — `for_each` fan-out,
+`{placeholder}` templating, `time: latest`/`month: run`, and the report layout —
+and `suites/roms_marbl_diagnostic.yaml`/`suites/roms_marbl_quick.yaml` for a worked
+ROMS-MARBL example (latest snapshot, monthly means, WOA23/GLODAPv2/satellite
+chlorophyll comparisons).
+
 ## Variable specs
 
 A plain name is the common case, but `variable=`/`variables=` accepts three other
@@ -748,7 +766,7 @@ catalogs/          project-local catalogs you build (auto-discovered; gitignored
 tests/             pytest suite
 docs/              MyST / Jupyter Book docs + notebooks
 examples/          short runnable scripts
-suites/            declarative comparison suites (YAML)
+suites/            declarative multi-page suites (YAML) -- run with ocean-skill-run
 environment.yml    conda scientific stack (source of truth)
 ```
 

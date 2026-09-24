@@ -1,0 +1,124 @@
+# ROMS-MARBL simulation diagnostic: the latest snapshot, monthly means, and
+# model-vs-observation maps (WOA23 nutrients, GLODAPv2 carbon, satellite
+# chlorophyll), for a run that may still be writing output.
+#
+# Run it:
+#     ocean-skill-run suites/roms_marbl_diagnostic.yaml
+#
+# Every run writes its own report directory under output_dir (nothing is ever
+# overwritten) with report.pdf, figures/*.png, metrics/*.csv, a copy of this file,
+# and manifest.json. See docs/suites.md for the full grammar.
+#
+# Lines to edit for your own run:
+#   - refresh: the streams/paths of your output and grid
+#   - defaults.test: the catalog entry name your streams register (must match
+#     one of the names under refresh.sources)
+#   - output_dir: where reports land
+#
+# For a fast repeated check with no observation comparisons (no regridding, no
+# downloads), use suites/roms_marbl_quick.yaml instead -- same defaults, snapshot
+# and monthly pages only.
+
+name: roms_marbl_diagnostic
+output_dir: /anvil/scratch/x-smaticka/sims_runtime/cstar/pac_dt_ramp/diagnostics
+
+refresh:
+  catalog: catalogs/pac_dt_ramp.yaml
+  sources:
+    - name: pac_dt_ramp
+      files: pac_dt_ramp/tasks/*/joined_output/output_rst.*.nc
+      grid: pac_dt_ramp/tasks/third_1wks/input/input_datasets/PACMED12km_spec_config_WithRivers_grid.nc
+      ref: refs/pac_dt_ramp.parquet
+      keep: latest-per-file  # restart files: keep each file's main (not repeated) time step
+
+defaults:
+  test: pac_dt_ramp
+  depths: [surface, 100]
+  plot: {zoom: 1.5}
+
+pages:
+  # -- latest snapshot: model only ----------------------------------------------
+  - title: "Physics — latest snapshot (surface)"
+    field:
+      variables: [temperature, salinity, ssh, {calculate: mld, method: density_threshold}]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Nutrients — latest snapshot (surface)"
+    field:
+      variables: [nitrate, phosphate, silicate, ammonium, iron, oxygen]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Nutrients — latest snapshot (100 m)"
+    field:
+      variables: [nitrate, phosphate, silicate, ammonium, iron, oxygen]
+      select: {depth: 100, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Carbon & chlorophyll — latest snapshot (surface)"
+    field:
+      variables: [dissolved_inorganic_carbon, alkalinity, {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}, co2_flux, PH, pCO2]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  # -- monthly means: model only, one page per variable --------------------------
+  - title: "Monthly means — {variable}"
+    for_each:
+      variable:
+        - temperature
+        - salinity
+        - nitrate
+        - phosphate
+        - silicate
+        - ammonium
+        - iron
+        - oxygen
+        - dissolved_inorganic_carbon
+        - alkalinity
+        - PH
+        - pCO2
+    field:
+      variables: ["{variable}"]
+      select: {depth: "{depths}"}
+      aggregate: {time: {resample: 1MS, reduce: mean}}
+    plot: {shared_limits: true}
+
+  # -- model vs. observations -----------------------------------------------------
+  - title: "Nutrients vs WOA23 — {month.name} {month.year} ({depth.label})"
+    for_each:
+      month: run
+      depth: "{depths}"
+    compare:
+      reference:
+        - woa23_nitrate_month{month.mm}
+        - woa23_phosphate_month{month.mm}
+        - woa23_silicate_month{month.mm}
+        - woa23_oxygen_month{month.mm}
+      variables: [nitrate, phosphate, silicate, oxygen]
+      select:
+        test: {depth: "{depth}", time: "{month.window}"}
+        reference: {depth: "{depth}"}
+      aggregate: {time: mean}
+
+  - title: "Alkalinity & DIC vs GLODAPv2 (run mean)"
+    compare:
+      reference: [glodap]
+      variables: [alkalinity, dissolved_inorganic_carbon]
+      depths: [surface, 100]
+      aggregate: {time: mean}
+
+  - title: "Chlorophyll vs satellite — {month.name} {month.year}"
+    for_each:
+      month: {run: {last: 1}}
+    compare:
+      reference: chl_gapfree_my_daily_geo
+      variables:
+        - {test: {sum: [spChl, diatChl, diazChl]}, reference: chlorophyll, standard_name: chlorophyll}
+      select:
+        test: {Z: {min: 0, max: 10}, time: "{month.window}"}
+        reference: {time: "{month.window}"}
+      aggregate: {time: mean, Z: mean}
+
+  - title: Summary
+    summary: {kind: both, color_by: variable}

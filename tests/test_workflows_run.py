@@ -7,11 +7,16 @@ rather than ``_refresh_sources`` silently pinning every suite to the old ``"all"
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
-from ocean_skill.workflows.run import _refresh_sources
+from ocean_skill import comparison as _comparison
+from ocean_skill.workflows import pages as _pages
+from ocean_skill.workflows.run import _refresh_sources, main, run_suite
 
 
 def _segment(path, t0, value):
@@ -188,3 +193,298 @@ def test_a_stream_matching_only_unfinished_files_keeps_its_existing_entry(tmp_pa
     _refresh_sources(spec, catalog_path)  # must not raise
     after = intake.from_yaml_file(str(catalog_path))["GOM_bgc"].read()
     xr.testing.assert_identical(before, after)
+
+
+# ======================================================================================
+# ``run_suite`` / ``main``: the page orchestrator and CLI.
+#
+# Field pages go through the real ``osk.field(...).plot()`` path with only
+# ``comparison.prepare_source`` and ``extrema._native_time_index`` stubbed (the same
+# minimal stub ``tests/test_field_map_grid.py`` uses) -- everything else, including
+# ``FieldSet``'s own variable-availability pre-filter, runs for real. ``compare``/
+# ``summary`` pages are exercised at the boundary this module owns:
+# :func:`ocean_skill.workflows.pages.build` is the only place that calls
+# ``osk.compare``/``osk.summary``, and those functions already have their own
+# extensive test suites elsewhere in the repo, so here it is monkeypatched to
+# isolate what ``run_suite`` itself is responsible for -- report layout, PNGs, the
+# PDF, the metrics CSV, the manifest, and exit codes.
+# ======================================================================================
+
+_INDEX = pd.date_range("2010-01-05", periods=6, freq="7D")
+
+
+def _stub_field(value: float = 5.0):
+    lat = xr.DataArray([10.0, 20.0], dims="lat")
+    lon = xr.DataArray([-100.0, -90.0], dims="lon")
+    da = xr.DataArray(
+        [[value, value], [value, value]],
+        dims=("lat", "lon"),
+        coords={"lat": lat, "lon": lon},
+        attrs={"units": "degC"},
+    )
+    return da, None
+
+
+@pytest.fixture
+def stub_model(monkeypatch):
+    monkeypatch.setattr(_comparison, "prepare_source", lambda *a, **k: _stub_field())
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda source: _INDEX)
+
+
+def _write_suite(tmp_path, payload):
+    import yaml
+
+    path = tmp_path / "suite.yaml"
+    path.write_text(yaml.dump(payload))
+    return path
+
+
+def _model_only_suite(tmp_path, **extra):
+    return {
+        "name": "quick_check",
+        "output_dir": str(tmp_path / "out"),
+        "defaults": {"test": "stub"},
+        "pages": [
+            {
+                "title": "Physics latest",
+                "field": {
+                    "variables": ["temperature", "salinity"],
+                    "select": {"depth": "surface", "time": "latest"},
+                },
+            },
+        ],
+        **extra,
+    }
+
+
+def test_model_only_report_writes_pdf_pngs_and_manifest(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert result.exit_code == 0
+    assert result.report_dir.exists()
+    assert result.pdf is not None and result.pdf.exists()
+    assert (result.report_dir / "suite.yaml").read_text()
+    assert result.manifest.exists()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["name"] == "quick_check"
+    assert manifest["pages"][0]["status"] == "ok"
+    assert len(result.figures) == 3  # title page, one drawn page, log page
+
+
+def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path, list_only=True)
+    out = capsys.readouterr().out
+    assert "Physics latest" in out
+    assert result.report_dir is None
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_missing_variable_page_is_skipped_not_fatal(
+    tmp_path, stub_model, monkeypatch
+):
+    monkeypatch.setattr(_comparison, "_variable_available", lambda *a, **k: False)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert result.exit_code == 1  # the only page was skipped
+    page = result.pages[0]
+    assert page.status == "skipped"
+    assert "none" in page.reason or "temperature" in page.reason
+
+
+def test_two_runs_never_overwrite_each_other(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result1 = run_suite(path)
+    result2 = run_suite(path)
+    assert result1.report_dir != result2.report_dir
+    assert result1.report_dir.exists() and result2.report_dir.exists()
+    latest = (tmp_path / "out" / "latest.txt").read_text()
+    assert latest == str(result2.report_dir)
+
+
+def test_suite_yaml_copy_is_byte_identical(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+    assert (result.report_dir / "suite.yaml").read_bytes() == path.read_bytes()
+
+
+def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.workflows.run._refresh_sources",
+        lambda spec, cat: calls.append((spec, cat)),
+    )
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": "catalogs/x.yaml",
+            "sources": [{"name": "stub", "files": "x/*.nc", "ref": "refs/x.parquet"}],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    run_suite(path)
+    assert len(calls) == 1
+    assert calls[0][1] == "catalogs/x.yaml"
+    assert calls[0][0][0]["name"] == "stub"
+
+
+def _obs_suite(tmp_path):
+    return {
+        "name": "with_obs",
+        "output_dir": str(tmp_path / "out"),
+        "defaults": {"test": "stub"},
+        "pages": [
+            {
+                "title": "WOA",
+                "compare": {
+                    "reference": ["woa23_nitrate_month01"],
+                    "variables": ["nitrate"],
+                    "aggregate": {"time": "mean"},
+                },
+            },
+            {"title": "Summary", "summary": {"kind": "portrait"}},
+        ],
+    }
+
+
+def test_a_failing_compare_page_is_skipped_and_summary_is_skipped_too(
+    tmp_path, stub_model, monkeypatch
+):
+    def fake_build(page, *, pooled_records=None):
+        if page.kind == "compare":
+            raise RuntimeError("regrid failed")
+        # summary: still reached (every page is attempted), but with nothing
+        # pooled to summarize -- the same shape the real build() raises.
+        if not pooled_records:
+            raise ValueError("no compare page produced results to summarize")
+        raise AssertionError("unexpected pooled records in this test")
+
+    monkeypatch.setattr(_pages, "build", fake_build)
+    path = _write_suite(tmp_path, _obs_suite(tmp_path))
+    result = run_suite(path)
+
+    by_title = {p.title: p for p in result.pages}
+    assert by_title["WOA"].status == "skipped"
+    assert "regrid failed" in by_title["WOA"].reason
+    assert by_title["Summary"].status == "skipped"
+    assert result.metrics is None
+    assert result.report_dir.exists()  # the report still completes and is written
+    assert result.exit_code == 1  # both of this suite's two pages were skipped
+
+
+def test_exit_code_is_3_when_some_pages_ok_and_some_skipped(
+    tmp_path, stub_model, monkeypatch
+):
+    real_build = _pages.build
+
+    def fake_build(page, *, pooled_records=None):
+        if page.kind == "field":
+            return real_build(page, pooled_records=pooled_records)
+        raise RuntimeError("regrid failed")
+
+    monkeypatch.setattr(_pages, "build", fake_build)
+    suite = _model_only_suite(tmp_path)
+    suite["pages"].append(
+        {
+            "title": "WOA",
+            "compare": {
+                "reference": ["woa23_nitrate_month01"],
+                "variables": ["nitrate"],
+                "aggregate": {"time": "mean"},
+            },
+        }
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+    assert result.exit_code == 3
+    assert result.report_dir.exists()
+
+
+def test_an_unresolvable_obs_source_is_a_graceful_page_skip(
+    tmp_path, stub_model, monkeypatch
+):
+    """A page skip driven by a real (unmocked) failure, not a controlled stand-in.
+
+    A real ``osk.compare()`` call against a source no catalog on the search path
+    declares must still be caught by ``run_suite``'s per-page try/except rather
+    than aborting the report.
+    """
+    empty_cats = tmp_path / "empty_cats"
+    empty_cats.mkdir()
+    monkeypatch.setenv("OCEAN_SKILL_CATALOGS", str(empty_cats))
+
+    path = _write_suite(tmp_path, _obs_suite(tmp_path))
+    result = run_suite(path)
+
+    assert result.report_dir.exists()
+    assert result.pdf is not None and result.pdf.exists()
+    by_title = {p.title: p for p in result.pages}
+    assert by_title["WOA"].status == "skipped"
+    assert by_title["Summary"].status == "skipped"
+    assert result.metrics is None
+    assert result.exit_code == 1
+
+
+def test_compare_metrics_pool_into_a_summary_page_and_a_csv(
+    tmp_path, stub_model, monkeypatch
+):
+    record = {
+        "variable": "nitrate",
+        "bias": 0.1,
+        "rmse": 0.2,
+        "corr": 0.9,
+        "sigma_ratio": 1.0,
+        "n": 10,
+        "label": "nitrate",
+        "units": "mmol m-3",
+    }
+
+    import matplotlib.pyplot as plt
+
+    def fake_build(page, *, pooled_records=None):
+        if page.kind == "compare":
+            page.metrics_records = [record]
+            return [("", plt.subplots()[0])]
+        if page.kind == "summary":
+            assert pooled_records == [record]
+            return [("", plt.subplots()[0])]
+        raise AssertionError("no field pages in this suite")
+
+    monkeypatch.setattr(_pages, "build", fake_build)
+    path = _write_suite(tmp_path, _obs_suite(tmp_path))
+    result = run_suite(path)
+
+    assert result.exit_code == 0
+    assert result.metrics is not None and result.metrics.exists()
+    df = pd.read_csv(result.metrics)
+    assert df.iloc[0]["variable"] == "nitrate"
+
+
+# -- CLI -------------------------------------------------------------------------------
+
+
+def test_main_list_flag(tmp_path, stub_model, capsys):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    code = main([str(path), "--list"])
+    assert code == 0
+    assert "Physics latest" in capsys.readouterr().out
+
+
+def test_main_no_args_is_a_usage_error():
+    assert main([]) == 2
+
+
+def test_main_bad_schema_is_a_usage_error(tmp_path):
+    path = tmp_path / "bad.yaml"
+    path.write_text("name: t\npages: []\n")
+    assert main([str(path)]) == 2
+
+
+def test_main_reports_exit_code_from_run(tmp_path, stub_model, capsys):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    code = main([str(path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "page(s) drawn" in out

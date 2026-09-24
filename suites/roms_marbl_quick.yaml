@@ -1,0 +1,73 @@
+# ROMS-MARBL simulation diagnostic, quick form: the latest snapshot and monthly
+# means, model only -- no observation comparisons, so no regridding and no
+# downloads. Meant to be run often while a simulation is progressing.
+#
+# Run it:
+#     ocean-skill-run suites/roms_marbl_quick.yaml
+#
+# For the full diagnostic (WOA23, GLODAPv2, satellite chlorophyll, a summary
+# diagram), use suites/roms_marbl_diagnostic.yaml -- same defaults: block, so a
+# change to one belongs in the other too. See docs/suites.md.
+
+name: roms_marbl_quick
+output_dir: /anvil/scratch/x-smaticka/sims_runtime/cstar/pac_dt_ramp/diagnostics
+
+refresh:
+  catalog: catalogs/pac_dt_ramp.yaml
+  sources:
+    - name: pac_dt_ramp
+      files: pac_dt_ramp/tasks/*/joined_output/output_rst.*.nc
+      grid: pac_dt_ramp/tasks/third_1wks/input/input_datasets/PACMED12km_spec_config_WithRivers_grid.nc
+      ref: refs/pac_dt_ramp.parquet
+      keep: latest-per-file  # restart files: keep each file's main (not repeated) time step
+
+defaults:
+  test: pac_dt_ramp
+  depths: [surface, 100]
+  plot: {zoom: 1.5}
+
+pages:
+  - title: "Physics — latest snapshot (surface)"
+    field:
+      variables: [temperature, salinity, ssh, {calculate: mld, method: density_threshold}]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Nutrients — latest snapshot (surface)"
+    field:
+      variables: [nitrate, phosphate, silicate, ammonium, iron, oxygen]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Nutrients — latest snapshot (100 m)"
+    field:
+      variables: [nitrate, phosphate, silicate, ammonium, iron, oxygen]
+      select: {depth: 100, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Carbon & chlorophyll — latest snapshot (surface)"
+    field:
+      variables: [dissolved_inorganic_carbon, alkalinity, {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}, co2_flux, PH, pCO2]
+      select: {depth: surface, time: latest}
+    plot: {ncols: 3}
+
+  - title: "Monthly means — {variable}"
+    for_each:
+      variable:
+        - temperature
+        - salinity
+        - nitrate
+        - phosphate
+        - silicate
+        - ammonium
+        - iron
+        - oxygen
+        - dissolved_inorganic_carbon
+        - alkalinity
+        - PH
+        - pCO2
+    field:
+      variables: ["{variable}"]
+      select: {depth: "{depths}"}
+      aggregate: {time: {resample: 1MS, reduce: mean}}
+    plot: {shared_limits: true}
