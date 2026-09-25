@@ -203,6 +203,7 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
     metrics/<name>.csv (+ .txt)
     suite.yaml                 -- byte-identical copy of the input
     manifest.json
+    run.log                    -- everything printed to the terminal during the run
 <output_dir>/latest.txt        -- path of the newest report dir
 ```
 
@@ -214,10 +215,20 @@ literal value), each page's outcome, and the resolved `catalog_search_paths:`
 directories -- enough that a second person with the same suite YAML and the same
 catalogs gets the identical report.
 
+`run.log` is a mirror of stdout/stderr for the run: a `== page i/n: <title> ==` header
+and a `done in Ns`/`SKIPPED after Ns` line bracket each page, so a warning in between
+is attributable to the page that raised it. It also carries the full traceback for
+every skipped page and, if the run crashes outright, for the crash itself -- neither of
+which the terminal shows. `--list` writes nothing, so no `run.log` is created for it.
+A Python-level tee catches everything this package or its warnings print; it does not
+catch a C library writing straight to a file descriptor.
+
 ## The log page and exit codes
 
 Every PDF/PNG set ends with a plain-text log page: each page's title, whether it drew
-or was skipped, and why. A page is skipped -- never fatal to the rest of the report --
+or was skipped, why, and how long it took. It is `run.log`'s content rasterized as the
+final report page; `run.log` is the greppable version, and the place to look for a
+skipped page's traceback. A page is skipped -- never fatal to the rest of the report --
 when its variable is absent, its observational catalog entry isn't on this machine's
 search path (`osk.catalog.search_paths()`), or the comparison itself raises. `main`'s
 exit code: `0` every page drew, `3` the run completed with some pages skipped, `1` no

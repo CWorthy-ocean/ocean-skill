@@ -4,7 +4,10 @@ A suite (``ocean_skill.config.SuiteConfig``) is a YAML file listing pages -- eac
 one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call -- plus shared
 defaults and output settings. Running it draws every page, writes a PNG per figure,
 collects them into one PDF (unless ``pdf: false``), and writes a metrics CSV and a
-``manifest.json`` recording exactly what was drawn. See ``docs/suites.md``.
+``manifest.json`` recording exactly what was drawn. It also writes ``run.log`` --
+everything printed to the terminal over the course of the run, plus full tracebacks
+for skipped pages and for a fatal crash, which the terminal itself never shows. See
+``docs/suites.md``.
 
 Optionally the suite can refresh a model's kerchunk reference before running, which
 is what makes it usable against a run that is still writing output.
@@ -13,16 +16,113 @@ is what makes it usable against a run that is still writing output.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
+import time
+import traceback
 import warnings
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 __all__ = ["main", "run_suite"]
+
+
+class _Tee:
+    """A stream that mirrors every write to the original stream and to a file.
+
+    Before :meth:`attach` is called there is no file yet -- writes are buffered
+    in memory -- because a suite's ``refresh:`` step can print before the report
+    directory (and so ``run.log``'s path) exists. ``attach`` flushes that buffer
+    into the file and every write after that goes straight through.
+    """
+
+    def __init__(self, original: TextIO) -> None:
+        self.original = original
+        self._buffer = io.StringIO()
+        self._file: TextIO | None = None
+
+    def write(self, s: str) -> int:
+        n = self.original.write(s)
+        (self._file or self._buffer).write(s)
+        if self._file is not None:
+            self._file.flush()
+        return n
+
+    def flush(self) -> None:
+        self.original.flush()
+        if self._file is not None:
+            self._file.flush()
+
+    def isatty(self) -> bool:
+        return self.original.isatty()
+
+    def fileno(self) -> int:
+        return self.original.fileno()
+
+    @property
+    def encoding(self) -> str:
+        return self.original.encoding
+
+    def attach(self, path: Path) -> None:
+        self._file = path.open("a", encoding="utf-8")
+        self._file.write(self._buffer.getvalue())
+        self._file.flush()
+        self._buffer = io.StringIO()
+
+    def log_only(self, s: str) -> None:
+        """Write to the log file (or the pre-attach buffer) but not the terminal."""
+        (self._file or self._buffer).write(s)
+        if self._file is not None:
+            self._file.flush()
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+class _Capture:
+    """Handle yielded by :func:`_capture_terminal`: ``attach`` and ``log_only``."""
+
+    def __init__(self, out: _Tee, err: _Tee) -> None:
+        self._out = out
+        self._err = err
+
+    def attach(self, path: Path) -> None:
+        self._out.attach(path)
+        self._err.attach(path)
+
+    def log_only(self, s: str) -> None:
+        self._err.log_only(s)
+
+
+@contextlib.contextmanager
+def _capture_terminal():
+    """Mirror stdout/stderr (and therefore ``warnings.warn``) to a file.
+
+    The file is only attached partway through the run, once the report
+    directory exists (see :class:`_Tee`); anything printed before that is
+    buffered and flushed in once ``attach`` is called. A fatal exception still
+    gets its traceback written to the log before propagating, even though the
+    terminal itself only ever sees ``main``'s one-line ``error: ...``.
+    """
+    out, err = _Tee(sys.stdout), _Tee(sys.stderr)
+    sys.stdout, sys.stderr = out, err
+    cap = _Capture(out, err)
+    try:
+        yield cap
+    except BaseException:
+        cap.log_only(traceback.format_exc())
+        raise
+    finally:
+        sys.stdout, sys.stderr = out.original, err.original
+        out.close()
+        err.close()
 
 
 def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> None:
@@ -118,6 +218,7 @@ class SuiteResult:
     figures: list[Path] = _dc_field(default_factory=list)
     metrics: Path | None = None
     manifest: Path | None = None
+    log: Path | None = None
 
     @property
     def exit_code(self) -> int:
@@ -210,7 +311,8 @@ def _log_text(pages: list[Any], metrics_csv: Path | None) -> str:
     lines = ["run log", ""]
     for p in pages:
         mark = "ok" if p.status == "ok" else "SKIPPED"
-        lines.append(f"  [{mark}] {p.title}")
+        timing = f"  ({p.elapsed:.1f}s)" if p.elapsed is not None else ""
+        lines.append(f"  [{mark}] {p.title}{timing}")
         if p.reason:
             lines.append(f"          {p.reason}")
     lines.append("")
@@ -237,109 +339,126 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
     raw = yaml.safe_load(path.read_text())
     suite = SuiteConfig.model_validate(raw)
 
-    catalog_dirs = _resolve_catalog_dirs(suite.catalog_search_paths, path)
-    for entry, resolved in zip(suite.catalog_search_paths, catalog_dirs):
-        if not resolved.is_dir():
-            raise FileNotFoundError(
-                f"catalog_search_paths: {entry!r} resolved to {resolved}, which is "
-                "not a directory"
+    with _capture_terminal() as cap:
+        catalog_dirs = _resolve_catalog_dirs(suite.catalog_search_paths, path)
+        for entry, resolved in zip(suite.catalog_search_paths, catalog_dirs):
+            if not resolved.is_dir():
+                raise FileNotFoundError(
+                    f"catalog_search_paths: {entry!r} resolved to {resolved}, which "
+                    "is not a directory"
+                )
+            if resolved not in catalog._added_dirs:
+                catalog.add_search_path(resolved)
+
+        if suite.refresh is not None:
+            _refresh_sources(
+                [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
+                suite.refresh.catalog,
             )
-        if resolved not in catalog._added_dirs:
-            catalog.add_search_path(resolved)
 
-    if suite.refresh is not None:
-        _refresh_sources(
-            [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
-            suite.refresh.catalog,
+        expanded = _pages.expand(suite)
+
+        test_source = suite.defaults.get("test")
+        index = extrema._native_time_index(test_source) if test_source else None
+
+        if list_only:
+            for i, p in enumerate(expanded, 1):
+                cache_note = "cache" if p.cache else "no-cache (open window)"
+                print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note})")
+            return SuiteResult(pages=expanded)
+
+        output_dir = (
+            Path(suite.output_dir).expanduser()
+            if suite.output_dir
+            else outputs.base_dir()
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report_dir = output_dir / _report_dir_name(
+            suite.name, test_source or "model", index
+        )
+        report_dir.mkdir(parents=True, exist_ok=True)
+        cap.attach(report_dir / "run.log")
+        (report_dir / "suite.yaml").write_text(path.read_text())
+
+        manifest_path = report_dir / "manifest.json"
+        _write_manifest(
+            manifest_path,
+            suite=suite,
+            pages=expanded,
+            report_dir=report_dir,
+            catalog_dirs=catalog_dirs,
         )
 
-    expanded = _pages.expand(suite)
+        pdf_path = (report_dir / "report.pdf") if suite.pdf else None
+        pooled_records: list[dict[str, Any]] = []
 
-    test_source = suite.defaults.get("test")
-    index = extrema._native_time_index(test_source) if test_source else None
+        from ocean_skill.workflows.report import PdfReport
 
-    if list_only:
-        for i, p in enumerate(expanded, 1):
-            cache_note = "cache" if p.cache else "no-cache (open window)"
-            print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note})")
-        return SuiteResult(pages=expanded)
+        with PdfReport(pdf_path, report_dir / "figures") as report:
+            report.title_page(
+                _title_text(suite, expanded, test_source=test_source, index=index)
+            )
 
-    output_dir = (
-        Path(suite.output_dir).expanduser() if suite.output_dir else outputs.base_dir()
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = output_dir / _report_dir_name(
-        suite.name, test_source or "model", index
-    )
-    report_dir.mkdir(parents=True, exist_ok=True)
-    (report_dir / "suite.yaml").write_text(path.read_text())
+            n = len(expanded)
+            for i, page in enumerate(expanded, 1):
+                print(f"== page {i}/{n}: {page.title} ==")
+                t0 = time.perf_counter()
+                try:
+                    results = _pages.build(page, pooled_records=pooled_records)
+                except Exception as exc:
+                    page.elapsed = time.perf_counter() - t0
+                    page.status = "skipped"
+                    page.reason = f"{type(exc).__name__}: {exc}"
+                    warnings.warn(
+                        f"skipping page {page.title!r}: {exc}", stacklevel=2
+                    )
+                    cap.log_only(traceback.format_exc())
+                    print(f"   SKIPPED after {page.elapsed:.1f}s: {page.reason}")
+                    continue
+                page.elapsed = time.perf_counter() - t0
+                page.status = "ok"
+                print(f"   done in {page.elapsed:.1f}s")
+                for suffix, fig in results:
+                    report.emit(fig, outputs.slug(page.title) + suffix)
+                pooled_records.extend(page.metrics_records)
 
-    manifest_path = report_dir / "manifest.json"
-    _write_manifest(
-        manifest_path,
-        suite=suite,
-        pages=expanded,
-        report_dir=report_dir,
-        catalog_dirs=catalog_dirs,
-    )
+            metrics_csv = None
+            if pooled_records:
+                from ocean_skill import metrics as _metrics
 
-    pdf_path = (report_dir / "report.pdf") if suite.pdf else None
-    pooled_records: list[dict[str, Any]] = []
+                metrics_csv = _metrics.write(
+                    pooled_records, report_dir, stem=suite.name
+                )
 
-    from ocean_skill.workflows.report import PdfReport
+            report.log_page(_log_text(expanded, metrics_csv))
 
-    with PdfReport(pdf_path, report_dir / "figures") as report:
-        report.title_page(
-            _title_text(suite, expanded, test_source=test_source, index=index)
+        _write_manifest(
+            manifest_path,
+            suite=suite,
+            pages=expanded,
+            report_dir=report_dir,
+            catalog_dirs=catalog_dirs,
         )
 
-        for page in expanded:
-            try:
-                results = _pages.build(page, pooled_records=pooled_records)
-            except Exception as exc:
-                page.status = "skipped"
-                page.reason = f"{type(exc).__name__}: {exc}"
-                warnings.warn(f"skipping page {page.title!r}: {exc}", stacklevel=2)
-                continue
-            page.status = "ok"
-            for suffix, fig in results:
-                report.emit(fig, outputs.slug(page.title) + suffix)
-            pooled_records.extend(page.metrics_records)
+        latest_path = output_dir / "latest.txt"
+        latest_path.write_text(str(report_dir))
+        latest_link = output_dir / "latest"
+        try:
+            if latest_link.is_symlink() or latest_link.exists():
+                latest_link.unlink()
+            latest_link.symlink_to(report_dir.name)
+        except OSError:
+            pass  # best-effort only; latest.txt is the real contract
 
-        metrics_csv = None
-        if pooled_records:
-            from ocean_skill import metrics as _metrics
-
-            metrics_csv = _metrics.write(pooled_records, report_dir, stem=suite.name)
-
-        report.log_page(_log_text(expanded, metrics_csv))
-
-    _write_manifest(
-        manifest_path,
-        suite=suite,
-        pages=expanded,
-        report_dir=report_dir,
-        catalog_dirs=catalog_dirs,
-    )
-
-    latest_path = output_dir / "latest.txt"
-    latest_path.write_text(str(report_dir))
-    latest_link = output_dir / "latest"
-    try:
-        if latest_link.is_symlink() or latest_link.exists():
-            latest_link.unlink()
-        latest_link.symlink_to(report_dir.name)
-    except OSError:
-        pass  # best-effort only; latest.txt is the real contract
-
-    result = SuiteResult(
-        pages=expanded,
-        report_dir=report_dir,
-        pdf=pdf_path if pdf_path and pdf_path.exists() else None,
-        figures=report.png_paths,
-        metrics=metrics_csv,
-        manifest=manifest_path,
-    )
+        result = SuiteResult(
+            pages=expanded,
+            report_dir=report_dir,
+            pdf=pdf_path if pdf_path and pdf_path.exists() else None,
+            figures=report.png_paths,
+            metrics=metrics_csv,
+            manifest=manifest_path,
+            log=report_dir / "run.log",
+        )
     return result
 
 
@@ -376,11 +495,21 @@ def main(argv: list[str] | None = None) -> int:
 
     n_ok = sum(1 for p in result.pages if p.status == "ok")
     n_skipped = len(result.pages) - n_ok
-    print(f"{n_ok} page(s) drawn, {n_skipped} skipped -> {result.report_dir}")
+    summary_lines = [
+        f"{n_ok} page(s) drawn, {n_skipped} skipped -> {result.report_dir}"
+    ]
     if result.pdf:
-        print(f"  report: {result.pdf}")
+        summary_lines.append(f"  report: {result.pdf}")
     if result.metrics:
-        print(f"  metrics: {result.metrics}")
+        summary_lines.append(f"  metrics: {result.metrics}")
+    for line in summary_lines:
+        print(line)
+    # run_suite's own tee is closed by the time these lines print, so append them
+    # to run.log directly -- this is the only bit of terminal output not already
+    # captured by run_suite itself.
+    if result.log is not None:
+        with result.log.open("a", encoding="utf-8") as f:
+            f.write("\n".join(summary_lines) + "\n")
     return result.exit_code
 
 
