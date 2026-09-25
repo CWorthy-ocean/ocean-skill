@@ -66,13 +66,14 @@ refresh:                              # optional: rebuild the model's kerchunk r
 defaults:                             # merged into every page; a page's own keys win
   test: pac_dt_ramp                   # exactly one source -- required for time: latest/month: run
   depths: [surface, 100]
-  plot: {zoom: 1.5}
 
 pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
     field: {...}          # exactly one of field: / compare: / summary:
     for_each: {...}        # optional: fan this one page into several (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
+                            # (size:/zoom:/figsize: are pinned to the page canvas and warned
+                            # about instead while pdf: true -- see Page size, below)
 ```
 
 `defaults.test` must be a single source name, not a list: `time: latest`, `month: run`,
@@ -223,6 +224,23 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
     run.log                    -- everything printed to the terminal during the run
 <output_dir>/latest.txt        -- path of the newest report dir
 ```
+
+### Page size
+
+`report.pdf`'s pages are all a fixed US Letter portrait (8.5x11in): each figure's own
+ink is placed at the top of the page, horizontally centred, with a small margin above
+it -- a wide figure (a time series, three maps in a row) leaves white space below
+rather than growing the page, and a tall one (a profile) is unaffected. This is what
+makes the report paginate and print like a document regardless of what any one page
+draws.
+
+Because of this, `size:`/`zoom:`/`figsize:` in a page's `plot:` (or a `summary:`
+page's own kwargs) are ignored while `pdf: true` -- pinned to the `"page"` canvas
+instead, with a warning naming the ignored kwarg (once per suite run, not once per
+page). Set `pdf: false` to size figures freely; PNGs are still written, as tight crops
+around each figure rather than letter pages. A figure whose own ink still doesn't fit
+8.5x11 even after pinning (rare -- only an explicit `figsize:` outside this grammar
+could do it) grows the page rather than clipping the figure, with its own warning.
 
 `t0`/`t1` are the test source's own first/last recorded day; `<run-time>` is when the
 command was run, down to the second, plus a short random suffix so two runs started in

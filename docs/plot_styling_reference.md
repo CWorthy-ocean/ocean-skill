@@ -114,6 +114,12 @@ physics.plot(size=(6.5, None))  # 6.5in wide, uncapped
 | `"slide"` | 13.33in | 7.5in | 16:9 presentations |
 | `"column"` | 3.5in | none | a single journal column (cramped for three maps — see the warning below) |
 
+`ocean-skill-run` pins every page's `size` to `"page"` while a suite has `pdf: true`
+(the default), since `report.pdf`'s pages are that same 8.5x11in letter canvas — an
+explicit `size=`/`zoom=`/`figsize=` in a suite's `plot:` is dropped, with a warning,
+rather than drawing a figure the report couldn't reproduce as one page. See
+`docs/suites.md`'s *Page size* section.
+
 The **height cap belongs to the canvas**, which matters for many-row grids: `"page"` keeps
 the figure printable by squeezing panels, and `"free"` keeps every panel at full height
 and lets the figure grow. Previously the 11-inch cap was unavoidable.
