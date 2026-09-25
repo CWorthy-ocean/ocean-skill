@@ -310,35 +310,6 @@ def _resolve_cache_dir(entry: str | None, suite_path: Path) -> Path | None:
     return d.resolve()
 
 
-def _title_text(suite: Any, pages: list[Any], *, test_source: str, index: Any) -> str:
-    lines = [
-        f"suite: {suite.name}",
-        f"test source: {test_source}",
-        f"run coverage: {index[0]} .. {index[-1]}  ({len(index)} steps)",
-        f"generated: {datetime.now(UTC).isoformat()}",
-        f"pages planned: {len(pages)}",
-        "",
-    ]
-    for p in pages:
-        lines.append(f"  - {p.title}")
-    return "\n".join(lines)
-
-
-def _log_text(pages: list[Any], metrics_csv: Path | None) -> str:
-    lines = ["run log", ""]
-    for p in pages:
-        mark = "ok" if p.status == "ok" else "SKIPPED"
-        timing = f"  ({p.elapsed:.1f}s)" if p.elapsed is not None else ""
-        lines.append(f"  [{mark}] {p.title}{timing}")
-        if p.reason:
-            lines.append(f"          {p.reason}")
-    lines.append("")
-    lines.append(
-        f"metrics: {metrics_csv}" if metrics_csv else "metrics: (none written)"
-    )
-    return "\n".join(lines)
-
-
 def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
     """Load, expand, and draw a suite YAML; return a :class:`SuiteResult`.
 
@@ -421,10 +392,6 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
         from ocean_skill.workflows.report import PdfReport
 
         with PdfReport(pdf_path, report_dir / "figures") as report:
-            report.title_page(
-                _title_text(suite, expanded, test_source=test_source, index=index)
-            )
-
             n = len(expanded)
             for i, page in enumerate(expanded, 1):
                 print(f"== page {i}/{n}: {page.title} ==")
@@ -455,8 +422,6 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                 metrics_csv = _metrics.write(
                     pooled_records, report_dir, stem=suite.name
                 )
-
-            report.log_page(_log_text(expanded, metrics_csv))
 
         _write_manifest(
             manifest_path,

@@ -259,16 +259,14 @@ which the terminal shows. `--list` writes nothing, so no `run.log` is created fo
 A Python-level tee catches everything this package or its warnings print; it does not
 catch a C library writing straight to a file descriptor.
 
-## The log page and exit codes
+## Exit codes
 
-Every PDF/PNG set ends with a plain-text log page: each page's title, whether it drew
-or was skipped, why, and how long it took. It is `run.log`'s content rasterized as the
-final report page; `run.log` is the greppable version, and the place to look for a
-skipped page's traceback. A page is skipped -- never fatal to the rest of the report --
-when its variable is absent, its observational catalog entry isn't on this machine's
-search path (`osk.catalog.search_paths()`), or the comparison itself raises. `main`'s
-exit code: `0` every page drew, `3` the run completed with some pages skipped, `1` no
-page drew at all, `2` a schema or usage error (nothing was drawn or written).
+A page is skipped -- never fatal to the rest of the report -- when its variable is
+absent, its observational catalog entry isn't on this machine's search path
+(`osk.catalog.search_paths()`), or the comparison itself raises; `run.log` has the
+traceback. `main`'s exit code: `0` every page drew, `3` the run completed with some
+pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn
+or written).
 
 ## CLI
 

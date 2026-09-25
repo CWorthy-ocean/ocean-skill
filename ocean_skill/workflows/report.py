@@ -3,9 +3,7 @@
 :class:`PdfReport` writes each page's figure to ``figures/NN_<slug>.png`` and,
 unless the suite has ``pdf: false``, adds it as a page to one ``report.pdf`` --
 matplotlib's own :class:`~matplotlib.backends.backend_pdf.PdfPages`, so there is
-no new dependency. A title page (what was asked for, what the run covers) and a
-closing log page (what actually happened) bracket the drawn pages, both plain
-text so they carry no data of their own to get stale.
+no new dependency.
 
 PDF pages are all US Letter portrait (8.5x11in, :data:`~ocean_skill.plot.typography.PAGE_W`
 / :data:`~ocean_skill.plot.typography.PAGE_H`) -- a figure's tight ink is placed at the
@@ -87,10 +85,10 @@ def _page_bbox(fig: Any, stem: str) -> Any:
 class PdfReport:
     """Write PNGs (always) and a PDF (unless ``pdf_path`` is ``None``) as pages arrive.
 
-    Used as a context manager: pages are added with :meth:`title_page`,
-    :meth:`emit`, and :meth:`log_page`, in that order; the PDF is opened before
-    the first page and closed on exit even if a page's own drawing raised, so a
-    partially-run report is never left with a corrupt or half-written PDF.
+    Used as a context manager: pages are added with :meth:`emit`; the PDF is
+    opened before the first page and closed on exit even if a page's own drawing
+    raised, so a partially-run report is never left with a corrupt or half-written
+    PDF.
     """
 
     pdf_path: Path | None
@@ -110,7 +108,7 @@ class PdfReport:
             self._pdf.__enter__()
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         if self._pdf is not None:
             self._pdf.__exit__(*exc)
 
@@ -126,32 +124,10 @@ class PdfReport:
         self.png_paths.append(png)
         return png
 
-    def title_page(self, text: str) -> Path:
-        return self._emit(_text_figure(text), "title")
-
     def emit(self, fig: Any, stem: str) -> Path:
         return self._emit(fig, stem)
-
-    def log_page(self, text: str) -> Path:
-        return self._emit(_text_figure(text), "log")
 
     def get_pagecount(self) -> int | None:
         # PdfPages.get_pagecount() reports 0 once the file is closed -- this
         # object's own running index is the reliable count either way.
         return self._index if self._pdf is not None else None
-
-
-def _text_figure(text: str) -> Any:
-    """Build a plain, one-page text figure -- report structure, not a data caveat."""
-    import matplotlib.pyplot as plt
-
-    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    fig.text(
-        0.06, 0.94, text, va="top", ha="left", family="monospace", fontsize=9, wrap=True
-    )
-    from matplotlib._pylab_helpers import Gcf
-
-    manager = next((m for m in Gcf.figs.values() if m.canvas.figure is fig), None)
-    if manager is not None:
-        Gcf.figs.pop(manager.num, None)
-    return fig
