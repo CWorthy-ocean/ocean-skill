@@ -14,9 +14,11 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from ocean_skill import catalog as _catalog
 from ocean_skill import comparison as _comparison
 from ocean_skill.workflows import pages as _pages
 from ocean_skill.workflows.run import _refresh_sources, main, run_suite
+from tests.test_catalog import _write_catalog
 
 
 def _segment(path, t0, value):
@@ -308,6 +310,121 @@ def test_suite_yaml_copy_is_byte_identical(tmp_path, stub_model):
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
     result = run_suite(path)
     assert (result.report_dir / "suite.yaml").read_bytes() == path.read_bytes()
+
+
+# -- catalog_search_paths: ---------------------------------------------------------
+
+
+def test_catalog_search_paths_absolute_path_registered_and_recorded(
+    tmp_path, stub_model, isolated_catalogs
+):
+    shared = tmp_path / "shared_abs"
+    _write_catalog(shared, title="shared catalog", name="bar")
+
+    path = _write_suite(
+        tmp_path, _model_only_suite(tmp_path, catalog_search_paths=[str(shared)])
+    )
+    result = run_suite(path)
+
+    assert shared in _catalog.search_paths()
+    assert "bar" in _catalog.discover()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["catalog_search_paths"] == [str(shared)]
+
+
+def test_catalog_search_paths_relative_path_resolves_against_suite_file_not_cwd(
+    tmp_path, stub_model, isolated_catalogs, monkeypatch
+):
+    import yaml
+
+    suite_dir = tmp_path / "suites"
+    suite_dir.mkdir()
+    shared = tmp_path / "shared"
+    _write_catalog(shared, title="shared catalog", name="bar")
+
+    payload = _model_only_suite(tmp_path, catalog_search_paths=["../shared"])
+    path = suite_dir / "suite.yaml"
+    path.write_text(yaml.dump(payload))
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = run_suite(path)
+
+    assert shared.resolve() in _catalog.search_paths()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["catalog_search_paths"] == [str(shared.resolve())]
+
+
+def test_catalog_search_paths_missing_directory_raises_naming_entry_and_resolved_path(
+    tmp_path, stub_model
+):
+    import yaml
+
+    suite_dir = tmp_path / "suites"
+    suite_dir.mkdir()
+    payload = _model_only_suite(tmp_path, catalog_search_paths=["../nope"])
+    path = suite_dir / "suite.yaml"
+    path.write_text(yaml.dump(payload))
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        run_suite(path)
+    message = str(exc_info.value)
+    assert "../nope" in message
+    assert str((tmp_path / "nope").resolve()) in message
+
+
+def test_main_catalog_search_paths_missing_directory_is_a_usage_error(
+    tmp_path, stub_model
+):
+    path = _write_suite(
+        tmp_path,
+        _model_only_suite(tmp_path, catalog_search_paths=[str(tmp_path / "nope")]),
+    )
+    assert main([str(path)]) == 2
+
+
+def test_catalog_search_paths_registered_before_refresh_runs(
+    tmp_path, stub_model, isolated_catalogs, monkeypatch
+):
+    shared = tmp_path / "shared_before_refresh"
+    _write_catalog(shared, title="shared catalog", name="bar")
+
+    seen_during_refresh = []
+
+    def _fake_refresh(spec, cat):
+        seen_during_refresh.append(shared in _catalog.search_paths())
+
+    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", _fake_refresh)
+
+    suite = _model_only_suite(
+        tmp_path,
+        catalog_search_paths=[str(shared)],
+        refresh={
+            "catalog": "catalogs/x.yaml",
+            "sources": [{"name": "stub", "files": "x/*.nc", "ref": "refs/x.parquet"}],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    run_suite(path)
+
+    assert seen_during_refresh == [True]
+
+
+def test_catalog_search_paths_repeated_runs_do_not_duplicate_added_dirs(
+    tmp_path, stub_model, isolated_catalogs
+):
+    shared = tmp_path / "shared_repeat"
+    _write_catalog(shared, title="shared catalog", name="bar")
+
+    path = _write_suite(
+        tmp_path, _model_only_suite(tmp_path, catalog_search_paths=[str(shared)])
+    )
+    run_suite(path)
+    run_suite(path)
+
+    assert _catalog._added_dirs.count(shared) == 1
 
 
 def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeypatch):

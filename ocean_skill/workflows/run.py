@@ -147,7 +147,12 @@ def _report_dir_name(name: str, test_source: str, index: Any) -> str:
 
 
 def _write_manifest(
-    path: Path, *, suite: Any, pages: list[Any], report_dir: Path
+    path: Path,
+    *,
+    suite: Any,
+    pages: list[Any],
+    report_dir: Path,
+    catalog_dirs: list[Path] | None = None,
 ) -> None:
     import ocean_skill
 
@@ -156,6 +161,7 @@ def _write_manifest(
         "ocean_skill_version": getattr(ocean_skill, "__version__", None),
         "name": suite.name,
         "output_dir": str(report_dir),
+        "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
         "pages": [
             {
                 **p.as_dict(),
@@ -166,6 +172,24 @@ def _write_manifest(
         ],
     }
     path.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _resolve_catalog_dirs(entries: list[str], suite_path: Path) -> list[Path]:
+    """Resolve a suite's ``catalog_search_paths:`` entries to absolute directories, in
+    YAML order.
+
+    A relative entry resolves against ``suite_path``'s own directory -- not the
+    working directory -- so the suite means the same thing from cron or from any
+    launch directory. This deliberately differs from ``refresh:``/``output_dir``,
+    which are working-directory-relative today.
+    """
+    resolved = []
+    for entry in entries:
+        d = Path(entry).expanduser()
+        if not d.is_absolute():
+            d = suite_path.parent / d
+        resolved.append(d.resolve())
+    return resolved
 
 
 def _title_text(suite: Any, pages: list[Any], *, test_source: str, index: Any) -> str:
@@ -205,13 +229,23 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
     """
     import yaml
 
-    from ocean_skill import extrema, outputs
+    from ocean_skill import catalog, extrema, outputs
     from ocean_skill.config import SuiteConfig
     from ocean_skill.workflows import pages as _pages
 
     path = Path(path).expanduser()
     raw = yaml.safe_load(path.read_text())
     suite = SuiteConfig.model_validate(raw)
+
+    catalog_dirs = _resolve_catalog_dirs(suite.catalog_search_paths, path)
+    for entry, resolved in zip(suite.catalog_search_paths, catalog_dirs):
+        if not resolved.is_dir():
+            raise FileNotFoundError(
+                f"catalog_search_paths: {entry!r} resolved to {resolved}, which is "
+                "not a directory"
+            )
+        if resolved not in catalog._added_dirs:
+            catalog.add_search_path(resolved)
 
     if suite.refresh is not None:
         _refresh_sources(
@@ -241,7 +275,13 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
     (report_dir / "suite.yaml").write_text(path.read_text())
 
     manifest_path = report_dir / "manifest.json"
-    _write_manifest(manifest_path, suite=suite, pages=expanded, report_dir=report_dir)
+    _write_manifest(
+        manifest_path,
+        suite=suite,
+        pages=expanded,
+        report_dir=report_dir,
+        catalog_dirs=catalog_dirs,
+    )
 
     pdf_path = (report_dir / "report.pdf") if suite.pdf else None
     pooled_records: list[dict[str, Any]] = []
@@ -274,7 +314,13 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
         report.log_page(_log_text(expanded, metrics_csv))
 
-    _write_manifest(manifest_path, suite=suite, pages=expanded, report_dir=report_dir)
+    _write_manifest(
+        manifest_path,
+        suite=suite,
+        pages=expanded,
+        report_dir=report_dir,
+        catalog_dirs=catalog_dirs,
+    )
 
     latest_path = output_dir / "latest.txt"
     latest_path.write_text(str(report_dir))
