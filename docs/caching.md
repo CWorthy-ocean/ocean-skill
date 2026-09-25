@@ -168,6 +168,7 @@ way an uncropped one is.
 | Turn off for this session | `osk.cache.disable()` |
 | Turn back on | `osk.cache.enable()` |
 | Move it elsewhere | `osk.cache.enable("/path/to/dir")`, or set `$OCEAN_SKILL_DIR` |
+| Pin a suite's cache | `cache_dir:` in the suite YAML (`docs/suites.md`) |
 | Empty it | `osk.cache.clear()` → number removed (`clear("prepared")` for one layer) |
 | Skip for one call | `osk.compare(..., cache=False)` / `Comparison(..., cache=False)` |
 | Recompute and overwrite | `osk.compare(..., refresh=True)` / `c.align(refresh=True)` |

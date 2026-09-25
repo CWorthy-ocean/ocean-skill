@@ -256,6 +256,7 @@ def _write_manifest(
     catalog_dirs: list[Path] | None = None,
 ) -> None:
     import ocean_skill
+    from ocean_skill import cache as _cache
 
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -263,6 +264,7 @@ def _write_manifest(
         "name": suite.name,
         "output_dir": str(report_dir),
         "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
+        "cache_dir": str(_cache.base_dir()),
         "pages": [
             {
                 **p.as_dict(),
@@ -291,6 +293,21 @@ def _resolve_catalog_dirs(entries: list[str], suite_path: Path) -> list[Path]:
             d = suite_path.parent / d
         resolved.append(d.resolve())
     return resolved
+
+
+def _resolve_cache_dir(entry: str | None, suite_path: Path) -> Path | None:
+    """Resolve a suite's ``cache_dir:`` entry to an absolute directory, or ``None``.
+
+    Same rule as :func:`_resolve_catalog_dirs`: a relative entry resolves against
+    ``suite_path``'s own directory, not the working directory, so the suite means
+    the same thing run from cron, a notebook, or any shell.
+    """
+    if entry is None:
+        return None
+    d = Path(entry).expanduser()
+    if not d.is_absolute():
+        d = suite_path.parent / d
+    return d.resolve()
 
 
 def _title_text(suite: Any, pages: list[Any], *, test_source: str, index: Any) -> str:
@@ -350,6 +367,12 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             if resolved not in catalog._added_dirs:
                 catalog.add_search_path(resolved)
 
+        cache_dir = _resolve_cache_dir(suite.cache_dir, path)
+        if cache_dir is not None:
+            from ocean_skill import cache
+
+            cache.enable(cache_dir)
+
         if suite.refresh is not None:
             _refresh_sources(
                 [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
@@ -362,6 +385,9 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
         index = extrema._native_time_index(test_source) if test_source else None
 
         if list_only:
+            from ocean_skill import cache as _cache
+
+            print(f"cache: {_cache.base_dir()}")
             for i, p in enumerate(expanded, 1):
                 cache_note = "cache" if p.cache else "no-cache (open window)"
                 print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note})")

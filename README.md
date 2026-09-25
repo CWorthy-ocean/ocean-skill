@@ -616,7 +616,8 @@ Every run writes its own report directory (nothing is ever overwritten), named a
 the model and the run's own time range, plus when the command was run. See
 [docs/suites.md](docs/suites.md) for the full grammar — `for_each` fan-out,
 `{placeholder}` templating, `time: latest`/`month: run`, a `catalog_search_paths:` key
-for shared catalog directories, and the report layout —
+for shared catalog directories, a `cache_dir:` key to pin the suite's cache to one
+directory across runs, and the report layout —
 and `suites/roms_marbl_diagnostic.yaml`/`suites/roms_marbl_quick.yaml` for a worked
 ROMS-MARBL example (latest snapshot, monthly means, WOA23/GLODAPv2/satellite
 chlorophyll comparisons).

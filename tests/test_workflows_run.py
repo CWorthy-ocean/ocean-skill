@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from ocean_skill import cache as _cache
 from ocean_skill import catalog as _catalog
 from ocean_skill import comparison as _comparison
 from ocean_skill.workflows import pages as _pages
@@ -429,6 +430,72 @@ def test_catalog_search_paths_repeated_runs_do_not_duplicate_added_dirs(
     run_suite(path)
 
     assert _catalog._added_dirs.count(shared) == 1
+
+
+# -- cache_dir: ---------------------------------------------------------------------
+
+
+def test_cache_dir_absolute_path_relocates_cache_and_is_recorded(
+    tmp_path, stub_model
+):
+    pinned = tmp_path / "pinned_cache"
+    path = _write_suite(
+        tmp_path, _model_only_suite(tmp_path, cache_dir=str(pinned))
+    )
+    result = run_suite(path)
+
+    assert _cache.base_dir() == pinned.resolve()
+    assert _cache.obs_dir() == pinned.resolve() / "cache" / "obs"
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["cache_dir"] == str(pinned.resolve())
+
+
+def test_cache_dir_relative_path_resolves_against_suite_file_not_cwd(
+    tmp_path, stub_model, monkeypatch
+):
+    import yaml
+
+    suite_dir = tmp_path / "suites"
+    suite_dir.mkdir()
+    pinned = tmp_path / "pinned_relative"
+
+    payload = _model_only_suite(tmp_path, cache_dir="../pinned_relative")
+    path = suite_dir / "suite.yaml"
+    path.write_text(yaml.dump(payload))
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = run_suite(path)
+
+    assert _cache.base_dir() == pinned.resolve()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["cache_dir"] == str(pinned.resolve())
+
+
+def test_no_cache_dir_manifest_records_whatever_cache_was_already_active(
+    tmp_path, stub_model
+):
+    # The autouse ``isolated_cache`` fixture already pointed the cache at its own
+    # tmp_path -- with no cache_dir: key, a suite must leave that alone.
+    before = _cache.base_dir()
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert _cache.base_dir() == before
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["cache_dir"] == str(before)
+
+
+def test_cache_dir_is_applied_under_list_only(tmp_path, stub_model):
+    pinned = tmp_path / "pinned_list_only"
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, cache_dir=str(pinned)))
+
+    run_suite(path, list_only=True)
+
+    assert _cache.base_dir() == pinned.resolve()
+    assert not pinned.exists()  # applying it never creates the directory eagerly
 
 
 def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeypatch):
