@@ -7,7 +7,9 @@
 #
 # Every run writes its own report directory under output_dir (nothing is ever
 # overwritten) with report.pdf, figures/*.png, metrics/*.csv, a copy of this file,
-# and manifest.json. See docs/suites.md for the full grammar.
+# manifest.json, and (since refresh: is set below) a refs/ copy of the kerchunk
+# reference exactly as it was when this report was drawn. See docs/suites.md for
+# the full grammar.
 #
 # Lines to edit for your own run:
 #   - refresh: the streams/paths of your output and grid
