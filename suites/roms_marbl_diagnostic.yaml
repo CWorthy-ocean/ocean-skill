@@ -14,6 +14,9 @@
 #   - defaults.test: the catalog entry name your streams register (must match
 #     one of the names under refresh.sources)
 #   - output_dir: where reports land
+#   - catalog_search_paths: uncomment if the WOA23/GLODAPv2 observational catalogs
+#     live in a shared team directory rather than $OCEAN_SKILL_CATALOGS -- useful
+#     for a cron-scheduled run, which does not source a shell rc
 #
 # For a fast repeated check with no observation comparisons (no regridding, no
 # downloads), use suites/roms_marbl_quick.yaml instead -- same defaults, snapshot
@@ -21,6 +24,9 @@
 
 name: roms_marbl_diagnostic
 output_dir: /anvil/scratch/x-smaticka/sims_runtime/cstar/pac_dt_ramp/diagnostics
+
+# catalog_search_paths:
+#   - /anvil/projects/x-ees250129/catalogs
 
 refresh:
   catalog: catalogs/pac_dt_ramp.yaml

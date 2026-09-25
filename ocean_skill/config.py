@@ -98,6 +98,12 @@ class SuiteConfig(BaseModel):
     single source string: ``time: latest``, ``month: run``, and the report
     directory's time range are all read off *one* source's time axis, and several
     sources have no single "latest" to mean.
+
+    ``catalog_search_paths`` registers extra shared catalog directories -- absolute, or
+    relative to this suite file (not the working directory) -- in the same tier as
+    ``$OCEAN_SKILL_CATALOGS``, so a suite handed to a collaborator or run from cron (which
+    does not source a shell rc) still finds its observational catalogs without relying on
+    environment setup. See ``docs/suites.md``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -107,6 +113,7 @@ class SuiteConfig(BaseModel):
     pdf: bool = True
     cache: bool = True
     refresh: RefreshConfig | None = None
+    catalog_search_paths: list[str] = Field(default_factory=list)
     defaults: dict[str, Any] = Field(default_factory=dict)
     pages: list[PageConfig]
 
@@ -115,6 +122,17 @@ class SuiteConfig(BaseModel):
     def _pages_not_empty(cls, v: list[PageConfig]) -> list[PageConfig]:
         if not v:
             raise ValueError("a suite needs at least one page under pages:")
+        return v
+
+    @field_validator("catalog_search_paths")
+    @classmethod
+    def _catalog_search_paths_not_blank(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if not entry or not entry.strip():
+                raise ValueError(
+                    f"catalog_search_paths: entries must be non-empty paths, "
+                    f"got {entry!r}"
+                )
         return v
 
     @model_validator(mode="after")

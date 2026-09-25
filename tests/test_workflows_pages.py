@@ -57,6 +57,27 @@ def test_defaults_test_must_be_a_single_source():
         )
 
 
+def test_catalog_search_paths_defaults_to_empty_list():
+    suite = _suite([{"title": "x", "field": {"variables": ["temperature"]}}])
+    assert suite.catalog_search_paths == []
+
+
+def test_catalog_search_paths_accepts_absolute_relative_and_home_paths():
+    suite = _suite(
+        [{"title": "x", "field": {"variables": ["temperature"]}}],
+        catalog_search_paths=["/abs/dir", "rel/dir", "~/dir"],
+    )
+    assert suite.catalog_search_paths == ["/abs/dir", "rel/dir", "~/dir"]
+
+
+def test_catalog_search_paths_rejects_blank_entries():
+    with pytest.raises(Exception):
+        _suite(
+            [{"title": "x", "field": {"variables": ["temperature"]}}],
+            catalog_search_paths=[""],
+        )
+
+
 # -- for_each --------------------------------------------------------------------------
 
 

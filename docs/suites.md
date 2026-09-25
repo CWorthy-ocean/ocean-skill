@@ -48,6 +48,9 @@ name: roms_marbl_diagnostic          # a label you choose: report-dir prefix, me
 output_dir: /path/to/diagnostics      # report dirs go under here; unset -> $OCEAN_SKILL_OUTPUT or ./output
 pdf: true                             # report.pdf beside the PNGs; false -> PNGs only
 cache: true                           # false -> never reuse a prepared field from disk (see Caching, below)
+catalog_search_paths:                 # optional: shared catalog dirs; relative = to this file
+  - /anvil/projects/x-ees250129/catalogs
+  - ../shared_catalogs
 
 refresh:                              # optional: rebuild the model's kerchunk reference first
   catalog: catalogs/pac_dt_ramp.yaml
@@ -74,6 +77,21 @@ pages:
 `defaults.test` must be a single source name, not a list: `time: latest`, `month: run`,
 and the report directory's own time range are all read off *one* source's time axis,
 and several sources have no single "latest" between them.
+
+`catalog_search_paths:` registers extra shared catalog directories -- the same tier as
+`$OCEAN_SKILL_CATALOGS` (see the Catalogs section of the main README) -- *before* the
+suite touches any catalog entry, including under `--list`. This exists because
+`$OCEAN_SKILL_CATALOGS` is normally set in a shell rc, which cron does not source, so a
+suite that resolves its observational catalogs interactively can otherwise fail
+silently (a missing entry is a *skipped page*, not an error) once it's scheduled. It
+also means a suite handed to a collaborator is self-contained, matching the rest of this
+doc's claim that everything that changes what gets drawn is a YAML key. A relative entry
+resolves against **this suite file's own directory**, not the working directory --
+deliberately different from `refresh:`/`output_dir` above, which are working-directory
+relative -- so the suite means the same thing run from cron, a notebook, or any shell. A
+directory that doesn't exist is a usage error (`main` returns `2`), since the suite
+names it explicitly. Registering it never outranks a user's own
+`~/.ocean-skill/catalogs` or the project's own `./catalogs`.
 
 ### `field:` -- model only
 
@@ -192,8 +210,9 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
 command was run, down to the second, plus a short random suffix so two runs started in
 the same second still land in different directories. `manifest.json` records the fully
 expanded page list (every `time: latest`/`month: run`/window already resolved to a
-literal value), each page's outcome, and the catalog entries used -- enough that a
-second person with the same suite YAML and the same catalogs gets the identical report.
+literal value), each page's outcome, and the resolved `catalog_search_paths:`
+directories -- enough that a second person with the same suite YAML and the same
+catalogs gets the identical report.
 
 ## The log page and exit codes
 
@@ -213,5 +232,7 @@ ocean-skill-run SUITE.yaml [--list]
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
 expanded page list with no drawing and nothing written -- a fast check on an edited
 suite, or on how many pages a long run's `month: run` will produce, before committing
-to the full run. There is no other flag: everything that changes what gets drawn is a
-YAML key, so the suite file alone is what reproduces a report.
+to the full run. `--list` still registers `catalog_search_paths:` first, since resolving
+`latest`/`month: run` reads a source's time axis. There is no other flag: everything
+that changes what gets drawn is a YAML key, so the suite file alone is what reproduces a
+report.
