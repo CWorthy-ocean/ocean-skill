@@ -104,6 +104,13 @@ class SuiteConfig(BaseModel):
     ``$OCEAN_SKILL_CATALOGS``, so a suite handed to a collaborator or run from cron (which
     does not source a shell rc) still finds its observational catalogs without relying on
     environment setup. See ``docs/suites.md``.
+
+    ``cache_dir``, resolved the same way (absolute, or relative to this suite file), is
+    the same fix applied to the cache: it calls :func:`ocean_skill.cache.enable` for the
+    whole process before the suite touches any source, so a suite run from cron -- which
+    would otherwise fall back to ``$OCEAN_SKILL_DIR`` or a per-user platformdirs cache --
+    keeps reading from and adding to one particular directory across repeated runs. See
+    "Caching" in ``docs/suites.md``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -112,6 +119,7 @@ class SuiteConfig(BaseModel):
     output_dir: str | None = None
     pdf: bool = True
     cache: bool = True
+    cache_dir: str | None = None
     refresh: RefreshConfig | None = None
     catalog_search_paths: list[str] = Field(default_factory=list)
     defaults: dict[str, Any] = Field(default_factory=dict)
@@ -133,6 +141,13 @@ class SuiteConfig(BaseModel):
                     f"catalog_search_paths: entries must be non-empty paths, "
                     f"got {entry!r}"
                 )
+        return v
+
+    @field_validator("cache_dir")
+    @classmethod
+    def _cache_dir_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(f"cache_dir: must be a non-empty path, got {v!r}")
         return v
 
     @model_validator(mode="after")

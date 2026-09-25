@@ -78,6 +78,28 @@ def test_catalog_search_paths_rejects_blank_entries():
         )
 
 
+def test_cache_dir_defaults_to_none():
+    suite = _suite([{"title": "x", "field": {"variables": ["temperature"]}}])
+    assert suite.cache_dir is None
+
+
+def test_cache_dir_accepts_absolute_relative_and_home_paths():
+    for entry in ("/abs/dir", "rel/dir", "~/dir"):
+        suite = _suite(
+            [{"title": "x", "field": {"variables": ["temperature"]}}],
+            cache_dir=entry,
+        )
+        assert suite.cache_dir == entry
+
+
+def test_cache_dir_rejects_blank():
+    with pytest.raises(Exception):
+        _suite(
+            [{"title": "x", "field": {"variables": ["temperature"]}}],
+            cache_dir="   ",
+        )
+
+
 # -- for_each --------------------------------------------------------------------------
 
 

@@ -17,6 +17,8 @@
 #   - catalog_search_paths: uncomment if the WOA23/GLODAPv2 observational catalogs
 #     live in a shared team directory rather than $OCEAN_SKILL_CATALOGS -- useful
 #     for a cron-scheduled run, which does not source a shell rc
+#   - cache_dir: uncomment to pin this suite's cache to one directory across
+#     scheduled runs, instead of $OCEAN_SKILL_DIR or a per-user default
 #
 # For a fast repeated check with no observation comparisons (no regridding, no
 # downloads), use suites/roms_marbl_quick.yaml instead -- same defaults, snapshot
@@ -27,6 +29,8 @@ output_dir: /anvil/scratch/x-smaticka/sims_runtime/cstar/pac_dt_ramp/diagnostics
 
 # catalog_search_paths:
 #   - /anvil/projects/x-ees250129/catalogs
+
+# cache_dir: /anvil/scratch/x-smaticka/sims_runtime/cstar/pac_dt_ramp/osk_cache
 
 refresh:
   catalog: catalogs/pac_dt_ramp.yaml

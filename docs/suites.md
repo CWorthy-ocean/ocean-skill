@@ -51,6 +51,7 @@ cache: true                           # false -> never reuse a prepared field fr
 catalog_search_paths:                 # optional: shared catalog dirs; relative = to this file
   - /anvil/projects/x-ees250129/catalogs
   - ../shared_catalogs
+cache_dir: /anvil/scratch/x-me/osk_cache  # optional: pin this suite's cache; relative = to this file
 
 refresh:                              # optional: rebuild the model's kerchunk reference first
   catalog: catalogs/pac_dt_ramp.yaml
@@ -92,6 +93,18 @@ relative -- so the suite means the same thing run from cron, a notebook, or any 
 directory that doesn't exist is a usage error (`main` returns `2`), since the suite
 names it explicitly. Registering it never outranks a user's own
 `~/.ocean-skill/catalogs` or the project's own `./catalogs`.
+
+`cache_dir:` is the same fix applied to the cache rather than the catalogs: it calls
+`osk.cache.enable(dir)` for the whole process before the suite touches any source
+(resolved the same way as `catalog_search_paths:` -- relative to this suite file, not
+the working directory), so a suite scheduled from cron keeps reading from and adding to
+one particular directory across repeated runs instead of falling back to
+`$OCEAN_SKILL_DIR` or a per-user platformdirs cache. It is a base directory: entries land
+under `<cache_dir>/cache/{prepared,aligned,weights,obs}`, same layout as the default.
+Several suites can point at the same `cache_dir:` -- cache keys are source-name identity,
+not path, so entries from different suites coexist. Unlike `catalog_search_paths:`, a
+missing directory is not an error; the cache layer creates what it needs. See "Caching"
+below, and `docs/caching.md` for the key format and identity-caveat this inherits.
 
 ### `field:` -- model only
 
@@ -192,6 +205,10 @@ page, which matters after a restart rewrites already-seen timestamps (`keep:
 latest-per-file`) and an old prepared field could otherwise be served under a select
 that now means something different.
 
+Set `cache_dir:` to pin where those entries accumulate across repeated runs of this
+suite (see the schema section above); only closed-window pages actually add to it, since
+every open-window page runs with caching off regardless of where the cache lives.
+
 ## Output layout
 
 Every invocation writes its own report directory -- nothing is ever overwritten:
@@ -211,9 +228,10 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
 command was run, down to the second, plus a short random suffix so two runs started in
 the same second still land in different directories. `manifest.json` records the fully
 expanded page list (every `time: latest`/`month: run`/window already resolved to a
-literal value), each page's outcome, and the resolved `catalog_search_paths:`
-directories -- enough that a second person with the same suite YAML and the same
-catalogs gets the identical report.
+literal value), each page's outcome, the resolved `catalog_search_paths:` directories,
+and the effective `cache_dir` (the suite's own if set, otherwise wherever
+`osk.cache.base_dir()` already pointed) -- enough that a second person with the same
+suite YAML and the same catalogs gets the identical report.
 
 `run.log` is a mirror of stdout/stderr for the run: a `== page i/n: <title> ==` header
 and a `done in Ns`/`SKIPPED after Ns` line bracket each page, so a warning in between
