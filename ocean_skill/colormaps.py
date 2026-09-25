@@ -51,14 +51,42 @@ __all__ = [
 #: BGC species colors — edit here, nothing else needs to change. Values are cmocean
 #: colormap names (``cmo.<name>``). Reused as both the xcmocean "vartype" key and its
 #: own (escaped, exact) match pattern.
+#:
+#: Policy: the twelve BGC species (nitrate, phosphate, silicate, ammonium, iron,
+#: oxygen, DIC, alkalinity, chlorophyll, PAR, turbidity, pH) must each get a
+#: *different* sequential map -- a figure that puts two of them side by side must not
+#: paint them alike (this table's whole reason to exist: ammonium and iron used to
+#: both fall through to xcmocean's "dye" default and collide). Everything else
+#: (physics) follows xcmocean's own family conventions -- temperature/thermal,
+#: salinity/haline, velocity/speed, density/dense, depth/deep, ice/ice -- and *may*
+#: share a hue with a BGC species, since the two are a different family and unlikely
+#: to sit in the same figure. cmocean has 15 sequential maps and ~40 vocabulary
+#: variables, so some cross-family sharing is unavoidable; where it happens it's a
+#: deliberate choice, listed here rather than left as an accident to rediscover:
+#:   - ammonium / sigma_theta: both cmo.dense
+#:   - nitrate / mld / pressure: both cmo.deep
+#:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
+#:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
+#:   - pH cmo.speed_r vs the velocity family's cmo.speed
+#:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
+#:     _METRIC_CMAPS below) -- a separate table by design, not a leak
+#: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
+#: entry, out of scope for this table's BGC-species guarantee: alkalinity (explicit
+#: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
+#: a cell-count/pigment family unlikely to sit beside the twelve species above.
 _SEQUENTIAL_CMAPS: dict[str, str] = {
     # xcmocean's own default for this vartype ("zeta") is a sequential cmo.amp; SSH is
     # signed, not a magnitude, so we use a diverging-look map for its sequential panel
     # too -- a deliberate override, not an oversight.
     "sea_surface_height_above_geoid": "cmo.balance",
-    "nitrate": "cmo.turbid",
-    "phosphate": "cmo.speed",
+    # full standard_name: xcmocean's own "vel" pattern matches the substring "vel" in
+    # "sea_le-vel-", which would otherwise give sea-level anomaly a velocity map.
+    "sea_surface_height_above_sea_level": "cmo.balance",
+    "nitrate": "cmo.deep",
+    "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",
+    "ammonium": "cmo.dense",
+    "iron": "cmo.amp",
     "oxygen": "cmo.gray_r",
     # "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water": "cmo.oxy",
     "dissolved_inorganic_carbon": "cmo.ice_r",
@@ -70,6 +98,22 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # keyed by full standard_name: the resolved name has no "par" substring, so a
     # short "par" key would never match re.search (unlike turbidity/fluorescence).
     "downwelling_photosynthetic_photon_flux_in_sea_water": "cmo.solar",
+    # full standard_name: a bare "ph" key would also match phosphate, photon flux
+    # (PAR) and phaeopigment, all of which contain "ph".
+    "sea_water_ph_reported_on_total_scale": "cmo.speed_r",
+    # kd490: shares turbidity's map -- both are water-clarity/optical measures.
+    "diffuse_attenuation": "cmo.turbid",
+    # eastward_wind/northward_wind; wind_speed already matches xcmocean's own "vel"
+    # pattern (it contains "speed") to the same cmo.speed, so this just extends the
+    # same family to the two wind components. No other standard_name contains "wind".
+    "wind": "cmo.speed",
+    "sea_ice": "cmo.ice",
+    "sigma_theta": "cmo.dense",
+    "conductivity": "cmo.haline",
+    "mixed_layer": "cmo.deep",
+    # full standard_name: a bare "pressure" key is fine too, but spelled out for
+    # symmetry with the other full-standard_name entries above.
+    "sea_water_pressure": "cmo.deep",
 }
 
 #: Display range/log-scale — concerns xcmocean has no notion of at all, so they stay
