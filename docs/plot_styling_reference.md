@@ -409,20 +409,38 @@ physics.plot(title="ROMS GOM vs. WOA (100m, Jan 2001)", renderer="holoviews")  #
 ```
 
 The one-source families default it, the panels having said *when* but nothing having
-said *what*. `Field.plot()` composes what a `select=` has taken off the page — the
-variable's short name, the depth (unless a row or facet axis already names it), and the
-instant (when time has collapsed to a single scalar rather than staying the panels'
-own axis) — as `source: variable · depth · time`, each part dropped when it does not
-apply (`alkalinity · 50 m · 2013-01-16`, or just `alkalinity` when the panels already
-say when and there is no single depth to add). Pass `title=""` to drop it, or any
-string to replace it. `Field.movie()` defaults to the plainer `field_title` (variable
-only); on an interactive movie the name joins each frame's label (`alkalinity —
-2013-01-16`) instead, bokeh's only title there being the panel's own. A single
-comparison (`Comparison.plot()`, a `test | reference | difference` row) defaults to the
-same `variable · depth · time` through the shared spelling, since a lone row has no
-left-edge label to name its variable (that is `field_grid`'s, and only when it stacks
-several rows). A `field_grid` of stacked comparisons still draws no per-row title: each
-row is named down its left edge, and one overall title sits up top if given.
+said *what*. `Field.plot()` composes what a `select=`/`aggregate=` has taken off the
+page — the variable's short name, the depth (unless a row or facet axis already names
+it), and the time — as `source: variable · depth · time`, each part dropped when it
+does not apply or when the panels already say it. Time is spelled one of three ways,
+whichever the collapse actually was:
+
+- a plain `select={"time": ...}` (including a resolved `"latest"`), or a
+  `resample`/`groupby` squeezed to its one surviving bin — the instant itself, e.g.
+  `alkalinity · 50 m · 2013-01-16`;
+- a *collapsing* `aggregate` (a plain `"mean"`/other reduce, no `groupby`/`resample`)
+  — the window it averaged, from `select`'s own time key, e.g. `alkalinity · 50 m ·
+  mean over 2012-01-01–2012-12-31`, or a bare `alkalinity · 50 m · time mean` when no
+  window was named;
+- time still standing over several steps (an ordinary facet) — nothing; the panels
+  already say `Jan 2012`, `Feb 2012`, ... down their own titles.
+
+Pass `title=""` to drop it, or any string to replace it. `Field.movie()` defaults to
+the plainer `field_title` (variable only); on an interactive movie the name joins each
+frame's label (`alkalinity — 2013-01-16`) instead, bokeh's only title there being the
+panel's own. A single comparison (`Comparison.plot()`, a `test | reference |
+difference` row) defaults to the same `variable · depth · time` through the shared
+spelling, since a lone row has no left-edge label to name its variable (that is
+`field_grid`'s, and only when it stacks several rows). A `field_grid` of stacked
+comparisons still draws no per-row title: each row is named down its left edge, and one
+overall title sits up top if given.
+
+A `FieldSet` of several variables (`field_map_grid`, one map panel per variable) draws
+the same way one level up: each panel keeps the variable as its own title, and the
+suptitle carries whatever depth/time every member shares, composed exactly as above --
+`surface · 2012-12-31`, or `surface · mean over 2012-01-01–2012-03-31`. Members that
+disagree (different instants, different depths) drop that part from the suptitle
+rather than pick one.
 
 ### `font_scale`
 

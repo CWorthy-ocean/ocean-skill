@@ -2838,6 +2838,12 @@ def _scalar_time_label(value) -> str:
     return t.strftime(fmt)
 
 
+#: Sentinel default for :func:`field_suptitle`'s ``time`` -- distinguishes "no
+#: override given, derive it from the field's own coordinate" (every existing
+#: caller, including every direct test) from "given as ``None``, say nothing".
+_TIME_NOT_GIVEN = object()
+
+
 def field_suptitle(
     field,
     *,
@@ -2846,6 +2852,7 @@ def field_suptitle(
     label: str | None = None,
     facet_dim: str | None = None,
     row_dim: str | None = None,
+    time: str | None = _TIME_NOT_GIVEN,
 ) -> str:
     """The suptitle a one-field figure carries: what a ``select=`` has taken off the page.
 
@@ -2857,14 +2864,22 @@ def field_suptitle(
     joined with " · " and each part dropped when it is not this figure's to say.
 
     Depth is left out when it is still a facet or row axis — those panels already say
-    it, down the rotated row label or across the columns. Time is included only when it
-    survives as a *scalar* coordinate; a standing time dimension is the facet axis
-    itself, and the panels already say when. A region is included when the field's own
-    ``select`` cropped it to a box (``attrs["region"]``, set by
+    it, down the rotated row label or across the columns. A region is included when the
+    field's own ``select`` cropped it to a box (``attrs["region"]``, set by
     :func:`ocean_skill.align.subset_to_box`) — the one-field counterpart of
     :func:`ocean_skill.comparison.Comparison.as_item`'s ``"region"`` key.
+
+    ``time`` defaults to reading the field's own scalar time coordinate (present only
+    when time has collapsed to one instant; a standing time dimension is the facet axis
+    itself, and the panels already say when) -- the same read
+    :meth:`~ocean_skill.field.Field._map_item`'s own ``"time"`` item key makes via
+    :func:`~ocean_skill.field._map_time_label`, which also covers a case this field
+    alone cannot: a *collapsing* aggregate (a plain reduce, no ``groupby``/``resample``)
+    that removed the time coordinate entirely, spelled instead as its window (``"mean
+    over 2012-01-01–2012-12-31"``). Callers building an item already carry that fuller
+    answer and should pass it through as ``time=item.get("time")`` rather than let this
+    fall back to the narrower coordinate-only read.
     """
-    from ocean_skill.align import _time_name
     from ocean_skill.comparison import _region_label
     from ocean_skill.operators import resolve_dim
 
@@ -2875,9 +2890,19 @@ def field_suptitle(
     if depth and not faceted_vertically:
         extras.append(depth)
 
-    tname = _time_name(field)
-    if tname is not None and tname in field.coords and field.coords[tname].ndim == 0:
-        extras.append(_scalar_time_label(field.coords[tname].values.item()))
+    if time is _TIME_NOT_GIVEN:
+        from ocean_skill.align import _time_name
+
+        tname = _time_name(field)
+        time = (
+            _scalar_time_label(field.coords[tname].values.item())
+            if tname is not None
+            and tname in field.coords
+            and field.coords[tname].ndim == 0
+            else None
+        )
+    if time:
+        extras.append(time)
 
     region = field.attrs.get("region")
     if region is not None:
@@ -2986,6 +3011,12 @@ def field_facet(
     standard_name: str | None = None,
     depth: str | None = None,
     label: str | None = None,
+    # Defaults to _TIME_NOT_GIVEN (not None) so a caller who never mentions
+    # ``time=`` at all still gets field_suptitle's own coordinate-derived
+    # default; ``time=None`` (what the field_facet registry dispatch passes
+    # for an item whose "time" key is explicitly unset -- a still-standing
+    # facet axis, whose panels already say when) suppresses it instead.
+    time: Any = _TIME_NOT_GIVEN,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
     domain: tuple[float, float, float, float] | np.ndarray | None = None,
@@ -3089,6 +3120,7 @@ def field_facet(
             label=label,
             facet_dim=facet_dim,
             row_dim=row_dim,
+            time=time,
         )
         if title is None
         else title
@@ -6530,6 +6562,12 @@ def _render(spec, **kwargs: Any):
             standard_name=item.get("standard_name"),
             depth=item.get("depth"),
             label=item.get("label"),
+            # An item with no "time" key at all (any hand-built item predating
+            # this key, e.g. a direct PlotSpec in a test) falls back to
+            # field_facet's own coordinate-derived default rather than being
+            # made to say nothing -- only an item that *names* "time" (even as
+            # None, for a still-standing facet axis) overrides it.
+            time=item.get("time", _TIME_NOT_GIVEN),
             **opts,
         )
     if family == "facet_movie":
