@@ -350,6 +350,7 @@ class ExpandedPage:
     cache: bool
     status: str = "pending"
     reason: str | None = None
+    elapsed: float | None = None
     metrics_records: list[dict[str, Any]] = _dc_field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:

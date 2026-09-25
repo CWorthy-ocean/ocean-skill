@@ -8,6 +8,8 @@ rather than ``_refresh_sources`` silently pinning every suite to the old ``"all"
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -280,7 +282,9 @@ def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
     out = capsys.readouterr().out
     assert "Physics latest" in out
     assert result.report_dir is None
+    assert result.log is None
     assert not (tmp_path / "out").exists()
+    assert not list(tmp_path.rglob("run.log"))
 
 
 def test_a_missing_variable_page_is_skipped_not_fatal(
@@ -605,3 +609,150 @@ def test_main_reports_exit_code_from_run(tmp_path, stub_model, capsys):
     assert code == 0
     out = capsys.readouterr().out
     assert "page(s) drawn" in out
+
+
+# -- run.log: the terminal transcript, persisted -------------------------------------
+#
+# ``run_suite`` mirrors stdout/stderr to ``<report_dir>/run.log`` for the whole run
+# (see ``ocean_skill.workflows.run._capture_terminal``). These tests check that the
+# file matches what the terminal actually showed, carries the tracebacks the terminal
+# never shows (skipped pages, a fatal crash), stays attributable per page via headers
+# and timing, is never written for ``--list``, and never leaves stdout/stderr swapped
+# out after the run -- success, skip, or crash.
+
+
+def test_run_log_is_written_and_matches_terminal(
+    tmp_path, stub_model, monkeypatch, capsys
+):
+    monkeypatch.setattr(_comparison, "_variable_available", lambda *a, **k: False)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert result.log == result.report_dir / "run.log"
+    assert result.log.exists()
+    log_text = result.log.read_text()
+    out = capsys.readouterr().out
+    # "SKIPPED after ...:" is a plain print(), so it reaches both the log file
+    # and the real terminal; the warnings.warn() alongside it is not checked here
+    # because pytest's own warning-capture plugin intercepts it before stderr
+    # regardless of this tee (a test-harness artifact, not a run.py behavior).
+    assert "SKIPPED after" in log_text
+    assert "SKIPPED after" in out
+
+
+def test_run_log_has_traceback_for_skipped_page(tmp_path, stub_model, monkeypatch):
+    monkeypatch.setattr(_comparison, "_variable_available", lambda *a, **k: False)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert "Traceback" in result.log.read_text()
+
+
+def test_output_before_report_dir_exists_is_buffered_into_run_log(
+    tmp_path, stub_model, monkeypatch
+):
+    def fake_refresh(spec, cat):
+        print("refresh happened")
+
+    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", fake_refresh)
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": "catalogs/x.yaml",
+            "sources": [{"name": "stub", "files": "x/*.nc", "ref": "refs/x.parquet"}],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    assert "refresh happened" in result.log.read_text()
+
+
+def test_fatal_crash_still_leaves_run_log_with_traceback(
+    tmp_path, stub_model, monkeypatch
+):
+    from ocean_skill.workflows.report import PdfReport
+
+    def boom(self, text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(PdfReport, "title_page", boom)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_suite(path)
+
+    report_dirs = list((tmp_path / "out").iterdir())
+    assert len(report_dirs) == 1
+    log_text = (report_dirs[0] / "run.log").read_text()
+    assert "boom" in log_text
+    assert "Traceback" in log_text
+
+
+def test_streams_are_restored_after_run(tmp_path, stub_model):
+    stdout_before, stderr_before = sys.stdout, sys.stderr
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    run_suite(path)
+    assert sys.stdout is stdout_before
+    assert sys.stderr is stderr_before
+
+
+def test_streams_are_restored_after_a_crash(tmp_path, stub_model, monkeypatch):
+    from ocean_skill.workflows.report import PdfReport
+
+    def boom(self, text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(PdfReport, "title_page", boom)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    stdout_before, stderr_before = sys.stdout, sys.stderr
+    with pytest.raises(RuntimeError):
+        run_suite(path)
+    assert sys.stdout is stdout_before
+    assert sys.stderr is stderr_before
+
+
+def test_main_summary_lines_are_appended_to_run_log(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    code = main([str(path)])
+    assert code == 0
+
+    latest = Path((tmp_path / "out" / "latest.txt").read_text())
+    log_text = (latest / "run.log").read_text()
+    assert "page(s) drawn" in log_text
+
+
+def test_run_log_has_page_headers_and_timing(tmp_path, stub_model, monkeypatch):
+    real_build = _pages.build
+
+    def fake_build(page, *, pooled_records=None):
+        if page.kind == "field":
+            return real_build(page, pooled_records=pooled_records)
+        raise RuntimeError("regrid failed")
+
+    monkeypatch.setattr(_pages, "build", fake_build)
+    suite = _model_only_suite(tmp_path)
+    suite["pages"].append(
+        {
+            "title": "WOA",
+            "compare": {
+                "reference": ["woa23_nitrate_month01"],
+                "variables": ["nitrate"],
+                "aggregate": {"time": "mean"},
+            },
+        }
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    log_text = result.log.read_text()
+    assert "== page 1/2: Physics latest ==" in log_text
+    assert "== page 2/2: WOA ==" in log_text
+    assert "done in" in log_text
+    assert "SKIPPED after" in log_text
+
+    page2_idx = log_text.index("== page 2/2")
+    assert log_text.index("regrid failed", page2_idx) > page2_idx
+
+    assert result.pages[0].elapsed is not None and result.pages[0].elapsed >= 0
+    assert result.pages[1].elapsed is not None and result.pages[1].elapsed >= 0
