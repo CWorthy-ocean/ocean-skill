@@ -420,3 +420,83 @@ def test_expand_is_json_serializable_and_deterministic():
     dicts1 = [p.as_dict() for p in out1]
     dicts2 = [p.as_dict() for p in out2]
     assert json.dumps(dicts1, sort_keys=True) == json.dumps(dicts2, sort_keys=True)
+
+
+# -- pinning size/zoom/figsize to the page when pdf: true ------------------------------
+
+
+def test_zoom_is_pinned_to_page_and_warned_once_when_pdf_is_on():
+    suite = _suite(
+        [
+            {"title": "a", "field": {"variable": "temperature"}},
+            {"title": "b", "field": {"variable": "salinity"}},
+        ],
+        defaults={"test": "stub", "plot": {"zoom": 1.5}},
+    )
+    assert suite.pdf  # default
+    with pytest.warns(UserWarning, match=r"zoom=1\.5.*ignored"):
+        out = P.expand(suite)
+
+    assert [p.plot for p in out] == [{"size": "page"}, {"size": "page"}]
+
+
+def test_zoom_is_untouched_when_pdf_is_false():
+    suite = _suite(
+        [{"title": "a", "field": {"variable": "temperature"}}],
+        defaults={"test": "stub", "plot": {"zoom": 1.5}},
+        pdf=False,
+    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = P.expand(suite)  # no warning raised
+
+    assert out[0].plot == {"zoom": 1.5}
+
+
+def test_per_page_figsize_is_pinned_and_warned_independently_of_defaults_zoom():
+    suite = _suite(
+        [
+            {
+                "title": "a",
+                "field": {"variable": "temperature"},
+                "plot": {"figsize": [12, 3]},
+            },
+            {"title": "b", "field": {"variable": "salinity"}},
+        ],
+        defaults={"test": "stub", "plot": {"zoom": 1.5}},
+    )
+    with pytest.warns(UserWarning) as caught:
+        out = P.expand(suite)
+
+    messages = {str(w.message) for w in caught.list}
+    assert any("figsize=[12, 3]" in m for m in messages)
+    assert any("zoom=1.5" in m for m in messages)
+    # each distinct kwarg warns once across the whole suite, not once per page
+    assert sum("zoom=1.5" in m for m in messages) == 1
+    assert sum("figsize=" in m for m in messages) == 1
+    assert out[0].plot == {"size": "page"}
+    assert out[1].plot == {"size": "page"}
+
+
+def test_summary_pages_own_kwargs_are_pinned_too():
+    # a summary page's sizing kwargs live directly on `summary:`, not `plot:` -- see
+    # ocean_skill.workflows.pages.build, which forwards page.kwargs (not page.plot)
+    # to osk.summary().
+    suite = _suite(
+        [
+            {
+                "title": "a",
+                "compare": {"test": "stub", "reference": ["ref"], "variables": ["x"]},
+            },
+            {"title": "overview", "summary": {"zoom": 2.0}},
+        ],
+        defaults={"test": "stub"},
+    )
+    with pytest.warns(UserWarning, match=r"zoom=2\.0.*ignored"):
+        out = P.expand(suite)
+
+    summary_page = next(p for p in out if p.kind == "summary")
+    assert summary_page.kwargs["size"] == "page"
+    assert "zoom" not in summary_page.kwargs

@@ -24,7 +24,6 @@ refresh:
 defaults:
   test: pac_dt_ramp
   depths: [surface, 100]
-  plot: {zoom: 1.5}
 
 pages:
   - title: "Physics — latest snapshot (surface)"

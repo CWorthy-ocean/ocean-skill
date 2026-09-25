@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import calendar
 import re
+import warnings
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from itertools import product
@@ -363,6 +364,32 @@ class ExpandedPage:
         }
 
 
+def _pin_to_page(kwargs: dict[str, Any], *, seen: set[str]) -> dict[str, Any]:
+    """Drop ``zoom``/``size``/``figsize`` and pin the figure to the ``"page"`` canvas.
+
+    A suite's ``report.pdf`` pages are a fixed 8.5x11in (see
+    :mod:`ocean_skill.workflows.report`), so a page or its ``defaults.plot`` asking to
+    be drawn a different size no longer means anything once it lands there -- the
+    figure is pinned regardless, with a warning naming the ignored kwarg. Warned once
+    per key across the whole suite (via ``seen``), not once per expanded page, since
+    ``defaults.plot: {zoom: ...}`` would otherwise repeat the same warning on every
+    page. Only called when ``suite.pdf`` is true; a PNG-only suite keeps its own sizing.
+    """
+    pinned = dict(kwargs)
+    for key in ("zoom", "size", "figsize"):
+        if key in pinned:
+            value = pinned.pop(key)
+            if key not in seen:
+                seen.add(key)
+                warnings.warn(
+                    f"{key}={value!r} ignored: report.pdf pages are a fixed "
+                    "8.5x11in; set pdf: false to size figures freely",
+                    stacklevel=2,
+                )
+    pinned["size"] = "page"
+    return pinned
+
+
 def expand(suite: Any) -> list[ExpandedPage]:
     """Turn ``suite.pages`` into a flat, fully-resolved list of :class:`ExpandedPage`.
 
@@ -378,6 +405,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
     test_source = defaults.get("test")
 
     index_cache: dict[str, Any] = {}
+    pin_seen: set[str] = set()
 
     def get_index(source: str) -> Any:
         if source not in index_cache:
@@ -406,6 +434,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 **plot_defaults,
                 **_template_value(page.plot, namespace, title=title),
             }
+            if suite.pdf:
+                plot = _pin_to_page(plot, seen=pin_seen)
 
             if page.kind == "field":
                 kwargs = _template_value(dict(page.field), namespace, title=title)
@@ -466,6 +496,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
 
             else:  # summary
                 kwargs = _template_value(dict(page.summary), namespace, title=title)
+                if suite.pdf:
+                    kwargs = _pin_to_page(kwargs, seen=pin_seen)
                 out.append(
                     ExpandedPage(
                         title=title,
