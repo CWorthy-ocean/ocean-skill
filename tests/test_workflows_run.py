@@ -274,7 +274,7 @@ def test_model_only_report_writes_pdf_pngs_and_manifest(tmp_path, stub_model):
     manifest = json.loads(result.manifest.read_text())
     assert manifest["name"] == "quick_check"
     assert manifest["pages"][0]["status"] == "ok"
-    assert len(result.figures) == 3  # title page, one drawn page, log page
+    assert len(result.figures) == 1  # one drawn page
 
 
 def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
@@ -740,10 +740,10 @@ def test_fatal_crash_still_leaves_run_log_with_traceback(
 ):
     from ocean_skill.workflows.report import PdfReport
 
-    def boom(self, text):
+    def boom(self, fig, stem):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(PdfReport, "title_page", boom)
+    monkeypatch.setattr(PdfReport, "emit", boom)
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -767,10 +767,10 @@ def test_streams_are_restored_after_run(tmp_path, stub_model):
 def test_streams_are_restored_after_a_crash(tmp_path, stub_model, monkeypatch):
     from ocean_skill.workflows.report import PdfReport
 
-    def boom(self, text):
+    def boom(self, fig, stem):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(PdfReport, "title_page", boom)
+    monkeypatch.setattr(PdfReport, "emit", boom)
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
     stdout_before, stderr_before = sys.stdout, sys.stderr
     with pytest.raises(RuntimeError):
