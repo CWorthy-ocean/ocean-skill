@@ -277,6 +277,51 @@ def test_model_only_report_writes_pdf_pngs_and_manifest(tmp_path, stub_model):
     assert len(result.figures) == 3  # title page, one drawn page, log page
 
 
+def test_a_one_variable_monthly_means_page_draws_instead_of_being_skipped(
+    tmp_path, monkeypatch
+):
+    """A one-variable ``variables:`` list used to be refused and skipped.
+
+    :meth:`~ocean_skill.field.Field._map_item` used to refuse a standing monthly
+    time axis (see ``tests/test_field_map_grid.py``'s own coverage of the same
+    fix), logging the page as ``skipped`` -- the exact shape of the shipped
+    suites' own monthly-means pages (``suites/roms_marbl_quick.yaml``,
+    ``suites/roms_marbl_diagnostic.yaml``).
+    """
+    months = pd.date_range("2010-01-01", periods=3, freq="MS")
+    lat = xr.DataArray([10.0, 20.0], dims="lat")
+    lon = xr.DataArray([-100.0, -90.0], dims="lon")
+
+    def stub(*a, **k):
+        da = xr.DataArray(
+            np.full((3, 2, 2), 5.0),
+            dims=("time", "lat", "lon"),
+            coords={"time": months, "lat": lat, "lon": lon},
+            attrs={"units": "degC"},
+        )
+        return da, None
+
+    monkeypatch.setattr(_comparison, "prepare_source", stub)
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda source: months)
+
+    suite = _model_only_suite(tmp_path)
+    suite["pages"] = [
+        {
+            "title": "Monthly means -- temperature",
+            "field": {
+                "variables": ["temperature"],
+                "aggregate": {"time": {"resample": "1MS", "reduce": "mean"}},
+            },
+        },
+    ]
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    page = result.pages[0]
+    assert page.status == "ok", page.reason
+    assert len(result.figures) == 3  # title page, one drawn page, log page
+
+
 def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
     result = run_suite(path, list_only=True)

@@ -123,6 +123,68 @@ def _facet_dims_of(da) -> tuple[str | None, str | None]:
     return _facet_dims(da, spatial)
 
 
+def _map_time_label(
+    field, select: dict[str, Any] | None, aggregate: dict[str, Any] | None
+) -> str | None:
+    """Spell the one time a map's own ``select``/``aggregate`` settled on, or ``None``.
+
+    A map item carries no "when" of its own the way a facet panel's own label does --
+    :func:`Field._map_item` squeezes any surviving size-one facet/row axis to a scalar
+    coordinate precisely so this has something to read. Two shapes:
+
+    * ``field`` still carries a scalar time coordinate (``ndim == 0``) -- an ordinary
+      ``select={"time": ...}`` (including a resolved ``"latest"``), a ``resample``/
+      ``groupby`` squeezed to its one surviving bin, or a climatology's bare unsqueezed
+      ``time`` -- read straight off it via :func:`~ocean_skill.plot.matplotlib_renderer
+      ._scalar_time_label`, the same coordinate :func:`~ocean_skill.plot
+      .matplotlib_renderer.field_suptitle` already reads for a bare, unsqueezed
+      :class:`Field`.
+    * ``field`` carries no time coordinate at all -- either there never was one, or a
+      *collapsing* ``aggregate`` (a plain reduce, no ``groupby``/``resample``) removed
+      it outright, leaving nothing on the data itself to say what was averaged.
+      Spelled instead from ``select``/``aggregate``: the window ``select`` named
+      (e.g. the suite's own injected ``{"min", "max"}``), as ``"mean over
+      2012-01-01–2012-12-31"``, or a bare ``"time mean"`` when no window was named.
+
+    A time axis still standing at more than one step (an ordinary multi-panel facet)
+    reads as neither -- its coordinate is a dim of size greater than one, not a scalar,
+    and no collapsing reduction ran -- so this returns ``None`` and the panels are left
+    to say *when* on their own, exactly as they already do.
+    """
+    from ocean_skill.align import _time_name
+    from ocean_skill.plot.matplotlib_renderer import _scalar_time_label
+
+    tname = _time_name(field)
+    if tname is not None and tname in field.coords and field.coords[tname].ndim == 0:
+        return _scalar_time_label(field.coords[tname].values.item())
+
+    if not aggregate:
+        return None
+    from ocean_skill.sources import _TIME_KEYS
+
+    time_entry = next((aggregate[k] for k in _TIME_KEYS if k in aggregate), None)
+    if time_entry is None:
+        return None
+    kept_axis = isinstance(time_entry, dict) and (
+        "groupby" in time_entry or "resample" in time_entry
+    )
+    if kept_axis:
+        # A kept-axis reduction with nothing scalar surviving is a standing facet
+        # axis this helper does not narrate -- the panels already say when.
+        return None
+    reduce_name = (
+        time_entry if isinstance(time_entry, str) else time_entry.get("reduce")
+    )
+    if reduce_name is None:
+        return None
+    from ocean_skill.comparison import _selected_time, _time_label
+
+    window = _selected_time(select or {})
+    if window is not None:
+        return f"{reduce_name} over {_time_label(window)}"
+    return f"time {reduce_name}"
+
+
 def _grid_has_vertical_axis(meta: dict[str, Any]) -> bool:
     """Whether a catalog entry's own metadata declares a vertical axis at all.
 
@@ -995,6 +1057,13 @@ class Field:
         are read off ``field``'s own shape (:func:`_facet_dims_of`), not
         ``self.data``'s, so a level already reduced away here does not also
         count as a facet axis.
+
+        Also carries a ``"time"`` key (:func:`_map_time_label`) -- ``None`` here
+        whenever time is still a standing facet/row axis (the panels already say
+        when), and otherwise the collapsing reduction's own window, since nothing
+        else on this item would say it. :meth:`_map_item` recomputes it after its
+        own squeeze, when a size-one facet axis becomes the scalar coordinate this
+        already reads.
         """
         from ocean_skill.comparison import _depth_label, _selected_depth
 
@@ -1008,6 +1077,7 @@ class Field:
             "units": field.attrs.get("units"),
             "standard_name": self.standard_name,
             "depth": depth,
+            "time": _map_time_label(field, self.select, self.aggregate),
             "label": self.label or self.source,
         }
         row_dim, facet_dim = _facet_dims_of(field)
@@ -1145,7 +1215,16 @@ class Field:
             # the scalar coordinate field_suptitle/grid_suptitle already know how
             # to read for context (e.g. a WOA climatology's bare "time").
             field = field.squeeze(axes, drop=False)
-            item = {**item, "field": field, "facet_dim": None, "row_dim": None}
+            item = {
+                **item,
+                "field": field,
+                "facet_dim": None,
+                "row_dim": None,
+                # Recomputed against the now-squeezed field: a size-one facet/row
+                # axis just became the scalar coordinate _map_time_label reads,
+                # so this member's item can say when for the first time.
+                "time": _map_time_label(field, self.select, self.aggregate),
+            }
         return item
 
     @graft_plot_options()
@@ -1629,12 +1708,18 @@ class FieldSet:
         if maps and len(maps) == len(self.fields):
             # Every member draws as a map -- one panel each, its own colour
             # scale and colorbar (different variables, different units), unlike
-            # the shared-scale rows below. _map_item refuses any member still
-            # faceted over time or depth, so every item reaching here is
-            # already a single map.
-            items = self._map_items()
-            family = "field_facet" if len(items) == 1 else "field_map_grid"
-            spec = PlotSpec(family=family, items=items, options=kwargs)
+            # the shared-scale rows below. A lone member is drawn by its own
+            # Field.plot() instead of _map_items(): that keeps a genuinely
+            # standing facet/row axis (several timesteps, several depths)
+            # faceted the ordinary way (one panel per step, e.g. "Jan 2012",
+            # "Feb 2012", ...) rather than being refused by _map_item, whose
+            # refusal exists only for a *set* of several maps side by side --
+            # a lone one has no such neighbour to keep level with.
+            if len(self.fields) == 1:
+                return self.fields[0].plot(renderer=renderer, **kwargs)
+            spec = PlotSpec(
+                family="field_map_grid", items=self._map_items(), options=kwargs
+            )
             return render(spec, renderer=renderer)
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]
         mixed = len({f.family for f in self.fields} & {"series", "profile"}) > 1

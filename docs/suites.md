@@ -119,10 +119,14 @@ field:
 
 `variables:` is always a list (even for one variable) and becomes `field()`'s
 `variable=`; a combination (`{sum: [...]}`) or calculator (`{calculate: ...}`) spec
-works the same as it does from Python. Several variables draw as one `FieldSet` figure
--- fine for a snapshot, but a *faceted* member (several time steps or depths) is
-refused by `FieldSet.plot()`, which is why the monthly-means page below fans one
-variable per page with `for_each` instead of listing them all in one `field:` block.
+works the same as it does from Python. A one-variable list draws exactly as
+`osk.field(source, variable).plot()` would -- one panel per facet step (a month of a
+`resample`, say), rows per depth -- which is why the monthly-means page below fans one
+variable per page with `for_each` rather than listing several in one `field:` block.
+*Several* variables in one `field:` block draw as one `FieldSet` figure, one map panel
+per variable -- fine for a snapshot, but every member must already be a single map:
+one still faceted over time or depth (several steps standing) is refused, naming the
+offending source and axis.
 
 A depth-selected page cannot include a variable with no vertical axis (`ssh`, `mld`,
 `co2_flux`, `PH`, `pCO2`) -- that raises a clear schema error naming the offending
@@ -193,6 +197,14 @@ run-mean comparison like the GLODAP page) gets a literal `{"min", "max"}` window
 injected covering the run's full recorded span -- this is what makes the expanded page
 list, written into `manifest.json`, reproduce the same figures on replay rather than
 silently meaning "whatever the run happens to cover by then."
+
+None of this needs writing into a page's own `title:` to show up on the figure: a
+`field:` page whose `select`/`aggregate` collapses time to one answer -- the resolved
+`latest` instant, a single facet bin, or a window-reducing mean -- carries it
+automatically in the suptitle (`surface · 2012-12-31`, or `surface · mean over
+2012-01-01–2012-12-31`), the same way it already carries the depth a `select`
+narrowed. A page still faceted over several steps needs no suptitle text either,
+since each panel already says its own (`Jan 2012`, `Feb 2012`, ...).
 
 ## Caching
 

@@ -207,12 +207,13 @@ def test_ncols_wraps_the_panels(stub_by_variable):
 # -- rows=/cols= facet the grid on variable x source -------------------------------------
 
 
-def _map_item(source, variable, value, *, units="mmol m-3"):
+def _map_item(source, variable, value, *, units="mmol m-3", time=None):
     return {
         "field": _map(variable, value, units=units),
         "units": units,
         "standard_name": variable,
         "label": source,
+        "time": time,
     }
 
 
@@ -345,6 +346,98 @@ def test_a_duplicate_variable_source_pair_in_a_map_grid_is_refused():
     item = _map_item("run_a", NITRATE, 5.0)
     with pytest.raises(ValueError, match="land in the same cell"):
         field_map_grid([item, item], cols="variable")
+
+
+def test_the_shared_instant_lifts_to_the_suptitle():
+    """Every member drawn at the same instant carries it in the suptitle.
+
+    The :class:`~ocean_skill.field.FieldSet` counterpart of a single
+    :class:`~ocean_skill.field.Field`'s own ``variable · depth · time`` (see
+    ``tests/test_facet.py``'s ``test_a_collapsed_single_map_also_carries_when``),
+    now that :func:`~ocean_skill.field.Field._map_item` fills in the item's own
+    ``"time"`` key rather than leaving it unset.
+    """
+    from ocean_skill.plot.registry import render
+
+    items = [
+        {**_map_item("stub", NITRATE, 5.0, time="2012-03-01"), "depth": "surface"},
+        {**_map_item("stub", SILICATE, 20.0, time="2012-03-01"), "depth": "surface"},
+    ]
+    static = render(_spec(items), renderer="matplotlib")
+    assert static._suptitle.get_text() == "surface · 2012-03-01"
+
+    obj = render(_spec(items), renderer="holoviews")
+    assert obj.opts.get("plot").kwargs.get("title") == "surface · 2012-03-01"
+
+
+def test_members_at_different_instants_carry_no_time_in_the_suptitle():
+    from ocean_skill.plot.registry import render
+
+    items = [
+        {**_map_item("stub", NITRATE, 5.0, time="2012-01-01"), "depth": "surface"},
+        {**_map_item("stub", SILICATE, 20.0, time="2012-02-01"), "depth": "surface"},
+    ]
+    static = render(_spec(items), renderer="matplotlib")
+    assert static._suptitle.get_text() == "surface"
+
+
+def test_a_collapsing_mean_over_a_window_names_its_span_in_the_suptitle(
+    stub_by_variable,
+):
+    """A plain collapsing ``aggregate`` names its window in the suptitle.
+
+    ``aggregate={"time": "mean"}`` drops the coordinate entirely -- verified
+    empirically, ``xr.DataArray.mean("time")`` leaves no scalar coordinate
+    behind at all -- so the window has to come from ``select``/``aggregate``
+    themselves (:func:`~ocean_skill.field._map_time_label`) rather than from
+    anything left standing on the data.
+    """
+    stub_by_variable(
+        {"nitrate": _map("nitrate", 5.0), "silicate": _map("silicate", 20.0)}
+    )
+    fig = _make_set(
+        [NITRATE, SILICATE],
+        select={"depth": "surface", "time": {"min": "2012-01-01", "max": "2012-03-31"}},
+        aggregate={"time": "mean"},
+    ).plot()
+    assert fig._suptitle.get_text() == "surface · mean over 2012-01-01–2012-03-31"
+
+    obj = _make_set(
+        [NITRATE, SILICATE],
+        select={"depth": "surface", "time": {"min": "2012-01-01", "max": "2012-03-31"}},
+        aggregate={"time": "mean"},
+    ).plot(renderer="holoviews")
+    assert (
+        obj.opts.get("plot").kwargs.get("title")
+        == "surface · mean over 2012-01-01–2012-03-31"
+    )
+
+
+def test_a_one_element_monthly_list_draws_one_panel_per_month(stub_by_variable):
+    """A one-variable ``variables:`` list used to be refused outright.
+
+    :meth:`~ocean_skill.field.Field._map_item` used to raise on the standing
+    monthly axis before :class:`~ocean_skill.field.FieldSet.plot`'s own
+    one-member shortcut ever got a chance to run. Now the shortcut hands a lone
+    member straight to its own :meth:`~ocean_skill.field.Field.plot`, which
+    facets the months exactly as a bare ``Field`` already does
+    (``docs/suites.md``'s own monthly-means suite page: one variable per page,
+    several months per page).
+    """
+    stub_by_variable({"nitrate": _gridded_map(nt=3)})
+    aggregate = {"time": {"resample": "1MS", "reduce": "mean"}}
+    fig = _make_set([NITRATE], aggregate=aggregate).plot()
+    titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+    assert titles == ["Jan 2012", "Feb 2012", "Mar 2012"]
+
+    obj = _make_set([NITRATE], aggregate=aggregate).plot(renderer="holoviews")
+    import holoviews as hv
+
+    hv_titles = [
+        el.opts.get("plot").kwargs.get("title")
+        for el in obj.traverse(lambda x: x, [hv.QuadMesh])
+    ]
+    assert hv_titles == ["Jan 2012", "Feb 2012", "Mar 2012"]
 
 
 def test_shared_depth_still_lifts_to_the_suptitle_when_faceted():

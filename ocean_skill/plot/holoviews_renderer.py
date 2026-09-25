@@ -768,6 +768,7 @@ def _field_facet(
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
+        _TIME_NOT_GIVEN,
         _aspect_of,
         _limits,
         facet_labels,
@@ -800,6 +801,10 @@ def _field_facet(
             label=item.get("label"),
             facet_dim=facet_dim,
             row_dim=row_dim,
+            # See the static field_facet's own equivalent comment: an item with
+            # no "time" key at all still gets field_suptitle's coordinate-derived
+            # default; one that names it (even as None) overrides it.
+            time=item.get("time", _TIME_NOT_GIVEN),
         )
         if title is None
         else title
