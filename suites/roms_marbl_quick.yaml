@@ -1,6 +1,8 @@
 # ROMS-MARBL simulation diagnostic, quick form: the latest snapshot and monthly
 # means, model only -- no observation comparisons, so no regridding and no
-# downloads. Meant to be run often while a simulation is progressing.
+# downloads. Meant to be run often while a simulation is progressing -- each
+# report keeps its own refs/ copy of the kerchunk reference it was drawn from,
+# so earlier reports stay tied to their own data as the run grows.
 #
 # Run it:
 #     ocean-skill-run suites/roms_marbl_quick.yaml

@@ -512,10 +512,24 @@ def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeyp
         },
     )
     path = _write_suite(tmp_path, suite)
-    run_suite(path)
+    result = run_suite(path)
     assert len(calls) == 1
     assert calls[0][1] == "catalogs/x.yaml"
     assert calls[0][0][0]["name"] == "stub"
+
+    # _refresh_sources was faked and never actually built refs/x.parquet, so the
+    # snapshot step (which reads suite.refresh.sources directly, not this fake's
+    # return value) has nothing to copy -- noted, not fatal.
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["refresh"]["catalog"] == str(Path("catalogs/x.yaml").resolve())
+    assert manifest["refresh"]["sources"] == [
+        {
+            "name": "stub",
+            "ref": str(Path("refs/x.parquet").resolve()),
+            "snapshot": None,
+        }
+    ]
+    assert result.refs == []
 
 
 def _obs_suite(tmp_path):
@@ -823,3 +837,151 @@ def test_run_log_has_page_headers_and_timing(tmp_path, stub_model, monkeypatch):
 
     assert result.pages[0].elapsed is not None and result.pages[0].elapsed >= 0
     assert result.pages[1].elapsed is not None and result.pages[1].elapsed >= 0
+
+
+# ======================================================================================
+# ``refs/`` snapshot: each report directory keeps a copy of the reference it was drawn
+# from, since the shared reference at ``refresh.sources[].ref`` is rewritten in place
+# by every later run's own refresh.
+# ======================================================================================
+
+
+def test_report_dir_gets_a_snapshot_of_the_refreshed_reference(tmp_path, stub_model):
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    _segment(tmp_path / "out.1.nc", 43200.0, 1.0)
+    ref = tmp_path / "refs" / "gom_bgc.json"
+    catalog_path = tmp_path / "catalogs" / "x.yaml"
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": str(catalog_path),
+            "sources": [
+                {
+                    "name": "GOM_bgc",
+                    "files": str(tmp_path / "out.*.nc"),
+                    "ref": str(ref),
+                }
+            ],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    snapshot = result.report_dir / "refs" / "gom_bgc.json"
+    assert snapshot.exists()
+    assert snapshot.read_bytes() == ref.read_bytes()
+    assert result.refs == [snapshot]
+
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["refresh"]["catalog"] == str(catalog_path.resolve())
+    [record] = manifest["refresh"]["sources"]
+    assert record["name"] == "GOM_bgc"
+    assert record["ref"] == str(ref.resolve())
+    assert record["snapshot"] == str(snapshot)
+
+
+def test_snapshot_survives_the_next_refresh_overwriting_the_shared_ref(
+    tmp_path, stub_model
+):
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    ref = tmp_path / "refs" / "gom_bgc.json"
+    catalog_path = tmp_path / "catalogs" / "x.yaml"
+    refresh_block = {
+        "catalog": str(catalog_path),
+        "sources": [
+            {
+                "name": "GOM_bgc",
+                "files": str(tmp_path / "out.*.nc"),
+                "ref": str(ref),
+            }
+        ],
+    }
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, refresh=refresh_block))
+
+    result1 = run_suite(path)
+    snapshot1 = result1.report_dir / "refs" / "gom_bgc.json"
+    bytes1 = snapshot1.read_bytes()
+
+    _segment(tmp_path / "out.1.nc", 43200.0, 1.0)  # the "run" grows
+    result2 = run_suite(path)
+    snapshot2 = result2.report_dir / "refs" / "gom_bgc.json"
+
+    assert snapshot1.read_bytes() == bytes1, (
+        "an earlier report's snapshot must not change"
+    )
+    assert snapshot2.read_bytes() != bytes1
+    ds = xr.open_dataset(
+        str(snapshot1), engine="kerchunk", chunks={}, decode_times=False
+    )
+    assert ds.sizes["ocean_time"] == 2, "the first report still reads only its own data"
+
+
+def test_a_parquet_reference_directory_is_copied_as_a_tree(tmp_path):
+    """A parquet kerchunk target is a directory; the copy must be a full tree.
+
+    Built and compared byte-for-byte without ever opening it as parquet (see the
+    module note at the top of tests/test_build_helpers.py: the parquet reference
+    reader is intermittently broken upstream).
+    """
+    import filecmp
+
+    from ocean_skill.config import RefreshConfig
+    from ocean_skill.workflows.run import _snapshot_refs
+
+    src = tmp_path / "refs" / "x.parquet"
+    (src / "NO3").mkdir(parents=True)
+    (src / ".zmetadata").write_text('{"zarr_consolidated_format": 1}')
+    (src / "NO3" / "refs.0.parq").write_bytes(b"not-really-parquet-bytes")
+
+    refresh = RefreshConfig.model_validate(
+        {
+            "catalog": str(tmp_path / "cat.yaml"),
+            "sources": [{"name": "x", "files": "*.nc", "ref": str(src)}],
+        }
+    )
+    report_dir = tmp_path / "report"
+    report_dir.mkdir()
+
+    records = _snapshot_refs(refresh, report_dir)
+
+    dst = report_dir / "refs" / "x.parquet"
+    assert dst.is_dir()
+    cmp = filecmp.dircmp(src, dst)
+    assert not cmp.diff_files and not cmp.left_only and not cmp.right_only
+    for sub in cmp.subdirs.values():
+        assert not sub.diff_files and not sub.left_only and not sub.right_only
+    assert records == [{"name": "x", "ref": str(src.resolve()), "snapshot": str(dst)}]
+
+
+def test_a_missing_reference_is_noted_not_fatal(tmp_path, stub_model):
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": str(tmp_path / "catalogs" / "x.yaml"),
+            "sources": [
+                {
+                    "name": "stub",
+                    "files": str(tmp_path / "nothing" / "*.nc"),
+                    "ref": str(tmp_path / "refs" / "x.json"),
+                }
+            ],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    assert not (result.report_dir / "refs").exists()
+    assert result.refs == []
+    manifest = json.loads(result.manifest.read_text())
+    [record] = manifest["refresh"]["sources"]
+    assert record["snapshot"] is None
+    assert "no reference at" in result.log.read_text()
+
+
+def test_manifest_refresh_is_null_without_a_refresh_block(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["refresh"] is None
+    assert result.refs == []

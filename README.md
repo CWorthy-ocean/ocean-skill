@@ -613,7 +613,9 @@ ocean-skill-run suites/roms_marbl_diagnostic.yaml
 ```
 
 Every run writes its own report directory (nothing is ever overwritten), named after
-the model and the run's own time range, plus when the command was run. See
+the model and the run's own time range, plus when the command was run, and (for a
+suite with a `refresh:` block) carrying its own copy of the model's kerchunk reference
+as it was at that moment. See
 [docs/suites.md](docs/suites.md) for the full grammar — `for_each` fan-out,
 `{placeholder}` templating, `time: latest`/`month: run`, a `catalog_search_paths:` key
 for shared catalog directories, a `cache_dir:` key to pin the suite's cache to one

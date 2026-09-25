@@ -9,6 +9,11 @@ everything printed to the terminal over the course of the run, plus full traceba
 for skipped pages and for a fatal crash, which the terminal itself never shows. See
 ``docs/suites.md``.
 
+A suite whose ``refresh:`` block rebuilds a live run's kerchunk reference gets a copy
+of that reference under the report directory's own ``refs/``, so the report stays
+tied to the exact data it was drawn from even after the shared reference is
+overwritten by a later run.
+
 Optionally the suite can refresh a model's kerchunk reference before running, which
 is what makes it usable against a run that is still writing output.
 """
@@ -208,6 +213,50 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     save(cat, catalog_path)
 
 
+def _snapshot_refs(refresh: Any, report_dir: Path) -> list[dict[str, Any]]:
+    """Copy each ``refresh:`` source's kerchunk reference into ``report_dir/refs/``.
+
+    The shared reference at ``source.ref`` is rewritten in place by every future
+    refresh (:func:`_refresh_sources`), so without this a report directory stops
+    matching the data it was drawn from the moment the model output changes again.
+    Copied rather than linked -- a parquet reference is a directory that
+    ``to_kerchunk`` overwrites wholesale, so a symlink or hard link would not
+    survive the next refresh.
+
+    The copy pins file paths and byte ranges, not file contents: a restart that
+    rewrites an output file in place still changes what the snapshot reads. A
+    second suite run started concurrently, between this run's own refresh and this
+    copy, could in principle overwrite the shared reference first -- out of scope
+    here.
+
+    Returns one record per source: ``{"name", "ref": absolute path str, "snapshot":
+    absolute path str or None if no reference exists yet to copy}``.
+    """
+    import shutil
+
+    records = []
+    for source in refresh.sources:
+        src = Path(source.ref).expanduser().resolve()
+        record: dict[str, Any] = {
+            "name": source.name,
+            "ref": str(src),
+            "snapshot": None,
+        }
+        if not src.exists():
+            print(f"  refresh: {source.name}: no reference at {src} to snapshot")
+            records.append(record)
+            continue
+        dst = report_dir / "refs" / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+        record["snapshot"] = str(dst)
+        records.append(record)
+    return records
+
+
 @dataclass
 class SuiteResult:
     """What :func:`run_suite` produced."""
@@ -219,6 +268,7 @@ class SuiteResult:
     metrics: Path | None = None
     manifest: Path | None = None
     log: Path | None = None
+    refs: list[Path] = _dc_field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
@@ -254,6 +304,7 @@ def _write_manifest(
     pages: list[Any],
     report_dir: Path,
     catalog_dirs: list[Path] | None = None,
+    refresh: dict[str, Any] | None = None,
 ) -> None:
     import ocean_skill
     from ocean_skill import cache as _cache
@@ -265,6 +316,7 @@ def _write_manifest(
         "output_dir": str(report_dir),
         "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
         "cache_dir": str(_cache.base_dir()),
+        "refresh": refresh,
         "pages": [
             {
                 **p.as_dict(),
@@ -377,6 +429,14 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
         cap.attach(report_dir / "run.log")
         (report_dir / "suite.yaml").write_text(path.read_text())
 
+        refresh_info = None
+        if suite.refresh is not None:
+            ref_records = _snapshot_refs(suite.refresh, report_dir)
+            refresh_info = {
+                "catalog": str(Path(suite.refresh.catalog).expanduser().resolve()),
+                "sources": ref_records,
+            }
+
         manifest_path = report_dir / "manifest.json"
         _write_manifest(
             manifest_path,
@@ -384,6 +444,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             pages=expanded,
             report_dir=report_dir,
             catalog_dirs=catalog_dirs,
+            refresh=refresh_info,
         )
 
         pdf_path = (report_dir / "report.pdf") if suite.pdf else None
@@ -429,6 +490,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             pages=expanded,
             report_dir=report_dir,
             catalog_dirs=catalog_dirs,
+            refresh=refresh_info,
         )
 
         latest_path = output_dir / "latest.txt"
@@ -449,6 +511,11 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             metrics=metrics_csv,
             manifest=manifest_path,
             log=report_dir / "run.log",
+            refs=[
+                Path(r["snapshot"])
+                for r in (refresh_info["sources"] if refresh_info else [])
+                if r["snapshot"]
+            ],
         )
     return result
 
@@ -493,6 +560,11 @@ def main(argv: list[str] | None = None) -> int:
         summary_lines.append(f"  report: {result.pdf}")
     if result.metrics:
         summary_lines.append(f"  metrics: {result.metrics}")
+    if result.refs:
+        summary_lines.append(
+            f"  refs: {len(result.refs)} reference snapshot(s) -> "
+            f"{result.report_dir / 'refs'}"
+        )
     for line in summary_lines:
         print(line)
     # run_suite's own tee is closed by the time these lines print, so append them

@@ -39,7 +39,8 @@ build_catalog(refs, "catalogs/pac_dt_ramp.yaml", title="pac_dt_ramp")
 
 A suite's own `refresh:` block does exactly this rebuild automatically before each run,
 so the same suite stays correct against a run that is still writing output -- see
-below.
+below. Because that shared reference is overwritten by every later run, each report
+directory keeps its own copy under `refs/` -- see Output layout.
 
 ## Schema
 
@@ -222,6 +223,7 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
     suite.yaml                 -- byte-identical copy of the input
     manifest.json
     run.log                    -- everything printed to the terminal during the run
+    refs/<ref name>            -- copy of each refresh: reference, exactly as drawn
 <output_dir>/latest.txt        -- path of the newest report dir
 ```
 
@@ -247,9 +249,21 @@ command was run, down to the second, plus a short random suffix so two runs star
 the same second still land in different directories. `manifest.json` records the fully
 expanded page list (every `time: latest`/`month: run`/window already resolved to a
 literal value), each page's outcome, the resolved `catalog_search_paths:` directories,
-and the effective `cache_dir` (the suite's own if set, otherwise wherever
-`osk.cache.base_dir()` already pointed) -- enough that a second person with the same
-suite YAML and the same catalogs gets the identical report.
+the effective `cache_dir` (the suite's own if set, otherwise wherever
+`osk.cache.base_dir()` already pointed), and (when the suite has a `refresh:` block) a
+`"refresh"` key -- enough that a second person with the same suite YAML and the same
+catalogs gets the identical report.
+
+`refs/` only appears when the suite has a `refresh:` block. Each source's reference
+(`refresh.sources[].ref`, a parquet directory or a `.json` file) is copied there
+right after the report directory is created, before any page is drawn -- so it
+matches the model state the report was actually drawn from, even though the shared
+reference at `ref:` is overwritten by the *next* run's own refresh. `manifest.json`'s
+`"refresh"` key records `{"catalog": ..., "sources": [{"name", "ref", "snapshot"}]}`,
+where `snapshot` is the copy's path (`null` if no reference existed yet to copy). The
+copy pins file paths and byte ranges into the model output, not file contents: a
+restart that rewrites an output file in place still changes what the snapshot reads.
+Open a snapshot directly with `xr.open_dataset(path, engine="kerchunk", chunks={})`.
 
 `run.log` is a mirror of stdout/stderr for the run: a `== page i/n: <title> ==` header
 and a `done in Ns`/`SKIPPED after Ns` line bracket each page, so a warning in between
