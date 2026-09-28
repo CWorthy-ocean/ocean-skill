@@ -333,6 +333,159 @@ def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
     assert not list(tmp_path.rglob("run.log"))
 
 
+
+# -- then: extremum -> series, end to end -----------------------------------------
+
+_EXT_INDEX = pd.date_range("2010-01-05", periods=6, freq="7D")
+_EXT_LAT = np.array([10.0, 20.0, 30.0])
+_EXT_LON = np.array([-100.0, -95.0, -90.0])
+
+
+def _extremum_stub(source, variable, select, aggregate, **kwargs):
+    """Return a map with a planted min, or a point series at a pinned lon/lat.
+
+    Which one depends on ``select``: a plain map until it names a lon/lat, the
+    same shape :meth:`~ocean_skill.extrema.Extremum.series`'s re-entry into
+    ``field()`` actually asks for -- so the ``then:`` chain draws a real
+    ``series`` family figure rather than stalling on a map it cannot follow.
+    """
+    if select and "lon" in select and "lat" in select:
+        values = 5.0 + np.sin(np.arange(len(_EXT_INDEX)))
+        da = xr.DataArray(
+            values,
+            dims="time",
+            coords={"time": _EXT_INDEX},
+            attrs={"units": "mmol m-3"},
+        )
+        lon, lat = float(select["lon"]), float(select["lat"])
+        return da.assign_coords(lon=lon, lat=lat), None
+    values = np.full((3, 3), 5.0)
+    values[1, 2] = -50.0
+    da = xr.DataArray(
+        values,
+        dims=("lat", "lon"),
+        coords={"lat": _EXT_LAT, "lon": _EXT_LON},
+        attrs={"units": "mmol m-3"},
+    )
+    return da, None
+
+
+@pytest.fixture
+def stub_extremum_model(monkeypatch):
+    monkeypatch.setattr(_comparison, "prepare_source", _extremum_stub)
+    monkeypatch.setattr(
+        "ocean_skill.extrema._native_time_index", lambda source: _EXT_INDEX
+    )
+
+
+def _extremum_suite(tmp_path, **extra):
+    return _model_only_suite(
+        tmp_path,
+        pages=[
+            {
+                "title": "Alkalinity minimum",
+                "field": {
+                    "variables": ["alkalinity"],
+                    "select": {"depth": "surface", "time": "2010-01-19"},
+                },
+                "then": [
+                    {"extremum": "min"},
+                    {"series": {"variables": ["dissolved_inorganic_carbon"]}},
+                ],
+            },
+        ],
+        **extra,
+    )
+
+
+def test_then_extremum_series_draws_a_figure_and_records_results(
+    tmp_path, stub_extremum_model
+):
+    path = _write_suite(tmp_path, _extremum_suite(tmp_path))
+    result = run_suite(path)
+
+    page = result.pages[0]
+    assert page.status == "ok", page.reason
+    assert len(result.figures) == 1
+    assert len(page.results) == 1
+    rec = page.results[0]
+    assert rec["kind"] == "min"
+    assert rec["value"] == pytest.approx(-50.0)
+    assert rec["lon"] == pytest.approx(-90.0)
+    assert rec["lat"] == pytest.approx(20.0)
+
+
+def test_then_manifest_carries_steps_and_results(tmp_path, stub_extremum_model):
+    path = _write_suite(tmp_path, _extremum_suite(tmp_path))
+    result = run_suite(path)
+
+    manifest = json.loads(result.manifest.read_text())
+    page = manifest["pages"][0]
+    assert page["steps"][0] == {"name": "extremum", "kwargs": {"kind": "min"}}
+    assert page["steps"][1]["name"] == "series"
+    assert page["results"][0]["value"] == pytest.approx(-50.0)
+
+
+def test_then_extremum_repr_is_printed_to_run_log(tmp_path, stub_extremum_model):
+    path = _write_suite(tmp_path, _extremum_suite(tmp_path))
+    result = run_suite(path)
+    log_text = result.log.read_text()
+    assert "min " in log_text
+    assert "lon -90.0000, lat 20.0000" in log_text
+
+
+def test_list_only_shows_the_then_chain(tmp_path, stub_extremum_model, capsys):
+    path = _write_suite(tmp_path, _extremum_suite(tmp_path))
+    run_suite(path, list_only=True)
+    out = capsys.readouterr().out
+    assert "extremum(kind='min')" in out
+    assert "series(variables=" in out
+
+
+def test_field_page_forwards_qc_detide_and_label(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def capturing_stub(source, variable, select, aggregate, **kwargs):
+        captured.update(kwargs)
+        return _stub_field()
+
+    monkeypatch.setattr(_comparison, "prepare_source", capturing_stub)
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda source: _INDEX)
+
+    suite = _model_only_suite(
+        tmp_path,
+        pages=[
+            {
+                "title": "QC'd",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"depth": "surface", "time": "latest"},
+                    "qc": {"range": [-2, 40]},
+                    "detide": True,
+                    "label": "custom label",
+                },
+            },
+        ],
+    )
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    assert result.pages[0].status == "ok", result.pages[0].reason
+    assert captured["qc"] == {"range": [-2, 40]}
+    assert captured["detide"] == {"T": 33.0}
+
+
+def test_field_page_rejects_a_cache_kwarg(tmp_path, stub_model):
+    suite = _model_only_suite(tmp_path)
+    suite["pages"][0]["field"]["cache"] = True
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path)
+
+    page = result.pages[0]
+    assert page.status == "skipped"
+    assert "cache:" in page.reason
+
+
 def test_a_missing_variable_page_is_skipped_not_fatal(
     tmp_path, stub_model, monkeypatch
 ):

@@ -58,6 +58,17 @@ class PageConfig(BaseModel):
 
     ``for_each`` fans this one page into several -- one page per element of the
     Cartesian product of its lists (see :mod:`ocean_skill.workflows.pages`).
+
+    ``then`` runs a chain of methods on the object ``field:`` builds, before
+    ``plot:`` draws it -- the suite-YAML form of a Python chain like
+    ``osk.field(...).extremum("min").series(variables=[...])``. Only the step
+    *names* and their basic shape (a bare name, or one ``{name: args}`` mapping
+    per list entry) are checked here; the fuller check -- argument validation, and
+    that consecutive steps' types actually fit together -- happens in
+    :func:`ocean_skill.workflows.pages.expand`, which is also where the whole
+    chain runs against real step names (see :data:`~ocean_skill.workflows.pages
+    .STEP_REGISTRY`) rather than a hardcoded list here, so the two can never drift
+    apart. ``field:``-only for now.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -68,6 +79,7 @@ class PageConfig(BaseModel):
     summary: dict[str, Any] | None = None
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
+    then: list[str | dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> PageConfig:
@@ -88,6 +100,38 @@ class PageConfig(BaseModel):
             if getattr(self, k) is not None:
                 return k  # type: ignore[return-value]
         raise AssertionError("_exactly_one_kind already enforces this")
+
+    @model_validator(mode="after")
+    def _then_is_field_only_and_well_shaped(self) -> PageConfig:
+        if self.then is None:
+            return self
+        if self.kind != "field":
+            raise ValueError(
+                f"page {self.title!r}: then: is only supported on field: pages "
+                f"(this page is {self.kind}:)"
+            )
+        # Lazy import: keeps this module's own import light (see the module
+        # docstring) -- ocean_skill.workflows.pages imports only the stdlib and
+        # pydantic at module level, so this costs nothing beyond the import
+        # itself, paid once per suite load, not once per page.
+        from ocean_skill.workflows.pages import STEP_REGISTRY
+
+        for item in self.then:
+            if isinstance(item, str):
+                name = item
+            else:
+                if len(item) != 1:
+                    raise ValueError(
+                        f"page {self.title!r}: then: {item!r} must name exactly "
+                        "one step per list entry"
+                    )
+                name = next(iter(item))
+            if name not in STEP_REGISTRY:
+                raise ValueError(
+                    f"page {self.title!r}: then: {name!r} is not a known step "
+                    f"-- choose one of {sorted(STEP_REGISTRY)}"
+                )
+        return self
 
 
 class SuiteConfig(BaseModel):

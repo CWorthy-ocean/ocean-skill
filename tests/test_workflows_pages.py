@@ -502,6 +502,204 @@ def test_per_page_figsize_is_pinned_and_warned_independently_of_defaults_zoom():
     assert out[1].plot == {"size": "page"}
 
 
+
+
+
+# -- then: a field page's method chain -------------------------------------------------
+
+
+def _then_suite(then, *, select=None, aggregate=None, variables=None):
+    field = {
+        "variables": variables or ["alkalinity"],
+        "select": select or {"depth": "surface", "time": "2010-01-19"},
+    }
+    if aggregate is not None:
+        field["aggregate"] = aggregate
+    return _suite(
+        [{"title": "x", "field": field, "then": then}],
+        defaults={"test": "stub"},
+    )
+
+
+def test_normalize_step_accepts_bare_scalar_and_dict_forms():
+    assert P._normalize_step("extremum", title="t") == {
+        "name": "extremum",
+        "kwargs": {"kind": "max"},
+    }
+    assert P._normalize_step({"extremum": "min"}, title="t") == {
+        "name": "extremum",
+        "kwargs": {"kind": "min"},
+    }
+    assert P._normalize_step({"extremum": {"kind": "min"}}, title="t") == {
+        "name": "extremum",
+        "kwargs": {"kind": "min"},
+    }
+    assert P._normalize_step({"series": {"variables": ["a", "b"]}}, title="t") == {
+        "name": "series",
+        "kwargs": {"variables": ["a", "b"]},
+    }
+
+
+def test_normalize_step_rejects_an_unknown_step():
+    with pytest.raises(ValueError, match="not a known step"):
+        P._normalize_step("bogus", title="t")
+
+
+def test_normalize_step_rejects_an_unknown_kwarg():
+    with pytest.raises(ValueError, match="extra"):
+        P._normalize_step({"extremum": {"kinds": "min"}}, title="t")
+
+
+def test_normalize_step_rejects_time_latest_inside_series():
+    with pytest.raises(ValueError, match="then: step"):
+        P._normalize_step({"series": {"time": "latest"}}, title="t")
+
+
+def test_config_rejects_an_unknown_step_name():
+    with pytest.raises(Exception):
+        SuiteConfig.model_validate(
+            {
+                "name": "t",
+                "defaults": {"test": "stub"},
+                "pages": [
+                    {"title": "x", "field": {"variables": ["a"]}, "then": ["bogus"]}
+                ],
+            }
+        )
+
+
+def test_config_rejects_then_on_a_compare_page():
+    with pytest.raises(Exception, match="field: pages"):
+        SuiteConfig.model_validate(
+            {
+                "name": "t",
+                "pages": [
+                    {
+                        "title": "x",
+                        "compare": {
+                            "test": "stub",
+                            "reference": ["ref"],
+                            "variables": ["x"],
+                        },
+                        "then": ["extremum"],
+                    }
+                ],
+            }
+        )
+
+
+def test_expand_applies_placeholders_inside_then():
+    suite = _suite(
+        [
+            {
+                "title": "{variable}",
+                "for_each": {"variable": ["alkalinity"]},
+                "field": {
+                    "variables": ["{variable}"],
+                    "select": {"depth": "surface", "time": "2010-01-19"},
+                },
+                "then": [
+                    {"extremum": "min"},
+                    {"series": {"variables": ["{variable}"]}},
+                ],
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].steps[1]["kwargs"]["variables"] == ["alkalinity"]
+
+
+def test_then_chain_out_of_order_is_refused():
+    suite = _then_suite([{"series": {}}, {"extremum": "min"}])
+    with pytest.raises(ValueError, match="check the step order"):
+        P.expand(suite)
+
+
+def test_then_refuses_a_multi_variable_page():
+    suite = _then_suite(
+        [{"extremum": "min"}], variables=["alkalinity", "dissolved_inorganic_carbon"]
+    )
+    with pytest.raises(ValueError, match="builds 2 members"):
+        P.expand(suite)
+
+
+def test_then_extremum_needs_an_explicit_time():
+    suite = _then_suite([{"extremum": "min"}], select={"depth": "surface"})
+    with pytest.raises(ValueError, match=r"explicit select\.time"):
+        P.expand(suite)
+
+
+def test_then_extremum_time_range_is_accepted_without_pad_resolution():
+    suite = _then_suite(
+        [{"extremum": "min"}, {"series": {}}],
+        select={"depth": "surface", "time": {"min": "2010-01-01", "max": "2010-02-01"}},
+    )
+    out = P.expand(suite)
+    assert out[0].steps[1]["kwargs"] == {}  # left for Extremum.series()'s own default
+
+
+def test_then_extremum_needs_an_explicit_vertical_key():
+    suite = _then_suite([{"extremum": "min"}], select={"time": "2010-01-19"})
+    with pytest.raises(ValueError, match="explicit vertical key"):
+        P.expand(suite)
+
+
+def test_then_extremum_with_a_time_collapsing_aggregate_is_allowed():
+    suite = _then_suite(
+        [{"extremum": "min"}],
+        select={"depth": "surface"},
+        aggregate={"time": "mean"},
+    )
+    out = P.expand(suite)
+    assert out[0].steps == [{"name": "extremum", "kwargs": {"kind": "min"}}]
+
+
+def test_then_series_window_resolves_to_a_literal_for_a_fixed_snapshot():
+    suite = _then_suite(
+        [{"extremum": "min"}, {"series": {"pad": 1}}],
+        select={"depth": "surface", "time": "2010-01-19"},
+    )
+    out = P.expand(suite)
+    series_kwargs = out[0].steps[1]["kwargs"]
+    assert series_kwargs["time"] == {
+        "min": "2010-01-12 00:00:00",
+        "max": "2010-01-26 00:00:00",
+    }
+    assert series_kwargs["cache"] is True  # well inside the record, not an open window
+
+
+def test_then_series_window_reaching_latest_is_marked_uncached():
+    suite = _then_suite(
+        [{"extremum": "min"}, {"series": {}}],
+        select={"depth": "surface", "time": "latest"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False  # the locator field's own page-level flag
+    assert out[0].steps[1]["kwargs"]["cache"] is False
+
+
+def test_then_series_explicit_time_is_left_alone():
+    suite = _then_suite(
+        [{"extremum": "min"}, {"series": {"time": "2010-02-02"}}],
+        select={"depth": "surface", "time": "2010-01-19"},
+    )
+    out = P.expand(suite)
+    assert out[0].steps[1]["kwargs"] == {"time": "2010-02-02"}
+
+
+def test_expand_with_then_steps_is_json_serializable_and_deterministic():
+    suite = _then_suite(
+        [{"extremum": "min"}, {"series": {"variables": ["dissolved_inorganic_carbon"]}}]
+    )
+    out1 = P.expand(suite)
+    out2 = P.expand(suite)
+    dicts1 = [p.as_dict() for p in out1]
+    dicts2 = [p.as_dict() for p in out2]
+    assert json.dumps(dicts1, sort_keys=True) == json.dumps(dicts2, sort_keys=True)
+    assert dicts1[0]["steps"][0] == {"name": "extremum", "kwargs": {"kind": "min"}}
+
+
 def test_summary_pages_own_kwargs_are_pinned_too():
     # a summary page's sizing kwargs live directly on `summary:`, not `plot:` -- see
     # ocean_skill.workflows.pages.build, which forwards page.kwargs (not page.plot)

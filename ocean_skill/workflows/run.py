@@ -1,8 +1,10 @@
 """Run a suite: ``ocean-skill-run suite.yaml`` (see ``docs/suites.md`` for the grammar).
 
 A suite (``ocean_skill.config.SuiteConfig``) is a YAML file listing pages -- each
-one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call -- plus shared
-defaults and output settings. Running it draws every page, writes a PNG per figure,
+one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call (a ``field:``
+page may chain a few more methods after it -- see ``then:`` in ``docs/suites.md``) --
+plus shared defaults and output settings. Running it draws every page, writes a PNG
+per figure,
 collects them into one PDF (unless ``pdf: false``), and writes a metrics CSV and a
 ``manifest.json`` recording exactly what was drawn. It also writes ``run.log`` --
 everything printed to the terminal over the course of the run, plus full tracebacks
@@ -322,6 +324,9 @@ def _write_manifest(
                 **p.as_dict(),
                 "status": p.status,
                 "reason": p.reason,
+                # Data-dependent (a then: step's own extremum(), say) and so left
+                # out of as_dict()/the determinism check -- see ExpandedPage.
+                "results": p.results,
             }
             for p in pages
         ],
@@ -413,7 +418,14 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             print(f"cache: {_cache.base_dir()}")
             for i, p in enumerate(expanded, 1):
                 cache_note = "cache" if p.cache else "no-cache (open window)"
-                print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note})")
+                chain = "".join(
+                    " -> {}({})".format(
+                        s["name"],
+                        ", ".join(f"{k}={v!r}" for k, v in s["kwargs"].items()),
+                    )
+                    for s in p.steps
+                )
+                print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){chain}")
             return SuiteResult(pages=expanded)
 
         output_dir = (

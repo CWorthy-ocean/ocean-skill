@@ -602,6 +602,9 @@ A field already reduced to one place (see `Field.family`) has nothing left to se
 spatially, and `.extremum()` says so rather than returning the one value `.plot()`
 already shows.
 
+A suite page runs this same chain with no Python at all — see `then:` in
+[docs/suites.md](docs/suites.md).
+
 ## Suites: run a whole diagnostic from one YAML
 
 A suite is a YAML file listing **pages** — each one a single `osk.field`, `osk.compare`,
