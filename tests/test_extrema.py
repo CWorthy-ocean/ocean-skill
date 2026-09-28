@@ -443,6 +443,45 @@ def test_series_extra_variable_adds_a_second_member(stub):
     assert fs[1].standard_name != ext.standard_name
 
 
+def test_series_accepts_a_single_variable_not_wrapped_in_a_list(stub):
+    """A bare string must not be unpacked into ``s``, ``i``, ``l``, ... ."""
+    stub(_rectilinear_map())
+    ext = _make().extremum("max")
+    fs = ext.series(variables=SILICATE, time="2012-01")
+    assert len(fs) == 2
+    assert fs[1].standard_name != ext.standard_name
+
+
+def test_series_carries_qc_and_detide(stub):
+    stub(_rectilinear_map())
+    qc_spec = {"range": [-1000, 1000]}
+    ext = _make(qc=qc_spec, detide=True).extremum("max")
+    fs = ext.series(time="2012-01")
+    assert fs[0].qc == qc_spec
+    assert fs[0].detide == {"T": 33.0}
+
+
+def test_series_cache_defaults_to_inheriting_the_parent(stub):
+    stub(_rectilinear_map())
+    ext = _make(cache=False).extremum("max")
+    fs = ext.series(time="2012-01")
+    assert fs[0].cache is False
+
+
+def test_series_cache_can_be_overridden(stub):
+    stub(_rectilinear_map())
+    ext = _make(cache=True).extremum("max")
+    fs = ext.series(time="2012-01", cache=False)
+    assert fs[0].cache is False
+
+
+def test_series_refuses_a_parent_transect(stub):
+    stub(_rectilinear_map())
+    ext = _make(select={"transect": {"lon": -90.0}, "time": "2012-01"}).extremum("max")
+    with pytest.raises(ValueError, match="transect"):
+        ext.series()
+
+
 def test_series_refuses_when_the_field_has_no_position(stub):
     da = xr.DataArray(np.array([1.0, 2.0, 3.0]), dims="x", name=NITRATE)
     stub(da)

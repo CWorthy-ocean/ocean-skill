@@ -7,9 +7,10 @@ Two halves, deliberately separate:
 *not* need to read real data: ``for_each`` fanned out into its Cartesian product,
 ``{placeholder}`` strings filled in, the bare word ``latest`` and ``month: run``
 resolved against the test source's own time axis (one cheap, coordinate-only read),
-and a literal ``{"min", "max"}`` time window injected wherever a page would
-otherwise mean "whatever the run happens to cover right now" -- so the expanded
-list, written verbatim into a report's ``manifest.json``, is what actually
+a literal ``{"min", "max"}`` time window injected wherever a page would otherwise
+mean "whatever the run happens to cover right now", and a field page's own
+``then:`` chain (see :data:`STEP_REGISTRY`) normalized and type-checked -- so the
+expanded list, written verbatim into a report's ``manifest.json``, is what actually
 reproduces the figures. The result is JSON-serializable and takes no arguments a
 Phase 2 consumer (a notebook, a dashboard) could not also supply.
 
@@ -17,7 +18,11 @@ Phase 2 consumer (a notebook, a dashboard) could not also supply.
 :class:`matplotlib.figure.Figure` (plus the metric records a ``compare`` page
 produced, for the summary page and the metrics CSV). This is the only place that
 touches ``osk.field``/``osk.compare``/``osk.summary``, so the suite YAML's own
-grammar can change without changing what any of those calls do.
+grammar can change without changing what any of those calls do. A ``field:`` page's
+``then:`` steps are applied here too, on the object ``osk.field()`` returned,
+before ``.plot()`` -- so a suite page's ``then: [{extremum: min}, {series:
+...}]`` runs exactly the Python chain ``osk.field(...).extremum("min").series(...)``
+would.
 """
 
 from __future__ import annotations
@@ -28,9 +33,11 @@ import warnings
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from itertools import product
-from typing import Any
+from typing import Any, Literal
 
-__all__ = ["MetricRecord", "build", "expand"]
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+
+__all__ = ["STEP_REGISTRY", "MetricRecord", "build", "expand"]
 
 _EXACT_PLACEHOLDER_RE = re.compile(
     r"^\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}$"
@@ -65,6 +72,178 @@ class MetricRecord:
             "usable for osk.summary()/ComparisonSet.metrics(), which read "
             ".metrics() and .label, never .as_item()"
         )
+
+
+# -- then: steps -----------------------------------------------------------------
+#
+# A field page's ``then:`` runs a small, fixed chain of methods on the object
+# ``osk.field()`` built -- the suite-YAML form of a Python chain like
+# ``osk.field(...).extremum("min").series(variables=[...])``. Each step is
+# registered here with the object type it needs (``accepts``), the type it
+# produces (``returns``), a small pydantic model for its keyword arguments (with
+# ``extra="forbid"``, so a typo'd kwarg is a schema error, not a silently ignored
+# one), and which argument a bare scalar shorthand fills in (``extremum: min`` ->
+# ``{"kind": "min"}``). ``expand()`` walks the whole chain against these types
+# before any data is read, so a step in the wrong order or a bad argument fails
+# ``--list`` rather than showing up as a page silently skipped every run.
+#
+# Deliberately only ``extremum``/``series`` for now -- see the module docstring on
+# :func:`build` for how a step is actually applied. A step that returns a figure
+# or writes a file (a future ``movie``, or ``Comparison``'s ``taylor``/``target``/
+# ``map_locations``) does not belong here: the page's final output stays a
+# page-level key (``plot:`` today), never a step, so ``defaults.plot``/PDF page
+# pinning/the comparison per-family split all still have exactly one place to
+# apply.
+
+_TYPE_FIELD = "field"  # a single Field (never a multi-member FieldSet)
+_TYPE_EXTREMUM = "extremum"  # an Extremum
+_TYPE_SERIES = "series"  # a FieldSet drawn as a point series
+
+
+class _ExtremumArgs(BaseModel):
+    """``then: [{extremum: min}]`` / ``then: [{extremum: {kind: min}}]``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["min", "max"] = "max"
+
+
+class _SeriesArgs(BaseModel):
+    """``then: [..., {series: {variables: [...], time: ..., pad: ..., label: ...}}]``.
+
+    Loosely typed (``Any``) the same way ``field:``/``compare:`` are -- validated
+    for real by :meth:`~ocean_skill.extrema.Extremum.series` itself, which already
+    accepts everything here. ``pad`` is left ``None`` (rather than defaulting to
+    :data:`~ocean_skill.extrema.DEFAULT_PAD_STEPS` here) so :func:`expand` can tell
+    "not given" apart from an explicit value when it resolves the window to a
+    literal (see ``_resolve_series_window``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    variables: Any = None
+    time: Any = None
+    pad: int | None = None
+    label: str | None = None
+
+    @field_validator("time")
+    @classmethod
+    def _no_bare_latest(cls, v: Any) -> Any:
+        # "latest" only means anything as a *page's* select.time -- expand()
+        # resolves it there against the test source's own time index before this
+        # step ever sees it (see the field branch of expand()). Left here, it
+        # would reach operators.select as a literal, unrecognized string.
+        if isinstance(v, str) and v == "latest":
+            raise ValueError(
+                "time: latest is not supported inside a then: step -- give the "
+                "page's own select.time: latest instead (then: series with no "
+                "time: already follows it, padded by pad:)"
+            )
+        return v
+
+
+@dataclass(frozen=True)
+class StepSpec:
+    """One entry in :data:`STEP_REGISTRY`."""
+
+    name: str
+    accepts: str
+    returns: str
+    args_model: type[BaseModel]
+    #: The keyword argument a bare scalar shorthand (``extremum: min``) fills.
+    #: ``None`` means this step takes keyword arguments only.
+    shorthand: str | None
+
+
+STEP_REGISTRY: dict[str, StepSpec] = {
+    "extremum": StepSpec(
+        "extremum", _TYPE_FIELD, _TYPE_EXTREMUM, _ExtremumArgs, "kind"
+    ),
+    "series": StepSpec(
+        "series", _TYPE_EXTREMUM, _TYPE_SERIES, _SeriesArgs, "variables"
+    ),
+}
+
+
+def _normalize_step(raw: Any, *, title: str) -> dict[str, Any]:
+    """One ``then:`` list entry -> ``{"name": str, "kwargs": dict}``.
+
+    Accepts a bare name (``"extremum"``), a null-valued single-key mapping (YAML's
+    own reading of a bare ``- extremum:`` list item), or ``{name: <scalar or
+    dict>}``. Raises :class:`ValueError` naming the page for anything else, an
+    unknown step name, or arguments that fail the step's own model.
+    """
+    if isinstance(raw, str):
+        name, value = raw, None
+    elif isinstance(raw, dict):
+        if len(raw) != 1:
+            raise ValueError(
+                f"page {title!r}: then: {raw!r} must name exactly one step per "
+                "list entry"
+            )
+        (name, value) = next(iter(raw.items()))
+    else:
+        raise ValueError(
+            f"page {title!r}: then: {raw!r} is not a step name or {{name: args}}"
+        )
+
+    spec = STEP_REGISTRY.get(name)
+    if spec is None:
+        raise ValueError(
+            f"page {title!r}: then: {name!r} is not a known step -- choose one "
+            f"of {sorted(STEP_REGISTRY)}"
+        )
+
+    if value is None:
+        kwargs: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        kwargs = dict(value)
+    else:
+        if spec.shorthand is None:
+            raise ValueError(
+                f"page {title!r}: then: {name}: {value!r} -- this step takes "
+                f"keyword arguments only, e.g. {name}: {{...}}"
+            )
+        kwargs = {spec.shorthand: value}
+
+    try:
+        validated = spec.args_model.model_validate(kwargs)
+    except ValidationError as exc:
+        raise ValueError(f"page {title!r}: then: {name}: {exc}") from exc
+    return {"name": name, "kwargs": validated.model_dump(exclude_none=True)}
+
+
+def _check_step_chain(
+    steps: list[dict[str, Any]], *, title: str, n_members: int
+) -> None:
+    r"""Walk ``steps``' declared types; raise if the chain does not fit together.
+
+    ``n_members`` is how many ``Field``\ s this page's ``field:`` would build --
+    ``osk.field()`` builds a :class:`~ocean_skill.field.FieldSet` whenever
+    ``source``/``variable`` is a list, even a one-element one (see :func:`build`,
+    which unwraps that one-element case before applying steps). A chain is
+    refused up front for anything wider, since ``extremum`` has no single field to
+    start from.
+    """
+    if not steps:
+        return
+    if n_members != 1:
+        raise ValueError(
+            f"page {title!r}: then: needs a single source/variable to start "
+            f"from -- this page's field: builds {n_members} members. Narrow "
+            "variables:/source: to one value (a one-element list is fine), or "
+            "give each its own page."
+        )
+    current = _TYPE_FIELD
+    for step in steps:
+        spec = STEP_REGISTRY[step["name"]]
+        if spec.accepts != current:
+            raise ValueError(
+                f"page {title!r}: then: {step['name']!r} needs a {spec.accepts}, "
+                f"but the chain has a {current} at that point -- check the step "
+                "order"
+            )
+        current = spec.returns
 
 
 # -- placeholder namespaces --------------------------------------------------------
@@ -349,10 +528,22 @@ class ExpandedPage:
     kwargs: dict[str, Any]
     plot: dict[str, Any]
     cache: bool
+    #: A field page's normalized ``then:`` chain (``[]`` for every other page):
+    #: ``[{"name": "extremum", "kwargs": {"kind": "min"}}, ...]``. Fully resolved
+    #: by :func:`expand` (placeholders filled, a fixed-snapshot ``series`` window
+    #: turned into a literal) -- part of ``as_dict()`` since none of it needs data.
+    steps: list[dict[str, Any]] = _dc_field(default_factory=list)
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
     metrics_records: list[dict[str, Any]] = _dc_field(default_factory=list)
+    #: What a ``then:`` step actually found once the page was drawn -- e.g. one
+    #: record per ``extremum`` step (value, position, snapshot). Data-dependent,
+    #: so filled in by :func:`build`, not :func:`expand`; deliberately left out of
+    #: ``as_dict()`` (see ``test_expand_is_json_serializable_and_deterministic``)
+    #: and added to the manifest separately, the same way ``status``/``reason``
+    #: already are.
+    results: list[dict[str, Any]] = _dc_field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -361,6 +552,7 @@ class ExpandedPage:
             "kwargs": self.kwargs,
             "plot": self.plot,
             "cache": self.cache,
+            "steps": self.steps,
         }
 
 
@@ -390,6 +582,108 @@ def _pin_to_page(kwargs: dict[str, Any], *, seen: set[str]) -> dict[str, Any]:
     return pinned
 
 
+def _field_member_count(kwargs: dict[str, Any]) -> int:
+    r"""How many ``Field``\ s this page's ``source``/``variable`` would build.
+
+    Mirrors :func:`ocean_skill.field.field`'s own fan-out rule (a list on either
+    side builds one member per (source, variable) pair) without importing it --
+    ``expand()`` stays a data-free, dependency-light pass. Variable-name dedup
+    (aliases of the same canonical name collapse to one member) can only make the
+    real count *smaller* than this, never larger, so a chain this refuses would
+    never have silently produced the wrong thing -- it may in rare alias cases
+    refuse a chain that would have worked; narrowing ``variables:`` to one
+    resolves it either way.
+    """
+    source = kwargs.get("source")
+    variable = kwargs.get("variable")
+    n_sources = len(source) if isinstance(source, list) else 1
+    n_variables = len(variable) if isinstance(variable, list) else 1
+    return n_sources * n_variables
+
+
+def _has_any_key(select: Any, keys: Any) -> bool:
+    return isinstance(select, dict) and any(k in select for k in keys)
+
+
+def _resolve_series_window(
+    steps: list[dict[str, Any]],
+    *,
+    select: dict[str, Any],
+    index: Any,
+    suite_cache: bool,
+    extrema: Any,
+) -> None:
+    """Turn a ``series`` step's implicit pad window (and cache flag) into a literal.
+
+    Done in place, whenever the page's own snapshot is a single fixed instant --
+    so the manifest reproduces the same figure regardless of how much the run has
+    grown by the time it is replayed.
+
+    Left alone (:meth:`~ocean_skill.extrema.Extremum.series`'s own runtime
+    default, still read lazily at build time) when the page's ``time`` is
+    instead a range: the extremum's own landing time is then only known once the
+    data is actually read, so there is nothing to resolve here without one.
+    Likewise left alone when the step itself already names ``time=`` -- an
+    explicit window is used verbatim, never padded.
+    """
+    time_value = select.get("time")
+    if not isinstance(time_value, str):
+        return
+    for step in steps:
+        if step["name"] != "series":
+            continue
+        kwargs = step["kwargs"]
+        if "time" in kwargs:
+            continue
+        pad = kwargs.get("pad", extrema.DEFAULT_PAD_STEPS)
+        window = extrema._window_select(index, time_value, pad)
+        kwargs["time"] = window
+        reaches_latest = window["max"] == str(index[-1])
+        kwargs["cache"] = suite_cache and not reaches_latest
+
+
+def _check_extremum_guardrails(
+    steps: list[dict[str, Any]],
+    *,
+    title: str,
+    select: dict[str, Any],
+    aggregate: Any,
+    had_explicit_time: bool,
+    time_keys: Any,
+    vertical_keys: Any,
+) -> None:
+    """Refuse an ``extremum`` step on a page that would read too much, too vaguely.
+
+    That means either the whole (and ever-growing) run, with no explicit time
+    named, or a column ``.plot()`` would have shown as just the surface. Both
+    checks run on the page's own select *before* :func:`_inject_field_window`
+    -- a page this refuses would otherwise have had a whole-run window injected
+    for it, since that injection only fires when the page names no time of its
+    own, exactly the case this guards against.
+    """
+    if not any(s["name"] == "extremum" for s in steps):
+        return
+    aggregate_collapses_time = isinstance(aggregate, dict) and any(
+        k in aggregate for k in time_keys
+    )
+    if not had_explicit_time and not aggregate_collapses_time:
+        raise ValueError(
+            f"page {title!r}: then: extremum needs an explicit select.time (a "
+            "literal instant, a range, or 'latest') or an aggregate.time that "
+            "collapses it -- without one the search would load the whole, "
+            "ever-growing run into memory. Add one to select= (or aggregate=) "
+            "first."
+        )
+    if not _has_any_key(select, vertical_keys):
+        raise ValueError(
+            f"page {title!r}: then: extremum needs an explicit vertical key "
+            "(select.depth/Z/z/vertical/sigma0) -- .plot() defaults a bare "
+            "column to the surface, but extremum() searches whatever vertical "
+            "axis is left standing, which can report a different level than "
+            "the map you would otherwise see."
+        )
+
+
 def expand(suite: Any) -> list[ExpandedPage]:
     """Turn ``suite.pages`` into a flat, fully-resolved list of :class:`ExpandedPage`.
 
@@ -400,6 +694,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
     now".
     """
     from ocean_skill import extrema
+    from ocean_skill.comparison import _ANY_VERTICAL_KEYS
+    from ocean_skill.sources import _TIME_KEYS
 
     defaults = dict(suite.defaults)
     test_source = defaults.get("test")
@@ -449,10 +745,36 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 index = get_index(source)
                 t0, t1 = index[0].isoformat(), index[-1].isoformat()
                 select = kwargs.setdefault("select", {})
+                had_explicit_time = "time" in select
                 was_latest = select.get("time") == "latest"
                 open_window = was_latest or _inject_field_window(kwargs, t0, t1)
                 if was_latest:
                     select["time"] = t1
+
+                steps = [
+                    _normalize_step(raw, title=title)
+                    for raw in _template_value(page.then or [], namespace, title=title)
+                ]
+                _check_step_chain(
+                    steps, title=title, n_members=_field_member_count(kwargs)
+                )
+                _check_extremum_guardrails(
+                    steps,
+                    title=title,
+                    select=select,
+                    aggregate=kwargs.get("aggregate"),
+                    had_explicit_time=had_explicit_time,
+                    time_keys=_TIME_KEYS,
+                    vertical_keys=_ANY_VERTICAL_KEYS,
+                )
+                _resolve_series_window(
+                    steps,
+                    select=select,
+                    index=index,
+                    suite_cache=suite.cache,
+                    extrema=extrema,
+                )
+
                 out.append(
                     ExpandedPage(
                         title=title,
@@ -460,6 +782,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         kwargs=kwargs,
                         plot=plot,
                         cache=suite.cache and not open_window,
+                        steps=steps,
                     )
                 )
 
@@ -510,27 +833,90 @@ def expand(suite: Any) -> list[ExpandedPage]:
     return out
 
 
+def _extremum_record(ext: Any) -> dict[str, Any]:
+    """Build a small, JSON-safe record of what an ``extremum`` step found.
+
+    Written into the manifest as :attr:`ExpandedPage.results` (see :func:`build`).
+    """
+    return {
+        "kind": ext.kind,
+        "variable": ext.variable,
+        "standard_name": ext.standard_name,
+        "value": ext.value,
+        "units": ext.units,
+        "lon": ext.lon,
+        "lat": ext.lat,
+        "lon_convention": ext.lon_convention,
+        "indices": ext.indices,
+        "coords": ext.coords,
+        "time": str(ext.time) if ext.time is not None else None,
+        "time_reason": ext.time_reason,
+    }
+
+
 def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = None):
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
     Almost always one pair (``suffix=""``); a ``compare`` page whose comparisons
     span more than one plot family draws one figure per family instead (see
     :meth:`ocean_skill.comparison.ComparisonSet.plot`), each suffixed by its
-    family name so no PNG is overwritten. A ``field`` page's ``variable=``/
-    ``select=``/``aggregate=`` (and a ``compare`` page's own kwargs) are used
-    exactly as :func:`ocean_skill.field.field`/:func:`ocean_skill.comparison.compare`
-    already validate them -- this function adds nothing to that grammar.
+    family name so no PNG is overwritten. A ``field`` page's ``select=``/
+    ``aggregate=`` (and a ``compare`` page's own kwargs) are used exactly as
+    :func:`ocean_skill.field.field`/:func:`ocean_skill.comparison.compare` already
+    validate them -- this function adds nothing to that grammar. A ``field:``
+    page's own ``qc``/``detide``/``label`` (or anything else :func:`~ocean_skill
+    .field.field` accepts) pass straight through the same way; only ``cache`` is
+    reserved, since that is the suite's own to set (``cache:``/``cache_dir:``, or
+    a page's own open-window rule -- see ``docs/suites.md``).
+
+    A field page's ``then:`` chain (already normalized and type-checked by
+    :func:`expand`) is applied here, in order, via plain ``getattr`` -- one
+    ``osk.field(...).extremum(...).series(...)`` for each step. ``source``/
+    ``variable`` builds a one-member :class:`~ocean_skill.field.FieldSet`
+    whenever either is a list, even a one-element one (see :func:`~ocean_skill
+    .field.field`'s own docstring); a page with steps unwraps that single member
+    first, since a step like ``extremum`` runs on one :class:`~ocean_skill.field
+    .Field`, not a set. Whichever step returns an
+    :class:`~ocean_skill.extrema.Extremum` is also printed (so it lands in
+    ``run.log``) and recorded onto :attr:`ExpandedPage.results` (so it lands in
+    ``manifest.json`` too) -- the one place in this chain that is inherently
+    data-dependent and so cannot have been resolved by :func:`expand`.
     """
     import ocean_skill as osk
 
     if page.kind == "field":
+        if "cache" in page.kwargs:
+            raise ValueError(
+                f"page {page.title!r}: field: cache: is not supported -- "
+                "caching is controlled by the suite's own cache:/cache_dir: "
+                "settings, not a per-page kwarg"
+            )
+        field_kwargs = {
+            k: v for k, v in page.kwargs.items() if k not in ("source", "variable")
+        }
         obj = osk.field(
             page.kwargs["source"],
             page.kwargs["variable"],
-            select=page.kwargs.get("select"),
-            aggregate=page.kwargs.get("aggregate"),
             cache=page.cache,
+            **field_kwargs,
         )
+        if page.steps:
+            if isinstance(obj, osk.FieldSet):
+                # expand()'s _check_step_chain already refused anything wider
+                # than one member -- this is that one member, unwrapped.
+                obj = obj[0]
+            for step in page.steps:
+                method = getattr(obj, step["name"], None)
+                if method is None:
+                    raise ValueError(
+                        f"page {page.title!r}: then: {step['name']} step "
+                        f"produced a {type(obj).__name__}, which has no "
+                        f".{step['name']}() -- check the step order"
+                    )
+                obj = method(**step["kwargs"])
+                if isinstance(obj, osk.Extremum):
+                    print(repr(obj))
+                    page.results.append(_extremum_record(obj))
         fig = obj.plot(**page.plot)
         return [("", fig)]
 

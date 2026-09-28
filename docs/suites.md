@@ -1,11 +1,12 @@
 # Suites: run a whole diagnostic from one YAML
 
 A suite is a YAML file describing an ordered list of **pages** -- each one a single
-`osk.field`, `osk.compare`, or `osk.summary` call -- plus shared defaults and output
-settings. Running it draws every page, writes one PNG per figure, collects them into
-one PDF (unless `pdf: false`), and writes a metrics CSV and a `manifest.json` recording
-exactly what was drawn. The suite YAML is the whole interface: no Python is required to
-run one.
+`osk.field`, `osk.compare`, or `osk.summary` call (a `field:` page may chain a few more
+methods after it -- see `then:`, below) -- plus shared defaults and output settings.
+Running it draws every page, writes one PNG per figure, collects them into one PDF
+(unless `pdf: false`), and writes a metrics CSV and a `manifest.json` recording exactly
+what was drawn. The suite YAML is the whole interface: no Python is required to run
+one.
 
 ```bash
 ocean-skill-run suites/roms_marbl_diagnostic.yaml
@@ -72,6 +73,7 @@ pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
     field: {...}          # exactly one of field: / compare: / summary:
     for_each: {...}        # optional: fan this one page into several (see below)
+    then: [...]            # optional, field: pages only: a method chain (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
                             # (size:/zoom:/figsize: are pinned to the page canvas and warned
                             # about instead while pdf: true -- see Page size, below)
@@ -110,7 +112,11 @@ below, and `docs/caching.md` for the key format and identity-caveat this inherit
 
 ### `field:` -- model only
 
-Keys map straight onto `osk.field(source, variable, select=, aggregate=)`:
+Keys map straight onto `osk.field(source, variable, select=, aggregate=, ...)` -- every
+keyword `osk.field()` accepts (`qc:`, `detide:`, `label:`, ...) passes straight
+through, not only `select:`/`aggregate:`. `cache:` is the one reserved key: it is the
+suite's own to set (`cache:`/`cache_dir:` above, and each page's own open-window rule
+-- see Caching, below), not a per-page kwarg.
 
 ```yaml
 field:
@@ -206,6 +212,77 @@ automatically in the suptitle (`surface · 2012-12-31`, or `surface · mean over
 2012-01-01–2012-12-31`), the same way it already carries the depth a `select`
 narrowed. A page still faceted over several steps needs no suptitle text either,
 since each panel already says its own (`Jan 2012`, `Feb 2012`, ...).
+
+## `then:` -- a method chain after `field:`
+
+A `field:` page draws whatever `osk.field()` returns; `then:` runs a short, fixed
+chain of methods on that object first, in order -- the suite-YAML form of a Python
+chain like:
+
+```python
+run = osk.field("first_half", "alkalinity", select={"depth": "surface", "time": "2010-06-30T2345"})
+ext = run.extremum("min")                                   # where is it lowest?
+ext.series(variables=["dissolved_inorganic_carbon", "temperature", "salinity",
+                       "nitrate", "oxygen"]).plot()          # ... and how did it get there?
+```
+
+as a page:
+
+```yaml
+- title: "Alkalinity minimum ({test}) -- time series"
+  field:
+    variables: [alkalinity]
+    select: {depth: surface, time: "2010-06-30T2345"}    # or time: latest
+  then:
+    - extremum: min                              # {kind: min} would do the same
+    - series:
+        variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate, oxygen]
+```
+
+Each step is one of:
+
+- a bare name (`extremum`), run with its defaults;
+- `name: <scalar>`, filling in the one argument that reads most naturally as a bare
+  value (`extremum: min` -> `kind: min`; `series: temperature` -> `variables:
+  [temperature]`);
+- `name: {...}`, the step's keyword arguments in full (`series.variables`/`time`/
+  `pad`/`label` -- see `Extremum.series()`'s own docstring for what each does).
+
+Only two steps exist today, and each expects what the one before it produced:
+`extremum` (`kind: min`/`max`, default `max`) needs a single `Field` and returns an
+`Extremum`; `series` needs that `Extremum` and returns the point time series
+`FieldSet` that `plot:` then draws. `then:` is refused wherever that shape does not
+hold:
+
+- on a `compare:`/`summary:` page (a schema error);
+- when `variables:`/`source:` would build more than one `Field` (`extremum` has one
+  map to search, not several -- give each variable its own page instead);
+- when the steps are out of order, or a step's own arguments don't match what it
+  takes (both schema errors, caught by `--list` before any data is read);
+- when `extremum` would otherwise search the whole, ever-growing run: the page needs
+  an explicit `select.time` (a literal, a range, or `latest`) or an `aggregate.time`
+  that collapses it;
+- when `extremum` would otherwise search a bare vertical axis `.plot()` would have
+  shown as just the surface: the page needs an explicit `select.depth`/`Z`/`z`/
+  `vertical`/`sigma0`.
+
+`series`'s own default window -- `DEFAULT_PAD_STEPS` (10) native time steps either
+side of wherever `extremum` landed -- pads by the source's *own* cadence, so it means
+something different for an hourly stream than for a restart file written every few
+weeks; pass `series: {pad: N}` or an explicit `series: {time: ...}` to control it
+directly. When the page's own `select.time` is a single fixed instant (including a
+resolved `latest`), that window is worked out once, here, and written into
+`manifest.json` as a literal `{"min", "max"}` -- so replaying the same manifest later
+reproduces the same figure regardless of how much the run has grown by then, the same
+guarantee every other page already gets (see `time: latest`, above). It is left for
+`Extremum.series()`'s own runtime default only when the page instead searches a
+*range* of times, since which instant the minimum/maximum actually falls on is then
+only known once the data is read.
+
+What `extremum` finds -- value, position, and the snapshot it fell on -- is printed
+(so it lands in `run.log`) and recorded per page in `manifest.json`'s own `results:`
+list, since the figure itself only ever shows the time series, not the number that
+picked its location.
 
 ## Caching
 

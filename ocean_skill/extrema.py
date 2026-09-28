@@ -183,14 +183,18 @@ class Extremum:
         time: Any = None,
         pad: int = DEFAULT_PAD_STEPS,
         label: str | None = None,
+        cache: bool | None = None,
     ):
         """Follow this extremum through time: a point series at its location.
 
         Parameters
         ----------
         variables
-            Extra variables (list, or ``None``) to add as more lines on the same
-            figure; the extremum's own variable is always plotted first.
+            Extra variable(s) to add as more lines on the same figure; the
+            extremum's own variable is always plotted first. A single variable
+            (a string, or a combination/``calculate`` spec ``dict``) is accepted
+            the same as a one-element list -- it is never iterated over
+            character by character.
         time
             The ordinary :func:`ocean_skill.operators.select` grammar (a slice, a
             partial date, a ``{"min", "max"}`` range) to control the time window
@@ -202,14 +206,21 @@ class Extremum:
         label
             ``str`` label for the resulting field/series, or ``None`` (default)
             to reuse the parent field's own label.
+        cache
+            ``bool | None`` -- ``None`` (default) inherits the parent field's own
+            ``cache``; pass ``True``/``False`` to override it for this series
+            call alone (a suite page uses this to mark a window that reaches the
+            run's latest step as uncached, the same rule an ordinary page's own
+            ``time: latest`` already follows).
 
         Builds an ordinary :func:`ocean_skill.field.field` call from the parent
         field's own recipe -- same source, same vertical selection, same
-        aggregate minus its time entry -- with the horizontal axes pinned to this
-        extremum's position and the time axis narrowed to a window around its
-        snapshot. ``variables`` adds more lines to the same figure (the extremum's
-        own variable is always first, on the primary axis); a single-element list
-        still returns a :class:`~ocean_skill.field.FieldSet`, the same as
+        aggregate minus its time entry, same ``qc``/``detide`` -- with the
+        horizontal axes pinned to this extremum's position and the time axis
+        narrowed to a window around its snapshot. ``variables`` adds more lines to
+        the same figure (the extremum's own variable is always first, on the
+        primary axis); a single-element list still returns a
+        :class:`~ocean_skill.field.FieldSet`, the same as
         :func:`ocean_skill.field.field` itself.
 
         The default window is :data:`DEFAULT_PAD_STEPS` native time steps each
@@ -229,6 +240,11 @@ class Extremum:
         A variable that does not share this field's vertical axis is unaffected by
         the depth/sigma0 pin: :func:`ocean_skill.operators.select` skips a key
         naming an axis a given variable does not have.
+
+        Refused when the parent's own ``select`` names a ``transect`` -- once cut
+        to a transect, lon/lat lie along the cut's own ``along`` axis rather than
+        standing as ordinary coordinates, so there is no longer a plain lon/lat
+        pair here to pin a point series to.
         """
         from ocean_skill.comparison import _ANY_VERTICAL_KEYS
         from ocean_skill.field import field
@@ -248,6 +264,12 @@ class Extremum:
             )
 
         parent_select = dict(parent.select)
+        if "transect" in parent_select:
+            raise ValueError(
+                f"{parent.source!r}'s select includes a transect -- .series() "
+                "cannot follow a point through a transect's own along-axis. Call "
+                "extremum()/series() on a plain map or point-select field instead."
+            )
         parent_time_key = next((k for k in _TIME_KEYS if k in parent_select), None)
         parent_time_value = (
             parent_select.get(parent_time_key) if parent_time_key else None
@@ -308,13 +330,26 @@ class Extremum:
             k: v for k, v in (parent.aggregate or {}).items() if k not in _TIME_KEYS
         }
 
+        if variables is None:
+            extra: list[Any] = []
+        elif isinstance(variables, (list, tuple)):
+            extra = list(variables)
+        else:
+            # A single variable spec -- a plain name or a combination/``calculate``
+            # dict -- wrapped the same as field()'s own variable= would treat it.
+            # *variables would otherwise unpack a bare string character by
+            # character, or a dict's keys.
+            extra = [variables]
+
         return field(
             parent.source,
-            [parent.variable, *(variables or [])],
+            [parent.variable, *extra],
             select=sel,
             aggregate=agg or None,
             label=label if label is not None else parent.label,
-            cache=parent.cache,
+            cache=parent.cache if cache is None else cache,
+            qc=parent.qc,
+            detide=parent.detide,
         )
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
