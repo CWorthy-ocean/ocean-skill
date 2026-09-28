@@ -8,8 +8,9 @@ Two halves, deliberately separate:
 ``{placeholder}`` strings filled in, the bare word ``latest`` and ``month: run``
 resolved against the test source's own time axis (one cheap, coordinate-only read),
 a literal ``{"min", "max"}`` time window injected wherever a page would otherwise
-mean "whatever the run happens to cover right now", and a field page's own
-``then:`` chain (see :data:`STEP_REGISTRY`) normalized and type-checked -- so the
+mean "whatever the run happens to cover right now", a field page's own ``then:``
+chain (see :data:`STEP_REGISTRY`) normalized and type-checked, and each page's
+``cache=`` decided against that same index (see :func:`_is_closed`) -- so the
 expanded list, written verbatim into a report's ``manifest.json``, is what actually
 reproduces the figures. The result is JSON-serializable and takes no arguments a
 Phase 2 consumer (a notebook, a dashboard) could not also supply.
@@ -28,6 +29,7 @@ would.
 from __future__ import annotations
 
 import calendar
+import copy
 import re
 import warnings
 from dataclasses import dataclass
@@ -430,25 +432,21 @@ def _expand_for_each(
     return combos
 
 
-# -- window injection & the cache flag -----------------------------------------------
+# -- window injection ------------------------------------------------------------------
 
 
-def _inject_field_window(kwargs: dict[str, Any], t0: str, t1: str) -> bool:
+def _inject_field_window(kwargs: dict[str, Any], t0: str, t1: str) -> None:
     """Give a ``field`` page's select an explicit time window if it has none.
 
-    Returns whether this page's own time now reaches the run's latest step --
-    the "open window" pages a stale disk-cache entry could otherwise serve. Must
-    run *before* the caller resolves a literal ``"latest"`` to an ISO string, or
-    that resolved value looks like an ordinary, already-explicit time key here.
+    Must run *before* the caller resolves a literal ``"latest"`` to an ISO string,
+    or that resolved value looks like an ordinary, already-explicit time key here.
     """
     select = kwargs.setdefault("select", {})
     if "time" not in select:
         select["time"] = {"min": t0, "max": t1}
-        return True
-    return False
 
 
-def _inject_compare_window(kwargs: dict[str, Any], t0: str, t1: str) -> bool:
+def _inject_compare_window(kwargs: dict[str, Any], t0: str, t1: str) -> None:
     """Do the same for a ``compare`` page's test lane.
 
     Handles the two shapes the shipped pages actually use: no ``select`` at all
@@ -464,21 +462,169 @@ def _inject_compare_window(kwargs: dict[str, Any], t0: str, t1: str) -> bool:
         # A pair-spec select needs both keys even when only one has anything to
         # say -- compare() refuses a select naming just "test" or just "reference".
         kwargs["select"] = {"test": {"time": {"min": t0, "max": t1}}, "reference": {}}
-        return True
+        return
     if "test" in select or "reference" in select:
-        test_sel = select.setdefault("test", {})
+        # ``select.get(...) or {}`` rather than ``setdefault`` -- a pair-spec
+        # naming "test" explicitly as null (``select: {test: null, reference:
+        # [...]}}``) leaves the key present with value ``None``, which
+        # ``setdefault`` would hand back unchanged, and ``"time" not in None``
+        # raises. Written back either way, so a bare ``None`` becomes the ``{}``
+        # every other caller of this select already expects.
+        test_sel = select.get("test") or {}
+        select["test"] = test_sel
         if "time" not in test_sel:
             test_sel["time"] = {"min": t0, "max": t1}
-            return True
-        return False
-    return False
 
 
-def _is_open_month(namespace: dict[str, Any], latest: Any) -> bool:
-    month_ns = namespace.get("month")
-    if month_ns is None:
+# -- the cache flag: whether a lane's time selection tracks the run's own growth -----
+#
+# A page's ``cache=`` follows one rule: cache whenever the test lane's time selection
+# is either *pinned* to the run's own last step (so the cache key changes the moment
+# that step does -- see ``time: latest`` and the whole-run window injected just above)
+# or *closed* (see :func:`_is_closed`) -- provably unaffected by the run growing or its
+# last step being replaced. Anything else keeps ``cache=False``, exactly as every page
+# does today. See "Caching" in ``docs/suites.md``.
+
+
+def _steps_selected(lane: Any, index: Any) -> Any:
+    """Return the timestamps ``lane``'s time key(s) pick out of ``index``, or ``None``.
+
+    Builds a bare 1-D stand-in on ``index`` (named ``"time"``, the spelling every
+    shipped select uses) and runs the real :func:`ocean_skill.operators.select`
+    against it -- so a period string, a nearest-matched instant, a ``{"min",
+    "max"}`` window, and a positional ``{"index": ...}`` are all read exactly as
+    they will be when the page is actually drawn, with no separate
+    reimplementation of what a time key means. Any other key in ``lane``
+    (``depth``, a lon/lat box, ...) silently no-ops on this time-only stand-in,
+    the same way :func:`~ocean_skill.operators.select` already treats a key
+    naming an axis a given source lacks.
+
+    ``None`` means the selection could not be read at all here (an empty axis, a
+    key that raises rather than no-ops) -- the caller treats that as "cannot
+    vouch for this lane", not as "it selects nothing".
+    """
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill import operators
+
+    standin = xr.DataArray(
+        np.arange(len(index)), dims=("time",), coords={"time": index}
+    )
+    try:
+        out = operators.select(standin, lane if isinstance(lane, dict) else {})
+    except Exception:
+        return None
+    return np.atleast_1d(out["time"].values)
+
+
+def _appended_index(index: Any) -> Any:
+    """``index`` plus one more step at the end, or ``None`` if it can't be grown.
+
+    A :class:`pandas.DatetimeIndex` grows by one unit of its own ``.resolution``
+    word -- the same mapping :func:`ocean_skill.operators._string_instant` uses to
+    decide whether a date string names an instant or a period -- so "one more
+    step" can never flip that word to something finer than the real data ever
+    produces (a plain "smallest gap in the index" step could: a restart's
+    ``23:59:59`` stamp already reads as second-resolution, but a day-aligned axis
+    appended by one arbitrary sub-day gap elsewhere in the run would flip from
+    "day" to whatever that gap was).
+
+    A :class:`~xarray.CFTimeIndex` has no ``.resolution`` to preserve, so it grows
+    by its own last gap instead (one day if it has only one step).
+    :meth:`~xarray.CFTimeIndex.append` also hands back a plain
+    :class:`pandas.Index` for this type, which :func:`~ocean_skill.operators.select`
+    cannot use as a datetime axis, so it is rewrapped.
+    """
+    import pandas as pd
+    import xarray as xr
+
+    if isinstance(index, pd.DatetimeIndex):
+        step = {
+            "day": pd.Timedelta(days=1),
+            "hour": pd.Timedelta(hours=1),
+            "minute": pd.Timedelta(minutes=1),
+            "second": pd.Timedelta(seconds=1),
+            "millisecond": pd.Timedelta(milliseconds=1),
+            "microsecond": pd.Timedelta(microseconds=1),
+            "nanosecond": pd.Timedelta(nanoseconds=1),
+        }.get(index.resolution, pd.Timedelta(days=1))
+        return index.append(pd.DatetimeIndex([index[-1] + step]))
+    if isinstance(index, xr.CFTimeIndex):
+        step = index[-1] - index[-2] if len(index) > 1 else pd.Timedelta(days=1)
+        return xr.CFTimeIndex([*index, index[-1] + step])
+    return None
+
+
+def _is_closed(lane: Any, index: Any, *, margin: Any = None) -> bool:
+    """Whether ``lane``'s time selection is safe to cache against ``index``.
+
+    Closed means: it selects at least one step, none of them the run's current
+    last step (``index[-1]``, or within ``margin`` of it -- see below), and it
+    would select exactly the same steps if the run had one more (appended past
+    the end) or one fewer (its own last step taken away, standing in for that
+    step being *replaced*, which is what a restart file still being written does
+    under ``keep: latest-per-file``). Checked, not assumed -- a lopsided
+    ``{"min", "max"}`` window (or a bug in how one is read) could otherwise pick a
+    different step than intended without ever touching the run's actual last
+    step, and that would slip past a check that only looked at the current index.
+
+    ``margin`` (a duration, e.g. :class:`pandas.Timedelta`), when given, pushes
+    the cutoff back by that much before the last step -- for ``detide=``, whose
+    PL33 filter leaves roughly ``margin`` worth of edge NaNs near either end of
+    the *unselected* lane that keep changing shape as the run grows, even though
+    the filtered value at a step already well clear of the edge cannot change
+    once more data lands past it (see :func:`ocean_skill.detide.detide`).
+    """
+    current = _steps_selected(lane, index)
+    if current is None or len(current) == 0:
         return False
-    return (month_ns.year, month_ns.month) == (latest.year, latest.month)
+    cutoff = index[-1] if margin is None else index[-1] - margin
+    if any(t >= cutoff for t in current):
+        return False
+    grown = _appended_index(index)
+    if grown is None:
+        return False
+    after_grow = _steps_selected(lane, grown)
+    after_shrink = _steps_selected(lane, index[:-1])
+    return (
+        after_grow is not None
+        and list(current) == list(after_grow)
+        and after_shrink is not None
+        and list(current) == list(after_shrink)
+    )
+
+
+def _detide_margin(detide: Any, *, lane: str | None) -> Any:
+    """Return one lane's ``detide=`` cutoff, as a ``Timedelta``, or ``None``.
+
+    ``lane`` is ``"test"``/``"reference"`` for a two-lane ``compare:`` page
+    (normalized via :func:`ocean_skill.comparison._normalize_detide`), or
+    ``None`` for a single-lane ``field:`` page (normalized via
+    :func:`ocean_skill.comparison._normalize_detide_side`, the same helper
+    :class:`~ocean_skill.field.Field` itself uses for its own ``detide=``).
+
+    ``None`` when the page has no ``detide=`` at all, when the named lane isn't
+    detided, and (rather than raising) for a ``detide=`` shape that doesn't
+    normalize -- an invalid spec fails the page itself once it is actually drawn;
+    this only ever makes the cache flag more conservative, never less.
+    """
+    if not detide:
+        return None
+    import pandas as pd
+
+    try:
+        if lane is None:
+            from ocean_skill.comparison import _normalize_detide_side
+
+            spec = _normalize_detide_side(detide)
+        else:
+            from ocean_skill.comparison import _normalize_detide
+
+            spec = _normalize_detide(detide).get(lane)
+    except Exception:
+        return None
+    return pd.Timedelta(hours=spec["T"]) if spec else None
 
 
 # -- semantic checks ------------------------------------------------------------------
@@ -691,7 +837,9 @@ def expand(suite: Any) -> list[ExpandedPage]:
     source's native time index at most once (coordinate-only; memoized here), used
     to resolve ``latest``/``month: run`` and to bound the literal windows injected
     into any page that would otherwise mean "however much of the run exists right
-    now".
+    now". That same index also decides each page's ``cache=`` (see
+    :func:`_is_closed`), against whatever it resolved to on *this* call --
+    a page's cache entry is only ever as fresh as the last time the suite ran.
     """
     from ocean_skill import extrema
     from ocean_skill.comparison import _ANY_VERTICAL_KEYS
@@ -734,7 +882,16 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 plot = _pin_to_page(plot, seen=pin_seen)
 
             if page.kind == "field":
-                kwargs = _template_value(dict(page.field), namespace, title=title)
+                # Deep-copied so an exact-placeholder select (``select: "{sel}"``,
+                # resolved by ``_template_value`` to the referenced object itself
+                # -- see its own docstring) is never the *same* dict as whatever
+                # ``defaults``/another page's combo holds; the "latest" resolution
+                # and the window injection below both write into ``select`` in
+                # place, and without this a shared placeholder would leak one
+                # page's resolved time into every other page that names it.
+                kwargs = copy.deepcopy(
+                    _template_value(dict(page.field), namespace, title=title)
+                )
                 kwargs.setdefault("source", test_source)
                 source = kwargs["source"]
                 if source is None:
@@ -747,9 +904,15 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 select = kwargs.setdefault("select", {})
                 had_explicit_time = "time" in select
                 was_latest = select.get("time") == "latest"
-                open_window = was_latest or _inject_field_window(kwargs, t0, t1)
+                pinned = was_latest or not had_explicit_time
+                _inject_field_window(kwargs, t0, t1)
                 if was_latest:
                     select["time"] = t1
+                cacheable = pinned or _is_closed(
+                    select,
+                    index,
+                    margin=_detide_margin(kwargs.get("detide"), lane=None),
+                )
 
                 steps = [
                     _normalize_step(raw, title=title)
@@ -781,13 +944,16 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         kind="field",
                         kwargs=kwargs,
                         plot=plot,
-                        cache=suite.cache and not open_window,
+                        cache=suite.cache and cacheable,
                         steps=steps,
                     )
                 )
 
             elif page.kind == "compare":
-                kwargs = _template_value(dict(page.compare), namespace, title=title)
+                # See the field branch above for why this is deep-copied.
+                kwargs = copy.deepcopy(
+                    _template_value(dict(page.compare), namespace, title=title)
+                )
                 kwargs.setdefault("test", test_source)
                 source = kwargs["test"]
                 if source is None:
@@ -797,23 +963,47 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 index = get_index(source)
                 t0, t1 = index[0].isoformat(), index[-1].isoformat()
                 select = kwargs.get("select")
-                was_latest = (
-                    isinstance(select, dict)
-                    and "test" in select
-                    and select["test"].get("time") == "latest"
+                is_pair_spec = isinstance(select, dict) and (
+                    "test" in select or "reference" in select
                 )
-                open_window = was_latest or _inject_compare_window(kwargs, t0, t1)
-                if was_latest:
-                    kwargs["select"]["test"]["time"] = t1
-                if not open_window and "month" in namespace:
-                    open_window = _is_open_month(namespace, index[-1])
+                detide_margin = _detide_margin(kwargs.get("detide"), lane="test")
+                if select is None or is_pair_spec:
+                    was_latest = is_pair_spec and (
+                        isinstance(select.get("test"), dict)
+                        and select["test"].get("time") == "latest"
+                    )
+                    pinned = (
+                        select is None
+                        or was_latest
+                        or "time" not in (select.get("test") or {})
+                    )
+                    _inject_compare_window(kwargs, t0, t1)
+                    if was_latest:
+                        kwargs["select"]["test"]["time"] = t1
+                    test_lane = kwargs["select"]["test"]
+                    cacheable = pinned or _is_closed(
+                        test_lane, index, margin=detide_margin
+                    )
+                else:
+                    # A flat, non-paired select applies to both lanes at once --
+                    # compare()'s own contract -- so rewriting only the "test"
+                    # side here would silently change what the reference reads
+                    # too. Never rewritten, only checked.
+                    cacheable = _is_closed(select, index, margin=detide_margin)
+                if kwargs.get("times") is not None:
+                    # times= fans this one page into several per-bin comparisons,
+                    # each replacing whatever time entry select carried with its
+                    # own bin value at draw time (comparison._fanned_time_select)
+                    # -- what actually gets keyed is not what was just resolved
+                    # above, so nothing here can vouch for it.
+                    cacheable = False
                 out.append(
                     ExpandedPage(
                         title=title,
                         kind="compare",
                         kwargs=kwargs,
                         plot=plot,
-                        cache=suite.cache and not open_window,
+                        cache=suite.cache and cacheable,
                     )
                 )
 

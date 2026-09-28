@@ -115,8 +115,8 @@ below, and `docs/caching.md` for the key format and identity-caveat this inherit
 Keys map straight onto `osk.field(source, variable, select=, aggregate=, ...)` -- every
 keyword `osk.field()` accepts (`qc:`, `detide:`, `label:`, ...) passes straight
 through, not only `select:`/`aggregate:`. `cache:` is the one reserved key: it is the
-suite's own to set (`cache:`/`cache_dir:` above, and each page's own open-window rule
--- see Caching, below), not a per-page kwarg.
+suite's own to set (`cache:`/`cache_dir:` above, and each page's own tracks-or-closed
+rule -- see Caching, below), not a per-page kwarg.
 
 ```yaml
 field:
@@ -287,18 +287,44 @@ picked its location.
 ## Caching
 
 `osk.field`/`osk.compare` normally reuse an already-prepared field from ocean-skill's
-own disk cache (see `docs/caching.md`). A page whose window reaches the run's current
-latest step -- `time: latest`, the calendar month containing it, or an injected
-whole-run window -- is run with caching off, since the run has grown since any earlier
-check and a stale hit would silently serve an old mean. A completed month (safely in
-the past) keeps caching on. Set the suite-level `cache: false` to disable it for every
-page, which matters after a restart rewrites already-seen timestamps (`keep:
-latest-per-file`) and an old prepared field could otherwise be served under a select
-that now means something different.
+own disk cache (see `docs/caching.md`). A suite page decides whether its own call gets
+`cache=True` or `cache=False` from one rule: cache whenever the test lane's time
+selection either **tracks** the run's current last step, or is **closed** against it --
+anything else keeps `cache=False`, the safe default.
+
+**Tracks**: `time: latest` resolves to the last step's own timestamp, and a page with no
+time key at all gets the injected `{"min", "max"}` window described above -- both
+already change the moment the run's last step does, whether that is a new step being
+appended or the old one being *replaced* (which is what happens to the restart file
+still being written, under `keep: latest-per-file`). Both get `cache=True`: rerunning
+the suite once the model has stopped hits the cache instead of reprocessing, and
+rerunning it while the model is still advancing recomputes -- a new latest step means
+a new key -- and refills the cache for next time.
+
+**Closed**: checked against the run's current time axis, not assumed -- a page's
+selection picks at least one step, none of them the run's current last step, and it
+would pick exactly the same steps with one more step appended or its current last step
+taken away. A calendar month still being written, an explicit window or instant
+reaching up to the run's end, a flat (non-paired) `compare:` select with no time key at
+all (it reads both lanes, so it is never rewritten, only checked), and a `times=` page
+(each bin's own value replaces whatever time key the page had, so nothing here can
+speak for it) all keep `cache=False`. A `detide:` page's cutoff sits a little earlier
+still, since its PL33 filter leaves an edge of the record that keeps changing shape as
+the run grows.
+
+Set the suite-level `cache: false` to disable caching for every page regardless of any
+of the above -- useful after any change that a select-identity key cannot see on its
+own: old output purged, a segment rewritten in place with the same final timestamp, or
+a reference that is itself still being appended to.
+
+`--list` prints `latest step of <test>: ...` once, so a comparison between two `--list`
+runs shows whether the run has actually moved, and marks each page `(cache)`,
+`(no-cache (cache: false))`, or `(no-cache (may change as the run grows))`.
 
 Set `cache_dir:` to pin where those entries accumulate across repeated runs of this
-suite (see the schema section above); only closed-window pages actually add to it, since
-every open-window page runs with caching off regardless of where the cache lives.
+suite (see the schema section above). Entries for a step the run has since moved past
+are not pruned automatically -- they simply stop being read, and accumulate until
+`osk.cache.clear()`.
 
 ## Output layout
 
