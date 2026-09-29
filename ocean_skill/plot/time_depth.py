@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import xarray as xr
 
 __all__ = [
@@ -89,12 +88,12 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
     :func:`ocean_skill.plot.profile.vertical_values` does
     (:func:`ocean_skill.operators.vertical_coord_on`, tolerant of a coordinate riding
     under a different name than its dimension): whichever of the axis's own
-    coordinate or a same-dim ``z_rho`` is present, taken as ``abs()`` -- a no-op for an
-    already positive-down observational ``depth``, and what turns ROMS's negative-down
-    ``z_rho`` into the positive-down metres every other depth label in this package
-    uses. Unlike :func:`ocean_skill.plot.section.prepare_section`, this never negates
-    the raw coordinate first: a tabular station's ``depth`` is already positive-down,
-    so :func:`~ocean_skill.plot.section.prepare_section`'s "must be negative-down"
+    coordinate or a same-dim ``z_rho`` is present, converted by
+    :func:`ocean_skill.plot.profile.positive_down` -- ROMS's ``z_rho`` negated (a
+    height, so a level above mean sea level under a raised free surface stays above
+    the 0 m line), anything else ``abs()``'d: a no-op for an already positive-down
+    tabular station's ``depth``, which is why
+    :func:`~ocean_skill.plot.section.prepare_section`'s "must be negative-down"
     convention does not apply here.
 
     The returned field is transposed to ``(vertical, time)`` -- the row/column order
@@ -125,6 +124,7 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
     zdim = extra[0]
 
     from ocean_skill.operators import vertical_coord_on
+    from ocean_skill.plot.profile import positive_down
 
     depth_source = vertical_coord_on(da, zdim)
     if depth_source is None:
@@ -132,11 +132,11 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
         if z_rho is not None and zdim in z_rho.dims:
             depth_source = z_rho
 
-    depth = np.abs(depth_source).rename("depth")
-    depth.attrs["units"] = depth_source.attrs.get("units", "m")
+    depth = positive_down(depth_source)
+    depth_units = depth_source.attrs.get("units", "m")
 
     date_axis = date_axis_of(da[tdim])
-    result = da.assign_coords(depth=(zdim, np.asarray(depth)))
+    result = da.assign_coords(depth=(zdim, depth))
     if date_axis:
         # A real time axis is renamed to the shared "time" coordinate name every
         # renderer already expects; a groupby axis keeps its own name (`month`,
@@ -149,7 +149,7 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
         x_name="time" if date_axis else tdim,
         y_name="depth",
         x_label="time" if date_axis else tdim,
-        y_label=f"Depth [{depth.attrs.get('units') or 'm'}]",
+        y_label=f"Depth [{depth_units or 'm'}]",
         place_note=_place_of(da),
         period_note=_period_of(da[tdim]),
         date_axis=date_axis,

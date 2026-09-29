@@ -30,7 +30,14 @@ from ocean_skill.plot import _titles
 from ocean_skill.plot import series as _series_layout
 from ocean_skill.plot import style as _style
 
-__all__ = ["compose", "depth_range", "fan_season", "panel_title", "vertical_values"]
+__all__ = [
+    "compose",
+    "depth_range",
+    "fan_season",
+    "panel_title",
+    "positive_down",
+    "vertical_values",
+]
 
 #: The dimension name a season groupby produces (see
 #: :func:`ocean_skill.operators._reduce_dim`'s ``SeasonGrouper`` route) --
@@ -142,23 +149,46 @@ def _vertical_coord(da):
     )
 
 
+#: Vertical coordinates built as *height* -- positive up, zero at mean sea level --
+#: rather than depth: ROMS's native cell-centre and interface depths (see
+#: :func:`ocean_skill.roms.add_depth_coord`/
+#: :func:`~ocean_skill.roms.add_interface_coord`). They carry the free surface in
+#: them, so under a raised sea surface (``zeta > 0``, a high tide on a shallow
+#: shelf) the top levels are genuinely *positive*.
+_HEIGHT_COORDS = frozenset({"z_rho", "z_w"})
+
+
+def positive_down(coord) -> np.ndarray:
+    """Return a vertical coordinate's values as positive-down metres (or density).
+
+    A height coordinate (:data:`_HEIGHT_COORDS`, or anything marked CF
+    ``positive="up"``) is *negated*, never ``abs()``'d: a level 1 m above mean sea
+    level must draw at -1 m -- above the 0 m line, where it is -- not be mirrored to
+    1 m down, which folds every above-MSL level back under the ones beneath it and
+    draws the column's top as a hook (the same negation
+    :func:`ocean_skill.plot.section.prepare_section` already applies to a section's
+    ``z_rho``). Anything else comes back as ``abs()`` of its raw values: a no-op for
+    an observational ``depth``/``DEPTH``/``lev`` (already positive-down) or a
+    ``sigma0`` axis (a positive density anomaly), and what turns
+    :func:`ocean_skill.roms.to_depth`'s ``z`` -- negative-down, and never above 0,
+    since its levels are the depths a caller requested -- positive.
+    """
+    values = np.asarray(coord.values, dtype="float64")
+    height = str(coord.attrs.get("positive", "")).lower() == "up"
+    if height or str(coord.name) in _HEIGHT_COORDS:
+        return -values
+    return np.abs(values)
+
+
 def vertical_values(da) -> np.ndarray:
     """Return ``da``'s vertical coordinate as positive-down (or positive-density) values.
 
     The axis every profile panel draws against, read off ``da``'s own (and only)
     dimension (see :func:`_vertical_coord` for where that coordinate actually
-    lives). A depth-like axis (``z``, negative-down from
-    :func:`ocean_skill.roms.to_depth`; ``z_rho``, negative-down native s-levels;
-    ``depth``/``DEPTH``/``lev``, already positive-down from an observational
-    product) comes back as ``abs()`` of its raw coordinate -- a no-op for an axis
-    that was already positive, and exactly what turns ROMS's negative-down
-    convention into the positive-down metres every other depth label in this
-    package uses (see ``facet_labels``' own ``abs()`` in
-    :mod:`ocean_skill.plot.matplotlib_renderer`). A ``sigma0`` axis is already
-    positive (density anomaly, roughly 20-28 kg/m3), so ``abs()`` there is a no-op
-    too -- there is no third case to special-case.
+    lives), converted by :func:`positive_down` -- the one place that knows which
+    coordinates are heights to negate and which are depths already.
     """
-    return np.abs(np.asarray(_vertical_coord(da).values, dtype="float64"))
+    return positive_down(_vertical_coord(da))
 
 
 def depth_range(
