@@ -590,7 +590,16 @@ class Field:
             return "drawn as a section: select={'transect': ...} leaves a cut through space, with depth on the other axis"
         return "drawn as map panels: a horizontal extent survives"
 
-    def extremum(self, kind: str = "max") -> Any:
+    def extremum(
+        self,
+        kind: str = "max",
+        *,
+        n: int = 1,
+        local: bool = False,
+        window: int | None = None,
+        interior: bool = False,
+        separation: int | None = None,
+    ) -> Any:
         """Locate this field's min/max: value, lon/lat, grid indices, snapshot.
 
         Parameters
@@ -598,6 +607,22 @@ class Field:
         kind
             One of ``"max"`` or ``"min"`` (default ``"max"``) -- which extremum
             to locate.
+        n
+            ``int >= 1`` (default 1). One returns an
+            :class:`~ocean_skill.extrema.Extremum`; more return an
+            :class:`~ocean_skill.extrema.Extrema` of the ``n`` most extreme
+            *distinct* places (hits closer than ``separation`` cells merge into one).
+        local
+            ``bool`` (default ``False``). Rank by departure from the median of each
+            cell's wet neighbors instead of by value -- see below.
+        window
+            Local mode only: odd ``int >= 3``, neighborhood side in cells
+            (default 3).
+        interior
+            Local mode only: skip every cell that touches land (or the grid's edge).
+        separation
+            ``int >= 1``, minimum spacing in cells between reported hits
+            (default: ``window`` when ``local``, else 10).
 
         Runs over every dim the prepared field still has, not just the horizontal
         ones -- a field faceted over time or depth reports the facet coordinate
@@ -617,15 +642,40 @@ class Field:
             ext = run.extremum("max")
             ext.series(variables=["salinity"]).plot()   # both, same place/window
 
+        The global min/max is usually a coastline or river-mouth cell, and the "k-th
+        lowest value" is more of the same. The specks a ``robust=True`` colorbar
+        reveals are not extreme in value -- they are extreme *relative to their
+        neighbors* -- so ``local=True`` scores every wet cell by ``value - median
+        of its wet neighbors`` (a straight front scores ~0; only a feature about
+        one cell wide stands out) and ``n=`` lists the worst offenders::
+
+            hits = run.extremum("min", local=True, n=15)
+            hits                                   # table of value, anomaly, lon, lat
+            hits.to_dataframe().query("wet_neighbors == 8")   # open ocean only
+            hits[0].plot()                         # each hit follows through time
+
+        Each hit reports its wet-neighbor count, so land-adjacent hits are easy to
+        tell apart; ``interior=True`` drops them up front. Cells at the grid's edge
+        use only their in-grid neighbors.
+
         A :class:`FieldSet` (several variables) has no ``extremum`` of its own --
         each member is its own field with its own map; call it on one member,
         e.g. ``fields[0].extremum()``.
 
-        See :class:`ocean_skill.extrema.Extremum`.
+        See :class:`ocean_skill.extrema.Extremum` and
+        :class:`ocean_skill.extrema.Extrema`.
         """
         from ocean_skill.extrema import field_extremum
 
-        return field_extremum(self, kind)
+        return field_extremum(
+            self,
+            kind,
+            n=n,
+            local=local,
+            window=window,
+            interior=interior,
+            separation=separation,
+        )
 
     def _series_items(self) -> list[dict[str, Any]]:
         """Return this field's data as one or more single-source series items.

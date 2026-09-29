@@ -515,3 +515,369 @@ def test_plot_shortcut_delegates_to_series(stub):
     fig = ext.plot()
     assert len(fig.axes) == 1
     assert len(fig.axes[0].lines) == 1
+
+
+# -- n= and local=True: distinct places, departure from wet neighbors --------
+
+
+def _ramp(nlat: int = 20, nlon: int = 30):
+    """Build a smooth, linear background whose median departure is exactly 0."""
+    lat = np.arange(nlat, dtype=float)
+    lon = -120.0 + np.arange(nlon, dtype=float)
+    ramp = 2300.0 + 0.5 * lat[:, None] + 0.3 * np.arange(nlon)[None, :]
+    return lat, lon, ramp
+
+
+def _speckled_map(nt: int | None = None):
+    """Build a ramp with the features the local search must tell apart.
+
+    * a NaN "land" block in the corner, with a very low cell (-300) on its coast
+      at (3, 2), which has only 5 wet neighbors -- the global min;
+    * a one-cell speck (-100) in the open ocean at (10, 12);
+    * a two-cell speck (-60) at (15, 5) and (15, 6);
+    * a +500 step front at lon index >= 22, which is large but straight, so it must
+      not register as a local anomaly anywhere along it.
+
+    With ``nt`` set, the open-ocean speck persists through every step and is deepest
+    (-100, versus -50) at step 2, and the other features are left out.
+    """
+    lat, lon, ramp = _ramp()
+    if nt is None:
+        values = ramp.copy()
+        values[:3, :5] = np.nan
+        values[3, 2] -= 300.0
+        values[10, 12] -= 100.0
+        values[15, 5] -= 60.0
+        values[15, 6] -= 60.0
+        values[:, 22:] += 500.0
+        return xr.DataArray(
+            values,
+            dims=("lat", "lon"),
+            coords={"lat": lat, "lon": lon},
+            name=NITRATE,
+            attrs={"units": "mmol m-3"},
+        )
+    values = np.tile(ramp, (nt, 1, 1))
+    values[:, 10, 12] -= 50.0
+    values[2, 10, 12] -= 50.0
+    time = pd.date_range("2012-01-01", periods=nt, freq="D")
+    return xr.DataArray(
+        values,
+        dims=("time", "lat", "lon"),
+        coords={"time": time, "lat": lat, "lon": lon},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    )
+
+
+def _positions(hits):
+    return [(h.indices["lat"], h.indices["lon"]) for h in hits]
+
+
+def test_n_one_still_returns_a_single_extremum(stub):
+    from ocean_skill.extrema import Extrema, Extremum
+
+    stub(_speckled_map())
+    assert type(_make().extremum("min")) is Extremum
+    assert type(_make().extremum("min", n=1)) is Extremum
+    assert type(_make().extremum("min", local=True)) is Extremum
+    assert type(_make().extremum("min", n=2)) is Extrema
+
+
+def test_global_min_is_the_coastal_cell_and_carries_no_local_fields(stub):
+    stub(_speckled_map())
+    ext = _make().extremum("min")
+    assert ext.indices == {"lat": 3, "lon": 2}
+    assert ext.mode == "global"
+    assert ext.anomaly is None and ext.wet_neighbors is None and ext.window is None
+
+
+def test_global_top_n_hits_are_distinct_places(stub):
+    stub(_speckled_map())
+    hits = _make().extremum("min", n=3, separation=4)
+    assert [h.rank for h in hits] == [1, 2, 3]
+    values = [h.value for h in hits]
+    assert values == sorted(values)
+    pos = _positions(hits)
+    for i in range(len(pos)):
+        for j in range(i + 1, len(pos)):
+            assert max(abs(pos[i][0] - pos[j][0]), abs(pos[i][1] - pos[j][1])) >= 4
+
+
+def test_global_default_separation_merges_a_whole_neighborhood(stub):
+    stub(_rectilinear_map())  # 4 x 5 grid: one place fills it at separation 10
+    hits = _make().extremum("min", n=3)
+    assert len(hits) == 1
+    assert hits[0].value == pytest.approx(-50.0)
+
+
+def test_separation_one_returns_adjacent_cells(stub):
+    stub(_rectilinear_map())
+    hits = _make().extremum("min", n=3, separation=1)
+    assert [h.value for h in hits] == pytest.approx([-50.0, 5.0, 5.0])
+
+
+def test_local_ranks_the_coast_then_the_open_ocean_speck_then_the_pair(stub):
+    stub(_speckled_map())
+    hits = _make().extremum("min", local=True, n=3)
+    assert _positions(hits)[:2] == [(3, 2), (10, 12)]
+    assert _positions(hits)[2] in {(15, 5), (15, 6)}
+    assert [h.anomaly for h in hits] == pytest.approx([-300.0, -100.0, -60.0], abs=1.0)
+    assert all(h.mode == "local" and h.window == 3 for h in hits)
+
+
+def test_local_hit_reports_its_own_value_and_wet_neighbor_count(stub):
+    stub(_speckled_map())
+    coast, speck, _ = _make().extremum("min", local=True, n=3)
+    ramp = _ramp()[2]
+    # the field's own value, not the score
+    assert speck.value == pytest.approx(ramp[10, 12] - 100.0)
+    assert speck.wet_neighbors == 8
+    assert speck.neighborhood == pytest.approx(ramp[10, 12], abs=0.1)
+    assert speck.anomaly == pytest.approx(speck.value - speck.neighborhood)
+    assert coast.wet_neighbors == 5
+    assert (speck.lat, speck.lon) == (10.0, -108.0)
+
+
+def test_local_max_finds_positive_departures_only_by_sign(stub):
+    da = _speckled_map()
+    da[8, 20] += 200.0
+    stub(da)
+    top = _make().extremum("max", local=True)
+    assert (top.indices["lat"], top.indices["lon"]) == (8, 20)
+    assert top.anomaly == pytest.approx(200.0, abs=1.0)
+
+
+def test_a_straight_step_front_is_not_a_local_anomaly(stub):
+    from ocean_skill.extrema import _horizontal_dims, _neighbor_departure
+
+    da = _speckled_map()
+    departure, _, _ = _neighbor_departure(
+        da, _horizontal_dims(da), 3, interior=False
+    )
+    # the two columns straddling the +500 step: the median ignores the far side, so
+    # the step's size never shows up -- only the ramp's ~1-unit residue does
+    front = departure.isel(lon=slice(21, 23))
+    assert float(np.abs(front).max()) < 5.0
+    # ... while a one-cell feature of the same order does
+    assert float(np.abs(departure).max()) > 250.0
+
+
+def test_a_two_cell_speck_is_one_hit_but_separation_one_splits_it(stub):
+    stub(_speckled_map())
+    merged = _positions(_make().extremum("min", local=True, n=4))
+    assert sum(p in {(15, 5), (15, 6)} for p in merged) == 1
+    split = _positions(_make().extremum("min", local=True, n=4, separation=1))
+    assert {(15, 5), (15, 6)} <= set(split)
+
+
+def test_interior_drops_cells_that_touch_land(stub):
+    stub(_speckled_map())
+    hits = _make().extremum("min", local=True, n=2, interior=True)
+    assert _positions(hits)[0] == (10, 12)
+    assert (3, 2) not in _positions(hits)
+    assert all(h.wet_neighbors == 8 for h in hits)
+
+
+def test_a_persistent_speck_is_reported_once_at_its_strongest_step(stub):
+    da = _speckled_map(nt=4)
+    stub(da)
+    hits = _make().extremum("min", local=True, n=2)
+    top = hits[0]
+    assert top.indices == {"time": 2, "lat": 10, "lon": 12}
+    assert pd.Timestamp(top.time) == pd.Timestamp(da["time"].values[2])
+    assert top.anomaly == pytest.approx(-100.0, abs=1.0)
+    second = hits[1]
+    assert max(abs(second.indices["lat"] - 10), abs(second.indices["lon"] - 12)) >= 3
+
+
+def test_local_on_a_curvilinear_grid_keys_indices_by_grid_dims(stub):
+    stub(_curvilinear_map())  # planted +50 on the xi_rho edge at (2, 4)
+    top = _make().extremum("max", local=True)
+    assert top.indices == {"eta_rho": 2, "xi_rho": 4}
+    assert top.wet_neighbors == 5
+    assert top.anomaly == pytest.approx(45.0)
+
+
+def test_local_ignores_dim_order(stub):
+    da = _speckled_map(nt=4).transpose("lat", "time", "lon")
+    stub(da)
+    top = _make().extremum("min", local=True)
+    assert top.indices == {"lat": 10, "time": 2, "lon": 12}
+    assert list(top.indices) == list(da.dims)
+
+
+def test_n_larger_than_the_scoreable_cells_returns_fewer(stub):
+    stub(_curvilinear_map())
+    hits = _make().extremum("max", local=True, n=1000, separation=1)
+    assert 1 < len(hits) < 1000
+    assert _make().extremum("max", n=1000, separation=1)[0].value == pytest.approx(50.0)
+
+
+def test_all_nan_raises_for_local_and_for_n(stub):
+    stub(_all_nan_map())
+    with pytest.raises(ValueError, match=r"'stub'.*NaN everywhere"):
+        _make().extremum("min", local=True)
+    with pytest.raises(ValueError, match=r"'stub'.*NaN everywhere"):
+        _make().extremum("min", n=3)
+
+
+def test_interior_that_drops_every_cell_raises(stub):
+    # a 2 x 2 field: every cell touches the grid's edge, so none has a full window
+    stub(_rectilinear_map().isel(lat=slice(0, 2), lon=slice(0, 2)))
+    with pytest.raises(ValueError, match="NaN everywhere"):
+        _make().extremum("min", local=True, interior=True)
+
+
+def test_neighbor_median_matches_a_brute_force_loop():
+    # The sort-and-index median must agree with a plain per-cell nanmedian at every
+    # wet-neighbor count (even and odd), around masked cells and at the edges.
+    from ocean_skill.extrema import MIN_WET_NEIGHBORS, _slice_departure
+
+    rng = np.random.default_rng(0)
+    for window in (3, 5):
+        sl = rng.normal(size=(9, 11))
+        sl[rng.random(sl.shape) < 0.3] = np.nan
+        departure, median, wet = _slice_departure(sl, window, interior=False)
+        r = window // 2
+        for i in range(sl.shape[0]):
+            for j in range(sl.shape[1]):
+                block = sl[max(i - r, 0) : i + r + 1, max(j - r, 0) : j + r + 1]
+                centre = (i - max(i - r, 0)) * block.shape[1] + j - max(j - r, 0)
+                around = np.delete(block.ravel(), centre)
+                around = around[np.isfinite(around)]
+                assert wet[i, j] == len(around)
+                if len(around):
+                    assert median[i, j] == pytest.approx(np.median(around))
+                if np.isfinite(sl[i, j]) and len(around) >= MIN_WET_NEIGHBORS:
+                    expected = sl[i, j] - np.median(around)
+                    assert departure[i, j] == pytest.approx(expected)
+                else:
+                    assert np.isnan(departure[i, j])
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"interior": True}, "only apply to local=True"),
+        ({"window": 5}, "only apply to local=True"),
+        ({"n": 0}, "n must be an integer"),
+        ({"n": True}, "n must be an integer"),
+        ({"n": 1.5}, "n must be an integer"),
+        ({"separation": 0}, "separation must be an integer"),
+        ({"local": True, "window": 4}, "odd integer >= 3"),
+        ({"local": True, "window": 1}, "odd integer >= 3"),
+        ({"local": True, "window": 3.0}, "odd integer >= 3"),
+    ],
+)
+def test_bad_arguments_are_refused(stub, kwargs, match):
+    stub(_speckled_map())
+    with pytest.raises(ValueError, match=match):
+        _make().extremum("min", **kwargs)
+
+
+def test_local_needs_a_two_dimensional_horizontal_grid(stub):
+    along = np.arange(6, dtype=float)
+    line = xr.DataArray(
+        np.arange(6, dtype=float),
+        dims="along",
+        coords={"lon": ("along", -100.0 + along), "lat": ("along", 10.0 + along)},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    )
+    stub(line)
+    with pytest.raises(ValueError, match="2-D horizontal grid"):
+        _make().extremum("min", local=True)
+    assert _make().extremum("min", n=2, separation=1)[0].value == pytest.approx(0.0)
+
+
+def test_a_wider_window_reads_a_wider_neighborhood(stub):
+    stub(_speckled_map())
+    top = _make().extremum("min", local=True, window=5)
+    assert top.window == 5
+    assert top.wet_neighbors <= 24
+    assert "5x5" in repr(top)
+
+
+def test_lone_wet_cells_are_never_scored(stub):
+    da = _speckled_map()
+    da[:, 27:] = np.nan  # leave the far columns dry ...
+    da[18, 28] = -1e6  # ... except one lone, absurdly low wet pixel
+    stub(da)
+    top = _make().extremum("min", local=True)
+    assert (top.indices["lat"], top.indices["lon"]) != (18, 28)
+
+
+# -- the Extrema container ---------------------------------------------------
+
+
+def test_extrema_behaves_like_a_tuple_of_extremum(stub):
+    from ocean_skill.extrema import Extremum
+
+    stub(_speckled_map())
+    hits = _make().extremum("min", local=True, n=3)
+    assert len(hits) == 3
+    assert all(isinstance(h, Extremum) for h in hits)
+    assert list(hits) == list(hits.items)
+    assert hits[0] is hits.items[0]
+    assert hits[-1].rank == 3
+
+
+def test_local_dataframe_columns_and_index(stub):
+    stub(_speckled_map())
+    df = _make().extremum("min", local=True, n=3).to_dataframe()
+    assert list(df.columns) == [
+        "value", "anomaly", "neighborhood", "wet_neighbors",
+        "lon", "lat", "time", "i_lat", "i_lon",
+    ]  # fmt: skip
+    assert df.index.name == "rank" and list(df.index) == [1, 2, 3]
+    assert df.loc[1, "wet_neighbors"] == 5
+    assert len(df.query("wet_neighbors == 8")) == 2
+
+
+def test_global_dataframe_has_no_local_columns_but_keeps_facet_coords(stub):
+    stub(_depth_faceted_point())
+    df = _make().extremum("max", n=2, separation=1).to_dataframe()
+    assert "anomaly" not in df.columns
+    assert {"value", "lon", "lat", "i_depth", "depth"} <= set(df.columns)
+    assert df.loc[1, "depth"] == pytest.approx(50.0)
+
+
+def test_extrema_repr_is_a_header_and_a_table(stub):
+    stub(_speckled_map())
+    text = repr(_make().extremum("min", local=True, n=3))
+    assert text.splitlines()[0].startswith("3 local min nitrate")
+    assert "3x3 wet-neighbor median" in text and "3 cells apart" in text
+    assert "wet_neighbors" in text and "'stub'" in text
+    assert "interior cells only" in repr(
+        _make().extremum("min", local=True, n=2, interior=True)
+    )
+    assert repr(_make().extremum("min", n=2, separation=1)).splitlines()[0].startswith(
+        "2 min nitrate"
+    )
+
+
+def test_a_local_extremum_repr_explains_the_contrast(stub):
+    stub(_speckled_map())
+    coast, speck, _ = _make().extremum("min", local=True, n=3)
+    text = repr(speck)
+    assert text.startswith("local min nitrate")
+    assert "below the median of its 3x3 wet neighbors" in text and "8/8 wet" in text
+    assert "5/8 wet" in repr(coast)
+
+
+def test_a_local_hit_follows_through_time_like_any_extremum(stub, monkeypatch):
+    stub(_speckled_map(nt=5))
+    hits = _make().extremum("min", local=True, n=2)
+    index = pd.date_range("2012-01-01", periods=5, freq="D")
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda src: index)
+    fs = hits[0].series(pad=1)
+    assert fs[0].select["lon"] == hits[0].lon
+    assert fs[0].select["lat"] == hits[0].lat
+    assert fs[0].select["time"] == {"min": str(index[1]), "max": str(index[3])}
+
+
+def test_extrema_is_exported():
+    import ocean_skill as osk
+
+    assert osk.Extrema is not None and "Extrema" in osk.__all__
