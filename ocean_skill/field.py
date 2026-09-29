@@ -273,7 +273,8 @@ class Field:
     select
         ``dict[str, Any] | None`` -- axis name -> selection, e.g. ``{"depth":
         "surface"}``, ``{"lon": -144.25, "lat": 49.98}`` (see
-        :func:`ocean_skill.comparison.as_select`). ``None`` (default) selects
+        :func:`ocean_skill.comparison.as_select`); ``{"time": "latest"}`` is
+        this source's newest step. ``None`` (default) selects
         nothing. Not a ``{"test", "reference"}`` pair-spec.
     aggregate
         ``dict[str, Any] | None`` -- axis name -> reduction, e.g. ``{"time":
@@ -325,6 +326,7 @@ class Field:
         from ocean_skill.comparison import (
             _normalize_detide_side,
             _require_pair_spec,
+            _resolve_latest,
             as_select,
             is_pair_spec,
         )
@@ -375,7 +377,7 @@ class Field:
             if isinstance(variable, str)
             else variable
         )
-        self.select = as_select(select)
+        self.select = _resolve_latest(as_select(select), source)
         self.aggregate = aggregate
         self.label = label
         self.cache = cache
@@ -2089,7 +2091,9 @@ def field(
         "surface"}``, ``{"lon": ..., "lat": ...}``, or ``{"sigma0": ...}`` for an
         isopycnal (ROMS sources only). ``select={"transect": {"cross": ...}}``
         builds a :class:`Cross` instead (source and variable must each be a
-        single, non-list value for that). ``None`` (default) leaves the
+        single, non-list value for that). ``{"time": "latest"}`` is the
+        newest step of each source's own time axis, resolved to its date when
+        the field is built. ``None`` (default) leaves the
         vertical axis whole, unlike :func:`ocean_skill.comparison.compare`,
         whose own default is ``"surface"``.
     aggregate

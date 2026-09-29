@@ -199,6 +199,14 @@ coordinate-only read, done once per run regardless of how many pages use it). Ne
 combine it with a `method:` key -- nearest-matching is automatic and `method` is
 otherwise ignored with a warning.
 
+The same shorthand works outside suites: `osk.field(src, select={"time": "latest"})`
+and `osk.compare(..., select={"time": "latest"})` (or a pair-spec's `test` side; not its
+`reference` side) resolve it to that source's newest step's date as the field or
+comparison is built, so the on-disk cache keys on the date, not the word. A run that
+has not moved hits the cache; one that has gained a step is a new key. In a long-lived
+session the catalog is read once, so call `osk.cache.clear()` to notice steps appended
+since.
+
 Every page with no time key at all (a monthly-means page reducing the whole run, a
 run-mean comparison like the GLODAP page) gets a literal `{"min", "max"}` window
 injected covering the run's full recorded span -- this is what makes the expanded page
