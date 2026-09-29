@@ -47,7 +47,8 @@ def test_threshold_crossing_interpolates_between_levels():
 
 def test_column_order_does_not_matter():
     """ROMS stores s_rho bottom-to-top -- depth *decreasing* with index -- so the
-    internal sort has to actually do something, not rely on already-sorted input."""
+    internal sort has to actually do something, not rely on already-sorted input.
+    """
     out = mld._mld_threshold_1d(TEMP[::-1], DEPTH[::-1], threshold=0.2, ref_depth=10.0)
     assert out == pytest.approx(CROSSING_MLD)
 
@@ -160,7 +161,8 @@ def test_mld_density_threshold_matches_gsw_computed_independently():
 def test_calculate_mld_needs_an_explicit_method():
     """No default method: four exist in the product this is meant to match, and
     picking one silently would be the kind of looks-right number this project
-    otherwise refuses to produce."""
+    otherwise refuses to produce.
+    """
     with pytest.raises(KeyError, match="mld needs method"):
         mld.calculate_mld(_water_column(DEPTH, TEMP))
 
@@ -203,13 +205,14 @@ def test_spec_names_reports_temperature_or_density_inputs_by_method():
     assert spec_names({"calculate": "mld"}) == [[temp, salt]]
 
 
-def test_prepare_refuses_a_depth_selection_alongside_calculate():
-    """MLD already collapses the vertical axis; select={'depth': ...} beside it is a
-    contradiction worth naming rather than silently ignoring."""
+def test_prepare_refuses_a_real_depth_selection_alongside_calculate():
+    """MLD already collapses the vertical axis; select={'depth': 100} beside it is a
+    contradiction worth naming rather than silently ignoring.
+    """
     ds = _water_column(DEPTH, TEMP)
     spec = {"calculate": "mld", "method": "temperature_threshold"}
     with pytest.raises(ValueError, match="already reduces the vertical axis"):
-        _prepare(ds, {"model": "roms"}, spec, {"depth": "surface"})
+        _prepare(ds, {"model": "roms"}, spec, {"depth": 100})
 
 
 def test_prepare_accepts_calculate_with_no_depth_key():
@@ -218,3 +221,71 @@ def test_prepare_accepts_calculate_with_no_depth_key():
     da, actual_depth = _prepare(ds, {"model": "roms"}, spec, {})
     assert actual_depth is None
     assert float(da.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)
+
+
+def test_prepare_accepts_a_plain_surface_selection_alongside_calculate():
+    """select={'depth': 'surface'} is the default Comparison/Field inject for *every*
+    lane that names no depth at all (see Comparison._prepare_lane, Field._surfaced) --
+    a caller-visible no-op for a calculator, not a contradiction, unlike a real depth
+    (see test_prepare_refuses_a_real_depth_selection_alongside_calculate just above).
+    """
+    ds = _water_column(DEPTH, TEMP)
+    spec = {"calculate": "mld", "method": "temperature_threshold"}
+    da, actual_depth = _prepare(ds, {"model": "roms"}, spec, {"depth": "surface"})
+    assert actual_depth is None
+    assert float(da.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)
+
+
+# -- regression: the grid surface default must not collide with a calculator --------
+#
+# Comparison._prepare_lane and Field._surfaced() both inject select={"depth":
+# "surface"} for *any* grid lane naming no depth (added 2026-09-04, after this
+# module's own calculator guard above already existed) -- neither exempted a
+# calculated variable, so every real MLD Comparison/Field call raised the
+# "already reduces the vertical axis" error above, unconditionally. The two
+# _prepare-level tests just above cover the guard itself; these go one level up,
+# through the real (unmocked) prepare_source both injection sites actually call,
+# to prove the *callers* are fixed too -- only the catalog resolve and the read
+# are faked, exactly as much I/O as a unit test needs to skip.
+
+
+def _mock_grid_source(monkeypatch, ds, meta):
+    from unittest import mock
+
+    monkeypatch.setattr("ocean_skill.catalog.resolve", lambda name: mock.Mock(metadata=meta))
+    monkeypatch.setattr("ocean_skill.read", lambda name, **kw: ds)
+
+
+def test_prepare_source_accepts_the_comparison_lane_surface_default(monkeypatch):
+    """Comparison._prepare_lane's own injected select, reproduced directly against
+    prepare_source -- the function both it and Field.prepare() call.
+    """
+    from ocean_skill.comparison import prepare_source
+
+    ds = _water_column(DEPTH, TEMP)
+    spec = {"calculate": "mld", "method": "temperature_threshold"}
+    _mock_grid_source(monkeypatch, ds, {"model": "roms", "featureType": "grid"})
+
+    da, actual_depth = prepare_source(
+        "fake_model", spec, {"depth": "surface"}, None, use_cache=False
+    )
+    assert actual_depth is None
+    assert float(da.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)
+
+
+def test_field_surfaced_default_accepts_a_calculate_spec(monkeypatch):
+    """Field._surfaced() (the grid surface default a bare plot()/prepare() falls
+    through to) must not turn a calculated variable's own no-op depth into an error.
+    """
+    from ocean_skill.field import Field
+
+    ds = _water_column(DEPTH, TEMP)
+    spec = {"calculate": "mld", "method": "temperature_threshold"}
+    _mock_grid_source(monkeypatch, ds, {"model": "roms", "featureType": "grid"})
+
+    field = Field("fake_model", spec)
+    surfaced = field._surfaced()
+    assert surfaced.select == {"depth": "surface"}
+
+    out = surfaced.prepare()
+    assert float(out.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)

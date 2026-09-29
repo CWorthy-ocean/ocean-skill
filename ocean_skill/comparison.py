@@ -2015,7 +2015,18 @@ def _prepare(
             da = da.squeeze(_tsp_tdim, drop=False)
 
     if calculated:
-        bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
+        # A plain surface request is not a contradiction here: it is the default
+        # Comparison._prepare_lane/Field._surfaced() inject for *every* grid lane
+        # that names no depth at all (so a calculated variable shares their cache
+        # entry rather than needing its own carve-out at each injection site) --
+        # a caller-visible no-op for a calculator, which never had a vertical axis
+        # to take "surface" from in the first place. A real depth, a band, a level
+        # list, or sigma0 is still a genuine contradiction and still refused.
+        bad = (
+            "sigma0"
+            if sigma is not None
+            else "depth" if (depth is not None and not surface) else None
+        )
         if bad is not None:
             raise ValueError(
                 f"{variable!r} is a registered calculator, which already reduces "
