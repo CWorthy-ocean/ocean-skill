@@ -16,6 +16,15 @@ for the same reason: today it is always "the source's own grid", but a compariso
 aligned pair lives on the coarser lane's regrid target, and that case will want to
 name it rather than let a caller assume the test source's native grid.
 
+The global min/max of a model field is usually a coastline or river-mouth cell, and
+the "k-th lowest value" is more of the same, so two options widen the search. ``n=``
+returns the ``n`` most extreme *distinct* places as an :class:`Extrema` (hits closer
+than ``separation`` cells merge into one). ``local=True`` changes what is ranked: each
+wet cell is scored by its departure from the median of its wet neighbors, which is
+what a one-cell speck -- unremarkable in absolute value, nothing like its surroundings
+-- stands out on, while a straight front or a coastal gradient scores near zero. The
+neighborhood counts only wet cells, and every hit reports how many there were.
+
 The follow-on time series is deliberately *not* a new plot family: writing the
 extremum's ``lon``/``lat`` into a fresh ``select`` and re-entering
 :func:`ocean_skill.field.field` produces an ordinary ``Field``/``FieldSet`` whose
@@ -33,7 +42,7 @@ import numpy as np
 
 from ocean_skill import _stacklevel
 
-__all__ = ["Extremum", "field_extremum"]
+__all__ = ["Extrema", "Extremum", "field_extremum"]
 
 #: Native time steps kept on each side of the snapshot by :meth:`Extremum.series`'s
 #: default window. Ten steps each way is enough to see an event grow and decay at
@@ -41,32 +50,164 @@ __all__ = ["Extremum", "field_extremum"]
 #: overrides it with the full :func:`ocean_skill.operators.select` grammar.
 DEFAULT_PAD_STEPS = 10
 
+#: Neighborhood side, in cells, for ``local=True`` when ``window=`` is not given.
+DEFAULT_WINDOW = 3
 
-def _locate(da, kind: str, *, source: str) -> dict[str, int]:
-    """Indices of ``da``'s global nan-``kind`` extremum, over every dim it has.
+#: Minimum grid-index spacing between hits of a global ``n > 1`` search when
+#: ``separation=`` is not given -- wide enough that one river plume or coastal
+#: pile-up is one place rather than ten adjacent cells. A ``local=True`` search
+#: defaults to its own ``window`` instead (one speck, one hit).
+DEFAULT_GLOBAL_SEPARATION = 10
+
+#: A cell with fewer wet neighbors than this (a lone wet pixel, a one-cell inlet) has
+#: no neighborhood to stand out from, so ``local=True`` does not score it.
+MIN_WET_NEIGHBORS = 3
+
+
+def _rank(
+    score,
+    kind: str,
+    *,
+    n: int = 1,
+    separation: int = 1,
+    hdims: tuple[str, ...] = (),
+    source: str,
+    what: str = "prepared field",
+    hint: str = (
+        "The selection may fall entirely on land/masked cells, or outside the "
+        "source's coverage -- widen select= or check the depth/time asked for."
+    ),
+) -> list[dict[str, int]]:
+    """Return the indices of ``score``'s ``n`` most extreme *distinct* places.
+
+    Most extreme first.
 
     The unravel-index idiom :func:`ocean_skill.align._nearest_indices` uses for one
-    dimension pair, generalized to however many dims ``da`` still carries — which is
-    what lets a field faceted over time or depth report the facet coordinate the
+    dimension pair, generalized to however many dims ``score`` still carries -- which
+    is what lets a field faceted over time or depth report the facet coordinate the
     extremum fell on, for free, once the caller reads the point back off the indices.
+
+    After each pick, every cell within ``separation - 1`` grid indices of it on
+    ``hdims`` is masked out -- across *every* other dimension, so a feature that
+    persists through the record is reported once, at the slice where it is most
+    extreme. Fewer than ``n`` picks come back when the field runs out of finite
+    cells; none at all raises.
     """
     if kind not in ("max", "min"):
         raise ValueError(f'kind must be "max" or "min", got {kind!r}.')
     finder = np.nanargmax if kind == "max" else np.nanargmin
-    values = np.asarray(da.values)
-    try:
-        flat = int(finder(values))
-    except ValueError as err:
-        raise ValueError(
-            f"cannot locate a {kind}: {source!r}'s prepared field is NaN "
-            f"everywhere ({dict(da.sizes)}). The selection may fall entirely on "
-            "land/masked cells, or outside the source's coverage -- widen "
-            "select= or check the depth/time asked for."
-        ) from err
-    return {
-        str(d): int(i)
-        for d, i in zip(da.dims, np.unravel_index(flat, values.shape))
-    }
+    values = np.asarray(score.values)
+    if n > 1:
+        values = np.array(values, dtype=float)  # a writable copy to mask into
+    radius = max(int(separation) - 1, 0)
+    picks: list[dict[str, int]] = []
+    for _ in range(n):
+        try:
+            flat = int(finder(values))
+        except ValueError as err:
+            if picks:
+                break
+            raise ValueError(
+                f"cannot locate a {kind}: {source!r}'s {what} is NaN "
+                f"everywhere ({dict(score.sizes)}). {hint}"
+            ) from err
+        where = np.unravel_index(flat, values.shape)
+        picks.append({str(d): int(i) for d, i in zip(score.dims, where)})
+        if len(picks) == n:
+            break
+        if hdims:
+            box = tuple(
+                slice(max(i - radius, 0), i + radius + 1) if d in hdims else slice(None)
+                for d, i in zip(score.dims, where)
+            )
+        else:
+            box = tuple(slice(i, i + 1) for i in where)
+        values[box] = np.nan
+    return picks
+
+
+def _locate(da, kind: str, *, source: str) -> dict[str, int]:
+    """Indices of ``da``'s global nan-``kind`` extremum, over every dim it has."""
+    return _rank(da, kind, n=1, source=source)[0]
+
+
+def _horizontal_dims(da) -> tuple[str, ...]:
+    """Return the dims ``da``'s lon/lat coordinates live on, in ``da``'s dim order.
+
+    ``("eta_rho", "xi_rho")`` on a curvilinear grid, ``("lat", "lon")`` on a
+    rectilinear one, one dim on a transect's ``along`` axis, none when the field
+    carries no lon/lat at all.
+    """
+    from ocean_skill.align import _lat_name, _lon_name
+
+    found: set[str] = set()
+    for name in (_lon_name(da), _lat_name(da)):
+        if name is not None and name in da.coords:
+            found.update(str(d) for d in da.coords[name].dims)
+    return tuple(str(d) for d in da.dims if str(d) in found)
+
+
+def _slice_departure(sl, window: int, *, interior: bool):
+    """Departure of every cell of one 2-D slice from the median of its wet neighbors.
+
+    Returns ``(departure, median, wet)`` arrays shaped like ``sl``. ``wet`` counts the
+    finite neighbors among the ``window**2 - 1`` around each cell (the cell itself
+    excluded); the median is over those alone, so land never drags it. The median is
+    read off a sort along the neighbor axis -- NaNs sort last, so the ``wet`` finite
+    values lead -- rather than :func:`numpy.nanmedian`, which is slow at this size and
+    warns on an all-NaN neighborhood. Cells beyond the grid's edge are not neighbors
+    (no periodic wrap).
+
+    ``departure`` is NaN where the cell itself is masked, where ``wet`` is under
+    :data:`MIN_WET_NEIGHBORS`, or -- with ``interior`` -- where any neighbor is dry.
+    """
+    r = window // 2
+    ny, nx = sl.shape
+    padded = np.full((ny + 2 * r, nx + 2 * r), np.nan)
+    padded[r : r + ny, r : r + nx] = np.where(np.isfinite(sl), sl, np.nan)
+    stack = np.stack(
+        [
+            padded[dy : dy + ny, dx : dx + nx]
+            for dy in range(window)
+            for dx in range(window)
+            if (dy, dx) != (r, r)
+        ]
+    )
+    wet = np.isfinite(stack).sum(axis=0)
+    stack.sort(axis=0)
+    lo = np.clip((wet - 1) // 2, 0, None)[None]
+    hi = (wet // 2)[None]
+    median = 0.5 * (
+        np.take_along_axis(stack, lo, axis=0)[0]
+        + np.take_along_axis(stack, hi, axis=0)[0]
+    )
+    centre = padded[r : r + ny, r : r + nx]
+    scored = np.isfinite(centre) & (wet >= MIN_WET_NEIGHBORS)
+    if interior:
+        scored &= wet == window * window - 1
+    return np.where(scored, centre - median, np.nan), median, wet
+
+
+def _neighbor_departure(da, hdims: tuple[str, ...], window: int, *, interior: bool):
+    """Return ``(departure, median, wet)`` DataArrays on ``da``'s own coordinates.
+
+    :func:`_slice_departure` at every horizontal slice of ``da``.
+
+    Leading (time, depth, ...) dims are looped over one 2-D slice at a time, so the
+    working set is ``window**2 - 1`` copies of one slice, not of the whole field. The
+    returned arrays are transposed to put the horizontal dims last.
+    """
+    lead = [d for d in da.dims if d not in hdims]
+    da_t = da.transpose(*lead, *hdims)
+    values = np.asarray(da_t.values, dtype=float)
+    departure = np.full(values.shape, np.nan)
+    median = np.full(values.shape, np.nan)
+    wet = np.zeros(values.shape, dtype=np.int16)
+    for idx in np.ndindex(*values.shape[:-2]):
+        departure[idx], median[idx], wet[idx] = _slice_departure(
+            values[idx], window, interior=interior
+        )
+    return da_t.copy(data=departure), da_t.copy(data=median), da_t.copy(data=wet)
 
 
 def _time_reason(time: Any, select: dict[str, Any]) -> str:
@@ -126,6 +267,15 @@ class Extremum:
     grid
         ``str`` naming which grid ``indices`` is into -- always ``"the source's
         own grid"`` for a ``Field`` today.
+    mode
+        ``"global"`` (ranked by value) or ``"local"`` (ranked by departure from
+        the wet-neighbor median, ``Field.extremum(..., local=True)``).
+    rank
+        ``int``, 1 for the most extreme hit, 2 for the next distinct one, ...
+    anomaly, neighborhood, wet_neighbors, window
+        Local mode only (``None`` otherwise): ``anomaly`` is ``value -
+        neighborhood`` in the field's units, ``neighborhood`` the median of the
+        ``wet_neighbors`` finite cells among the ``window**2 - 1`` around the hit.
 
     Built by :func:`field_extremum` (reached as ``Field.extremum()``), never
     directly. :meth:`series` follows the same location through time.
@@ -154,6 +304,12 @@ class Extremum:
     #: on the coarser lane's regrid target rather than either source's native grid.
     grid: str
     _parent: Any = dataclasses.field(repr=False, compare=False)
+    mode: str = "global"
+    rank: int = 1
+    anomaly: float | None = None
+    neighborhood: float | None = None
+    wet_neighbors: int | None = None
+    window: int | None = None
 
     def __repr__(self) -> str:
         from ocean_skill.comparison import _short_variable_label
@@ -170,8 +326,19 @@ class Extremum:
             else f"no snapshot time ({self.time_reason})"
         )
         extra = f", {self.coords}" if self.coords else ""
+        label = f"local {self.kind}" if self.mode == "local" else self.kind
+        contrast = ""
+        if self.mode == "local" and self.anomaly is not None:
+            side = "below" if self.anomaly < 0 else "above"
+            w = self.window or DEFAULT_WINDOW
+            contrast = (
+                f"  {abs(self.anomaly):.6g}{units} {side} the median of its {w}x{w} "
+                f"wet neighbors ({self.neighborhood:.6g}; "
+                f"{self.wet_neighbors}/{w * w - 1} wet)\n"
+            )
         return (
-            f"{self.kind} {name} = {self.value:.6g}{units} at {where}\n"
+            f"{label} {name} = {self.value:.6g}{units} at {where}\n"
+            f"{contrast}"
             f"  grid indices {self.indices}, {when}{extra}\n"
             f"  source={self.source!r}, grid={self.grid!r}"
         )
@@ -369,6 +536,92 @@ class Extremum:
         return self.series().plot(renderer=renderer, **kwargs)
 
 
+@dataclasses.dataclass(frozen=True)
+class Extrema:
+    """The ``n`` most extreme distinct places of a field, most extreme first.
+
+    Returned by ``Field.extremum(..., n=...)`` for ``n > 1``. Each item is an
+    ordinary :class:`Extremum`, so ``hits[2].series()`` / ``.plot()`` follow that
+    place through time exactly as a single extremum's do. ``len()``, iteration and
+    indexing work as on a tuple; :meth:`to_dataframe` gives the table to filter and
+    sort, and the repr prints it.
+
+    Parameters
+    ----------
+    kind
+        ``"max"`` or ``"min"``.
+    mode
+        ``"global"`` or ``"local"`` -- see :class:`Extremum`.
+    window
+        Neighborhood side in cells (local mode), or ``None``.
+    separation
+        Minimum grid-index spacing between hits on the horizontal dims.
+    interior
+        Whether cells touching land were excluded (local mode).
+    items
+        The hits, as a tuple of :class:`Extremum`.
+    """
+
+    kind: str
+    mode: str
+    window: int | None
+    separation: int
+    interior: bool
+    items: tuple[Extremum, ...]
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __getitem__(self, i):
+        return self.items[i]
+
+    def to_dataframe(self):
+        """One row per hit, indexed by ``rank``.
+
+        Columns: ``value``, then (local mode) ``anomaly``, ``neighborhood`` and
+        ``wet_neighbors``, then ``lon``, ``lat``, ``time``, one ``i_<dim>`` column of
+        grid indices per dimension, and each scalar coordinate (depth, ...).
+        """
+        import pandas as pd
+
+        rows = []
+        for e in self.items:
+            row: dict[str, Any] = {"value": e.value}
+            if self.mode == "local":
+                row.update(
+                    anomaly=e.anomaly,
+                    neighborhood=e.neighborhood,
+                    wet_neighbors=e.wet_neighbors,
+                )
+            row.update(lon=e.lon, lat=e.lat, time=e.time)
+            row.update({f"i_{d}": i for d, i in e.indices.items()})
+            for name, val in e.coords.items():
+                row.setdefault(name, val)
+            rows.append(row)
+        return pd.DataFrame(rows, index=pd.Index(range(1, len(rows) + 1), name="rank"))
+
+    def __repr__(self) -> str:
+        from ocean_skill.comparison import _short_variable_label
+
+        first = self.items[0]
+        how = f">= {self.separation} cells apart"
+        if self.mode == "local":
+            w = self.window or DEFAULT_WINDOW
+            how = f"{w}x{w} wet-neighbor median, {how}"
+            if self.interior:
+                how += ", interior cells only"
+        label = f"local {self.kind}" if self.mode == "local" else self.kind
+        name = _short_variable_label(first.variable)
+        units = f" [{first.units}]" if first.units else ""
+        return (
+            f"{len(self)} {label} {name}{units} on {first.source!r} ({how})\n"
+            f"{self.to_dataframe().to_string()}"
+        )
+
+
 def _native_time_index(source: str):
     """The source's full, native time index, read lazily off the catalog entry.
 
@@ -436,37 +689,19 @@ def _window_select(index, snapshot: Any, pad: int) -> dict[str, str]:
     return {"min": str(index[lo]), "max": str(index[hi])}
 
 
-def field_extremum(fld, kind: str = "max") -> Extremum:
-    """Build an :class:`Extremum` for ``fld`` -- the implementation behind
-    ``Field.extremum()``.
+def _build(fld, da, indices: dict[str, int], kind: str, **extra: Any) -> Extremum:
+    """One :class:`Extremum` for the cell of ``da`` at ``indices``.
 
-    Parameters
-    ----------
-    fld
-        A :class:`~ocean_skill.field.Field` whose prepared data has not already
-        been reduced to a single point.
-    kind
-        One of ``"max"``, ``"min"`` (default ``"max"``) -- which extremum to
-        locate.
+    ``extra`` carries the fields only a ``local=True`` hit has (``mode``,
+    ``rank``, ``anomaly``, ``neighborhood``, ``wet_neighbors``, ``window``).
     """
     from ocean_skill.align import (
         _lat_name,
         _lon_name,
         _time_name,
         natural_convention,
-        point_of,
     )
 
-    da = fld.data
-    if point_of(da) is not None:
-        raise ValueError(
-            f"{fld.source!r} has already been reduced to one place "
-            f"({fld.family_reason}), so there is no spatial extremum to locate "
-            "-- an extremum of one cell is the value .plot() already shows. "
-            "Widen select= to keep a horizontal extent."
-        )
-
-    indices = _locate(da, kind, source=fld.source)
     point = da.isel(indices)
 
     lon_name, lat_name = _lon_name(point), _lat_name(point)
@@ -497,10 +732,151 @@ def field_extremum(fld, kind: str = "max") -> Extremum:
         lon=lon,
         lat=lat,
         lon_convention=natural_convention(da),
-        indices=indices,
+        indices={str(d): indices[str(d)] for d in da.dims},
         coords=coords,
         time=time,
         time_reason=_time_reason(time, fld.select),
         grid="the source's own grid",
         _parent=fld,
+        **extra,
+    )
+
+
+def field_extremum(
+    fld,
+    kind: str = "max",
+    *,
+    n: int = 1,
+    local: bool = False,
+    window: int | None = None,
+    interior: bool = False,
+    separation: int | None = None,
+) -> Extremum | Extrema:
+    """Build an :class:`Extremum` (or, for ``n > 1``, an :class:`Extrema`) for
+    ``fld`` -- the implementation behind ``Field.extremum()``.
+
+    Parameters
+    ----------
+    fld
+        A :class:`~ocean_skill.field.Field` whose prepared data has not already
+        been reduced to a single point.
+    kind
+        One of ``"max"``, ``"min"`` (default ``"max"``) -- which extremum to
+        locate.
+    n
+        ``int >= 1`` (default 1) -- how many distinct places to return. One gives an
+        :class:`Extremum`; more give an :class:`Extrema`, holding fewer if the field
+        runs out of scoreable cells.
+    local
+        ``bool`` (default ``False``). Rank cells by their departure from the median
+        of their wet neighbors rather than by value, which surfaces features one
+        cell wide -- a speck that is unremarkable in absolute value but nothing like
+        the cells around it. ``"min"`` is then the most negative departure. Needs a
+        2-D horizontal grid.
+    window
+        Local mode only: odd ``int >= 3``, the neighborhood's side in cells
+        (default :data:`DEFAULT_WINDOW`).
+    interior
+        Local mode only: score only cells whose whole neighborhood is wet, dropping
+        everything that touches land (or the grid's edge).
+    separation
+        ``int >= 1``, minimum spacing in grid cells between reported hits on the
+        horizontal dims (default: ``window`` when ``local``, else
+        :data:`DEFAULT_GLOBAL_SEPARATION`).
+    """
+    from ocean_skill.align import point_of
+
+    da = fld.data
+    if point_of(da) is not None:
+        raise ValueError(
+            f"{fld.source!r} has already been reduced to one place "
+            f"({fld.family_reason}), so there is no spatial extremum to locate "
+            "-- an extremum of one cell is the value .plot() already shows. "
+            "Widen select= to keep a horizontal extent."
+        )
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError(f"n must be an integer >= 1, got {n!r}.")
+    if not local:
+        stray = [k for k, v in (("window", window), ("interior", interior)) if v]
+        if stray:
+            raise ValueError(
+                f"{' and '.join(stray)} only apply to local=True (neighbor-contrast) "
+                "extrema; pass local=True or drop them."
+            )
+    if separation is not None and (
+        isinstance(separation, bool)
+        or not isinstance(separation, (int, np.integer))
+        or separation < 1
+    ):
+        raise ValueError(f"separation must be an integer >= 1, got {separation!r}.")
+
+    hdims = _horizontal_dims(da)
+    if not local:
+        gap = DEFAULT_GLOBAL_SEPARATION if separation is None else int(separation)
+        picks = _rank(
+            da, kind, n=int(n), separation=gap, hdims=hdims, source=fld.source
+        )
+        hits = [
+            _build(fld, da, ix, kind, rank=i)
+            for i, ix in enumerate(picks, start=1)
+        ]
+        w = None
+    else:
+        w = DEFAULT_WINDOW if window is None else window
+        if isinstance(w, bool) or not isinstance(w, (int, np.integer)):
+            raise ValueError(f"window must be an odd integer >= 3, got {window!r}.")
+        w = int(w)
+        if w < 3 or w % 2 == 0:
+            raise ValueError(f"window must be an odd integer >= 3, got {window!r}.")
+        if len(hdims) != 2:
+            raise ValueError(
+                "local=True needs a 2-D horizontal grid to take neighbors on, but "
+                f"{fld.source!r}'s prepared field has horizontal dims "
+                f"{hdims or 'none'} (a transect or along-axis field has no "
+                "neighbors on both sides). Use the default global search for it."
+            )
+        gap = w if separation is None else int(separation)
+        interior_note = (
+            " (interior=True also drops every cell touching land)" if interior else ""
+        )
+        departure, median, wet = _neighbor_departure(da, hdims, w, interior=interior)
+        picks = _rank(
+            departure,
+            kind,
+            n=int(n),
+            separation=gap,
+            hdims=hdims,
+            source=fld.source,
+            what="neighbor-departure field",
+            hint=(
+                f"Every cell is masked or has fewer than {MIN_WET_NEIGHBORS} wet "
+                f"neighbors{interior_note} -- widen select= or check the "
+                "depth/time asked for."
+            ),
+        )
+        hits = [
+            _build(
+                fld,
+                da,
+                {str(d): ix[str(d)] for d in da.dims},
+                kind,
+                mode="local",
+                rank=i,
+                anomaly=float(departure.isel(ix)),
+                neighborhood=float(median.isel(ix)),
+                wet_neighbors=int(wet.isel(ix)),
+                window=w,
+            )
+            for i, ix in enumerate(picks, start=1)
+        ]
+
+    if n == 1:
+        return hits[0]
+    return Extrema(
+        kind=kind,
+        mode="local" if local else "global",
+        window=w,
+        separation=gap,
+        interior=bool(interior),
+        items=tuple(hits),
     )
