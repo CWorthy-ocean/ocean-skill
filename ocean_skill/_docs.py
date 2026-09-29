@@ -111,6 +111,7 @@ Forwarded to whichever renderer family the data selects (``field_row``,
 accepted varies with the data rather than with this method. Option families
 shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``title``, ``domain`` (map extent), ``robust`` (colour-limit clipping),
+``colorbar_label_clipped`` (write the true min/max at a clipped colourbar end),
 ``vmin``/``vmax`` (exact colour limits -- single-field families only:
 ``field_facet``, ``section``, ``cross``, ``time_depth``),
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
