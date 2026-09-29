@@ -404,8 +404,14 @@ class Extremum:
         that too, the series defaults to the source's full record and warns, since
         that read can be large.
 
+        A native s-level axis with no coordinate of its own (a bare parent select at
+        a ROMS point) is pinned by position, ``select={"s_rho": {"index": k}}``,
+        rather than by depth: ``z_rho`` is a height that moves with the tide and can
+        put the extremum's level above mean sea level, where no depth request can
+        name it.
+
         A variable that does not share this field's vertical axis is unaffected by
-        the depth/sigma0 pin: :func:`ocean_skill.operators.select` skips a key
+        the depth/sigma0/s-level pin: :func:`ocean_skill.operators.select` skips a key
         naming an axis a given variable does not have.
 
         Refused when the parent's own ``select`` names a ``transect`` -- once cut
@@ -459,15 +465,27 @@ class Extremum:
         elif zdim is not None and zdim in self.coords:
             sel[zdim] = self.coords[zdim]
         elif zdim is not None and "z_rho" in self.coords:
-            # A native s-level axis (a bare parent select=, or {"depth": "column"})
-            # carries no coordinate of its own named zdim to read the extremum's
-            # own level back off of -- the actual depth rode on z_rho instead
-            # (negative-down, see plot/profile.py:vertical_values), which the
-            # extremum's own isel already reduced to a scalar. Pin the child field
-            # to that one depth explicitly, or an empty sel here would leave the
-            # whole column standing again rather than following the extremum at
-            # the one level it was actually found on.
-            sel["depth"] = abs(float(self.coords["z_rho"]))
+            # A native s-level axis (a bare parent select=) carries no coordinate
+            # of its own named zdim to read the extremum's own level back off of --
+            # the level's height rode on z_rho instead, which the extremum's own
+            # isel already reduced to a scalar. Pin the child field to that one
+            # level explicitly, or an empty sel here would leave the whole column
+            # standing again rather than following the extremum at the one level
+            # it was actually found on.
+            #
+            # Pinned by position, not by depth: z_rho is a height (see
+            # plot/profile.py:positive_down) carrying the free surface, so under
+            # a raised sea surface the extremum's level can be above mean sea
+            # level -- a negative depth, which is no request select={"depth": ...}
+            # is written to take -- and even a positive one names a fixed depth
+            # the tide moves the level off of, letting the series drift out of
+            # the column it was pinned to. The s-level index is the one thing that
+            # stays put.
+            sel[zdim] = {
+                "index": _source_index(
+                    sel.get(zdim), self.indices[zdim], source=parent.source
+                )
+            }
         elif zdim is not None:
             raise ValueError(
                 f"{parent.source!r}'s vertical axis ({zdim!r}) carries no "
@@ -620,6 +638,43 @@ class Extrema:
             f"{len(self)} {label} {name}{units} on {first.source!r} ({how})\n"
             f"{self.to_dataframe().to_string()}"
         )
+
+
+def _source_index(narrowed: Any, k: int, *, source: str) -> int:
+    """Map position ``k`` in a positionally narrowed axis back to the source's own.
+
+    ``k`` counts along the *parent's prepared* axis, so if the parent's own select
+    already cut that axis by position -- ``{"index": {"min": 10, "max": 20}}``, a
+    ``{"index": [3, 5, 7]}`` list, or a bare list -- the child field, which
+    re-selects from the whole source, needs the position in the source rather than
+    in that cut. ``None`` (nothing narrowed the axis) is the identity.
+
+    A slice is only mapped back when its origin is knowable without the source's
+    full length: a non-negative ``start`` and a positive ``step``. A negative one
+    counts from the far end of an axis whose length is not to hand here, so it is
+    refused rather than guessed at, as is any selection that is not positional at
+    all (a coordinate-value one cannot address a bare native axis).
+    """
+    if narrowed is None:
+        return int(k)
+    from ocean_skill.operators import _index_spec
+
+    picked = _index_spec(narrowed)
+    if picked is None:
+        picked = narrowed
+    if isinstance(picked, list | tuple | np.ndarray):
+        return int(picked[k])
+    if isinstance(picked, slice):
+        start = 0 if picked.start is None else int(picked.start)
+        step = 1 if picked.step is None else int(picked.step)
+        if start >= 0 and step > 0:
+            return start + int(k) * step
+    raise ValueError(
+        f"{source!r}'s native vertical axis was narrowed with select={narrowed!r}, "
+        "which cannot be mapped back to a single s-level to pin the follow-up "
+        "series to. Narrow it with an explicit non-negative {'index': ...} range "
+        "or list, or leave it whole, before calling extremum()."
+    )
 
 
 def _native_time_index(source: str):
