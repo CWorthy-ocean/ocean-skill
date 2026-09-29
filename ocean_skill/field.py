@@ -211,16 +211,22 @@ def _top_level(da, zdim: str, *, source: str):
     (:meth:`Field._grid_metadata_if_eligible`) could not settle it first --
     an uncatalogued source, or the hand-built stubs tests construct directly.
 
-    A coordinate-bearing axis (an observational product's own reported levels)
-    picks the level nearest 0. A coordinate-less native ``s_rho``/``s_w`` axis
-    with a same-dim ``z_rho`` (see :func:`_labelless_vertical`) picks the index
-    whose ``z_rho`` reads shallowest -- averaged over any other dimension
-    ``z_rho`` might carry (a curvilinear grid's own eta/xi), so one index names
-    the top level everywhere a facet panel might be drawn, not just at a single
-    column. Anything else -- coordinate-less with no ``z_rho`` either -- has no
-    way to tell top from bottom and is refused, the same message
-    :meth:`Field._series_items`/:meth:`Field._refuse_labelless_facet` give the
-    same shape elsewhere.
+    A coordinate-bearing axis picks the level
+    :func:`ocean_skill.plot.profile.positive_down` reads shallowest: nearest 0 for
+    an observational product's own reported depths, but the *highest* level for a
+    height coordinate (a same-dim ``z_rho`` on a single column, say), whose top
+    levels can sit above mean sea level under a raised free surface -- the level
+    nearest 0 is beneath the top one there. A coordinate-less native
+    ``s_rho``/``s_w`` axis with a same-dim ``z_rho`` (see
+    :func:`_labelless_vertical`) picks the index whose ``z_rho`` reads shallowest
+    -- averaged over any other dimension ``z_rho`` might carry (a curvilinear
+    grid's own eta/xi), so one index names the top level everywhere a facet panel
+    might be drawn, not just at a single column. Either way the ``actual_depth``
+    recorded is the level's ``positive_down`` value, so a level above mean sea
+    level reads negative rather than mirrored below it. Anything else --
+    coordinate-less with no ``z_rho`` either -- has no way to tell top from bottom
+    and is refused, the same message :meth:`Field._series_items`/
+    :meth:`Field._refuse_labelless_facet` give the same shape elsewhere.
 
     Returns ``(field, "surface")`` -- the depth label a caller attaches to the
     item it builds, matching what an explicit ``select={"depth": "surface"}``
@@ -229,13 +235,14 @@ def _top_level(da, zdim: str, *, source: str):
     import numpy as np
 
     from ocean_skill.operators import vertical_coord_on
+    from ocean_skill.plot.profile import positive_down
 
     coord = vertical_coord_on(da, zdim)
     if coord is not None:
-        levels = np.asarray(coord.values, dtype="float64")
-        k = int(np.argmin(np.abs(levels)))
+        depths = positive_down(coord)
+        k = int(np.argmin(depths))
         top = da.isel({zdim: k})
-        top.attrs["actual_depth"] = float(abs(levels[k]))
+        top.attrs["actual_depth"] = float(depths[k])
         return top, "surface"
 
     z_rho = da.coords.get("z_rho")
@@ -244,7 +251,7 @@ def _top_level(da, zdim: str, *, source: str):
         shallowest = z_rho.mean(dim=reduce_dims) if reduce_dims else z_rho
         k = int(np.asarray(shallowest).argmax())
         top = da.isel({zdim: k})
-        top.attrs["actual_depth"] = float(np.abs(np.asarray(top["z_rho"])).mean())
+        top.attrs["actual_depth"] = float(positive_down(top["z_rho"]).mean())
         return top.drop_vars([zdim, "z_rho"], errors="ignore"), "surface"
 
     raise ValueError(
@@ -701,6 +708,7 @@ class Field:
         import xarray as xr
 
         from ocean_skill.operators import resolve_dim, vertical_coord_on
+        from ocean_skill.plot.profile import positive_down
 
         da = self.data
         tdim = self._time_axis_dim(da)
@@ -745,19 +753,24 @@ class Field:
             item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
             # actual_depth lives on the *item's* Dataset, not the DataArray, since
             # that is what _depth_of (plot/series.py) reads -- the same convention
-            # Comparison.align() uses for its own aligned pair. abs() unconditionally
-            # (matching plot/profile.vertical_values and
-            # plot/time_depth.prepare_time_depth) -- a no-op for an already
-            # positive-down observational coordinate, and what turns z_rho's
-            # negative-down convention into the positive-down metres every other
-            # depth label in this package uses. zcoord may itself resolve to z_rho
-            # (see vertical_coord_on): a bare native axis with a 1-D z_rho counts as
+            # Comparison.align() uses for its own aligned pair. Converted by
+            # plot/profile.positive_down, the same as vertical_values and
+            # plot/time_depth.prepare_time_depth: z_rho is a height (positive up,
+            # free surface included), so it is negated -- a level 0.9 m above mean
+            # sea level reads -0.9 m, not a mirrored 0.9 m depth -- while an
+            # already positive-down observational coordinate passes through as
+            # abs(), a no-op. zcoord may itself resolve to z_rho (see
+            # vertical_coord_on): a bare native axis with a 1-D z_rho counts as
             # carrying a real coordinate the same way a differently-named observational
             # one does, so both are read the same way here.
             if zcoord_name is not None and zcoord_name in level.coords:
-                item["aligned"].attrs["actual_depth"] = abs(float(level[zcoord_name]))
+                item["aligned"].attrs["actual_depth"] = float(
+                    positive_down(level[zcoord_name])
+                )
             elif "z_rho" in level.coords and level["z_rho"].ndim == 0:
-                item["aligned"].attrs["actual_depth"] = abs(float(level["z_rho"]))
+                item["aligned"].attrs["actual_depth"] = float(
+                    positive_down(level["z_rho"])
+                )
             items.append(item)
         return items
 
