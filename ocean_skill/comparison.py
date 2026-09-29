@@ -569,6 +569,69 @@ def as_select(select: Any) -> dict[str, Any]:
     )
 
 
+def _is_latest(value: Any) -> bool:
+    return isinstance(value, str) and value == "latest"
+
+
+def _resolve_latest(select: dict[str, Any], source: Any) -> dict[str, Any]:
+    """Replace a ``"latest"`` time entry in ``select`` with ``source``'s newest step.
+
+    The shorthand suites already spell as ``time: latest``, resolved the same way --
+    against the source's own native time axis, to the ISO string of its last step --
+    so an API call and a suite page keying the same run agree. It has to be a
+    concrete instant *before* anything keys on ``select``: the on-disk cache hashes it
+    as written, so a literal ``"latest"`` (or a position like ``{"index": -1}``) would
+    keep serving the old last step after the run gained a new one, and labels would
+    name the word rather than the date. Resolved this way, a run that has not moved
+    hits the cache and one that has is a new key.
+
+    ``select`` comes back untouched, with no source read, when it has no ``"latest"``.
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    keys = [k for k in _TIME_KEYS if _is_latest(select.get(k))]
+    if not keys:
+        return select
+    import pandas as pd
+    import xarray as xr
+
+    from ocean_skill import extrema
+
+    index = extrema._native_time_index(source)
+    if not isinstance(index, pd.DatetimeIndex | xr.CFTimeIndex):
+        raise ValueError(
+            f"{source!r}'s time axis is not a decoded calendar axis"
+            f"{f' ({type(index).__name__})' if index is not None else ''}, so "
+            "'latest' has no newest step to name. This is usually a climatology "
+            "read with decode_times=False -- select its own numeric time value "
+            "instead."
+        )
+    latest = index[-1].isoformat()
+    return {**select, **dict.fromkeys(keys, latest)}
+
+
+def _resolve_latest_lanes(select: dict[str, Any], test: Any) -> dict[str, Any]:
+    """:func:`_resolve_latest` for a Comparison's already-normalized ``select``.
+
+    ``"latest"`` names the newest step of the *test* source: a flat select gives both
+    lanes that one instant (the reference snaps to its nearest step, as it does for any
+    instant), and a pair-spec resolves its test side. A reference-side ``"latest"`` is
+    refused rather than guessed at -- a reference is usually an observational product
+    with no run to be "latest" of.
+    """
+    if not is_pair_spec(select):
+        return _resolve_latest(select, test)
+    from ocean_skill.sources import _TIME_KEYS
+
+    if any(_is_latest(select["reference"].get(k)) for k in _TIME_KEYS):
+        raise ValueError(
+            "select['reference'] cannot use time: 'latest' -- it names the newest "
+            "step of the test source. Give the reference an explicit date, or use "
+            "select={'test': {'time': 'latest'}, ...} to resolve only the test side."
+        )
+    return {**select, "test": _resolve_latest(select["test"], test)}
+
+
 def is_depth_band(depth: Any) -> bool:
     """Report whether ``depth`` asks for an average over a band rather than a level.
 
@@ -3347,6 +3410,7 @@ class Comparison:
         # the model's calendar time can) -- see select_for/aggregate_for, which each
         # lane's own prepare() call resolves this through, mirroring variable_for.
         self.select = _normalize_pair(select, "select", normalize_side=as_select)
+        self.select = _resolve_latest_lanes(self.select, test)
         self.aggregate = _normalize_pair(aggregate, "aggregate")
         if is_pair_spec(self.aggregate):
             for role, side in self.aggregate.items():
@@ -7883,7 +7947,10 @@ def compare(
     select
         Dict of axis -> selection (e.g. ``{"time": "2012-01"}``), or a
         ``{"test": ..., "reference": ...}`` pair-spec giving each lane its
-        own selection. ``None`` (default) selects nothing.
+        own selection. ``{"time": "latest"}`` is the newest step of the
+        *test* source's time axis, resolved to its date when the comparison is
+        built (both lanes then get that instant); it is refused on a pair-spec's
+        ``reference`` side. ``None`` (default) selects nothing.
     aggregate
         Dict of axis -> reduction (e.g. ``{"time": "mean"}``), or the same
         ``{"test": ..., "reference": ...}`` pair-spec shape as ``select``.
