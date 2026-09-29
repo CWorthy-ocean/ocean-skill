@@ -605,29 +605,48 @@ already shows.
 **Specks, not just the extreme.** On a model field the global min/max is usually a
 coastline or river-mouth cell, and the next-lowest values are more of the same. The tiny
 minima a `robust=True` colorbar reveals are not extreme in *value* — they are extreme
-relative to their *neighbors* — so `local=True` scores every wet cell by `value − median
-of its wet neighbors` (a straight front or a smooth gradient scores ~0; only a feature
+relative to their *neighbors* — so `local=True` scores every wet cell against the median
+of its wet neighbors (a straight front or a smooth gradient scores ~0; only a feature
 about one cell wide stands out) and `n=` lists the worst offenders:
 
 ```python
 hits = run.extremum("min", local=True, n=15)
 hits
-# 15 local min alkalinity [mmol/m^3] on 'pac_dt_ramp' (3x3 wet-neighbor median, >= 3 cells apart)
-#       value  anomaly  neighborhood  wet_neighbors      lon    lat       time  i_eta_rho  i_xi_rho
+# 15 local min alkalinity [mmol/m^3] on 'pac_dt_ramp' (3x3 wet-neighbor median, ranked by z, >= 3 cells apart)
+#       value  anomaly  neighborhood  spread      z  wet_neighbors  land_distance     lon    lat       time  i_eta_rho  i_xi_rho
 # rank
-# 1    2215.3    -53.5        2268.8              8  166.65  39.58 2010-10-01        795       596
+# 1    2288.5    -30.0        2318.5    0.59  -50.6              8              8  166.65  39.58 2010-10-01        795       596
 # ...
-hits.to_dataframe().query("wet_neighbors == 8")   # open-ocean specks only
+hits.to_dataframe().query("land_distance > 10")   # well offshore only
 hits[0].plot()                                    # each hit follows through time, as above
 ```
 
-Each hit is an ordinary `Extremum`, so `.series()` / `.plot()` work on it. `wet_neighbors`
-says how many of the window's other cells were wet, so hits at coasts and islands are easy
-to tell from open-ocean ones; `interior=True` drops every cell touching land (or the grid's
-edge) up front. `window=5` widens the neighborhood, and `separation=` sets how many cells
-apart hits must be (default: the window; 10 for a plain `n=` search, so one river plume is
-one place rather than ten adjacent cells). A field faceted over time is scored one slice at
-a time, and a speck that persists is reported once, at the step where it is strongest.
+**Ranking.** A river plume defeats a plain departure: a few cells offshore it is steep, so
+its cells depart from their neighbors by hundreds of units and crowd out a speck that
+departs by tens. By default hits are therefore ranked by `z` — the departure in units of
+how much the neighbors vary *among themselves* (`spread`, a scaled median absolute
+deviation) — which is large in smooth water and small inside a plume or front. A z is never
+divided by less than the field's typical spread, so a flat patch cannot inflate it.
+`score="departure"` ranks by the departure in the field's own units instead; every hit
+reports both, as `anomaly` and `z`.
+
+**Distance from land.** `land_distance` is the number of cells from a hit to the nearest
+land cell or the grid's edge (1 = touching), and `wet_neighbors` counts how many of the
+window's other cells were wet, so coast and island hits are easy to tell from open-ocean
+ones. `interior=k` drops every cell with land or the edge within `k` cells up front
+(`interior=True` is the window's own reach — one cell for the default 3×3) and works for a
+plain global `n=` search too, keeping it off the coast:
+
+```python
+run.extremum("min", local=True, n=15, interior=10)   # no land within 10 cells
+run.extremum("max", n=5, interior=10)                # the highest values away from any coast
+```
+
+Each hit is an ordinary `Extremum`, so `.series()` / `.plot()` work on it. `window=5`
+widens the neighborhood, and `separation=` sets how many cells apart hits must be
+(default: the window; 10 for a plain `n=` search, so one river plume is one place rather
+than ten adjacent cells). A field faceted over time is scored one slice at a time, and a
+speck that persists is reported once, at the step where it is strongest.
 
 A suite page runs this same chain with no Python at all — see `then:` in
 [docs/suites.md](docs/suites.md).

@@ -606,8 +606,9 @@ class Field:
         n: int = 1,
         local: bool = False,
         window: int | None = None,
-        interior: bool = False,
+        interior: bool | int = False,
         separation: int | None = None,
+        score: str | None = None,
     ) -> Any:
         """Locate this field's min/max: value, lon/lat, grid indices, snapshot.
 
@@ -622,16 +623,21 @@ class Field:
             :class:`~ocean_skill.extrema.Extrema` of the ``n`` most extreme
             *distinct* places (hits closer than ``separation`` cells merge into one).
         local
-            ``bool`` (default ``False``). Rank by departure from the median of each
-            cell's wet neighbors instead of by value -- see below.
+            ``bool`` (default ``False``). Rank by how far each cell sits from its
+            wet neighbors instead of by value -- see below.
         window
             Local mode only: odd ``int >= 3``, neighborhood side in cells
             (default 3).
         interior
-            Local mode only: skip every cell that touches land (or the grid's edge).
+            ``False`` (default) considers every wet cell. An ``int`` k keeps only
+            cells with no land and not the grid's edge within k cells; ``True`` is
+            the local window's own reach (1 for the default 3 x 3). Works for a
+            global search too, and each hit reports its ``land_distance``.
         separation
             ``int >= 1``, minimum spacing in cells between reported hits
             (default: ``window`` when ``local``, else 10).
+        score
+            Local mode only: ``"z"`` (default) or ``"departure"`` -- see below.
 
         Runs over every dim the prepared field still has, not just the horizontal
         ones -- a field faceted over time or depth reports the facet coordinate
@@ -654,18 +660,28 @@ class Field:
         The global min/max is usually a coastline or river-mouth cell, and the "k-th
         lowest value" is more of the same. The specks a ``robust=True`` colorbar
         reveals are not extreme in value -- they are extreme *relative to their
-        neighbors* -- so ``local=True`` scores every wet cell by ``value - median
-        of its wet neighbors`` (a straight front scores ~0; only a feature about
-        one cell wide stands out) and ``n=`` lists the worst offenders::
+        neighbors* -- so ``local=True`` scores every wet cell against the median of
+        its wet neighbors (a straight front scores ~0; only a feature about one cell
+        wide stands out) and ``n=`` lists the worst offenders::
 
             hits = run.extremum("min", local=True, n=15)
-            hits                                   # table of value, anomaly, lon, lat
-            hits.to_dataframe().query("wet_neighbors == 8")   # open ocean only
+            hits                                   # table: anomaly, z, lon, lat
+            hits.to_dataframe().query("land_distance > 10")   # well offshore only
             hits[0].plot()                         # each hit follows through time
 
-        Each hit reports its wet-neighbor count, so land-adjacent hits are easy to
-        tell apart; ``interior=True`` drops them up front. Cells at the grid's edge
-        use only their in-grid neighbors.
+        A river plume defeats a plain departure: a few cells offshore the plume is
+        steep, so its cells depart from their neighbors by hundreds of units and
+        crowd out a speck that departs by tens. By default hits are therefore ranked
+        by ``z``, the departure in units of how much the neighbors vary among
+        themselves -- large in smooth water, small inside a plume or front.
+        ``score="departure"`` ranks by the departure in the field's units instead;
+        every hit reports both, as ``anomaly`` and ``z``.
+
+        Each hit reports its wet-neighbor count and ``land_distance``, so
+        land-adjacent hits are easy to tell apart; ``interior=10`` drops everything
+        within 10 cells of land (or the grid's edge) up front, which also keeps a
+        global ``n=`` search away from the coast. Cells at the grid's edge use only
+        their in-grid neighbors.
 
         A :class:`FieldSet` (several variables) has no ``extremum`` of its own --
         each member is its own field with its own map; call it on one member,
@@ -684,6 +700,7 @@ class Field:
             window=window,
             interior=interior,
             separation=separation,
+            score=score,
         )
 
     def _series_items(self) -> list[dict[str, Any]]:
