@@ -2822,21 +2822,34 @@ def _preload_frames(da):
     return da.load()
 
 
-def _lon_pieces(lon0: float, lon1: float) -> list[tuple[float, float]]:
-    """Split a longitude span into ``(west, east)`` clip pieces in the ±180 frame.
+def _coastline_clips(
+    lon0: float, lon1: float, central: float
+) -> list[tuple[float, float, float]]:
+    """Split a longitude span into ``(west, east, shift)`` coastline clips.
 
-    Natural Earth geometry lives in −180…180 and so does the plot: the mesh is
-    projected into that frame whatever convention the grid uses, so the coastline is
-    clipped — and left — in it. A 0…360-style span becomes the equivalent pieces, two
-    of them when it crosses the antimeridian, exactly where the projected mesh lands.
+    Natural Earth geometry lives in −180…180; the movie is drawn in a frame that is
+    either that same ±180 (``central=0``) or the 180-centred one
+    :func:`_output_projection` picks for a straddling domain (``central=180``), whose
+    ``x = (lon % 360) - 180`` puts its seam at Natural Earth's longitude 0. A grid's
+    ``lon0…lon1`` may be spelled in either convention (or, padded, run past 360°), so
+    each clip is a span in Natural Earth's own coordinates plus the one fixed ``shift``
+    that carries it into the output frame — never a per-point modulo, which would send a
+    coastline crossing the seam (Britain and Iberia, in the Pacific frame) to opposite
+    edges with a stroke the full width of the map between them. Every clip's shifted
+    image lies inside −180…180, so no stroke can cross the seam, and for a span of up to
+    360° no two clips overlap.
     """
-    if -180 <= lon0 and lon1 <= 180:
-        return [(lon0, lon1)]
-    if lon0 < 180 < lon1:
-        return [(lon0, 180.0), (-180.0, lon1 - 360.0)]
-    if lon0 >= 180:
-        return [(lon0 - 360.0, lon1 - 360.0)]
-    return [(max(lon0, -180.0), min(lon1, 180.0))]
+    clips = []
+    # ``copy``: which 360°-wide copy of the globe the span is spelled in; ``wrap``:
+    # which 360°-wide copy of the output frame a clip lands in
+    for copy in (-360.0, 0.0, 360.0):
+        for wrap in (-360.0, 0.0, 360.0):
+            shift = wrap - central
+            west = max(-180.0, lon0 - copy, -180.0 - shift)
+            east = min(180.0, lon1 - copy, 180.0 - shift)
+            if east > west:
+                clips.append((west, east, shift))
+    return clips
 
 
 def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION):
@@ -2862,8 +2875,12 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     straddling the antimeridian is drawn in :func:`_output_projection`'s 180-centred
     frame instead (the same test :func:`_tiles_for` uses to decide tiles cannot show
     such a domain at all) — so the coastline's x is shifted into that frame too, or
-    it would land 180° away from the mesh it is meant to outline.
-    ``apply_ranges=False`` keeps the clip margin from widening the view.
+    it would land 180° away from the mesh it is meant to outline. That frame's seam
+    is Natural Earth's longitude 0, so the coastline is cut there (see
+    :func:`_coastline_clips`) rather than drawn across it: a coast that crossed the
+    seam whole would be a stroke the width of the map. The margin is capped at one
+    turn of the globe for the same reason — past that it would only draw every coast
+    twice. ``apply_ranges=False`` keeps the clip margin from widening the view.
 
     Returns ``None`` when the coastline cannot be built (no cartopy, or Natural Earth
     data unavailable offline) — a movie without an outline still plays.
@@ -2871,8 +2888,8 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     import holoviews as hv
 
     # 180 for a domain _output_projection would centre the mesh on (straddling the
-    # antimeridian); 0 -- an identity shift below -- for every other domain, leaving
-    # today's coordinates untouched.
+    # antimeridian); 0 -- no shift in _coastline_clips -- for every other domain,
+    # leaving today's coordinates untouched.
     central = 180.0 if any(_output_projection(f) is not None for f in fields) else 0.0
 
     try:
@@ -2886,6 +2903,12 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
         pad_x, pad_y = 0.5 * max(lon1 - lon0, 1e-3), 0.5 * max(lat1 - lat0, 1e-3)
         lat0, lat1 = max(lat0 - pad_y, -90.0), min(lat1 + pad_y, 90.0)
         lon0_padded, lon1_padded = lon0 - pad_x, lon1 + pad_x
+        if lon1_padded - lon0_padded > 360.0:
+            # a wide domain's margin would wrap past one full turn of the globe and
+            # clip the same coast twice; one turn, centred on the domain, is the most
+            # anything can pan into
+            mid = 0.5 * (lon0 + lon1)
+            lon0_padded, lon1_padded = mid - 180.0, mid + 180.0
         ne_resolution = nearest_ne_resolution(
             normalize_coastline_resolution(coastline_resolution),
             extent=(lon0_padded, lon1_padded, lat0, lat1),
@@ -2896,7 +2919,7 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
             ).geometries()
         )
         segments = []
-        for west, east in _lon_pieces(lon0_padded, lon1_padded):
+        for west, east, shift in _coastline_clips(lon0_padded, lon1_padded, central):
             clip = box(west, lat0, east, lat1)
             for geom in geoms:
                 gx0, gy0, gx1, gy1 = geom.bounds
@@ -2908,7 +2931,9 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
                 for line in getattr(piece, "geoms", [piece]):
                     coords = np.asarray(line.coords)
                     if len(coords) >= 2:
-                        segments.append(coords[:, :2])
+                        xy = coords[:, :2].copy()
+                        xy[:, 0] += shift
+                        segments.append(xy)
     except Exception as err:  # pragma: no cover - depends on local NE cache/network
         warnings.warn(
             f"could not build the movie's coastline overlay ({err}); the frames play "
@@ -2924,11 +2949,6 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     merged = np.concatenate(
         [arr for seg in segments for arr in (seg, nan_row)][:-1] or [np.empty((0, 2))]
     )
-    if central:
-        # NaN separator rows pass through unchanged: arithmetic and mod on NaN stay
-        # NaN. Each clip piece already lies inside one contiguous span of the output
-        # frame (see _lon_pieces), so this never introduces a new seam of its own.
-        merged[:, 0] = ((merged[:, 0] - central + 180.0) % 360.0) - 180.0
     return hv.Path([merged]).opts(
         color="black", line_width=1, apply_ranges=False, show_legend=False
     )
