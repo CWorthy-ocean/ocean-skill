@@ -593,6 +593,55 @@ def test_movie_coastline_is_unshifted_for_a_non_straddling_domain():
     assert finite.max() <= lon1 + pad + 1e-6
 
 
+def test_movie_coastline_has_no_seam_crossing_strokes_for_a_wide_straddling_domain():
+    """No coastline stroke spans the seam of a PACMED-wide movie.
+
+    Such a domain pads its clip past Greenwich, where the 180-centred frame has its
+    seam. A coast crossing it (Britain, Iberia, Ghana) used to come out as one stroke
+    from edge to edge of the map -- the horizontal lines across the movie.
+    """
+    pytest.importorskip("cartopy.feature")
+    from ocean_skill.plot.holoviews_renderer import _extension, _movie_coastline
+
+    _extension()
+    field = _rectilinear_field(77.4, 316.2, nx=48, ny=40)
+    field = field.assign_coords(lat=np.linspace(-54.3, 66.1, 40))
+    path = _movie_coastline(field)
+    if path is None:  # pragma: no cover - depends on local Natural Earth cache
+        pytest.skip("Natural Earth coastline data unavailable offline")
+    xs = np.asarray(path.dimension_values(0))
+    assert np.all(np.abs(xs[np.isfinite(xs)]) <= 180.0 + 1e-6)
+    steps = np.abs(np.diff(xs))
+    finite_steps = steps[np.isfinite(steps)]
+    assert not np.any(finite_steps > 180.0), "a coastline stroke spans the seam"
+
+
+def test_coastline_clips_carry_every_piece_into_the_output_frame_without_overlap():
+    from ocean_skill.plot.holoviews_renderer import _coastline_clips
+
+    # PACMED-wide domain, already capped at one turn of the globe: the whole world,
+    # cut at Greenwich (the 180-centred frame's seam) rather than carried across it
+    clips = _coastline_clips(16.8, 376.8, 180.0)
+    landed = sorted((w + shift, e + shift) for w, e, shift in clips)
+    assert all(-180.0 <= w < e <= 180.0 for w, e in landed)
+    merged = [landed[0]]
+    for w, e in landed[1:]:  # adjacent pieces abut; none overlap
+        assert w == pytest.approx(merged[-1][1])
+        merged[-1] = (merged[-1][0], e)
+    assert merged == [pytest.approx((-180.0, 180.0))]
+
+    # a span that does not reach the seam stays two contiguous pieces
+    assert _coastline_clips(100.0, 300.0, 180.0) == [
+        (100.0, 180.0, -180.0),
+        (-180.0, -60.0, 180.0),
+    ]
+    # non-straddling domains are never shifted: ±180 as it is, 0-360-stored folded back
+    assert _coastline_clips(-98.0, -80.0, 0.0) == [(-98.0, -80.0, 0.0)]
+    assert _coastline_clips(255.0, 275.0, 0.0) == [(-105.0, -85.0, 0.0)]
+    # a global ±180 span is one clip, not a double-drawn overlap
+    assert _coastline_clips(-180.0, 180.0, 0.0) == [(-180.0, 180.0, 0.0)]
+
+
 def test_interactive_still_projects_a_straddling_mesh_onto_the_180_frame():
     """A still (non-movie) map of a straddling field must project its mesh.
 
