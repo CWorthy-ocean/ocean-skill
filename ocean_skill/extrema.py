@@ -20,10 +20,18 @@ The global min/max of a model field is usually a coastline or river-mouth cell, 
 the "k-th lowest value" is more of the same, so two options widen the search. ``n=``
 returns the ``n`` most extreme *distinct* places as an :class:`Extrema` (hits closer
 than ``separation`` cells merge into one). ``local=True`` changes what is ranked: each
-wet cell is scored by its departure from the median of its wet neighbors, which is
-what a one-cell speck -- unremarkable in absolute value, nothing like its surroundings
--- stands out on, while a straight front or a coastal gradient scores near zero. The
-neighborhood counts only wet cells, and every hit reports how many there were.
+wet cell is scored against the median of its wet neighbors, which is what a one-cell
+speck -- unremarkable in absolute value, nothing like its surroundings -- stands out
+on, while a straight front or a coastal gradient scores near zero. The neighborhood
+counts only wet cells, and every hit reports how many there were.
+
+By default that score is ``z``: the departure in units of how much the neighbors vary
+among themselves. A river plume is steep a few cells offshore, so its cells depart from
+their neighbors by far more than a speck does, but their neighbors differ just as much;
+dividing by that spread ranks the speck first. ``score="departure"`` ranks by the
+departure alone. ``interior=k`` additionally drops every cell with land or the grid's
+edge within ``k`` cells, for either kind of search, and every hit reports its
+``land_distance`` so the coast is visible in the table.
 
 The follow-on time series is deliberately *not* a new plot family: writing the
 extremum's ``lon``/``lat`` into a fresh ``select`` and re-entering
@@ -63,6 +71,23 @@ DEFAULT_GLOBAL_SEPARATION = 10
 #: no neighborhood to stand out from, so ``local=True`` does not score it.
 MIN_WET_NEIGHBORS = 3
 
+#: Scales a median absolute deviation to a standard deviation for normal data, so a
+#: ``spread`` reads on the same footing as a standard error of the neighbors.
+_MAD_TO_SIGMA = 1.4826
+
+#: Why a search can come back empty, appended to by whatever else emptied it.
+_NO_DATA_HINT = (
+    "The selection may fall entirely on land/masked cells, or outside the "
+    "source's coverage -- widen select= or check the depth/time asked for."
+)
+
+#: The two ways ``local=True`` can rank a cell. ``"z"`` divides the departure from the
+#: neighbors' median by how much those neighbors vary among themselves, so a cell in a
+#: steep plume or front (large departure, but its neighbors differ just as much) ranks
+#: below a one-cell speck in smooth water; ``"departure"`` is the departure alone, in
+#: the field's units.
+SCORES = ("z", "departure")
+
 
 def _rank(
     score,
@@ -73,10 +98,7 @@ def _rank(
     hdims: tuple[str, ...] = (),
     source: str,
     what: str = "prepared field",
-    hint: str = (
-        "The selection may fall entirely on land/masked cells, or outside the "
-        "source's coverage -- widen select= or check the depth/time asked for."
-    ),
+    hint: str = _NO_DATA_HINT,
 ) -> list[dict[str, int]]:
     """Return the indices of ``score``'s ``n`` most extreme *distinct* places.
 
@@ -147,19 +169,33 @@ def _horizontal_dims(da) -> tuple[str, ...]:
     return tuple(str(d) for d in da.dims if str(d) in found)
 
 
-def _slice_departure(sl, window: int, *, interior: bool):
-    """Departure of every cell of one 2-D slice from the median of its wet neighbors.
+def _median_along_first(stack, wet):
+    """Median over the leading axis of ``stack`` of its ``wet`` finite values.
 
-    Returns ``(departure, median, wet)`` arrays shaped like ``sl``. ``wet`` counts the
-    finite neighbors among the ``window**2 - 1`` around each cell (the cell itself
-    excluded); the median is over those alone, so land never drags it. The median is
-    read off a sort along the neighbor axis -- NaNs sort last, so the ``wet`` finite
-    values lead -- rather than :func:`numpy.nanmedian`, which is slow at this size and
-    warns on an all-NaN neighborhood. Cells beyond the grid's edge are not neighbors
-    (no periodic wrap).
+    ``stack`` must already be sorted along axis 0 -- NaNs sort last, so the ``wet``
+    finite values lead -- and ``wet`` counts them per cell. Read off the two middle
+    ranks rather than through :func:`numpy.nanmedian`, which is slow at this size and
+    warns on an all-NaN neighborhood.
+    """
+    lo = np.clip((wet - 1) // 2, 0, None)[None]
+    hi = (wet // 2)[None]
+    return 0.5 * (
+        np.take_along_axis(stack, lo, axis=0)[0]
+        + np.take_along_axis(stack, hi, axis=0)[0]
+    )
 
-    ``departure`` is NaN where the cell itself is masked, where ``wet`` is under
-    :data:`MIN_WET_NEIGHBORS`, or -- with ``interior`` -- where any neighbor is dry.
+
+def _slice_departure(sl, window: int):
+    """Score one 2-D slice: departure from the wet-neighbor median, and the spread.
+
+    Returns ``(departure, median, spread, wet)`` arrays shaped like ``sl``. ``wet``
+    counts the finite neighbors among the ``window**2 - 1`` around each cell (the cell
+    itself excluded); ``median`` is over those alone, so land never drags it, and
+    ``spread`` is their median absolute deviation about it, scaled to a standard
+    deviation. Cells beyond the grid's edge are not neighbors (no periodic wrap).
+
+    ``departure`` (``sl`` minus ``median``) and ``spread`` are NaN where the cell
+    itself is masked or where ``wet`` is under :data:`MIN_WET_NEIGHBORS`.
     """
     r = window // 2
     ny, nx = sl.shape
@@ -175,21 +211,22 @@ def _slice_departure(sl, window: int, *, interior: bool):
     )
     wet = np.isfinite(stack).sum(axis=0)
     stack.sort(axis=0)
-    lo = np.clip((wet - 1) // 2, 0, None)[None]
-    hi = (wet // 2)[None]
-    median = 0.5 * (
-        np.take_along_axis(stack, lo, axis=0)[0]
-        + np.take_along_axis(stack, hi, axis=0)[0]
-    )
+    median = _median_along_first(stack, wet)
+    deviation = np.abs(stack - median[None])  # NaN stays NaN, so it still sorts last
+    deviation.sort(axis=0)
+    spread = _MAD_TO_SIGMA * _median_along_first(deviation, wet)
     centre = padded[r : r + ny, r : r + nx]
     scored = np.isfinite(centre) & (wet >= MIN_WET_NEIGHBORS)
-    if interior:
-        scored &= wet == window * window - 1
-    return np.where(scored, centre - median, np.nan), median, wet
+    return (
+        np.where(scored, centre - median, np.nan),
+        median,
+        np.where(scored, spread, np.nan),
+        wet,
+    )
 
 
-def _neighbor_departure(da, hdims: tuple[str, ...], window: int, *, interior: bool):
-    """Return ``(departure, median, wet)`` DataArrays on ``da``'s own coordinates.
+def _neighbor_departure(da, hdims: tuple[str, ...], window: int):
+    """Return ``(departure, median, spread, wet)`` DataArrays on ``da``'s coordinates.
 
     :func:`_slice_departure` at every horizontal slice of ``da``.
 
@@ -202,12 +239,88 @@ def _neighbor_departure(da, hdims: tuple[str, ...], window: int, *, interior: bo
     values = np.asarray(da_t.values, dtype=float)
     departure = np.full(values.shape, np.nan)
     median = np.full(values.shape, np.nan)
+    spread = np.full(values.shape, np.nan)
     wet = np.zeros(values.shape, dtype=np.int16)
     for idx in np.ndindex(*values.shape[:-2]):
-        departure[idx], median[idx], wet[idx] = _slice_departure(
-            values[idx], window, interior=interior
+        departure[idx], median[idx], spread[idx], wet[idx] = _slice_departure(
+            values[idx], window
         )
-    return da_t.copy(data=departure), da_t.copy(data=median), da_t.copy(data=wet)
+    return tuple(da_t.copy(data=a) for a in (departure, median, spread, wet))
+
+
+def _z_floor(spread, magnitude_of) -> float:
+    """Return the smallest neighbor spread a z-score divides by.
+
+    The field's own typical local variability -- the median ``spread`` over every
+    scored cell -- so a patch that happens to be nearly constant cannot turn a
+    departure of a fraction of a unit into an enormous z. A field that is constant
+    everywhere has a zero median, so the floor never drops below floating-point
+    resolution at the field's own magnitude, which keeps a lone speck's z finite.
+    """
+    finite = spread[np.isfinite(spread)]
+    typical = float(np.median(finite)) if finite.size else 0.0
+    has = np.isfinite(magnitude_of).any()
+    magnitude = float(np.nanmax(np.abs(magnitude_of))) if has else 1.0
+    return max(typical, float(np.finfo(float).eps) * (magnitude or 1.0))
+
+
+def _near_land(sl, reach: int):
+    """Boolean array shaped like ``sl``: a dry cell or the grid's edge within ``reach``.
+
+    "Within" is Chebyshev distance -- the ``(2 * reach + 1)`` square around each cell
+    -- and cells past the edge of the grid count as dry, so the mask is true for every
+    cell that does not have a full ``reach`` of wet cells all round it. A summed-area
+    table gives each square's dry count in constant time, so the cost is independent
+    of ``reach``.
+    """
+    ny, nx = sl.shape
+    padded = np.ones((ny + 2 * reach, nx + 2 * reach), dtype=np.int32)
+    padded[reach : reach + ny, reach : reach + nx] = ~np.isfinite(sl)
+    table = np.zeros((padded.shape[0] + 1, padded.shape[1] + 1), dtype=np.int64)
+    table[1:, 1:] = padded.cumsum(axis=0).cumsum(axis=1)
+    w = 2 * reach + 1
+    dry = (
+        table[w : w + ny, w : w + nx]
+        - table[0:ny, w : w + nx]
+        - table[w : w + ny, 0:nx]
+        + table[0:ny, 0:nx]
+    )
+    return dry > 0
+
+
+def _near_land_mask(da, hdims: tuple[str, ...], reach: int):
+    """:func:`_near_land` at every horizontal slice of ``da``, as a DataArray.
+
+    Transposed to put the horizontal dims last, like :func:`_neighbor_departure`.
+    """
+    lead = [d for d in da.dims if d not in hdims]
+    da_t = da.transpose(*lead, *hdims)
+    values = np.asarray(da_t.values, dtype=float)
+    near = np.zeros(values.shape, dtype=bool)
+    for idx in np.ndindex(*values.shape[:-2]):
+        near[idx] = _near_land(values[idx], reach)
+    return da_t.copy(data=near)
+
+
+def _land_distance(da, hdims: tuple[str, ...], indices: dict[str, int]) -> int:
+    """Cells from the hit at ``indices`` to the nearest dry cell or the grid's edge.
+
+    Chebyshev distance on the hit's own horizontal slice, so ``1`` means touching
+    land (or the edge) and a hit is kept by ``interior=k`` exactly when this exceeds
+    ``k``. The distance to the edge bounds the answer, so only the square that far
+    around the hit is searched for dry cells.
+    """
+    lead = {d: i for d, i in indices.items() if d not in hdims}
+    sl = np.asarray(da.isel(lead).transpose(*hdims).values, dtype=float)
+    i, j = (indices[d] for d in hdims)
+    ny, nx = sl.shape
+    edge = min(i + 1, j + 1, ny - i, nx - j)
+    r = edge - 1
+    box = sl[i - r : i + r + 1, j - r : j + r + 1]
+    rows, cols = np.nonzero(~np.isfinite(box))
+    if rows.size == 0:
+        return int(edge)
+    return int(np.maximum(np.abs(rows - r), np.abs(cols - r)).min())
 
 
 def _time_reason(time: Any, select: dict[str, Any]) -> str:
@@ -268,14 +381,22 @@ class Extremum:
         ``str`` naming which grid ``indices`` is into -- always ``"the source's
         own grid"`` for a ``Field`` today.
     mode
-        ``"global"`` (ranked by value) or ``"local"`` (ranked by departure from
-        the wet-neighbor median, ``Field.extremum(..., local=True)``).
+        ``"global"`` (ranked by value) or ``"local"`` (ranked by how far a cell
+        sits from its wet neighbors, ``Field.extremum(..., local=True)``).
     rank
         ``int``, 1 for the most extreme hit, 2 for the next distinct one, ...
-    anomaly, neighborhood, wet_neighbors, window
+    anomaly, neighborhood, spread, z, wet_neighbors, window, score
         Local mode only (``None`` otherwise): ``anomaly`` is ``value -
         neighborhood`` in the field's units, ``neighborhood`` the median of the
-        ``wet_neighbors`` finite cells among the ``window**2 - 1`` around the hit.
+        ``wet_neighbors`` finite cells among the ``window**2 - 1`` around the hit,
+        ``spread`` those neighbors' own variability (a scaled median absolute
+        deviation, in the field's units), ``z`` the ``anomaly`` in units of that
+        spread (never divided by less than the field's typical spread), and
+        ``score`` which of ``"z"``/``"departure"`` the hits were ranked by.
+    land_distance
+        ``int``, cells to the nearest land (masked) cell or the edge of the grid,
+        by Chebyshev distance -- 1 means touching -- or ``None`` on a field
+        without a 2-D horizontal grid.
 
     Built by :func:`field_extremum` (reached as ``Field.extremum()``), never
     directly. :meth:`series` follows the same location through time.
@@ -310,6 +431,10 @@ class Extremum:
     neighborhood: float | None = None
     wet_neighbors: int | None = None
     window: int | None = None
+    spread: float | None = None
+    z: float | None = None
+    score: str | None = None
+    land_distance: int | None = None
 
     def __repr__(self) -> str:
         from ocean_skill.comparison import _short_variable_label
@@ -331,10 +456,16 @@ class Extremum:
         if self.mode == "local" and self.anomaly is not None:
             side = "below" if self.anomaly < 0 else "above"
             w = self.window or DEFAULT_WINDOW
+            z = f", z = {self.z:.3g}" if self.z is not None else ""
             contrast = (
                 f"  {abs(self.anomaly):.6g}{units} {side} the median of its {w}x{w} "
                 f"wet neighbors ({self.neighborhood:.6g}; "
-                f"{self.wet_neighbors}/{w * w - 1} wet)\n"
+                f"{self.wet_neighbors}/{w * w - 1} wet){z}\n"
+            )
+        if self.land_distance is not None:
+            cells = "cell" if self.land_distance == 1 else "cells"
+            contrast += (
+                f"  {self.land_distance} {cells} from the nearest land or grid edge\n"
             )
         return (
             f"{label} {name} = {self.value:.6g}{units} at {where}\n"
@@ -575,7 +706,10 @@ class Extrema:
     separation
         Minimum grid-index spacing between hits on the horizontal dims.
     interior
-        Whether cells touching land were excluded (local mode).
+        ``int``, the ``interior=`` reach: hits are at least ``interior + 1`` cells
+        from land or the grid's edge (``0`` when nothing was excluded).
+    score
+        ``"z"`` or ``"departure"`` (local mode), or ``None``.
     items
         The hits, as a tuple of :class:`Extremum`.
     """
@@ -584,8 +718,9 @@ class Extrema:
     mode: str
     window: int | None
     separation: int
-    interior: bool
+    interior: int
     items: tuple[Extremum, ...]
+    score: str | None = None
 
     def __len__(self) -> int:
         return len(self.items)
@@ -599,9 +734,10 @@ class Extrema:
     def to_dataframe(self):
         """One row per hit, indexed by ``rank``.
 
-        Columns: ``value``, then (local mode) ``anomaly``, ``neighborhood`` and
-        ``wet_neighbors``, then ``lon``, ``lat``, ``time``, one ``i_<dim>`` column of
-        grid indices per dimension, and each scalar coordinate (depth, ...).
+        Columns: ``value``, then (local mode) ``anomaly``, ``neighborhood``,
+        ``spread``, ``z`` and ``wet_neighbors``, then ``land_distance``, ``lon``,
+        ``lat``, ``time``, one ``i_<dim>`` column of grid indices per dimension, and
+        each scalar coordinate (depth, ...).
         """
         import pandas as pd
 
@@ -612,8 +748,12 @@ class Extrema:
                 row.update(
                     anomaly=e.anomaly,
                     neighborhood=e.neighborhood,
+                    spread=e.spread,
+                    z=e.z,
                     wet_neighbors=e.wet_neighbors,
                 )
+            if e.land_distance is not None:
+                row["land_distance"] = e.land_distance
             row.update(lon=e.lon, lat=e.lat, time=e.time)
             row.update({f"i_{d}": i for d, i in e.indices.items()})
             for name, val in e.coords.items():
@@ -628,9 +768,10 @@ class Extrema:
         how = f">= {self.separation} cells apart"
         if self.mode == "local":
             w = self.window or DEFAULT_WINDOW
-            how = f"{w}x{w} wet-neighbor median, {how}"
-            if self.interior:
-                how += ", interior cells only"
+            how = f"{w}x{w} wet-neighbor median, ranked by {self.score}, {how}"
+        if self.interior:
+            cells = "cell" if self.interior == 1 else "cells"
+            how += f", no land within {self.interior} {cells}"
         label = f"local {self.kind}" if self.mode == "local" else self.kind
         name = _short_variable_label(first.variable)
         units = f" [{first.units}]" if first.units else ""
@@ -797,6 +938,24 @@ def _build(fld, da, indices: dict[str, int], kind: str, **extra: Any) -> Extremu
     )
 
 
+def _interior_reach(interior: Any, window: int | None) -> int:
+    """Cells of clearance ``interior=`` asks for around every scored cell.
+
+    ``False``/``None``/``0`` ask for none; ``True`` for the reach of the local window
+    (``window // 2``, one cell for the default 3 x 3); an integer for exactly that many.
+    """
+    if interior is None or interior is False:
+        return 0
+    if interior is True or isinstance(interior, np.bool_):
+        return (window or DEFAULT_WINDOW) // 2 if interior else 0
+    if isinstance(interior, (int, np.integer)) and interior >= 0:
+        return int(interior)
+    raise ValueError(
+        "interior must be True/False or an integer >= 0 (cells of clearance from "
+        f"land or the grid's edge), got {interior!r}."
+    )
+
+
 def field_extremum(
     fld,
     kind: str = "max",
@@ -804,8 +963,9 @@ def field_extremum(
     n: int = 1,
     local: bool = False,
     window: int | None = None,
-    interior: bool = False,
+    interior: bool | int = False,
     separation: int | None = None,
+    score: str | None = None,
 ) -> Extremum | Extrema:
     """Build an :class:`Extremum` (or, for ``n > 1``, an :class:`Extrema`) for
     ``fld`` -- the implementation behind ``Field.extremum()``.
@@ -823,21 +983,28 @@ def field_extremum(
         :class:`Extremum`; more give an :class:`Extrema`, holding fewer if the field
         runs out of scoreable cells.
     local
-        ``bool`` (default ``False``). Rank cells by their departure from the median
+        ``bool`` (default ``False``). Rank cells by how far they sit from the median
         of their wet neighbors rather than by value, which surfaces features one
         cell wide -- a speck that is unremarkable in absolute value but nothing like
-        the cells around it. ``"min"`` is then the most negative departure. Needs a
-        2-D horizontal grid.
+        the cells around it. ``"min"`` is then the most negative. Needs a 2-D
+        horizontal grid.
     window
         Local mode only: odd ``int >= 3``, the neighborhood's side in cells
         (default :data:`DEFAULT_WINDOW`).
     interior
-        Local mode only: score only cells whose whole neighborhood is wet, dropping
-        everything that touches land (or the grid's edge).
+        ``False`` (default) considers every wet cell. An ``int`` k keeps only cells
+        with no land and not the grid's edge within k cells (Chebyshev distance);
+        ``True`` is k = ``window // 2``, i.e. a cell whose whole neighborhood is
+        wet. Works for a global search too. Needs a 2-D horizontal grid.
     separation
         ``int >= 1``, minimum spacing in grid cells between reported hits on the
         horizontal dims (default: ``window`` when ``local``, else
         :data:`DEFAULT_GLOBAL_SEPARATION`).
+    score
+        Local mode only. ``"z"`` (the default there) ranks by the departure divided
+        by the neighbors' own spread, so a steep plume or front -- large departure,
+        but its neighbors differ just as much -- ranks below a speck in smooth water;
+        ``"departure"`` ranks by the departure alone, in the field's units.
     """
     from ocean_skill.align import point_of
 
@@ -851,8 +1018,10 @@ def field_extremum(
         )
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
         raise ValueError(f"n must be an integer >= 1, got {n!r}.")
+    if score is not None and score not in SCORES:
+        raise ValueError(f'score must be "z" or "departure", got {score!r}.')
     if not local:
-        stray = [k for k, v in (("window", window), ("interior", interior)) if v]
+        stray = [k for k, v in (("window", window), ("score", score)) if v]
         if stray:
             raise ValueError(
                 f"{' and '.join(stray)} only apply to local=True (neighbor-contrast) "
@@ -866,17 +1035,8 @@ def field_extremum(
         raise ValueError(f"separation must be an integer >= 1, got {separation!r}.")
 
     hdims = _horizontal_dims(da)
-    if not local:
-        gap = DEFAULT_GLOBAL_SEPARATION if separation is None else int(separation)
-        picks = _rank(
-            da, kind, n=int(n), separation=gap, hdims=hdims, source=fld.source
-        )
-        hits = [
-            _build(fld, da, ix, kind, rank=i)
-            for i, ix in enumerate(picks, start=1)
-        ]
-        w = None
-    else:
+    w = None
+    if local:
         w = DEFAULT_WINDOW if window is None else window
         if isinstance(w, bool) or not isinstance(w, (int, np.integer)):
             raise ValueError(f"window must be an odd integer >= 3, got {window!r}.")
@@ -890,40 +1050,70 @@ def field_extremum(
                 f"{hdims or 'none'} (a transect or along-axis field has no "
                 "neighbors on both sides). Use the default global search for it."
             )
+    reach = _interior_reach(interior, w)
+    if reach and len(hdims) != 2:
+        raise ValueError(
+            "interior needs a 2-D horizontal grid to measure the distance to land "
+            f"on, but {fld.source!r}'s prepared field has horizontal dims "
+            f"{hdims or 'none'}."
+        )
+    cells = "cell" if reach == 1 else "cells"
+    note = (
+        f" (interior={interior!r} also drops every cell within {reach} {cells} of "
+        "land or the grid's edge)"
+        if reach
+        else ""
+    )
+
+    if local:
+        chosen = "z" if score is None else score
+        departure, median, spread, wet = _neighbor_departure(da, hdims, w)
+        floor = _z_floor(spread.values, median.values)
+        z = departure / np.maximum(spread, floor)
+        ranking = z if chosen == "z" else departure
+        what = "neighbor-departure field"
+        hint = (
+            f"Every cell is masked or has fewer than {MIN_WET_NEIGHBORS} wet "
+            f"neighbors{note} -- widen select= or check the depth/time asked for."
+        )
         gap = w if separation is None else int(separation)
-        interior_note = (
-            " (interior=True also drops every cell touching land)" if interior else ""
-        )
-        departure, median, wet = _neighbor_departure(da, hdims, w, interior=interior)
-        picks = _rank(
-            departure,
-            kind,
-            n=int(n),
-            separation=gap,
-            hdims=hdims,
-            source=fld.source,
-            what="neighbor-departure field",
-            hint=(
-                f"Every cell is masked or has fewer than {MIN_WET_NEIGHBORS} wet "
-                f"neighbors{interior_note} -- widen select= or check the "
-                "depth/time asked for."
-            ),
-        )
-        hits = [
-            _build(
-                fld,
-                da,
-                {str(d): ix[str(d)] for d in da.dims},
-                kind,
+    else:
+        chosen = None
+        ranking = da
+        what = "prepared field"
+        hint = _NO_DATA_HINT + note
+        gap = DEFAULT_GLOBAL_SEPARATION if separation is None else int(separation)
+    if reach:
+        near = _near_land_mask(da, hdims, reach)
+        ranking = ranking.where(~near.transpose(*ranking.dims))
+
+    picks = _rank(
+        ranking,
+        kind,
+        n=int(n),
+        separation=gap,
+        hdims=hdims,
+        source=fld.source,
+        what=what,
+        hint=hint,
+    )
+    hits = []
+    for i, ix in enumerate(picks, start=1):
+        extra: dict[str, Any] = {"rank": i}
+        if len(hdims) == 2:
+            extra["land_distance"] = _land_distance(da, hdims, ix)
+        if local:
+            extra.update(
                 mode="local",
-                rank=i,
                 anomaly=float(departure.isel(ix)),
                 neighborhood=float(median.isel(ix)),
+                spread=float(spread.isel(ix)),
+                z=float(z.isel(ix)),
                 wet_neighbors=int(wet.isel(ix)),
                 window=w,
+                score=chosen,
             )
-            for i, ix in enumerate(picks, start=1)
-        ]
+        hits.append(_build(fld, da, ix, kind, **extra))
 
     if n == 1:
         return hits[0]
@@ -932,6 +1122,7 @@ def field_extremum(
         mode="local" if local else "global",
         window=w,
         separation=gap,
-        interior=bool(interior),
+        interior=reach,
         items=tuple(hits),
+        score=chosen,
     )

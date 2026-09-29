@@ -652,9 +652,7 @@ def test_a_straight_step_front_is_not_a_local_anomaly(stub):
     from ocean_skill.extrema import _horizontal_dims, _neighbor_departure
 
     da = _speckled_map()
-    departure, _, _ = _neighbor_departure(
-        da, _horizontal_dims(da), 3, interior=False
-    )
+    departure = _neighbor_departure(da, _horizontal_dims(da), 3)[0]
     # the two columns straddling the +500 step: the median ignores the far side, so
     # the step's size never shows up -- only the ramp's ~1-unit residue does
     front = departure.isel(lon=slice(21, 23))
@@ -738,7 +736,7 @@ def test_neighbor_median_matches_a_brute_force_loop():
     for window in (3, 5):
         sl = rng.normal(size=(9, 11))
         sl[rng.random(sl.shape) < 0.3] = np.nan
-        departure, median, wet = _slice_departure(sl, window, interior=False)
+        departure, median, spread, wet = _slice_departure(sl, window)
         r = window // 2
         for i in range(sl.shape[0]):
             for j in range(sl.shape[1]):
@@ -749,18 +747,26 @@ def test_neighbor_median_matches_a_brute_force_loop():
                 assert wet[i, j] == len(around)
                 if len(around):
                     assert median[i, j] == pytest.approx(np.median(around))
+                    mad = np.median(np.abs(around - np.median(around)))
+                    scored = np.isfinite(sl[i, j]) and len(around) >= MIN_WET_NEIGHBORS
+                    if scored:
+                        assert spread[i, j] == pytest.approx(1.4826 * mad)
                 if np.isfinite(sl[i, j]) and len(around) >= MIN_WET_NEIGHBORS:
                     expected = sl[i, j] - np.median(around)
                     assert departure[i, j] == pytest.approx(expected)
                 else:
-                    assert np.isnan(departure[i, j])
+                    assert np.isnan(departure[i, j]) and np.isnan(spread[i, j])
 
 
 @pytest.mark.parametrize(
     "kwargs, match",
     [
-        ({"interior": True}, "only apply to local=True"),
+        ({"score": "z"}, "only apply to local=True"),
         ({"window": 5}, "only apply to local=True"),
+        ({"local": True, "score": "bad"}, "score must be"),
+        ({"interior": -1}, "interior must be"),
+        ({"interior": 1.5}, "interior must be"),
+        ({"interior": "yes"}, "interior must be"),
         ({"n": 0}, "n must be an integer"),
         ({"n": True}, "n must be an integer"),
         ({"n": 1.5}, "n must be an integer"),
@@ -827,8 +833,8 @@ def test_local_dataframe_columns_and_index(stub):
     stub(_speckled_map())
     df = _make().extremum("min", local=True, n=3).to_dataframe()
     assert list(df.columns) == [
-        "value", "anomaly", "neighborhood", "wet_neighbors",
-        "lon", "lat", "time", "i_lat", "i_lon",
+        "value", "anomaly", "neighborhood", "spread", "z", "wet_neighbors",
+        "land_distance", "lon", "lat", "time", "i_lat", "i_lon",
     ]  # fmt: skip
     assert df.index.name == "rank" and list(df.index) == [1, 2, 3]
     assert df.loc[1, "wet_neighbors"] == 5
@@ -849,8 +855,12 @@ def test_extrema_repr_is_a_header_and_a_table(stub):
     assert text.splitlines()[0].startswith("3 local min nitrate")
     assert "3x3 wet-neighbor median" in text and "3 cells apart" in text
     assert "wet_neighbors" in text and "'stub'" in text
-    assert "interior cells only" in repr(
+    assert "ranked by z" in text
+    assert "no land within 1 cell" in repr(
         _make().extremum("min", local=True, n=2, interior=True)
+    )
+    assert "no land within 5 cells" in repr(
+        _make().extremum("min", local=True, n=2, interior=5, separation=1)
     )
     assert repr(_make().extremum("min", n=2, separation=1)).splitlines()[0].startswith(
         "2 min nitrate"
@@ -881,3 +891,215 @@ def test_extrema_is_exported():
     import ocean_skill as osk
 
     assert osk.Extrema is not None and "Extrema" in osk.__all__
+
+
+# -- z-score ranking, and interior= as a distance from land -----------------
+
+
+def _plume_map():
+    """Build a river-mouth blob a few cells off a coast and a lone speck offshore.
+
+    The blob (-600, sigma 1.5 cells, centered at (14, 8), four cells from the land
+    block along the left edge) departs from its neighbors by hundreds of units, but
+    its neighbors differ from one another by nearly as much; the speck at (22, 25)
+    departs by only 30, in water whose neighbors differ by a fraction of a unit.
+    """
+    lat = np.arange(30, dtype=float)
+    lon = -120.0 + np.arange(40, dtype=float)
+    rr, cc = np.mgrid[0:30, 0:40]
+    values = 2300.0 + 0.5 * lat[:, None] + 0.3 * np.arange(40)[None, :]
+    values = values - 600.0 * np.exp(-((rr - 14) ** 2 + (cc - 8) ** 2) / (2 * 1.5**2))
+    values[22, 25] -= 30.0
+    values[:, :5] = np.nan
+    return xr.DataArray(
+        values,
+        dims=("lat", "lon"),
+        coords={"lat": lat, "lon": lon},
+        name=NITRATE,
+        attrs={"units": "mmol m-3"},
+    )
+
+
+def test_a_plume_outranks_a_speck_by_departure_even_with_interior_true(stub):
+    # The reported failure: interior=True only clears the first ring of cells, and a
+    # river plume a few cells further out still departs from its neighbors by more
+    # than any speck does.
+    stub(_plume_map())
+    hits = _make().extremum(
+        "min", local=True, n=2, interior=True, score="departure"
+    )
+    plume, speck = hits
+    assert (plume.indices["lat"], plume.indices["lon"]) == (14, 8)
+    assert 1 < plume.land_distance <= 5  # passes interior=True: not touching land
+    assert (speck.indices["lat"], speck.indices["lon"]) == (22, 25)
+    assert abs(plume.anomaly) > 4 * abs(speck.anomaly)
+
+
+def test_z_ranks_the_speck_above_the_plume(stub):
+    stub(_plume_map())
+    hits = _make().extremum("min", local=True, n=2, interior=True)
+    speck, plume = hits
+    assert (speck.indices["lat"], speck.indices["lon"]) == (22, 25)
+    assert speck.z < -20 and abs(plume.z) < 5
+    assert plume.spread > 20 * speck.spread  # why: its neighbors vary just as much
+    assert speck.anomaly == pytest.approx(-30.0, abs=0.5)  # anomaly stays in units
+
+
+def test_z_is_the_default_and_score_z_is_explicit_z(stub):
+    stub(_plume_map())
+    default = _make().extremum("min", local=True, n=3)
+    explicit = _make().extremum("min", local=True, n=3, score="z")
+    assert _positions(default) == _positions(explicit)
+    assert default.score == explicit.score == "z"
+    assert all(h.score == "z" for h in default)
+    assert _make().extremum("min", local=True, score="departure").score == "departure"
+
+
+def test_global_hits_carry_no_score(stub):
+    stub(_plume_map())
+    assert _make().extremum("min").score is None
+    assert _make().extremum("min", n=2).score is None
+
+
+def test_interior_as_a_distance_clears_the_plume(stub):
+    stub(_plume_map())
+    hits = _make().extremum(
+        "min", local=True, n=3, interior=6, score="departure", separation=1
+    )
+    assert (hits[0].indices["lat"], hits[0].indices["lon"]) == (22, 25)
+    assert all(h.land_distance > 6 for h in hits)
+
+
+def test_interior_keeps_a_global_search_off_the_coast(stub):
+    stub(_speckled_map())
+    assert _make().extremum("min").indices == {"lat": 3, "lon": 2}  # the coastal cell
+    hits = _make().extremum("min", n=3, interior=4, separation=1)
+    assert all(h.land_distance > 4 for h in hits)
+    assert (3, 2) not in _positions(hits)
+    assert isinstance(_make().extremum("min", interior=True).land_distance, int)
+
+
+def test_interior_true_is_the_local_windows_own_reach(stub):
+    stub(_speckled_map())
+    for window in (3, 5):
+        hits = _make().extremum(
+            "min", local=True, n=6, window=window, interior=True, separation=1
+        )
+        assert hits.interior == window // 2
+        assert all(h.land_distance > window // 2 for h in hits)
+        assert all(h.wet_neighbors == window * window - 1 for h in hits)
+
+
+def test_interior_zero_and_false_exclude_nothing(stub):
+    stub(_speckled_map())
+    base = _make().extremum("min", local=True, n=3)
+    for off in (0, False):
+        assert _positions(_make().extremum("min", local=True, n=3, interior=off)) == (
+            _positions(base)
+        )
+    assert base.interior == 0
+
+
+def test_near_land_matches_a_brute_force_loop():
+    from ocean_skill.extrema import _near_land
+
+    rng = np.random.default_rng(3)
+    for reach in (1, 2, 3):
+        sl = rng.normal(size=(12, 15))
+        sl[rng.random(sl.shape) < 0.1] = np.nan
+        padded = np.pad(~np.isfinite(sl), reach, constant_values=True)  # edge is dry
+        expected = np.array(
+            [
+                [
+                    padded[i : i + 2 * reach + 1, j : j + 2 * reach + 1].any()
+                    for j in range(sl.shape[1])
+                ]
+                for i in range(sl.shape[0])
+            ]
+        )
+        assert (_near_land(sl, reach) == expected).all()
+
+
+def test_land_distance_counts_cells_to_land_and_the_edge(stub):
+    stub(_speckled_map())
+    coast, speck, _ = _make().extremum("min", local=True, n=3)
+    assert coast.land_distance == 1  # touching the NaN block
+    assert speck.land_distance == 8  # (10, 12) to the block's corner at (2, 4)
+    stub(_curvilinear_map())
+    edge = _make().extremum("max", local=True)
+    assert edge.indices == {"eta_rho": 2, "xi_rho": 4}
+    assert edge.land_distance == 1  # on the last column: the edge counts
+
+
+def test_land_distance_is_reported_for_a_time_faceted_field(stub):
+    stub(_speckled_map(nt=4))
+    top = _make().extremum("min", local=True)
+    assert top.indices["time"] == 2
+    assert top.land_distance == min(10 + 1, 12 + 1, 20 - 10, 30 - 12)
+
+
+def test_z_stays_finite_on_a_constant_field_with_a_lone_speck(stub):
+    values = np.full((12, 12), 100.0)
+    values[6, 6] = 70.0
+    stub(
+        xr.DataArray(
+            values,
+            dims=("lat", "lon"),
+            coords={"lat": np.arange(12.0), "lon": np.arange(12.0)},
+            name=NITRATE,
+        )
+    )
+    top = _make().extremum("min", local=True)
+    assert (top.indices["lat"], top.indices["lon"]) == (6, 6)
+    assert np.isfinite(top.z) and top.z < 0
+
+
+def test_the_spread_floor_stops_a_smooth_patch_inflating_z():
+    from ocean_skill.extrema import _horizontal_dims, _neighbor_departure, _z_floor
+
+    rng = np.random.default_rng(1)
+    values = 2300.0 + rng.normal(0.0, 2.0, size=(30, 30))
+    values[10:20, 10:20] = 2300.0  # a perfectly flat patch: its neighbors' spread is 0
+    values[15, 15] = 2300.01  # ... with a wiggle of a hundredth of a unit
+    da = xr.DataArray(
+        values,
+        dims=("lat", "lon"),
+        coords={"lat": np.arange(30.0), "lon": np.arange(30.0)},
+    )
+    departure, median, spread, _ = _neighbor_departure(da, _horizontal_dims(da), 3)
+    assert float(spread.isel(lat=15, lon=15)) == 0.0
+    floor = _z_floor(spread.values, median.values)
+    assert floor > 0.5
+    z = departure / np.maximum(spread, floor)
+    assert abs(float(z.isel(lat=15, lon=15))) < 0.05  # not 0.01 / 0
+
+
+def test_interior_needs_a_two_dimensional_horizontal_grid(stub):
+    along = np.arange(6, dtype=float)
+    stub(
+        xr.DataArray(
+            np.arange(6, dtype=float),
+            dims="along",
+            coords={"lon": ("along", -100.0 + along), "lat": ("along", 10.0 + along)},
+            name=NITRATE,
+        )
+    )
+    with pytest.raises(ValueError, match="interior needs a 2-D horizontal grid"):
+        _make().extremum("min", interior=3)
+
+
+def test_an_interior_that_leaves_nothing_names_the_distance(stub):
+    stub(_speckled_map())  # 20 x 30: no cell is more than 10 cells from land/edge
+    with pytest.raises(ValueError, match=r"NaN everywhere.*within 10 cells"):
+        _make().extremum("min", local=True, interior=10)
+    with pytest.raises(ValueError, match=r"NaN everywhere.*within 10 cells"):
+        _make().extremum("min", interior=10)
+
+
+def test_a_local_repr_carries_z_and_the_distance_to_land(stub):
+    stub(_speckled_map())
+    coast, speck, _ = _make().extremum("min", local=True, n=3)
+    assert ", z = " in repr(speck)
+    assert "8 cells from the nearest land or grid edge" in repr(speck)
+    assert "1 cell from the nearest land or grid edge" in repr(coast)
+    assert "from the nearest land" in repr(_make().extremum("min"))  # global, too
