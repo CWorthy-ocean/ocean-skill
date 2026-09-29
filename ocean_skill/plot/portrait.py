@@ -145,6 +145,7 @@ def portrait(
     title: str | None = None,
     ncols: int | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     annot_kwargs: dict[str, Any] | None = None,
@@ -289,7 +290,13 @@ def portrait(
                         **merged_annot,
                     )
         _draw_colorbar(
-            fig, im, ax, panel_title, colorbar_kwargs, defaults["colorbar_kwargs"]
+            fig,
+            im,
+            ax,
+            panel_title,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
 
     _align_colorbars(fig)

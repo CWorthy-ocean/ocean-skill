@@ -121,6 +121,74 @@ def _limits(
     return (vmin if vmin is not None else lo, vmax if vmax is not None else hi)
 
 
+def _data_range(*arrays, log: bool = False) -> tuple[float, float] | None:
+    """Finite ``(min, max)`` over ``arrays``, or ``None`` when nothing is finite.
+
+    Under ``log`` only positive values count: a ``LogNorm`` masks anything ``<= 0`` as
+    bad rather than clipping it to the low end, so it never reaches the colour scale
+    and cannot be what an extension arrow is pointing at.
+    """
+    lo, hi = np.inf, -np.inf
+    for a in arrays:  # one array at a time: a movie passes every frame
+        vals = np.asarray(a, dtype=float).ravel()
+        vals = vals[np.isfinite(vals)]
+        if log:
+            vals = vals[vals > 0]
+        if vals.size:
+            lo, hi = min(lo, float(vals.min())), max(hi, float(vals.max()))
+    return (lo, hi) if lo <= hi else None
+
+
+def _extend(lo: float, hi: float, data_range: tuple[float, float] | None) -> str:
+    """Which ends of a colour bar have data beyond them: matplotlib's ``extend=``.
+
+    One rule for both renderers, so the static arrow and the interactive ``≥``/``≤``
+    end label can only ever appear together. ``"neither"`` when the range is unknown.
+    """
+    if data_range is None:
+        return "neither"
+    below, above = data_range[0] < lo, data_range[1] > hi
+    return (
+        "both" if below and above else "min" if below else "max" if above else "neither"
+    )
+
+
+def _clip_text(end: str, value: float) -> str:
+    """``"max 29.9"`` / ``"min −1.8"``: the true extreme a clipped bar end hides."""
+    return f"{end} {value:.3g}".replace("-", "\N{MINUS SIGN}")
+
+
+def _with_range(norm, *arrays):
+    """Remember on ``norm`` the finite data range it was built to display.
+
+    The norm is the one object that travels from where the limits are chosen to where
+    the colour bar is drawn, so it carries the answer to "is anything beyond the ends?"
+    for :func:`_draw_colorbar` to turn into an arrow -- the same reason the colourbar's
+    own bookkeeping is stashed on its axes as ``_osk_*`` attributes. Returned so a call
+    site can wrap the ``norm_for(...)`` it already has.
+    """
+    import matplotlib.colors as mcolors
+
+    norm._osk_data_range = _data_range(*arrays, log=isinstance(norm, mcolors.LogNorm))
+    return norm
+
+
+def _extend_of(norm) -> str:
+    """``extend=`` for a colour bar drawn from ``norm`` (``"neither"`` if unknown)."""
+    return _extend(norm.vmin, norm.vmax, getattr(norm, "_osk_data_range", None))
+
+
+def _contour_kw(norm, n: int = 21) -> dict[str, Any]:
+    """``contourf`` keywords matching ``norm``: its levels, and the ends left open.
+
+    ``contourf`` fills only between its first and last level, so on a clipped scale the
+    data past either end would be bare holes -- unlike ``pcolormesh``, which saturates
+    it to the end colour. ``extend`` fills those regions and is also what the colour
+    bar reads its arrows from.
+    """
+    return {"levels": _contour_levels(norm, n), "extend": _extend_of(norm)}
+
+
 def _contour_levels(norm, n: int = 21):
     """Level edges matching ``norm`` — geometrically spaced under a ``LogNorm``."""
     import matplotlib.colors as mcolors
@@ -367,8 +435,65 @@ def _apply_subplot_spacing(fig, *, wspace: float | None, hspace: float | None) -
     engine.set(**kwargs)
 
 
+def _label_clipped_ends(cbar, norm, *, size: float) -> None:
+    """Write the true data extreme at the tip of each extension arrow.
+
+    ``max 29.9`` beyond the top (right) tip, ``min −1.8`` beyond the bottom (left)
+    one, only on an end that actually has an arrow. Placed with an offset in points
+    from the tip, in the bar's own axes coordinates, so :func:`_align_colorbars`
+    moving or resizing the bar moves the text with it. The tip is read off the bar's
+    outline rather than assumed, because the arrow's length is matplotlib's to choose.
+    """
+    data_range = getattr(norm, "_osk_data_range", None)
+    if data_range is None:
+        return
+    xy = cbar.outline.get_path().vertices
+    horizontal = cbar.orientation == "horizontal"
+    # the long axis is x for a horizontal bar, y for a vertical one
+    long_axis = xy[:, 0] if horizontal else xy[:, 1]
+    ends = (
+        (
+            "min",
+            data_range[0],
+            float(long_axis.min()),
+            -1,
+            cbar.extend in ("min", "both"),
+        ),
+        (
+            "max",
+            data_range[1],
+            float(long_axis.max()),
+            1,
+            cbar.extend in ("max", "both"),
+        ),
+    )
+    for end, value, tip, sign, extended in ends:
+        if not extended:
+            continue
+        at = (tip, 0.5) if horizontal else (0.5, tip)
+        offset = (3.0 * sign, 0.0) if horizontal else (0.0, 3.0 * sign)
+        cbar.ax.annotate(
+            _clip_text(end, value),
+            xy=at,
+            xycoords="axes fraction",
+            xytext=offset,
+            textcoords="offset points",
+            ha=("left" if sign > 0 else "right") if horizontal else "center",
+            va="center" if horizontal else ("bottom" if sign > 0 else "top"),
+            fontsize=size,
+            annotation_clip=False,
+        )
+
+
 def _draw_colorbar(
-    fig, im, ax, label, colorbar_kwargs: dict[str, Any] | None, defaults
+    fig,
+    im,
+    ax,
+    label,
+    colorbar_kwargs: dict[str, Any] | None,
+    defaults,
+    *,
+    label_clipped: bool = False,
 ):
     """Draw one colorbar from a single merged kwargs dict, split by key prefix.
 
@@ -376,6 +501,12 @@ def _draw_colorbar(
     ``.ax.tick_params()``, everything else goes to ``fig.colorbar()`` itself — one
     parameter for the caller, still three separate matplotlib calls underneath,
     since that's genuinely three different methods with non-overlapping kwargs.
+
+    The bar gets an extension arrow at each end that has data beyond it (see
+    :func:`_extend_of`), so a clipped scale -- ``robust``, a pinned ``vmin``/``vmax``,
+    a difference panel's 98th-percentile range -- says so rather than looking like the
+    whole story. An ``extend`` in ``colorbar_kwargs`` wins, ``"neither"`` included.
+    ``label_clipped=True`` also writes the true extreme at each arrow's tip.
     """
     merged = _merged(defaults, colorbar_kwargs)
     cbar_kw, label_kw, tick_kw = {}, {}, {}
@@ -386,7 +517,10 @@ def _draw_colorbar(
             tick_kw[k.removeprefix("tick_")] = v
         else:
             cbar_kw[k] = v
+    cbar_kw.setdefault("extend", _extend_of(im.norm))
     cbar = fig.colorbar(im, ax=ax, **cbar_kw)
+    if label_clipped:
+        _label_clipped_ends(cbar, im.norm, size=tick_kw.get("labelsize", 8))
     if label:
         cbar.set_label(label, **label_kw)
         # an explicitly requested label_size must survive _fit_text_widths
@@ -477,6 +611,14 @@ def _align_colorbars(fig, renderer=None) -> None:
         # which is the one thing that must not move). We size both axes here, so the
         # constraint has nothing left to do.
         cax.set_box_aspect(None)
+        # A bar with extension arrows draws through matplotlib's _ColorbarAxesLocator,
+        # which shrinks the body to make room for the arrows *and re-imposes the
+        # original aspect as a box aspect on every draw* -- undoing the line above and
+        # leaving the bar a fraction of the panels' width. The stored value is what it
+        # reads, so clear that; the shrink for the arrows themselves stays, which is
+        # what keeps their tips level with the panels' edges.
+        if isinstance(getattr(cax, "_colorbar_info", None), dict):
+            cax._colorbar_info["aspect"] = None
         if cax._osk_cbar_horizontal:
             height = thickness[True] / fig_h
             top = near - gap[True] / fig_h
@@ -657,7 +799,7 @@ def _draw_map(
 
     proj = ccrs.PlateCarree()
     draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
-    kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+    kw = _contour_kw(norm) if mark == "contourf" else {}
     im = draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
     _basemap(
         ax,
@@ -771,10 +913,10 @@ def _draw_row(
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, robust=robust)
-        seq_norm = norm_for(standard_name, vmin, vmax)
+        seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-        div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
+        div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
@@ -867,9 +1009,9 @@ def _draw_section_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     vmin, vmax = _limits(t, r, robust=robust)
-    seq_norm = norm_for(standard_name, vmin, vmax)
+    seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-    div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
+    div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
@@ -881,7 +1023,7 @@ def _draw_section_row(
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
         ax.set_facecolor("0.85")
         draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-        kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+        kw = _contour_kw(norm) if mark == "contourf" else {}
         im = draw(
             da[geometry.x_name], da[geometry.y_name], da, cmap=cmap, norm=norm, **kw
         )
@@ -1847,6 +1989,7 @@ def field_row(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -2010,7 +2153,13 @@ def field_row(
         titles=titles,
     )
     _draw_colorbar(
-        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        fig,
+        ims[1],
+        axes[:2],
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
     _draw_colorbar(
         fig,
@@ -2019,6 +2168,7 @@ def field_row(
         f"difference {lab}",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     # after the suptitle, so the margin is fitted to the layout the figure ends with
@@ -2408,14 +2558,16 @@ def _shared_norms(
     all_t = [np.asarray(c["aligned"][test_name]) for c in comparisons]
     all_r = [np.asarray(c["aligned"][reference_name]) for c in comparisons]
     vmin, vmax = _limits(*all_t, *all_r, robust=robust)
-    seq_norm = norm_for(standard_name, vmin, vmax)
+    seq_norm = _with_range(norm_for(standard_name, vmin, vmax), *all_t, *all_r)
 
     all_d = np.concatenate(
         [np.asarray(c["aligned"]["difference"]).ravel() for c in comparisons]
     )
     finite = all_d[np.isfinite(all_d)]
     dmax = float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0
-    div_norm = mcolors.Normalize(vmin=-(dmax or 1.0), vmax=dmax or 1.0)
+    div_norm = _with_range(
+        mcolors.Normalize(vmin=-(dmax or 1.0), vmax=dmax or 1.0), finite
+    )
     return seq_norm, div_norm
 
 
@@ -2433,6 +2585,7 @@ def field_grid(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -2617,7 +2770,13 @@ def field_grid(
             titles=resolved_titles[i * 3 : i * 3 + 3],
         )
         _draw_colorbar(
-            fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+            fig,
+            ims[1],
+            axes[i][:2],
+            lab,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
         _draw_colorbar(
             fig,
@@ -2626,6 +2785,7 @@ def field_grid(
             f"test − reference {lab}",
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
 
     # after the suptitle, so the margin is fitted to the layout the figure ends with
@@ -3023,6 +3183,7 @@ def field_facet(
     ncols: int | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -3207,7 +3368,9 @@ def field_facet(
 
     def _norm_of(sub):
         lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
-        return norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+        return _with_range(
+            norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), sub
+        )
 
     # Computed before drawing so each panel is drawn against its scale rather than
     # corrected afterwards. One norm per row, unless there is only one scale to have.
@@ -3295,10 +3458,17 @@ def field_facet(
                 bar_label,
                 colorbar_kwargs,
                 defaults["colorbar_kwargs"],
+                label_clipped=colorbar_label_clipped,
             )
     elif im is not None:
         _draw_colorbar(
-            fig, im, used, bar_label, colorbar_kwargs, defaults["colorbar_kwargs"]
+            fig,
+            im,
+            used,
+            bar_label,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
 
     if title:
@@ -3396,6 +3566,7 @@ def section(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     suptitle_kwargs: dict[str, Any] | None = None,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
@@ -3474,13 +3645,15 @@ def section(
 
     cmap, _ = cmaps_for(standard_name)
     lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
-    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+    norm = _with_range(
+        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), values
+    )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     ax.set_facecolor("0.85")  # the map families' land grey, doing the same job here:
     # a below-bathymetry (or off-domain) cell is genuinely absent data, not zero.
     draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-    kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+    kw = _contour_kw(norm) if mark == "contourf" else {}
     im = draw(
         values[geometry.x_name],
         values[geometry.y_name],
@@ -3495,7 +3668,15 @@ def section(
     ax.tick_params(axis="both", labelsize=scale["tick_label"])
 
     lab = units or ""
-    _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+    _draw_colorbar(
+        fig,
+        im,
+        ax,
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
+    )
 
     if title:
         sup = fig.suptitle(title, **suptitle_kwargs)
@@ -3521,6 +3702,7 @@ def cross(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
     align_colorbars: bool = True,
@@ -3628,7 +3810,10 @@ def cross(
     lo, hi = _limits(
         *(values for values, _ in prepared), robust=robust, vmin=vmin, vmax=vmax
     )
-    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+    norm = _with_range(
+        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+        *(values for values, _ in prepared),
+    )
 
     fig, axes_grid = plt.subplots(
         nrows, ncols, figsize=figsize, constrained_layout=True
@@ -3647,7 +3832,7 @@ def cross(
     ):
         ax.set_facecolor("0.85")  # section()'s below-bathymetry/off-domain grey
         draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-        kw = {"levels": _contour_levels(norm)} if mark == "contourf" else {}
+        kw = _contour_kw(norm) if mark == "contourf" else {}
         im = draw(
             values[geometry.x_name],
             values[geometry.y_name],
@@ -3666,7 +3851,13 @@ def cross(
 
     lab = units or ""
     _draw_colorbar(
-        fig, ims[-1], axes, lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        fig,
+        ims[-1],
+        axes,
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     if title:
@@ -3734,6 +3925,7 @@ def time_depth(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     suptitle_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     align_colorbars: bool = True,
@@ -3822,7 +4014,9 @@ def time_depth(
 
     cmap, _ = cmaps_for(standard_name)
     lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
-    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+    norm = _with_range(
+        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), values
+    )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     im = _draw_time_depth(ax, values, geometry, cmap=cmap, norm=norm, mark=mark)
@@ -3833,7 +4027,15 @@ def time_depth(
     )
 
     lab = units or ""
-    _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+    _draw_colorbar(
+        fig,
+        im,
+        ax,
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
+    )
 
     if title:
         sup = fig.suptitle(title, **suptitle_kwargs)
@@ -3865,6 +4067,7 @@ def time_depth_grid(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -4134,7 +4337,10 @@ def time_depth_grid(
                 vmin=vmin,
                 vmax=vmax,
             )
-            norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+            norm = _with_range(
+                norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+                *(prepared[i][0] for i in group_indices),
+            )
             for i in group_indices:
                 panel_scale[i] = (cmap, norm)
 
@@ -4161,8 +4367,11 @@ def time_depth_grid(
         else:
             cmap, _ = cmaps_for(item.get("standard_name"))
             lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
-            norm = norm_for(
-                item.get("standard_name"), lo, hi, user_vmin=vmin, user_vmax=vmax
+            norm = _with_range(
+                norm_for(
+                    item.get("standard_name"), lo, hi, user_vmin=vmin, user_vmax=vmax
+                ),
+                values,
             )
         im = _draw_time_depth(
             ax, values, geometry, cmap=cmap, norm=norm, mark=panel_mark
@@ -4180,7 +4389,15 @@ def time_depth_grid(
             ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
         )
         lab = item.get("units") or ""
-        _draw_colorbar(fig, im, ax, lab, colorbar_kwargs, defaults["colorbar_kwargs"])
+        _draw_colorbar(
+            fig,
+            im,
+            ax,
+            lab,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
+        )
 
     total_cells = grid_nrows * grid_ncols
     if grid_ncols == 1 or (grid_nrows == 1 and grid_ncols == len(drawn)):
@@ -4292,10 +4509,10 @@ def _draw_time_depth_row(
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, robust=robust)
-        seq_norm = norm_for(standard_name, vmin, vmax)
+        seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-        div_norm = mcolors.Normalize(vmin=-dmax, vmax=dmax)
+        div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
@@ -4350,6 +4567,7 @@ def time_depth_row(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
@@ -4454,7 +4672,13 @@ def time_depth_row(
         robust=robust,
     )
     _draw_colorbar(
-        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        fig,
+        ims[1],
+        axes[:2],
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
     _draw_colorbar(
         fig,
@@ -4463,6 +4687,7 @@ def time_depth_row(
         f"difference {lab}",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     if title:
@@ -4492,6 +4717,7 @@ def time_depth_row_grid(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     row_label_kwargs: dict[str, Any] | None = None,
@@ -4630,7 +4856,13 @@ def time_depth_row_grid(
             titles=resolved_titles[i * 3 : i * 3 + 3],
         )
         _draw_colorbar(
-            fig, ims[1], axes[i][:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+            fig,
+            ims[1],
+            axes[i][:2],
+            lab,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
         _draw_colorbar(
             fig,
@@ -4639,6 +4871,7 @@ def time_depth_row_grid(
             f"difference {lab}",
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
 
     if title:
@@ -4672,6 +4905,7 @@ def field_map_grid(
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -4883,7 +5117,10 @@ def field_map_grid(
             vmin, vmax = _limits(
                 *(cell_items[i]["field"] for i in group_indices), robust=robust
             )
-            norm = norm_for(standard_name, vmin, vmax)
+            norm = _with_range(
+                norm_for(standard_name, vmin, vmax),
+                *(cell_items[i]["field"] for i in group_indices),
+            )
             for i in group_indices:
                 panel_scale[i] = (cmap, norm)
 
@@ -4897,7 +5134,7 @@ def field_map_grid(
         else:
             cmap, _ = cmaps_for(standard_name)
             vmin, vmax = _limits(field, robust=robust)
-            norm = norm_for(standard_name, vmin, vmax)
+            norm = _with_range(norm_for(standard_name, vmin, vmax), field)
         # No drawn cell to my left in this row (the grid's own edge, or an
         # interior/trailing blank standing in for one) keeps the latitude
         # labels; no drawn cell below me in this column keeps the longitude
@@ -4926,7 +5163,13 @@ def field_map_grid(
         ax.title._osk_size_pinned = title_pinned
         bar_label = f"[{item['units']}]" if item.get("units") else ""
         _draw_colorbar(
-            fig, im, ax, bar_label, colorbar_kwargs, defaults["colorbar_kwargs"]
+            fig,
+            im,
+            ax,
+            bar_label,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
         )
 
     # A blank cell (past the last panel, unfaceted; or a facet combination
@@ -4968,6 +5211,7 @@ def section_row(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
@@ -5058,7 +5302,13 @@ def section_row(
         titles=titles,
     )
     _draw_colorbar(
-        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        fig,
+        ims[1],
+        axes[:2],
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
     _draw_colorbar(
         fig,
@@ -5067,6 +5317,7 @@ def section_row(
         f"difference {lab}",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     if title:
@@ -5158,6 +5409,16 @@ def _apply_extent(axes, extent, items, names) -> None:
         ax.set_extent(box, crs=ccrs.PlateCarree())
 
 
+def _station_values(items, name: str) -> np.ndarray:
+    """Every station's value of metric ``name`` across ``items``: the dots on a skill map."""
+    parts = [
+        np.asarray(item["stations"]["values"][name], dtype=float).ravel()
+        for item in items
+        if item.get("stations") is not None and name in item["stations"]["values"]
+    ]
+    return np.concatenate(parts) if parts else np.empty(0)
+
+
 def skill_map(
     items: list[dict[str, Any]],
     *,
@@ -5170,6 +5431,7 @@ def skill_map(
     ncols: int | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -5403,6 +5665,10 @@ def skill_map(
             shared_colors[name] = metric_colors(
                 name, pooled, standard_name=items[0].get("standard_name")
             )
+            if station_markers:  # the dots are painted on this scale too
+                shared_colors[name] = shared_colors[name].covering(
+                    _station_values(items, name)
+                )
 
     # Colorbars are drawn per panel by default, but a shared scale wants exactly one
     # bar per metric spanning every row it appears in -- collected here as panels are
@@ -5436,6 +5702,8 @@ def skill_map(
                 name, arrays[row_index][name], standard_name=item.get("standard_name")
             )
         )
+        if station_markers and not (shared_limits and stacked):
+            colors = colors.covering(_station_values([item], name))
         # Every row shows every metric once, so within a layout's own repeating axis
         # the label only needs to appear once: "rows" repeats metrics across columns,
         # so the metric title is shown on the top row only (row-label carries the
@@ -5514,6 +5782,7 @@ def skill_map(
                 _units_label(item["skill"][name]),
                 colorbar_kwargs,
                 defaults["colorbar_kwargs"],
+                label_clipped=colorbar_label_clipped,
             )
 
     if shared_limits and stacked:
@@ -5528,6 +5797,7 @@ def skill_map(
                 _units_label(items[0]["skill"][name]),
                 colorbar_kwargs,
                 defaults["colorbar_kwargs"],
+                label_clipped=colorbar_label_clipped,
             )
 
     # Cells past the last panel carry no map and so no label artists — hidden rather
@@ -5741,7 +6011,7 @@ def _update_field(ax, im, da, *, mark: str, proj):
             transform=proj,
             cmap=cmap,
             norm=norm,
-            levels=_contour_levels(norm),
+            **_contour_kw(norm),
         )
     im.set_array(np.asarray(da))
     return im
@@ -5763,6 +6033,7 @@ def field_movie(
     figsize: tuple[float, float] | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -5894,8 +6165,22 @@ def field_movie(
         land=land,
         robust=robust,
     )
+    # The scale came from the first frame (or every one, when shared) but the bars are
+    # drawn once for the whole movie, so their arrows have to answer for every frame: a
+    # later frame that outruns the first is clipped exactly as much as an outlier is.
+    _with_range(
+        ims[1].norm,
+        *(f["aligned"][key] for f in frames for key in (test_name, reference_name)),
+    )
+    _with_range(ims[2].norm, *(f["aligned"]["difference"] for f in frames))
     _draw_colorbar(
-        fig, ims[1], axes[:2], lab, colorbar_kwargs, defaults["colorbar_kwargs"]
+        fig,
+        ims[1],
+        axes[:2],
+        lab,
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
     _draw_colorbar(
         fig,
@@ -5904,6 +6189,7 @@ def field_movie(
         f"difference {lab}",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     label_text = None
@@ -5998,6 +6284,7 @@ def facet_movie(
     domain: tuple[float, float, float, float] | np.ndarray | None = None,
     figsize: tuple[float, float] | None = None,
     colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
     title_kwargs: dict[str, Any] | None = None,
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
@@ -6082,7 +6369,12 @@ def facet_movie(
     # field. field_facet shares one scale across its panels for the same reason.
     scope = field if shared_limits else field.isel({facet_dim: indices[0]})
     lo, hi = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
-    norm = norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax)
+    # the arrow is about every frame, even when the scale was set by the first alone: a
+    # later frame that outruns it is exactly the clipping the arrow is there to flag
+    norm = _with_range(
+        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+        *(field.isel({facet_dim: i}) for i in indices),
+    )
     cmap, _ = cmaps_for(standard_name)
 
     fig, ax = plt.subplots(
@@ -6121,6 +6413,7 @@ def facet_movie(
         f"[{units}]" if units else "",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
     )
 
     label_text = None

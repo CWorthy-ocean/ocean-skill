@@ -485,3 +485,33 @@ def test_portrait_is_not_delegated_to_matplotlib(comparisons):
             PlotSpec(family="portrait", items=items, options={"metric_names": "bias"}),
             renderer="holoviews",
         )
+
+
+def test_portrait_bar_marks_a_cell_past_its_percentile_scale(comparisons):
+    """One wild cell sits past the 98th-percentile end of a bias bar: arrow + label."""
+    comparisons[0]._metrics["bias"] = 50.0
+    fig = portrait(comparisons, metric_names="bias", colorbar_label_clipped=True)
+    (image,) = _images(fig)
+    assert image.colorbar.extend in ("max", "both")
+    texts = [t.get_text() for ax in fig.axes for t in ax.texts]
+    assert "max 50" in texts
+
+
+def test_interactive_portrait_bar_marks_a_cell_past_its_scale(comparisons):
+    import holoviews as hv
+    from bokeh.models import ColorBar
+
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    comparisons[0]._metrics["bias"] = 50.0
+    obj = render(
+        PlotSpec(
+            family="portrait",
+            items=_items(comparisons),
+            options={"metric_names": "bias", "colorbar_label_clipped": True},
+        ),
+        renderer="holoviews",
+    )
+    (bar,) = hv.render(obj, backend="bokeh").select({"type": ColorBar})
+    assert "(max 50)" in " ".join(bar.major_label_overrides.values())
