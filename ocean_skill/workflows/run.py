@@ -411,13 +411,24 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
         test_source = suite.defaults.get("test")
         index = extrema._native_time_index(test_source) if test_source else None
+        # Printed once, unconditionally, so it lands in run.log even for an
+        # ordinary (non-list_only) run: whether "latest" moved since the last run
+        # is exactly what decides whether the cache-eligible pages below actually
+        # hit or recompute -- see "Caching" in docs/suites.md.
+        if index is not None:
+            print(f"latest step of {test_source}: {index[-1]}")
 
         if list_only:
             from ocean_skill import cache as _cache
 
             print(f"cache: {_cache.base_dir()}")
             for i, p in enumerate(expanded, 1):
-                cache_note = "cache" if p.cache else "no-cache (open window)"
+                if p.cache:
+                    cache_note = "cache"
+                elif not suite.cache:
+                    cache_note = "no-cache (cache: false)"
+                else:
+                    cache_note = "no-cache (may change as the run grows)"
                 chain = "".join(
                     " -> {}({})".format(
                         s["name"],
@@ -475,9 +486,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                     page.elapsed = time.perf_counter() - t0
                     page.status = "skipped"
                     page.reason = f"{type(exc).__name__}: {exc}"
-                    warnings.warn(
-                        f"skipping page {page.title!r}: {exc}", stacklevel=2
-                    )
+                    warnings.warn(f"skipping page {page.title!r}: {exc}", stacklevel=2)
                     cap.log_only(traceback.format_exc())
                     print(f"   SKIPPED after {page.elapsed:.1f}s: {page.reason}")
                     continue

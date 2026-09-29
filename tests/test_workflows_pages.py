@@ -278,7 +278,7 @@ def test_latest_resolves_to_the_index_last_value_no_method_key():
     assert "method" not in out[0].kwargs["select"]
 
 
-def test_latest_page_is_never_cached():
+def test_latest_page_is_cached_pinned_to_the_resolved_step():
     suite = _suite(
         [
             {
@@ -292,10 +292,19 @@ def test_latest_page_is_never_cached():
         defaults={"test": "stub"},
     )
     out = P.expand(suite)
-    assert out[0].cache is False
+    # cache=True is safe here precisely because the resolved value above is baked
+    # into the cache key: a rerun against an unchanged run's-end hits, and a
+    # rerun once the run has moved recomputes under a different key.
+    assert out[0].cache is True
 
 
 # -- window injection & the cache flag -------------------------------------------------
+#
+# The cache flag follows one rule (see "Caching" in docs/suites.md): cache whenever the
+# test lane's time selection is *pinned* to the run's own last step -- so its key
+# changes the moment that step does -- or *closed* against the run's current time axis:
+# selects at least one step, none of them the run's current last step, and would select
+# exactly the same steps with one more step appended or its own last step taken away.
 
 
 def test_a_field_page_with_no_time_key_gets_the_whole_run_window():
@@ -313,10 +322,12 @@ def test_a_field_page_with_no_time_key_gets_the_whole_run_window():
         "min": INDEX[0].isoformat(),
         "max": INDEX[-1].isoformat(),
     }
-    assert out[0].cache is False  # open-ended: reaches the run's latest step
+    # pinned: the injected window's own "max" is the run's last step, so its key
+    # changes the moment that step does.
+    assert out[0].cache is True
 
 
-def test_a_completed_woa_month_page_keeps_caching():
+def test_a_completed_woa_month_page_keeps_caching_and_the_open_month_now_does_too():
     suite = _suite(
         [
             {
@@ -335,7 +346,32 @@ def test_a_completed_woa_month_page_keeps_caching():
     by_title = {p.title: p for p in out}
     assert by_title["January"].cache is True
     assert by_title["February"].cache is True
-    assert by_title["March"].cache is False  # contains the run's latest step
+    # March's own window still only ever selects what the run actually has (Mar 2
+    # and Mar 9) -- closed against a *contiguous* window would be wrong here, since
+    # the window's nominal "max" (Mar 31) is well past the run's end, but the run's
+    # last recorded step (Mar 9) is what is actually selected, so it stays uncached.
+    assert by_title["March"].cache is False
+
+
+def test_a_field_page_for_each_month_gets_the_same_open_month_treatment():
+    suite = _suite(
+        [
+            {
+                "title": "{month.name}",
+                "for_each": {"month": "run"},
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": "{month.window}"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    by_title = {p.title: p for p in out}
+    assert by_title["January"].cache is True
+    assert by_title["February"].cache is True
+    assert by_title["March"].cache is False
 
 
 def test_a_compare_page_with_no_select_gets_the_whole_run_window():
@@ -357,7 +393,290 @@ def test_a_compare_page_with_no_select_gets_the_whole_run_window():
         "min": INDEX[0].isoformat(),
         "max": INDEX[-1].isoformat(),
     }
+    assert out[0].cache is True
+
+
+def test_a_pair_spec_test_lane_explicitly_null_is_treated_as_no_time_key():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {"test": None, "reference": {}},
+                    "aggregate": {"time": "mean"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)  # does not raise
+    assert out[0].kwargs["select"]["test"]["time"] == {
+        "min": INDEX[0].isoformat(),
+        "max": INDEX[-1].isoformat(),
+    }
+    assert out[0].cache is True
+
+
+def test_a_flat_compare_select_with_no_time_key_is_never_cached():
+    # a flat (non-paired) select narrows both lanes at once, so it is never
+    # rewritten the way a pair-spec's test lane is -- only checked.
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {"depth": "surface"},
+                    "aggregate": {"time": "mean"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].kwargs["select"] == {"depth": "surface"}  # untouched
     assert out[0].cache is False
+
+
+def test_a_flat_compare_window_inside_the_run_is_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {"time": {"min": "2010-01-05", "max": "2010-01-26"}},
+                    "aggregate": {"time": "mean"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is True
+
+
+def test_a_flat_compare_window_reaching_the_last_step_is_not_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {"time": {"min": "2010-03-01", "max": "2010-03-09"}},
+                    "aggregate": {"time": "mean"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_a_period_containing_the_last_step_is_not_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {"variables": ["temperature"], "select": {"time": "2010-03"}},
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_a_period_well_before_the_last_step_is_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {"variables": ["temperature"], "select": {"time": "2010-01"}},
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is True
+
+
+def test_an_instant_nearest_matching_the_last_step_is_not_cached():
+    # "2010-03-16" names no real step -- the nearest one is the run's own last
+    # step (Mar 9), so this is exactly as unsafe to cache as asking for it by name.
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": "2010-03-16"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_an_instant_well_inside_the_run_is_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": "2010-01-12"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is True
+
+
+def test_a_negative_index_tracking_the_tail_is_not_cached():
+    # index=-2 names a *position*, which shifts to a different actual step once
+    # the run gains (or loses) a step at the end.
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": {"index": -2}},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_a_positive_index_range_from_the_start_is_cached():
+    # positions 0 and 1 name the same two steps regardless of what happens at the
+    # tail.
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": {"index": {"min": 0, "max": 2}}},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is True
+
+
+def test_a_window_entirely_past_the_run_is_not_cached():
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "field": {
+                    "variables": ["temperature"],
+                    "select": {"time": {"min": "2010-03-16", "max": "2010-03-23"}},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_detide_pushes_the_cutoff_back_by_its_own_cutoff_period():
+    # the same window, only the detide period differs: T=200h reaches back far
+    # enough to catch Mar 2 (a week before the run's last step, Mar 9); a window
+    # ending three weeks earlier (Feb 23) clears it either way.
+    close_to_the_end = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {
+                        "test": {"time": {"min": "2010-01-01", "max": "2010-03-02"}},
+                        "reference": {},
+                    },
+                    "detide": {"T": 200},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    assert P.expand(close_to_the_end)[0].cache is False
+
+    well_clear = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "select": {
+                        "test": {"time": {"min": "2010-01-01", "max": "2010-02-23"}},
+                        "reference": {},
+                    },
+                    "detide": {"T": 200},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    assert P.expand(well_clear)[0].cache is True
+
+
+def test_times_fan_is_never_cached_even_with_no_select():
+    # times= replaces whatever time entry select carried with its own per-bin
+    # value at draw time (comparison._fanned_time_select) -- what actually gets
+    # keyed is not what expand() resolved above, so nothing here can vouch for it.
+    suite = _suite(
+        [
+            {
+                "title": "x",
+                "compare": {
+                    "reference": ["glodap"],
+                    "variables": ["alkalinity"],
+                    "times": {"resample": "1MS", "reduce": "mean"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert out[0].cache is False
+
+
+def test_a_shared_select_placeholder_is_not_mutated_across_pages():
+    suite = _suite(
+        [
+            {"title": "a", "field": {"variables": ["temperature"], "select": "{sel}"}},
+            {"title": "b", "field": {"variables": ["salinity"], "select": "{sel}"}},
+        ],
+        defaults={"test": "stub", "sel": {"depth": "surface", "time": "latest"}},
+    )
+    out = P.expand(suite)
+    assert out[0].kwargs["select"]["time"] == INDEX[-1].isoformat()
+    assert out[1].kwargs["select"]["time"] == INDEX[-1].isoformat()
+    # each page resolved its own copy, not fighting over one shared dict
+    assert out[0].kwargs["select"] is not out[1].kwargs["select"]
+    # and the suite's own stored default was never written through
+    assert suite.defaults["sel"]["time"] == "latest"
 
 
 def test_suite_level_cache_false_forces_every_page():
@@ -500,9 +819,6 @@ def test_per_page_figsize_is_pinned_and_warned_independently_of_defaults_zoom():
     assert sum("figsize=" in m for m in messages) == 1
     assert out[0].plot == {"size": "page"}
     assert out[1].plot == {"size": "page"}
-
-
-
 
 
 # -- then: a field page's method chain -------------------------------------------------
@@ -675,7 +991,12 @@ def test_then_series_window_reaching_latest_is_marked_uncached():
         select={"depth": "surface", "time": "latest"},
     )
     out = P.expand(suite)
-    assert out[0].cache is False  # the locator field's own page-level flag
+    # The locator field's own page-level flag caches: "latest" is pinned to the
+    # resolved step (see "Caching" in docs/suites.md), so its key changes the
+    # moment that step does. The nested series step is a different question --
+    # its own padded window reaches the run's current end, so *that* stays
+    # uncached regardless of the outer page's own flag.
+    assert out[0].cache is True
     assert out[0].steps[1]["kwargs"]["cache"] is False
 
 

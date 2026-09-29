@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,7 @@ import xarray as xr
 from ocean_skill import cache as _cache
 from ocean_skill import catalog as _catalog
 from ocean_skill import comparison as _comparison
+from ocean_skill.config import SuiteConfig
 from ocean_skill.workflows import pages as _pages
 from ocean_skill.workflows.run import _refresh_sources, main, run_suite
 from tests.test_catalog import _write_catalog
@@ -327,11 +329,43 @@ def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
     result = run_suite(path, list_only=True)
     out = capsys.readouterr().out
     assert "Physics latest" in out
+    assert f"latest step of stub: {_INDEX[-1]}" in out
+    # time: latest is pinned to the resolved step above, so it caches.
+    assert "(cache)" in out
     assert result.report_dir is None
     assert result.log is None
     assert not (tmp_path / "out").exists()
     assert not list(tmp_path.rglob("run.log"))
 
+
+def test_list_only_notes_suite_level_cache_false_distinctly(
+    tmp_path, stub_model, capsys
+):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, cache=False))
+    run_suite(path, list_only=True)
+    out = capsys.readouterr().out
+    assert "no-cache (cache: false)" in out
+    assert "no-cache (may change as the run grows)" not in out
+
+
+def test_list_only_notes_a_growing_selection_distinctly(tmp_path, stub_model, capsys):
+    suite = _model_only_suite(tmp_path)
+    suite["pages"].append(
+        {
+            "title": "WOA",
+            "compare": {
+                "reference": ["woa23_nitrate_month01"],
+                "variables": ["nitrate"],
+                "aggregate": {"time": "mean"},
+                "select": {"depth": "surface"},  # flat select, no time key
+            },
+        }
+    )
+    path = _write_suite(tmp_path, suite)
+    run_suite(path, list_only=True)
+    out = capsys.readouterr().out
+    assert "no-cache (may change as the run grows)" in out
+    assert "no-cache (cache: false)" not in out
 
 
 # -- then: extremum -> series, end to end -----------------------------------------
@@ -633,13 +667,9 @@ def test_catalog_search_paths_repeated_runs_do_not_duplicate_added_dirs(
 # -- cache_dir: ---------------------------------------------------------------------
 
 
-def test_cache_dir_absolute_path_relocates_cache_and_is_recorded(
-    tmp_path, stub_model
-):
+def test_cache_dir_absolute_path_relocates_cache_and_is_recorded(tmp_path, stub_model):
     pinned = tmp_path / "pinned_cache"
-    path = _write_suite(
-        tmp_path, _model_only_suite(tmp_path, cache_dir=str(pinned))
-    )
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, cache_dir=str(pinned)))
     result = run_suite(path)
 
     assert _cache.base_dir() == pinned.resolve()
@@ -694,6 +724,112 @@ def test_cache_dir_is_applied_under_list_only(tmp_path, stub_model):
 
     assert _cache.base_dir() == pinned.resolve()
     assert not pinned.exists()  # applying it never creates the directory eagerly
+
+
+# -- a page's resolved cache flag actually round-trips through the real cache -------
+#
+# ``stub_model`` replaces ``comparison.prepare_source`` wholesale, so it never
+# exercises the cache layer prepare_source itself owns. These patch one level
+# deeper -- ``comparison._prepare``, the read-and-reduce step *inside*
+# prepare_source -- the same idiom ``tests/test_cache.py``'s own
+# ``counted_pipeline`` fixture uses, so prepare_source's real cache-key/hit/miss
+# logic runs for real (``isolated_cache``, autouse via conftest.py, already
+# points it at a fresh temp dir).
+
+
+@pytest.fixture
+def counted_prepare(monkeypatch):
+    """Patch out the expensive read/reduce step, counting how often it runs."""
+    calls = {"n": 0}
+    da = xr.DataArray(
+        np.random.default_rng(0).normal(5.0, 1.0, (8, 10)),
+        dims=("lat", "lon"),
+        coords={"lat": np.linspace(20, 30, 8), "lon": np.linspace(-100, -90, 10)},
+        name="temperature",
+        attrs={"units": "degC"},
+    )
+
+    def fake_prepare(obj, meta, variable, select, aggregate=None, **kwargs):
+        calls["n"] += 1
+        return da, None
+
+    monkeypatch.setattr(_comparison, "_prepare", fake_prepare)
+    monkeypatch.setattr(_catalog, "resolve", lambda name: mock.Mock(metadata={}))
+    monkeypatch.setattr("ocean_skill.read", lambda n: None)
+    return calls
+
+
+def _expand_one_page(monkeypatch, index):
+    suite = SuiteConfig.model_validate(
+        {
+            "name": "t",
+            "defaults": {"test": "stub"},
+            "pages": [
+                {
+                    "title": "x",
+                    "field": {
+                        "variables": ["temperature"],
+                        "select": {"depth": "surface", "time": "latest"},
+                    },
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda source: index)
+    return _pages.expand(suite)[0]
+
+
+def test_a_latest_page_hits_the_real_cache_once_the_run_stops(
+    monkeypatch, counted_prepare
+):
+    page = _expand_one_page(monkeypatch, _INDEX)
+    assert page.cache is True
+
+    from ocean_skill.comparison import prepare_source
+
+    prepare_source(
+        "stub",
+        page.kwargs["variable"],
+        page.kwargs["select"],
+        page.kwargs.get("aggregate"),
+        use_cache=page.cache,
+    )
+    prepare_source(
+        "stub",
+        page.kwargs["variable"],
+        page.kwargs["select"],
+        page.kwargs.get("aggregate"),
+        use_cache=page.cache,
+    )
+    assert counted_prepare["n"] == 1, (
+        "a rerun against an unchanged latest step should hit"
+    )
+
+
+def test_a_latest_page_recomputes_once_the_run_has_moved(monkeypatch, counted_prepare):
+    from ocean_skill.comparison import prepare_source
+
+    page = _expand_one_page(monkeypatch, _INDEX)
+    prepare_source(
+        "stub",
+        page.kwargs["variable"],
+        page.kwargs["select"],
+        page.kwargs.get("aggregate"),
+        use_cache=page.cache,
+    )
+    assert counted_prepare["n"] == 1
+
+    grown = _INDEX.append(pd.DatetimeIndex([_INDEX[-1] + pd.Timedelta(days=7)]))
+    page2 = _expand_one_page(monkeypatch, grown)
+    assert page2.kwargs["select"]["time"] != page.kwargs["select"]["time"]
+    prepare_source(
+        "stub",
+        page2.kwargs["variable"],
+        page2.kwargs["select"],
+        page2.kwargs.get("aggregate"),
+        use_cache=page2.cache,
+    )
+    assert counted_prepare["n"] == 2, "a new latest step is a new key, so this misses"
 
 
 def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeypatch):
