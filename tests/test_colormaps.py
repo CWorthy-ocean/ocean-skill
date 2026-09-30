@@ -84,3 +84,43 @@ def test_sla_is_signed():
     """
     seq, _ = cmaps_for("sea_level_anomaly")
     assert seq.name == "balance"
+
+
+# --- bathymetry -----------------------------------------------------------------------
+#
+# ROMS calls its seafloor depth ``h`` and keeps it under that name (``to_depth`` reads
+# it), so ``field(src, "h").plot()`` asks for a colormap by a one-letter string. That
+# can only be matched exactly: as a substring pattern it would colour half the
+# vocabulary. And it must not be a vocabulary alias either -- ``find_variable`` would
+# then look for ``sea_floor_depth_below_geoid`` in a dataset that only has ``h``.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["h", "H", "bathymetry", "sea_floor_depth", "sea_floor_depth_below_geoid"],
+)
+def test_bathymetry_spellings_get_the_deep_map(name):
+    assert cmaps_for(name)[0].name == "deep"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("hs", "viridis"),  # contains an h, is not bathymetry: falls to the default
+        ("ph", "speed_r"),
+        ("phosphate", "rain"),
+        ("chlorophyll", "algae"),
+        ("temperature", "thermal"),
+        ("sea_surface_height_above_geoid", "balance"),
+    ],
+)
+def test_the_bathymetry_pattern_is_anchored_and_captures_nothing_else(name, expected):
+    assert cmaps_for(name)[0].name == expected
+
+
+def test_h_is_not_a_vocabulary_alias():
+    """``h`` stays what the dataset calls it; only its colour is looked up by name."""
+    from ocean_skill.vocabulary import is_known, resolve_name
+
+    assert resolve_name("h") == "h"
+    assert not is_known("h")

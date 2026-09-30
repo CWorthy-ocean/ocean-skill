@@ -3043,6 +3043,10 @@ def field_facet(
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
+    location_items: Sequence[dict[str, Any]] | None = None,
+    legend: bool = True,
+    legend_kwargs: dict[str, Any] | None = None,
+    marker_size: float = 80.0,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -3105,6 +3109,13 @@ def field_facet(
     ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead — applied to
     every row alike — and override ``robust`` and a variable's own declared display
     range wherever either end is given.
+
+    ``location_items`` draws :mod:`ocean_skill.plot.locations`-family items (built by
+    :func:`ocean_skill.plot.map_locations.location_items`; ``Field.plot(locations=...)``
+    fills this in) on top of every panel: markers, transect lines, extent boxes, a
+    dashed domain ring. They are context, not data -- a station outside the field does
+    not widen the map -- and the framed featureType key (``legend``, ``legend_kwargs``,
+    ``marker_size``) is drawn once, on the first panel.
     """
     import matplotlib.pyplot as plt
 
@@ -3273,6 +3284,15 @@ def field_facet(
             coastline_resolution=coastline_resolution,
             land=land,
         )
+        if location_items:
+            _overlay_locations(
+                ax,
+                location_items,
+                marker_size=marker_size,
+                legend=legend and i == 0,
+                legend_kwargs=legend_kwargs,
+                legend_fontsize=scale["legend"],
+            )
         used.append(ax)
         ims.append(im)
         if col == 0 and row_labels[row]:
@@ -6160,95 +6180,54 @@ def facet_movie(
     )
 
 
-def locations(
+def _overlay_locations(
+    ax,
     items,
     *,
-    title: str | None = None,
-    extent: tuple[float, float, float, float] | None = None,
-    legend: bool = True,
-    marker_size: float = 80.0,
-    tiles: str | bool | None = None,
-    save: str | Path | None = None,
-    figsize: tuple[float, float] | None = None,
-    size: str | Canvas | tuple[float, float | None] | float | None = None,
-    zoom: float = 1.0,
-    font_scale: float = 1.0,
-    title_kwargs: dict[str, Any] | None = None,
-    gridline_kwargs: dict[str, Any] | None = None,
-    tick_label_kwargs: dict[str, Any] | None = None,
-    legend_kwargs: dict[str, Any] | None = None,
-    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
-    land: bool | float = True,
-):
-    """Map where things sit: markers for points, dashed boxes for extents and
-    domains, solid lines for selection slices.
+    marker_size: float,
+    legend: bool,
+    legend_kwargs: dict[str, Any] | None,
+    legend_fontsize: float,
+) -> None:
+    """Draw ``locations``-family items over a field map already on ``ax``.
 
-    Items come from :func:`ocean_skill.plot.locations.build_items` (pure catalog
-    metadata) and/or :func:`ocean_skill.plot.map_locations.build_map_items` (a
-    plotted selection) — no field, no colormap and no colorbar either way; colour
-    keys the item's ``featureType`` instead, off the shared constants and
-    :func:`~ocean_skill.plot.locations.style_for` in
-    :mod:`ocean_skill.plot.locations`, and the legend is the key to it.
-
-    ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
-    ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
-    :func:`~ocean_skill.plot.map_locations.map_locations`). ``tiles`` is accepted
-    so ``renderer="both"`` can pass one set of options, but web tiles are the
-    interactive renderer's; here it warns and draws the usual coastline basemap.
-
-    ``coastline_resolution``/``land`` pick that basemap's coastline/land dataset and
-    the land fill's visibility — see :func:`field_row`'s docstring.
+    The view is frozen around the field: ``ax.plot``/``ax.scatter`` fold what they draw
+    into the axes' data limits, so a station or transect running past the edge of the
+    field would otherwise zoom the map out to hold it -- the reason
+    :func:`_draw_map` adds its domain ring with ``add_artist`` too. Items are context
+    for the field, not something the view should frame itself around.
     """
     import cartopy.crs as ccrs
-    import matplotlib.pyplot as plt
+
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+    handles = _draw_location_items(
+        ax, items, proj=ccrs.PlateCarree(), marker_size=marker_size
+    )
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    if legend:
+        _draw_location_legend(
+            ax, handles, fontsize=legend_fontsize, legend_kwargs=legend_kwargs
+        )
+
+
+def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
+    """Draw ``locations``-family items into ``ax`` and return the legend handles.
+
+    Markers for points, dashed boxes for extents and rings, solid lines for selection
+    slices -- coloured by ``featureType`` off :func:`~ocean_skill.plot.locations.
+    style_for`. Shared by :func:`locations` (its own figure) and :func:`field_facet`
+    (drawn on top of a field map), so a location looks the same on either.
+
+    ``proj`` is the **data** transform, always plain
+    :class:`~cartopy.crs.PlateCarree`, never the axes projection: items are pre-wrapped
+    to ±180 and seam-split (see :mod:`ocean_skill.plot.locations`), and on a
+    180-centred axes it is the *axes* that moves, not the coordinates.
+    """
     from matplotlib.lines import Line2D
 
     from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, style_for
-    from ocean_skill.plot.proj_check import warn_projection_skew
     from ocean_skill.plot.summary import _MARKERS
-
-    warn_projection_skew()
-    _warn_if_interactive_only(None, None, tiles)
-
-    if extent is None:
-        from ocean_skill.plot.locations import _default_extent
-
-        extent = _default_extent(items)
-    lon0, lat0, lon1, lat1 = (float(v) for v in extent)
-
-    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
-    canvas = resolve_canvas(size, zoom)
-    if figsize is None:
-        # one panel, no colorbar: the facet fraction (a shared-bar grid's) is the
-        # closest existing answer to "the map keeps nearly the whole cell"
-        figsize = auto_figsize(
-            aspect,
-            nrows=1,
-            ncols=1,
-            canvas=canvas,
-            font_scale=font_scale,
-            panel_w_fraction=FACET_PANEL_W_FRACTION,
-        )
-    scale = type_scale(figsize, ncols=1, nrows=1, font_scale=font_scale)
-
-    proj = ccrs.PlateCarree()
-    fig, ax = plt.subplots(
-        figsize=figsize, subplot_kw={"projection": proj}, layout="constrained"
-    )
-    if (lon0, lat0, lon1, lat1) == (-180.0, -90.0, 180.0, 90.0):
-        ax.set_global()
-    else:
-        ax.set_extent((lon0, lon1, lat0, lat1), crs=proj)
-    _basemap(
-        ax,
-        gridline_kwargs=_merged(DEFAULT_GRIDLINE_KWARGS, gridline_kwargs),
-        tick_label_kwargs=_merged(
-            {**DEFAULT_TICK_LABEL_KWARGS, "size": scale["tick_label"]},
-            tick_label_kwargs,
-        ),
-        coastline_resolution=coastline_resolution,
-        land=land,
-    )
 
     groups: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -6332,21 +6311,123 @@ def locations(
                     label=feature_type,
                 )
             )
+    return handles
 
-    if legend and handles:
-        # framed, unlike the series default: this key floats over a map, and
-        # unbacked text over coastlines and extent boxes is unreadable
-        ax.legend(
-            handles=handles,
-            **_merged(
-                {
-                    "frameon": True,
-                    "framealpha": 0.85,
-                    "edgecolor": "0.6",
-                    "fontsize": scale["legend"],
-                },
-                legend_kwargs,
-            ),
+
+def _draw_location_legend(ax, handles, *, fontsize, legend_kwargs=None) -> None:
+    """Draw the framed featureType key of a ``locations`` map or a field map overlay.
+
+    Framed, unlike the series default: this key floats over a map, and unbacked text
+    over coastlines and extent boxes is unreadable.
+    """
+    if not handles:
+        return
+    ax.legend(
+        handles=handles,
+        **_merged(
+            {
+                "frameon": True,
+                "framealpha": 0.85,
+                "edgecolor": "0.6",
+                "fontsize": fontsize,
+            },
+            legend_kwargs,
+        ),
+    )
+
+
+def locations(
+    items,
+    *,
+    title: str | None = None,
+    extent: tuple[float, float, float, float] | None = None,
+    legend: bool = True,
+    marker_size: float = 80.0,
+    tiles: str | bool | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
+):
+    """Map where things sit: markers for points, dashed boxes for extents and
+    domains, solid lines for selection slices.
+
+    Items come from :func:`ocean_skill.plot.locations.build_items` (pure catalog
+    metadata) and/or :func:`ocean_skill.plot.map_locations.build_map_items` (a
+    plotted selection) — no field, no colormap and no colorbar either way; colour
+    keys the item's ``featureType`` instead, off the shared constants and
+    :func:`~ocean_skill.plot.locations.style_for` in
+    :mod:`ocean_skill.plot.locations`, and the legend is the key to it.
+
+    ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
+    ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
+    :func:`~ocean_skill.plot.map_locations.map_locations`). ``tiles`` is accepted
+    so ``renderer="both"`` can pass one set of options, but web tiles are the
+    interactive renderer's; here it warns and draws the usual coastline basemap.
+
+    ``coastline_resolution``/``land`` pick that basemap's coastline/land dataset and
+    the land fill's visibility — see :func:`field_row`'s docstring.
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.proj_check import warn_projection_skew
+
+    warn_projection_skew()
+    _warn_if_interactive_only(None, None, tiles)
+
+    if extent is None:
+        from ocean_skill.plot.locations import _default_extent
+
+        extent = _default_extent(items)
+    lon0, lat0, lon1, lat1 = (float(v) for v in extent)
+
+    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
+    canvas = resolve_canvas(size, zoom)
+    if figsize is None:
+        # one panel, no colorbar: the facet fraction (a shared-bar grid's) is the
+        # closest existing answer to "the map keeps nearly the whole cell"
+        figsize = auto_figsize(
+            aspect,
+            nrows=1,
+            ncols=1,
+            canvas=canvas,
+            font_scale=font_scale,
+            panel_w_fraction=FACET_PANEL_W_FRACTION,
+        )
+    scale = type_scale(figsize, ncols=1, nrows=1, font_scale=font_scale)
+
+    proj = ccrs.PlateCarree()
+    fig, ax = plt.subplots(
+        figsize=figsize, subplot_kw={"projection": proj}, layout="constrained"
+    )
+    if (lon0, lat0, lon1, lat1) == (-180.0, -90.0, 180.0, 90.0):
+        ax.set_global()
+    else:
+        ax.set_extent((lon0, lon1, lat0, lat1), crs=proj)
+    _basemap(
+        ax,
+        gridline_kwargs=_merged(DEFAULT_GRIDLINE_KWARGS, gridline_kwargs),
+        tick_label_kwargs=_merged(
+            {**DEFAULT_TICK_LABEL_KWARGS, "size": scale["tick_label"]},
+            tick_label_kwargs,
+        ),
+        coastline_resolution=coastline_resolution,
+        land=land,
+    )
+
+    handles = _draw_location_items(ax, items, proj=proj, marker_size=marker_size)
+
+    if legend:
+        _draw_location_legend(
+            ax, handles, fontsize=scale["legend"], legend_kwargs=legend_kwargs
         )
     ax.set_title(
         title or "",

@@ -34,7 +34,7 @@ import numpy as np
 
 from ocean_skill import _stacklevel
 
-__all__ = ["build_map_items", "map_locations"]
+__all__ = ["build_map_items", "location_items", "map_locations"]
 
 #: Sentinel default for ``domain=``: outline each distinct test source
 #: automatically. Distinct from ``None`` (draw no outline at all) — an ``ndarray``
@@ -668,6 +668,68 @@ def build_map_items(obj: Any, *, domain: Any = _AUTO) -> list[dict[str, Any]]:
     return items
 
 
+def location_items(
+    what: Any = None,
+    *,
+    catalog: str | None = None,
+    domain: Any = _AUTO,
+    who: str = "map_locations()",
+) -> list[dict[str, Any]]:
+    """Build the ``"locations"`` items for anything :func:`map_locations` accepts.
+
+    Split out of :func:`map_locations` so a *field* map can draw the same items on top
+    of itself (``Field.plot(locations=...)``) without going through the ``locations``
+    family's own figure. ``what`` follows :func:`map_locations`'s rules -- ``None``
+    (everything discoverable), a catalog source name, a
+    :func:`~ocean_skill.catalog.find` result, a ``Comparison``/``ComparisonSet``/
+    ``Field``/``FieldSet``, or a list mixing names and objects -- and ``domain`` and
+    ``catalog`` mean what they do there. Catalog names draw from metadata alone;
+    objects draw their *request*. Nothing is opened and nothing is aligned.
+
+    ``who`` names the caller in the error for a list entry that cannot be placed, so
+    ``locations=[...]`` on a field map does not blame ``map_locations()``.
+    Raises :class:`ValueError` when nothing at all can be placed.
+    """
+    from ocean_skill.comparison import Comparison, ComparisonSet
+    from ocean_skill.field import Field, FieldSet
+    from ocean_skill.plot.locations import build_items as _catalog_build_items
+
+    object_types = (Comparison, ComparisonSet, Field, FieldSet)
+
+    if what is None or isinstance(what, str):
+        candidates: Iterable[Any] = [what]
+    elif isinstance(what, object_types):
+        candidates = [what]
+    else:
+        candidates = list(what)
+
+    names: list[str] = []
+    objects: list[Any] = []
+    for item in candidates:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, object_types):
+            objects.append(item)
+        else:
+            raise TypeError(
+                f"{who} cannot place {item!r}: expected a catalog "
+                "source name, or a Comparison/ComparisonSet/Field/FieldSet."
+            )
+
+    items: list[dict[str, Any]] = []
+    if what is None or names:
+        catalog_items, _ = _catalog_build_items(names or None, catalog=catalog)
+        items += catalog_items
+    for obj in objects:
+        items += build_map_items(obj, domain=domain)
+
+    if not items:
+        raise ValueError("no datasets with a geospatial extent to map")
+    return items
+
+
 def map_locations(
     what: Any = None,
     *,
@@ -735,46 +797,11 @@ def map_locations(
     ...), passed to the renderer like any other family's. The default
     ``extent`` frames everything mapped, with a margin.
     """
-    from ocean_skill.comparison import Comparison, ComparisonSet
-    from ocean_skill.field import Field, FieldSet
     from ocean_skill.plot.locations import _default_extent
-    from ocean_skill.plot.locations import build_items as _catalog_build_items
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
 
-    object_types = (Comparison, ComparisonSet, Field, FieldSet)
-
-    if what is None or isinstance(what, str):
-        candidates: Iterable[Any] = [what]
-    elif isinstance(what, object_types):
-        candidates = [what]
-    else:
-        candidates = list(what)
-
-    names: list[str] = []
-    objects: list[Any] = []
-    for item in candidates:
-        if item is None:
-            continue
-        if isinstance(item, str):
-            names.append(item)
-        elif isinstance(item, object_types):
-            objects.append(item)
-        else:
-            raise TypeError(
-                f"map_locations() cannot place {item!r}: expected a catalog "
-                "source name, or a Comparison/ComparisonSet/Field/FieldSet."
-            )
-
-    items: list[dict[str, Any]] = []
-    if what is None or names:
-        catalog_items, _ = _catalog_build_items(names or None, catalog=catalog)
-        items += catalog_items
-    for obj in objects:
-        items += build_map_items(obj, domain=domain)
-
-    if not items:
-        raise ValueError("no datasets with a geospatial extent to map")
+    items = location_items(what, catalog=catalog, domain=domain)
     kwargs.setdefault("extent", _default_extent(items))
     spec = PlotSpec(family="locations", items=items, options=kwargs)
     return render(spec, renderer=renderer)

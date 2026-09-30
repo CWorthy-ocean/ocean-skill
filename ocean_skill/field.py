@@ -1228,7 +1228,9 @@ class Field:
         return item
 
     @graft_plot_options()
-    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def plot(
+        self, *, renderer: str = "matplotlib", locations: Any = None, **kwargs: Any
+    ):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
 
         Parameters
@@ -1236,6 +1238,19 @@ class Field:
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive) -- goes through the same renderer registry either way.
+        locations
+            Map panels only. Draw where things sit on top of the field: anything
+            :func:`~ocean_skill.plot.map_locations.map_locations` accepts -- catalog
+            source names, a :func:`~ocean_skill.catalog.find` result, a
+            ``Field``/``Comparison`` (or a set of either), or a list mixing them --
+            as markers, transect lines and extent boxes, keyed by a legend
+            (``legend``, ``legend_kwargs``, ``marker_size``). A ``Field`` whose
+            ``select`` cuts a transect draws that transect's path, so the section
+            you analyse and the line on the map cannot disagree. The model's own
+            outline is not repeated here -- the map draws that through ``domain``.
+            They are context, not data: a location outside the field does not widen
+            the map. Refused for the other shapes (a series, section, profile...),
+            which have no map to draw on.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -1267,8 +1282,24 @@ class Field:
         grid_meta = self._grid_metadata_if_eligible()
         if grid_meta is not None:
             if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
-                return self._surfaced().plot(renderer=renderer, **kwargs)
+                return self._surfaced().plot(
+                    renderer=renderer, locations=locations, **kwargs
+                )
             self._refuse_bare_multistep_time_precheck()
+
+        if locations is not None:
+            if self.family != "field_facet":
+                raise ValueError(
+                    f"locations= draws on a map, but this field draws as "
+                    f"{self.family!r} ({self.family_reason}). Narrow it to a map, "
+                    "or call osk.map_locations() for the locations on their own."
+                )
+            from ocean_skill.plot.map_locations import location_items
+
+            # domain=None: the map draws its own model outline through ``domain=``
+            kwargs["location_items"] = location_items(
+                locations, domain=None, who="locations="
+            )
 
         if self.family == "time_depth":
             spec = PlotSpec(

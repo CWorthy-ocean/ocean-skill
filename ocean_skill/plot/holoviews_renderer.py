@@ -706,6 +706,9 @@ def _field_facet(
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
+    location_items=None,
+    legend: bool = True,
+    marker_size: float = 9.0,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -764,6 +767,11 @@ def _field_facet(
     ``nrows * ncols`` entries here against ``ncols`` there. ``None`` at a
     position keeps that panel's own title; the wrong count raises a
     copy-pasteable ``ValueError`` listing the current titles.
+
+    ``location_items`` draws :mod:`ocean_skill.plot.locations`-family items over every
+    panel (see :func:`_location_elements`); ``legend`` keys them on the first panel
+    only, and they are context rather than data -- a station outside the field does not
+    widen the map.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -812,6 +820,7 @@ def _field_facet(
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name)
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
+    loc_xform = _location_xform(field, tiles, geo=geo)
     # one panel's worth of cells, not the whole faceted field, which would overcount by
     # the number of panels and rasterize a grid whose individual maps are small
     one_panel = field.isel({d: 0 for d in (facet_dim, row_dim) if d})
@@ -885,7 +894,19 @@ def _field_facet(
             coastline_resolution=coastline_resolution,
             land=land,
         )
-        return mesh if outline is None else mesh * outline
+        panel = mesh if outline is None else mesh * outline
+        if location_items:
+            keyed = legend and (row, col) == (0, 0)
+            for element in _location_elements(
+                location_items,
+                xform=loc_xform,
+                marker_size=marker_size,
+                legend=keyed,
+            ):
+                panel = panel * element
+            if keyed:
+                panel = panel.opts(legend_position="right")
+        return panel
 
     panels = [
         _panel(row, col, panel_title)
@@ -4561,6 +4582,169 @@ def _target(
     return result.opts(**opts)
 
 
+def _identity_xform(xs, ys):
+    """Return coordinates unchanged: they are already in the panel's frame."""
+    return xs, ys
+
+
+def _shift_to_180_frame(xs, ys):
+    """Shift ±180 longitudes into a ``PlateCarree(central_longitude=180)`` frame.
+
+    ``x = (lon % 360) - 180`` -- the same formula :func:`_domain_overlay` and
+    :func:`_movie_coastline` use for their plain-holoviews geometry, which takes no
+    part in geoviews's automatic projection and so has to be moved by hand.
+    """
+    return (np.asarray(xs, dtype=float) % 360.0) - 180.0, np.asarray(ys, dtype=float)
+
+
+def _location_xform(field, tiles, *, geo: bool = True):
+    """Return the plain-element transform for ``locations`` geometry over ``field``.
+
+    Web Mercator under a tile basemap, the 180-centred shift on an untiled
+    dateline-straddling field (see :func:`_output_projection`), and the identity
+    otherwise -- the same three-way choice :func:`_domain_overlay` makes for its ring.
+    """
+    if geo and tiles:
+        return _to_mercator
+    if geo and _output_projection(field) is not None:
+        return _shift_to_180_frame
+    return _identity_xform
+
+
+def _location_elements(items, *, xform, marker_size: float, legend: bool) -> list:
+    """Build the holoviews elements for ``locations``-family items, in draw order.
+
+    Extent boxes, then point markers, then line/ring paths, one element per
+    featureType so the legend gets one entry per type. Shared by :func:`_locations`
+    (its own map) and :func:`_field_facet` (drawn over a field), so a location looks
+    the same on either.
+
+    ``xform(xs, ys)`` moves *plain* holoviews geometry (rectangle corners, path
+    vertices) into the panel's frame: ``gv.Points`` is left in degrees, since geoviews
+    projects its own elements from their ``crs`` -- shifting them too would move them
+    twice. Rectangles and paths are plain ``hv`` elements deliberately:
+    ``gv.Rectangles`` + hover crashes in geoviews's bokeh hover handling (its
+    ``_process_hover_geo`` assumes two kdims), and a geoviews path re-projects its
+    geometry from scratch on every render. Every element takes ``apply_ranges=False``:
+    on a field map these are context for the field, not something the view should
+    widen to hold -- the interactive counterpart of the static view-freeze in
+    :func:`ocean_skill.plot.matplotlib_renderer._overlay_locations`.
+    """
+    import geoviews as gv
+    import pandas as pd
+    from bokeh.models import HoverTool
+
+    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, HOVER_FIELDS, style_for
+
+    hv = _extension()
+
+    def hover_tool():
+        # A fresh HoverTool per element — a bokeh model belongs to one renderer.
+        # Explicit tooltips rather than bokeh's defaults, which would append the
+        # kdims: raw Web Mercator metres for a rectangle corner under tiles.
+        return HoverTool(tooltips=[(f, f"@{{{f}}}") for f in HOVER_FIELDS])
+
+    def _ordered(groups: dict[str, list[dict[str, Any]]]) -> list[str]:
+        ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
+        ordered += [ft for ft in groups if ft not in FEATURE_TYPE_ORDER]
+        return ordered
+
+    elements: list = []
+
+    extent_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] == "extent":
+            extent_groups.setdefault(item["featureType"], []).append(item)
+    for feature_type in _ordered(extent_groups):
+        style = style_for(feature_type)
+        rect_rows = [
+            {"lon0": lo, "lat0": la, "lon1": hi, "lat1": ha}
+            | {field: item[field] for field in HOVER_FIELDS}
+            for item in extent_groups[feature_type]
+            for lo, la, hi, ha in item["bboxes"]
+        ]
+        rect_df = pd.DataFrame(rect_rows)
+        for lon_col, lat_col in (("lon0", "lat0"), ("lon1", "lat1")):
+            rect_df[lon_col], rect_df[lat_col] = xform(
+                rect_df[lon_col], rect_df[lat_col]
+            )
+        elements.append(
+            hv.Rectangles(
+                rect_df,
+                kdims=["lon0", "lat0", "lon1", "lat1"],
+                vdims=list(HOVER_FIELDS),
+                label=feature_type,
+            ).opts(
+                fill_alpha=0,
+                line_dash="solid" if style["linestyle"] == "-" else "dashed",
+                line_color=style["color"],
+                line_width=1.5,
+                tools=[hover_tool()],
+                show_legend=legend,
+                apply_ranges=False,
+            )
+        )
+
+    point_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] == "point":
+            point_groups.setdefault(item["featureType"], []).append(item)
+    for feature_type in _ordered(point_groups):
+        style = style_for(feature_type)
+        marker = style["bokeh_marker"] or _BOKEH_MARKERS[
+            style["marker_index"] % len(_BOKEH_MARKERS)
+        ]
+        frame = pd.DataFrame(point_groups[feature_type])[
+            ["lon", "lat", *HOVER_FIELDS]
+        ]
+        # One element per featureType with a fixed colour, as the Target diagram
+        # groups its points — it is also what gives the legend one entry per type.
+        elements.append(
+            gv.Points(
+                frame,
+                kdims=["lon", "lat"],
+                vdims=list(HOVER_FIELDS),
+                label=feature_type,
+            ).opts(
+                color=style["color"],
+                marker=marker,
+                size=marker_size,
+                tools=[hover_tool()],
+                line_color="white",
+                line_width=1,
+                show_legend=legend,
+                apply_ranges=False,
+            )
+        )
+
+    # "line" (a selection slice) and "ring" (a domain outline) are plain paths, not
+    # geoviews elements. No hover on these in v1, matching _domain_overlay's own
+    # domain ring: there is nothing per-glyph to report.
+    path_groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] in ("line", "ring"):
+            path_groups.setdefault(item["featureType"], []).append(item)
+    for feature_type in _ordered(path_groups):
+        style = style_for(feature_type)
+        group_items = path_groups[feature_type]
+        any_solid = any(item["kind"] == "line" for item in group_items)
+        segments = []
+        for item in group_items:
+            for seg in item["paths"]:
+                xs, ys = xform(seg[:, 0].astype(float), seg[:, 1].astype(float))
+                segments.append(np.column_stack([xs, ys]))
+        elements.append(
+            hv.Path(segments, label=feature_type).opts(
+                color=style["color"],
+                line_dash="solid" if any_solid else "dashed",
+                line_width=1.8 if any_solid else 1.0,
+                show_legend=legend,
+                apply_ranges=False,
+            )
+        )
+    return elements
+
+
 def _locations(
     items,
     *,
@@ -4600,21 +4784,11 @@ def _locations(
     has no effect with ``tiles`` on, the tile layer already showing land.
     """
     import geoviews as gv
-    import pandas as pd
-    from bokeh.models import HoverTool
-
-    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, HOVER_FIELDS, style_for
 
     hv = _extension()
     if tiles is True:
         tiles = "EsriOceanBase"
     tiles = _check_tiles(tiles or None)
-
-    def hover_tool():
-        # A fresh HoverTool per element — a bokeh model belongs to one renderer.
-        # Explicit tooltips rather than bokeh's defaults, which would append the
-        # kdims: raw Web Mercator metres for a rectangle corner under tiles.
-        return HoverTool(tooltips=[(f, f"@{{{f}}}") for f in HOVER_FIELDS])
 
     to_mercator = _to_mercator
 
@@ -4643,99 +4817,13 @@ def _locations(
         # unconditionally.
         overlay = hv.Overlay([])
 
-    def _ordered(groups: dict[str, list[dict[str, Any]]]) -> list[str]:
-        ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
-        ordered += [ft for ft in groups if ft not in FEATURE_TYPE_ORDER]
-        return ordered
-
-    extent_groups: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        if item["kind"] == "extent":
-            extent_groups.setdefault(item["featureType"], []).append(item)
-    for feature_type in _ordered(extent_groups):
-        style = style_for(feature_type)
-        rect_rows = [
-            {"lon0": lo, "lat0": la, "lon1": hi, "lat1": ha}
-            | {field: item[field] for field in HOVER_FIELDS}
-            for item in extent_groups[feature_type]
-            for lo, la, hi, ha in item["bboxes"]
-        ]
-        rect_df = pd.DataFrame(rect_rows)
-        if tiles:
-            for lon_col, lat_col in (("lon0", "lat0"), ("lon1", "lat1")):
-                rect_df[lon_col], rect_df[lat_col] = to_mercator(
-                    rect_df[lon_col], rect_df[lat_col]
-                )
-        overlay = overlay * hv.Rectangles(
-            rect_df,
-            kdims=["lon0", "lat0", "lon1", "lat1"],
-            vdims=list(HOVER_FIELDS),
-            label=feature_type,
-        ).opts(
-            fill_alpha=0,
-            line_dash="solid" if style["linestyle"] == "-" else "dashed",
-            line_color=style["color"],
-            line_width=1.5,
-            tools=[hover_tool()],
-            show_legend=legend,
-        )
-
-    point_groups: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        if item["kind"] == "point":
-            point_groups.setdefault(item["featureType"], []).append(item)
-    for feature_type in _ordered(point_groups):
-        style = style_for(feature_type)
-        marker = style["bokeh_marker"] or _BOKEH_MARKERS[
-            style["marker_index"] % len(_BOKEH_MARKERS)
-        ]
-        frame = pd.DataFrame(point_groups[feature_type])[
-            ["lon", "lat", *HOVER_FIELDS]
-        ]
-        # One element per featureType with a fixed colour, as the Target diagram
-        # groups its points — it is also what gives the legend one entry per type.
-        overlay = overlay * gv.Points(
-            frame,
-            kdims=["lon", "lat"],
-            vdims=list(HOVER_FIELDS),
-            label=feature_type,
-        ).opts(
-            color=style["color"],
-            marker=marker,
-            size=marker_size,
-            tools=[hover_tool()],
-            line_color="white",
-            line_width=1,
-            show_legend=legend,
-        )
-
-    # "line" (a selection slice) and "ring" (a domain outline) are plain paths, not
-    # geoviews elements -- the same reason the extent rectangles above are plain
-    # hv.Rectangles: a geoviews element re-projects its geometry from scratch on
-    # every render, and gv + hover crashes for a shape with no point-per-glyph
-    # record to show. No hover on these in v1, matching _domain_overlay's own
-    # domain ring, for the same reason: there is nothing per-glyph to report.
-    path_groups: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        if item["kind"] in ("line", "ring"):
-            path_groups.setdefault(item["featureType"], []).append(item)
-    for feature_type in _ordered(path_groups):
-        style = style_for(feature_type)
-        group_items = path_groups[feature_type]
-        any_solid = any(item["kind"] == "line" for item in group_items)
-        segments = []
-        for item in group_items:
-            for seg in item["paths"]:
-                xs, ys = seg[:, 0].astype(float), seg[:, 1].astype(float)
-                if tiles:
-                    xs, ys = to_mercator(xs, ys)
-                segments.append(np.column_stack([xs, ys]))
-        overlay = overlay * hv.Path(segments, label=feature_type).opts(
-            color=style["color"],
-            line_dash="solid" if any_solid else "dashed",
-            line_width=1.8 if any_solid else 1.0,
-            show_legend=legend,
-        )
+    for element in _location_elements(
+        items,
+        xform=to_mercator if tiles else _identity_xform,
+        marker_size=marker_size,
+        legend=legend,
+    ):
+        overlay = overlay * element
 
     opts: dict[str, Any] = {
         "frame_width": px[0],
