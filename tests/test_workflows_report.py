@@ -99,7 +99,7 @@ _PAGE_PT = (0.0, 0.0, PAGE_W * 72, PAGE_H * 72)
 
 
 def test_every_pdf_page_is_a_fixed_letter_page_regardless_of_figure_shape(tmp_path):
-    """Wide, tall, square, and default-shaped figures all land on the same 8.5x11in page."""
+    """Wide, tall, square, and default-shaped figures all land on the same letter page."""
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.emit(_figure(), "default")
         report.emit(_figure(figsize=(8.5, 2.7)), "wide")  # a map row / series shape
