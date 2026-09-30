@@ -27,6 +27,18 @@ need not be a real CF name, it's just what's easy to read and call by):
   ``"month"`` matching cf-pandas' time regex is exactly the looseness these patterns
   must not repeat (see :mod:`ocean_skill.tabular`'s coordinate matcher for the same
   rule applied to column axes).
+- ``broader`` (optional): the short key, standard_name or any spelling of a *broader*
+  entry this one is one specific kind of — ``mld_by_sigma_theta`` names ``"mld"``,
+  because a potential-density mixed layer depth is one particular *definition* of
+  "mixed layer depth". One level only (no chains, no self-reference), and recorded on
+  the *specific* entry rather than as a list on the broad one, so that
+  :func:`register` replacing the broad entry — which replaces the whole dict —
+  cannot wipe out what the specific entries say about it. It changes nothing about
+  what a name *resolves* to, and :func:`equivalent_names` and :func:`same_quantity`
+  stay the symmetric "same variable" tests they always were; it adds a separate,
+  one-directional relation, read through :func:`narrower_names` and :func:`covers`:
+  asking for the broad name is satisfied by any specific definition, while asking
+  for a specific one is never satisfied by the broad name or by a sibling definition.
 
 A caller may use the short key, the canonical ``standard_name``, any alias, or
 anything one entry's ``patterns`` fullmatch, interchangeably, **in any
@@ -46,6 +58,26 @@ much less near the surface). They are plain aliases here deliberately: a separat
 wording of a message and never how a variable was matched. If that distinction ever
 matters for real work, this is the point to reintroduce it — with resolution
 behaviour attached, not just a label.
+
+``broader`` is that tier reintroduced, for the case that finally made the distinction
+matter: mixed layer depth has one generic CF name and several *definition-specific*
+ones (by sigma_theta, sigma_t, temperature, or a model's own mixing scheme), and a
+request for "the MLD" should find a source carrying any one of them without ever
+letting a request for one specific definition be quietly answered by another. That is
+a one-level broad-to-specific relation, not near-identity (so not an alias), with
+resolution behaviour attached in the two places a variable is actually looked for:
+**search**, where :func:`covers` says whether what a source declares satisfies what
+was asked for (the right question for a catalog or source filter to put to each
+declared variable — the symmetric :func:`same_quantity` can only say "the same
+variable"), and **dataset lookup**, where the broad entry's cf-xarray criteria also
+match its specific entries' spellings (see :func:`_register_custom_criteria`), so a
+generic request finds the one specific definition a dataset carries. The dataset
+half is deliberately *data*, not lookup code: cf-xarray acts on the registered
+criteria by itself, so another tool registering the same criteria gets the same
+behaviour; a dataset carrying several definitions is cf-xarray's own "multiple
+variables" case, which :func:`ocean_skill.units.find_variable` reports rather than
+resolves. Catalog search has no cf-xarray equivalent — a catalog's declared names
+are not a Dataset — so :func:`covers` is the one piece that stays code.
 
 Note this vocabulary's shape is ours, not cf-xarray's: cf-xarray's own
 ``custom_criteria`` only understands attribute names as keys (``"name"``,
@@ -75,11 +107,13 @@ __all__ = [
     "add_alias",
     "add_pattern",
     "coord_report",
+    "covers",
     "equivalent_names",
     "excluded_from_axis",
     "is_known",
     "match_report",
     "matches_axis",
+    "narrower_names",
     "nickname",
     "register",
     "resolve_and_report",
@@ -469,15 +503,61 @@ VOCABULARY: dict[str, dict[str, object]] = {
         "aliases": ["Dinoflagellate"],
     },
     "mld": {
+        # The *generic* name: mixed layer depth, definition unspecified -- what older
+        # catalogs, and any product that does not say how it draws the base of the
+        # layer, carry. The base is a judgement call (a threshold on density or on
+        # temperature, or a turbulence closure's own boundary layer), and CF only
+        # says which *kind* through the definition-specific names, which are the
+        # separate entries just below, each naming this one as its `broader`. Asking
+        # for "mld" finds any of them -- when searching sources (covers) and inside a
+        # dataset (this entry's cf-xarray criteria include theirs) -- while asking for
+        # a specific one never finds the generic name or a sibling definition. This
+        # used to be the one name ROMS' KPP `hbls` and the MLD calculator's output
+        # shared on purpose, so that comparing them was a plain "mld" request; that
+        # request still reaches both, but each now says which definition it is rather
+        # than posing as the generic one.
         "standard_name": "ocean_mixed_layer_thickness",
-        # Two ways to reach the same standard_name: ROMS' own KPP boundary-layer
-        # depth (build.py's ROMS_STANDARD_NAMES maps `hbls` here directly) is the
-        # model's own diagnostic, while {"calculate": "mld", "method": ...}
-        # (ocean_skill.mld) computes it offline from T/S by a chosen criterion.
-        # Both are legitimately "the model's MLD" and share the CF name on purpose
-        # -- comparing them against each other is exactly the useful thing to do,
-        # not a collision to avoid.
         "aliases": ["mixed_layer_depth", "mixed_layer_thickness"],
+    },
+    # The definition-specific mixed layer depths, all one kind of the generic entry
+    # above. CF: "The base of the mixed layer defined by temperature, sigma or
+    # sigma_theta is the level at which the quantity indicated differs from its
+    # surface value by a certain amount" -- and neither that amount (0.03 vs 0.125 kg
+    # m-3 for density, say) nor the reference depth is in the name, so two sources
+    # sharing one of these names agree on the *kind* of criterion, not necessarily its
+    # threshold. Deliberately no aliases or patterns here: a raw product name
+    # (`mld_dt_mean`, `hbls`) is renamed to the definition-specific standard_name in
+    # its own catalog, where its definition is known, and never made a global alias --
+    # `mlotst` alone is sigma_theta in Copernicus but sigma_t in CMIP's own naming,
+    # which is exactly why it could not be one.
+    "mld_by_sigma_theta": {
+        # Base = where potential density (sigma_theta) exceeds its surface value by a
+        # threshold: Holte & Talley's Argo climatology (`mld_dt_mean`), Copernicus'
+        # `mlotst`, and the "density_threshold" method of ocean_skill.mld.
+        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_theta",
+        "broader": "mld",
+    },
+    "mld_by_sigma_t": {
+        # The same criterion on sigma_t -- density at surface pressure but the
+        # *in-situ* temperature, where sigma_theta uses the potential temperature --
+        # e.g. a CMIP-style `mlotst`. Its own concept rather than an alias of
+        # sigma_theta: the two differ (a little near the surface, more with depth),
+        # and a request for one is never answered by the other.
+        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_t",
+        "broader": "mld",
+    },
+    "mld_by_temperature": {
+        # Base = where temperature differs from its surface value by a threshold:
+        # the "temperature_threshold" method of ocean_skill.mld.
+        "standard_name": "ocean_mixed_layer_thickness_defined_by_temperature",
+        "broader": "mld",
+    },
+    "mld_by_mixing_scheme": {
+        # Not a threshold on any property: the depth a model's own mixing scheme
+        # diagnoses as the base of its turbulent boundary layer -- ROMS' KPP `hbls`
+        # (build.py's ROMS_STANDARD_NAMES maps it here).
+        "standard_name": "ocean_mixed_layer_thickness_defined_by_mixing_scheme",
+        "broader": "mld",
     },
 }
 
@@ -547,6 +627,50 @@ def _build_key_by_standard_name() -> dict[str, str]:
     return {entry["standard_name"]: key for key, entry in VOCABULARY.items()}  # type: ignore[misc]
 
 
+def _build_narrower() -> dict[str, tuple[str, ...]]:
+    """Map a broad entry's standard_name to its specific entries' standard_names.
+
+    The table :func:`narrower_names` and :func:`covers` read: every entry with a
+    ``broader`` is filed, by its own standard_name, under the standard_name that
+    ``broader`` resolves to, each tuple sorted so results never depend on dict order.
+    ``broader`` may be any spelling of the broad entry (its key, standard_name, an
+    alias), so it is resolved the way a caller's name is -- which is why
+    :func:`_refresh` builds this only *after* the index and patterns exist.
+
+    :func:`register` refuses a ``broader`` that breaks the one-level rule, but
+    :data:`VOCABULARY` can also be edited by hand, so a link that names nothing
+    known, names the entry itself, or names an entry that is itself one specific kind
+    of something else is warned about and left out here, exactly as
+    :func:`_build_index` warns rather than guess on a colliding spelling. Nothing
+    below ever follows a chain, so :func:`covers` cannot become transitive by accident.
+    """
+    children: dict[str, set[str]] = {}
+    for key, entry in VOCABULARY.items():
+        broader = entry.get("broader")
+        if broader is None:
+            continue
+        sn = str(entry["standard_name"])
+        parent = resolve_name(str(broader))
+        parent_entry = _BY_STANDARD_NAME.get(parent)
+        if parent == sn:
+            problem = "is the entry itself"
+        elif parent_entry is None:
+            problem = "is not a known name"
+        elif parent_entry.get("broader") is not None:
+            problem = f"resolves to {parent!r}, itself one specific kind of another"
+        else:
+            children.setdefault(parent, set()).add(sn)
+            continue
+        warnings.warn(
+            f"vocabulary broader: {key!r} (-> {sn!r}) names broader={broader!r}, "
+            f"which {problem}; ignoring the link. A broader entry must be a known "
+            "concept that is not itself one specific kind of another (one level "
+            "only).",
+            stacklevel=3,
+        )
+    return {parent: tuple(sorted(kids)) for parent, kids in children.items()}
+
+
 def _build_patterns() -> list[tuple[re.Pattern[str], str]]:
     """Compile every entry's ``patterns`` into one ``(regex, standard_name)`` pair.
 
@@ -568,6 +692,7 @@ _INDEX: dict[str, str] = {}
 _BY_STANDARD_NAME: dict[str, dict[str, object]] = {}
 _KEY_BY_STANDARD_NAME: dict[str, str] = {}
 _PATTERNS: list[tuple[re.Pattern[str], str]] = []
+_NARROWER: dict[str, tuple[str, ...]] = {}
 
 
 def _pattern_lookup(name: str) -> str | None:
@@ -649,6 +774,12 @@ def equivalent_names(name: str) -> set[str]:
     recognize a whole family of spellings with no enumeration, so they never appear
     here -- use :func:`same_quantity` to compare a possibly pattern-matched name
     against a declared one instead of set membership.
+
+    Specific definitions (:func:`narrower_names`) are deliberately not included: a
+    potential-density mixed layer depth is one *kind* of mixed layer depth, not the
+    same variable as the generic one, and this set stays the symmetric "same
+    variable" one. See :func:`covers` for the one-directional question of whether a
+    declared name satisfies a request once definitions count.
     """
     entry = _BY_STANDARD_NAME.get(resolve_name(name))
     return {name} if entry is None else set(_all_names(entry))
@@ -663,8 +794,62 @@ def same_quantity(a: str, b: str) -> bool:
     :func:`_build_index`). Two names the vocabulary has never heard of compare
     equal only when they are literally the same spelling (case-insensitively),
     since :func:`resolve_name` passes an unknown name through unchanged.
+
+    Symmetric, and about *identity* only: a generic name and one of its specific
+    definitions are not the same quantity here (see :func:`covers` for that).
     """
     return resolve_name(a).lower() == resolve_name(b).lower()
+
+
+def narrower_names(name: str) -> tuple[str, ...]:
+    """Return the standard_names of the specific definitions one level under ``name``.
+
+    ``name`` may be any spelling :func:`resolve_name` accepts for the *broad* entry
+    -- ``"mld"``, ``"mixed_layer_depth"``, the full standard_name, in any
+    capitalization -- and the result is the sorted standard_names of every entry
+    that names it as its ``broader`` (see the module docstring): for the generic
+    ``"mld"``, the four definition-specific mixed layer depths. ``()`` for a name
+    that is itself a specific definition, one the vocabulary has never heard of, or
+    a concept nothing is a kind of (``"temperature"``): the relation is one level
+    and one direction, so a specific name has nothing narrower, and this never
+    reports a *broader* name.
+
+    >>> from ocean_skill import vocabulary
+    >>> vocabulary.narrower_names("mld")[0]
+    'ocean_mixed_layer_thickness_defined_by_mixing_scheme'
+    >>> vocabulary.narrower_names("mld_by_sigma_theta")
+    ()
+    """
+    return _NARROWER.get(resolve_name(name), ())
+
+
+def covers(requested: str, declared: str) -> bool:
+    """Whether a source declaring ``declared`` satisfies a request for ``requested``.
+
+    True when the two are the same quantity (:func:`same_quantity`: every spelling,
+    alias, pattern match and capitalization of one variable), *or* when ``declared``
+    is one of the specific definitions under ``requested``
+    (:func:`narrower_names`) -- asking for ``"mld"`` is satisfied by a source that
+    declares ``ocean_mixed_layer_thickness_defined_by_sigma_theta``.
+
+    One-directional, the way a request is. Asking for a specific definition is never
+    satisfied by the generic name (a source declaring plain
+    ``ocean_mixed_layer_thickness`` has not said which definition it carries) nor by
+    a sibling definition: the ``sigma_theta`` and ``sigma_t`` names do not cover each
+    other in either direction, though one is a prefix of the other -- names are
+    compared whole, never by prefix.
+
+    >>> from ocean_skill import vocabulary
+    >>> vocabulary.covers("mld", "ocean_mixed_layer_thickness_defined_by_sigma_theta")
+    True
+    >>> vocabulary.covers("mld_by_sigma_theta", "mld")
+    False
+    """
+    wanted = resolve_name(requested)
+    got = resolve_name(declared)
+    if wanted.lower() == got.lower():  # same_quantity(requested, declared)
+        return True
+    return got.lower() in (n.lower() for n in _NARROWER.get(wanted, ()))
 
 
 def nickname(name: str) -> str | None:
@@ -1030,17 +1215,57 @@ def _register_custom_criteria() -> None:
     criteria *keys* the way literal spellings are — every dataset-side lookup
     (:func:`ocean_skill.units.find_variable`) arrives here already canonicalized by
     :func:`resolve_name`, and the canonical standard_name is always a literal key.
+
+    A *broad* entry — one that others name as their ``broader`` (see
+    :func:`narrower_names`) — also matches every spelling and pattern of those
+    specific entries, one level down: ``ds.cf["ocean_mixed_layer_thickness"]``
+    finds a variable named ``..._defined_by_sigma_theta``, and also one under a raw
+    product name whose ``standard_name`` *attribute* is one of those specific names
+    (the one attribute criterion registered here — for the specific names only,
+    exactly what cf-xarray's built-in matching already does when asked for a specific
+    name, so the broad name finds the same variables they do). That is the dataset half
+    of the ``broader`` relation, and it lives here, in the criteria, rather than in
+    lookup code on purpose: it is plain data that cf-xarray alone acts on, so any
+    tool registering these criteria (ROMS-Tools, xroms) gets the same broad-to-specific
+    lookup with no ocean-skill code at all. The specific entries keep their own
+    criteria, so a request for one definition never matches the generic name or a
+    sibling. A dataset carrying two definitions matches the broad key twice, which
+    is cf-xarray's own "multiple variables" error — reported, not guessed at (see
+    :func:`ocean_skill.units.find_variable`).
     """
     import cf_xarray
 
+    def own_parts(key: str, entry: dict[str, object]) -> list[str]:
+        parts = [re.escape(n) for n in _matchable_names(key, entry)]
+        parts += [f"(?:{p})" for p in entry.get("patterns", [])]  # type: ignore[union-attr]
+        return parts
+
+    # One standard_name per entry is guaranteed (see _build_key_by_standard_name), so
+    # the specific entries' own alternations can be looked up by standard_name.
+    by_standard_name = {
+        str(entry["standard_name"]): own_parts(key, entry)
+        for key, entry in VOCABULARY.items()
+    }
     criteria: dict[str, dict[str, str]] = {}
     for key, entry in VOCABULARY.items():
-        names = _matchable_names(key, entry)
-        parts = [re.escape(n) for n in names]
-        parts += [f"(?:{p})" for p in entry.get("patterns", [])]  # type: ignore[union-attr]
-        pattern = "(?i)(?:" + "|".join(parts) + ")$"
-        for name in names:
-            criteria[name] = {"name": pattern}
+        sn = str(entry["standard_name"])
+        narrower = _NARROWER.get(sn, ())
+        parts = list(by_standard_name[sn])
+        for specific in narrower:
+            parts += by_standard_name.get(specific, [])
+        entry_criteria = {"name": "(?i)(?:" + "|".join(parts) + ")$"}
+        if narrower:
+            # A variable under a raw product name that states its specific definition
+            # only as an attribute: cf-xarray already finds it by that attribute when
+            # asked for the specific name (its built-in standard_name matching), so the
+            # broad name finds it the same way. Only the *specific* names are listed --
+            # the broad entry's own standard_name attribute is cf-xarray's built-in
+            # match already, and widening it is what misfires on WOA-style companions.
+            entry_criteria["standard_name"] = (
+                "(?i)(?:" + "|".join(re.escape(n) for n in narrower) + ")$"
+            )
+        for name in _matchable_names(key, entry):
+            criteria[name] = entry_criteria
     cf_xarray.set_options(custom_criteria=criteria)
 
 
@@ -1053,13 +1278,82 @@ def _refresh() -> None:
     :func:`resolve_name` or cf-xarray's own registration, since both are cached at
     module load; call this afterwards if you edit the dict by hand instead of
     through those functions.
+
+    Order matters for one table: ``_NARROWER`` (the ``broader`` relation, see
+    :func:`_build_narrower`) is built *after* the index and patterns, because it
+    resolves each entry's ``broader`` with :func:`resolve_name`.
     """
-    global _INDEX, _BY_STANDARD_NAME, _KEY_BY_STANDARD_NAME, _PATTERNS
+    global _INDEX, _BY_STANDARD_NAME, _KEY_BY_STANDARD_NAME, _PATTERNS, _NARROWER
     _INDEX = _build_index()
     _BY_STANDARD_NAME = _build_by_standard_name()
     _KEY_BY_STANDARD_NAME = _build_key_by_standard_name()
     _PATTERNS = _build_patterns()
+    _NARROWER = _build_narrower()
     _register_custom_criteria()
+
+
+def _check_broader(
+    key: str, standard_name: str, broader: str, aliases: list[str] | None
+) -> None:
+    """Raise :class:`ValueError` unless ``broader`` keeps the relation one level deep.
+
+    Run by :func:`register` before it touches :data:`VOCABULARY`, and about the entry
+    as it *will* be rather than as the vocabulary currently stands: registering over
+    an existing key replaces that entry's spellings, so ``broader`` is checked
+    against the new entry's own key, standard_name and aliases as well as against
+    what is already registered. Four ways to get it wrong, each of which would leave
+    :func:`covers` answering something other than "one specific kind of":
+
+    - ``broader`` names the entry itself (by any of its own spellings, or by another
+      entry's spelling of the same standard_name);
+    - ``broader`` is not a name the vocabulary knows, so there is nothing to be a
+      specific kind of;
+    - ``broader`` names an entry that is itself one specific kind of another (a
+      chain);
+    - the entry being registered already has specific entries under it, so giving it
+      a ``broader`` too would turn them into the far end of a chain.
+
+    A ``broader`` that is not a single name (a list of several broader entries, say)
+    is a :class:`TypeError`: an entry is one specific kind of *one* broader entry.
+    """
+    if not isinstance(broader, str):
+        raise TypeError(
+            f"register({key!r}, ...): broader must be one name -- the key, "
+            "standard_name or any spelling of a single broader entry -- not "
+            f"{broader!r}; an entry is one specific kind of one broader entry."
+        )
+    own = {n.lower() for n in (key, standard_name, *(aliases or []))}
+    if broader.lower() in own or resolve_name(broader).lower() == standard_name.lower():
+        raise ValueError(
+            f"register({key!r}, ...): broader={broader!r} names this entry itself, "
+            "and an entry cannot be one specific kind of itself. broader must be a "
+            "different, broader concept."
+        )
+    if not is_known(broader):
+        raise ValueError(
+            f"register({key!r}, ...): broader={broader!r} is not a known vocabulary "
+            "name, so there is nothing for this entry to be one specific kind of. "
+            "Register the broader concept first, or check VOCABULARY for its key."
+        )
+    parent = resolve_name(broader)
+    grandparent = _BY_STANDARD_NAME.get(parent, {}).get("broader")
+    if grandparent is not None:
+        raise ValueError(
+            f"register({key!r}, ...): broader={broader!r} is {parent!r}, which is "
+            f"itself one specific kind of {grandparent!r}. The relation is one level "
+            f"only (broad -> specific), so name {grandparent!r} instead, or leave "
+            "broader out."
+        )
+    replaced = VOCABULARY.get(key)
+    under_it = _NARROWER.get(standard_name) or (
+        _NARROWER.get(str(replaced["standard_name"])) if replaced else None
+    )
+    if under_it:
+        raise ValueError(
+            f"register({key!r}, ...): this entry already has specific entries under "
+            f"it ({list(under_it)!r}), so it cannot itself be one specific kind of "
+            f"{broader!r}; the relation is one level only (broad -> specific)."
+        )
 
 
 def register(
@@ -1068,6 +1362,7 @@ def register(
     *,
     aliases: list[str] | None = None,
     patterns: list[str] | None = None,
+    broader: str | None = None,
 ) -> None:
     """Add (or replace) one vocabulary entry, live -- no restart needed.
 
@@ -1075,6 +1370,17 @@ def register(
     already has an entry, prefer :func:`add_alias`/:func:`add_pattern` instead, so
     you don't have to repeat its existing ``standard_name``/aliases just to add one
     more.
+
+    ``broader`` makes the new entry one *specific kind of* an existing, broader one
+    -- any spelling of it, ``"mld"`` for instance (see the module docstring's
+    ``broader`` bullet): asking for the broad name then finds this entry too, while
+    asking for this one never finds the broad name or a sibling. It is validated,
+    like ``patterns``, before anything is stored, and raises :class:`ValueError` if
+    it is not a known name, names the entry itself, names an entry that is itself
+    one specific kind of another (one level only, no chains), or if the entry being
+    registered already has specific entries of its own under it. Like ``aliases``
+    and ``patterns`` it belongs to the entry that a re-registration replaces, so
+    pass it again when re-registering a specific entry to keep it.
 
     >>> from ocean_skill import vocabulary
     >>> vocabulary.register(
@@ -1085,13 +1391,15 @@ def register(
     """
     for pattern in patterns or []:
         re.compile(pattern)  # validate before touching VOCABULARY at all
+    if broader is not None:
+        _check_broader(key, standard_name, broader, aliases)  # same: nothing stored
     existing = VOCABULARY.get(key)
     if existing is not None and existing["standard_name"] != standard_name:
         warnings.warn(
             f"register({key!r}, ...) replaces an existing entry pointing at "
             f"{existing['standard_name']!r} with {standard_name!r}; its current "
-            "aliases and patterns are discarded. Use add_alias()/add_pattern() to "
-            "extend an entry instead.",
+            "aliases, patterns and broader are discarded. Use "
+            "add_alias()/add_pattern() to extend an entry instead.",
             stacklevel=2,
         )
     entry: dict[str, object] = {"standard_name": standard_name}
@@ -1099,6 +1407,8 @@ def register(
         entry["aliases"] = list(aliases)
     if patterns:
         entry["patterns"] = list(patterns)
+    if broader is not None:
+        entry["broader"] = broader
     VOCABULARY[key] = entry
     _refresh()
 
@@ -1107,7 +1417,10 @@ def add_alias(key: str, *names: str) -> None:
     """Add one or more new spellings to an *existing* concept, live, no restart needed.
 
     ``key`` must already be in :data:`VOCABULARY` (use :func:`register` to add a
-    new concept from scratch). Duplicates are ignored.
+    new concept from scratch). Duplicates are ignored. The entry is extended in
+    place, so everything else it says -- its patterns, its ``broader`` -- is left
+    exactly as it was: aliasing a raw product name onto ``mld_by_sigma_theta`` keeps
+    it one specific kind of ``mld``.
 
     >>> from ocean_skill import vocabulary
     >>> vocabulary.add_alias("chlorophyll", "chlor_a")
@@ -1134,6 +1447,8 @@ def add_pattern(key: str, *patterns: str) -> None:
     (see the module docstring's "patterns" bullet for the narrowness this requires
     -- enumerated decorations, never an open-ended ``.*`` tail). Duplicates are
     ignored; an invalid regex raises :class:`re.error` before anything is stored.
+    Like :func:`add_alias`, it extends the entry in place, leaving its ``broader``
+    (and everything else) untouched.
 
     >>> from ocean_skill import vocabulary
     >>> vocabulary.add_pattern("oxygen", "oxy(?:_umolkg)?")

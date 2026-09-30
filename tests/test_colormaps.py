@@ -6,7 +6,10 @@ is not a substring of ``downwelling_photosynthetic_photon_flux_in_sea_water``, w
 why that entry is keyed by the full standard_name instead. This test locks in the
 mapping (and would have caught that gotcha) for turbidity/fluorescence/PAR, and
 (with the tests below) for ammonium/iron colliding on xcmocean's "dye" default and for
-sea-level anomaly colliding on its "vel" pattern.
+sea-level anomaly colliding on its "vel" pattern. It also pins the mixed layer
+thickness names -- the generic one and CF's four ``..._defined_by_<criterion>`` ones --
+to the MLD map: those embed their criterion variable's name ("sigma_theta"), so which
+map they get depends on the *order* of the table, not just on what it contains.
 """
 
 from __future__ import annotations
@@ -53,8 +56,21 @@ _BGC_SPECIES = (
         ("northward_wind", "speed"),
         ("sea_ice", "ice"),
         ("sigma_theta", "dense"),
+        # the density anomaly itself, spelled as the resolved CF name (the short
+        # "sigma_theta" above resolves to it): listing "mixed_layer" ahead of it in the
+        # table (see the MLD cases below) must not change what it gets
+        ("sea_water_sigma_theta", "dense"),
         ("conductivity", "haline"),
         ("mld", "deep"),
+        # The criterion-specific mixed layer thicknesses, by full CF name (the short
+        # forms resolve to these). Each embeds the name of its criterion variable, and
+        # "sigma_theta" is a *substring* of the first one: first-match-wins over the
+        # table would hand it the density map (dense) unless "mixed_layer" is listed
+        # ahead of "sigma_theta". All four are a thickness in metres -- the MLD map.
+        ("ocean_mixed_layer_thickness_defined_by_sigma_theta", "deep"),
+        ("ocean_mixed_layer_thickness_defined_by_sigma_t", "deep"),
+        ("ocean_mixed_layer_thickness_defined_by_temperature", "deep"),
+        ("ocean_mixed_layer_thickness_defined_by_mixing_scheme", "deep"),
         ("pressure", "deep"),
         ("ph", "speed_r"),
         ("kd490", "turbid"),

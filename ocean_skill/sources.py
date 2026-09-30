@@ -3,8 +3,10 @@
 Opens the entry with intake (``cat[name].read()``), then standardizes: ROMS entries
 (``metadata.model == "roms"``) route through :mod:`ocean_skill.roms`; other gridded/obs
 entries get a light CF rename from the entry's ``standard_names`` map (fuller handling
-lives in :mod:`ocean_skill.cf`). Returns a **known type** by featureType: point
-featureTypes → :class:`pandas.DataFrame`; gridded/multidim → :class:`xarray.Dataset`.
+lives in :mod:`ocean_skill.cf`), and a Dataset's renamed variables have their own
+``standard_name`` attribute set to match -- the catalog outranks the file's attribute.
+Returns a **known type** by featureType: point featureTypes →
+:class:`pandas.DataFrame`; gridded/multidim → :class:`xarray.Dataset`.
 """
 
 from __future__ import annotations
@@ -162,6 +164,31 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         rename[src] = dst
     if rename:
         obj = obj.rename(columns=rename) if is_frame else obj.rename(rename)
+    if rename and not is_frame:
+        # The catalog's declared standard name is the authority, so each renamed
+        # variable's own ``standard_name`` attribute is made to agree with it,
+        # overwriting whatever the file said. Renaming alone leaves a wrong attribute
+        # standing, and downstream code reads ``attrs["standard_name"] or name`` (see
+        # ocean_skill.units.find_variable, and the pair-spec mismatch check in
+        # ocean_skill.comparison): a product like the Holte & Talley MLD climatology
+        # carries self-named attributes (``mld_dt_mean`` says ``"mld_dt_mean"``), so the
+        # variable would be renamed to its CF name and still be reported, and looked
+        # up, under the old one. A DataFrame has no per-column attrs, so this is the
+        # Dataset's alone.
+        #
+        # Functional, one variable at a time: ``assign`` builds a new Dataset, and
+        # each step reads the previous one so a coordinate carried inside a later
+        # variable's DataArray already has its stamp. Nothing is written into an
+        # existing attrs dict, so the Dataset the reader handed back -- which it may
+        # still hold -- is never touched. ``assign`` with an existing name keeps a
+        # coordinate a coordinate and a data variable a data variable, so there is no
+        # need to sort the renamed names into the two. Only a renamed variable whose
+        # attribute is missing or disagrees is touched, which leaves an entry whose
+        # attributes already match -- the usual case, since the map was derived from
+        # them -- on exactly the path it took before; nothing else changes.
+        for dst in rename.values():
+            if obj[dst].attrs.get("standard_name") != dst:
+                obj = obj.assign({dst: obj[dst].assign_attrs(standard_name=dst)})
 
     # A moored/fixed station read directly as xarray (rather than built through
     # ocean_skill.tabular.to_dataset, which already collapses this for a table) can

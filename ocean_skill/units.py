@@ -31,7 +31,7 @@ import re
 import warnings
 
 from ocean_skill import _stacklevel
-from ocean_skill.vocabulary import resolve_name
+from ocean_skill.vocabulary import narrower_names, nickname, resolve_name
 
 __all__ = [
     "O2_MMOL_PER_ML",
@@ -343,6 +343,47 @@ def _match_name(ds, standard_name: str, *, allow_qc: bool = False) -> str | None
     return hits[0] if hits else None
 
 
+def _cf_name(searchable, name: str, standard_name: str) -> str | None:
+    """Return the one variable cf-xarray finds for ``standard_name``, else ``None``.
+
+    ``searchable`` is the dataset to ask (with any QC flags already dropped from
+    it). cf-xarray raises a plain ``KeyError`` both for "no such key" and for
+    *several* variables matching it, and a name that cannot be pinned to one
+    variable is treated as not found rather than guessed at -- but the second case is
+    worth saying, since the variable is plainly there: the list form of the same
+    lookup (``.cf[[key]]``) succeeds only when there were several, and names them.
+    The usual way to land here is a generic mixed layer depth asked of a dataset
+    carrying two of its definitions (the generic entry's criteria match every
+    specific one -- see :func:`ocean_skill.vocabulary._register_custom_criteria`),
+    and the answer is the same as for any other ambiguity: ask for one by name.
+    """
+    try:
+        return str(searchable.cf[standard_name].name)
+    except KeyError:
+        pass
+    try:
+        candidates = sorted(str(v) for v in searchable.cf[[standard_name]].data_vars)
+    except KeyError:
+        return None  # genuinely absent
+    if len(candidates) > 1:
+        listed = ", ".join(_describe_candidate(searchable, c) for c in candidates)
+        warnings.warn(
+            f"{name!r} matches more than one variable in this dataset ({listed}), so "
+            "it is not being resolved to either; ask for the one you mean by name.",
+            stacklevel=_stacklevel.find(),
+        )
+    return None
+
+
+def _describe_candidate(ds, variable: str) -> str:
+    """``'var'``, plus the vocabulary key to ask for it by, when it has one."""
+    known = resolve_name(str(ds[variable].attrs.get("standard_name") or variable))
+    key = nickname(known)
+    if key and key != variable:
+        return f"{variable!r} (ask for {key!r})"
+    return repr(variable)
+
+
 def find_variable(ds, name: str):
     """Return the variable in ``ds`` matching ``name`` or a known equivalent.
 
@@ -369,12 +410,26 @@ def find_variable(ds, name: str):
     doesn't share a dimension with the match (lon/lat, the grid, ``z_rho``, ...),
     which every downstream step here depends on carrying along.
 
+    **A generic name can be answered by one specific definition** — with no code
+    here for it: the generic mixed layer depth's cf-xarray criteria also match each of
+    its definitions' spellings (see
+    :func:`ocean_skill.vocabulary._register_custom_criteria`), so ``"mld"`` finds a
+    variable named ``..._defined_by_sigma_theta`` through the same ``.cf[...]`` step
+    as any alias. A variable literally carrying the generic name still wins, because
+    the literal-name check runs first; a request for a specific definition never
+    finds the generic name or a sibling, since its own criteria name only itself.
+
     Warns once, naming both, whenever ``name`` isn't literally what this dataset
     calls the variable — including the exact spelling actually found, which may
     differ per dataset even when every caller asks by the same canonical name.
-    Returns ``None`` if nothing matches; raises if a dataset carries *both*
-    spellings of the same concept at once (cf-xarray's own ambiguity error) rather
-    than silently choosing one.
+
+    Returns ``None`` if nothing matches. That includes a name cf-xarray finds on
+    *several* variables at once — two definitions of mixed layer depth, or two alias
+    spellings of one concept — which is neither raised nor silently resolved to one
+    of them: it warns, naming the candidates, and returns ``None``, so a comparison
+    skips the pair as not available and a combination still falls back to its own
+    ``standard_name``. Raises :class:`ValueError` if two variables differ only by
+    case (:func:`_match_name`).
     """
     standard_name = resolve_name(name)
     # A request that names a flag gets a flag; a request that names a measurement never
@@ -395,18 +450,23 @@ def find_variable(ds, name: str):
                 [str(v) for v in ds.variables if is_qc_name(v)], errors="ignore"
             )
         )
-        try:
-            found_name = str(searchable.cf[standard_name].name)
-        except KeyError:
-            if not allow_qc:
-                _warn_if_only_a_flag_matched(ds, standard_name)
-            return None
+        found_name = _cf_name(searchable, name, standard_name)
+    if found_name is None:
+        if not allow_qc:
+            _warn_if_only_a_flag_matched(ds, standard_name)
+        return None
     da = ds[found_name]
 
     found = da.attrs.get("standard_name") or found_name
     if name != found:
         detail = f"{name!r} resolved to {found!r}"
-        if standard_name not in (name, found):
+        if resolve_name(found) in narrower_names(standard_name):
+            # The generic name's criteria reached one of its specific definitions.
+            if found_name != found:
+                detail += f" (variable {found_name!r})"
+            of = "it" if name == standard_name else repr(standard_name)
+            detail += f", one specific definition of {of}"
+        elif standard_name not in (name, found):
             detail += f" (standard_name {standard_name!r})"
         warnings.warn(detail, stacklevel=_stacklevel.find())
     return da

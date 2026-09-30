@@ -1,17 +1,35 @@
 """Tests for :mod:`ocean_skill.sources` — opening a catalog entry.
 
 Offline throughout: a local CSV entry stands in for the remote table whose reader
-keywords actually matter (an ERDDAP ``constraints=`` that subsets server-side).
+keywords actually matter (an ERDDAP ``constraints=`` that subsets server-side), and a
+tiny local NetCDF stands in for the product whose own ``standard_name`` attributes a
+catalog's ``standard_names`` rename has to outrank.
 """
 
 from __future__ import annotations
 
 import intake
+import numpy as np
 import pytest
+import xarray as xr
 from intake.readers import datatypes, readers
 
 import ocean_skill as osk
+from ocean_skill.build import _reader_for
 from ocean_skill.catalog import SourceRef
+
+SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+
+
+def _saved_ref(tmp_path, name, reader, metadata) -> SourceRef:
+    """Save ``reader`` as a one-entry catalog and return the ref that reads it."""
+    reader.metadata.update(metadata)
+    cat = intake.entry.Catalog()
+    cat[name] = reader
+    cat.aliases[name] = name
+    path = tmp_path / f"{name}.catalog.yaml"
+    cat.to_yaml_file(str(path))
+    return SourceRef(name=name, catalog=name, path=path, metadata=dict(reader.metadata))
 
 
 @pytest.fixture
@@ -47,6 +65,204 @@ def test_reader_keywords_reach_the_reader(csv_source):
     while believing it had been narrowed.
     """
     assert len(osk.read(csv_source, nrows=2)) == 2
+
+
+# -- the standard_names rename ------------------------------------------------
+#
+# The catalog's ``standard_names`` map renames variables at read time. For a Dataset it
+# also has to make each renamed variable's own ``standard_name`` *attribute* agree,
+# because a product like the Holte & Talley Argo mixed-layer-depth climatology sets
+# that attribute to the variable's own name and the rename alone would leave it.
+
+
+def _mld_dataset() -> xr.Dataset:
+    """Return a tiny Holte & Talley-shaped Dataset with self-named attributes."""
+    grid = ("iMONTH", "iLAT", "iLON")
+    return xr.Dataset(
+        {
+            "mld_dt_mean": (
+                grid,
+                np.ones((2, 3, 4)),
+                {"standard_name": "mld_dt_mean", "units": "m"},
+            ),
+            "mld_da_mean": (
+                grid,
+                np.ones((2, 3, 4)),
+                {"standard_name": "mld_da_mean", "units": "m"},
+            ),
+            "lat": (("iLAT",), np.arange(3.0), {"standard_name": "latitude"}),
+            "lon": (("iLON",), np.arange(4.0), {"standard_name": "longitude"}),
+            "month": (("iMONTH",), np.array([1, 2]), {"standard_name": "Month"}),
+        }
+    )
+
+
+@pytest.fixture
+def mld_source(tmp_path) -> SourceRef:
+    """Build a Holte & Talley-shaped NetCDF entry whose catalog renames ``mld_dt_mean``.
+
+    The entry's ``standard_names`` is what a catalog built with
+    ``standard_names={"mld_dt_mean": SIGMA_THETA}`` holds: the probed map (an identity
+    map here, since every attribute is self-named) with that one entry corrected.
+    ``mld_da_mean`` and ``month`` are deliberately *not* renamed to anything new.
+    """
+    nc = tmp_path / "mld_clim.nc"
+    _mld_dataset().to_netcdf(nc)
+    return _saved_ref(
+        tmp_path,
+        "mld_clim",
+        _reader_for(str(nc)),
+        {
+            "featureType": "grid",
+            "standard_names": {
+                "mld_dt_mean": SIGMA_THETA,
+                "mld_da_mean": "mld_da_mean",
+                "lat": "latitude",
+                "lon": "longitude",
+            },
+        },
+    )
+
+
+def test_a_renamed_variable_takes_the_catalogs_standard_name(mld_source):
+    """The rename would otherwise leave a self-named attribute behind.
+
+    Downstream code reads ``attrs["standard_name"] or name``, so a variable renamed to
+    its CF name but still saying ``standard_name="mld_dt_mean"`` would be looked up,
+    and reported in a mismatch warning, under the very name the catalog just replaced.
+    """
+    ds = osk.read(mld_source)
+
+    assert SIGMA_THETA in ds
+    assert "mld_dt_mean" not in ds
+    assert ds[SIGMA_THETA].attrs["standard_name"] == SIGMA_THETA  # overwrote the bogus
+    assert ds[SIGMA_THETA].attrs["units"] == "m"  # everything else rides along
+    assert ds["latitude"].attrs["standard_name"] == "latitude"
+
+
+def test_a_renamed_variable_with_no_attribute_gets_one(tmp_path):
+    """A name that came from a name_map or the vocabulary has no attribute behind it.
+
+    GLODAP-style files carry no ``standard_name`` at all, so their catalog's names were
+    never read off an attribute; stamping puts the catalog's name where downstream
+    lookups (``attrs["standard_name"] or name``) will see it as well.
+    """
+    nitrate = "mole_concentration_of_nitrate_in_sea_water"
+    nc = tmp_path / "glodap.nc"
+    xr.Dataset({"NO3": (("x",), np.ones(3))}, coords={"x": [0, 1, 2]}).to_netcdf(nc)
+    ref = _saved_ref(
+        tmp_path,
+        "glodap",
+        _reader_for(str(nc)),
+        {"featureType": "grid", "standard_names": {"NO3": nitrate}},
+    )
+
+    ds = osk.read(ref)
+
+    assert "NO3" not in ds
+    assert ds[nitrate].attrs == {"standard_name": nitrate}
+
+
+def test_variables_the_catalog_leaves_alone_keep_their_own_attrs(mld_source):
+    """Only renamed variables are stamped; nothing else about the file is overruled."""
+    ds = osk.read(mld_source)
+
+    # not in the map at all: "Month" must not become "month" (its name)
+    assert ds["month"].attrs == {"standard_name": "Month"}
+    # in the map, but its target already exists, so it is never renamed
+    assert ds["mld_da_mean"].attrs == {"standard_name": "mld_da_mean", "units": "m"}
+
+
+def test_the_dataset_the_reader_returned_is_never_written_into(mld_source, monkeypatch):
+    """Stamping builds new variables; it does not edit the reader's own object.
+
+    The reader may hand back something it still holds, and the open memo serves
+    shallow copies precisely so that one caller's edits never reach another's -- an
+    in-place ``attrs`` write on the pre-rename object would leak the catalog's name
+    into everything else sharing those variables.
+    """
+    opened = _mld_dataset()
+    monkeypatch.setattr(
+        readers.XArrayDatasetReader, "read", lambda self, *args, **kwargs: opened
+    )
+
+    ds = osk.read(mld_source)
+
+    assert ds[SIGMA_THETA].attrs["standard_name"] == SIGMA_THETA
+    assert "mld_dt_mean" in opened  # still under its own name ...
+    assert opened["mld_dt_mean"].attrs["standard_name"] == "mld_dt_mean"  # ... and attr
+    assert opened["lat"].attrs["standard_name"] == "latitude"
+    assert SIGMA_THETA not in opened
+
+
+def test_a_renamed_coordinate_is_stamped_and_stays_a_coordinate(tmp_path):
+    """A rename target can be a coordinate, and a coordinate has to stay one.
+
+    A dimension coordinate is the awkward case for anything that rebuilds a variable
+    by hand: its index has to come along, and it must not turn into a data variable.
+    """
+    nc = tmp_path / "sst.nc"
+    xr.Dataset(
+        {"sst": (("lat", "lon"), np.ones((3, 4)), {"standard_name": "sst"})},
+        coords={
+            "lat": (
+                "lat",
+                [10.0, 20.0, 30.0],
+                {"standard_name": "lat", "units": "degrees_north"},
+            ),
+            "lon": ("lon", [0.0, 90.0, 180.0, 270.0]),
+        },
+    ).to_netcdf(nc)
+    ref = _saved_ref(
+        tmp_path,
+        "sst",
+        _reader_for(str(nc)),
+        {
+            "featureType": "grid",
+            "standard_names": {"sst": "sea_surface_temperature", "lat": "latitude"},
+        },
+    )
+
+    ds = osk.read(ref)
+
+    assert "latitude" in ds.coords
+    assert "latitude" in ds.indexes  # still a dimension coordinate, index intact
+    assert ds["latitude"].attrs == {
+        "standard_name": "latitude",
+        "units": "degrees_north",
+    }
+    assert "sea_surface_temperature" in ds.data_vars
+    assert ds["sea_surface_temperature"].dims == ("latitude", "lon")
+    assert ds["sea_surface_temperature"].attrs["standard_name"] == (
+        "sea_surface_temperature"
+    )
+    assert "standard_name" not in ds["lon"].attrs  # not renamed, so not stamped
+
+
+@pytest.fixture
+def renamed_csv_source(tmp_path) -> SourceRef:
+    """Build a CSV entry whose catalog renames its ``temp`` column."""
+    csv = tmp_path / "station.csv"
+    csv.write_text("time,temp\n2015-01-01,1\n2015-01-02,2\n2015-01-03,3\n")
+    return _saved_ref(
+        tmp_path,
+        "station",
+        readers.PandasCSV(datatypes.CSV(url=str(csv))),
+        {
+            "featureType": "timeSeries",
+            "axes": {"T": "time"},
+            "standard_names": {"temp": "sea_water_temperature"},
+        },
+    )
+
+
+def test_a_tabular_source_still_renames_its_columns(renamed_csv_source):
+    """A DataFrame's columns have no attrs, so the rename is all there is to do."""
+    frame = osk.read(renamed_csv_source)
+
+    assert list(frame.columns) == ["time", "sea_water_temperature"]
+    assert frame["sea_water_temperature"].tolist() == [1, 2, 3]
+    assert "standard_name" not in frame.attrs  # nothing is stamped onto the frame
 
 
 # -- turning a select into server-side constraints ----------------------------

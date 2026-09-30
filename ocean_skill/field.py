@@ -398,13 +398,27 @@ class Field:
 
     @property
     def standard_name(self) -> str | None:
-        """The CF name this field represents, for colormaps and labels."""
+        """The CF name this field represents, for colormaps and labels.
+
+        Read off the variable spec when the spec says it -- a name, or a combination's
+        explicit ``standard_name``. A ``{"calculate": ...}`` spec usually says nothing:
+        what it produces is only known once it has run (the MLD calculator names its
+        output by method, ``..._defined_by_sigma_theta`` for ``density_threshold``).
+        So once this field has been prepared, the computed field's own
+        ``standard_name`` attribute answers instead -- every renderer's item dict reads
+        the data before this property, which is what lets a calculated MLD take the
+        MLD colormap and label rather than the anonymous default. Never triggers a
+        read itself: unprepared and unnamed is still ``None``.
+        """
         from ocean_skill.operators import DERIVED
 
         spec = self.variable
         if isinstance(spec, str):
             spec = DERIVED.get(spec, spec)
-        return spec if isinstance(spec, str) else spec.get("standard_name")
+        name = spec if isinstance(spec, str) else spec.get("standard_name")
+        if name is None and self._data is not None:
+            name = self._data.attrs.get("standard_name")
+        return name
 
     def _use_cache(self) -> bool:
         from ocean_skill import cache as _cache
