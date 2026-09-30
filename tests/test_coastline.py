@@ -17,6 +17,10 @@ from ocean_skill.plot.coastline import (
     normalize_coastline_resolution,
 )
 
+# This is the unit module for the adaptive choice itself, so it gets cartopy's real
+# scaler, not the coarsest-scale stand-in conftest's coarse_auto_coastlines installs.
+pytestmark = pytest.mark.adaptive_coastline
+
 
 def test_default_is_auto():
     assert DEFAULT_COASTLINE_RESOLUTION == "auto"
