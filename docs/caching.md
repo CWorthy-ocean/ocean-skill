@@ -163,7 +163,7 @@ way an uncropped one is.
 | What | How |
 |---|---|
 | Where it lives | `osk.cache.path()` (or `path("prepared")`) |
-| Where downloaded sources land | `osk.cache.obs_dir()` |
+| Where downloaded sources land | `osk.cache.obs_dir()` — never touched by `clear()` (`clear("obs")` raises); delete by hand to reclaim space |
 | State, entry counts, size | `osk.cache.info()` |
 | Turn off for this session | `osk.cache.disable()` |
 | Turn back on | `osk.cache.enable()` |

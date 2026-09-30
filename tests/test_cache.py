@@ -13,6 +13,7 @@ recompute with a warning, never an exception.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import warnings
@@ -400,6 +401,84 @@ def test_clear_can_target_one_kind(aligned):
     assert cache.clear("prepared") == 1
     assert len(cache.entries("aligned")) == 1
     assert cache.clear() == 1
+
+
+def _downloads() -> list[pathlib.Path]:
+    """Lay down realistic download-cache files in ``obs_dir()``; return their paths."""
+    obs = cache.obs_dir()
+    # A location the user gave fsspec wins over the isolated one (see obs_dir()), and
+    # is somebody's real downloads: never write made-up files into it.
+    assert obs.is_relative_to(cache.base_dir()), f"{obs} is not inside the test cache"
+    paths = [
+        # fsspec simplecache with same_names=True, as the ocean_skill.build recipes
+        # configure it: a ``.nc`` that looks just like a weights entry
+        obs / "woa23_decav_n00_01.nc",
+        # simplecache's default name, a hash of the URL: no extension at all
+        obs / hashlib.sha256(b"https://example.org/x.nc").hexdigest(),
+        # fsspec blockcache's metadata file
+        obs / "cache",
+        # a pooch ``<md5>-<basename>`` tarball, unpacked by ``pooch.Untar`` into a
+        # ``.untar`` directory
+        obs / "0f1e2d3c-glodap.tar.gz.untar" / "GLODAPv2.2016b.TAlk.nc",
+    ]
+    for p in paths:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"downloaded")
+    return paths
+
+
+def test_a_plain_clear_leaves_downloads_alone(aligned):
+    """Only results go stale when a model is rerun, so only results are cleared.
+
+    Downloads are URL-keyed copies of remote files, the slowest thing to get back,
+    and they may sit in a directory the user pointed fsspec at for other things too.
+    """
+    downloads = _downloads()
+    cache.save("k", aligned)
+
+    assert cache.clear() == 1
+    assert all(p.exists() for p in downloads)
+
+
+@pytest.mark.parametrize("call", ["clear", "entries"])
+def test_naming_downloads_is_refused_and_touches_nothing(call, aligned):
+    """``"obs"`` sits right beside the three kinds on disk but is not one of them.
+
+    It used to be a bare ``KeyError`` whenever the directory existed. A refusal has
+    to name the kinds and say where downloads really live. It also has to leave
+    everything as it found it: no download removed, no result entry removed, and not
+    even ``sources.read``'s memo flushed (a real ``clear()`` flushes it).
+    """
+    from ocean_skill import sources
+
+    downloads = _downloads()
+    cache.save("k", aligned)
+
+    with (
+        mock.patch.object(sources.read, "cache_clear") as flush,
+        pytest.raises(ValueError, match="unknown cache kind 'obs'") as err,
+    ):
+        getattr(cache, call)("obs")
+
+    assert all(repr(k) in str(err.value) for k in cache.KINDS)
+    assert str(cache.obs_dir()) in str(err.value)
+    assert all(p.exists() for p in downloads)
+    assert len(cache.entries()) == 1
+    flush.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["obs", "align"])
+def test_a_kind_is_checked_by_name_not_by_what_is_on_disk(kind):
+    """A brand-new cache has no such directory, and must still refuse the name.
+
+    Before the kind was validated, a name whose directory did not exist never reached
+    the extension lookup, so ``clear("obs")`` on a fresh machine returned 0: a
+    clean-looking success at nothing. A typo like ``"align"`` behaved that way every
+    time.
+    """
+    assert not (cache.base_dir() / "cache").exists()
+    with pytest.raises(ValueError, match="unknown cache kind"):
+        cache.clear(kind)
 
 
 class TestDownloadLocationFollowsTheCache:
