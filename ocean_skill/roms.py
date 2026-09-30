@@ -3,8 +3,9 @@
 The catalog says *how to read* a ROMS file (driver/args → intake); this module turns
 that raw output into a CF-standardized dataset ocean-skill can compare: attach the grid
 (lon/lat/h/mask), decode ``ocean_time``, rename variables to CF standard_names, mask
-land, and reconstruct depth. The s-coordinate → z transform is xgcm-based (Vtransform 2,
-using ``Cs_r``/``sigma_r`` from the grid); it stays lazy (dask) — no unchunk needed.
+land, and reconstruct depth. The s-coordinate → z transform is xgcm-based (Vtransform 1
+or 2, using ``Cs_r``/``sigma_r`` from the grid); it stays lazy (dask) — no unchunk
+needed.
 Lateral regridding lives in :mod:`ocean_skill.align` (xesmf), not here.
 """
 
@@ -97,6 +98,16 @@ def _decode_time(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
     tdim = meta.get("time_dim", "time")
     if tcoord not in ds.variables:
         return ds
+    if tcoord in ds.dims and tcoord != tdim:
+        # Classic Rutgers ROMS makes ``ocean_time`` itself the dimension, where UCLA
+        # puts the ``ocean_time`` variable on a dim called ``time``. Left alone, the
+        # assign_coords below would mint a brand-new, unrelated ``time`` dim while the
+        # data stayed on ``ocean_time``. Renaming the dim first (dropping its index so
+        # the variable rides along as an ordinary non-index coord, like UCLA's) puts
+        # the data on ``tdim`` and lets the decode below attach to it.
+        if tcoord in ds.indexes:
+            ds = ds.drop_indexes(tcoord)
+        ds = ds.rename_dims({tcoord: tdim})
     ref = np.datetime64(meta.get("reference_date", "2000-01-01"))
     units = meta.get("time_units", "seconds")
     if units not in ("seconds", "second", "s"):
@@ -324,6 +335,31 @@ def add_geographic_velocity_windowed(ds: xr.Dataset, meta: dict[str, Any]) -> xr
     return ds
 
 
+def _normalize_classic_layout(ds: xr.Dataset) -> xr.Dataset:
+    """Give a classic-Rutgers s-coordinate the UCLA layout (``sigma_*`` + bare dim).
+
+    Classic ROMS output stores its sigma values as the 1-D dimension coordinates
+    ``s_rho``/``s_w`` and ships no ``sigma_r``/``sigma_w``; UCLA-ROMS has the opposite
+    layout, ``sigma_r``/``sigma_w`` data variables over *bare* ``s_rho``/``s_w`` dims.
+    Everything downstream is written against the UCLA one -- :func:`add_depth_coord`
+    reads ``sigma_r``, :mod:`ocean_skill.comparison` re-attaches ``sigma_r``/
+    ``sigma_w`` after slicing, and plotting's vertical-coordinate lookup
+    (``operators.vertical_coord_on``) expects ``s_rho`` to be a bare dim so it falls
+    through to ``z_rho``. A *valued* ``s_rho`` would make plots and profiles use the
+    sigma values as the vertical axis instead of depth in metres.
+
+    So when ``sigma_r``/``sigma_w`` is missing and the matching ``s_rho``/``s_w``
+    variable exists, move its values (and attrs) onto the ``sigma_*`` data variable
+    and drop the label, leaving the bare dimension. A no-op on UCLA data, which
+    already has ``sigma_*``.
+    """
+    for label, sigma in (("s_rho", "sigma_r"), ("s_w", "sigma_w")):
+        if sigma not in ds.variables and label in ds.variables:
+            ds = ds.assign({sigma: (label, ds[label].values, ds[label].attrs)})
+            ds = ds.drop_vars(label)
+    return ds
+
+
 def standardize(
     ds: xr.Dataset, meta: dict[str, Any], *, derive_velocity: bool = False
 ) -> xr.Dataset:
@@ -352,6 +388,8 @@ def standardize(
         with no graph built at all). Pass ``True`` only for a caller -- direct or
         test-only -- that wants the older, simpler all-in-one shape.
     """
+    # first, so a self-contained grid (grid is ds, below) sees ``sigma_r`` too
+    ds = _normalize_classic_layout(ds)
     # the grid may be a separate file, or already merged into the output
     # (self_contained_grid, e.g. a combined ROMS file)
     grid = ds if meta.get("self_contained_grid") else _open_grid(meta)
@@ -407,13 +445,63 @@ def standardize(
     return ds
 
 
+def _vertical_params(ds: xr.Dataset, meta: dict[str, Any]) -> tuple[float, int]:
+    """Return ``(hc, Vtransform)`` for the s-coordinate -> depth transform.
+
+    Each comes from the catalog entry's ``vertical`` block when it names it, else from
+    the file's own 0-d ``hc``/``Vtransform`` variable (classic Rutgers output carries
+    both). ``hc`` has no default -- it is a property of the run -- so a missing one
+    raises a clear error rather than the opaque ``float(None)`` it used to. An absent
+    ``Vtransform`` means 2, the UCLA-ROMS/roms-tools convention this module grew up on.
+    """
+    vert = meta.get("vertical", {})
+    hc = vert.get("hc")
+    if hc is None and "hc" in ds.variables:
+        hc = ds["hc"].values
+    if hc is None:
+        raise ValueError(
+            "ROMS depth needs 'hc' -- in the catalog entry's metadata 'vertical' block "
+            "or as a variable on the dataset."
+        )
+    vt = vert.get("Vtransform")
+    if vt is None and "Vtransform" in ds.variables:
+        vt = ds["Vtransform"].values
+    if vt is None:
+        vt = 2
+    vt = int(vt)
+    if vt not in (1, 2):
+        raise ValueError(f"Unsupported ROMS Vtransform {vt!r}; expected 1 or 2.")
+    return float(hc), vt
+
+
+def _s_to_z(sigma, Cs, h, zeta, hc: float, vtransform: int):
+    """Evaluate the ROMS s-coordinate -> depth transform (metres, negative down).
+
+    Vtransform 2 (UCLA-ROMS, roms-tools) is ``zeta + (zeta + h) * s`` with
+    ``s = (hc*sigma + h*Cs) / (hc + h)``; the expression order is kept exactly so
+    results are bit-identical to the inline form it replaced. Vtransform 1 (classic
+    Rutgers, and what xroms applies) is ``z0 + zeta * (1 + z0/h)`` with
+    ``z0 = hc*(sigma - Cs) + Cs*h``. ``vtransform`` is validated by
+    :func:`_vertical_params`, so it is 1 or 2 here.
+    """
+    if vtransform == 1:
+        z0 = hc * (sigma - Cs) + Cs * h
+        return z0 + zeta * (1 + z0 / h)
+    s = (hc * sigma + h * Cs) / (hc + h)
+    return zeta + (zeta + h) * s
+
+
 def add_depth_coord(
     ds: xr.Dataset, meta: dict[str, Any], *, zero_zeta: bool = False
 ) -> xr.Dataset:
-    """Attach the (lazy) ROMS z_rho depth coordinate via Vtransform 2.
+    """Attach the (lazy) ROMS z_rho depth coordinate via Vtransform 1 or 2.
 
-    ``z_rho = zeta + (zeta + h) * (hc*sigma_r + h*Cs_r) / (hc + h)`` (metres, negative
-    down). Requires ``h``/``Cs_r``/``sigma_r`` (from the grid) and ``zeta``.
+    Vtransform 2: ``z_rho = zeta + (zeta + h) * (hc*sigma_r + h*Cs_r) / (hc + h)``.
+    Vtransform 1: ``z0 = hc*(sigma_r - Cs_r) + Cs_r*h`` and
+    ``z_rho = z0 + zeta * (1 + z0/h)`` (metres, negative down). Requires
+    ``h``/``Cs_r``/``sigma_r`` (from the grid) and ``zeta``. ``hc`` and the Vtransform
+    come from the catalog's ``vertical`` block, or from the file's own ``hc``/
+    ``Vtransform`` variables when it carries them (see :func:`_vertical_params`).
 
     ``zero_zeta=True`` ignores any ``zeta``/``sea_surface_height_above_geoid`` on
     ``ds`` and uses ``zeta = 0`` instead, the same fallback already used when neither
@@ -426,8 +514,7 @@ def add_depth_coord(
     ``zeta`` is metres against an ``h`` of hundreds to thousands, so dropping it here
     costs nothing a vertical section could show.
     """
-    vert = meta.get("vertical", {})
-    hc = float(vert.get("hc"))
+    hc, vtransform = _vertical_params(ds, meta)
     if zero_zeta:
         zeta = xr.zeros_like(ds["h"])
     elif "zeta" in ds.variables:
@@ -436,8 +523,7 @@ def add_depth_coord(
         zeta = ds["sea_surface_height_above_geoid"]
     else:  # no free-surface field: use zeta = 0
         zeta = xr.zeros_like(ds["h"])
-    s = (hc * ds["sigma_r"] + ds["h"] * ds["Cs_r"]) / (hc + ds["h"])
-    z_rho = zeta + (zeta + ds["h"]) * s
+    z_rho = _s_to_z(ds["sigma_r"], ds["Cs_r"], ds["h"], zeta, hc, vtransform)
     # The preferred order for the full field; `...` carries forward anything not
     # named here (`along`, for a vertical section already sliced to one grid
     # column -- see ocean_skill.transect.grid_slice) in whatever order it already
@@ -452,8 +538,8 @@ def add_interface_coord(
 ) -> xr.Dataset:
     """Attach the (lazy) ``z_w`` cell-*interface* depths, the companion to ``z_rho``.
 
-    Same Vtransform-2 formula as :func:`add_depth_coord`, evaluated on ``sigma_w``/
-    ``Cs_w`` (N+1 interfaces) instead of ``sigma_r``/``Cs_r`` (N centres).
+    Same Vtransform-1-or-2 formula as :func:`add_depth_coord`, evaluated on
+    ``sigma_w``/``Cs_w`` (N+1 interfaces) instead of ``sigma_r``/``Cs_r`` (N centres).
 
     The two serve different operations and neither replaces the other. Data lives at
     *centres*, so interpolating to a depth (:func:`to_depth`) must use ``z_rho``.
@@ -466,8 +552,7 @@ def add_interface_coord(
     ``zero_zeta`` -- see :func:`add_depth_coord`, the same zeta-free mesh for a
     section built on ``s_w`` instead of ``s_rho``.
     """
-    vert = meta.get("vertical", {})
-    hc = float(vert.get("hc"))
+    hc, vtransform = _vertical_params(ds, meta)
     if zero_zeta:
         zeta = xr.zeros_like(ds["h"])
     elif "zeta" in ds.variables:
@@ -476,8 +561,7 @@ def add_interface_coord(
         zeta = ds["sea_surface_height_above_geoid"]
     else:
         zeta = xr.zeros_like(ds["h"])
-    s = (hc * ds["sigma_w"] + ds["h"] * ds["Cs_w"]) / (hc + ds["h"])
-    z_w = zeta + (zeta + ds["h"]) * s
+    z_w = _s_to_z(ds["sigma_w"], ds["Cs_w"], ds["h"], zeta, hc, vtransform)
     dims = ("time", "s_w", "eta_rho", "xi_rho")  # see add_depth_coord's note on `...`
     z_w = z_w.transpose(*[d for d in dims if d in z_w.dims], ...)
     return ds.assign_coords(z_w=z_w)

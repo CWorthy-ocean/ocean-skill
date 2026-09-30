@@ -1894,37 +1894,62 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
 def _roms_metadata(ds) -> dict[str, Any]:
     """Detect ROMS output and return the metadata its adapter needs, else ``{}``.
 
-    Presence of the s-coordinate stretching arrays is the tell. Without this block
+    The tell is the s-coordinate stretching array ``Cs_r`` plus the sigma values
+    themselves, carried either as a ``sigma_r`` variable (UCLA-ROMS / roms-tools) or
+    as the ``s_rho`` coordinate itself (classic Rutgers ROMS). Without this block
     :func:`ocean_skill.sources.read` would not route through
     :mod:`ocean_skill.roms`, so land would never be masked and no depth coordinate
     would be built — a silent correctness bug, since ROMS writes 0.0 (not NaN) on land.
     """
     import re
 
-    if not {"Cs_r", "sigma_r"}.issubset(set(ds.variables)):
+    has_sigma = "sigma_r" in ds.variables or (
+        "s_rho" in ds.variables and ds["s_rho"].ndim == 1
+    )
+    if "Cs_r" not in ds.variables or not has_sigma:
         return {}
     md: dict[str, Any] = {
         "model": "roms",
         "loader": "ocean_skill.roms",
         "self_contained_grid": "lon_rho" in ds.variables,
     }
-    a = ds.attrs
-    if all(k in a for k in ("theta_s", "theta_b", "hc")):
+
+    def _scalar(name):
+        """Global attribute ``name`` first, else a 0-d data variable, else ``None``.
+
+        UCLA-ROMS writes the vertical-grid scalars as global attributes; classic
+        Rutgers ROMS writes them as 0-d variables. The value comes back as a plain
+        Python number (never a numpy scalar) so it survives a YAML catalog round trip.
+        """
+        if name in ds.attrs:
+            return ds.attrs[name]
+        if name in ds.variables and ds[name].ndim == 0:
+            return ds[name].item()
+        return None
+
+    hc, vt = _scalar("hc"), _scalar("Vtransform")
+    if hc is not None:
         md["vertical"] = {
             "s_dim": "s_rho",
-            "theta_s": float(a["theta_s"]),
-            "theta_b": float(a["theta_b"]),
-            "hc": float(a["hc"]),
-            "Vtransform": 2,
+            "hc": float(hc),
+            "Vtransform": int(vt) if vt is not None else 2,
         }
+        for k in ("theta_s", "theta_b"):
+            if (v := _scalar(k)) is not None:
+                md["vertical"][k] = float(v)
     if "ocean_time" in ds.variables:
         t = ds["ocean_time"]
         text = f"{t.attrs.get('long_name', '')} {t.attrs.get('units', '')}"
         m = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", text)
+        # ocean_skill.roms._decode_time raises on anything but seconds, so record
+        # the file's own unit here: a classic file in "days since ..." then fails
+        # loudly at read time rather than being silently decoded as seconds. Units
+        # with no "since" (some UCLA files) keep today's "seconds".
+        um = re.match(r"^\s*(\w+)\s+since\s+", str(t.attrs.get("units", "")), re.I)
         md.update(
             time_coord="ocean_time",
             time_dim="time",
-            time_units="seconds",
+            time_units=um.group(1).lower() if um else "seconds",
             reference_date=(
                 f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "2000-01-01"
             ),
@@ -2076,6 +2101,19 @@ def _probe(
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))
     md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
+    if md.get("model") == "roms":
+        # A classic ROMS file carries s_rho as a *valued* coordinate, so the generic
+        # probe above takes it for "vertical" and records its sigma values
+        # (-0.98..-0.017) as if they were metres. UCLA output has a bare s_rho dim
+        # and records none; dropping these makes ROMS sources look the same whatever
+        # the layout. ROMS depth comes from z_rho at read time, not from these keys.
+        for k in (
+            "geospatial_vertical_min",
+            "geospatial_vertical_max",
+            "vertical_resolution_min",
+            "vertical_resolution_max",
+        ):
+            md.pop(k, None)
 
     if md.get("model") == "roms" and "variables" in md:
         # ocean_skill.roms.standardize derives true eastward/northward velocity
