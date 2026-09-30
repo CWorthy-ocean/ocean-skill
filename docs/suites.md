@@ -340,7 +340,7 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
 
 ```
 <output_dir>/<name>_<test>_<t0>_to_<t1>_<run-time>/
-    report.pdf                (unless pdf: false)
+    report.pdf                (unless pdf: false, or no page drew at all)
     figures/NN_<slug(title)>[_<family>].png
     metrics/<name>.csv (+ .txt)
     suite.yaml                 -- byte-identical copy of the input

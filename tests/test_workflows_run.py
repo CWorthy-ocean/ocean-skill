@@ -321,7 +321,7 @@ def test_a_one_variable_monthly_means_page_draws_instead_of_being_skipped(
 
     page = result.pages[0]
     assert page.status == "ok", page.reason
-    assert len(result.figures) == 3  # title page, one drawn page, log page
+    assert len(result.figures) == 1  # one drawn page
 
 
 def test_list_only_prints_and_draws_nothing(tmp_path, stub_model, capsys):
@@ -955,7 +955,9 @@ def test_an_unresolvable_obs_source_is_a_graceful_page_skip(
     result = run_suite(path)
 
     assert result.report_dir.exists()
-    assert result.pdf is not None and result.pdf.exists()
+    # no page drew, so PdfPages never got a single savefig() call and never wrote
+    # a file to disk at all
+    assert result.pdf is None
     by_title = {p.title: p for p in result.pages}
     assert by_title["WOA"].status == "skipped"
     assert by_title["Summary"].status == "skipped"
