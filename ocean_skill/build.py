@@ -220,6 +220,11 @@ def _store_for(target):
     # fails with "Unable to canonicalize filesystem root", which gives no hint that the
     # path simply was not expanded.
     path = Path(url).expanduser()
+    # is_file: obstore reports a missing file as "Unable to canonicalize filesystem
+    # root: <parent dir>" — naming the wrong path and never saying the file is absent,
+    # so a path copied from another machine reads as a broken store, not an absent file.
+    if not path.is_file():
+        raise FileNotFoundError(f"no such file: {path}")
     return f"file://{path}", LocalStore(prefix=path.parent)
 
 
@@ -1001,6 +1006,10 @@ def make_kerchunk(
     parser = _parser_for(paths[0])
     if grid is not None and not _is_remote(grid):
         grid = Path(grid).expanduser()
+        # checked before the outputs are opened: virtualizing months of output only
+        # to then trip over a bad grid path wastes the whole run
+        if not grid.is_file():
+            raise FileNotFoundError(f"grid file does not exist: {grid}")
     preprocess = (
         _keep_latest_per_file(concat_dim, loadable_variables)
         if keep == "latest-per-file"

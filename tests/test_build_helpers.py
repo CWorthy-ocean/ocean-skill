@@ -1861,6 +1861,39 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
     assert built.is_relative_to(fake_home / "refs")
 
 
+# ------------------------------------------------------- missing local files
+#
+# obstore blames the *parent directory* for a missing file ("Unable to canonicalize
+# filesystem root: /home/someone/input-data"), so a grid path copied from another
+# machine looked like a broken store rather than an absent file.
+
+
+def test_store_for_names_the_missing_file(tmp_path):
+    from ocean_skill.build import _store_for
+
+    with pytest.raises(FileNotFoundError, match=r"no such file: .*absent\.nc"):
+        _store_for(tmp_path / "absent.nc")
+
+
+def test_build_kerchunk_rejects_a_missing_grid_before_opening_output(tmp_path):
+    """A months-long run should not be virtualized only to trip over the grid path."""
+    from ocean_skill.build import build_kerchunk
+
+    (tmp_path / "runs").mkdir()
+    for i in range(2):
+        _roms_like(
+            tmp_path / "runs" / f"o.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0
+        )
+
+    with pytest.raises(FileNotFoundError, match="grid file does not exist"):
+        build_kerchunk(
+            {"dev": "runs/o.*.nc"},
+            root=tmp_path,
+            grid="/home/someone-else/input-data/grid.nc",
+            out_dir=tmp_path / "refs",
+        )
+
+
 # ------------------------------------------------------ skipping unfinished files
 #
 # A file still being written by a live model run typically looks either empty
