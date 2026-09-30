@@ -128,7 +128,7 @@ matches, not if every source does.
 For an *exact* catalog name, skip searching entirely:
 
 ```python
-"ooi_papa" in osk.catalog_names()
+"ooi_papa" in osk.catalogs.catalog_names()
 ```
 
 ## By title and description
@@ -170,6 +170,27 @@ GLODAP declare it **per unit volume**. Searching one exact standard_name finds t
 sources and silently misses the thirteen you would actually want to compare
 against — so the filter matches any equivalent spelling, exactly as `compare()`
 does when pairing a variable with the sources that carry it.
+
+A *broad* name also finds every source declaring one of its *specific* definitions.
+Mixed layer depth is the case that exists: CF names it by the variable that defines the
+base of the layer, so there is a generic name and one per criterion, and each source
+declares whichever it is — Copernicus' `mlotst` is
+`ocean_mixed_layer_thickness_defined_by_sigma_theta`, for instance:
+
+```python
+osk.find(variable="mld")                    # 6   any definition of mixed layer depth
+osk.find(variable="mld_by_sigma_theta")     # 6   only sources declaring that definition
+osk.find(variable="mld_by_temperature")     # 0   no shipped catalog declares that one
+```
+
+The rule is one-directional: a specific name is never satisfied by a source declaring
+only the generic `ocean_mixed_layer_thickness` (it hasn't said which definition it
+carries) or by a sibling definition, because those are different quantities.
+`compare()` applies the same rule when it decides which sources carry a variable.
+`vocabulary.narrower_names("mld")` lists the definitions under a name,
+`vocabulary.covers(requested, declared)` is the test `find` puts to each declared
+variable, and `vocabulary.register(key, standard_name, broader="mld")` files a new
+definition under the broad name (`from ocean_skill import vocabulary`).
 
 Matching is against what a source *declares*, which comes from probing it at
 catalog-build time. A catalog built with `probe=False` declares no variables, so it

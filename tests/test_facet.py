@@ -522,16 +522,6 @@ def test_a_big_facet_panel_is_rasterized_and_a_small_one_is_not():
     assert "Image" in kinds(facet(big))
 
 
-def test_a_faceted_vertical_suppresses_the_depth_part(daily):
-    """A ``row_dim`` of levels already names the depth down the left edge."""
-    item = {
-        **_item(_by_depth(daily), "time", "depth"),
-        "depth": "surface, 50 m, 100 m",
-    }
-    fig = render(PlotSpec(family="field_facet", items=[item]))
-    assert fig._suptitle.get_text() == "nitrate"
-
-
 # --- field_suptitle, in isolation from a drawn figure --------------------------------
 
 
@@ -846,16 +836,20 @@ def _mpl_panels(fig):
 def test_the_depth_by_month_grid(daily):
     """Everything one render of a 3-level x 6-month grid has to get right at once.
 
-    Five claims, all against the same figure — merged into one render because each
+    Six claims, all against the same figure — merged into one render because each
     used to build and throw away an identical grid just to check a different part of
     it. Kept as one function, not one assertion, so a failure still says which claim
     broke.
     """
     from matplotlib.collections import QuadMesh
 
-    fig = render(
-        PlotSpec(family="field_facet", items=[_item(_by_depth(daily), "time", "depth")])
-    )
+    # The item carries a ``depth`` part, as a faceted vertical's does; only the suptitle
+    # claim below is about it.
+    item = {
+        **_item(_by_depth(daily), "time", "depth"),
+        "depth": "surface, 50 m, 100 m",
+    }
+    fig = render(PlotSpec(family="field_facet", items=[item]))
     panels = _mpl_panels(fig)
 
     # Three levels by six months is 3x6 — no aspect-ratio choice left to make.
@@ -877,6 +871,10 @@ def test_the_depth_by_month_grid(daily):
         if getattr(ax, "_osk_row_label", None) is not None
     ]
     assert labels == ["0 m", "50 m", "100 m"]
+
+    # A faceted vertical suppresses the depth part of the suptitle: a ``row_dim`` of
+    # levels already names the depth down the left edge.
+    assert fig._suptitle.get_text() == "nitrate"
 
     # Nitrate at 100 m and at the surface have unrelated ranges. One scale across both
     # would push every surface panel to the bottom of the bar and hide the monthly

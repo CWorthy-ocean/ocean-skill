@@ -940,6 +940,160 @@ def test_a_pattern_recognized_spelling_finds_the_source(pattern_spellings, spell
     ]
 
 
+# -- variable search: broad names vs specific definitions ---------------------
+
+
+MLD_GENERIC = "ocean_mixed_layer_thickness"
+MLD_SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+MLD_SIGMA_T = "ocean_mixed_layer_thickness_defined_by_sigma_t"
+MLD_MIXING_SCHEME = "ocean_mixed_layer_thickness_defined_by_mixing_scheme"
+
+#: The four sources that hold *a* mixed layer depth in the fixture below -- every one
+#: of them is what a broad "mld" search is for.
+ALL_MLD_SOURCES = ["cmip_mlotst", "copernicus_mlotst", "gom_his", "gom_his_old"]
+
+
+@pytest.fixture
+def mld_definitions(monkeypatch):
+    """Index sources holding mixed layer depth under each of its definitions.
+
+    Not contrived: an older ROMS catalog still declares KPP's ``hbls`` under the
+    generic name (``roms.standardize`` renames from the catalog's stored map, so
+    nothing changes until it is rebuilt), a rebuilt one declares the mixing-scheme
+    definition, Copernicus' ``mlotst`` is a sigma_theta criterion and a CMIP-style
+    ``mlotst`` a sigma_t one. One source holds an unrelated variable.
+    """
+    return _fake_index(
+        monkeypatch,
+        {
+            "gom_his_old": (
+                "GOM offline run (older catalog)",
+                {"model": "roms", "variables": [MLD_GENERIC]},
+            ),
+            "gom_his": (
+                "GOM offline run",
+                {"model": "roms", "variables": [MLD_MIXING_SCHEME]},
+            ),
+            "copernicus_mlotst": ("Copernicus", {"variables": [MLD_SIGMA_THETA]}),
+            "cmip_mlotst": ("CMIP", {"variables": [MLD_SIGMA_T]}),
+            "gom_his_temp": (
+                "GOM offline run",
+                {"variables": ["sea_water_potential_temperature"]},
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "spelling", ["mld", "MLD", "mixed_layer_depth", MLD_GENERIC]
+)
+def test_a_broad_name_finds_every_definition_of_it(mld_definitions, spelling):
+    """Asking for mixed layer depth finds every source holding *any* mixed layer depth.
+
+    The generic name, the short key and an alias are all the same broad request, and
+    it is answered by the source declaring the generic name (an older ROMS catalog)
+    and by each source declaring one specific definition -- but not by the bystander.
+    """
+    assert sorted(mld_definitions.find(variable=spelling)) == ALL_MLD_SOURCES
+
+
+@pytest.mark.parametrize("spelling", ["mld_by_sigma_theta", MLD_SIGMA_THETA])
+def test_a_specific_name_finds_only_that_definition(mld_definitions, spelling):
+    """A specific definition is not answered by the generic name or a sibling.
+
+    The older ROMS catalog's generic ``ocean_mixed_layer_thickness`` has not said
+    which definition it carries, and the sigma_t source is a different criterion
+    whose name merely shares a prefix.
+    """
+    assert mld_definitions.find(variable=spelling) == ["copernicus_mlotst"]
+
+
+@pytest.mark.parametrize("spelling", ["mld_by_sigma_t", MLD_SIGMA_T])
+def test_a_specific_name_never_matches_by_prefix(mld_definitions, spelling):
+    """Asking for the sigma_t definition never finds the sigma_theta one.
+
+    ``..._defined_by_sigma_t`` is a strict string prefix of
+    ``..._defined_by_sigma_theta``; names are compared whole, so neither request
+    finds the other's source (the sigma_theta direction is pinned just above).
+    """
+    assert mld_definitions.find(variable=spelling) == ["cmip_mlotst"]
+
+
+def test_a_definition_nobody_declares_matches_nothing(mld_definitions):
+    assert mld_definitions.find(variable="mld_by_temperature") == []
+
+
+def test_the_mixing_scheme_definition_finds_only_a_rebuilt_roms_catalog(
+    mld_definitions,
+):
+    """The ROMS source declaring the generic name is *not* the mixing-scheme one.
+
+    Until its catalog is rebuilt it declares only the generic name, which is exactly
+    the vagueness a specific request refuses -- and the reason the broad request
+    above is the one that still finds it.
+    """
+    assert mld_definitions.find(variable="mld_by_mixing_scheme") == ["gom_his"]
+
+
+def test_a_broad_name_combines_with_other_filters(mld_definitions):
+    assert mld_definitions.find(variable="mld", catalog="Copernicus") == [
+        "copernicus_mlotst"
+    ]
+    assert mld_definitions.find(variable="mld_by_sigma_t", catalog="Copernicus") == []
+
+
+def test_find_catalogs_takes_the_same_broad_and_specific_rule(mld_definitions):
+    """``find_catalogs`` delegates to ``find``, so it inherits the one-way rule."""
+    assert mld_definitions.find_catalogs(variable="mld_by_sigma_theta") == [
+        "Copernicus"
+    ]
+    assert sorted(mld_definitions.find_catalogs(variable="mld")) == [
+        "CMIP",
+        "Copernicus",
+        "GOM offline run",
+        "GOM offline run (older catalog)",
+    ]
+
+
+# -- the one declared-variable test find() and compare() share -------------------
+
+
+GRID_RELATIVE = ("sea_water_x_velocity", "sea_water_y_velocity")
+
+
+@pytest.mark.parametrize(
+    ("meta", "requested", "expected"),
+    [
+        ({"variables": [MLD_SIGMA_THETA]}, "mld", True),  # broad -> specific
+        ({"variables": [MLD_GENERIC]}, "mld_by_sigma_theta", False),  # never back up
+        ({"variables": [MLD_SIGMA_T]}, "mld_by_sigma_theta", False),  # nor sideways
+        ({"variables": [MLD_GENERIC]}, "mixed_layer_depth", True),  # an alias
+        ({"variables": []}, "mld", False),  # nothing declared, nothing satisfied
+        ({}, "mld", False),
+        # ROMS: grid-relative u/v on the list means the read derives true east/north
+        (
+            {"model": "roms", "variables": list(GRID_RELATIVE)},
+            "eastward_sea_water_velocity",
+            True,
+        ),
+        (
+            {"variables": list(GRID_RELATIVE)},
+            "eastward_sea_water_velocity",
+            False,  # only ROMS gets that derivation
+        ),
+    ],
+)
+def test_declares_variable_is_the_shared_rule(meta, requested, expected):
+    """``find(variable=)`` and ``compare()``'s pre-filter ask one function.
+
+    So a source a search returns is exactly a source a comparison pairs (the fan-out
+    side is exercised in tests/test_mld_definitions.py); this pins the function itself.
+    """
+    from ocean_skill.catalog import _declares_variable
+
+    assert _declares_variable(meta, requested) is expected
+
+
 # -- free text ----------------------------------------------------------------
 
 

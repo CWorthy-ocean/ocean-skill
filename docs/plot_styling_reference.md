@@ -198,7 +198,7 @@ its tick labels are three different matplotlib methods with non-overlapping keyw
 
 **`Figure.colorbar`'s own keywords worth knowing** (beyond `shrink`/`aspect`/`pad`):
 `orientation` (`"vertical"`/`"horizontal"`), `extend` (`"neither"`/`"both"`/`"min"`/`"max"`
-— draws a pointed end for out-of-range values), `ticks` (explicit tick locations),
+— draws a pointed end for out-of-range values; set for you, see [Clipped colourbar ends](#clipped-colourbar-ends)), `ticks` (explicit tick locations),
 `format` (a format string or `Formatter` for tick labels).
 
 **Defaults** — `field_row` and `field_grid` start from different values (one page-width
@@ -690,6 +690,30 @@ itself is unaffected. Not available on the comparison families (`field_row`,
 `field_grid`, `field_map_grid`, `skill_map`, and their movie/row forms) — a test/
 reference pair's shared scale and a difference panel's own symmetric one are a
 different question, unaddressed here.
+
+### Clipped colourbar ends
+
+Whenever a colourbar's limits cut off data — `robust=`, a pinned `vmin`/`vmax`, a
+variable's fixed display range, the 98th-percentile scale of a difference or skill-map
+panel — the bar says so. Statically, each end with data beyond it gets matplotlib's
+triangular extension (`extend="min"`/`"max"`/`"both"`, chosen from the data, so a bar
+that shows the full range has none). `mark="contourf"` gets the same, which also fills
+the clipped regions instead of leaving them blank. To override, pass
+`colorbar_kwargs={"extend": "neither"}` (or any other value).
+
+Bokeh cannot draw the triangle, so the interactive renderer forces a tick onto that end
+of the bar and labels it `≥ 27` or `≤ 3`. Both renderers use one rule to decide which
+ends, so they always agree.
+
+**`colorbar_label_clipped`** — `bool`, default `False`. Also write the true extreme of
+the data at each clipped end: `max 29.9` beyond the arrow's tip statically,
+`≥ 27 (max 29.9)` on the interactive tick. Only ends that are actually clipped are
+labelled. In a movie the extremes are taken over every frame; the station dots on a
+`skill_map` count too.
+
+```python
+osk.field(run, "temp", select={"time": "2012-01"}).plot(robust=True, colorbar_label_clipped=True)
+```
 
 ### `shared_limits`
 
@@ -2253,7 +2277,7 @@ follow-up.
 
 Exactly `section`'s: positive-down depth, y-axis inverted, along-path distance
 in kilometres, below-bathymetry/off-domain cells grey. Test and reference share
-one colour scale (10th–90th percentile of the pair); the difference panel is
+one colour scale (the pair's full range unless `robust=`); the difference panel is
 diverging and centred on zero; metrics go in the difference panel's corner box
 (statically) or fold into its title (interactively) — precisely as `field_row`
 draws a gridded comparison, just against depth and along-path distance rather

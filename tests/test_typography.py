@@ -382,21 +382,34 @@ def test_a_narrow_but_uncapped_canvas_can_still_fit():
         field_row(_aligned(), size=3.5, title="t")
 
 
-def test_a_height_capped_grid_is_told_to_lift_the_cap_not_to_widen():
-    """The two ways to run out of room want opposite advice.
+def test_a_height_capped_grid_is_told_to_lift_the_cap_and_lifting_it_keeps_the_panels():
+    """What nine rows on a page report, and what ``size="free"`` does about it.
 
-    Nine rows on a page are cramped because the *height* cap is splitting between them,
-    and widening does nothing for that — the fix is ``size="free"``. Naming the wrong
-    knob would send someone off in the wrong direction, so the message picks by which
-    constraint actually bound.
+    Two claims, both about the same pair of figures — merged into two renders because
+    each used to build and throw away an identical page grid and an identical free grid
+    just to check a different part of them. Kept as one function, not one assertion, so
+    a failure still says which claim broke.
     """
     rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(9)]
+
+    # The two ways to run out of room want opposite advice.
+    #
+    # Nine rows on a page are cramped because the *height* cap is splitting between
+    # them, and widening does nothing for that — the fix is ``size="free"``. Naming the
+    # wrong knob would send someone off in the wrong direction, so the message picks by
+    # which constraint actually bound.
     with pytest.warns(UserWarning, match='size="free"'):
-        field_grid(rows, title="t")
+        page = field_grid(rows, title="t")
+
     # and with the cap lifted there is nothing to report
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        field_grid(rows, title="t", size="free")
+        free = field_grid(rows, title="t", size="free")
+
+    # The drawn counterpart of the uncapped-canvas test above: lifting the cap grows the
+    # figure instead of squeezing the rows, so each row keeps its panels.
+    assert free.get_size_inches()[1] > page.get_size_inches()[1]
+    assert _panel_box(free)[1] > _panel_box(page)[1]
 
 
 def test_a_normal_canvas_does_not_warn():
@@ -451,15 +464,6 @@ def test_zoom_moves_figure_panels_and_type_together():
 def test_a_named_size_reaches_the_drawn_figure():
     slide = field_row(_aligned(), title="t", size="slide")
     assert slide.get_size_inches()[0] == pytest.approx(tg.CANVASES["slide"].width)
-
-
-def test_size_free_lets_a_many_row_grid_keep_its_panels():
-    """The drawn counterpart of the uncapped-canvas test above."""
-    rows = [{"aligned": _aligned(), "units": "degC"} for _ in range(8)]
-    page = field_grid(rows, title="t")
-    free = field_grid(rows, title="t", size="free")
-    assert free.get_size_inches()[1] > page.get_size_inches()[1]
-    assert _panel_box(free)[1] > _panel_box(page)[1]
 
 
 def test_figsize_still_overrides_size_and_zoom():

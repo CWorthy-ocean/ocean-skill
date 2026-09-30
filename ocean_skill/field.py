@@ -211,16 +211,22 @@ def _top_level(da, zdim: str, *, source: str):
     (:meth:`Field._grid_metadata_if_eligible`) could not settle it first --
     an uncatalogued source, or the hand-built stubs tests construct directly.
 
-    A coordinate-bearing axis (an observational product's own reported levels)
-    picks the level nearest 0. A coordinate-less native ``s_rho``/``s_w`` axis
-    with a same-dim ``z_rho`` (see :func:`_labelless_vertical`) picks the index
-    whose ``z_rho`` reads shallowest -- averaged over any other dimension
-    ``z_rho`` might carry (a curvilinear grid's own eta/xi), so one index names
-    the top level everywhere a facet panel might be drawn, not just at a single
-    column. Anything else -- coordinate-less with no ``z_rho`` either -- has no
-    way to tell top from bottom and is refused, the same message
-    :meth:`Field._series_items`/:meth:`Field._refuse_labelless_facet` give the
-    same shape elsewhere.
+    A coordinate-bearing axis picks the level
+    :func:`ocean_skill.plot.profile.positive_down` reads shallowest: nearest 0 for
+    an observational product's own reported depths, but the *highest* level for a
+    height coordinate (a same-dim ``z_rho`` on a single column, say), whose top
+    levels can sit above mean sea level under a raised free surface -- the level
+    nearest 0 is beneath the top one there. A coordinate-less native
+    ``s_rho``/``s_w`` axis with a same-dim ``z_rho`` (see
+    :func:`_labelless_vertical`) picks the index whose ``z_rho`` reads shallowest
+    -- averaged over any other dimension ``z_rho`` might carry (a curvilinear
+    grid's own eta/xi), so one index names the top level everywhere a facet panel
+    might be drawn, not just at a single column. Either way the ``actual_depth``
+    recorded is the level's ``positive_down`` value, so a level above mean sea
+    level reads negative rather than mirrored below it. Anything else --
+    coordinate-less with no ``z_rho`` either -- has no way to tell top from bottom
+    and is refused, the same message :meth:`Field._series_items`/
+    :meth:`Field._refuse_labelless_facet` give the same shape elsewhere.
 
     Returns ``(field, "surface")`` -- the depth label a caller attaches to the
     item it builds, matching what an explicit ``select={"depth": "surface"}``
@@ -229,13 +235,14 @@ def _top_level(da, zdim: str, *, source: str):
     import numpy as np
 
     from ocean_skill.operators import vertical_coord_on
+    from ocean_skill.plot.profile import positive_down
 
     coord = vertical_coord_on(da, zdim)
     if coord is not None:
-        levels = np.asarray(coord.values, dtype="float64")
-        k = int(np.argmin(np.abs(levels)))
+        depths = positive_down(coord)
+        k = int(np.argmin(depths))
         top = da.isel({zdim: k})
-        top.attrs["actual_depth"] = float(abs(levels[k]))
+        top.attrs["actual_depth"] = float(depths[k])
         return top, "surface"
 
     z_rho = da.coords.get("z_rho")
@@ -244,7 +251,7 @@ def _top_level(da, zdim: str, *, source: str):
         shallowest = z_rho.mean(dim=reduce_dims) if reduce_dims else z_rho
         k = int(np.asarray(shallowest).argmax())
         top = da.isel({zdim: k})
-        top.attrs["actual_depth"] = float(np.abs(np.asarray(top["z_rho"])).mean())
+        top.attrs["actual_depth"] = float(positive_down(top["z_rho"]).mean())
         return top.drop_vars([zdim, "z_rho"], errors="ignore"), "surface"
 
     raise ValueError(
@@ -273,7 +280,8 @@ class Field:
     select
         ``dict[str, Any] | None`` -- axis name -> selection, e.g. ``{"depth":
         "surface"}``, ``{"lon": -144.25, "lat": 49.98}`` (see
-        :func:`ocean_skill.comparison.as_select`). ``None`` (default) selects
+        :func:`ocean_skill.comparison.as_select`); ``{"time": "latest"}`` is
+        this source's newest step. ``None`` (default) selects
         nothing. Not a ``{"test", "reference"}`` pair-spec.
     aggregate
         ``dict[str, Any] | None`` -- axis name -> reduction, e.g. ``{"time":
@@ -325,6 +333,7 @@ class Field:
         from ocean_skill.comparison import (
             _normalize_detide_side,
             _require_pair_spec,
+            _resolve_latest,
             as_select,
             is_pair_spec,
         )
@@ -375,7 +384,7 @@ class Field:
             if isinstance(variable, str)
             else variable
         )
-        self.select = as_select(select)
+        self.select = _resolve_latest(as_select(select), source)
         self.aggregate = aggregate
         self.label = label
         self.cache = cache
@@ -389,13 +398,27 @@ class Field:
 
     @property
     def standard_name(self) -> str | None:
-        """The CF name this field represents, for colormaps and labels."""
+        """The CF name this field represents, for colormaps and labels.
+
+        Read off the variable spec when the spec says it -- a name, or a combination's
+        explicit ``standard_name``. A ``{"calculate": ...}`` spec usually says nothing:
+        what it produces is only known once it has run (the MLD calculator names its
+        output by method, ``..._defined_by_sigma_theta`` for ``density_threshold``).
+        So once this field has been prepared, the computed field's own
+        ``standard_name`` attribute answers instead -- every renderer's item dict reads
+        the data before this property, which is what lets a calculated MLD take the
+        MLD colormap and label rather than the anonymous default. Never triggers a
+        read itself: unprepared and unnamed is still ``None``.
+        """
         from ocean_skill.operators import DERIVED
 
         spec = self.variable
         if isinstance(spec, str):
             spec = DERIVED.get(spec, spec)
-        return spec if isinstance(spec, str) else spec.get("standard_name")
+        name = spec if isinstance(spec, str) else spec.get("standard_name")
+        if name is None and self._data is not None:
+            name = self._data.attrs.get("standard_name")
+        return name
 
     def _use_cache(self) -> bool:
         from ocean_skill import cache as _cache
@@ -590,7 +613,17 @@ class Field:
             return "drawn as a section: select={'transect': ...} leaves a cut through space, with depth on the other axis"
         return "drawn as map panels: a horizontal extent survives"
 
-    def extremum(self, kind: str = "max") -> Any:
+    def extremum(
+        self,
+        kind: str = "max",
+        *,
+        n: int = 1,
+        local: bool = False,
+        window: int | None = None,
+        interior: bool | int = False,
+        separation: int | None = None,
+        score: str | None = None,
+    ) -> Any:
         """Locate this field's min/max: value, lon/lat, grid indices, snapshot.
 
         Parameters
@@ -598,6 +631,27 @@ class Field:
         kind
             One of ``"max"`` or ``"min"`` (default ``"max"``) -- which extremum
             to locate.
+        n
+            ``int >= 1`` (default 1). One returns an
+            :class:`~ocean_skill.extrema.Extremum`; more return an
+            :class:`~ocean_skill.extrema.Extrema` of the ``n`` most extreme
+            *distinct* places (hits closer than ``separation`` cells merge into one).
+        local
+            ``bool`` (default ``False``). Rank by how far each cell sits from its
+            wet neighbors instead of by value -- see below.
+        window
+            Local mode only: odd ``int >= 3``, neighborhood side in cells
+            (default 3).
+        interior
+            ``False`` (default) considers every wet cell. An ``int`` k keeps only
+            cells with no land and not the grid's edge within k cells; ``True`` is
+            the local window's own reach (1 for the default 3 x 3). Works for a
+            global search too, and each hit reports its ``land_distance``.
+        separation
+            ``int >= 1``, minimum spacing in cells between reported hits
+            (default: ``window`` when ``local``, else 10).
+        score
+            Local mode only: ``"z"`` (default) or ``"departure"`` -- see below.
 
         Runs over every dim the prepared field still has, not just the horizontal
         ones -- a field faceted over time or depth reports the facet coordinate
@@ -617,15 +671,51 @@ class Field:
             ext = run.extremum("max")
             ext.series(variables=["salinity"]).plot()   # both, same place/window
 
+        The global min/max is usually a coastline or river-mouth cell, and the "k-th
+        lowest value" is more of the same. The specks a ``robust=True`` colorbar
+        reveals are not extreme in value -- they are extreme *relative to their
+        neighbors* -- so ``local=True`` scores every wet cell against the median of
+        its wet neighbors (a straight front scores ~0; only a feature about one cell
+        wide stands out) and ``n=`` lists the worst offenders::
+
+            hits = run.extremum("min", local=True, n=15)
+            hits                                   # table: anomaly, z, lon, lat
+            hits.to_dataframe().query("land_distance > 10")   # well offshore only
+            hits[0].plot()                         # each hit follows through time
+
+        A river plume defeats a plain departure: a few cells offshore the plume is
+        steep, so its cells depart from their neighbors by hundreds of units and
+        crowd out a speck that departs by tens. By default hits are therefore ranked
+        by ``z``, the departure in units of how much the neighbors vary among
+        themselves -- large in smooth water, small inside a plume or front.
+        ``score="departure"`` ranks by the departure in the field's units instead;
+        every hit reports both, as ``anomaly`` and ``z``.
+
+        Each hit reports its wet-neighbor count and ``land_distance``, so
+        land-adjacent hits are easy to tell apart; ``interior=10`` drops everything
+        within 10 cells of land (or the grid's edge) up front, which also keeps a
+        global ``n=`` search away from the coast. Cells at the grid's edge use only
+        their in-grid neighbors.
+
         A :class:`FieldSet` (several variables) has no ``extremum`` of its own --
         each member is its own field with its own map; call it on one member,
         e.g. ``fields[0].extremum()``.
 
-        See :class:`ocean_skill.extrema.Extremum`.
+        See :class:`ocean_skill.extrema.Extremum` and
+        :class:`ocean_skill.extrema.Extrema`.
         """
         from ocean_skill.extrema import field_extremum
 
-        return field_extremum(self, kind)
+        return field_extremum(
+            self,
+            kind,
+            n=n,
+            local=local,
+            window=window,
+            interior=interior,
+            separation=separation,
+            score=score,
+        )
 
     def _series_items(self) -> list[dict[str, Any]]:
         """Return this field's data as one or more single-source series items.
@@ -649,6 +739,7 @@ class Field:
         import xarray as xr
 
         from ocean_skill.operators import resolve_dim, vertical_coord_on
+        from ocean_skill.plot.profile import positive_down
 
         da = self.data
         tdim = self._time_axis_dim(da)
@@ -693,19 +784,24 @@ class Field:
             item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
             # actual_depth lives on the *item's* Dataset, not the DataArray, since
             # that is what _depth_of (plot/series.py) reads -- the same convention
-            # Comparison.align() uses for its own aligned pair. abs() unconditionally
-            # (matching plot/profile.vertical_values and
-            # plot/time_depth.prepare_time_depth) -- a no-op for an already
-            # positive-down observational coordinate, and what turns z_rho's
-            # negative-down convention into the positive-down metres every other
-            # depth label in this package uses. zcoord may itself resolve to z_rho
-            # (see vertical_coord_on): a bare native axis with a 1-D z_rho counts as
+            # Comparison.align() uses for its own aligned pair. Converted by
+            # plot/profile.positive_down, the same as vertical_values and
+            # plot/time_depth.prepare_time_depth: z_rho is a height (positive up,
+            # free surface included), so it is negated -- a level 0.9 m above mean
+            # sea level reads -0.9 m, not a mirrored 0.9 m depth -- while an
+            # already positive-down observational coordinate passes through as
+            # abs(), a no-op. zcoord may itself resolve to z_rho (see
+            # vertical_coord_on): a bare native axis with a 1-D z_rho counts as
             # carrying a real coordinate the same way a differently-named observational
             # one does, so both are read the same way here.
             if zcoord_name is not None and zcoord_name in level.coords:
-                item["aligned"].attrs["actual_depth"] = abs(float(level[zcoord_name]))
+                item["aligned"].attrs["actual_depth"] = float(
+                    positive_down(level[zcoord_name])
+                )
             elif "z_rho" in level.coords and level["z_rho"].ndim == 0:
-                item["aligned"].attrs["actual_depth"] = abs(float(level["z_rho"]))
+                item["aligned"].attrs["actual_depth"] = float(
+                    positive_down(level["z_rho"])
+                )
             items.append(item)
         return items
 
@@ -2120,7 +2216,9 @@ def field(
         "surface"}``, ``{"lon": ..., "lat": ...}``, or ``{"sigma0": ...}`` for an
         isopycnal (ROMS sources only). ``select={"transect": {"cross": ...}}``
         builds a :class:`Cross` instead (source and variable must each be a
-        single, non-list value for that). ``None`` (default) leaves the
+        single, non-list value for that). ``{"time": "latest"}`` is the
+        newest step of each source's own time axis, resolved to its date when
+        the field is built. ``None`` (default) leaves the
         vertical axis whole, unlike :func:`ocean_skill.comparison.compare`,
         whose own default is ``"surface"``.
     aggregate

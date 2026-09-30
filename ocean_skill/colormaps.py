@@ -35,7 +35,7 @@ colormap (this was tried and is why it's called out here, not a hypothetical).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 __all__ = [
@@ -64,7 +64,12 @@ __all__ = [
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
 #: deliberate choice, listed here rather than left as an accident to rediscover:
 #:   - ammonium / sigma_theta: both cmo.dense
-#:   - nitrate / mld / pressure / bathymetry: all cmo.deep
+#:   - nitrate / mld / pressure / bathymetry: all cmo.deep -- "mld" meaning all five
+#:     mixed-layer thickness names, the generic one and the four CF
+#:     ``..._defined_by_<criterion>`` ones. That includes the sigma_theta-defined
+#:     one: it is a depth in metres, not a density, so it takes the MLD map even though
+#:     its name contains "sigma_theta" (see the ordering note at the "mixed_layer"
+#:     entry below)
 #:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
 #:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
 #:   - pH cmo.speed_r vs the velocity family's cmo.speed
@@ -108,9 +113,21 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # same family to the two wind components. No other standard_name contains "wind".
     "wind": "cmo.speed",
     "sea_ice": "cmo.ice",
+    # Every mixed-layer-thickness name: the generic ``ocean_mixed_layer_thickness``
+    # and CF's ``..._defined_by_sigma_theta``/``_sigma_t``/``_temperature``/
+    # ``_mixing_scheme``. ORDER MATTERS: ``cmaps_for`` takes the *first* key in this
+    # table that ``re.search`` finds in the name, and a definition-specific MLD name
+    # embeds the name of its criterion variable. ``..._defined_by_sigma_theta`` has
+    # "sigma_theta" in it, so with that entry listed first it gets the density map
+    # (cmo.dense) although it is a thickness in metres and belongs with the other
+    # MLDs. This entry must therefore stay above every entry keyed by a criterion
+    # variable -- today only "sigma_theta", but a "temperature" or "sigma_t" key added
+    # later would shadow its MLD name just the same. xcmocean's own patterns need no
+    # such care: ours are inserted ahead of them (see _register_colormaps), which is
+    # also what stops its "temp" pattern claiming ``..._defined_by_temperature``.
+    "mixed_layer": "cmo.deep",
     "sigma_theta": "cmo.dense",
     "conductivity": "cmo.haline",
-    "mixed_layer": "cmo.deep",
     # full standard_name: a bare "pressure" key is fine too, but spelled out for
     # symmetry with the other full-standard_name entries above.
     "sea_water_pressure": "cmo.deep",
@@ -352,18 +369,52 @@ class MetricColors:
     vmin: float
     vmax: float
     log: bool = False
+    #: The finite extremes of the values the limits came from, if known. The limits are
+    #: a percentile, so these are how a renderer tells whether data lies beyond an end
+    #: of the bar and should say so.
+    data_min: float | None = None
+    data_max: float | None = None
 
     def clim(self) -> tuple[float, float]:
         """``(vmin, vmax)`` for hvplot/bokeh."""
         return (self.vmin, self.vmax)
 
+    def data_range(self) -> tuple[float, float] | None:
+        """``(data_min, data_max)``, or ``None`` when the data was not measured."""
+        if self.data_min is None or self.data_max is None:
+            return None
+        return (self.data_min, self.data_max)
+
+    def covering(self, values) -> MetricColors:
+        """The same scale, told about more data drawn on it: only the extremes grow.
+
+        The limits stay where they were fitted -- a skill map's station dots are painted
+        on the scale its interpolated surface earned, and letting them move it would
+        change the surface's colours -- but a dot past an end of the bar is clipped just
+        as a cell is, so the bar's arrow has to know about it.
+        """
+        finite = _finite(values)
+        if not finite.size:
+            return self
+        lo, hi = float(finite.min()), float(finite.max())
+        if self.data_min is not None and self.data_max is not None:
+            lo, hi = min(lo, self.data_min), max(hi, self.data_max)
+        return replace(self, data_min=lo, data_max=hi)
+
     def norm(self):
-        """Return a matplotlib ``Normalize`` (or ``LogNorm``) over the same limits."""
+        """Return a matplotlib ``Normalize`` (or ``LogNorm``) over the same limits.
+
+        Carries :meth:`data_range` on the norm as ``_osk_data_range``, which is what the
+        static renderer's colourbar reads to decide where to draw its extension arrows.
+        """
         import matplotlib.colors as mcolors
 
         if self.log:
-            return mcolors.LogNorm(vmin=max(self.vmin, 1e-6), vmax=self.vmax)
-        return mcolors.Normalize(vmin=self.vmin, vmax=self.vmax)
+            norm = mcolors.LogNorm(vmin=max(self.vmin, 1e-6), vmax=self.vmax)
+        else:
+            norm = mcolors.Normalize(vmin=self.vmin, vmax=self.vmax)
+        norm._osk_data_range = self.data_range()
+        return norm
 
 
 def _cmocean(name: str):
@@ -402,6 +453,15 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
 
     seq_cmap, div_cmap = cmaps_for(standard_name)
     finite = _finite(values)
+    # Only the variable-like metrics can be log; a log bar cannot show a value <= 0, so
+    # such a value is not what an end arrow would point at.
+    log = metric in _VARIABLE_LIKE_METRICS and is_log(standard_name)
+    seen = finite[finite > 0] if log else finite
+    extremes = (
+        {"data_min": float(seen.min()), "data_max": float(seen.max())}
+        if seen.size
+        else {}
+    )
 
     if metric in _VARIABLE_LIKE_METRICS:
         # the field itself: the variable's own colours, range and log-ness
@@ -413,6 +473,7 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
             vmin=float(norm.vmin),
             vmax=float(norm.vmax),
             log=is_log(standard_name),
+            **extremes,
         )
 
     vmin, vmax, center = _METRIC_RANGES.get(metric, (None, None, None))
@@ -428,7 +489,9 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
 
     if center is not None:
         if vmin is not None and vmax is not None:
-            return MetricColors(cmap=cmap, vmin=float(vmin), vmax=float(vmax))
+            return MetricColors(
+                cmap=cmap, vmin=float(vmin), vmax=float(vmax), **extremes
+            )
         spread = (
             float(np.percentile(np.abs(finite - center), 98)) if finite.size else 0.0
         )
@@ -436,7 +499,9 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
             spread = _DEGENERATE_SPREAD
         if vmin is not None:  # a floor: keep the symmetric low end above it
             spread = min(spread, center - float(vmin))
-        return MetricColors(cmap=cmap, vmin=center - spread, vmax=center + spread)
+        return MetricColors(
+            cmap=cmap, vmin=center - spread, vmax=center + spread, **extremes
+        )
 
     lo = (
         float(vmin)
@@ -453,4 +518,4 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
         hi = float(np.percentile(finite, 98))
     if hi <= lo:  # a constant field: give the bar somewhere to go
         hi = lo + 1.0
-    return MetricColors(cmap=cmap, vmin=lo, vmax=hi)
+    return MetricColors(cmap=cmap, vmin=lo, vmax=hi, **extremes)

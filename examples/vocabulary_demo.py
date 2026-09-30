@@ -11,7 +11,10 @@ rather than reading anything over the network. Shows:
 3. ``add_pattern()`` -- teach an *existing* concept a whole family of spellings via
    a narrow, anchored regex, when an enumerated alias list would be tedious.
 4. ``register()`` -- add a wholly new concept from scratch, live.
-5. How to make an addition permanent: edit ``ocean_skill/vocabulary.py``'s
+5. ``register(..., broader=)`` -- file a new *specific kind of* an existing concept
+   under it (mixed layer depth by sigma_theta, by temperature, ...): asking for the
+   broad name is satisfied by any of them, asking for a specific one never by another.
+6. How to make an addition permanent: edit ``ocean_skill/vocabulary.py``'s
    ``VOCABULARY`` dict directly instead of calling these at runtime.
 
 Run:  python examples/vocabulary_demo.py
@@ -127,7 +130,66 @@ print("find_variable(ph_shaped, 'ph') ->", found.name if found is not None else 
 
 print()
 print("=" * 70)
-print("5. Every resolution says which variable it actually found")
+print("5. broader=: a concept that is one specific KIND of another")
+print("=" * 70)
+
+# Mixed layer depth has one generic CF name and four definition-specific ones -- CF
+# names only the variable that defines the base of the layer, never the threshold.
+# Each specific entry in VOCABULARY says "broader": "mld"; narrower_names() and
+# covers() read that. It is a one-way relation, so it is not an alias.
+print("narrower_names('mld'):")
+for standard_name in vocabulary.narrower_names("mld"):
+    print("  ", standard_name)
+
+print()
+print("covers(requested, declared) -- does a source declaring `declared` satisfy a")
+print("request for `requested`?")
+for requested, declared in [
+    ("mld", "mld_by_sigma_theta"),  # a broad request, a specific source: yes
+    ("mld_by_sigma_theta", "mld"),  # the generic name has not said which: no
+    ("mld_by_sigma_theta", "mld_by_sigma_t"),  # siblings never cover each other: no
+]:
+    answer = vocabulary.covers(requested, declared)
+    print(f"  covers({requested!r}, {declared!r}) -> {answer}")
+
+# register(..., broader=) files a NEW definition under the broad name, live. The
+# standard_name is made up here -- a stand-in for a definition of your own.
+vocabulary.register("mld_by_shear", "my_mld_defined_by_shear", broader="mld")
+print()
+print("after register('mld_by_shear', ..., broader='mld'):")
+print("  covers('mld', 'mld_by_shear') ->", vocabulary.covers("mld", "mld_by_shear"))
+print("  covers('mld_by_shear', 'mld') ->", vocabulary.covers("mld_by_shear", "mld"))
+
+# The same rule inside a dataset: one definition answers the broad name (and says
+# which it picked); a definition the dataset does not carry is simply not found.
+shear_shaped = _tiny_dataset("my_mld_defined_by_shear")
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    da = find_variable(shear_shaped, "mld")
+message = caught[0].message if caught else None
+print("find_variable(ds, 'mld')                ->", da.name)
+print("message shown                           :", message)
+not_carried = find_variable(shear_shaped, "mld_by_sigma_theta")
+print("find_variable(ds, 'mld_by_sigma_theta') ->", not_carried)
+
+# Two different definitions and no generic variable: choosing either would be a coin
+# flip on the numbers, so nothing is returned and the warning names the candidates.
+# (This matching is plain cf-xarray -- the generic entry's registered criteria include
+# every definition -- so ds.cf["mld"] raises cf-xarray's own "multiple variables".)
+two_definitions = _tiny_dataset("my_mld_defined_by_shear")
+two_definitions["ocean_mixed_layer_thickness_defined_by_sigma_theta"] = (
+    two_definitions["my_mld_defined_by_shear"]
+)
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    ambiguous = find_variable(two_definitions, "mld")
+message = caught[0].message if caught else None
+print("two definitions, asked for 'mld'        ->", ambiguous)
+print("message shown                           :", message)
+
+print()
+print("=" * 70)
+print("6. Every resolution says which variable it actually found")
 print("=" * 70)
 
 # sea_water_temperature (in-situ) is an alias of sea_water_potential_temperature.

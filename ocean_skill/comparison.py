@@ -569,6 +569,69 @@ def as_select(select: Any) -> dict[str, Any]:
     )
 
 
+def _is_latest(value: Any) -> bool:
+    return isinstance(value, str) and value == "latest"
+
+
+def _resolve_latest(select: dict[str, Any], source: Any) -> dict[str, Any]:
+    """Replace a ``"latest"`` time entry in ``select`` with ``source``'s newest step.
+
+    The shorthand suites already spell as ``time: latest``, resolved the same way --
+    against the source's own native time axis, to the ISO string of its last step --
+    so an API call and a suite page keying the same run agree. It has to be a
+    concrete instant *before* anything keys on ``select``: the on-disk cache hashes it
+    as written, so a literal ``"latest"`` (or a position like ``{"index": -1}``) would
+    keep serving the old last step after the run gained a new one, and labels would
+    name the word rather than the date. Resolved this way, a run that has not moved
+    hits the cache and one that has is a new key.
+
+    ``select`` comes back untouched, with no source read, when it has no ``"latest"``.
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    keys = [k for k in _TIME_KEYS if _is_latest(select.get(k))]
+    if not keys:
+        return select
+    import pandas as pd
+    import xarray as xr
+
+    from ocean_skill import extrema
+
+    index = extrema._native_time_index(source)
+    if not isinstance(index, pd.DatetimeIndex | xr.CFTimeIndex):
+        raise ValueError(
+            f"{source!r}'s time axis is not a decoded calendar axis"
+            f"{f' ({type(index).__name__})' if index is not None else ''}, so "
+            "'latest' has no newest step to name. This is usually a climatology "
+            "read with decode_times=False -- select its own numeric time value "
+            "instead."
+        )
+    latest = index[-1].isoformat()
+    return {**select, **dict.fromkeys(keys, latest)}
+
+
+def _resolve_latest_lanes(select: dict[str, Any], test: Any) -> dict[str, Any]:
+    """:func:`_resolve_latest` for a Comparison's already-normalized ``select``.
+
+    ``"latest"`` names the newest step of the *test* source: a flat select gives both
+    lanes that one instant (the reference snaps to its nearest step, as it does for any
+    instant), and a pair-spec resolves its test side. A reference-side ``"latest"`` is
+    refused rather than guessed at -- a reference is usually an observational product
+    with no run to be "latest" of.
+    """
+    if not is_pair_spec(select):
+        return _resolve_latest(select, test)
+    from ocean_skill.sources import _TIME_KEYS
+
+    if any(_is_latest(select["reference"].get(k)) for k in _TIME_KEYS):
+        raise ValueError(
+            "select['reference'] cannot use time: 'latest' -- it names the newest "
+            "step of the test source. Give the reference an explicit date, or use "
+            "select={'test': {'time': 'latest'}, ...} to resolve only the test side."
+        )
+    return {**select, "test": _resolve_latest(select["test"], test)}
+
+
 def is_depth_band(depth: Any) -> bool:
     """Report whether ``depth`` asks for an average over a band rather than a level.
 
@@ -1297,31 +1360,94 @@ def _short_variable_label(spec: Any) -> str:
     the package calls things — and a combination spec has no short name to look up.
     Shared by :func:`compare` and :func:`_pooled_labels` so a set's own labels and a
     pooled set's relabelling cannot drift apart.
+
+    A short name that already ends in a bracket -- the criterion-specific mixed layer
+    depths' ``"MLD (σθ)"`` (see :func:`ocean_skill.vars.short_name`) -- takes the
+    method *inside* it, ``"MLD (σθ, density_threshold)"``, rather than growing a
+    second parenthetical (``"MLD (σθ) (density_threshold)"``) that reads as two
+    unrelated qualifiers. A name with no bracket keeps the plain suffix, so the
+    generic label (``"ocean mixed layer thickness (density_threshold)"``) is what it
+    always was.
     """
     base = _short_variable_label_base(spec)
     method = _calculate_method(spec)
-    return f"{base} ({method})" if method else base
+    if not method:
+        return base
+    if base.endswith(")"):
+        return f"{base[:-1]}, {method})"
+    return f"{base} ({method})"
 
 
 def _variable_matches(standard_name: str | None, variable: Any, wanted: Any) -> bool:
     """Whether a field/comparison's variable matches one ``.sel(variable=...)`` value.
 
-    Resolves both sides through :func:`ocean_skill.vocabulary.resolve_name` so a short
+    Goes through the vocabulary (:func:`ocean_skill.vocabulary.covers`) so a short
     name, an alias, and the CF standard_name itself all pick out the same member --
-    ``"temp"``, ``"temperature"`` and ``"sea_water_temperature"`` all match. A
-    combination/pair-spec ``wanted`` (anything not a plain string) has no vocabulary
-    entry to resolve through, so it falls back to matching the raw variable spec by
-    equality. Shared by :meth:`FieldSet.sel` and :meth:`ComparisonSet.sel` so the two
-    cannot drift apart on what "the same variable" means.
+    ``"temp"``, ``"temperature"`` and ``"sea_water_temperature"`` all match -- and
+    so a *broad* name also picks out members of any of its specific definitions:
+    ``.sel(variable="mld")`` keeps a sigma_theta mixed layer depth, a temperature one
+    and a mixing-scheme one alike, while ``.sel(variable="mld_by_sigma_theta")`` keeps
+    only the sigma_theta ones (never a member that carries the generic name, which
+    has not said which definition it is, nor a sibling definition). That is the same
+    one-directional rule :func:`ocean_skill.catalog.find` and :func:`compare` apply
+    to a request against a *source*, applied here to a request against a *member*, so
+    narrowing a set the way a search built it never disagrees with the search.
+
+    A member matches on either its ``standard_name`` or, when the spec is itself a
+    plain name, that name. A combination/pair-spec ``wanted`` (anything not a plain
+    string) has no vocabulary entry to resolve through, so it falls back to matching
+    the raw variable spec by equality. Shared by :meth:`FieldSet.sel` and
+    :meth:`ComparisonSet.sel` so the two cannot drift apart on what "the same
+    variable" means.
     """
-    from ocean_skill.vocabulary import resolve_name
+    from ocean_skill.vocabulary import covers
 
     if not isinstance(wanted, str):
         return variable == wanted
-    resolved = resolve_name(wanted)
-    if standard_name is not None and resolve_name(standard_name) == resolved:
+    if standard_name is not None and covers(wanted, standard_name):
         return True
-    return isinstance(variable, str) and resolve_name(variable) == resolved
+    return isinstance(variable, str) and covers(wanted, variable)
+
+
+def _lane_standard_name(da) -> str | None:
+    """Return a prepared lane's canonical standard_name, or ``None`` if it names none.
+
+    ``attrs["standard_name"] or .name`` -- the same fallback
+    :func:`ocean_skill.units.find_variable` itself uses (a properly standardized field
+    is keyed *by* its standard_name even when nothing stamped the attribute; ROMS
+    lanes are exactly that, carrying the name only as the variable's key) -- run
+    through :func:`ocean_skill.vocabulary.resolve_name` so two spellings of one name
+    read as one. A lane whose name is missing, empty or not a string yields ``None``
+    rather than a made-up one, which is what :meth:`Comparison.align` leaves unstored
+    and :meth:`Comparison._warn_on_definition_mismatch` treats as "nothing to check".
+    """
+    from ocean_skill.vocabulary import resolve_name
+
+    attrs = getattr(da, "attrs", None) or {}
+    name = attrs.get("standard_name") or getattr(da, "name", None)
+    return resolve_name(name) if isinstance(name, str) and name else None
+
+
+def _aligned_standard_name(aligned, role: str) -> str | None:
+    """Return the canonical standard_name recorded for one aligned lane, if any.
+
+    ``role`` is ``"test"`` or ``"reference"``. Reads ``attrs["<role>_standard_name"]``
+    first -- what :meth:`Comparison.align` writes from the lane's *resolved* name
+    (:func:`_lane_standard_name`) before the pair is cached, so it is there both on a
+    freshly computed pair and on one read back from disk -- and falls back to the
+    ``role`` array's own ``standard_name`` attribute (which the regrid step keeps,
+    ``keep_attrs=True``) for a pair cached before this attr existed.
+
+    The array's ``.name`` is deliberately *not* a fallback here: the aligned
+    dataset's variables are literally ``"test"``/``"reference"``, which says nothing
+    about the field, and treating that as a name is the failure
+    :meth:`Comparison._warn_on_pair_spec_mismatch`'s ``trust_name_fallback=False``
+    exists to prevent. ``None`` when neither is present.
+    """
+    name = aligned.attrs.get(f"{role}_standard_name")
+    if not name and role in aligned:
+        name = aligned[role].attrs.get("standard_name")
+    return name if isinstance(name, str) and name else None
 
 
 #: Keys naming the vertical axis in a `select`, in any accepted spelling.
@@ -2015,7 +2141,18 @@ def _prepare(
             da = da.squeeze(_tsp_tdim, drop=False)
 
     if calculated:
-        bad = "sigma0" if sigma is not None else "depth" if depth is not None else None
+        # A plain surface request is not a contradiction here: it is the default
+        # Comparison._prepare_lane/Field._surfaced() inject for *every* grid lane
+        # that names no depth at all (so a calculated variable shares their cache
+        # entry rather than needing its own carve-out at each injection site) --
+        # a caller-visible no-op for a calculator, which never had a vertical axis
+        # to take "surface" from in the first place. A real depth, a band, a level
+        # list, or sigma0 is still a genuine contradiction and still refused.
+        bad = (
+            "sigma0"
+            if sigma is not None
+            else "depth" if (depth is not None and not surface) else None
+        )
         if bad is not None:
             raise ValueError(
                 f"{variable!r} is a registered calculator, which already reduces "
@@ -3336,6 +3473,7 @@ class Comparison:
         # the model's calendar time can) -- see select_for/aggregate_for, which each
         # lane's own prepare() call resolves this through, mirroring variable_for.
         self.select = _normalize_pair(select, "select", normalize_side=as_select)
+        self.select = _resolve_latest_lanes(self.select, test)
         self.aggregate = _normalize_pair(aggregate, "aggregate")
         if is_pair_spec(self.aggregate):
             for role, side in self.aggregate.items():
@@ -4005,6 +4143,18 @@ class Comparison:
         **test** side names the figure -- an arbitrary but necessary choice, since the
         two sides may resolve to different CF names (that mismatch itself is reported
         once, in :meth:`align`, rather than silently picked between here).
+
+        A ``{"calculate": ...}`` spec usually says nothing about its own output name --
+        what it produces is only known once it has run (the MLD calculator names its
+        result by method, ``..._defined_by_sigma_theta`` for ``density_threshold``) --
+        so, once this comparison has been aligned, the test lane's *resolved* name
+        answers instead: the ``test_standard_name`` :meth:`align` records on the
+        aligned pair (which survives the disk cache, where the arrays' own attrs may
+        not), else the aligned ``test`` array's own ``standard_name`` attribute.
+        Without that a calculated MLD drew in the anonymous default colormap and label
+        in both renderers, though its name was known by then. Read off the *already
+        held* aligned pair, never :attr:`aligned` -- this property never triggers an
+        align or a read itself, so an un-aligned, unnamed comparison is still ``None``.
         """
         from ocean_skill.operators import DERIVED
 
@@ -4017,7 +4167,10 @@ class Comparison:
             # A DERIVED key is a name for a spec, not a CF name -- expand it, or
             # colormaps, plot labels and the metrics table all see the key.
             spec = DERIVED.get(spec, spec)
-        return spec if isinstance(spec, str) else spec.get("standard_name")
+        name = spec if isinstance(spec, str) else spec.get("standard_name")
+        if name is None and self._aligned is not None:
+            name = _aligned_standard_name(self._aligned, "test")
+        return name
 
     @property
     def _cache_key(self) -> str:
@@ -4307,6 +4460,16 @@ class Comparison:
         computed the pair would silently miss the one safety net an unlabelled
         pair-spec has.
 
+        "Different" means a different *quantity*, not a different spelling
+        (:func:`ocean_skill.vocabulary.same_quantity`): ``"mixed_layer_depth"`` on one
+        side and ``"ocean_mixed_layer_thickness"`` on the other are one variable and
+        stay silent, where a temperature-defined mixed layer depth against a
+        sigma_theta one is two, and warns. The generic name and a specific definition
+        are not the same quantity either (the generic has not said which definition it
+        carries), so that pairing warns too -- this check makes no exception for a
+        family. The plain-request counterpart, for a *broad* ``variable="mld"`` rather
+        than a pair-spec, is :meth:`_warn_on_definition_mismatch`.
+
         Checked against the *resolved* fields rather than the specs themselves: a
         ``{"calculate": ...}`` spec's output name is not statically knowable (only its
         *inputs* are, via :data:`ocean_skill.operators.CALCULATOR_INPUTS`), so this has
@@ -4329,6 +4492,7 @@ class Comparison:
         import warnings
 
         from ocean_skill import _stacklevel
+        from ocean_skill.vocabulary import same_quantity
 
         spec = self.variable
         if not is_pair_spec(spec) or spec.get("standard_name"):
@@ -4338,7 +4502,11 @@ class Comparison:
         if trust_name_fallback:
             test_name = test_name or test_da.name
             reference_name = reference_name or reference_da.name
-        if test_name and reference_name and test_name != reference_name:
+        if (
+            test_name
+            and reference_name
+            and not same_quantity(test_name, reference_name)
+        ):
             warnings.warn(
                 f"this comparison's test side resolves to {test_name!r} but its "
                 f"reference side resolves to {reference_name!r} -- a pair-spec with "
@@ -4348,6 +4516,95 @@ class Comparison:
                 "intentional, or check the two method/variable choices if it is not.",
                 stacklevel=_stacklevel.find(),
             )
+
+    def _warn_on_definition_mismatch(self, test_sn, reference_sn) -> None:
+        """Warn once when a broad request lands on two different specific definitions.
+
+        The plain-request counterpart of :meth:`_warn_on_pair_spec_mismatch`. A
+        pair-spec is the caller *writing down* two recipes, so a mismatch there is
+        checked against what the two sides resolved to; a plain ``variable="mld"``
+        writes down nothing, yet is exactly what reaches two different mixed layer
+        depths -- it is a *broad* name, satisfied by a source carrying any one of its
+        definitions (:func:`ocean_skill.vocabulary.covers`), so ROMS' KPP ``hbls`` (the
+        mixing scheme's own boundary layer, or the generic name on a catalog that
+        predates the definition-specific ones) on the test side can be paired with a
+        Holte & Talley sigma_theta climatology on the reference side. Both are "mixed
+        layer depth", both have metres for units, and the metrics would score one
+        against the other without a word: the definitions differ by more than any
+        tolerance would (they put the base of the layer by a different criterion
+        entirely), so a bias or a correlation here partly measures the definitions
+        rather than the model. Under the standing "warn, don't annotate" rule this is
+        where that gets said, once, before anything downstream treats the pair as
+        settled.
+
+        ``test_sn``/``reference_sn`` are the two lanes' resolved standard_names -- from
+        :func:`_lane_standard_name` on a freshly prepared pair, from
+        :func:`_aligned_standard_name` on one read back from the cache (where
+        :meth:`align` stored them, since a ROMS lane carries no ``standard_name``
+        attribute and the cached arrays are literally named ``"test"``/``"reference"``).
+        Either may be missing (an older cache entry, a lane that names nothing), and
+        then there is nothing to check and this stays silent.
+
+        Applies only when ``self.variable`` is a plain string with specific
+        definitions under it (:func:`ocean_skill.vocabulary.narrower_names`): a
+        pair-spec is :meth:`_warn_on_pair_spec_mismatch`'s, a combination has no single
+        name to have definitions of, and a request that already names *one* definition
+        (``"mld_by_sigma_theta"``) either got it on both sides or did not pair at all
+        (:func:`compare` filters on :func:`~ocean_skill.vocabulary.covers`). Silent too
+        when both lanes carry the same definition, and when either names something
+        outside the request's family altogether -- a raw product name unknown to the
+        vocabulary is not evidence of a mismatch, only of a name this cannot judge.
+        """
+        import warnings
+
+        from ocean_skill import _stacklevel
+        from ocean_skill.vars import short_name
+        from ocean_skill.vocabulary import narrower_names, nickname, resolve_name
+
+        variable = self.variable
+        if not isinstance(variable, str):
+            return
+        specifics = narrower_names(variable)
+        if not specifics or not test_sn or not reference_sn:
+            return
+        generic = resolve_name(variable)
+        test, reference = resolve_name(test_sn), resolve_name(reference_sn)
+        family = {n.lower() for n in (generic, *specifics)}
+        if (
+            test.lower() not in family
+            or reference.lower() not in family
+            or test.lower() == reference.lower()
+        ):
+            return
+
+        def describe(name: str) -> str:
+            # The generic name is the one that states no definition -- worth saying
+            # in so many words, since "the same name as the request" would otherwise
+            # read as the *unremarkable* side of the pair when it is the vaguer one.
+            if name.lower() == generic.lower():
+                return f"the generic {name!r} (no definition stated)"
+            return f"{short_name(name)!r} ({name})"
+
+        # Asking for one definition is the fix, and only a *specific* name can be
+        # asked for -- naming the generic one back would change nothing.
+        asks = " or ".join(
+            f"variables=[{(nickname(n) or n)!r}]"
+            for n in (test, reference)
+            if n.lower() != generic.lower()
+        )
+        warnings.warn(
+            f"this comparison asked for {(nickname(generic) or generic)!r} without "
+            "saying which definition, and its two sides carry different ones: the "
+            f"test side is {describe(test)} and the reference side is "
+            f"{describe(reference)}. Different definitions are different quantities "
+            "(and a side that states none may be any of them), but the metrics will "
+            "not distinguish them, so a bias or a correlation here partly measures "
+            "the definitions rather than the model. Ask for one definition "
+            f"explicitly ({asks}) so only sources carrying it are paired, or, if "
+            "comparing the two definitions is the point, pass a {'test': ..., "
+            "'reference': ..., 'standard_name': ...} pair-spec to say so.",
+            stacklevel=_stacklevel.find(),
+        )
 
     def _verify_point_window(
         self,
@@ -4482,6 +4739,14 @@ class Comparison:
         repeat is already served by :attr:`aligned`'s own memo. Pass
         ``refresh=True`` to recompute and overwrite a stale entry, or construct the
         comparison with ``cache=False`` to bypass disk entirely.
+
+        Two checks on what the lanes turned out to be run on the way, each warning at
+        most once per call and on a cached result as well as a fresh one (the lanes'
+        resolved standard_names are stored on the aligned pair for exactly that): a
+        pair-spec whose two sides resolve to different quantities
+        (:meth:`_warn_on_pair_spec_mismatch`), and a plain broad request such as
+        ``"mld"`` that landed on two different definitions of it
+        (:meth:`_warn_on_definition_mismatch`).
         """
         from ocean_skill import align as _align
         from ocean_skill import cache as _cache
@@ -4499,6 +4764,16 @@ class Comparison:
                 self._actual_depth = hit.attrs.get("actual_depth")
                 self._warn_on_pair_spec_mismatch(
                     hit["test"], hit["reference"], trust_name_fallback=False
+                )
+                # The definition check restores the same way, off the resolved names
+                # the fresh path below recorded on the pair's own attrs (a ROMS lane
+                # has no standard_name attribute, and the cached arrays are literally
+                # named "test"/"reference", so without them a hit would have nothing
+                # to check). An entry written before those attrs existed falls back
+                # to the arrays' own standard_name attribute, and is usually silent.
+                self._warn_on_definition_mismatch(
+                    _aligned_standard_name(hit, "test"),
+                    _aligned_standard_name(hit, "reference"),
                 )
                 # The cache holds the *raw* pair (see the save below and _cache_key's
                 # note): a demeaning request derives its own view here, off the shared
@@ -4828,6 +5103,12 @@ class Comparison:
             point_window_cells=test_cells,
         )
         self._warn_on_pair_spec_mismatch(t, r)
+        # Each lane's resolved name, computed once: the plain-request definition check
+        # reads them here, and they are stored on the aligned pair below so a later
+        # cache hit can run the same check (see _aligned_standard_name).
+        test_standard_name = _lane_standard_name(t)
+        reference_standard_name = _lane_standard_name(r)
+        self._warn_on_definition_mismatch(test_standard_name, reference_standard_name)
         self._actual_depth = r_depth
         # .load() so a computed result is a computed result: a cache hit hands back
         # eager arrays (open_zarr(...).load()), and a miss must leave the comparison
@@ -4870,6 +5151,18 @@ class Comparison:
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
+        # The lanes' resolved names ride along in the attrs for the same reason
+        # actual_depth does -- so a cached result restores the state a freshly
+        # computed one has. Nothing else keeps them: a ROMS lane carries no
+        # standard_name attribute at all (roms.standardize renames from the catalog's
+        # map and stamps nothing), and align() names its output arrays literally
+        # "test"/"reference", so once this pair is written to disk the only record of
+        # which definition each side was is what is stored here. Only real names are
+        # stored: a lane that named nothing leaves no attr rather than an empty one.
+        if test_standard_name:
+            self._aligned.attrs["test_standard_name"] = test_standard_name
+        if reference_standard_name:
+            self._aligned.attrs["reference_standard_name"] = reference_standard_name
         # Cache the *raw* pair, then demean the in-memory copy -- so this entry is
         # the one a raw run of the same comparison would also write and read, and the
         # two share it (see _cache_key). Demeaning is cheap enough to redo per load
@@ -6191,10 +6484,15 @@ class ComparisonSet:
 
         ``variable`` (alias ``standard_name``) matches through the vocabulary, so
         ``"temp"``, ``"temperature"`` and the CF standard_name all pick out the same
-        comparisons (see :func:`_variable_matches`). ``source``/``test`` (synonyms)
-        match the **test** lane (:attr:`Comparison.test_name`); ``reference`` matches
-        the **reference/obs** lane (:attr:`Comparison.reference_name`) -- the same
-        lanes :meth:`plot`'s ``rows=``/``cols=`` facets by (see
+        comparisons (see :func:`_variable_matches`) -- and a broad name also picks out
+        comparisons of any of its specific definitions: ``"mld"`` keeps every mixed
+        layer depth, ``"mld_by_sigma_theta"`` only the sigma_theta ones. A calculated
+        member (a ``{"calculate": "mld", ...}`` side) matches by the name it resolved
+        to when it was aligned, which every member :func:`compare` returns has been.
+        ``source``/``test`` (synonyms) match the **test** lane
+        (:attr:`Comparison.test_name`); ``reference`` matches the **reference/obs**
+        lane (:attr:`Comparison.reference_name`) -- the same lanes :meth:`plot`'s
+        ``rows=``/``cols=`` facets by (see
         :func:`ocean_skill.plot.series._group_key`). A value may be one spec or a
         list of them, matched as membership.
 
@@ -7872,7 +8170,10 @@ def compare(
     select
         Dict of axis -> selection (e.g. ``{"time": "2012-01"}``), or a
         ``{"test": ..., "reference": ...}`` pair-spec giving each lane its
-        own selection. ``None`` (default) selects nothing.
+        own selection. ``{"time": "latest"}`` is the newest step of the
+        *test* source's time axis, resolved to its date when the comparison is
+        built (both lanes then get that instant); it is refused on a pair-spec's
+        ``reference`` side. ``None`` (default) selects nothing.
     aggregate
         Dict of axis -> reduction (e.g. ``{"time": "mean"}``), or the same
         ``{"test": ..., "reference": ...}`` pair-spec shape as ``select``.
@@ -7972,6 +8273,27 @@ def compare(
     :func:`ocean_skill.align.sample_at`) -- is skipped the same way, discovered only
     once that one station's read is attempted. Progress prints one line per pair
     considered, plus a final count of comparisons formed and skipped.
+
+    Whether a source "has" the variable is decided by
+    :func:`ocean_skill.vocabulary.covers`, the rule :func:`ocean_skill.catalog.find`
+    searches by too, and it is one-directional where a variable has *specific
+    definitions* (mixed layer depth is the case that exists). A **broad** request --
+    ``variables=["mld"]`` -- pairs every source declaring the generic name *or* any one
+    of its definitions (``mld_by_sigma_theta``, ``mld_by_sigma_t``,
+    ``mld_by_temperature``, ``mld_by_mixing_scheme``); a **specific** one --
+    ``variables=["mld_by_sigma_theta"]`` -- pairs only sources declaring that one, not
+    the generic name (which has not said which definition it carries) and not a
+    sibling. The broad request is how you compare "whatever mixed layer depth each
+    side has", and it can therefore pair two *different* definitions (ROMS' KPP
+    ``hbls`` against a Holte & Talley sigma_theta climatology): those are different
+    quantities the metrics cannot tell apart, so :meth:`Comparison.align` warns once
+    when a plain broad request lands that way, naming both definitions
+    (:meth:`Comparison._warn_on_definition_mismatch`). Asking for one definition, or
+    -- when comparing two on purpose -- a ``{"test": ..., "reference": ...,
+    "standard_name": ...}`` pair-spec, settles it. A dataset that carries several
+    definitions and no generic variable cannot answer a broad request on its own:
+    the lookup warns, naming the candidates, and the pair is skipped like any other
+    one lacking the variable (see :func:`ocean_skill.units.find_variable`).
 
     A variable may also be a *combination* — ``{"sum": ["spChl", "diatChl",
     "diazChl"], "standard_name": CHL}`` — see :mod:`ocean_skill.operators`.
@@ -8293,11 +8615,7 @@ def compare(
     from ocean_skill import _stacklevel
     from ocean_skill.align import NoValidData
     from ocean_skill.catalog import resolve
-    from ocean_skill.vocabulary import (
-        equivalent_names,
-        resolve_and_report,
-        same_quantity,
-    )
+    from ocean_skill.vocabulary import resolve_and_report
 
     # Validated (and, for a pair, normalized to plain per-side dicts) once up front,
     # like `variables` below -- otherwise a one-sided {"test": ...} select/aggregate
@@ -8565,6 +8883,7 @@ def compare(
         convention (MODIS ships total chlorophyll; MARBL ships the components).
         Any one complete option is enough.
         """
+        from ocean_skill.catalog import _declares_variable
         from ocean_skill.operators import spec_names
         from ocean_skill.vocabulary import is_known
 
@@ -8572,21 +8891,8 @@ def compare(
             entry_meta = resolve(source).metadata
         except KeyError:
             return True
-        declared = entry_meta.get("variables")
-        if not declared:
+        if not entry_meta.get("variables"):
             return True  # no metadata to filter on; let the read decide
-        declared = set(declared)
-        if entry_meta.get("model") == "roms":
-            # roms.standardize derives true eastward/northward velocity from
-            # grid-relative u/v (rotated by the grid angle) at READ time, which a
-            # catalog's stored `variables` may not list -- built before this
-            # derivation existed, or otherwise missing the same augmentation
-            # ocean_skill.build._probe now applies at build time. Without this, a
-            # ROMS source that plainly ends up offering the variable at read time
-            # would be wrongly excluded here, before the read ever runs.
-            from ocean_skill.roms import derived_geographic_velocities
-
-            declared |= set(derived_geographic_velocities(declared))
         options = spec_names(variable)
         if not options:
             # A calculator that registered no `inputs=` (ocean_skill.operators
@@ -8599,16 +8905,12 @@ def compare(
             # in register_calculator's own docstring.
             return True
 
-        def _declared_offers(n: str) -> bool:
-            # The literal intersection is the regex-free fast path; same_quantity
-            # additionally reaches a declared spelling only a vocabulary pattern
-            # recognizes, so a source advertising e.g. "Temperature_CTD" still
-            # counts as offering "temperature".
-            return bool(equivalent_names(n) & declared) or any(
-                same_quantity(n, d) for d in declared
-            )
-
-        if any(all(_declared_offers(n) for n in opt) for opt in options):
+        # Same test, same function, as osk.find(variable=...) -- a source a search
+        # returns is a source this pairs (see catalog._declares_variable: the ROMS
+        # derived-velocity names, and the vocabulary's broad/specific rule).
+        if any(
+            all(_declares_variable(entry_meta, n) for n in opt) for opt in options
+        ):
             return True  # positively offered
 
         # Not positively offered -- but "absent" and "unknowable" are different.

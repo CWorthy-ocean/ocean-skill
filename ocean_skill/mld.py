@@ -1,23 +1,46 @@
 """Mixed layer depth (MLD): the genuinely custom diagnostic named in operators.py.
 
-Threshold-criterion methods only, for now — matching two of the four fields the Holte
-& Talley Argo climatology publishes (``density_threshold``, ``temperature_threshold``),
-so a model run can be compared against that observational product with the *same*
-definition rather than an incidental one. The other two (``density_algorithm``,
+Threshold-criterion methods only, for now (``density_threshold``,
+``temperature_threshold``), so a model run can be compared against an observational
+MLD product with the *same* definition rather than an incidental one. The product this
+is aimed at is the Holte & Talley Argo monthly climatology
+(``Argo_mixedlayers_monthlyclim_04142022.nc``), and that file ships density-based MLD
+fields only: ``mld_dt_*`` (density threshold — 0.03 kg/m3 from 10 dbar, which
+``density_threshold`` matches) and ``mld_da_*`` (their hybrid density algorithm). It has
+no temperature-criterion MLD field at all, so ``temperature_threshold`` (de Boyer
+Montégut's 0.2 degC from 10 m) is the same kind of definition but has nothing in that
+file to be scored against. The hybrid ``*_algorithm`` methods (``density_algorithm``,
 ``temperature_algorithm``) are Holte & Talley's 2009 hybrid method — a profile-shape
 fit plus gradient/curvature feature detection plus a selection tree — and are a
 separate, larger port (reference: the Climate Data Toolbox's ``mld.m``,
 https://github.com/chadagreene/CDT/blob/master/cdt/mld.m); ``calculate_mld`` names
 them explicitly so asking for one now fails with what to expect instead of a bare
-KeyError.
+KeyError. (``mld_da_*`` is what a ported ``density_algorithm`` would be scored
+against.)
 
-**Definition** (de Boyer Montégut 2004 / Holte & Talley "threshold" fields): the
-shallowest depth at which a profile variable differs from its value at ``ref_depth``
-by more than ``threshold``, found by linear interpolation between the two bracketing
-model levels — not snapped to the nearer one. A column shallower than ``ref_depth``,
-or one with no crossing at all (fully mixed to the deepest resolved level), returns
-NaN, mirroring how :func:`ocean_skill.roms.to_depth` treats a target outside the
-water column: no extrapolation, said with NaN rather than a guess.
+**Definition** (de Boyer Montégut 2004, the same criterion Holte & Talley's
+density-threshold field uses): the shallowest depth at which a profile variable
+differs from its value at ``ref_depth`` by more than ``threshold``, found by linear
+interpolation between the two bracketing model levels — not snapped to the nearer
+one. A column shallower than ``ref_depth``, or one with no crossing at all (fully
+mixed to the deepest resolved level), returns NaN, mirroring how
+:func:`ocean_skill.roms.to_depth` treats a target outside the water column: no
+extrapolation, said with NaN rather than a guess.
+
+**CF names** (:data:`_STANDARD_NAMES`) follow the method, because CF's
+``ocean_mixed_layer_thickness_defined_by_<criterion>`` family encodes only the
+criterion *variable*: the base of the layer is where that quantity (temperature,
+sigma-t, or sigma-theta) differs from its surface value by a certain amount, and
+neither the amount nor the depth standing in for "the surface" is part of the name.
+So ``density_threshold`` produces
+``ocean_mixed_layer_thickness_defined_by_sigma_theta`` (sigma0 via TEOS-10 is a
+potential-density anomaly, i.e. CF's sigma-theta criterion) and
+``temperature_threshold`` produces
+``ocean_mixed_layer_thickness_defined_by_temperature``. Neither produces the generic
+``ocean_mixed_layer_thickness``, which names no criterion at all. What the name
+leaves out is recorded on the result instead, in its ``mld_method``,
+``mld_threshold`` and ``mld_ref_depth`` attrs — the place to look for "which
+threshold, measured from what depth?".
 
 Only ROMS output is supported: the calculation needs the full water column *before*
 any vertical selection/reduction has collapsed it, which is exactly what
@@ -40,17 +63,37 @@ __all__ = [
 ]
 
 #: Default reference depth (m) and thresholds, matching de Boyer Montégut (2004) /
-#: Holte & Talley's "threshold" fields, and CDT's ``mld.m`` defaults (``refpres``,
+#: Holte & Talley's threshold criteria, and CDT's ``mld.m`` defaults (``refpres``,
 #: ``dthresh``, ``tthresh``) — named the same way now so the hybrid methods slot in
 #: later without a signature break.
 REF_DEPTH = 10.0
 DENSITY_THRESHOLD = 0.03  # kg/m3
 TEMPERATURE_THRESHOLD = 0.2  # degC
 
-#: Holte & Talley's two hybrid ("algorithm") fields. Not implemented here — see the
+#: Holte & Talley's two hybrid ("algorithm") methods. Not implemented here — see the
 #: module docstring — named explicitly so a request for one says what to expect
 #: instead of "unknown method".
 _HYBRID_METHODS = frozenset({"density_algorithm", "temperature_algorithm"})
+
+#: The CF standard_name each method's output carries — one per *criterion variable*,
+#: because that is all CF's ``ocean_mixed_layer_thickness_defined_by_<criterion>``
+#: family encodes: the layer's base is where the criterion quantity differs from its
+#: surface value by a certain amount, and neither the amount (``threshold``) nor what
+#: stands in for "the surface" (``ref_depth``) is part of the name. Those ride on the
+#: result's ``mld_threshold``/``mld_ref_depth`` attrs instead (see :func:`_mld_attrs`).
+#:
+#: ``density_threshold`` is a sigma-theta criterion: :func:`potential_density` is
+#: TEOS-10 sigma0, a potential-density anomaly referenced to the sea surface, which is
+#: what CF means by sigma-theta. Deliberately *not* the generic
+#: ``ocean_mixed_layer_thickness``: that names no criterion, so it could not tell
+#: these two definitions (or a mixing scheme's own boundary-layer depth, CF's
+#: ``..._defined_by_mixing_scheme``) apart. A method added to :data:`_METHODS` needs
+#: an entry here too — :func:`_mld_attrs` raises KeyError rather than quietly falling
+#: back to the generic name.
+_STANDARD_NAMES = {
+    "density_threshold": "ocean_mixed_layer_thickness_defined_by_sigma_theta",
+    "temperature_threshold": "ocean_mixed_layer_thickness_defined_by_temperature",
+}
 
 
 def _mld_threshold_1d(
@@ -159,9 +202,16 @@ def _require(ds, standard_name: str):
 
 
 def _mld_attrs(method: str, threshold: float, ref_depth: float) -> dict[str, Any]:
+    """Return the attrs of a computed MLD: its CF name from the method, plus its recipe.
+
+    The ``standard_name`` comes from :data:`_STANDARD_NAMES` (the criterion variable,
+    which is all a CF name can say); the ``mld_*`` attrs carry what the name leaves out
+    — the method, the threshold and the reference depth — so a result stays
+    self-describing after it has left this module.
+    """
     return {
         "units": "m",
-        "standard_name": "ocean_mixed_layer_thickness",
+        "standard_name": _STANDARD_NAMES[method],
         "long_name": f"mixed layer depth ({method.replace('_', ' ')})",
         "mld_method": method,
         "mld_threshold": threshold,
@@ -174,8 +224,12 @@ def mld_density_threshold(
 ):
     """MLD as the shallowest depth where sigma0 exceeds sigma0(ref_depth) + threshold.
 
-    de Boyer Montégut (2004); Holte & Talley's ``density_threshold`` field. Defaults
-    (0.03 kg/m3 from 10 m) match both.
+    de Boyer Montégut (2004); Holte & Talley's ``mld_dt_*`` monthly-climatology
+    fields. Defaults (0.03 kg/m3 from 10 m) match both. The result is named
+    ``ocean_mixed_layer_thickness_defined_by_sigma_theta`` (sigma0 is a
+    potential-density anomaly, CF's sigma-theta criterion); the threshold and
+    reference depth are on its ``mld_threshold``/``mld_ref_depth`` attrs, not in the
+    name (see the module docstring).
     """
     temp = _require(ds, "sea_water_potential_temperature")
     salt = _require(ds, "sea_water_practical_salinity")
@@ -187,8 +241,11 @@ def mld_density_threshold(
     z_rho = ds.coords["z_rho"]
     sigma0 = potential_density(temp, salt, z_rho, ds.coords["lon"], ds.coords["lat"])
     out = mld_threshold(sigma0, z_rho, threshold=threshold, ref_depth=ref_depth, s_dim=s_dim)
-    out = out.rename("ocean_mixed_layer_thickness")
-    out.attrs = _mld_attrs("density_threshold", threshold, ref_depth)
+    # The variable's name *is* its standard_name; taking both from the one attrs dict
+    # means they cannot drift apart.
+    attrs = _mld_attrs("density_threshold", threshold, ref_depth)
+    out = out.rename(attrs["standard_name"])
+    out.attrs = attrs
     return out
 
 
@@ -197,8 +254,12 @@ def mld_temperature_threshold(
 ):
     """MLD as the shallowest depth where |T - T(ref_depth)| exceeds threshold.
 
-    de Boyer Montégut (2004); Holte & Talley's ``temperature_threshold`` field.
-    Defaults (0.2 degC from 10 m) match both.
+    de Boyer Montégut (2004)'s temperature criterion; the default (0.2 degC from 10 m)
+    is theirs. Holte & Talley's monthly climatology carries no temperature-criterion
+    MLD field, so there is nothing in it to match (see the module docstring). The
+    result is named ``ocean_mixed_layer_thickness_defined_by_temperature``; the
+    threshold and reference depth are on its ``mld_threshold``/``mld_ref_depth``
+    attrs, not in the name.
     """
     temp = _require(ds, "sea_water_potential_temperature")
     if "z_rho" not in ds.coords:
@@ -208,8 +269,10 @@ def mld_temperature_threshold(
         )
     z_rho = ds.coords["z_rho"]
     out = mld_threshold(temp, z_rho, threshold=threshold, ref_depth=ref_depth, s_dim=s_dim)
-    out = out.rename("ocean_mixed_layer_thickness")
-    out.attrs = _mld_attrs("temperature_threshold", threshold, ref_depth)
+    # Name and standard_name from one attrs dict, as in mld_density_threshold.
+    attrs = _mld_attrs("temperature_threshold", threshold, ref_depth)
+    out = out.rename(attrs["standard_name"])
+    out.attrs = attrs
     return out
 
 
@@ -224,10 +287,12 @@ _METHODS = {
 def calculate_mld(ds, *, method: str | None = None, **kwargs):
     """Dispatch to one of the threshold MLD methods by name.
 
-    ``method`` is required rather than defaulted, on purpose: four methods exist in
-    the observational product this is meant to match, two are implemented here, and
-    picking one silently would be the kind of "looks right" number this project
-    otherwise refuses to produce (see :func:`ocean_skill.operators.combine`).
+    ``method`` is required rather than defaulted, on purpose: four methods are named
+    here (two implemented, two hybrid ones not yet ported), and picking one silently
+    would be the kind of "looks right" number this project otherwise refuses to
+    produce (see :func:`ocean_skill.operators.combine`). The method also decides the
+    result's CF name (:data:`_STANDARD_NAMES`), so it is never just a detail of how
+    the number was made.
     """
     if method in _HYBRID_METHODS:
         raise NotImplementedError(

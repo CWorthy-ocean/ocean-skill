@@ -37,6 +37,8 @@ from ocean_skill.plot.coastline import (
 )
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
+    _data_range,
+    _station_values,
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
@@ -214,6 +216,86 @@ def _lonlat_extent(da) -> tuple[float, float, float, float] | None:
         return None
 
 
+def _clip_colorbar_opts(
+    clim, data_range, *, log: bool = False, label_clipped: bool = False
+) -> dict[str, Any] | None:
+    """Bokeh ``colorbar_opts`` marking each end of the bar that has data beyond it.
+
+    Bokeh's colour bar cannot grow the extension arrows matplotlib draws, so the same
+    fact -- "some data is clipped at this end" -- is told with a tick forced onto the
+    bar's end and labelled ``≥ 27`` / ``≤ 3``. Which ends is decided by the static
+    renderer's own :func:`~ocean_skill.plot.matplotlib_renderer._extend`, so the two
+    can only ever agree. ``label_clipped=True`` adds the true extreme to that label,
+    ``≥ 27 (max 29.9)``, in the words the static renderer's arrow tip uses.
+
+    ``None`` when nothing is clipped, leaving bokeh's own ticks untouched -- the forced
+    ticker replaces them, so it is only worth the swap when there is an end to mark.
+    """
+    from bokeh.models import FixedTicker
+    from matplotlib.ticker import LogLocator, MaxNLocator
+
+    from ocean_skill.plot.matplotlib_renderer import _clip_text, _extend
+
+    lo, hi = float(clim[0]), float(clim[1])
+    extend = _extend(lo, hi, data_range)
+    if extend == "neither":
+        return None
+    marked_low, marked_high = extend in ("min", "both"), extend in ("max", "both")
+
+    locator = LogLocator(numticks=6) if log else MaxNLocator(nbins=5)
+
+    def _pos(value: float) -> float:
+        """Where along the bar ``value`` sits, in the bar's own (log or linear) units."""
+        return float(np.log10(value)) if log else float(value)
+
+    span = (_pos(hi) - _pos(lo)) or 1.0
+    ends = [e for e, marked in ((lo, marked_low), (hi, marked_high)) if marked]
+    # interior ticks, minus any that would sit on top of a forced end label
+    ticks = [
+        float(t)
+        for t in locator.tick_values(lo, hi)
+        if lo < t < hi and all(abs(_pos(t) - _pos(e)) / span > 0.1 for e in ends)
+    ]
+    overrides = {}
+    for value, marked, sign, end, extreme in (
+        (lo, marked_low, "≤", "min", None if data_range is None else data_range[0]),
+        (hi, marked_high, "≥", "max", None if data_range is None else data_range[1]),
+    ):
+        if not marked:
+            continue
+        ticks.append(value)
+        text = f"{sign} {value:.4g}"
+        if label_clipped and extreme is not None:
+            text += f" ({_clip_text(end, extreme)})"
+        overrides[value] = text.replace("-", "\N{MINUS SIGN}")
+    return {
+        "ticker": FixedTicker(ticks=sorted(ticks)),
+        "major_label_overrides": overrides,
+    }
+
+
+def _mark_clipped(obj, clim, data_range, *, log: bool = False, label_clipped=False):
+    """Apply :func:`_clip_colorbar_opts` to every colour-mapped element inside ``obj``.
+
+    Option-by-type rather than ``obj.opts(colorbar_opts=...)``: a map is an overlay of
+    mesh, coastline and tiles, and the overlay itself rejects the option. The four types
+    are the ones this module colour-maps -- a mesh, the ``Image`` it becomes once
+    rasterized, scatter ``Points`` and a portrait's ``HeatMap`` -- and an element type
+    the object does not contain is skipped, not an error.
+    """
+    import holoviews as hv
+
+    opts = _clip_colorbar_opts(clim, data_range, log=log, label_clipped=label_clipped)
+    if opts is None:
+        return obj
+    return obj.opts(
+        *(
+            getattr(hv.opts, kind)(colorbar_opts=opts)
+            for kind in ("QuadMesh", "Image", "Points", "HeatMap")
+        )
+    )
+
+
 def _quadmesh(
     da,
     *,
@@ -240,6 +322,8 @@ def _quadmesh(
     invert_y: bool = False,
     bgcolor: str | None = None,
     xticks: tuple[tuple[float, str], ...] | None = None,
+    data_range: tuple[float, float] | None = None,
+    label_clipped: bool = False,
 ):
     """One interactive map panel with hover readout.
 
@@ -267,6 +351,13 @@ def _quadmesh(
     the static renderer paints by default — see ``matplotlib_renderer._basemap``), so
     a float has no fill to fade and is treated as truthy; only ``land=False`` has a
     visible effect here, dropping the coastline outline too for a fully bare map.
+
+    A colour bar whose ``clim`` has data beyond it gets that end marked ``≥``/``≤`` (see
+    :func:`_clip_colorbar_opts`) -- bokeh's counterpart of the static renderer's
+    extension arrow. ``data_range`` is the ``(min, max)`` to test ``clim`` against, for
+    a panel whose bar answers for more than its own data (a row's test and reference
+    share one scale); it defaults to this panel's. ``label_clipped=True`` adds the true
+    extreme to the marked label.
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
@@ -394,7 +485,11 @@ def _quadmesh(
         # bokeh plot class accepts it fine) -- confirmed by applying it via
         # .opts() on the already-built element instead, which this does.
         result = result.opts(invert_yaxis=True)
-    return result
+    if data_range is None:
+        data_range = _data_range(da, log=log)
+    return _mark_clipped(
+        result, clim, data_range, log=log, label_clipped=label_clipped
+    )
 
 
 def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
@@ -433,6 +528,7 @@ def _field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     titles=None,
     **_,
 ):
@@ -497,6 +593,7 @@ def _field_row(
     if log:
         vmin = max(vmin, 1e-6)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    scale_range = _data_range(t, r, log=log)  # the one scale both bars answer for
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -515,6 +612,7 @@ def _field_row(
             title=test_title,
             cmap=seq,
             clim=(vmin, vmax),
+            data_range=scale_range,
             units=units,
             geo=geo,
             log=log,
@@ -525,12 +623,14 @@ def _field_row(
             tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
             r,
             title=ref_title,
             cmap=seq,
             clim=(vmin, vmax),
+            data_range=scale_range,
             units=units,
             geo=geo,
             log=log,
@@ -541,6 +641,7 @@ def _field_row(
             tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
             d,
@@ -556,6 +657,7 @@ def _field_row(
             tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         ),
     ]
     outline = _domain_overlay(domain, t, geo=geo, tiles=tiles)
@@ -585,6 +687,7 @@ def _field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     titles=None,
     **_,
 ):
@@ -661,6 +764,7 @@ def _field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            colorbar_label_clipped=colorbar_label_clipped,
             titles=resolved_titles[i * 3 : i * 3 + 3],
         )
         for i, it in enumerate(items)
@@ -703,6 +807,7 @@ def _field_facet(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
@@ -837,6 +942,10 @@ def _field_facet(
         _clim(field.isel({row_dim: r})) if per_row else _clim(field)
         for r in range(nrows)
     ]
+    ranges = [
+        _data_range(field.isel({row_dim: r}) if per_row else field, log=log)
+        for r in range(nrows)
+    ]
 
     labels = (
         facet_labels(field[facet_dim])
@@ -883,6 +992,7 @@ def _field_facet(
             title=panel_title,
             cmap=seq,
             clim=clims[row],
+            data_range=ranges[row],
             units=units,
             geo=geo,
             log=log,
@@ -893,6 +1003,7 @@ def _field_facet(
             tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         )
         panel = mesh if outline is None else mesh * outline
         if location_items:
@@ -941,6 +1052,7 @@ def _section(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     **_,
@@ -1002,6 +1114,7 @@ def _section(
         aspect=SECTION_ASPECT,
         invert_y=True,
         bgcolor="#d9d9d9",
+        label_clipped=colorbar_label_clipped,
     )
 
 
@@ -1015,6 +1128,7 @@ def _cross(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
@@ -1086,6 +1200,7 @@ def _cross(
             hover=hover,
             rasterize=rasterize,
             robust=robust,
+            colorbar_label_clipped=colorbar_label_clipped,
             vmin=vmin,
             vmax=vmax,
         )
@@ -1108,9 +1223,11 @@ def _time_depth(
     rasterize: bool | str = "auto",
     mark: str | None = None,
     clim: tuple[float, float] | None = None,
+    data_range: tuple[float, float] | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     **_,
@@ -1144,7 +1261,9 @@ def _time_depth(
 
     ``vmin``/``vmax`` pin an exact colour range for this panel alone, overriding
     ``robust`` wherever either end is given; ``clim`` (the grid's own shared-scale
-    plumbing) still wins over both when given.
+    plumbing) still wins over both when given. ``data_range`` is likewise the grid's:
+    the ``(min, max)`` of everything the shared scale answers for, so the bar marks a
+    clipped end when *any* panel in the group runs past it (see :func:`_quadmesh`).
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -1212,7 +1331,13 @@ def _time_depth(
             points = points.opts(xlim=xlim)
         if ylim is not None:
             points = points.opts(ylim=ylim)
-        return points
+        return _mark_clipped(
+            points,
+            (lo, hi),
+            data_range if data_range is not None else _data_range(field, log=log),
+            log=log,
+            label_clipped=colorbar_label_clipped,
+        )
 
     raster = _should_rasterize(field, rasterize)
     mesh = _quadmesh(
@@ -1220,6 +1345,7 @@ def _time_depth(
         title=title,
         cmap=seq,
         clim=(lo, hi),
+        data_range=data_range,
         units=units,
         geo=False,
         log=log,
@@ -1235,6 +1361,7 @@ def _time_depth(
         invert_y=True,
         bgcolor="#d9d9d9",
         xticks=geometry.x_ticks,
+        label_clipped=colorbar_label_clipped,
     )
     # applied on the built element, not folded into _quadmesh's own opts, the same
     # way invert_y is there -- _quadmesh's xlim is documented geo-only (see its
@@ -1264,6 +1391,7 @@ def _time_depth_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
@@ -1322,6 +1450,7 @@ def _time_depth_grid(
     """
     hv = _extension()
 
+    from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
     from ocean_skill.plot._facets import (
         facet_grid_titles,
@@ -1398,6 +1527,7 @@ def _time_depth_grid(
 
     limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
     clims: dict[int, tuple[float, float] | None] = {}
+    reaches: dict[int, tuple[float, float] | None] = {}
     if limit_groups is not None:
         drawn_indices = [i for i, _ in drawn]
         for group in limit_groups:
@@ -1408,8 +1538,13 @@ def _time_depth_grid(
                 vmin=vmin,
                 vmax=vmax,
             )
+            reach = _data_range(
+                *(prepared[i][0] for i in group_indices),
+                log=is_log(cell_items[group_indices[0]].get("standard_name")),
+            )
             for i in group_indices:
                 clims[i] = span
+                reaches[i] = reach
 
     date_axis_kinds = {prepared[i][1].date_axis for i, _ in drawn}
     if sharex is None:
@@ -1481,6 +1616,7 @@ def _time_depth_grid(
                 title=resolved_full[i],
                 mark=mark,
                 clim=clims.get(i),
+                data_range=reaches.get(i),
                 xlim=xlims.get(i),
                 ylim=shared_ylim,
                 font_scale=font_scale,
@@ -1489,6 +1625,7 @@ def _time_depth_grid(
                 hover=hover,
                 rasterize=rasterize,
                 robust=robust,
+                colorbar_label_clipped=colorbar_label_clipped,
                 vmin=vmin,
                 vmax=vmax,
             )
@@ -1516,6 +1653,7 @@ def _field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     shared_limits: bool | str = False,
     titles=None,
     **_,
@@ -1628,15 +1766,21 @@ def _field_map_grid(
 
     limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
     clims: dict[int, tuple[float, float]] = {}
+    reaches: dict[int, tuple[float, float] | None] = {}
     if limit_groups is not None:
         drawn_indices = [i for i, _ in drawn]
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
-            span = _limits(
-                *(cell_items[i]["field"] for i in group_indices), robust=robust
+            fields = [cell_items[i]["field"] for i in group_indices]
+            span = _limits(*fields, robust=robust)
+            # the shared bar answers for the whole group, as the static norm does
+            reach = _data_range(
+                *fields,
+                log=is_log(cell_items[group_indices[0]].get("standard_name")),
             )
             for i in group_indices:
                 clims[i] = span
+                reaches[i] = reach
 
     panels: list[Any] = []
     for i in range(len(cell_items)):
@@ -1661,6 +1805,7 @@ def _field_map_grid(
             title=resolved_full[i],
             cmap=seq,
             clim=clim,
+            data_range=reaches.get(i),
             units=item.get("units") or "",
             geo=geo,
             log=log,
@@ -1671,6 +1816,7 @@ def _field_map_grid(
             tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         )
         outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
         panels.append(mesh if outline is None else mesh * outline)
@@ -1703,6 +1849,7 @@ def _section_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     titles=None,
     **_,
 ):
@@ -1752,6 +1899,7 @@ def _section_row(
     if log:
         vmin = max(vmin, 1e-6)
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    scale_range = _data_range(t, r, log=log)  # the one scale both bars answer for
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -1777,11 +1925,13 @@ def _section_row(
     panels = [
         _quadmesh(
             t, title=tl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
-            **section_opts,
+            data_range=scale_range, **section_opts,
+            label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
             r, title=rl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
-            **section_opts,
+            data_range=scale_range, **section_opts,
+            label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
             d,
@@ -1790,6 +1940,7 @@ def _section_row(
             clim=(-dmax, dmax),
             units=f"test − reference {units}",
             **section_opts,
+            label_clipped=colorbar_label_clipped,
         ),
     ]
     row = panels[0] + panels[1] + panels[2]
@@ -1813,8 +1964,11 @@ def _time_depth_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     seq_clim: tuple[float, float] | None = None,
     div_clim: tuple[float, float] | None = None,
+    seq_range: tuple[float, float] | None = None,
+    div_range: tuple[float, float] | None = None,
     titles=None,
     **_,
 ):
@@ -1886,6 +2040,11 @@ def _time_depth_row(
     if div_clim is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
         div_clim = (-dmax, dmax)
+    # what the bars answer for: the row's own data unless a grid's shared scale says more
+    if seq_range is None:
+        seq_range = _data_range(t, r, log=log)
+    if div_range is None:
+        div_range = _data_range(d)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -1898,7 +2057,9 @@ def _time_depth_row(
         [test_title, str(rl), diff_title], titles
     )
 
-    def _panel(field, panel_title: str, cmap, clim, panel_units: str, log_scale: bool):
+    def _panel(
+        field, panel_title: str, cmap, clim, panel_units: str, log_scale: bool, reach
+    ):
         if mark == "scatter":
 
             frame = (
@@ -1931,12 +2092,19 @@ def _time_depth_row(
             )
             if geometry.x_ticks:
                 points = points.opts(xticks=list(geometry.x_ticks))
-            return points
+            return _mark_clipped(
+                points,
+                clim,
+                reach,
+                log=log_scale,
+                label_clipped=colorbar_label_clipped,
+            )
         return _quadmesh(
             field,
             title=panel_title,
             cmap=cmap,
             clim=clim,
+            data_range=reach,
             units=panel_units,
             geo=False,
             log=log_scale,
@@ -1950,12 +2118,15 @@ def _time_depth_row(
             invert_y=True,
             bgcolor="#d9d9d9",
             xticks=geometry.x_ticks,
+            label_clipped=colorbar_label_clipped,
         )
 
     panels = [
-        _panel(t, test_title, seq, seq_clim, units, log),
-        _panel(r, ref_title, seq, seq_clim, units, log),
-        _panel(d, diff_title, div, div_clim, f"test − reference {units}", False),
+        _panel(t, test_title, seq, seq_clim, units, log, seq_range),
+        _panel(r, ref_title, seq, seq_clim, units, log, seq_range),
+        _panel(
+            d, diff_title, div, div_clim, f"test − reference {units}", False, div_range
+        ),
     ]
     row = panels[0] + panels[1] + panels[2]
     row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
@@ -1978,6 +2149,7 @@ def _time_depth_row_grid(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     titles=None,
     **_,
 ):
@@ -2030,6 +2202,7 @@ def _time_depth_row_grid(
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
 
     shared_seq_clim = shared_div_clim = None
+    shared_seq_range = shared_div_range = None
     if shared_limits:
         import warnings
 
@@ -2054,6 +2227,10 @@ def _time_depth_row_grid(
         all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
         dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
         shared_div_clim = (-dmax, dmax)
+        shared_seq_range = _data_range(
+            *all_t, *all_r, log=is_log(items[0].get("standard_name"))
+        )
+        shared_div_range = _data_range(*all_d)
 
     rows = [
         _time_depth_row(
@@ -2069,8 +2246,11 @@ def _time_depth_row_grid(
             hover=hover,
             rasterize=rasterize,
             robust=robust,
+            colorbar_label_clipped=colorbar_label_clipped,
             seq_clim=shared_seq_clim,
             div_clim=shared_div_clim,
+            seq_range=shared_seq_range,
+            div_range=shared_div_range,
             titles=resolved_titles[i * 3 : i * 3 + 3],
         )
         for i, it in enumerate(items)
@@ -2144,6 +2324,7 @@ def _skill_map(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     titles=None,
+      colorbar_label_clipped: bool = False,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -2254,6 +2435,10 @@ def _skill_map(
             shared_colors[name] = metric_colors(
                 name, pooled, standard_name=items[0].get("standard_name")
             )
+            if station_markers:  # the dots are painted on this scale too
+                shared_colors[name] = shared_colors[name].covering(
+                    _station_values(items, name)
+                )
 
     # "rows" (default) tiles metrics across within a comparison's row; "columns"
     # transposes by tiling comparisons across within a metric's row instead -- paired
@@ -2295,11 +2480,14 @@ def _skill_map(
                 name, arrays[row][name], standard_name=item.get("standard_name")
             )
         )
+        if station_markers and not (shared_limits and stacked):
+            colors = colors.covering(_station_values([item], name))
         mesh = _quadmesh(
             item["skill"][name],
             title=panel_title,
             cmap=colors.cmap,
             clim=colors.clim(),
+            data_range=colors.data_range(),
             units=str(item["skill"][name].attrs.get("units", "") or ""),
             geo=geo,
             log=colors.log,
@@ -2309,6 +2497,7 @@ def _skill_map(
             rasterize=raster,
             coastline_resolution=coastline_resolution,
             land=land,
+            label_clipped=colorbar_label_clipped,
         )
         points = (
             _station_overlay(
@@ -2349,6 +2538,7 @@ def _portrait(
     zoom: float = 1.0,
     hover: bool = True,
     titles=None,
+      colorbar_label_clipped: bool = False,
     **_,
 ):
     """Interactive portrait plot: hover a cell for its full metric record.
@@ -2477,6 +2667,13 @@ def _portrait(
             frame_height=px[1],
             fontsize=fontsize,
             tools=["hover"] if hover else [],
+        )
+        heat = _mark_clipped(
+            heat,
+            colors.clim(),
+            colors.data_range(),
+            log=colors.log,
+            label_clipped=colorbar_label_clipped,
         )
         if annotate:
             label_df = df.assign(text=[_fmt_value(name, v) for v in df["value"]])
@@ -2646,21 +2843,34 @@ def _preload_frames(da):
     return da.load()
 
 
-def _lon_pieces(lon0: float, lon1: float) -> list[tuple[float, float]]:
-    """Split a longitude span into ``(west, east)`` clip pieces in the ±180 frame.
+def _coastline_clips(
+    lon0: float, lon1: float, central: float
+) -> list[tuple[float, float, float]]:
+    """Split a longitude span into ``(west, east, shift)`` coastline clips.
 
-    Natural Earth geometry lives in −180…180 and so does the plot: the mesh is
-    projected into that frame whatever convention the grid uses, so the coastline is
-    clipped — and left — in it. A 0…360-style span becomes the equivalent pieces, two
-    of them when it crosses the antimeridian, exactly where the projected mesh lands.
+    Natural Earth geometry lives in −180…180; the movie is drawn in a frame that is
+    either that same ±180 (``central=0``) or the 180-centred one
+    :func:`_output_projection` picks for a straddling domain (``central=180``), whose
+    ``x = (lon % 360) - 180`` puts its seam at Natural Earth's longitude 0. A grid's
+    ``lon0…lon1`` may be spelled in either convention (or, padded, run past 360°), so
+    each clip is a span in Natural Earth's own coordinates plus the one fixed ``shift``
+    that carries it into the output frame — never a per-point modulo, which would send a
+    coastline crossing the seam (Britain and Iberia, in the Pacific frame) to opposite
+    edges with a stroke the full width of the map between them. Every clip's shifted
+    image lies inside −180…180, so no stroke can cross the seam, and for a span of up to
+    360° no two clips overlap.
     """
-    if -180 <= lon0 and lon1 <= 180:
-        return [(lon0, lon1)]
-    if lon0 < 180 < lon1:
-        return [(lon0, 180.0), (-180.0, lon1 - 360.0)]
-    if lon0 >= 180:
-        return [(lon0 - 360.0, lon1 - 360.0)]
-    return [(max(lon0, -180.0), min(lon1, 180.0))]
+    clips = []
+    # ``copy``: which 360°-wide copy of the globe the span is spelled in; ``wrap``:
+    # which 360°-wide copy of the output frame a clip lands in
+    for copy in (-360.0, 0.0, 360.0):
+        for wrap in (-360.0, 0.0, 360.0):
+            shift = wrap - central
+            west = max(-180.0, lon0 - copy, -180.0 - shift)
+            east = min(180.0, lon1 - copy, 180.0 - shift)
+            if east > west:
+                clips.append((west, east, shift))
+    return clips
 
 
 def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION):
@@ -2686,8 +2896,12 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     straddling the antimeridian is drawn in :func:`_output_projection`'s 180-centred
     frame instead (the same test :func:`_tiles_for` uses to decide tiles cannot show
     such a domain at all) — so the coastline's x is shifted into that frame too, or
-    it would land 180° away from the mesh it is meant to outline.
-    ``apply_ranges=False`` keeps the clip margin from widening the view.
+    it would land 180° away from the mesh it is meant to outline. That frame's seam
+    is Natural Earth's longitude 0, so the coastline is cut there (see
+    :func:`_coastline_clips`) rather than drawn across it: a coast that crossed the
+    seam whole would be a stroke the width of the map. The margin is capped at one
+    turn of the globe for the same reason — past that it would only draw every coast
+    twice. ``apply_ranges=False`` keeps the clip margin from widening the view.
 
     Returns ``None`` when the coastline cannot be built (no cartopy, or Natural Earth
     data unavailable offline) — a movie without an outline still plays.
@@ -2695,8 +2909,8 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     import holoviews as hv
 
     # 180 for a domain _output_projection would centre the mesh on (straddling the
-    # antimeridian); 0 -- an identity shift below -- for every other domain, leaving
-    # today's coordinates untouched.
+    # antimeridian); 0 -- no shift in _coastline_clips -- for every other domain,
+    # leaving today's coordinates untouched.
     central = 180.0 if any(_output_projection(f) is not None for f in fields) else 0.0
 
     try:
@@ -2710,6 +2924,12 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
         pad_x, pad_y = 0.5 * max(lon1 - lon0, 1e-3), 0.5 * max(lat1 - lat0, 1e-3)
         lat0, lat1 = max(lat0 - pad_y, -90.0), min(lat1 + pad_y, 90.0)
         lon0_padded, lon1_padded = lon0 - pad_x, lon1 + pad_x
+        if lon1_padded - lon0_padded > 360.0:
+            # a wide domain's margin would wrap past one full turn of the globe and
+            # clip the same coast twice; one turn, centred on the domain, is the most
+            # anything can pan into
+            mid = 0.5 * (lon0 + lon1)
+            lon0_padded, lon1_padded = mid - 180.0, mid + 180.0
         ne_resolution = nearest_ne_resolution(
             normalize_coastline_resolution(coastline_resolution),
             extent=(lon0_padded, lon1_padded, lat0, lat1),
@@ -2720,7 +2940,7 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
             ).geometries()
         )
         segments = []
-        for west, east in _lon_pieces(lon0_padded, lon1_padded):
+        for west, east, shift in _coastline_clips(lon0_padded, lon1_padded, central):
             clip = box(west, lat0, east, lat1)
             for geom in geoms:
                 gx0, gy0, gx1, gy1 = geom.bounds
@@ -2732,7 +2952,9 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
                 for line in getattr(piece, "geoms", [piece]):
                     coords = np.asarray(line.coords)
                     if len(coords) >= 2:
-                        segments.append(coords[:, :2])
+                        xy = coords[:, :2].copy()
+                        xy[:, 0] += shift
+                        segments.append(xy)
     except Exception as err:  # pragma: no cover - depends on local NE cache/network
         warnings.warn(
             f"could not build the movie's coastline overlay ({err}); the frames play "
@@ -2748,11 +2970,6 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
     merged = np.concatenate(
         [arr for seg in segments for arr in (seg, nan_row)][:-1] or [np.empty((0, 2))]
     )
-    if central:
-        # NaN separator rows pass through unchanged: arithmetic and mod on NaN stay
-        # NaN. Each clip piece already lies inside one contiguous span of the output
-        # frame (see _lon_pieces), so this never introduces a new seam of its own.
-        merged[:, 0] = ((merged[:, 0] - central + 180.0) % 360.0) - 180.0
     return hv.Path([merged]).opts(
         color="black", line_width=1, apply_ranges=False, show_legend=False
     )
@@ -2919,6 +3136,7 @@ def _facet_movie(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
     **_,
@@ -3013,6 +3231,8 @@ def _facet_movie(
     vmin, vmax = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
     if log:
         vmin = max(vmin, 1e-6)
+    # the bar is built once for the slider, so its ends are marked for every frame
+    reach = _data_range(frames_da, log=log)
     raster = _should_rasterize(frames_da.isel({facet_dim: 0}), rasterize)
     tiles = _tiles_for(_check_tiles(tiles), frames_da)
     # with tiles the basemap draws the coast; without them a static, once-built
@@ -3035,6 +3255,7 @@ def _facet_movie(
             title=f"{subject} — {keys[position]}" if subject else keys[position],
             cmap=seq,
             clim=(vmin, vmax),
+            data_range=reach,
             units=units,
             geo=geo,
             log=log,
@@ -3047,6 +3268,7 @@ def _facet_movie(
             tiles=tiles,
             coastline=False,
             project=True,
+            label_clipped=colorbar_label_clipped,
         )
         for overlay in (coast, outline):
             if overlay is not None:
@@ -3082,6 +3304,7 @@ def _field_movie(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
     **_,
 ):
     """Put the same row on a slider: the interactive counterpart of a movie.
@@ -3172,6 +3395,14 @@ def _field_movie(
         or 1.0
     )
 
+    # one bar per panel serves the whole slider, so its ends are marked for every frame
+    reach = _data_range(
+        *[f["aligned"]["test"] for f in items],
+        *[f["aligned"]["reference"] for f in items],
+        log=log,
+    )
+    diff_reach = _data_range(*[f["aligned"]["difference"] for f in items])
+
     def draw(position: int, panel: int):
         mesh = _panel_mesh(position, panel)
         for overlay in (coast, outline):
@@ -3192,6 +3423,7 @@ def _field_movie(
                 title=f"{keys[position]} — {tl}",
                 cmap=seq,
                 clim=(vmin, vmax),
+                data_range=reach,
                 units=units,
                 geo=geo,
                 log=log,
@@ -3202,6 +3434,7 @@ def _field_movie(
                 tiles=tiles,
                 coastline=False,
                 project=True,
+                label_clipped=colorbar_label_clipped,
             )
         if panel == 1:
             return _quadmesh(
@@ -3209,6 +3442,7 @@ def _field_movie(
                 title=str(rl),
                 cmap=seq,
                 clim=(vmin, vmax),
+                data_range=reach,
                 units=units,
                 geo=geo,
                 log=log,
@@ -3219,6 +3453,7 @@ def _field_movie(
                 tiles=tiles,
                 coastline=False,
                 project=True,
+                label_clipped=colorbar_label_clipped,
             )
         summary = _metrics_summary(item.get("metrics"), metric_keys)
         return _quadmesh(
@@ -3226,6 +3461,7 @@ def _field_movie(
             title=f"difference ({summary})" if summary else "difference",
             cmap=div,
             clim=(-dmax, dmax),
+            data_range=diff_reach,
             units=f"test − reference {units}",
             geo=geo,
             font_scale=font_scale,
@@ -3235,6 +3471,7 @@ def _field_movie(
             tiles=tiles,
             coastline=False,
             project=True,
+            label_clipped=colorbar_label_clipped,
         )
 
     # three maps over one shared frame dimension, so a single widget steps all three

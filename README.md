@@ -602,6 +602,52 @@ A field already reduced to one place (see `Field.family`) has nothing left to se
 spatially, and `.extremum()` says so rather than returning the one value `.plot()`
 already shows.
 
+**Specks, not just the extreme.** On a model field the global min/max is usually a
+coastline or river-mouth cell, and the next-lowest values are more of the same. The tiny
+minima a `robust=True` colorbar reveals are not extreme in *value* — they are extreme
+relative to their *neighbors* — so `local=True` scores every wet cell against the median
+of its wet neighbors (a straight front or a smooth gradient scores ~0; only a feature
+about one cell wide stands out) and `n=` lists the worst offenders:
+
+```python
+hits = run.extremum("min", local=True, n=15)
+hits
+# 15 local min alkalinity [mmol/m^3] on 'pac_dt_ramp' (3x3 wet-neighbor median, ranked by z, >= 3 cells apart)
+#       value  anomaly  neighborhood  spread      z  wet_neighbors  land_distance     lon    lat       time  i_eta_rho  i_xi_rho
+# rank
+# 1    2288.5    -30.0        2318.5    0.59  -50.6              8              8  166.65  39.58 2010-10-01        795       596
+# ...
+hits.to_dataframe().query("land_distance > 10")   # well offshore only
+hits[0].plot()                                    # each hit follows through time, as above
+```
+
+**Ranking.** A river plume defeats a plain departure: a few cells offshore it is steep, so
+its cells depart from their neighbors by hundreds of units and crowd out a speck that
+departs by tens. By default hits are therefore ranked by `z` — the departure in units of
+how much the neighbors vary *among themselves* (`spread`, a scaled median absolute
+deviation) — which is large in smooth water and small inside a plume or front. A z is never
+divided by less than the field's typical spread, so a flat patch cannot inflate it.
+`score="departure"` ranks by the departure in the field's own units instead; every hit
+reports both, as `anomaly` and `z`.
+
+**Distance from land.** `land_distance` is the number of cells from a hit to the nearest
+land cell or the grid's edge (1 = touching), and `wet_neighbors` counts how many of the
+window's other cells were wet, so coast and island hits are easy to tell from open-ocean
+ones. `interior=k` drops every cell with land or the edge within `k` cells up front
+(`interior=True` is the window's own reach — one cell for the default 3×3) and works for a
+plain global `n=` search too, keeping it off the coast:
+
+```python
+run.extremum("min", local=True, n=15, interior=10)   # no land within 10 cells
+run.extremum("max", n=5, interior=10)                # the highest values away from any coast
+```
+
+Each hit is an ordinary `Extremum`, so `.series()` / `.plot()` work on it. `window=5`
+widens the neighborhood, and `separation=` sets how many cells apart hits must be
+(default: the window; 10 for a plain `n=` search, so one river plume is one place rather
+than ten adjacent cells). A field faceted over time is scored one slice at a time, and a
+speck that persists is reported once, at the step where it is strongest.
+
 A suite page runs this same chain with no Python at all — see `then:` in
 [docs/suites.md](docs/suites.md).
 
@@ -649,11 +695,20 @@ osk.compare(
 ```
 
 **A registered calculator** is for a genuine formula rather than arithmetic — mixed
-layer depth, computed from temperature and salinity by a chosen criterion:
+layer depth, computed by a chosen criterion from a ROMS run's temperature (and, for the
+density criterion, salinity), so point it at the run's physics output rather than a
+biogeochemistry file that carries neither:
 
 ```python
-osk.field("GOM_bgc", {"calculate": "mld", "method": "density_threshold"})
+osk.field("GOM_his", {"calculate": "mld", "method": "density_threshold"})
 ```
+
+The result is named by its definition — `ocean_mixed_layer_thickness_defined_by_sigma_theta`
+for `density_threshold`, `..._defined_by_temperature` for `temperature_threshold` —
+because CF's mixed-layer names encode which variable defines the base of the layer. The
+threshold and reference depth (0.03 kg m-3 from 10 m for density, 0.2 °C from 10 m for
+temperature; `threshold=`/`ref_depth=` in the spec change them) are not part of the name,
+so they ride on the result's `mld_threshold`/`mld_ref_depth` attrs.
 
 Any function can be plugged in this way, from a notebook, with no codebase change —
 `register_calculator` is public API, not an internal detail:
@@ -677,22 +732,58 @@ ships it as a plain field:
 
 ```python
 osk.compare(
-    reference="holte_talley_mld_clim", test="GOM_bgc",
+    reference="holte_talley_mld_clim", test="GOM_his",
     variables=[{
         "test": {"calculate": "mld", "method": "density_threshold"},
-        "reference": "mld_dt_mean",
-        "standard_name": "ocean_mixed_layer_thickness",
+        "reference": "mld_by_sigma_theta",   # the name its catalog gives mld_dt_mean
     }],
     aggregate={"time": "mean"},
 )
 ```
 
-`standard_name` is optional but worth setting whenever you know it: it names the
-figure precisely, and — since the two sides of a pair-spec can resolve to genuinely
-different CF names with nothing else checking that they don't — its absence is also
-what turns a mismatch between the two recipes into a warning rather than a number that
-looks right and isn't. `Comparison`/`compare()` accept a pair-spec; `Field` does not
-(there is no second lane to give the other half of the pair to).
+Both sides resolve to `ocean_mixed_layer_thickness_defined_by_sigma_theta` — the same
+criterion variable, and at the calculator's defaults the same threshold as `mld_dt_mean`
+— so this scores like against like. (`holte_talley_mld_clim` is a catalog you build once;
+see "Catalogs" below for the one that gives the file's `mld_dt_mean` that name.)
+
+`standard_name` is optional here — both sides already agree, and the test side names
+the figure. Set it to name the figure and its labels yourself
+(`"standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_theta"` reads as
+"MLD (σθ, density_threshold)" in a pooled figure), or when the two recipes' CF names
+legitimately differ: without one a pair-spec is assumed to score a quantity against
+itself, so a mismatch between what its two sides resolve to is a warning rather than a
+number that looks right and isn't. Swap the test side for
+`{"calculate": "mld", "method": "temperature_threshold"}` and it warns — a
+temperature-defined mixed layer depth is not the density-defined one the climatology
+holds — until you set `standard_name` to say the difference is intended.
+`Comparison`/`compare()` accept a pair-spec; `Field` does not (there is no second lane
+to give the other half of the pair to).
+
+**Broad and specific names.** CF names a mixed layer depth by the variable that defines
+the base of the layer, not by the threshold, so there is a generic `"mld"` and one name
+per criterion: `"mld_by_sigma_theta"`, `"mld_by_sigma_t"`, `"mld_by_temperature"`,
+`"mld_by_mixing_scheme"`. `"mld"` finds and compares any definition; a specific name
+asks for that one, and is never answered by the generic name (which hasn't said which
+definition it carries) or by a sibling. The shipped Copernicus `mlotst` products (and
+Holte & Talley's climatology, catalogued below) are `"mld_by_sigma_theta"`; ROMS' KPP
+`hbls` is `"mld_by_mixing_scheme"`, though an older ROMS catalog keeps the generic name
+until it is rebuilt — `"mld"` still finds it, `"mld_by_mixing_scheme"` will not:
+
+```python
+osk.find(variable="mld")                  # a mixed layer depth of any definition
+osk.find(variable="mld_by_sigma_theta")   # only the potential-density ones
+```
+
+So a plain `variables=["mld"]` comparison can pair two different definitions — KPP `hbls`
+against a sigma_theta climatology — and warns once when it does (a cached rerun too),
+since a bias between them partly measures the definitions; the pair-spec above is the
+like-for-like route. Inside one dataset `"mld"` resolves to the single definition it
+carries (with a warning naming it); if it carries several, it warns, naming them, and
+treats the variable as not available until you ask for one by name. That dataset-side
+matching is plain cf-xarray: the generic entry's registered criteria include each
+definition's spellings, so `ds.cf["mld"]` behaves the same way outside ocean-skill.
+`vocabulary.register(..., broader="mld")` (from `ocean_skill import vocabulary`) adds
+another definition under the broad name.
 
 `select` and `aggregate` accept the same `{"test": ..., "reference": ...}` spelling,
 for when the two lanes' *axes* don't match, not just their variable recipe — a model
@@ -760,12 +851,46 @@ path any time with `osk.catalog.search_paths()`.
 On a cluster with data already staged on a shared filesystem, build a catalog that
 points straight at it and save it into a `$OCEAN_SKILL_CATALOGS` directory so it
 shadows the packaged, internet-backed entry of the same name — see the GLODAP-on-Anvil
-recipe in `docs/catalogs.ipynb` (`ocean_skill.readers.PoochTarNetCDF` takes `local_dir=`
-as well as `url=`, so the same reader and merge logic runs either way).
+recipe in `docs/tutorial.ipynb` (the `grid` example under "Data catalogs";
+`ocean_skill.readers.PoochTarNetCDF` takes `local_dir=` as well as `url=`, so the same
+reader and merge logic runs either way).
 
 Remote files are cached under ocean-skill's cache directory; set `$OCEAN_SKILL_DIR`
 to move it, or fsspec's own `FSSPEC_SIMPLECACHE_CACHE_STORAGE` to override it
-outright.
+outright. A remote single-file product takes a `simplecache::` prefix on its URL, which
+downloads it once into that cache (the WOA entries do the same).
+
+A product whose own metadata is wrong is corrected in its catalog entry, not in the
+file. A per-source `standard_names` map *merges* over what the probe found — your entry
+wins for the variables it names and the rest of the probed map stays — and a variable it
+renames also has its own `standard_name` attribute set to the catalog's name when the
+source is read. The Holte & Talley Argo mixed-layer-depth climatology needs exactly
+this: its `standard_name` attributes just repeat each variable's own name, so its
+density-threshold field `mld_dt_mean` has to be told what it is:
+
+```python
+from ocean_skill import build
+
+build.build_catalog(
+    {
+        "holte_talley_mld_clim": {
+            "url": "simplecache::https://mixedlayer.ucsd.edu/data/"
+                   "Argo_mixedlayers_monthlyclim_04142022.nc",
+            "climatology": True,
+            "standard_names": {
+                "mld_dt_mean": "ocean_mixed_layer_thickness_defined_by_sigma_theta",
+            },
+        },
+    },
+    "catalogs/mld_climatologies.yaml",
+    reader_kwargs={"engine": "scipy"},  # a classic netCDF3 file; h5netcdf can't read it
+    title="Global mixed layer depth climatologies",
+    name_map=None,                      # not ROMS output: skip the ROMS name fallback
+)
+```
+
+`osk.find(variable="mld_by_sigma_theta")` now finds it, and `"mld_by_sigma_theta"` is the
+name the pair-spec above reads it by.
 
 ## Layout
 
