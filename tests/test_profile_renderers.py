@@ -1552,6 +1552,57 @@ def test_bands_carry_no_legend_entry_in_either_renderer():
     assert len(interactive) == 4
 
 
+# -- band_legend= gives the band its own entry --------------------------------------
+
+
+def test_band_legend_off_by_default_reproduces_todays_legend():
+    """Byte-identity guard: leaving ``band_legend`` unset must not add a row."""
+    item = _seasonal_single_item(seasons=("JJA",), spread=0.5)
+    fig = render(_spec([item]), renderer="matplotlib")
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()] == ["run_new"]
+
+
+def test_band_legend_adds_one_entry_per_banded_line_in_both_renderers():
+    item = _seasonal_single_item(seasons=("JJA",), spread=0.5)
+    fig = render(_spec([item], band_legend=True), renderer="matplotlib")
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()] == [
+        "run_new",
+        "run_new spread",
+    ]
+
+    import holoviews as hv
+
+    obj = render(_spec([item], band_legend=True), renderer="holoviews")
+    polygons = obj.traverse(lambda x: x, [hv.Polygons])
+    assert polygons and all(p.label == "run_new spread" for p in polygons)
+
+
+def test_band_legend_only_labels_lanes_that_actually_carry_a_band():
+    """Only the reference has a spread here -- the test lane earns no ``spread`` row."""
+    item = _seasonal_profile_item(seasons=("JJA",), reference_spread=0.4)
+    fig = render(_spec([item], band_legend=True, metric_keys=()), renderer="matplotlib")
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()] == [
+        "whots",
+        "run_new",
+        "whots spread",
+    ]
+
+
+def test_band_legend_skips_a_line_the_auto_title_already_dropped():
+    """A comparison facet drops the distinguishing line's own label to the title.
+
+    Its band must not get a "` spread`" row glued onto that now-blank label.
+    """
+    items = [_profile_item(test=f"run{i}") for i in range(2)]
+    for item in items:
+        item["aligned"]["test_spread"] = item["aligned"]["test"] * 0 + 0.3
+    fig = render(
+        _spec(items, cols="comparison", band_legend=True, legend="below"),
+        renderer="matplotlib",
+    )
+    assert [t.get_text() for t in fig.legends[0].get_texts()] == ["whots"]
+
+
 def test_a_comparisons_envelope_carries_each_lanes_own_spread():
     item = _seasonal_profile_item(test_spread=0.3, reference_spread=0.6)
     static = _matplotlib_bands(render(_spec([item]), renderer="matplotlib"))
@@ -2270,6 +2321,7 @@ def test_profile_is_registered_everywhere_it_has_to_be():
         "hspace",
         "colors",
         "line_labels",
+        "band_legend",
         "titles",
         "metrics_labels",
     ):
