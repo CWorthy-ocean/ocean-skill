@@ -1500,7 +1500,12 @@ PROFILE_MARKS = ("line", "line+marker", "marker")
 
 
 def _draw_profile_lines(
-    ax, lines, line_kwargs: dict[str, Any], *, mark: str = "line"
+    ax,
+    lines,
+    line_kwargs: dict[str, Any],
+    *,
+    mark: str = "line",
+    band_legend: bool = False,
 ) -> list:
     """Draw one panel's lines: value on x, depth on y -- the transpose of
     :func:`_draw_series_lines`, marking the same subsample the same way.
@@ -1509,22 +1514,33 @@ def _draw_profile_lines(
     pass -- a horizontal fill (:func:`~matplotlib.axes.Axes.fill_betweenx`,
     value on x, depth on y, matching the panel's own orientation) in every
     line's own colour, split into :func:`~ocean_skill.plot.style.band_runs`'
-    contiguous finite runs. Not appended to ``drawn``: a band earns no legend
-    entry of its own, and matplotlib's default z-order (collections below
-    lines) already puts it beneath every line regardless.
+    contiguous finite runs. By default a band earns no legend entry of its
+    own (unlabeled, and matplotlib's default z-order -- collections below
+    lines -- already puts it beneath every line regardless); ``band_legend=
+    True`` labels each run ``f"{line.label} spread"`` and appends the
+    collection to the returned handles instead, so :func:`_series_legend`'s
+    own label-dedup collapses several runs of one line into the one row a
+    reader expects. A line with no legend-worthy label of its own (blank, or
+    the auto station-title's dropped source) gets no band entry either --
+    there is nothing to attach "spread" to.
     """
     from ocean_skill.plot.profile import vertical_values
     from ocean_skill.plot.style import BAND_ALPHA, band_runs, markevery_indices
 
+    band_handles = []
     for line in lines:
         if line.spec.spread is None:
             continue
         depth = vertical_values(line.spec.values)
         values = np.asarray(line.spec.values.values, dtype="float64")
+        labelled = band_legend and line.label and not line.label.startswith("_")
         for axis, lo, hi in band_runs(depth, values, line.spec.spread):
-            ax.fill_betweenx(
+            collection = ax.fill_betweenx(
                 axis, lo, hi, color=line.color, alpha=BAND_ALPHA, linewidth=0
             )
+            if labelled:
+                collection.set_label(f"{line.label} spread")
+                band_handles.append(collection)
 
     drawn = []
     for line in lines:
@@ -1561,7 +1577,7 @@ def _draw_profile_lines(
             **line_kwargs,
         )
         drawn.append(artist)
-    return drawn
+    return drawn + band_handles
 
 
 def profile(
@@ -1580,6 +1596,7 @@ def profile(
     mark: str = "line",
     legend: bool | str = True,
     line_labels: Sequence[str] | None = None,
+    band_legend: bool = False,
     titles: Sequence[str] | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
@@ -1634,6 +1651,10 @@ def profile(
     for the usual auto/off, ``"below"``/``"right"`` for one combined key, a corner
     name to force every panel's own key there, and ``line_labels=`` to override the
     legend text itself -- see :func:`series`' own docstring for the full rule.
+    ``band_legend=True`` gives each line's mean±spread envelope its own entry too
+    (``f"{label} spread"``), off by default since most figures do not want the
+    legend to double in length -- ``series`` has no equivalent: it carries the same
+    ``spread`` plumbing but draws no band yet, so there is nothing there to name.
 
     A ``cols="comparison"``/``rows="comparison"`` facet (one panel per station)
     auto-promotes the station into its panel's title and drops it from that
@@ -1774,7 +1795,9 @@ def profile(
             ax.set_visible(False)
             per_panel.append((ax, []))
             continue
-        handles = _draw_profile_lines(ax, panel.lines, line_kwargs, mark=mark)
+        handles = _draw_profile_lines(
+            ax, panel.lines, line_kwargs, mark=mark, band_legend=band_legend
+        )
         per_panel.append((ax, handles))
         panel_title_kwargs = _without_font(title_kwargs)
         if panel.secondary and "pad" not in panel_title_kwargs:
@@ -1818,7 +1841,9 @@ def profile(
             # by sharing the parent's y axis; with sharey=False there is no shared
             # axis to inherit from, so it is set explicitly instead.
             twin = ax.twiny()
-            handles += _draw_profile_lines(twin, panel.secondary, line_kwargs, mark=mark)
+            handles += _draw_profile_lines(
+                twin, panel.secondary, line_kwargs, mark=mark, band_legend=band_legend
+            )
             per_panel[-1] = (ax, handles)
             if not sharey:
                 twin.set_ylim(y_bottom, y_top)

@@ -1867,6 +1867,7 @@ for example).
 | `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
 | `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
 | `metrics_labels` | `None` | one string per metrics-box row, figure-wide, overriding its automatic prefix; wrong count raises, quoting the current labels to copy — matches `series` exactly, see [the statistics box](#the-statistics-box) |
+| `band_legend` | `False` | give each line's mean±spread envelope its own legend entry, `f"{label} spread"`; off by default. `series` has no equivalent -- it carries the same `spread` plumbing but draws no band yet |
 | `titles` | `None` | one string per panel, overriding the auto-derived title; see [`titles`](#titles-profile) |
 | `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
 | `xlim` | `None` | value-axis limits; bounds only the bottom (primary) axis when `secondary_x` merges a second variable in |

@@ -4043,7 +4043,7 @@ def _profile_curve(hv, line, dimensions, *, mark: str):
     return element
 
 
-def _profile_bands(hv, line, dimensions) -> list:
+def _profile_bands(hv, line, dimensions, *, band_legend: bool = False) -> list:
     """Return one ``hv.Polygons`` per finite run of one line's mean±spread envelope.
 
     HoloViews' ``hv.Area`` only fills *vertically* (between two y arrays along
@@ -4053,9 +4053,13 @@ def _profile_bands(hv, line, dimensions) -> list:
     (not one multi-patch element for the whole line): the static renderer
     draws one ``fill_betweenx`` collection per run the same way, which is what
     lets the two renderers' band *count* agree, not just their shapes. Each is
-    in the line's own colour and carries no ``label`` -- unlabeled, so it earns
-    no legend entry, matching the static renderer's un-legended
-    ``fill_betweenx``.
+    in the line's own colour and, by default, carries no ``label`` -- unlabeled,
+    so it earns no legend entry, matching the static renderer's un-legended
+    ``fill_betweenx``. ``band_legend=True`` labels every run
+    ``f"{line.label} spread"`` instead (bokeh, like matplotlib, collapses
+    several same-labeled glyphs into the one legend entry a reader expects);
+    a line with no legend-worthy label of its own (blank, or the auto
+    station-title's dropped source) gets no band label either.
 
     ``kdims`` must be a *list*, not the ``dimensions`` tuple as given: HoloViews
     reads a bare 2-tuple of dimensions as its own ``(name, label)`` shorthand
@@ -4066,13 +4070,15 @@ def _profile_bands(hv, line, dimensions) -> list:
 
     depth = vertical_values(line.spec.values)
     values = np.asarray(line.spec.values.values, dtype="float64")
+    labelled = band_legend and line.label and not line.label.startswith("_")
+    label = f"{line.label} spread" if labelled else ""
     bands = []
     for axis, lo, hi in band_runs(depth, values, line.spec.spread):
         xs = np.concatenate([lo, hi[::-1]])
         ys = np.concatenate([axis, axis[::-1]])
         patch = np.column_stack([xs, ys])
         bands.append(
-            hv.Polygons([patch], list(dimensions)).opts(
+            hv.Polygons([patch], list(dimensions), label=label).opts(
                 fill_color=line.color, fill_alpha=BAND_ALPHA, line_alpha=0
             )
         )
@@ -4198,6 +4204,7 @@ def _profile(
     colors=None,
     legend=True,
     line_labels=None,
+    band_legend: bool = False,
     titles=None,
     xlim=None,
     ylim=None,
@@ -4218,7 +4225,10 @@ def _profile(
     Composition, styling, labels, titles and the statistics text all come from
     :mod:`ocean_skill.plot.profile` and :mod:`ocean_skill.plot.style`, the same as
     the static renderer, so the two cannot disagree about anything but the drawing
-    call. The depth axis reads surface-at-top, seafloor (or the deepest sample) at
+    call. ``band_legend=True`` gives each line's mean±spread envelope its own
+    legend entry (``f"{label} spread"``), off by default -- see
+    :func:`_profile_bands`; matches the static renderer's own ``band_legend=``.
+    The depth axis reads surface-at-top, seafloor (or the deepest sample) at
     the bottom, the same way the static renderer's ``ax.set_ylim(deep, shallow)``
     achieves it -- ``ylim=(deep, shallow)`` on the bokeh side, deliberately *not*
     also ``invert_yaxis=True``, which would flip an already-descending range back
@@ -4330,7 +4340,7 @@ def _profile(
             band
             for line in panel.lines
             if line.spec.spread is not None
-            for band in _profile_bands(hv, line, dims)
+            for band in _profile_bands(hv, line, dims, band_legend=band_legend)
         ]
         curves = [_profile_curve(hv, line, dims, mark=mark) for line in panel.lines]
         if panel.secondary:
@@ -4345,7 +4355,9 @@ def _profile(
                 band
                 for line in panel.secondary
                 if line.spec.spread is not None
-                for band in _profile_bands(hv, line, second_dims)
+                for band in _profile_bands(
+                    hv, line, second_dims, band_legend=band_legend
+                )
             ]
             curves += [
                 _profile_curve(hv, line, second_dims, mark=mark)
