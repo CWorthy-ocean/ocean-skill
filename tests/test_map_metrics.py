@@ -464,6 +464,39 @@ def test_the_overlay_draws_one_dot_per_station_in_both_renderers():
     assert all(len(p.data) == 9 for p in points)
 
 
+def test_station_dots_are_projected_onto_a_tiled_map():
+    """Under a basemap the dots must land where the stations are, not near (0, 0).
+
+    A tiled panel's axes are Web Mercator metres, so plain degree ``hv.Points`` (the
+    untiled form) would sit a few hundred metres from the origin, off the map.
+    geoviews projects the tiled form from its ``crs`` instead, so bokeh's columns
+    (still named ``lon``/``lat`` after the kdims) hold metres in the mesh's own frame.
+    """
+    import holoviews as hv
+    from bokeh.models import Scatter
+
+    from ocean_skill.plot.holoviews_renderer import _to_mercator
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    df = _records(n=9)
+    items = build_items(df, metrics=("bias",), grid="regular")
+    spec = PlotSpec(family="skill_map", items=items, options={})
+
+    fig = hv.render(render(spec, renderer="holoviews"), backend="bokeh")
+    dots = [r for r in fig.renderers if isinstance(getattr(r, "glyph", None), Scatter)]
+    assert len(dots) == 1
+    data = dots[0].data_source.data
+    xs, ys = _to_mercator(df["lon"].to_numpy(), df["lat"].to_numpy())
+    # compared sorted: which positions are drawn is the contract, not their row order
+    assert np.sort(np.asarray(data["lon"])) == pytest.approx(np.sort(xs))
+    assert np.sort(np.asarray(data["lat"])) == pytest.approx(np.sort(ys))
+    # ...and therefore inside the view the mesh frames, not somewhere beside it
+    lon, lat = np.asarray(data["lon"]), np.asarray(data["lat"])
+    assert fig.x_range.start < lon.min() and lon.max() < fig.x_range.end
+    assert fig.y_range.start < lat.min() and lat.max() < fig.y_range.end
+
+
 def _map_axes(fig):
     """Every drawn (visible) cartopy map panel in a skill_map figure."""
     return [ax for ax in fig.axes if hasattr(ax, "projection") and ax.get_visible()]
@@ -514,6 +547,7 @@ def test_extent_tight_still_contains_every_station():
 
 
 def test_extent_bbox_is_used_verbatim_in_both_renderers():
+    from ocean_skill.plot.holoviews_renderer import _to_mercator
     from ocean_skill.plot.registry import render
     from ocean_skill.plot.spec import PlotSpec
 
@@ -531,7 +565,21 @@ def test_extent_bbox_is_used_verbatim_in_both_renderers():
     # the box's and both ranges are finite (cropped, not left on auto).
     import holoviews as hv
 
+    # tiles are on by default, which puts the panel's axes in Web Mercator metres: the
+    # window is the box's corners projected there (degree limits would frame the wrong
+    # place), so the centre is the mean of the projected corners.
     bokeh = hv.render(render(spec, renderer="holoviews"))
+    xs, ys = _to_mercator([box[0], box[1]], [box[2], box[3]])
+    xc = (bokeh.x_range.start + bokeh.x_range.end) / 2
+    yc = (bokeh.y_range.start + bokeh.y_range.end) / 2
+    assert xc == pytest.approx((xs[0] + xs[1]) / 2)
+    assert yc == pytest.approx((ys[0] + ys[1]) / 2)
+
+    # tiles=False is the offline coastline in plain degrees: the window stays in them.
+    untiled_spec = PlotSpec(
+        family="skill_map", items=items, options={"extent": box, "tiles": False}
+    )
+    bokeh = hv.render(render(untiled_spec, renderer="holoviews"))
     xc = (bokeh.x_range.start + bokeh.x_range.end) / 2
     yc = (bokeh.y_range.start + bokeh.y_range.end) / 2
     assert xc == pytest.approx((box[0] + box[1]) / 2)

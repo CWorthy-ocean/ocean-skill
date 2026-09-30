@@ -768,6 +768,32 @@ def test_a_straddling_field_facet_drops_tiles_for_a_coastline():
     assert "Feature" in kinds, kinds
 
 
+def test_a_straddling_skill_map_drops_tiles_for_a_coastline():
+    """A skill map gets the same seam protection as the other still maps.
+
+    Tiles are on by default for it too (see :func:`_skill_map`), so a metric map over
+    a dateline-straddling model domain must fall back to the offline coastline rather
+    than tear at the Web Mercator seam.
+    """
+    pytest.importorskip("geoviews")
+    pytest.importorskip("cartopy.feature")
+    from ocean_skill.plot.registry import render
+    from ocean_skill.plot.spec import PlotSpec
+
+    item = {
+        "skill": xr.Dataset({"bias": _straddling_field()}),
+        "metric_names": ("bias",),
+    }
+    with pytest.warns(UserWarning, match="Web Mercator"):
+        obj = render(
+            PlotSpec(family="skill_map", items=[item], options={}),
+            renderer="holoviews",
+        )
+    kinds = [type(n).__name__ for n in obj.traverse()]
+    assert "WMTS" not in kinds, kinds
+    assert "Feature" in kinds, kinds
+
+
 def test_a_non_straddling_field_facet_keeps_tiles_without_a_warning():
     pytest.importorskip("geoviews")
     from ocean_skill.plot.registry import render

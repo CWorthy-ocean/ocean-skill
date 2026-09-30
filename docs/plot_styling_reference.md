@@ -619,8 +619,8 @@ Things worth knowing:
 ### `tiles` (holoviews only)
 
 A web basemap under the field, on every interactive map family — `field_facet`,
-`field_row`, `field_grid`, `field_map_grid`, `field_movie`/`facet_movie`, and
-`locations` (which picks its own default; see [its own
+`field_row`, `field_grid`, `field_map_grid`, `skill_map`, `field_movie`/`facet_movie`,
+and `locations` (which picks its own default; see [its own
 parameters](#locations-only-parameters)). On by default: a notebook rendering
 interactively is already on the web, so there's nothing offline about fetching a
 few map tiles too, and a basemap gives the eye real coastline and terrain where the
