@@ -476,7 +476,10 @@ def test_an_unreadable_source_is_fatal_not_quietly_banked(netcdfs, tmp_path):
 
 
 def test_a_readable_but_unprobeable_source_is_kept_with_a_warning(tmp_path):
-    """Undeciphered metadata is not an invalid entry -- it still reads fine."""
+    """Undeciphered metadata is not an invalid entry -- it still reads fine.
+
+    The warning blames the caller's own ``build_catalog`` call, not ``build.py``.
+    """
     from unittest import mock
 
     from ocean_skill import build
@@ -484,9 +487,16 @@ def test_a_readable_but_unprobeable_source_is_kept_with_a_warning(tmp_path):
     path = tmp_path / "x.nc"
     xr.Dataset({"v": (("i",), np.ones(3))}).to_netcdf(path)
     with mock.patch.object(build, "_probe", side_effect=RuntimeError("no axes")):
-        with pytest.warns(UserWarning, match="could not derive metadata"):
+        with pytest.warns(UserWarning, match="could not derive metadata") as record:
             out = build_catalog({"odd": str(path)}, tmp_path / "m.yaml")
     assert sorted(intake.from_yaml_file(str(out))) == ["odd"]
+    # Blames this test's ``build_catalog`` call: the old fixed stacklevel=3 blamed
+    # ``add_sources``, inside build.py.
+    derive = [w for w in record if "could not derive metadata" in str(w.message)]
+    assert derive, "expected a 'could not derive metadata' warning"
+    assert all(w.filename == __file__ for w in derive), (
+        f"blamed {[w.filename for w in derive]}, not the calling test file"
+    )
 
 
 def test_add_catalog_tolerates_one_bad_entry_in_a_sweep(prebuilt, tmp_path):
@@ -996,6 +1006,35 @@ def test_a_caller_name_overlays_a_tabular_sources_probed_map(tmp_path):
     assert md["units"]["Temperature (degC)"] == "degC"  # keyed by column: untouched
 
 
+def test_a_name_the_data_lacks_is_ignored_with_a_warning(tmp_path):
+    """A typo'd key is dropped, key by key, not merged into a name never produced.
+
+    ``read()`` renames only variables the file has, so ``mld_dt_maen`` could never
+    apply -- but merged blindly it would still put the CF name in ``variables``,
+    advertising something the entry cannot deliver. The warning names the near miss,
+    and the valid key beside the typo'd one still applies.
+    """
+    cat = new_catalog(title="t")
+    with pytest.warns(
+        UserWarning,
+        match=r"ignoring standard_names\['mld_dt_maen'\].*Did you mean: mld_dt_mean",
+    ):
+        add_source(
+            cat,
+            "ht",
+            _holte_talley_like(tmp_path / "ht.nc"),
+            name_map=None,
+            standard_names={"mld_dt_maen": SIGMA_THETA, "mld_da_mean": "x"},
+        )
+    md = cat["ht"].metadata
+
+    assert "mld_dt_maen" not in md["standard_names"]
+    assert md["standard_names"]["mld_da_mean"] == "x"  # the valid key still applies
+    assert md["standard_names"]["mld_dt_mean"] == "mld_dt_mean"  # still as probed
+    assert SIGMA_THETA not in md["variables"]
+    assert "x" in md["variables"]
+
+
 # The helper itself, on plain dicts: what the file-backed tests above cannot reach
 # without contriving a source for each case.
 
@@ -1079,6 +1118,224 @@ def test_a_caller_supplied_duplicate_record_is_never_overwritten():
     )
 
     assert got["duplicate_standard_names"] == {"mine": "kept"}
+
+
+# -------------------------------------------- add_erddap_source: the shared attach step
+#
+# ``add_erddap_source`` used to carry its own copy of the attach step -- read once,
+# probe, overlay the caller's metadata -- and so had none of the rules ``_attach`` gives
+# every other source: the ``standard_names`` merge, ``featureType`` canonicalization,
+# the read retry, and keeping an entry whose probe fails. These pin that it now goes
+# through ``_attach`` and shares them.
+
+
+def _add_erddap_table(monkeypatch, tmp_path, **kw):
+    """Add a small Papa-shaped ERDDAP table to a new catalog and return the catalog.
+
+    ``TableDAPReader`` is swapped for the network-free stand-in tests/test_qc.py builds
+    over an on-disk CSV. ERDDAP declares no flag metadata here and the table has no
+    flag columns, so there is no request and no qc warning. ``kw`` goes to
+    ``add_erddap_source``.
+    """
+    from ocean_skill.build import add_erddap_source
+    from tests.test_qc import _fake_table_dap_reader_factory
+
+    csv = tmp_path / "papa.csv"
+    csv.write_text(
+        "time (UTC),latitude (degrees_north),longitude (degrees_east),depth (m),"
+        "TEMP (degree_Celsius),PSAL (1e-3)\n"
+        "2010-01-15T00:00:00Z,50.1,-144.9,1.0,6.401,32.50\n"
+        "2010-01-15T01:00:00Z,50.1,-144.9,1.0,6.398,32.51\n"
+    )
+    monkeypatch.setattr(
+        "intake_erddap.erddap.TableDAPReader",
+        _fake_table_dap_reader_factory(
+            csv, lambda server, dataset_id: {"variables": {}}
+        ),
+    )
+    cat = new_catalog(title="t")
+    add_erddap_source(
+        cat,
+        "papa",
+        server="https://data.pmel.noaa.gov/pmel/erddap",
+        dataset_id="papa_hourly",
+        **kw,
+    )
+    return cat
+
+
+def test_a_caller_name_merges_over_an_erddap_sources_probed_map(monkeypatch, tmp_path):
+    """Naming one column of an ERDDAP table leaves the rest of the probed map.
+
+    The old ERDDAP path replaced the map wholesale, so the one-line fix for a column
+    dropped ``PSAL`` from ``standard_names`` and left ``variables`` advertising the old
+    name. Through ``_attach`` it is an overlay, as for every other source.
+    """
+    cat = _add_erddap_table(
+        monkeypatch,
+        tmp_path,
+        standard_names={"TEMP (degree_Celsius)": "sea_water_temperature"},
+    )
+    md = cat["papa"].metadata
+
+    assert md["standard_names"] == {
+        "TEMP (degree_Celsius)": "sea_water_temperature",
+        "PSAL (1e-3)": "PSAL",  # still as probed
+    }
+    assert md["variables"] == ["PSAL", "sea_water_temperature"]
+    assert md["units"]["TEMP (degree_Celsius)"] == "degree_Celsius"  # keyed by column
+    assert "duplicate_standard_names" not in md  # nothing was displaced
+    assert md["dataset_id"] == "papa_hourly"  # what the source records itself
+    assert md["server"] == "https://data.pmel.noaa.gov/pmel/erddap"
+
+
+def test_an_erddap_feature_type_is_canonicalized_and_marked_declared(
+    monkeypatch, tmp_path
+):
+    """A caller's ``featureType`` is treated as it is for ``add_source``.
+
+    The old ERDDAP path saved the spelling as typed, and left ``featureType_source``
+    at the ``"inferred"`` that the probe's own guess had set.
+    """
+    cat = _add_erddap_table(monkeypatch, tmp_path, featureType="timeseries")
+    md = cat["papa"].metadata
+
+    assert md["featureType"] == "timeSeries"
+    assert md["featureType_source"] == "declared"
+
+
+def test_an_erddap_probe_read_that_fails_once_is_retried(monkeypatch, tmp_path):
+    """A flaky ERDDAP server's read that recovers on the second try keeps the entry.
+
+    ERDDAP is the server the read retry was written for, but the old path read the
+    table once and bare, so the first 500 ended the entry.
+
+    The retry notice blames the caller's own code, not a line inside ``build.py``.
+    """
+    from unittest import mock
+
+    from intake.readers import readers
+
+    real_read = readers.PandasCSV.read
+    calls = {"n": 0}
+
+    def flaky_then_ok(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("server hiccup 500")
+        return real_read(self, *a, **k)
+
+    with (
+        mock.patch.object(readers.PandasCSV, "read", flaky_then_ok),
+        pytest.warns(UserWarning, match="retrying") as record,
+    ):
+        cat = _add_erddap_table(monkeypatch, tmp_path)
+
+    assert calls["n"] == 2  # the first read failed, the retry landed
+    assert list(cat) == ["papa"]
+    assert cat["papa"].metadata["variables"] == ["PSAL", "TEMP"]  # probed afterwards
+    # Blames ``_add_erddap_table`` (this file): the old fixed stacklevel=3 blamed
+    # ``add_erddap_source``, inside build.py.
+    retrying = [w for w in record if "retrying" in str(w.message)]
+    assert retrying, "expected a 'retrying' warning"
+    assert all(w.filename == __file__ for w in retrying), (
+        f"blamed {[w.filename for w in retrying]}, not the calling test file"
+    )
+
+
+def test_an_unprobeable_erddap_table_is_kept_with_a_warning(monkeypatch, tmp_path):
+    """A table that reads but cannot be probed is kept, as any other source is.
+
+    The old ERDDAP path let the probe's failure propagate, so one odd dataset ended a
+    sweep of them; "could not derive metadata" is not "this entry is invalid".
+    """
+    from unittest import mock
+
+    from ocean_skill import build
+
+    with (
+        mock.patch.object(build, "_probe", side_effect=RuntimeError("no axes")),
+        pytest.warns(UserWarning, match="could not derive metadata"),
+    ):
+        cat = _add_erddap_table(monkeypatch, tmp_path)
+    md = cat["papa"].metadata
+
+    assert list(cat) == ["papa"]
+    assert md["dataset_id"] == "papa_hourly"  # what the source records itself
+    assert "geospatial_lat_min" not in md  # nothing was derived
+
+
+def test_a_column_named_without_its_units_is_ignored_with_a_hint(monkeypatch, tmp_path):
+    """A table's columns keep their units suffix, so a bare ``TEMP`` names nothing.
+
+    The probed map is keyed by the column as the table spells it, ``TEMP
+    (degree_Celsius)``, so merging ``TEMP`` in would add a key ``read()`` can never
+    rename. It is ignored, and the warning points at the real spelling.
+    """
+    with pytest.warns(
+        UserWarning,
+        match=(
+            r"ignoring standard_names\['TEMP'\].*"
+            r"Did you mean: TEMP \(degree_Celsius\)"
+        ),
+    ):
+        cat = _add_erddap_table(
+            monkeypatch, tmp_path, standard_names={"TEMP": "sea_water_temperature"}
+        )
+    md = cat["papa"].metadata
+
+    assert md["standard_names"] == {
+        "TEMP (degree_Celsius)": "TEMP",
+        "PSAL (1e-3)": "PSAL",
+    }  # exactly as probed
+    assert md["variables"] == ["PSAL", "TEMP"]
+
+
+def test_a_bare_column_name_is_pointed_at_its_units_spelling_not_its_flag():
+    """A bare ``TEMP`` is pointed at ``TEMP (degree_Celsius)``, never at ``TEMP_QC``.
+
+    Edit distance favours the short flag column (``TEMP_QC`` scores 0.73 against
+    ``TEMP``, ``TEMP (degree_Celsius)`` only 0.32), yet a missing units suffix is the
+    likeliest mistake, and a real Papa table carries both. So a column whose
+    units-stripped name matches the key is offered first, and alone. Checked on the
+    helper directly, with a plain frame, so no reader or qc machinery is involved.
+    """
+    import pandas as pd
+
+    from ocean_skill.build import _drop_absent_standard_names
+
+    df = pd.DataFrame(
+        columns=[
+            "time (UTC)",
+            "TEMP (degree_Celsius)",
+            "TEMP_QC",
+            "PSAL (1e-3)",
+            "PSAL_QC",
+        ]
+    )
+    metadata = {
+        "standard_names": {"TEMP": "sea_water_temperature"},
+        "featureType": "timeSeries",
+    }
+    # ``$``: the hint ends at the units spelling, with no ``, TEMP_QC`` after it
+    with pytest.warns(
+        UserWarning,
+        match=(
+            r"ignoring standard_names\['TEMP'\].*"
+            r"Did you mean: TEMP \(degree_Celsius\)\?$"
+        ),
+    ) as record:
+        got = _drop_absent_standard_names("papa", metadata, df)
+
+    assert got["standard_names"] == {}
+    assert got["featureType"] == "timeSeries"  # every other key passes through
+    assert not any("TEMP_QC" in str(w.message) for w in record)
+
+    # case does not matter either: a hand-typed key is often lower-case
+    with pytest.warns(
+        UserWarning, match=r"\['temp'\].*Did you mean: TEMP \(degree_Celsius\)\?$"
+    ):
+        _drop_absent_standard_names("papa", {"standard_names": {"temp": "x"}}, df)
 
 
 # ----------------------------------------------------------- domain_outline (perimeter)

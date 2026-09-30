@@ -1064,7 +1064,7 @@ def find_catalogs(
 
     For an *exact* name rather than a substring/glob, skip searching entirely::
 
-        "ooi_papa" in osk.catalog_names()
+        "ooi_papa" in osk.catalogs.catalog_names()
 
     ::
 

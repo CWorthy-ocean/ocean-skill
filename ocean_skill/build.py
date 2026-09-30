@@ -59,6 +59,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from ocean_skill import _stacklevel
 from ocean_skill.cf import find_coord
 
 __all__ = [
@@ -2344,7 +2345,7 @@ def _read_with_retries(reader, name):
             warnings.warn(
                 f"read of {name!r} failed ({exc}); retrying in {wait:g}s "
                 f"(attempt {attempt + 1} of {PROBE_RETRIES})",
-                stacklevel=3,
+                stacklevel=_stacklevel.find(),
             )
             time.sleep(wait)
             attempt += 1
@@ -2426,7 +2427,83 @@ def _merge_standard_names(
     return out
 
 
-def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] | None = None):
+def _drop_absent_standard_names(
+    name: str, metadata: dict[str, Any], data
+) -> dict[str, Any]:
+    """Drop, with a warning, each ``standard_names`` key naming nothing in ``data``.
+
+    ``metadata`` is the caller's metadata as :func:`_attach` receives it, and ``data``
+    is what the probe just read. The read-time renames
+    (:func:`ocean_skill.sources.read`, and :func:`ocean_skill.roms.standardize` for
+    ROMS output) only ever rename a name the data carries, so a key that names
+    nothing -- a column the table lacks, a variable the file lacks -- could never take
+    effect. Merged in anyway, it would put its target into ``variables``, advertising
+    a variable ``read()`` never produces. Each such key warns once and is left out of
+    the map that comes back; ``metadata`` itself is never modified, and is returned as
+    the same object when there is nothing to drop.
+
+    The likeliest cause is a table column named without its units suffix (``"TEMP"``
+    for ``"TEMP (degree_Celsius)"``): a table's columns are matched exactly as they
+    are spelled. The warning's "Did you mean" hint names the column whose name
+    without its units is exactly the key first, before any close-spelling match, so
+    a flag column like ``TEMP_QC`` cannot win it.
+    A DataFrame's names are its columns and a Dataset's are its variables,
+    coordinates included -- the same sets the read-time renames test a key against.
+    Only ``standard_names`` is looked at; every other key passes through untouched.
+    With nothing readable in ``data`` there is nothing to check against, so nothing
+    is dropped.
+    """
+    is_frame = hasattr(data, "columns")
+    present = {
+        str(n) for n in (data.columns if is_frame else getattr(data, "variables", ()))
+    }
+    requested = dict(metadata.get("standard_names") or {})
+    if not requested or not present:
+        return metadata
+    absent = [raw for raw in requested if str(raw) not in present]
+    if not absent:
+        return metadata
+
+    from ocean_skill.catalog import _did_you_mean
+    from ocean_skill.tabular import split_units
+
+    kind = "column" if is_frame else "variable"
+    options = sorted(present)
+    for raw in absent:
+        # A table key missing its units suffix is the likeliest slip, and edit distance
+        # would rank the short flag column beside it first (TEMP_QC over "TEMP
+        # (degree_Celsius)"), so a column that is the key once its units are stripped
+        # is named before any close-spelling match gets a say.
+        bare = (
+            [c for c in options if split_units(c)[0].lower() == str(raw).lower()]
+            if is_frame
+            else []
+        )
+        hint = (
+            f" Did you mean: {', '.join(bare)}?"
+            if bare
+            else _did_you_mean(str(raw), options)
+        )
+        warnings.warn(
+            f"{name!r}: ignoring standard_names[{raw!r}] -- the data has no {kind} "
+            f"named that, so read() could never rename it.{hint}",
+            stacklevel=_stacklevel.find(),
+        )
+    kept = {raw: sn for raw, sn in requested.items() if str(raw) in present}
+    return {**metadata, "standard_names": kept}
+
+
+def _attach(
+    cat,
+    name,
+    reader,
+    *,
+    probe,
+    name_map,
+    metadata,
+    qc: dict[str, Any] | None = None,
+    resolve_qc=None,
+):
     """Probe a reader, attach metadata, and put it in ``cat`` under ``name``.
 
     The step every source shares once its reader exists — whether that reader was
@@ -2452,8 +2529,17 @@ def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] 
     derived — which is right for most keys, but wrong for ``qc``, where the
     *resolved* contract (built from the raw ``qc=`` spec plus the actual data) is
     what belongs in the saved entry, not the raw, unresolved spec clobbering it
-    after the fact. Callers (:func:`add_source`/:func:`add_sources`) keep ``qc``
-    out of ``metadata`` for exactly this reason.
+    after the fact. Callers (:func:`add_source`/:func:`add_sources`/
+    :func:`add_erddap_source`) keep ``qc`` out of ``metadata`` for exactly this
+    reason.
+
+    ``resolve_qc`` is for a builder whose ``qc`` spec depends on the data itself.
+    :func:`add_erddap_source` fills in what the caller's ``qc`` leaves unsaid from the
+    flag attributes ERDDAP declares for the flag columns the table actually carries,
+    and which columns those are is only known once the table has been read. It is
+    called with what the probe read and returns the spec :func:`_probe` gets in place
+    of ``qc``, so one read serves both the lookup and the probe. A failure in it is a
+    probe failure like any other: it warns, and the entry is kept.
 
     ``standard_names`` is a second special case, and the mirror image of ``qc``:
     where ``qc`` keeps the caller's raw value from clobbering the probe's resolved
@@ -2466,20 +2552,30 @@ def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] 
     for that reason, rather than only pushed into the reader, so the merge has
     something to be a merge *of*; with probing skipped or failed it is empty and the
     caller's map stands alone. Every other key keeps the plain override.
+
+    What the probe read is also what the caller's map is checked against: a key that
+    names nothing in it is dropped with a warning before the merge (see
+    :func:`_drop_absent_standard_names`). The read-time renames skip a key the data
+    does not carry, so merging it anyway would only make ``variables`` advertise a
+    name ``read()`` never produces. With probing skipped there is no data to check
+    against, and the map is taken as given.
     """
     probed: dict[str, Any] = {}
     if probe:
         # unreadable => unusable; let the caller decide, but retry a transient failure first
         data = _read_with_retries(reader, name)
         try:
+            if resolve_qc is not None:
+                qc = resolve_qc(data)
             probed = _probe(data, name_map, qc=qc)
             reader.metadata.update(probed)
         except Exception as exc:
             warnings.warn(
                 f"read {name!r} but could not derive metadata from it ({exc}); "
                 "adding it anyway, though osk.find() will not see its extents.",
-                stacklevel=3,
+                stacklevel=_stacklevel.find(),
             )
+        metadata = _drop_absent_standard_names(name, metadata, data)
     reader.metadata.update(_merge_standard_names(probed, metadata))
     if "featureType" in metadata:
         # A caller-supplied featureType overrides the probe's guess (the update
@@ -2515,7 +2611,7 @@ def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] 
                 f"{name!r} declares a separate ROMS grid file but it could not be "
                 f"read for a domain outline ({exc}); comparisons will fall back to "
                 "the bounding box.",
-                stacklevel=3,
+                stacklevel=_stacklevel.find(),
             )
         else:
             if outline is not None:
@@ -2609,8 +2705,10 @@ def add_source(
         dropped from the map and noted under ``duplicate_standard_names``. At read
         time (:func:`ocean_skill.sources.read`) each variable the map renames also has
         the catalog's name stamped onto its own ``standard_name`` attribute,
-        overwriting the bogus one. See :func:`_merge_standard_names` for the full
-        rules.
+        overwriting the bogus one. A key naming nothing in the data, as the probe
+        reads it, is ignored with a warning (for a table the keys are its column
+        names, units suffix included: ``"TEMP (degree_Celsius)"``, not ``"TEMP"``).
+        See :func:`_merge_standard_names` for the full rules.
     """
     if reader is None:
         if url is None:
@@ -2980,7 +3078,7 @@ def _declared_qc_spec(reader, server: str, dataset_id: str, df, qc):
         warnings.warn(
             f"{dataset_id!r}: could not read ERDDAP's declared flag metadata ({exc}); "
             "falling back to the observed flag values.",
-            stacklevel=3,
+            stacklevel=_stacklevel.find(),
         )
         attrs = {}
     flags_input = spec.get("flags")
@@ -3033,6 +3131,11 @@ def add_erddap_source(
     it is the right tool for discovery but an awkward one when you already know
     which dataset you want.
 
+    Probing and metadata go through the same attach step as :func:`add_source`
+    (:func:`_attach`): a transient read failure is retried (:data:`PROBE_RETRIES`), a
+    table that reads but cannot be probed is kept with a warning, and a caller's
+    ``featureType`` is normalized and recorded as declared.
+
     Parameters
     ----------
     server
@@ -3041,9 +3144,18 @@ def add_erddap_source(
     dataset_id
         The ERDDAP dataset ID — find one via that server's
         ``/search/index.csv?searchFor=...``.
+    variables
+        The ERDDAP variables (columns) to request, ``None`` for all of them. This is
+        not the ``variables`` metadata key, which the probe derives and which follows
+        the merged ``standard_names``.
     mask_failed_qartod
         Apply OOI's own QARTOD aggregate flags on read (the default): failed
         observations come back as NaN instead of needing separate QC downstream.
+    probe
+        Open the table once to derive extents/axes/variables/featureType and to
+        resolve ``qc`` (see :func:`add_source`). A read that fails transiently is
+        re-attempted first, and a table that reads but cannot be probed is kept with
+        a warning, as above.
     qc
         Provider QC flags for the tabular source -- see :mod:`ocean_skill.qc` (its
         module docstring is the spec) and :func:`add_source`. Threaded to
@@ -3061,6 +3173,18 @@ def add_erddap_source(
         contract for a dataset whose observed values alone were ambiguous.
         ``qc={"scheme": ...}`` (or ``flag_to_qartod``) pins it outright and skips
         the extra ``/info`` request.
+    **metadata
+        Extra metadata; caller values override derived ones -- except
+        ``standard_names``, which merges over the probed map instead of replacing it
+        (see :func:`add_source`): the caller wins per column and the rest of the
+        probed map stays. Its keys are the table's raw column names with the units
+        suffix, exactly as the probe records them. Each probed value is that column's
+        name with the units removed, which is a CF standard name only where the
+        server names its variables by one (PMEL's Station Papa ``TEMP``/``PSAL`` are
+        not). So one mislabelled column is corrected with
+        ``standard_names={"TEMP (degree_Celsius)": "sea_water_temperature"}``, the
+        other columns keeping their probed names. A key naming no column is ignored
+        with a warning.
     """
     from intake_erddap.erddap import TableDAPReader
 
@@ -3071,17 +3195,17 @@ def add_erddap_source(
         mask_failed_qartod=mask_failed_qartod,
         **(reader_kwargs or {}),
     )
-    md: dict[str, Any] = {"server": server, "dataset_id": dataset_id}
-    if probe:
-        # Read once; the frame serves both the declared-flag lookup and the probe.
-        df = reader.read()
-        resolved_qc = _declared_qc_spec(reader, server, dataset_id, df, qc)
-        md.update(_probe(df, None, qc=resolved_qc))
-    md.update(metadata)
-    reader.metadata.update(md)
-    cat[name] = reader
-    cat.aliases[name] = name
-    return reader
+    reader.metadata.update({"server": server, "dataset_id": dataset_id})
+    return _attach(
+        cat,
+        name,
+        reader,
+        probe=probe,
+        name_map=None,
+        metadata=metadata,
+        # the frame the probe reads also serves the declared-flag lookup
+        resolve_qc=lambda df: _declared_qc_spec(reader, server, dataset_id, df, qc),
+    )
 
 
 #: The two ARCO chunking layouts Copernicus Marine publishes for each dataset, and how
