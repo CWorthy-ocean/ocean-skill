@@ -5468,6 +5468,7 @@ def skill_map(
     fit_text: bool = True,
     rasterize: bool | str | None = None,
     hover: bool | None = None,
+    tiles: str | bool | None = None,
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
@@ -5539,9 +5540,11 @@ def skill_map(
     thousands of near-coincident stations the dots smear into a mask that hides the
     very surface they annotate.
 
-    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one option
-    set to each renderer (see :func:`_warn_if_interactive_only`) — they are the
-    interactive renderer's fix for a large mesh and do nothing here.
+    ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can pass
+    one option set to each renderer (see :func:`_warn_if_interactive_only`) —
+    ``rasterize``/``hover`` are the interactive renderer's fix for a large mesh and do
+    nothing here, and a web basemap (``tiles``) is drawn only there too; this renderer
+    always draws the offline coastline instead, so a truthy ``tiles`` warns.
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every panel — see :func:`field_row`'s docstring.
@@ -5561,7 +5564,7 @@ def skill_map(
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot.typography import facet_figsize, facet_layout
 
-    _warn_if_interactive_only(rasterize, hover)
+    _warn_if_interactive_only(rasterize, hover, tiles)
     if not items:
         raise ValueError("skill_map needs at least one comparison, got none")
     names = metric_panels(items[0]["skill"], metric_names)

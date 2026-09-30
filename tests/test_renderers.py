@@ -1865,3 +1865,33 @@ def test_static_field_grid_accepts_tiles_with_a_warning():
     spec = PlotSpec(family="field_grid", items=two_rows, options={"tiles": True})
     with pytest.warns(UserWarning, match="only affect the interactive renderer"):
         render(spec, renderer="matplotlib")
+
+
+def test_skill_map_gets_a_basemap_by_default_interactively():
+    """Every skill-metric panel carries a basemap, like the other map families.
+
+    Without one, each panel drew hvplot's offline coastline ``Feature``, which bokeh
+    re-projects from scratch per panel -- roughly nine seconds for a four-panel map.
+    """
+    layout = render(_skill_spec(_skill_item()), renderer="holoviews")
+    kinds = _element_kinds(layout)
+    assert kinds.count("WMTS") == len(_SKILL_METRICS), kinds  # one per metric panel
+    assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+
+
+def test_skill_map_tiles_false_is_the_offline_coastline_interactively():
+    layout = render(_skill_spec(_skill_item(), tiles=False), renderer="holoviews")
+    kinds = _element_kinds(layout)
+    assert "WMTS" not in kinds, kinds
+    assert kinds.count("Feature") == len(_SKILL_METRICS), kinds
+
+
+def test_static_skill_map_accepts_tiles_with_a_warning():
+    """``renderer="both"`` can hand ``tiles=`` to each renderer.
+
+    The static side must not raise, since it is a real option there too, just not
+    this one's.
+    """
+    spec = _skill_spec(_skill_item(), tiles=True)
+    with pytest.warns(UserWarning, match="only affect the interactive renderer"):
+        render(spec, renderer="matplotlib")

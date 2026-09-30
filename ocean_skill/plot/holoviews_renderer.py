@@ -2264,15 +2264,24 @@ def _time_depth_row_grid(
     return layout
 
 
-def _station_overlay(stations, name: str, colors, da, *, geo: bool):
+def _station_overlay(stations, name: str, colors, da, *, geo: bool, tiles=None):
     """Return one metric's station values as hoverable dots, or ``None``.
 
-    Plain ``hv.Points`` rather than a geoviews element — the same choice
+    Untiled, plain ``hv.Points`` rather than a geoviews element — the same choice
     :func:`_domain_overlay` makes and for the same reason: a static figure has no
     per-frame reprojection cost to worry about, but staying in one coordinate
     family with the outline it is drawn alongside is simpler than mixing two. The
     antimeridian shift matches :func:`_domain_overlay`'s: identity for every panel
     except one in :func:`_output_projection`'s shifted frame.
+
+    Under ``tiles`` the panel is in Web Mercator metres, which plain degree
+    ``hv.Points`` would miss entirely — the dots would land near (0, 0), off the map.
+    Projecting them by hand (:func:`_to_mercator`) would place them but leave the hover
+    reading metres, so this branch builds a ``gv.Points`` with ``crs=PlateCarree``
+    instead: geoviews projects it into the basemap's frame itself, and its hover reads
+    lon/lat in degrees — the same choice :func:`_location_elements` makes for its point
+    markers. That is also why this branch skips the 180-shift above: geoviews projects
+    from ``crs``, so shifting the longitudes first would move them twice.
     """
     if stations is None or name not in stations.get("values", {}):
         return None
@@ -2281,7 +2290,8 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool):
 
     lon = np.asarray(stations["lon"], dtype="float64")
     lat = np.asarray(stations["lat"], dtype="float64")
-    if geo and _output_projection(da) is not None:
+    tiled = bool(geo and tiles)
+    if geo and not tiled and _output_projection(da) is not None:
         lon = (lon % 360.0) - 180.0
     frame = {"lon": lon, "lat": lat, "value": np.asarray(stations["values"][name])}
     names = stations.get("names")
@@ -2289,7 +2299,19 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool):
     if names is not None:
         frame["station"] = list(names)
         vdims.append("station")
-    return hv.Points(pd.DataFrame(frame), kdims=["lon", "lat"], vdims=vdims).opts(
+    if tiled:
+        import cartopy.crs as ccrs
+        import geoviews as gv
+
+        points = gv.Points(
+            pd.DataFrame(frame),
+            kdims=["lon", "lat"],
+            vdims=vdims,
+            crs=ccrs.PlateCarree(),
+        )
+    else:
+        points = hv.Points(pd.DataFrame(frame), kdims=["lon", "lat"], vdims=vdims)
+    return points.opts(
         color="value",
         cmap=colors.cmap,
         clim=colors.clim(),
@@ -2318,13 +2340,14 @@ def _skill_map(
     extent=None,
     hover: bool = True,
     rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
     shared_limits: bool = False,
     layout: str = "rows",
     station_markers: bool = True,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     titles=None,
-      colorbar_label_clipped: bool = False,
+    colorbar_label_clipped: bool = False,
     **_,
 ):
     """One interactive map per skill metric: the interactive twin of ``skill_map``.
@@ -2352,12 +2375,24 @@ def _skill_map(
     curvilinear mesh too, and hits the same per-cell loop past
     :data:`RASTERIZE_ABOVE_CELLS`.
 
+    ``tiles`` puts a web basemap under every panel, on by default as it is for the other
+    map families — see :func:`_field_facet`'s docstring for what it accepts and
+    :func:`_tiles_for` for the antimeridian downgrade. Resolved once across every item,
+    since a straddling domain on any one comparison would tear the same way on its own
+    panel. The basemap draws the coast itself, so the offline coastline is skipped
+    under it — and that offline coastline is what made an untiled panel slow to draw,
+    since bokeh re-projects the world's coastline afresh for every panel;
+    ``tiles=False`` brings it back for a notebook that has to work offline. Both the
+    station dots (:func:`_station_overlay`) and the ``extent`` window below are
+    projected into the basemap's Web Mercator frame to match.
+
     ``extent`` crops the view the same way its static twin does — ``"tight"`` frames
     the drawn skill surface (the non-``NaN`` cells) with a small margin, a
     ``(lon_min, lon_max, lat_min, lat_max)`` tuple sets an exact window, and ``None``
     (the default) leaves each panel framing its whole grid. Resolved through the same
     :func:`~ocean_skill.plot.matplotlib_renderer.resolve_extent` both backends share,
-    then applied as each panel's ``xlim``/``ylim``.
+    then applied as each panel's ``xlim``/``ylim`` (projected to Web Mercator metres
+    first under ``tiles``, since a tiled panel's axes are no longer degrees).
 
     ``shared_limits=True`` pools each metric's values over every row before choosing
     its colour limits, the same as the static family — every panel of one metric then
@@ -2404,6 +2439,12 @@ def _skill_map(
         )
     for item in items[1:]:
         metric_panels(item["skill"], names)
+    # resolved once across every item's map -- every panel shares one basemap decision,
+    # and a straddling domain on any one comparison would tear the same way on its own
+    # panel (see _tiles_for/_check_tiles)
+    tiles = _tiles_for(
+        _check_tiles(tiles), *(item["skill"][names[0]] for item in items)
+    )
 
     if layout not in ("rows", "columns"):
         raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
@@ -2420,7 +2461,7 @@ def _skill_map(
     ncols = max(int(ncols), 1)
     factor = _canvas_factor(size, zoom)
     arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
-    outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo)
+    outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo, tiles=tiles)
     raster = _should_rasterize(items[0]["skill"][names[0]], rasterize)
 
     # One colour scale per metric, pooled over every row, when asked to share -- the
@@ -2452,9 +2493,15 @@ def _skill_map(
     # The view window every panel shares (None = each panel frames its whole grid).
     # Resolved from the same option, the same way, as the static family's set_extent.
     box = resolve_extent(extent, items, names)
-    view_opts = (
-        {"xlim": (box[0], box[1]), "ylim": (box[2], box[3])} if box else {}
-    )
+    view_opts: dict[str, Any] = {}
+    if box and geo and tiles:
+        # A tiled panel's axes are Web Mercator metres, so degree limits would frame
+        # the wrong place; plain opts take no part in geoviews' projection, so the
+        # bounds are projected by hand -- the same fix _locations makes for its window.
+        xs, ys = _to_mercator([box[0], box[1]], [box[2], box[3]])
+        view_opts = {"xlim": (xs[0], xs[1]), "ylim": (ys[0], ys[1])}
+    elif box:
+        view_opts = {"xlim": (box[0], box[1]), "ylim": (box[2], box[3])}
 
     def _auto_title(row, name):
         item = items[row]
@@ -2495,13 +2542,19 @@ def _skill_map(
             canvas_factor=factor,
             hover=hover,
             rasterize=raster,
+            tiles=tiles,
             coastline_resolution=coastline_resolution,
             land=land,
             label_clipped=colorbar_label_clipped,
         )
         points = (
             _station_overlay(
-                item.get("stations"), name, colors, item["skill"][name], geo=geo
+                item.get("stations"),
+                name,
+                colors,
+                item["skill"][name],
+                geo=geo,
+                tiles=tiles,
             )
             if station_markers
             else None
@@ -2538,7 +2591,7 @@ def _portrait(
     zoom: float = 1.0,
     hover: bool = True,
     titles=None,
-      colorbar_label_clipped: bool = False,
+    colorbar_label_clipped: bool = False,
     **_,
 ):
     """Interactive portrait plot: hover a cell for its full metric record.
