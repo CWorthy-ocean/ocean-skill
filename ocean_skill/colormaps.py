@@ -64,7 +64,11 @@ __all__ = [
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
 #: deliberate choice, listed here rather than left as an accident to rediscover:
 #:   - ammonium / sigma_theta: both cmo.dense
-#:   - nitrate / mld / pressure: both cmo.deep
+#:   - nitrate / mld / pressure: both cmo.deep -- "mld" meaning all five mixed-layer
+#:     thickness names, the generic one and the four CF ``..._defined_by_<criterion>``
+#:     ones. That includes the sigma_theta-defined one: it is a depth in metres, not a
+#:     density, so it takes the MLD map even though its name contains "sigma_theta"
+#:     (see the ordering note at the "mixed_layer" entry below)
 #:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
 #:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
 #:   - pH cmo.speed_r vs the velocity family's cmo.speed
@@ -108,9 +112,21 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # same family to the two wind components. No other standard_name contains "wind".
     "wind": "cmo.speed",
     "sea_ice": "cmo.ice",
+    # Every mixed-layer-thickness name: the generic ``ocean_mixed_layer_thickness``
+    # and CF's ``..._defined_by_sigma_theta``/``_sigma_t``/``_temperature``/
+    # ``_mixing_scheme``. ORDER MATTERS: ``cmaps_for`` takes the *first* key in this
+    # table that ``re.search`` finds in the name, and a definition-specific MLD name
+    # embeds the name of its criterion variable. ``..._defined_by_sigma_theta`` has
+    # "sigma_theta" in it, so with that entry listed first it gets the density map
+    # (cmo.dense) although it is a thickness in metres and belongs with the other
+    # MLDs. This entry must therefore stay above every entry keyed by a criterion
+    # variable -- today only "sigma_theta", but a "temperature" or "sigma_t" key added
+    # later would shadow its MLD name just the same. xcmocean's own patterns need no
+    # such care: ours are inserted ahead of them (see _register_colormaps), which is
+    # also what stops its "temp" pattern claiming ``..._defined_by_temperature``.
+    "mixed_layer": "cmo.deep",
     "sigma_theta": "cmo.dense",
     "conductivity": "cmo.haline",
-    "mixed_layer": "cmo.deep",
     # full standard_name: a bare "pressure" key is fine too, but spelled out for
     # symmetry with the other full-standard_name entries above.
     "sea_water_pressure": "cmo.deep",

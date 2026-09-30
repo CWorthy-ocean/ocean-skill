@@ -34,6 +34,11 @@ from ocean_skill.operators import register_calculator, register_derived
 
 CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
 MLD = "ocean_mixed_layer_thickness"
+# The definition-specific names the MLD calculator now gives its output by method
+# (density_threshold -> sigma_theta, temperature_threshold -> temperature), and the
+# name a Holte & Talley-style reference is renamed to in its own catalog.
+MLD_SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+MLD_TEMPERATURE = "ocean_mixed_layer_thickness_defined_by_temperature"
 
 PAIR = {
     "test": {"calculate": "mld", "method": "density_threshold"},
@@ -171,6 +176,83 @@ def test_a_non_pair_spec_never_warns():
         c._warn_on_pair_spec_mismatch(test_da, reference_da)
 
 
+# -- the mismatch warning compares quantities, not spellings ---------------------
+#
+# The check used to compare the two names literally, so any two *spellings* of one
+# quantity warned -- "mixed_layer_depth" on one side against
+# "ocean_mixed_layer_thickness" on the other, say. That mattered little while a
+# calculated depth and a reference could hardly disagree about what to call it, but
+# mixed layer depth now has definition-specific names, and the calculator names its
+# output by method. The check asks ocean_skill.vocabulary.same_quantity instead, the
+# vocabulary's own answer to "one variable or two": spellings, aliases, patterns and
+# capitalizations of one quantity stay silent, while two different definitions
+# (separate standard_names now) still warn.
+
+
+def test_mismatch_warning_is_silent_for_one_definition_on_both_sides():
+    """The density calculator's output against a sigma_theta reference of that name.
+
+    Both lanes carry ``..._defined_by_sigma_theta``: the calculator names its output
+    by method, and a Holte & Talley-style reference is renamed to the same
+    definition in its own catalog. That is one quantity, so an unlabelled pair-spec
+    of the two has nothing to warn about -- no ``standard_name=`` needed.
+    """
+    c = Comparison(reference="r", test="t", variable=PAIR)
+    test_da = xr.DataArray(1.0, attrs={"standard_name": MLD_SIGMA_THETA})
+    reference_da = xr.DataArray(1.0, attrs={"standard_name": MLD_SIGMA_THETA})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c._warn_on_pair_spec_mismatch(test_da, reference_da)
+
+
+def test_mismatch_warning_fires_when_two_definitions_differ():
+    """A temperature-threshold depth against a sigma_theta one is two quantities."""
+    c = Comparison(reference="r", test="t", variable=PAIR)
+    test_da = xr.DataArray(1.0, attrs={"standard_name": MLD_TEMPERATURE})
+    reference_da = xr.DataArray(1.0, attrs={"standard_name": MLD_SIGMA_THETA})
+    with pytest.warns(UserWarning, match="test side resolves") as record:
+        c._warn_on_pair_spec_mismatch(test_da, reference_da)
+    (message,) = [str(w.message) for w in record]
+    assert MLD_TEMPERATURE in message
+    assert MLD_SIGMA_THETA in message
+
+
+def test_mismatch_warning_fires_for_the_generic_name_against_a_definition():
+    """The generic name has not said which definition it carries, so it is not equal.
+
+    No exception is made for a family here: a pair-spec asserts the two recipes are
+    one quantity, and the generic name against a specific one cannot back that up.
+    """
+    c = Comparison(reference="r", test="t", variable=PAIR)
+    test_da = xr.DataArray(1.0, attrs={"standard_name": MLD})
+    reference_da = xr.DataArray(1.0, attrs={"standard_name": MLD_SIGMA_THETA})
+    with pytest.warns(UserWarning, match="test side resolves"):
+        c._warn_on_pair_spec_mismatch(test_da, reference_da)
+
+
+@pytest.mark.parametrize(
+    ("test_name", "reference_name"),
+    [
+        # the generic name spelled two ways: an alias against the canonical name
+        ("mixed_layer_depth", "ocean_mixed_layer_thickness"),
+        ("mixed_layer_thickness", "mixed_layer_depth"),
+        # one name, two capitalizations
+        (MLD_SIGMA_THETA, MLD_SIGMA_THETA.upper()),
+        # a pattern-recognized spelling against the canonical one
+        ("Temperature_CTD", "sea_water_potential_temperature"),
+    ],
+)
+def test_mismatch_warning_is_silent_for_two_spellings_of_one_quantity(
+    test_name, reference_name
+):
+    c = Comparison(reference="r", test="t", variable=PAIR)
+    test_da = xr.DataArray(1.0, attrs={"standard_name": test_name})
+    reference_da = xr.DataArray(1.0, name=reference_name)  # the .name fallback too
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        c._warn_on_pair_spec_mismatch(test_da, reference_da)
+
+
 # -- dedup and cache keys --------------------------------------------------------
 
 
@@ -229,6 +311,64 @@ def test_short_variable_label_on_a_named_pair_uses_the_vocabulary():
         _short_variable_label({**PAIR, "standard_name": MLD})
         == "ocean mixed layer thickness (density_threshold)"
     )
+
+
+def test_short_variable_label_folds_the_method_into_a_bracketed_short_name():
+    """A pair-spec naming a specific MLD gets one parenthetical, not two.
+
+    ``short_name`` already ends the specific names in a bracket (``"MLD (σθ)"``);
+    appending the method as a second one read as two unrelated qualifiers. The method
+    joins the first bracket instead.
+    """
+    assert (
+        _short_variable_label({**PAIR, "standard_name": MLD_SIGMA_THETA})
+        == "MLD (σθ, density_threshold)"
+    )
+    temperature = {
+        "test": {"calculate": "mld", "method": "temperature_threshold"},
+        "reference": "mld_tt_mean",
+        "standard_name": MLD_TEMPERATURE,
+    }
+    assert (
+        _short_variable_label(temperature)
+        == "MLD (temperature, temperature_threshold)"
+    )
+
+
+def test_short_variable_label_never_doubles_a_parenthetical():
+    for name in (MLD_SIGMA_THETA, MLD_TEMPERATURE):
+        label = _short_variable_label({**PAIR, "standard_name": name})
+        assert ") (" not in label
+        assert label.count("(") == label.count(")") == 1
+
+
+def test_two_definitions_sharing_a_method_get_different_short_labels():
+    """The bracket names the criterion, so two definitions never collide in a legend."""
+    sigma_theta = {**PAIR, "standard_name": MLD_SIGMA_THETA}
+    temperature = {
+        "test": {"calculate": "mld", "method": "density_threshold"},
+        "reference": "mld_tt_mean",
+        "standard_name": MLD_TEMPERATURE,
+    }
+    assert _short_variable_label(sigma_theta) != _short_variable_label(temperature)
+
+
+def test_long_variable_label_has_no_doubled_parenthetical_to_fold():
+    """``_variable_label`` splits the CF name apart itself, so it never had the problem.
+
+    It keeps the whole definition-specific name (no brackets of its own) and appends
+    the method once, which is why only the short label needed folding.
+    """
+    assert (
+        _variable_label({**PAIR, "standard_name": MLD_SIGMA_THETA})
+        == f"{MLD_SIGMA_THETA} (density_threshold)"
+    )
+
+
+def test_a_plain_specific_name_gets_its_bracketed_short_name_and_no_method():
+    """No calculate-spec, no method suffix: just what ``short_name`` says."""
+    assert _short_variable_label(MLD_SIGMA_THETA) == "MLD (σθ)"
+    assert _short_variable_label("mld_by_temperature") == "MLD (temperature)"
 
 
 def test_short_variable_label_recurses_into_a_plain_test_side():

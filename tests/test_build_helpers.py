@@ -31,6 +31,7 @@ from ocean_skill.build import (
 )
 
 CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
+SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
 
 
 @pytest.fixture
@@ -673,6 +674,411 @@ def test_declared_attr_still_wins_over_the_vocabulary():
     )
     md = _probe(ds, {"NO3": "would_be_from_name_map"})
     assert md["standard_names"]["NO3"] == "a_declared_standard_name"
+
+
+# ----------------------------- a caller's standard_names merge over the probed map
+#
+# The motivating product is the Holte & Talley Argo mixed-layer-depth climatology: it
+# sets every variable's ``standard_name`` attribute to the variable's *own* name, the
+# probe trusts attributes, and so the probed map is an identity map that has to be
+# corrected -- one variable of it, not the whole thing.
+
+
+def _holte_talley_like(path, *, da_standard_name="mld_da_mean"):
+    """Write a tiny file shaped like the Holte & Talley Argo MLD climatology.
+
+    Every variable sits on a bare dimension (no coordinate variables), ``lat``/``lon``
+    among them as ordinary data variables, and each variable's ``standard_name``
+    attribute is the variable's *own* name (``month`` says ``"Month"``). That is what
+    the probe trusts, so the probed map is close to an identity map and a caller has to
+    correct it. ``da_standard_name`` lets a test have the *other* MLD field claim a
+    different name -- say, the one the caller is about to hand to the first.
+    """
+    grid = ("iMONTH", "iLAT", "iLON")
+    xr.Dataset(
+        {
+            "mld_dt_mean": (
+                grid,
+                np.ones((2, 3, 4)),
+                {"standard_name": "mld_dt_mean", "units": "m"},
+            ),
+            "mld_da_mean": (
+                grid,
+                np.ones((2, 3, 4)),
+                {"standard_name": da_standard_name, "units": "m"},
+            ),
+            "lat": (
+                ("iLAT",),
+                np.linspace(-60.0, 60.0, 3),
+                {"standard_name": "latitude", "units": "degrees_north"},
+            ),
+            "lon": (
+                ("iLON",),
+                np.linspace(0.0, 270.0, 4),
+                {"standard_name": "longitude", "units": "degrees_east"},
+            ),
+            "month": (("iMONTH",), np.array([1, 2]), {"standard_name": "Month"}),
+        }
+    ).to_netcdf(path)
+    return str(path)
+
+
+def _entry_metadata(out, name):
+    """Return the saved metadata of one entry, read back from the YAML on disk."""
+    return intake.from_yaml_file(str(out))[name].metadata
+
+
+def test_the_hbls_map_entry_is_the_mixing_scheme_name():
+    """ROMS' ``hbls`` is a KPP boundary-layer depth, not a threshold-criterion MLD.
+
+    CF has a name for exactly that -- "mixed layer thickness defined by mixing scheme"
+    -- so the bare ``ocean_mixed_layer_thickness`` (which any MLD criterion could claim)
+    is not what it should be filed under.
+    """
+    from ocean_skill.build import ROMS_STANDARD_NAMES
+
+    assert (
+        ROMS_STANDARD_NAMES["hbls"]
+        == "ocean_mixed_layer_thickness_defined_by_mixing_scheme"
+    )
+
+
+def test_a_caller_standard_name_merges_over_the_probed_map(tmp_path):
+    """Correcting one variable leaves the rest of the probed map, and ``variables``.
+
+    ``standard_names`` used to *replace* the probed map wholesale, so the one-line fix
+    for a mislabelled variable also threw away ``lat -> latitude`` and every other
+    correct entry -- and left ``variables`` advertising the old name. The overlay
+    keeps what the probe found, and ``variables`` (which search and the catalog-level
+    roll-up read) says what the entry now offers.
+    """
+    out = build_catalog(
+        {
+            "holte_talley_mld_clim": {
+                "url": _holte_talley_like(tmp_path / "ht.nc"),
+                "climatology": True,
+                "standard_names": {"mld_dt_mean": SIGMA_THETA},
+            }
+        },
+        tmp_path / "ht.yaml",
+        name_map=None,
+    )
+    md = _entry_metadata(out, "holte_talley_mld_clim")
+
+    assert md["standard_names"] == {
+        "mld_dt_mean": SIGMA_THETA,  # the caller's correction ...
+        "mld_da_mean": "mld_da_mean",  # ... and everything the probe found survives
+        "lat": "latitude",
+        "lon": "longitude",
+        "month": "Month",
+    }
+    assert md["variables"] == sorted(
+        ["Month", "latitude", "longitude", "mld_da_mean", SIGMA_THETA]
+    )
+    assert "mld_dt_mean" not in md["variables"]
+    assert "duplicate_standard_names" not in md  # nothing was displaced
+    assert md["climatology"] is True  # every other key: plain override, untouched
+
+    # the catalog-level roll-up is built from each entry's ``variables``
+    rollup = intake.from_yaml_file(str(out)).metadata["standard_names"]
+    assert SIGMA_THETA in rollup
+    assert "mld_dt_mean" not in rollup
+
+
+def test_the_merge_also_reaches_entries_taken_from_a_catalog(prebuilt, tmp_path):
+    """An already-built catalog's entries go through the same attach step."""
+    out = build_catalog(
+        prebuilt, tmp_path / "m.yaml", probe=True, standard_names={"chlor_a": "my_chl"}
+    )
+    md = _entry_metadata(out, "a")
+    assert md["standard_names"] == {"chlor_a": "my_chl"}
+    assert md["variables"] == ["my_chl"]  # the probed CHL is gone, the caller's is in
+
+
+def test_a_probed_claim_on_the_callers_name_is_dropped_and_recorded(tmp_path):
+    """One variable holds a standard name; the caller decides which.
+
+    Here the file has the *other* MLD field claiming the very name the caller assigns
+    to ``mld_dt_mean``. Both cannot be renamed to it (a read skips the second claim),
+    so the probed entry is dropped from ``standard_names`` -- but recorded under
+    ``duplicate_standard_names``, so it is not silently forgotten -- and the name is
+    listed once in ``variables``.
+    """
+    path = _holte_talley_like(tmp_path / "ht.nc", da_standard_name=SIGMA_THETA)
+    out = build_catalog(
+        {"ht": {"url": path, "standard_names": {"mld_dt_mean": SIGMA_THETA}}},
+        tmp_path / "ht.yaml",
+        name_map=None,
+    )
+    md = _entry_metadata(out, "ht")
+
+    assert md["standard_names"] == {
+        "mld_dt_mean": SIGMA_THETA,
+        "lat": "latitude",
+        "lon": "longitude",
+        "month": "Month",
+    }
+    assert md["duplicate_standard_names"] == {"mld_da_mean": SIGMA_THETA}
+    assert md["variables"] == sorted(["Month", "latitude", "longitude", SIGMA_THETA])
+
+
+def test_an_explicit_variables_list_is_kept_verbatim(tmp_path):
+    """A caller who passes ``variables`` gets exactly that, order and all.
+
+    The map still merges; it is only the list that the caller has taken over.
+    """
+    declared = ["some_other_name", SIGMA_THETA]  # deliberately not sorted
+    out = build_catalog(
+        {
+            "ht": {
+                "url": _holte_talley_like(tmp_path / "ht.nc"),
+                "standard_names": {"mld_dt_mean": SIGMA_THETA},
+                "variables": declared,
+            }
+        },
+        tmp_path / "ht.yaml",
+        name_map=None,
+    )
+    md = _entry_metadata(out, "ht")
+
+    assert md["variables"] == declared
+    assert md["standard_names"]["mld_dt_mean"] == SIGMA_THETA
+    assert md["standard_names"]["lat"] == "latitude"
+
+
+def test_the_callers_map_stands_alone_when_probing_is_skipped(tmp_path):
+    """No probed map to merge over: the caller's is the whole map."""
+    out = build_catalog(
+        {
+            "ht": {
+                "url": _holte_talley_like(tmp_path / "ht.nc"),
+                "probe": False,
+                "standard_names": {"mld_dt_mean": SIGMA_THETA},
+            }
+        },
+        tmp_path / "ht.yaml",
+        name_map=None,
+    )
+    md = _entry_metadata(out, "ht")
+
+    assert md["standard_names"] == {"mld_dt_mean": SIGMA_THETA}
+    assert md["variables"] == [SIGMA_THETA]  # the entry still advertises what it names
+
+
+def test_the_callers_map_stands_alone_when_the_probe_fails(tmp_path):
+    """A source that reads but cannot be probed is kept, with the caller's map."""
+    from unittest import mock
+
+    from ocean_skill import build
+
+    path = _holte_talley_like(tmp_path / "ht.nc")
+    with (
+        mock.patch.object(build, "_probe", side_effect=RuntimeError("no axes")),
+        pytest.warns(UserWarning, match="could not derive metadata"),
+    ):
+        out = build_catalog(
+            {"ht": {"url": path, "standard_names": {"mld_dt_mean": SIGMA_THETA}}},
+            tmp_path / "ht.yaml",
+            name_map=None,
+        )
+    md = _entry_metadata(out, "ht")
+
+    assert md["standard_names"] == {"mld_dt_mean": SIGMA_THETA}
+    assert md["variables"] == [SIGMA_THETA]
+
+
+@pytest.mark.parametrize("empty", [None, {}])
+def test_an_empty_caller_map_leaves_the_probed_map_alone(tmp_path, empty):
+    """Neither ``None`` nor ``{}`` reads as "declare no names".
+
+    ``None`` is what an optional pass-through argument looks like; overlaying nothing
+    is the only reading of an empty map that a merge can give, and it must not wipe the
+    probed map the way the old wholesale replacement did.
+    """
+    path = _holte_talley_like(tmp_path / "ht.nc")
+    out = build_catalog(
+        {"ht": {"url": path, "standard_names": empty}},
+        tmp_path / "ht.yaml",
+        name_map=None,
+    )
+    md = _entry_metadata(out, "ht")
+
+    assert md["standard_names"]["mld_dt_mean"] == "mld_dt_mean"  # the probed map
+    assert md["standard_names"]["lat"] == "latitude"
+    assert "mld_dt_mean" in md["variables"]
+
+
+def test_a_per_source_map_replaces_a_shared_one_before_the_merge(tmp_path):
+    """The shared/per-source rule is unchanged: the two maps are not combined.
+
+    Each is merged over the *probe*, never with the other, exactly as any other
+    per-source key replaces its shared value.
+    """
+    out = build_catalog(
+        {
+            "ht": {
+                "url": _holte_talley_like(tmp_path / "ht.nc"),
+                "standard_names": {"mld_da_mean": "the_per_source_name"},
+            }
+        },
+        tmp_path / "ht.yaml",
+        name_map=None,
+        standard_names={"mld_dt_mean": SIGMA_THETA},
+    )
+    names = _entry_metadata(out, "ht")["standard_names"]
+
+    assert names["mld_da_mean"] == "the_per_source_name"
+    assert names["mld_dt_mean"] == "mld_dt_mean"  # the shared map never applied
+
+
+def test_a_caller_name_leaves_a_roms_sources_derived_velocities_alone(tmp_path):
+    """``variables`` is adjusted from the probed list, not rebuilt from the map.
+
+    A ROMS source advertises geographic velocities that no map value carries (they are
+    derived at read time from the grid-relative pair), so rebuilding ``variables`` from
+    ``standard_names`` would silently drop them. Renaming ``hbls`` must swap that one
+    name and leave the derived ones where the probe put them.
+    """
+    from ocean_skill import build
+    from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES, GRID_RELATIVE_VELOCITY_NAMES
+
+    path = tmp_path / "his.nc"
+    xr.Dataset(
+        {
+            name: (("ocean_time", "eta_rho", "xi_rho"), np.zeros((1, 4, 5)))
+            for name in ("u", "v", "hbls")
+        },
+        coords={
+            "Cs_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+            "sigma_r": ("s_rho", np.linspace(-1.0, 0.0, 2)),
+        },
+        attrs={"theta_s": 5.0, "theta_b": 1.0, "hc": 20.0},
+    ).to_netcdf(path)
+
+    cat = build.new_catalog(title="t")
+    build.add_source(cat, "roms", path, standard_names={"hbls": SIGMA_THETA})
+    md = cat["roms"].metadata
+
+    assert md["standard_names"]["hbls"] == SIGMA_THETA
+    assert md["variables"] == sorted(
+        [*GRID_RELATIVE_VELOCITY_NAMES, *GEOGRAPHIC_VELOCITY_NAMES, SIGMA_THETA]
+    )
+    assert build.ROMS_STANDARD_NAMES["hbls"] not in md["variables"]
+
+
+def test_a_caller_name_overlays_a_tabular_sources_probed_map(tmp_path):
+    """The overlay works on a table's probed map (column -> unit-stripped name) too.
+
+    Nothing in that map is a standard name until the caller says so, so this is the
+    case where the names dropped from ``variables`` are bare column names, not CF ones.
+    """
+    from intake.readers import datatypes, readers
+
+    csv = tmp_path / "ctd.csv"
+    csv.write_text(
+        "time,depth (m),lon,lat,Temperature (degC),Salinity (psu)\n"
+        "2024-01-01,1,-21.987,64.2638,8.1,34.5\n"
+        "2024-01-01,10,-21.987,64.2638,7.9,34.6\n"
+    )
+    cat = new_catalog(title="t")
+    add_source(
+        cat,
+        "ctd",
+        reader=readers.PandasCSV(datatypes.CSV(url=str(csv))),
+        name_map=None,
+        standard_names={"Temperature (degC)": "sea_water_temperature"},
+    )
+    md = cat["ctd"].metadata
+
+    assert md["standard_names"]["Temperature (degC)"] == "sea_water_temperature"
+    assert md["standard_names"]["Salinity (psu)"] == "Salinity"  # still as probed
+    assert md["variables"] == ["Salinity", "sea_water_temperature"]
+    assert md["units"]["Temperature (degC)"] == "degC"  # keyed by column: untouched
+
+
+# The helper itself, on plain dicts: what the file-backed tests above cannot reach
+# without contriving a source for each case.
+
+NITRATE = "mole_concentration_of_nitrate_in_sea_water"
+SALINITY = "sea_water_practical_salinity"
+
+
+def _woa_like_probe():
+    """Return a probe result where n_an won the nitrate name and n_mn lost it."""
+    return {
+        "standard_names": {"n_an": NITRATE, "s_an": SALINITY},
+        "duplicate_standard_names": {"n_mn": NITRATE},
+        "variables": sorted([NITRATE, SALINITY]),
+    }
+
+
+def test_merge_without_a_caller_map_hands_the_metadata_back_as_it_was():
+    from ocean_skill.build import _merge_standard_names
+
+    caller = {"institution": "NASA OB.DAAC", "variables": ["x"]}
+    assert _merge_standard_names(_woa_like_probe(), caller) == caller
+
+
+def test_a_variable_the_caller_promotes_swaps_places_with_the_probed_winner():
+    """Naming ``n_mn`` the nitrate demotes ``n_an``; ``n_mn`` stops being a loser."""
+    from ocean_skill.build import _merge_standard_names
+
+    got = _merge_standard_names(
+        _woa_like_probe(), {"standard_names": {"n_mn": NITRATE}}
+    )
+
+    assert got["standard_names"] == {"s_an": SALINITY, "n_mn": NITRATE}
+    assert got["duplicate_standard_names"] == {"n_an": NITRATE}
+    assert got["variables"] == sorted([NITRATE, SALINITY])
+
+
+def test_a_stale_duplicate_record_is_cleared_rather_than_left_standing():
+    """Naming the loser something of its own empties the record, in the entry too.
+
+    An empty mapping is written rather than the key being omitted: omitting it would
+    leave the probe's now-untrue record in the reader's metadata.
+    """
+    from ocean_skill.build import _merge_standard_names
+
+    got = _merge_standard_names(
+        _woa_like_probe(), {"standard_names": {"n_mn": "some_other_name"}}
+    )
+
+    assert got["standard_names"] == {
+        "n_an": NITRATE,
+        "s_an": SALINITY,
+        "n_mn": "some_other_name",
+    }
+    assert got["duplicate_standard_names"] == {}
+    assert got["variables"] == sorted([NITRATE, SALINITY, "some_other_name"])
+
+
+def test_the_probes_existing_duplicates_are_merged_not_overwritten():
+    """A displaced entry joins the probe's own duplicates instead of replacing them."""
+    from ocean_skill.build import _merge_standard_names
+
+    got = _merge_standard_names(
+        _woa_like_probe(), {"standard_names": {"other": SALINITY}}
+    )
+
+    assert got["standard_names"] == {"n_an": NITRATE, "other": SALINITY}
+    assert got["duplicate_standard_names"] == {"n_mn": NITRATE, "s_an": SALINITY}
+    assert got["variables"] == sorted([NITRATE, SALINITY])
+
+
+def test_a_caller_supplied_duplicate_record_is_never_overwritten():
+    """Only ``standard_names`` merges; another key the caller passed simply wins."""
+    from ocean_skill.build import _merge_standard_names
+
+    got = _merge_standard_names(
+        _woa_like_probe(),
+        {
+            "standard_names": {"other": SALINITY},
+            "duplicate_standard_names": {"mine": "kept"},
+        },
+    )
+
+    assert got["duplicate_standard_names"] == {"mine": "kept"}
 
 
 # ----------------------------------------------------------- domain_outline (perimeter)

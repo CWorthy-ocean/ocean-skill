@@ -94,7 +94,11 @@ ROMS_STANDARD_NAMES: dict[str, str] = {
     "u": "sea_water_x_velocity",
     "v": "sea_water_y_velocity",
     "w": "upward_sea_water_velocity",
-    "hbls": "ocean_mixed_layer_thickness",
+    # ROMS' KPP surface boundary-layer depth is CF's "mixed layer thickness defined by
+    # mixing scheme": the model's own diagnostic, not a threshold-criterion MLD (those
+    # are the ``mld`` calculator's). The vocabulary still relates it to the broad
+    # ``ocean_mixed_layer_thickness``, so a search for ``mld`` finds it either way.
+    "hbls": "ocean_mixed_layer_thickness_defined_by_mixing_scheme",
     "NO3": "mole_concentration_of_nitrate_in_sea_water",
     "PO4": "mole_concentration_of_phosphate_in_sea_water",
     "SiO3": "mole_concentration_of_silicate_in_sea_water",
@@ -2337,6 +2341,82 @@ def _read_with_retries(reader, name):
             attempt += 1
 
 
+def _merge_standard_names(
+    probed: dict[str, Any], caller: dict[str, Any]
+) -> dict[str, Any]:
+    """Return ``caller`` with its ``standard_names`` merged over the probed map.
+
+    ``caller`` is the metadata handed to :func:`add_source`; ``probed`` is what
+    :func:`_probe` derived (``{}`` when probing was skipped or failed). What comes
+    back is what :func:`_attach` applies on top of the probe: every other key of
+    ``caller`` untouched -- the plain "caller beats derived" rule -- and, when
+    ``caller`` names ``standard_names``, the merged map plus the ``variables`` and
+    ``duplicate_standard_names`` entries that have to move with it.
+
+    ``standard_names`` is the one key where overriding wholesale is the wrong rule. A
+    product that mislabels a single variable needs *that entry* fixed, not the dozen
+    correct ones beside it re-declared: the Holte & Talley Argo mixed-layer-depth
+    climatology sets each variable's ``standard_name`` attribute to the variable's own
+    name (``mld_dt_mean`` says ``"mld_dt_mean"``), attributes win in the probe, and
+    the fix is the one line ``"standard_names": {"mld_dt_mean": <the CF name>}`` --
+    which must leave ``lat -> latitude`` and the rest of the probed map standing.
+    So the caller's map is an overlay:
+
+    * The caller wins per raw variable.
+    * A probed entry for a *different* variable that claims a name the caller has just
+      given to another is dropped. Two raw variables on one standard name is exactly
+      what the read-time rename cannot apply (:func:`ocean_skill.sources.read` skips
+      the second claim), and which of the two the caller means is not in doubt. The
+      loser goes into ``duplicate_standard_names`` beside whatever the probe already
+      recorded there, so the information is kept rather than silently lost -- and a
+      variable the caller has now named explicitly is taken out of that record, since
+      it no longer lost anything.
+    * ``variables`` follows the merged map, unless the caller passed ``variables`` of
+      their own, which is kept verbatim. It is adjusted from the *probed* list rather
+      than rebuilt from the map's values, because the probe may have added names no
+      map value carries (a ROMS source's derived geographic velocities): the names the
+      probed map contributed and the merged map no longer holds come out, the
+      caller's targets go in, and the list stays sorted.
+
+    An empty or ``None`` ``standard_names`` overlays nothing, so the probed map
+    survives as it was -- ``None`` is what an optional pass-through argument looks
+    like, and neither one reads as "declare no names". With nothing probed the
+    caller's map is the whole map, and ``variables`` is then just its targets.
+    """
+    if "standard_names" not in caller:
+        return caller
+    rest = {k: v for k, v in caller.items() if k != "standard_names"}
+    overlay = dict(caller["standard_names"] or {})
+    if not overlay:
+        return rest
+
+    base = dict(probed.get("standard_names") or {})
+    taken = set(overlay.values())
+    displaced = {
+        raw: sn for raw, sn in base.items() if raw not in overlay and sn in taken
+    }
+    merged = {raw: sn for raw, sn in base.items() if raw not in displaced}
+    merged.update(overlay)  # a probed key keeps its place; only its value changes
+    out = {**rest, "standard_names": merged}
+
+    # Written whenever the probe recorded duplicates or this merge displaced one -- an
+    # empty result included, so a stale record the caller's own names have cleared does
+    # not survive in the entry -- but never over a value the caller supplied.
+    probed_duplicates = dict(probed.get("duplicate_standard_names") or {})
+    if "duplicate_standard_names" not in rest and (probed_duplicates or displaced):
+        out["duplicate_standard_names"] = {
+            **{r: sn for r, sn in probed_duplicates.items() if r not in overlay},
+            **displaced,
+        }
+
+    if "variables" not in rest:
+        gone = set(base.values()) - set(merged.values())
+        out["variables"] = sorted(
+            (set(probed.get("variables") or []) - gone) | set(overlay.values())
+        )
+    return out
+
+
 def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] | None = None):
     """Probe a reader, attach metadata, and put it in ``cat`` under ``name``.
 
@@ -2365,19 +2445,33 @@ def _attach(cat, name, reader, *, probe, name_map, metadata, qc: dict[str, Any] 
     what belongs in the saved entry, not the raw, unresolved spec clobbering it
     after the fact. Callers (:func:`add_source`/:func:`add_sources`) keep ``qc``
     out of ``metadata`` for exactly this reason.
+
+    ``standard_names`` is a second special case, and the mirror image of ``qc``:
+    where ``qc`` keeps the caller's raw value from clobbering the probe's resolved
+    one, the caller's map is meant to win here -- but only for the variables it
+    names. It is therefore *merged* over the probed map (see
+    :func:`_merge_standard_names`) rather than replacing it, so a product whose own
+    attributes mislabel one variable is fixed by naming just that variable: the rest
+    of the probed map, and the ``variables`` list that follows it, come through
+    intact instead of having to be re-declared. The probe's result is held on to here
+    for that reason, rather than only pushed into the reader, so the merge has
+    something to be a merge *of*; with probing skipped or failed it is empty and the
+    caller's map stands alone. Every other key keeps the plain override.
     """
+    probed: dict[str, Any] = {}
     if probe:
         # unreadable => unusable; let the caller decide, but retry a transient failure first
         data = _read_with_retries(reader, name)
         try:
-            reader.metadata.update(_probe(data, name_map, qc=qc))
+            probed = _probe(data, name_map, qc=qc)
+            reader.metadata.update(probed)
         except Exception as exc:
             warnings.warn(
                 f"read {name!r} but could not derive metadata from it ({exc}); "
                 "adding it anyway, though osk.find() will not see its extents.",
                 stacklevel=3,
             )
-    reader.metadata.update(metadata)
+    reader.metadata.update(_merge_standard_names(probed, metadata))
     if "featureType" in metadata:
         # A caller-supplied featureType overrides the probe's guess (the update
         # above), but was never run through the same canonicalization the probe's
@@ -2459,7 +2553,10 @@ def add_source(
         shared :mod:`ocean_skill.vocabulary` (which most datasets need no map for at
         all -- this one exists for the few ROMS/MARBL names too short/generic to be
         global vocabulary aliases: ``zeta``, ``u``, ``v``, ``hbls``, ``FG_CO2``).
-        Pass ``None`` to skip straight to the vocabulary, not to attrs-only.
+        Pass ``None`` to skip straight to the vocabulary, not to attrs-only. A
+        variable whose own ``standard_name`` *attribute* is wrong is not this map's
+        to fix, since attrs win over it -- name it in the ``standard_names`` metadata
+        below instead.
     probe
         Open the source once to derive extents/axes/variables/featureType. Opening is
         cheap locally; for remote sources it costs one round-trip per entry at build
@@ -2483,7 +2580,28 @@ def add_source(
         :func:`_probe` derives from it is what gets saved, not the raw spec
         clobbering that resolution afterward — see :func:`_attach`.
     **metadata
-        Extra metadata; caller values override derived ones.
+        Extra metadata; caller values override derived ones -- except
+        ``standard_names``, which merges over the probed map instead of replacing it.
+        The caller wins per raw variable, the rest of the probed map stays, and
+        ``variables`` follows the result (a ``variables`` passed here is kept
+        verbatim). That makes it the way to correct a product whose own attributes
+        mislabel a variable -- the Holte & Talley mixed-layer-depth climatology sets
+        each variable's ``standard_name`` attribute to the variable's own name, and
+        attributes win in the probe::
+
+            add_source(
+                cat, "holte_talley_mld_clim", url, name_map=None,
+                standard_names={
+                    "mld_dt_mean": "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+                },
+            )
+
+        A probed variable that claims a name the caller has just given to another is
+        dropped from the map and noted under ``duplicate_standard_names``. At read
+        time (:func:`ocean_skill.sources.read`) each variable the map renames also has
+        the catalog's name stamped onto its own ``standard_name`` attribute,
+        overwriting the bogus one. See :func:`_merge_standard_names` for the full
+        rules.
     """
     if reader is None:
         if url is None:
@@ -2545,6 +2663,30 @@ def add_sources(
     same as any other option -- one shared ``qc={"scheme": "woce_bottle"}`` for a
     catalog whose entries all use the same flag convention, overridden per source
     by putting ``qc`` in that source's own spec dict.
+
+    Extra metadata -- any other keyword, in ``**shared`` or in a source's own spec
+    dict (see :func:`add_source`'s ``**metadata``) -- is applied over what the probe
+    derived, caller values overriding derived ones. The exception is
+    ``standard_names``, which *merges* over the probed map: the caller wins per raw
+    variable and the rest of the probed map stays, with ``variables`` following the
+    result (:func:`_merge_standard_names` has the full rules). That is what lets one
+    line correct a single mislabelled variable without re-declaring the others::
+
+        SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+        add_sources(
+            cat,
+            {
+                "holte_talley_mld_clim": {
+                    "url": url,
+                    "standard_names": {"mld_dt_mean": SIGMA_THETA},
+                },
+            },
+            name_map=None,
+        )
+
+    A per-source ``standard_names`` replaces a shared one before that merge happens,
+    exactly as any other per-source key replaces its shared value: the two are not
+    combined with each other, only each with the probe.
 
     Returns ``{name: reader}`` for the entries actually added.
     """
@@ -2993,7 +3135,9 @@ def add_copernicus_source(
         ``variables=``); ``dataset_id``/``service``/``dataset_version`` are supplied
         here.
     **metadata
-        Extra metadata applied to every entry; caller values override derived ones.
+        Extra metadata applied to every entry; caller values override derived ones,
+        except ``standard_names``, which merges over the probed map (see
+        :func:`add_source`).
 
     Returns
     -------

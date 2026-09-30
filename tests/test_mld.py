@@ -12,6 +12,11 @@ computes sigma0 independently with gsw and feeds it through the same crossing sc
 then asserts :func:`ocean_skill.mld.mld_density_threshold` reproduces that number.
 That still catches real bugs -- a flipped pressure sign, the wrong SA/CT chaining
 order, a broadcasting mistake -- without re-deriving TEOS-10.
+
+Each method's output is also checked for the CF name it carries: the criterion
+variable and nothing else (CF's ``ocean_mixed_layer_thickness_defined_by_<criterion>``
+family has no slot for the threshold or the reference depth, which ride on attrs), plus
+the short labels :func:`ocean_skill.vars.short_name` gives those names.
 """
 
 from __future__ import annotations
@@ -23,6 +28,13 @@ import xarray as xr
 from ocean_skill import mld
 from ocean_skill.comparison import _prepare
 from ocean_skill.operators import resolve_variable, spec_names
+from ocean_skill.vars import lookup, short_name
+
+#: The CF name each method's output must carry -- one per criterion variable. Spelled
+#: out in full here rather than imported from ``mld._STANDARD_NAMES``, so the tests pin
+#: the *names* and a slip in that table cannot make them agree with themselves.
+MLD_SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+MLD_TEMPERATURE = "ocean_mixed_layer_thickness_defined_by_temperature"
 
 # -- the per-column scan, hand-worked -----------------------------------------
 #
@@ -132,12 +144,69 @@ def test_mld_temperature_threshold_matches_the_hand_worked_column():
 
 def test_mld_attrs_record_the_method_and_parameters():
     out = mld.mld_temperature_threshold(_water_column(DEPTH, TEMP), threshold=0.5)
-    assert out.name == "ocean_mixed_layer_thickness"
+    assert out.name == MLD_TEMPERATURE
     assert out.attrs["units"] == "m"
-    assert out.attrs["standard_name"] == "ocean_mixed_layer_thickness"
+    assert out.attrs["standard_name"] == MLD_TEMPERATURE
     assert out.attrs["mld_method"] == "temperature_threshold"
     assert out.attrs["mld_threshold"] == 0.5
     assert out.attrs["mld_ref_depth"] == mld.REF_DEPTH
+
+
+def test_mld_density_attrs_are_named_by_the_sigma_theta_criterion():
+    """The density method's output is named by its sigma_theta criterion.
+
+    sigma0 (TEOS-10) is a potential-density anomaly -- CF's sigma_theta criterion -- so
+    the output carries the sigma_theta-specific name, not the generic one; the
+    threshold and reference depth are on attrs, since a CF name has no place for them.
+    """
+    pytest.importorskip("gsw")
+
+    temp_step = np.array([20.0, 20.0, 20.0, 20.0, 15.0, 15.0])
+    out = mld.mld_density_threshold(_water_column(DEPTH, temp_step), threshold=0.05)
+    assert out.name == MLD_SIGMA_THETA
+    assert out.attrs["units"] == "m"
+    assert out.attrs["standard_name"] == MLD_SIGMA_THETA
+    assert out.attrs["mld_method"] == "density_threshold"
+    assert out.attrs["mld_threshold"] == 0.05
+    assert out.attrs["mld_ref_depth"] == mld.REF_DEPTH
+
+
+def test_every_method_has_a_cf_name():
+    """Every method in ``_METHODS`` has an entry in ``_STANDARD_NAMES``.
+
+    A method added without one would raise KeyError on its first call rather than fall
+    back to the generic name -- this catches that at test time instead.
+    """
+    assert set(mld._STANDARD_NAMES) == set(mld._METHODS)
+
+
+@pytest.mark.parametrize(
+    "standard_name,label",
+    [
+        (MLD_SIGMA_THETA, "MLD (σθ)"),
+        ("ocean_mixed_layer_thickness_defined_by_sigma_t", "MLD (σt)"),
+        (MLD_TEMPERATURE, "MLD (temperature)"),
+        ("ocean_mixed_layer_thickness_defined_by_mixing_scheme", "MLD (mixing scheme)"),
+    ],
+    # explicit ids: pytest would otherwise render the sigma/theta labels as σθ
+    ids=["sigma_theta", "sigma_t", "temperature", "mixing_scheme"],
+)
+def test_definition_specific_mld_names_have_labels_and_units(standard_name, label):
+    """Each criterion-specific name reads as a short, distinguishable label, in metres.
+
+    Left to the default (strip the CF noise words), "..._defined_by_sigma_theta" would
+    label a legend entry or table column "ocean mixed layer thickness defined by sigma
+    theta". The criterion is the one thing that tells two of them apart, so the
+    override keeps it.
+    """
+    assert short_name(standard_name) == label
+    assert lookup(standard_name).units == "m"
+
+
+def test_the_generic_mld_name_keeps_its_plain_label():
+    """The criterion-free name gets no criterion in its label: the default stands."""
+    assert short_name("ocean_mixed_layer_thickness") == "ocean mixed layer thickness"
+    assert lookup("ocean_mixed_layer_thickness").units == "m"
 
 
 def test_mld_density_threshold_matches_gsw_computed_independently():
@@ -159,9 +228,11 @@ def test_mld_density_threshold_matches_gsw_computed_independently():
 
 
 def test_calculate_mld_needs_an_explicit_method():
-    """No default method: four exist in the product this is meant to match, and
-    picking one silently would be the kind of looks-right number this project
-    otherwise refuses to produce.
+    """No default method: picking one silently would be a looks-right number.
+
+    Four methods are named (two implemented, two hybrid ones not yet ported), and the
+    method decides the result's CF name as well as how the number is made -- the kind
+    of choice this project otherwise refuses to make quietly.
     """
     with pytest.raises(KeyError, match="mld needs method"):
         mld.calculate_mld(_water_column(DEPTH, TEMP))
@@ -189,6 +260,8 @@ def test_resolve_variable_dispatches_to_the_mld_calculator():
     spec = {"calculate": "mld", "method": "temperature_threshold"}
     out = resolve_variable(ds, spec)
     assert float(out.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)
+    # a spec naming no standard_name keeps the calculator's own, criterion-specific one
+    assert out.attrs["standard_name"] == MLD_TEMPERATURE
 
 
 def test_spec_names_reports_temperature_or_density_inputs_by_method():
@@ -289,3 +362,43 @@ def test_field_surfaced_default_accepts_a_calculate_spec(monkeypatch):
 
     out = surfaced.prepare()
     assert float(out.isel(eta_rho=0, xi_rho=0)) == pytest.approx(CROSSING_MLD)
+
+
+# -- a calculated field names itself once computed -------------------------------------
+#
+# A {"calculate": ...} spec carries no CF name of its own, so Field.standard_name --
+# what both renderers' item dicts hand cmaps_for() and the title -- used to be None for
+# a calculated MLD, and both renderers drew it in the anonymous default (viridis, no
+# "MLD" in the title). Once prepared, the computed field's own standard_name answers.
+
+
+def test_a_calculated_field_names_itself_from_the_computed_field(monkeypatch):
+    from ocean_skill.colormaps import cmaps_for
+    from ocean_skill.field import Field
+
+    ds = _water_column(DEPTH, TEMP)
+    spec = {"calculate": "mld", "method": "temperature_threshold"}
+    _mock_grid_source(monkeypatch, ds, {"model": "roms", "featureType": "grid"})
+
+    field = Field("fake_model", spec, cache=False)
+    assert field.standard_name is None  # never reads just to answer
+    field.prepare()
+    assert field.standard_name == "ocean_mixed_layer_thickness_defined_by_temperature"
+    assert cmaps_for(field.standard_name)[0].name == "deep"
+    assert short_name(field.standard_name) == "MLD (temperature)"
+
+
+def test_an_explicit_standard_name_on_the_spec_still_wins(monkeypatch):
+    from ocean_skill.field import Field
+
+    ds = _water_column(DEPTH, TEMP)
+    spec = {
+        "calculate": "mld",
+        "method": "temperature_threshold",
+        "standard_name": "ocean_mixed_layer_thickness",
+    }
+    _mock_grid_source(monkeypatch, ds, {"model": "roms", "featureType": "grid"})
+
+    field = Field("fake_model", spec, cache=False)
+    field.prepare()
+    assert field.standard_name == "ocean_mixed_layer_thickness"

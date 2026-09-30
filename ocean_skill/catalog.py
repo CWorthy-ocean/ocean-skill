@@ -537,6 +537,45 @@ def _as_terms(text) -> list[str]:
     return [str(t).lower() for t in text if str(t).strip()]
 
 
+def _declares_variable(meta: dict[str, Any], variable: str) -> bool:
+    """Whether a catalog entry's declared variables satisfy a request for ``variable``.
+
+    The one question :func:`find` (``variable=``) and :func:`ocean_skill.comparison
+    .compare`'s source pre-filter both put to an entry's metadata, asked in one place so
+    a source a search returns is exactly a source a comparison pairs. Read-free: it
+    looks only at the entry's stored ``variables`` list. What a caller does when that
+    list is empty differs -- a search excludes the entry, a comparison lets the read
+    decide -- so that stays with the caller; this answers only for what is declared.
+
+    Two things widen the stored list or the match beyond literal membership:
+
+    * A ROMS entry also offers the true eastward/northward velocity
+      :func:`ocean_skill.roms.standardize` derives at read time from grid-relative
+      u/v (:func:`ocean_skill.roms.derived_geographic_velocities`) -- a catalog built
+      before that derivation existed does not list it, but the source plainly ends up
+      offering it.
+    * The vocabulary decides what counts as a match. The literal intersection with
+      :func:`~ocean_skill.vocabulary.equivalent_names` is the regex-free fast path;
+      :func:`~ocean_skill.vocabulary.covers` is the general test -- it reaches a
+      declared spelling only a vocabulary pattern recognizes (``"Temperature_CTD"``)
+      or differing only by case, and it is where a broad request meets a specific
+      declaration: ``"mld"`` is satisfied by an entry declaring any one definition of
+      mixed layer depth, ``"mld_by_sigma_theta"`` only by one declaring that
+      definition, never by the generic name (which has not said which one it
+      carries) or a sibling.
+    """
+    from ocean_skill.vocabulary import covers, equivalent_names
+
+    declared = set(meta.get("variables") or [])
+    if meta.get("model") == "roms":
+        from ocean_skill.roms import derived_geographic_velocities
+
+        declared |= set(derived_geographic_velocities(declared))
+    return bool(equivalent_names(variable) & declared) or any(
+        covers(variable, d) for d in declared
+    )
+
+
 def _overlaps(low, high, other_low, other_high) -> bool:
     """Whether two closed intervals intersect, given all four bounds are known."""
     return not (high < other_low or low > other_high)
@@ -792,7 +831,10 @@ def find(
         one. ``None`` (default) skips this filter.
     variable
         A short vocabulary key, CF ``standard_name``, or alias (any case) — see
-        :mod:`ocean_skill.vocabulary`. ``None`` (default) skips this filter.
+        :mod:`ocean_skill.vocabulary`. A broad name such as ``"mld"`` also finds
+        sources declaring any one of its specific definitions
+        (``"mld_by_sigma_theta"``, ...); a specific name finds only sources declaring
+        that definition. ``None`` (default) skips this filter.
     featureType
         Exact match against the entry's declared ``featureType`` (e.g.
         ``"timeSeries"``). ``None`` (default) skips this filter.
@@ -821,6 +863,8 @@ def find(
 
         osk.find(text="modis chl jan")               # free text, all terms must match
         osk.find(variable="nitrate")                 # any spelling of the variable
+        osk.find(variable="mld")                     # any mixed layer depth definition
+        osk.find(variable="mld_by_sigma_theta")      # only that one definition
         osk.find(name="papa")                        # substring, case-insensitive
         osk.find(name="woa23_nitrate_month*")        # glob
         osk.find(name="papa", featureType="timeSeries")
@@ -851,6 +895,21 @@ def find(
     products disagree: WOA declares nitrate per unit *mass* while ROMS/MARBL and
     GLODAP declare it per unit *volume*, so searching one exact standard_name finds
     two sources and silently misses the thirteen you would actually compare against.
+
+    A *broad* name also finds every source declaring one of its *specific*
+    definitions, in that direction only. Mixed layer depth is the case that exists:
+    ROMS' KPP ``hbls`` (the mixing scheme's own boundary layer), Copernicus'
+    ``mlotst`` and Holte & Talley's Argo climatology (a potential-density threshold)
+    and a CMIP-style ``mlotst`` (a threshold on sigma_t) are all one *kind* of thing,
+    and each declares which definition it is. ``variable="mld"`` finds all of them,
+    plus any older catalog still declaring only the generic name; but
+    ``variable="mld_by_sigma_theta"`` finds only the sources declaring that one --
+    neither the generic name, which has not said which definition it carries, nor
+    the sigma_t or mixing-scheme products, whose base of the layer is a different
+    quantity that merely shares a family. Asking for the broad name is how you
+    survey every mixed layer depth on offer; asking for a specific one is how you
+    guarantee the definition, which is the difference that decides whether a
+    comparison is like-for-like (see :func:`ocean_skill.vocabulary.covers`).
 
     ``name`` matches a source name **or its catalog's name**, because the useful
     handle is often on the catalog: OOI's sources are opaque dataset ids
@@ -899,14 +958,6 @@ def find(
     a ``catalog=``/``name=`` substring or glob actually matched.
     """
     terms = _as_terms(text) if text is not None else None
-    # Only pull in vocabulary (imports cf_xarray, runs its criteria refresh) and
-    # compute the equivalent-spellings set once, when a variable filter is
-    # actually in play -- not on every entry of every query.
-    wanted = None
-    if variable:
-        from ocean_skill.vocabulary import equivalent_names, same_quantity
-
-        wanted = equivalent_names(variable)
 
     out = SourceNames()
     for source, ref in discover().items():
@@ -930,27 +981,10 @@ def find(
                     continue
             elif is_clim is not climatology:
                 continue
-        if wanted is not None:
-            declared = set(meta.get("variables") or [])
-            if meta.get("model") == "roms":
-                # ocean_skill.roms.standardize derives true eastward/northward
-                # velocity from ROMS' grid-relative u/v (rotated by the grid
-                # angle) at read time; a catalog's stored `variables` may not
-                # list it (built before this derivation existed, or otherwise
-                # missing the augmentation ocean_skill.build._probe now applies)
-                # -- without this, a ROMS source that plainly ends up offering
-                # the variable at read time would not be findable by it.
-                from ocean_skill.roms import derived_geographic_velocities
-
-                declared |= set(derived_geographic_velocities(declared))
-            # The literal intersection is the regex-free fast path; same_quantity
-            # additionally reaches a declared spelling only a vocabulary pattern
-            # recognizes (e.g. "Temperature_CTD") and declared names differing only
-            # by case, which the exact set intersection is blind to.
-            if not (wanted & declared) and not any(
-                same_quantity(variable, d) for d in declared
-            ):
-                continue
+        # An entry declaring nothing cannot be found by variable -- see
+        # _declares_variable, the same test compare() pairs sources by.
+        if variable and not _declares_variable(meta, variable):
+            continue
         if featureType and meta.get("featureType") != featureType:
             continue
         if bbox is not None and _bbox_overlaps(meta, bbox) is False:

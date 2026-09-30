@@ -58,6 +58,21 @@ REGISTRY: dict[str, VarInfo] = {
         "mass_concentration_of_chlorophyll_a_in_sea_water", units="mg m-3"
     ),
     "ocean_mixed_layer_thickness": VarInfo("ocean_mixed_layer_thickness", units="m"),
+    # CF's criterion-specific mixed layer thicknesses, each its own key: this table is
+    # looked up by exact standard_name (see lookup), so the generic entry above does
+    # not cover them.
+    "ocean_mixed_layer_thickness_defined_by_sigma_theta": VarInfo(
+        "ocean_mixed_layer_thickness_defined_by_sigma_theta", units="m"
+    ),
+    "ocean_mixed_layer_thickness_defined_by_sigma_t": VarInfo(
+        "ocean_mixed_layer_thickness_defined_by_sigma_t", units="m"
+    ),
+    "ocean_mixed_layer_thickness_defined_by_temperature": VarInfo(
+        "ocean_mixed_layer_thickness_defined_by_temperature", units="m"
+    ),
+    "ocean_mixed_layer_thickness_defined_by_mixing_scheme": VarInfo(
+        "ocean_mixed_layer_thickness_defined_by_mixing_scheme", units="m"
+    ),
     "mole_concentration_of_nitrate_and_nitrite_in_sea_water": VarInfo(
         "mole_concentration_of_nitrate_and_nitrite_in_sea_water", units="mmol m-3"
     ),
@@ -110,6 +125,17 @@ _LABEL_OVERRIDES = {
     "surface_downward_mole_flux_of_carbon_dioxide": "CO2 flux",
     "mole_concentration_of_nitrate_and_nitrite_in_sea_water": "nitrate+nitrite",
     "downwelling_photosynthetic_photon_flux_in_sea_water": "PAR",
+    # The criterion-specific mixed layer thicknesses: stripping alone would leave
+    # "ocean mixed layer thickness defined by sigma theta", far too long for a legend
+    # entry or a table column -- and the criterion is the one thing that tells two of
+    # them apart, so it is kept, in brackets. The generic name
+    # (``ocean_mixed_layer_thickness``) is deliberately *not* overridden: it names no
+    # criterion, so a label claiming one would be wrong, and its plain stripped-down
+    # label is what existing callers show.
+    "ocean_mixed_layer_thickness_defined_by_sigma_theta": "MLD (σθ)",
+    "ocean_mixed_layer_thickness_defined_by_sigma_t": "MLD (σt)",
+    "ocean_mixed_layer_thickness_defined_by_temperature": "MLD (temperature)",
+    "ocean_mixed_layer_thickness_defined_by_mixing_scheme": "MLD (mixing scheme)",
 }
 
 

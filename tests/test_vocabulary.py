@@ -6,6 +6,11 @@ happens to use, in any capitalization — and still reach the same variable. The
 cover the resolution rules, the two live-extension entry points, and the spots
 where getting it wrong would be silent rather than loud (colliding spellings,
 clobbered entries, a QC companion standing in for real data).
+
+The one-level ``broader`` relation (a generic name and its definition-specific kinds,
+mixed layer depth being the shipped case) gets its own section near the end:
+``narrower_names``/``covers``, ``register(broader=...)``, and the vocabulary's own
+integrity.
 """
 
 from __future__ import annotations
@@ -22,6 +27,24 @@ from ocean_skill.units import find_variable
 
 CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
 OXYGEN = "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
+
+# Mixed layer depth: one generic CF name, and the definition-specific names each of
+# which is one specific kind of it (the vocabulary's ``broader`` relation).
+MLD = "ocean_mixed_layer_thickness"
+BY_SIGMA_THETA = "ocean_mixed_layer_thickness_defined_by_sigma_theta"
+BY_SIGMA_T = "ocean_mixed_layer_thickness_defined_by_sigma_t"
+BY_TEMPERATURE = "ocean_mixed_layer_thickness_defined_by_temperature"
+BY_MIXING_SCHEME = "ocean_mixed_layer_thickness_defined_by_mixing_scheme"
+#: The four definitions in the sorted order ``narrower_names`` promises (note
+#: sigma_t sorts before sigma_theta: one is a prefix of the other).
+MLD_DEFINITIONS = (BY_MIXING_SCHEME, BY_SIGMA_T, BY_SIGMA_THETA, BY_TEMPERATURE)
+#: Each definition's short key -- the name a caller actually types for it.
+MLD_KEYS = {
+    BY_SIGMA_THETA: "mld_by_sigma_theta",
+    BY_SIGMA_T: "mld_by_sigma_t",
+    BY_TEMPERATURE: "mld_by_temperature",
+    BY_MIXING_SCHEME: "mld_by_mixing_scheme",
+}
 
 
 @pytest.fixture
@@ -846,6 +869,434 @@ def test_total_current_wins_over_geostrophic_when_a_dataset_carries_both():
     da = find_variable(ds, "east_velocity")
     assert da.name == "eastward_sea_water_velocity"
     assert bool((da == 0).all())
+
+
+# -- broader: one-level broad -> specific definitions ---------------------------
+#
+# A request for "the MLD" should find a source carrying any one definition of it,
+# while a request for one definition must never be answered by the generic name or
+# by a sibling definition. These pin the relation itself (narrower_names/covers), its
+# live extension (register(broader=)), and the vocabulary as shipped;
+# ``find_variable``'s use of it is covered in tests/test_find_variable_mld.py.
+
+
+def test_narrower_names_of_the_generic_mld_are_its_four_definitions_sorted():
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    assert list(MLD_DEFINITIONS) == sorted(MLD_DEFINITIONS)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "mld",
+        "MLD",
+        "Mld",
+        "mixed_layer_depth",
+        "Mixed_Layer_Thickness",
+        MLD,
+        MLD.upper(),
+    ],
+)
+def test_narrower_names_takes_the_broad_name_however_it_is_spelled(spelling):
+    assert vocabulary.narrower_names(spelling) == MLD_DEFINITIONS
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mld_by_sigma_theta",  # a specific definition's key ...
+        BY_SIGMA_THETA,  # ... and its standard_name: nothing is narrower than one
+        BY_MIXING_SCHEME,
+        "temperature",  # a concept nothing is a specific kind of
+        "sea_water_potential_temperature",
+        "not_a_variable",  # a name the vocabulary has never heard of
+    ],
+)
+def test_narrower_names_is_empty_for_a_specific_childless_or_unknown_name(name):
+    assert vocabulary.narrower_names(name) == ()
+
+
+def test_the_generic_name_still_resolves_to_the_generic_standard_name():
+    """``broader`` is a relation *between* entries; it never changes what resolves."""
+    for spelling in ("mld", "mixed_layer_depth", "MLD", MLD):
+        assert vocabulary.resolve_name(spelling) == MLD
+
+
+@pytest.mark.parametrize("definition,key", sorted(MLD_KEYS.items()))
+def test_each_definition_has_its_own_typeable_key(definition, key):
+    assert vocabulary.is_known(key)
+    assert vocabulary.resolve_name(key) == definition
+    assert vocabulary.nickname(definition) == key
+
+
+@pytest.mark.parametrize("raw", ["mld_dt_mean", "mlotst", "hbls"])
+def test_raw_mld_product_names_are_deliberately_not_global_aliases(raw):
+    """``mlotst`` is sigma_theta in Copernicus but sigma_t in CMIP's own naming.
+
+    A raw product name is renamed to its definition-specific standard_name in its own
+    catalog, where the definition is known; a global alias would decide it for every
+    catalog at once.
+    """
+    assert not vocabulary.is_known(raw)
+    assert vocabulary.resolve_name(raw) == raw
+
+
+@pytest.mark.parametrize("definition", MLD_DEFINITIONS)
+def test_covers_the_generic_request_is_satisfied_by_every_definition(definition):
+    assert vocabulary.covers("mld", definition)
+    assert vocabulary.covers(MLD, definition)
+
+
+@pytest.mark.parametrize(
+    "requested,declared",
+    [
+        ("MLD", BY_SIGMA_THETA.upper()),  # capitalization, on both sides
+        ("mixed_layer_depth", BY_SIGMA_THETA),  # an alias of the broad name
+        ("mixed_layer_thickness", "mld_by_temperature"),  # a definition's own key
+        ("Mld", "MLD_BY_MIXING_SCHEME"),
+        (MLD, "Mld_By_Sigma_T"),
+    ],
+)
+def test_covers_reaches_definitions_through_aliases_keys_and_case(requested, declared):
+    assert vocabulary.covers(requested, declared)
+
+
+@pytest.mark.parametrize("definition", MLD_DEFINITIONS)
+def test_covers_a_specific_request_is_not_met_by_the_generic_name(definition):
+    """One direction only: asking for a definition never returns the generic name."""
+    for generic in ("mld", "mixed_layer_depth", MLD):
+        assert not vocabulary.covers(definition, generic)
+
+
+@pytest.mark.parametrize("a", MLD_DEFINITIONS)
+@pytest.mark.parametrize("b", MLD_DEFINITIONS)
+def test_covers_never_bridges_two_sibling_definitions(a, b):
+    assert vocabulary.covers(a, b) is (a == b)
+    assert vocabulary.covers(MLD_KEYS[a], MLD_KEYS[b]) is (a == b)
+
+
+def test_sigma_t_and_sigma_theta_do_not_cover_each_other_by_prefix():
+    """One name is a prefix of the other; names are compared whole, never by prefix."""
+    assert BY_SIGMA_THETA.startswith(BY_SIGMA_T)
+    assert not vocabulary.covers(BY_SIGMA_T, BY_SIGMA_THETA)
+    assert not vocabulary.covers(BY_SIGMA_THETA, BY_SIGMA_T)
+
+
+@pytest.mark.parametrize(
+    "requested,declared",
+    [
+        ("mld", "temperature"),
+        ("temperature", "mld"),
+        ("mld", "not_a_variable"),
+        ("not_a_variable", "mld"),
+        ("temperature", BY_SIGMA_THETA),
+        (BY_SIGMA_THETA, "temperature"),
+        ("nitrate", "oxygen"),
+    ],
+)
+def test_covers_is_false_for_unrelated_names(requested, declared):
+    assert not vocabulary.covers(requested, declared)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["mld", MLD, BY_SIGMA_THETA, "temperature", "not_a_variable", "Temperature_CTD"],
+)
+def test_covers_is_true_for_a_name_against_itself(name):
+    assert vocabulary.covers(name, name)
+
+
+def test_covers_still_means_the_same_quantity_through_patterns_and_case():
+    """Everything ``same_quantity`` already accepts, ``covers`` accepts too."""
+    assert vocabulary.covers("temperature", "Temperature_CTD")
+    assert vocabulary.covers("SEA_WATER_POTENTIAL_TEMPERATURE", "temp")
+    assert vocabulary.covers("Not_A_Variable", "not_a_variable")
+    assert not vocabulary.covers("Not_A_Variable", "another_unknown")
+
+
+def test_covers_differs_from_same_quantity_only_within_mixed_layer_depth():
+    """Outside the MLD family there is no hidden broadening: covers IS same_quantity.
+
+    A pair is compared over every spelling the shipped vocabulary recognizes, so a
+    ``broader`` added to some *other* entry later changes this test on purpose --
+    it is the one place that would say a new relation went beyond what was intended.
+    """
+    family = {MLD, *MLD_DEFINITIONS}
+    spellings = sorted(
+        {
+            spelling
+            for key in vocabulary.VOCABULARY
+            for spelling in {key, *vocabulary.equivalent_names(key)}
+        }
+    )
+    outside = [s for s in spellings if vocabulary.resolve_name(s) not in family]
+    assert len(outside) > 50, "the sweep should cover the whole shipped vocabulary"
+    for a in outside:
+        for b in outside:
+            assert vocabulary.covers(a, b) == vocabulary.same_quantity(a, b), (a, b)
+    for a in outside:  # and nothing outside is covered by, or covers, an MLD name
+        for name in family:
+            assert not vocabulary.covers(a, name), (a, name)
+            assert not vocabulary.covers(name, a), (name, a)
+
+
+def test_equivalent_names_and_same_quantity_leave_definitions_out():
+    """``broader`` is one-directional; the symmetric "same variable" tests stay put."""
+    names = vocabulary.equivalent_names("mld")
+    assert names == {MLD, "mixed_layer_depth", "mixed_layer_thickness"}
+    for definition in MLD_DEFINITIONS:
+        assert not vocabulary.same_quantity("mld", definition)
+        assert not vocabulary.same_quantity(definition, "mld")
+        assert vocabulary.equivalent_names(definition).isdisjoint(names)
+        assert definition not in names
+
+
+def test_shipped_broader_relation_is_one_level_and_points_at_real_entries():
+    """The one-level rule, checked on the vocabulary exactly as shipped.
+
+    Every ``broader`` must be a name the vocabulary knows, must not be the entry
+    itself, and must name an entry that has no ``broader`` of its own: no chain, so
+    ``narrower_names``/``covers`` never need to follow one.
+    """
+    by_standard_name = {e["standard_name"]: e for e in vocabulary.VOCABULARY.values()}
+    linked = 0
+    for key, entry in vocabulary.VOCABULARY.items():
+        broader = entry.get("broader")
+        if broader is None:
+            continue
+        linked += 1
+        assert vocabulary.is_known(broader), (key, broader)
+        parent = vocabulary.resolve_name(broader)
+        assert parent != entry["standard_name"], f"{key} is its own broader"
+        assert "broader" not in by_standard_name[parent], f"{key} starts a chain"
+        assert entry["standard_name"] in vocabulary.narrower_names(broader), key
+    assert linked == len(MLD_DEFINITIONS)  # today's only ``broader`` entries
+
+
+def test_every_shipped_entry_has_its_own_standard_name():
+    """``_build_by_standard_name`` keeps the LAST entry per standard_name.
+
+    Two keys sharing one standard_name would silently hide the first from
+    ``equivalent_names`` -- exactly the hazard of adding a second entry for
+    ``ocean_mixed_layer_thickness`` beside ``mld``.
+    """
+    standard_names = [e["standard_name"] for e in vocabulary.VOCABULARY.values()]
+    duplicated = {n for n in standard_names if standard_names.count(n) > 1}
+    assert not duplicated, duplicated
+
+
+def test_register_with_broader_takes_effect_immediately(pristine_vocabulary):
+    vocabulary.register("mld_by_shear", "mld_by_shear_standard", broader="mld")
+
+    expected = tuple(sorted((*MLD_DEFINITIONS, "mld_by_shear_standard")))
+    assert vocabulary.narrower_names("mld") == expected
+    assert vocabulary.covers("mld", "mld_by_shear_standard")
+    assert vocabulary.covers("mld", "mld_by_shear")  # ... or by its own key
+    assert not vocabulary.covers("mld_by_shear", "mld")  # one direction only
+    assert not vocabulary.covers(BY_SIGMA_THETA, "mld_by_shear_standard")  # a sibling
+    assert vocabulary.covers("mld", BY_SIGMA_THETA)  # the shipped ones are unaffected
+
+
+@pytest.mark.parametrize("broad", ["mld", "MLD", "mixed_layer_depth", MLD])
+def test_register_broader_may_be_any_spelling_of_the_broad_entry(
+    pristine_vocabulary, broad
+):
+    vocabulary.register("mld_by_shear", "mld_by_shear_standard", broader=broad)
+    assert "mld_by_shear_standard" in vocabulary.narrower_names("mld")
+
+
+def test_a_live_registered_definition_is_found_dataset_side_from_the_generic_name(
+    pristine_vocabulary,
+):
+    vocabulary.register("mld_by_shear", "mld_by_shear_standard", broader="mld")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        da = find_variable(_tiny("mld_by_shear_standard"), "mld")
+    assert da is not None and da.name == "mld_by_shear_standard"
+
+
+def test_a_new_broad_and_specific_pair_can_be_registered_from_scratch(
+    pristine_vocabulary,
+):
+    vocabulary.register("foo", "standard_foo")
+    vocabulary.register("foo_kind", "standard_foo_kind", broader="foo")
+    assert vocabulary.narrower_names("foo") == ("standard_foo_kind",)
+    assert vocabulary.covers("foo", "standard_foo_kind")
+    assert not vocabulary.covers("standard_foo_kind", "foo")
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS  # nothing bled over
+
+
+def _assert_register_rejected(match: str, *args, **kwargs) -> None:
+    """``register`` raises ``ValueError`` matching ``match`` and stores nothing.
+
+    Validation runs before ``VOCABULARY`` is touched (as a pattern's does), so a
+    rejected call leaves both the entries and what ``narrower_names`` reports exactly
+    as they were, and a following ``_refresh`` has nothing to warn about.
+    """
+    before = {k: dict(v) for k, v in vocabulary.VOCABULARY.items()}
+    with pytest.raises(ValueError, match=match):
+        vocabulary.register(*args, **kwargs)
+    assert {k: dict(v) for k, v in vocabulary.VOCABULARY.items()} == before
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        vocabulary._refresh()
+
+
+@pytest.mark.parametrize(
+    "own_spelling", ["mld_x", "mld_x_standard", "mld_x_alias", "MLD_X_ALIAS"]
+)
+def test_register_rejects_an_entry_that_is_its_own_broader(
+    pristine_vocabulary, own_spelling
+):
+    _assert_register_rejected(
+        "names this entry itself",
+        "mld_x",
+        "mld_x_standard",
+        aliases=["mld_x_alias"],
+        broader=own_spelling,
+    )
+
+
+def test_register_rejects_a_broader_that_resolves_to_its_own_standard_name(
+    pristine_vocabulary,
+):
+    """A second key for an existing standard_name, naming its twin as its broader."""
+    _assert_register_rejected("names this entry itself", "mld_twin", MLD, broader="mld")
+
+
+def test_register_rejects_several_broaders(pristine_vocabulary):
+    """An entry is one specific kind of *one* broader entry, never a list of them."""
+    several: object = ["mld", "temperature"]
+    with pytest.raises(TypeError, match="one name"):
+        vocabulary.register("mld_x", "mld_x_standard", broader=several)
+    assert "mld_x" not in vocabulary.VOCABULARY
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+
+
+def test_register_rejects_an_unknown_broader(pristine_vocabulary):
+    _assert_register_rejected(
+        "not a known vocabulary name",
+        "mld_x",
+        "mld_x_standard",
+        broader="not_a_concept",
+    )
+
+
+def test_register_rejects_a_broader_that_is_itself_a_specific_kind(
+    pristine_vocabulary,
+):
+    """One level only: naming a definition as the broader would build a chain."""
+    _assert_register_rejected(
+        "name 'mld' instead",
+        "mld_deeper",
+        "mld_deeper_standard",
+        broader="mld_by_sigma_theta",
+    )
+
+
+@pytest.mark.parametrize("standard_name", [MLD, "renamed_mld"])
+def test_register_rejects_a_broader_on_an_entry_that_already_has_definitions(
+    pristine_vocabulary, standard_name
+):
+    """Making the generic entry itself a kind of something would build a chain.
+
+    The four definitions would become its far end -- and they follow the *key*
+    ``mld``, so renaming its standard_name in the same call does not escape it.
+    """
+    _assert_register_rejected(
+        "already has specific entries under it",
+        "mld",
+        standard_name,
+        broader="temperature",
+    )
+
+
+def test_add_alias_keeps_the_broader_link(pristine_vocabulary):
+    """A raw product name can join a definition live and stay one kind of ``mld``."""
+    vocabulary.add_alias("mld_by_sigma_theta", "mld_dt_mean")
+
+    assert vocabulary.VOCABULARY["mld_by_sigma_theta"]["broader"] == "mld"
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    assert vocabulary.resolve_name("mld_dt_mean") == BY_SIGMA_THETA
+    assert vocabulary.covers("mld", "mld_dt_mean")
+    assert not vocabulary.covers("mld_by_temperature", "mld_dt_mean")
+
+
+def test_add_pattern_keeps_the_broader_link(pristine_vocabulary):
+    vocabulary.add_pattern("mld_by_sigma_theta", r"mld_dt_(?:mean|min|max)")
+
+    assert vocabulary.VOCABULARY["mld_by_sigma_theta"]["broader"] == "mld"
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    assert vocabulary.covers("mld", "MLD_DT_MEAN")
+    assert not vocabulary.covers(BY_SIGMA_T, "mld_dt_mean")
+
+
+def test_reregistering_the_broad_entry_keeps_its_definitions(pristine_vocabulary):
+    """The reason ``broader`` lives on the specific entries, not as a list on ``mld``.
+
+    ``register`` replaces the whole dict, dropping the aliases; a list of children kept
+    there would go with them, but each definition names its own broader.
+    """
+    vocabulary.register("mld", MLD)
+
+    assert vocabulary.VOCABULARY["mld"] == {"standard_name": MLD}
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    assert vocabulary.covers("mld", BY_SIGMA_THETA)
+    # ... while the alias the replacement dropped no longer reaches the concept
+    assert vocabulary.narrower_names("mixed_layer_depth") == ()
+
+
+def test_definitions_follow_the_broad_key_when_it_gets_a_new_standard_name(
+    pristine_vocabulary,
+):
+    with pytest.warns(UserWarning, match="replaces an existing entry"):
+        vocabulary.register("mld", "renamed_mld")
+
+    assert vocabulary.narrower_names("mld") == MLD_DEFINITIONS
+    assert vocabulary.narrower_names("renamed_mld") == MLD_DEFINITIONS
+    assert vocabulary.narrower_names(MLD) == ()  # the old name is just unknown now
+
+
+def test_register_replace_warning_names_broader_among_what_is_discarded(
+    pristine_vocabulary,
+):
+    with pytest.warns(UserWarning, match="aliases, patterns and broader"):
+        vocabulary.register("mld_by_temperature", "some_other_standard_name")
+    # ... and it really was discarded: it is no longer a kind of mld
+    assert "some_other_standard_name" not in vocabulary.narrower_names("mld")
+    assert BY_TEMPERATURE not in vocabulary.narrower_names("mld")
+
+
+@pytest.mark.parametrize(
+    "bad,problem",
+    [
+        ("no_such_name", "is not a known name"),
+        ("mld_by_temperature", "is the entry itself"),
+        ("mld_by_sigma_t", "itself one specific kind of another"),
+    ],
+)
+def test_a_hand_edited_broader_that_breaks_the_rule_is_warned_about_and_ignored(
+    pristine_vocabulary, bad, problem
+):
+    """``register`` refuses these; a hand edit of ``VOCABULARY`` gets a warning instead.
+
+    Dangling, self-referential and chained links are all dropped from the relation
+    (so ``covers`` cannot be fooled by one) rather than half-honoured, and the
+    dangling target does not acquire a child under its unknown name either.
+    """
+    vocabulary.VOCABULARY["mld_by_temperature"]["broader"] = bad
+    with pytest.warns(UserWarning, match=f"vocabulary broader.*{problem}"):
+        vocabulary._refresh()
+
+    assert BY_TEMPERATURE not in vocabulary.narrower_names("mld")
+    assert not vocabulary.covers("mld", BY_TEMPERATURE)
+    assert vocabulary.narrower_names(bad) == ()
+    assert vocabulary.narrower_names("mld") == (
+        BY_MIXING_SCHEME,
+        BY_SIGMA_T,
+        BY_SIGMA_THETA,
+    )
 
 
 # -- coordinate vocabulary ------------------------------------------------------
