@@ -82,14 +82,76 @@ def _matplotlib_panel_titles(fig) -> list[str]:
 _TOP_LEVEL = {"labels": ("GOM_bgc", "woa23_nitrate"), "title": "GOM vs WOA"}
 
 
-def test_matplotlib_grid_labels_each_row_from_its_own_source(two_rows):
+def test_the_static_grid(two_rows):
+    """Everything one render of a two-row static grid has to get right at once.
+
+    Six claims, all against the same figure — merged into one render because each
+    used to build and throw away an identical grid just to check a different part of
+    it. Kept as one function, not one assertion, so a failure still says which claim
+    broke. The redraw claim goes last: it is the only one that draws the figure again.
+    """
     fig = render(
         PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL)),
         renderer="matplotlib",
     )
+    # Where the colorbars sit as ``render`` returns the figure, for the redraw claim.
+    before = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
+    renderer = fig.canvas.get_renderer()
+
+    # Each row is labelled from its own source, not the first row's.
     titles = _matplotlib_panel_titles(fig)
     assert "woa23_nitrate" in titles
     assert "woa23_phosphate" in titles
+
+    # The left labels stay on the canvas.
+    assert _leftmost_label_x(fig) >= 0
+
+    # No axes may report a non-finite tight bbox. One that does is dropped from the
+    # *figure's* tight bbox, and then ``bbox_inches="tight"`` — our own ``save=``, and
+    # Jupyter's inline backend — crops it out of the picture entirely. That is how a
+    # whole column of maps went missing on matplotlib 3.11 while every panel was still
+    # being drawn correctly: automatic title placement over a gridline-labelled
+    # GeoAxes put the title at y=inf, so its extent was NaN and it poisoned the axes
+    # bbox containing it.
+    for ax in fig.axes:
+        bbox = ax.get_tightbbox(renderer)
+        assert np.isfinite([bbox.x0, bbox.y0, bbox.x1, bbox.y1]).all(), (
+            f"non-finite tight bbox for the {ax.get_title()!r} panel: {bbox}"
+        )
+    figure_bbox = fig.get_tightbbox(renderer)
+    leftmost = min(ax.get_position().x0 for ax in fig.axes) * fig.get_size_inches()[0]
+    assert figure_bbox.x0 <= leftmost, "the tight bbox starts right of the first column"
+
+    # The bar's long axis matches the *maps*, not the cell holding their labelling.
+    # ``fig.colorbar(im, ax=...)`` sizes the bar to the gridspec cell, which also holds
+    # the title above and the longitude labels below — and a cartopy GeoAxes shrinks
+    # itself inside its own slot to keep its aspect on top of that. So the bar overshot
+    # the map at both ends, which reads badly for something that is the map's own ruler.
+    bars = _colorbar_axes(fig)
+    assert len(bars) == 4  # two rows x (shared scale, difference)
+    for cax, parents in bars:
+        bar, boxes = cax.get_position(), [p.get_position() for p in parents]
+        assert bar.y0 == pytest.approx(min(b.y0 for b in boxes), abs=1e-6)
+        assert bar.y1 == pytest.approx(max(b.y1 for b in boxes), abs=1e-6)
+
+    # ``pad`` is a fraction of the parent's own width, so it has to be levelled too. A
+    # grid row's shared-scale bar is padded off a two-panel span and its difference bar
+    # off one panel, which left the far-right bar with roughly half the gap.
+    gaps = {
+        round(cax.get_position().x0 - max(p.get_position().x1 for p in parents), 9)
+        for cax, parents in bars
+    }
+    assert len(gaps) == 1
+    assert gaps.pop() > 0
+
+    # A later draw must not hand placement back to the layout engine. ``savefig`` and
+    # Jupyter's inline backend both draw again after we return the figure; with
+    # constrained_layout still live, that recomputes the positions and silently undoes
+    # the refit.
+    fig.canvas.draw()
+    after = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
+    for b, a in zip(before, after, strict=True):
+        assert (a.y0, a.y1) == pytest.approx((b.y0, b.y1), abs=1e-6)
 
 
 def test_the_holoviews_grid(two_rows):
@@ -328,13 +390,15 @@ def _row_label_gap(fig) -> float:
     return min(gaps) if gaps else float("nan")
 
 
-@pytest.mark.parametrize("width", [8.5, 6.5, 5.0, 3.5])
+@pytest.mark.parametrize("width", [8.5, 3.5])
 def test_row_labels_never_overlap_the_latitude_labels(two_rows, width):
     """At *any* figure width — the bug was an offset in axes fraction.
 
     ``x=-0.18`` is a share of the panel width, but the latitude labels it must clear
     are a fixed text width, so the two scaled differently: the label overlapped by 4px
-    at 8.5in and 31px at 3.5in.
+    at 8.5in and 31px at 3.5in. The offset scales with width and the text does not, so
+    the overlap only grows as the figure narrows: those two widths bracket every width
+    between them.
     """
     fig = render(
         PlotSpec(family="field_grid", items=two_rows, options={"figsize": (width, 4.4)})
@@ -352,37 +416,6 @@ def _leftmost_label_x(fig) -> float:
         for ax in fig.axes
         for text in _left_label_artists(ax)
     )
-
-
-def test_left_labels_stay_on_the_canvas(two_rows):
-    fig = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
-    )
-    assert _leftmost_label_x(fig) >= 0
-
-
-def test_every_panel_survives_a_tight_bbox_crop(two_rows):
-    """No axes may report a non-finite tight bbox.
-
-    One that does is dropped from the *figure's* tight bbox, and then
-    ``bbox_inches="tight"`` — our own ``save=``, and Jupyter's inline backend —
-    crops it out of the picture entirely. That is how a whole column of maps went
-    missing on matplotlib 3.11 while every panel was still being drawn correctly:
-    automatic title placement over a gridline-labelled GeoAxes put the title at
-    y=inf, so its extent was NaN and it poisoned the axes bbox containing it.
-    """
-    fig = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
-    )
-    renderer = fig.canvas.get_renderer()
-    for ax in fig.axes:
-        bbox = ax.get_tightbbox(renderer)
-        assert np.isfinite([bbox.x0, bbox.y0, bbox.x1, bbox.y1]).all(), (
-            f"non-finite tight bbox for the {ax.get_title()!r} panel: {bbox}"
-        )
-    figure_bbox = fig.get_tightbbox(renderer)
-    leftmost = min(ax.get_position().x0 for ax in fig.axes) * fig.get_size_inches()[0]
-    assert figure_bbox.x0 <= leftmost, "the tight bbox starts right of the first column"
 
 
 def test_left_margin_is_refitted_when_the_layout_reserves_none(two_rows):
@@ -424,25 +457,6 @@ def _colorbar_axes(fig):
         for ax in fig.axes
         if (parents := getattr(ax, "_osk_cbar_parents", None))
     ]
-
-
-def test_colorbars_start_and_end_level_with_their_panels(two_rows):
-    """The bar's long axis matches the *maps*, not the cell holding their labelling.
-
-    ``fig.colorbar(im, ax=...)`` sizes the bar to the gridspec cell, which also holds
-    the title above and the longitude labels below — and a cartopy GeoAxes shrinks
-    itself inside its own slot to keep its aspect on top of that. So the bar overshot
-    the map at both ends, which reads badly for something that is the map's own ruler.
-    """
-    fig = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
-    )
-    bars = _colorbar_axes(fig)
-    assert len(bars) == 4  # two rows x (shared scale, difference)
-    for cax, parents in bars:
-        bar, boxes = cax.get_position(), [p.get_position() for p in parents]
-        assert bar.y0 == pytest.approx(min(b.y0 for b in boxes), abs=1e-6)
-        assert bar.y1 == pytest.approx(max(b.y1 for b in boxes), abs=1e-6)
 
 
 def test_row_colorbars_span_their_panels_and_share_one_thickness():
@@ -617,40 +631,6 @@ def test_a_grid_does_not_borrow_the_single_rows_auto_title(two_rows):
     texts = [d.text or "" for d in hv.render(out, backend="bokeh").select({"type": Div})]
     assert sum("GOM vs WOA" in t for t in texts) == 1
     assert not any("·" in t for t in texts), "no row grew its own variable·depth title"
-
-
-def test_colorbars_sit_the_same_distance_from_their_panels(two_rows):
-    """``pad`` is a fraction of the parent's own width, so it has to be levelled too.
-
-    A grid row's shared-scale bar is padded off a two-panel span and its difference bar
-    off one panel, which left the far-right bar with roughly half the gap.
-    """
-    fig = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
-    )
-    gaps = {
-        round(cax.get_position().x0 - max(p.get_position().x1 for p in parents), 9)
-        for cax, parents in _colorbar_axes(fig)
-    }
-    assert len(gaps) == 1
-    assert gaps.pop() > 0
-
-
-def test_colorbar_alignment_survives_a_redraw(two_rows):
-    """A later draw must not hand placement back to the layout engine.
-
-    ``savefig`` and Jupyter's inline backend both draw again after we return the
-    figure; with constrained_layout still live, that recomputes the positions and
-    silently undoes the refit.
-    """
-    fig = render(
-        PlotSpec(family="field_grid", items=two_rows, options=dict(_TOP_LEVEL))
-    )
-    before = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
-    fig.canvas.draw()
-    after = [cax.get_position().frozen() for cax, _ in _colorbar_axes(fig)]
-    for b, a in zip(before, after, strict=True):
-        assert (a.y0, a.y1) == pytest.approx((b.y0, b.y1), abs=1e-6)
 
 
 def test_colorbar_alignment_can_be_turned_off(two_rows):
@@ -1610,9 +1590,12 @@ def test_static_field_row_accepts_rasterize_and_hover_with_a_warning():
 # coastline_resolution: see ocean_skill.plot.coastline. "auto" (the default)
 # scales Natural Earth to the panel's own extent -- the small domain _field_row()
 # items use (8 x 10 degrees) is well under both AdaptiveScaler thresholds, so it
-# resolves to "10m" in both renderers. GSHHS scales need a one-time shapefile
-# download (large at "full"), so the static tests that draw one skip rather than
-# fail on a machine with no network / an unreachable NOAA mirror.
+# resolves to "10m" in both renderers. That holds only under the
+# ``adaptive_coastline`` marker: everywhere else conftest's ``coarse_auto_coastlines``
+# pins the scaler to its coarsest scale, so the tests that assert the adaptive choice
+# itself carry the marker. The GSHHS test seeds cartopy's geometry cache rather than
+# read the full-resolution shapefile (30s+, and a download on a fresh machine) just to
+# check which feature class ``render()`` added.
 # ---------------------------------------------------------------------------
 
 
@@ -1626,21 +1609,6 @@ def _land_features(fig):
         for a in ax.get_children()
         if isinstance(a, FeatureArtist)
     ]
-
-
-def _force_gshhs_draw(fig):
-    """Actually render ``fig`` so a GSHHS feature's shapefile is fetched.
-
-    ``add_feature`` alone never touches disk or network -- the geometries are only
-    read the first time the axes are drawn (see ``FeatureArtist.draw``). Skips the
-    calling test when that fetch cannot complete offline, the same accommodation
-    ``test_movie_coastline_lands_in_the_180_centred_frame_for_a_straddling_domain``
-    (tests/test_antimeridian.py) makes for Natural Earth.
-    """
-    try:
-        fig.canvas.draw()
-    except Exception as err:  # pragma: no cover - depends on local GSHHS cache
-        pytest.skip(f"GSHHS shapefile unavailable offline ({err})")
 
 
 def test_coastline_resolution_defaults_to_auto_natural_earth():
@@ -1665,17 +1633,23 @@ def test_coastline_resolution_accepts_a_fixed_natural_earth_scale():
     assert features and all(f.scale == "10m" for f in features)
 
 
-def test_coastline_resolution_gshhs_draws_from_gshhs():
-    """An explicit GSHHS scale -- finer than Natural Earth's own limit -- draws GSHHS."""
+def test_coastline_resolution_gshhs_draws_from_gshhs(monkeypatch):
+    """An explicit GSHHS scale -- finer than Natural Earth's own limit -- draws GSHHS.
+
+    ``render`` draws the figure itself while it fits the layout, so the feature would
+    read the full-resolution shapefile (30s+) just to have its class checked. Seeding
+    cartopy's own geometry cache with an empty coastline skips that read and leaves
+    every other line of the draw path as it runs in production.
+    """
     import cartopy.feature as cfeature
 
+    monkeypatch.setitem(cfeature.GSHHSFeature._geometries_cache, ("f", 1), ())
     spec = PlotSpec(
         family="field_row",
         items=[_row_item()],
         options={"coastline_resolution": "full"},
     )
     fig = render(spec)
-    _force_gshhs_draw(fig)
     features = _land_features(fig)
     assert features and all(isinstance(f, cfeature.GSHHSFeature) for f in features)
 
@@ -1699,6 +1673,7 @@ def _coastline_scale(row):
     return feat.opts.get("plot").kwargs.get("scale")
 
 
+@pytest.mark.adaptive_coastline
 def test_coastline_resolution_auto_resolves_by_extent_interactively():
     """``"auto"`` reaches the interactive renderer too, not just the static one.
 
@@ -1819,6 +1794,7 @@ def test_land_false_drops_the_coastline_interactively():
     )
 
 
+@pytest.mark.adaptive_coastline
 def test_land_true_keeps_the_coastline_interactively():
     row = _hv_row(_row_item(), tiles=False)
     assert _coastline_scale(row) == "10m"

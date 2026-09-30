@@ -1018,12 +1018,35 @@ def test_main_bad_schema_is_a_usage_error(tmp_path):
     assert main([str(path)]) == 2
 
 
-def test_main_reports_exit_code_from_run(tmp_path, stub_model, capsys):
+def test_main_runs_a_suite_end_to_end(tmp_path, stub_model, capsys):
+    """Everything one ``main([suite])`` run on a clean model-only suite has to do.
+
+    Four claims, all against the same run — merged into one run because each used to
+    build and throw away an identical suite just to check a different part of it.
+    Kept as one function, not one assertion, so a failure still says which claim
+    broke. ``main`` goes through ``run_suite`` and its ``_capture_terminal``, so the
+    streams claim exercises the same swap-and-restore code as a direct ``run_suite``.
+    """
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    stdout_before, stderr_before = sys.stdout, sys.stderr
     code = main([str(path)])
+
+    # main reports the exit code from the run.
     assert code == 0
+
+    # The summary line reaches the real terminal.
     out = capsys.readouterr().out
     assert "page(s) drawn" in out
+
+    # run_suite's own tee is closed by the time main prints its summary, so main
+    # appends those lines to run.log directly; they must end up there too.
+    latest = Path((tmp_path / "out" / "latest.txt").read_text())
+    log_text = (latest / "run.log").read_text()
+    assert "page(s) drawn" in log_text
+
+    # stdout/stderr are never left swapped out after a successful run.
+    assert sys.stdout is stdout_before
+    assert sys.stderr is stderr_before
 
 
 # -- run.log: the terminal transcript, persisted -------------------------------------
@@ -1036,13 +1059,19 @@ def test_main_reports_exit_code_from_run(tmp_path, stub_model, capsys):
 # out after the run -- success, skip, or crash.
 
 
-def test_run_log_is_written_and_matches_terminal(
-    tmp_path, stub_model, monkeypatch, capsys
-):
+def test_run_log_of_a_skipped_page(tmp_path, stub_model, monkeypatch, capsys):
+    """Everything the run log has to hold after a run whose page gets skipped.
+
+    Two claims, both against the same run — merged into one run because each used to
+    build and throw away an identical skipped-page suite just to check a different
+    part of it. Kept as one function, not one assertion, so a failure still says
+    which claim broke.
+    """
     monkeypatch.setattr(_comparison, "_variable_available", lambda *a, **k: False)
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
     result = run_suite(path)
 
+    # run.log is written, at the path the result reports, and matches the terminal.
     assert result.log == result.report_dir / "run.log"
     assert result.log.exists()
     log_text = result.log.read_text()
@@ -1054,13 +1083,8 @@ def test_run_log_is_written_and_matches_terminal(
     assert "SKIPPED after" in log_text
     assert "SKIPPED after" in out
 
-
-def test_run_log_has_traceback_for_skipped_page(tmp_path, stub_model, monkeypatch):
-    monkeypatch.setattr(_comparison, "_variable_available", lambda *a, **k: False)
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
-    result = run_suite(path)
-
-    assert "Traceback" in result.log.read_text()
+    # The log also carries the traceback the terminal never shows for a skipped page.
+    assert "Traceback" in log_text
 
 
 def test_output_before_report_dir_exists_is_buffered_into_run_log(
@@ -1083,9 +1107,16 @@ def test_output_before_report_dir_exists_is_buffered_into_run_log(
     assert "refresh happened" in result.log.read_text()
 
 
-def test_fatal_crash_still_leaves_run_log_with_traceback(
+def test_a_fatal_crash_still_leaves_run_log_and_restores_streams(
     tmp_path, stub_model, monkeypatch
 ):
+    """Everything a fatal crash mid-run has to leave behind.
+
+    Two claims, both against the same crash — merged into one run because each used
+    to build and throw away an identical crashing suite just to check a different
+    part of it. Kept as one function, not one assertion, so a failure still says
+    which claim broke.
+    """
     from ocean_skill.workflows.report import PdfReport
 
     def boom(self, fig, stem):
@@ -1093,48 +1124,22 @@ def test_fatal_crash_still_leaves_run_log_with_traceback(
 
     monkeypatch.setattr(PdfReport, "emit", boom)
     path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    stdout_before, stderr_before = sys.stdout, sys.stderr
 
     with pytest.raises(RuntimeError, match="boom"):
         run_suite(path)
 
+    # stdout/stderr are never left swapped out, even when the run raises.
+    assert sys.stdout is stdout_before
+    assert sys.stderr is stderr_before
+
+    # The crash still leaves a run.log behind, with the traceback the terminal never
+    # sees (main prints only a one-line "error: ...").
     report_dirs = list((tmp_path / "out").iterdir())
     assert len(report_dirs) == 1
     log_text = (report_dirs[0] / "run.log").read_text()
     assert "boom" in log_text
     assert "Traceback" in log_text
-
-
-def test_streams_are_restored_after_run(tmp_path, stub_model):
-    stdout_before, stderr_before = sys.stdout, sys.stderr
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
-    run_suite(path)
-    assert sys.stdout is stdout_before
-    assert sys.stderr is stderr_before
-
-
-def test_streams_are_restored_after_a_crash(tmp_path, stub_model, monkeypatch):
-    from ocean_skill.workflows.report import PdfReport
-
-    def boom(self, fig, stem):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(PdfReport, "emit", boom)
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
-    stdout_before, stderr_before = sys.stdout, sys.stderr
-    with pytest.raises(RuntimeError):
-        run_suite(path)
-    assert sys.stdout is stdout_before
-    assert sys.stderr is stderr_before
-
-
-def test_main_summary_lines_are_appended_to_run_log(tmp_path, stub_model):
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
-    code = main([str(path)])
-    assert code == 0
-
-    latest = Path((tmp_path / "out" / "latest.txt").read_text())
-    log_text = (latest / "run.log").read_text()
-    assert "page(s) drawn" in log_text
 
 
 def test_run_log_has_page_headers_and_timing(tmp_path, stub_model, monkeypatch):

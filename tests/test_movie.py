@@ -229,16 +229,22 @@ def test_every_must_be_positive(frames):
         _movie(frames, every=0)
 
 
-def test_a_long_movie_warns_before_spending_the_time():
+def test_a_long_movie_warns_before_spending_the_time_and_is_not_capped():
+    """One 205-frame movie, two claims about it.
+
+    Merged into one build because each used to construct an identical movie just to
+    check a different part of it. Kept as one function, not one assertion, so a failure
+    still says which claim broke.
+    """
     many = [_frame(i) for i in range(205)]
+
+    # The warning fires when the movie is built, before the time is spent saving it —
+    # the cost is announced up front, not discovered halfway through.
     with pytest.warns(UserWarning, match="long movie"):
-        _movie(many)
+        movie = _movie(many)
 
-
-def test_a_long_movie_is_not_capped():
-    many = [_frame(i) for i in range(205)]
-    with pytest.warns(UserWarning):
-        assert _movie(many)._save_count == 205
+    # Warn, don't truncate: every one of the 205 frames is still in the movie.
+    assert movie._save_count == 205
 
 
 def test_no_frames_at_all_is_refused():

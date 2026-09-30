@@ -136,6 +136,36 @@ def fast_probe_retries(monkeypatch):
     monkeypatch.setattr(build, "PROBE_RETRY_BACKOFF", 0.0)
 
 
+@pytest.fixture(autouse=True)
+def coarse_auto_coastlines(request, monkeypatch):
+    """Let ``coastline_resolution="auto"`` draw the 110m coastline, not the 10m one.
+
+    Nearly every fixture draws an 8x10-degree domain, which cartopy's
+    ``AdaptiveScaler`` resolves to the 10m Natural Earth coastline -- about 40% of the
+    whole suite's CPU: the static ``FeatureArtist.draw`` spends seconds per multi-panel
+    figure, and bokeh re-projects the world's 10m coastline once per interactive panel.
+    Pinning the scaler to its coarsest scale changes only *which shapefile* cartopy
+    loads. Every line of ``ocean_skill`` still runs as in production, because both the
+    static path (``cfeature.LAND`` / ``ax.coastlines(resolution="auto")`` in
+    ``_basemap``) and the interactive one (:func:`ocean_skill.plot.coastline.
+    auto_ne_resolution`, used by ``_quadmesh``) go through
+    ``AdaptiveScaler.scale_from_extent``. An explicit ``"10m"`` / ``"50m"`` or a GSHHS
+    scale never asks the scaler, so those requests are untouched.
+
+    A test that asserts the adaptive choice itself opts out with
+    ``@pytest.mark.adaptive_coastline`` (or a module-level ``pytestmark``).
+    """
+    if request.node.get_closest_marker("adaptive_coastline"):
+        return
+    import cartopy.feature as cfeature
+
+    def _coarsest(self, extent):
+        self._scale = self._default_scale  # the bookkeeping the real method does
+        return self._scale
+
+    monkeypatch.setattr(cfeature.AdaptiveScaler, "scale_from_extent", _coarsest)
+
+
 @pytest.fixture
 def isolated_catalogs(tmp_path, monkeypatch):
     """Point catalog discovery at an isolated temp dir holding one intake v2 catalog.
