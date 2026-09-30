@@ -569,6 +569,53 @@ and `land=False` is bare in both.
 
 **Default:** `True`
 
+### `locations` (field maps)
+
+Draw where things sit **on top of** a field map: catalog stations as markers, a
+transect as a line, a region as a dashed box — anything
+[`osk.map_locations()`](#the-locations-family-dataset-map-and-selection-map) draws,
+laid over the field instead of over a bare coastline. It is how a domain-overview
+figure is made: the bathymetry underneath, the sections and stations being analysed
+on top.
+
+```python
+eq   = osk.field("pac_dt_ramp", "temperature", label="Eq",
+                 select={"transect": {"lat": 0, "lon": {"min": 130, "max": 280}}})
+m180 = osk.field("pac_dt_ramp", "temperature", label="180-160",
+                 select={"transect": {"lon": 180, "lat": {"min": -30, "max": 30}}})
+
+osk.field("pac_dt_ramp", "h").plot(locations=[eq, m180, *osk.find(featureType="timeSeries")])
+osk.field("pac_dt_ramp", "h").plot(locations=[eq, m180], renderer="holoviews")
+```
+
+`locations=` takes whatever `map_locations()` takes — catalog source names, a
+`find()` result, a `Field`/`Comparison` (or a set of either), or a list mixing them. A
+`Field` whose `select` cuts a transect draws that transect's path, so the line on the
+map and the section you analyse are the same request and cannot disagree. Bathymetry
+is `h` on a ROMS source and draws in `cmo.deep`.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `legend` | `True` | the featureType key, drawn once (on the first panel of a facet) |
+| `legend_kwargs` | — | `Axes.legend` properties (static renderer only, as ever) |
+| `marker_size` | `80` static / `9` interactive | marker size (points² / pixels) |
+
+Things worth knowing:
+
+- **Context, not data.** A station or transect outside the field does not widen the
+  map, on either renderer — the view stays framed on the field.
+- **The model's own outline is not repeated.** The field map already draws that through
+  [`domain`](#other-parameters-not-styling-dicts); `locations=` adds only what you name.
+- **Map panels only.** A series, section, profile or depth–time plot has no map to draw
+  on, and `locations=` raises rather than ignoring it. On a facet (several panels) every
+  panel carries the locations.
+- **Dateline-straddling domains work.** Locations are placed in the same 180-centred
+  frame as the field, on both renderers.
+- **Interactive:** hovering a marker or box reads that dataset's record, as it does on a
+  `map_locations()` map.
+
+**Default:** `None` (nothing drawn)
+
 ### `tiles` (holoviews only)
 
 A web basemap under the field, on every interactive map family — `field_facet`,
@@ -2255,6 +2302,10 @@ metadata alone — no field, so no colormap, no colorbar and no `mark`. Colour k
 `featureType` (markers for stations/profiles/tracks, dashed extent boxes for grids),
 and the legend is the key to it. The same family also draws where a plotted
 *selection* sits — see [Selection maps](#selection-maps) below.
+
+To lay these same locations over a *field* instead — bathymetry under a set of
+stations and transects — pass them as [`locations=`](#locations-field-maps) to
+`field.plot()`.
 
 ### `locations`-only parameters
 

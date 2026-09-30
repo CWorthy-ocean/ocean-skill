@@ -64,11 +64,12 @@ __all__ = [
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
 #: deliberate choice, listed here rather than left as an accident to rediscover:
 #:   - ammonium / sigma_theta: both cmo.dense
-#:   - nitrate / mld / pressure: both cmo.deep -- "mld" meaning all five mixed-layer
-#:     thickness names, the generic one and the four CF ``..._defined_by_<criterion>``
-#:     ones. That includes the sigma_theta-defined one: it is a depth in metres, not a
-#:     density, so it takes the MLD map even though its name contains "sigma_theta"
-#:     (see the ordering note at the "mixed_layer" entry below)
+#:   - nitrate / mld / pressure / bathymetry: all cmo.deep -- "mld" meaning all five
+#:     mixed-layer thickness names, the generic one and the four CF
+#:     ``..._defined_by_<criterion>`` ones. That includes the sigma_theta-defined
+#:     one: it is a depth in metres, not a density, so it takes the MLD map even though
+#:     its name contains "sigma_theta" (see the ordering note at the "mixed_layer"
+#:     entry below)
 #:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
 #:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
 #:   - pH cmo.speed_r vs the velocity family's cmo.speed
@@ -139,6 +140,23 @@ _RANGES: dict[str, tuple[float | None, float | None, bool]] = {
     "mass_concentration_of_chlorophyll_a_in_sea_water": (0.01, 10.0, True),
 }
 
+#: Variables recognized by an *exact* spelling rather than a substring. Every key in
+#: :data:`_SEQUENTIAL_CMAPS` is escaped and matched with ``re.search``, which is what a
+#: full CF standard_name wants and exactly what a one-letter name cannot have: ``"h"``
+#: as a substring pattern would colour half the vocabulary. ``vartype -> (regex,
+#: colormap)``, the regex fullmatched against the lower-cased name.
+#:
+#: ``"bathymetry"``: ROMS calls its seafloor depth ``h``, a grid constant that
+#: :func:`ocean_skill.roms.standardize` keeps under that name (``to_depth`` reads it),
+#: so ``field(src, "h")`` reaches this table with the string ``"h"`` and nothing to
+#: resolve it by. Deliberately *not* a vocabulary alias: an alias would make
+#: ``find_variable`` look for ``sea_floor_depth_below_geoid`` in a dataset that only
+#: has ``h``. xcmocean's own ``depths`` type covers the word "bathymetry" but not the
+#: CF ``sea_floor_depth_*`` names, which fall through to the default map.
+_ANCHORED_CMAPS: dict[str, tuple[str, str]] = {
+    "bathymetry": (r"^(h|bathymetry|sea_floor_depth(_below_\w+)?)$", "cmo.deep"),
+}
+
 _registered = False
 
 
@@ -158,6 +176,13 @@ def _register_colormaps() -> None:
     seqin = {
         name: getattr(cmocean.cm, cmap.removeprefix("cmo."), cmocean.cm.matter)
         for name, cmap in _SEQUENTIAL_CMAPS.items()
+    }
+    # anchored spellings first: they fullmatch, so they can shadow nothing else
+    anchored = {name: pattern for name, (pattern, _) in _ANCHORED_CMAPS.items()}
+    regexin = anchored | regexin
+    seqin |= {
+        name: getattr(cmocean.cm, cmap.removeprefix("cmo."), cmocean.cm.matter)
+        for name, (_, cmap) in _ANCHORED_CMAPS.items()
     }
     # dict order is insertion order; rebuilding with ours first, then xcmocean's
     # existing table, makes ours the entries checked first without disturbing

@@ -262,6 +262,12 @@ class PlotSpec:
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.
+
+        ``field_facet`` also reads ``options["location_items"]``: ``locations``-family
+        items (the same schema as above, built by
+        :func:`ocean_skill.plot.map_locations.location_items`) drawn on top of every
+        map panel -- how ``Field.plot(locations=...)`` puts stations and transects over
+        a bathymetry map. They are context rather than data: they never widen the view.
     """
 
     family: str
