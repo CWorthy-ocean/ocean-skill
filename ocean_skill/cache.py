@@ -229,6 +229,10 @@ configure_fsspec_cache()
 #: "not of the underlying data" caveat above does not apply to it -- two numerically
 #: identical grids always hit, from any source name, and a grid that changed shape or
 #: values always misses.
+#:
+#: Downloaded source files are *not* a fourth kind, even though by default they sit
+#: right beside these three, in ``<base>/cache/obs`` (see :func:`obs_dir`). They are
+#: kept out of this tuple on purpose; :func:`clear` explains why.
 KINDS = ("prepared", "aligned", "weights")
 
 #: File extension each :data:`KINDS` entry is stored under -- the two Dataset kinds as
@@ -455,10 +459,36 @@ def load_field(key: str):
     return da, ds.attrs.get(_DEPTH_ATTR)
 
 
+def _check_kind(kind: str | None) -> None:
+    """Raise :class:`ValueError` unless ``kind`` is ``None`` or one of :data:`KINDS`.
+
+    The check goes by *name*, never by what happens to be on disk. Before it,
+    :func:`entries` only found out by indexing ``_EXTENSIONS``, which it reached only
+    for a directory that existed. So a bad name gave a bare ``KeyError`` when its
+    directory existed, and a silent empty result when it did not: ``clear("obs")`` on
+    a fresh machine, or a typo like ``"align"`` anywhere, "succeeded" at removing
+    nothing.
+    """
+    if kind is None or kind in KINDS:
+        return
+    raise ValueError(
+        f"unknown cache kind {kind!r}; try one of {list(KINDS)}, or None for all of "
+        "them. Downloaded source files are not a kind, and clear() never touches "
+        f"them: they are in osk.cache.obs_dir() ({obs_dir()}), to delete by hand if "
+        "you want the space back."
+    )
+
+
 def entries(kind: str | None = None) -> list[Path]:
-    """Return cached entries on disk, for one :data:`KINDS` kind or all of them."""
+    """Return cached entries on disk, for one :data:`KINDS` kind or all of them.
+
+    Only ``None`` means all of them. Any name outside :data:`KINDS` raises
+    :class:`ValueError`, ``"obs"`` included; :func:`clear` explains why downloaded
+    source files are not a kind.
+    """
+    _check_kind(kind)
     found: list[Path] = []
-    for k in [kind] if kind else KINDS:
+    for k in KINDS if kind is None else [kind]:
         root = path(k)
         if root.exists():
             found.extend(sorted(root.glob(f"*.{_EXTENSIONS[k]}")))
@@ -515,18 +545,30 @@ def clear(kind: str | None = None) -> int:
     why identity-keyed entries cannot notice that themselves. Clears every kind
     unless one is named.
 
+    Downloaded source files are not one of :data:`KINDS`, so even a plain ``clear()``
+    never touches them, and ``clear("obs")``, like any name outside :data:`KINDS`,
+    raises :class:`ValueError` rather than guessing. A download is a copy of a remote
+    file keyed on its URL (in practice an observational reference), so the model rerun
+    this call exists for does not make it stale. Downloads are also the bigger
+    directory and slow to refill, and :func:`obs_dir` can be a directory the user
+    pointed fsspec at themselves (a ``cache_storage`` setting), holding files that are
+    not ocean-skill's to delete. To reclaim that space, delete from :func:`obs_dir` by
+    hand.
+
     Also empties :func:`ocean_skill.sources.read`'s own in-process open memo
-    (unconditionally, regardless of ``kind``) — it holds an already-opened,
+    (whichever kind is named, if any) — it holds an already-opened,
     already-standardized source, so a rerun-in-place this call exists for needs
     that memo gone too, or a since-edited source would keep being served from
-    before the rerun. Imported locally: :mod:`ocean_skill.sources` imports from
+    before the rerun. A refused ``kind`` raises first, so it flushes nothing
+    either. Imported locally: :mod:`ocean_skill.sources` imports from
     this module's sibling :mod:`ocean_skill.catalog`, not from here, but importing
     it at this module's top would still invite a cycle as the package grows.
     """
     from ocean_skill import sources as _sources
 
-    _sources.read.cache_clear()
+    # List first: a refused kind raises here, before the memo below is flushed.
     found = entries(kind)
+    _sources.read.cache_clear()
     for entry in found:
         _remove_entry(entry)
     return len(found)
