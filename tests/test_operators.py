@@ -822,6 +822,28 @@ def test_a_leftover_dimension_explains_itself(two_months):
         _align.align(monthly, monthly, method="bilinear")
 
 
+@pytest.mark.parametrize(
+    ("dim", "suggests_depths"), [("depth", True), ("s_rho", True), ("time", False)]
+)
+def test_a_leftover_vertical_axis_points_at_depths(dim, suggests_depths):
+    """select={"depth": [a, b]} keeps both levels as one axis; depths=[a, b] maps each.
+
+    The refusal used to list select/aggregate/over only, none of which is the
+    one-map-per-depth spelling a caller passing a depth list usually wanted.
+    """
+    from ocean_skill.comparison import _require_reduced
+
+    da = xr.DataArray(
+        np.zeros((2, 3, 4)),
+        dims=(dim, "lat", "lon"),
+        coords={dim: [0.0, 200.0], "lat": [0.0, 1.0, 2.0], "lon": [0.0, 1.0, 2.0, 3.0]},
+    )
+    with pytest.raises(ValueError, match="not a single map") as err:
+        _require_reduced(da, "test", "woa")
+    assert ("depths=[...]" in str(err.value)) is suggests_depths
+    assert "over= gives a map per metric" in str(err.value)
+
+
 def test_a_derived_key_reports_its_cf_standard_name():
     """Otherwise colormaps, plot labels and the metrics table see the key itself."""
     from ocean_skill.comparison import Comparison
