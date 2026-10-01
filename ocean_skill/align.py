@@ -163,18 +163,33 @@ def natural_convention(obj) -> Literal["0-360", "-180-180"]:
     seam's own coordinate rather than wrapped to -180, which would otherwise
     inflate the ±180 span to the whole globe for a domain that never left it.
     """
+    return _convention_preference(obj) or "-180-180"
+
+
+def _convention_preference(obj) -> Literal["0-360", "-180-180"] | None:
+    """Return the convention ``obj`` is contiguous in *only*, or ``None`` on a tie.
+
+    :func:`natural_convention` without its ±180 tie-break: ``None`` means either
+    convention keeps ``obj`` in one piece (a global field, or a domain crossing
+    neither seam), so ``obj`` alone has no reason to pick one. :func:`align` reads
+    that to let the *other* lane decide instead.
+    """
     lon = _lon_name(obj)
     if lon is None:
-        return "-180-180"
+        return None
     vals = np.asarray(obj[lon], dtype="float64").ravel()
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
-        return "-180-180"
+        return None
     wrapped_180 = ((vals + 180.0) % 360.0) - 180.0
     wrapped_180 = np.where(np.abs(vals - 180.0) <= _CONVENTION_TOL, 180.0, wrapped_180)
     span_180 = np.ptp(wrapped_180)
     span_360 = np.ptp(vals % 360.0)
-    return "0-360" if span_360 < span_180 - _CONVENTION_TOL else "-180-180"
+    if span_360 < span_180 - _CONVENTION_TOL:
+        return "0-360"
+    if span_180 < span_360 - _CONVENTION_TOL:
+        return "-180-180"
+    return None
 
 
 #: Degrees of margin kept around the test's own extent when the reference is cropped to
@@ -2737,12 +2752,20 @@ def align(
     # never gets cropped — and its derived cell corners fold, so a conservative
     # regrid paints the test across oceans it never covered (see
     # :func:`natural_convention`). The reference follows the test so both lanes,
-    # the bbox and the crop all speak one convention. Safe for a section lane too:
-    # harmonize_longitude only re-sorts a longitude that is itself a *dimension*
-    # coordinate, and a section's lon rides on `along`, not on its own dimension --
-    # the path's order survives untouched.
+    # the bbox and the crop all speak one convention. A test with no preference of
+    # its own (a global climatology tested against a Pacific model, the roles
+    # swapped) defers to the reference instead -- otherwise the pair lands in ±180
+    # on the test's global grid and the map is drawn centred on 0, the Pacific torn
+    # across both edges. Safe for a section lane too: harmonize_longitude only
+    # re-sorts a longitude that is itself a *dimension* coordinate, and a section's
+    # lon rides on `along`, not on its own dimension -- the path's order survives
+    # untouched.
     if convention == "auto":
-        convention = natural_convention(test)
+        convention = (
+            _convention_preference(test)
+            or _convention_preference(reference)
+            or "-180-180"
+        )
     test = harmonize_longitude(test, convention)
     reference = harmonize_longitude(reference, convention)
 
@@ -2776,8 +2799,14 @@ def align(
         )
 
     # regrid over the overlap, not the reference's full (often global) grid — the
-    # reference is the possibly-global lane whichever direction the regrid runs
+    # reference is usually the possibly-global lane whichever direction the regrid
+    # runs. Usually, not always: a global test against a regional reference (WOA
+    # tested against a Pacific model) is cropped back to the reference's extent
+    # too, the same overlap seen from the other side, so the pair does not come
+    # back on a globe of NaN around the one region actually compared. A no-op in
+    # the usual direction, where the reference was just cropped to the test.
     reference = subset_to_bbox(reference, bbox_of(test), pad=pad)
+    test = subset_to_bbox(test, bbox_of(reference), pad=pad)
 
     if _shared_grid(test, reference):
         # Two lanes already on one grid -- two runs of the same model, most
