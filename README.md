@@ -284,6 +284,53 @@ an explicit list of months (`select={"month": [1, 4, 7]}`) is the `month` climat
 own version of the depth-list rule above: it turns off "month is time" and fans into
 one profile line per named month instead, coloured and legended by month.
 
+**Statistics of a climatology: chain the steps.** An axis's value may be a *list* of
+steps, applied in order, each acting on the axis the previous one left — after a
+`groupby: "month"` that is the new `month` axis, after a `resample` it is still time. So
+the variance of the seasonal cycle is "mean by month, then the variance of those twelve":
+
+```python
+osk.field(
+    "run_new", "temperature",
+    select={"depth": "surface", "time": slice("2010-01", "2012-12")},
+    aggregate={"time": [{"groupby": "month", "reduce": "mean"}, "var"]},
+).plot()                              # one map, in °C² — not twelve panels
+```
+
+The common ones, each reading left to right (`range` is the one reduction added here,
+max − min):
+
+| You want | `aggregate={"time": ...}` |
+|---|---|
+| Seasonal-cycle variance / std | `[{groupby: month, reduce: mean}, var]` (or `std`) |
+| Seasonal range | `[{groupby: month, reduce: mean}, range]` |
+| Interannual variability | `[{resample: 1YS, reduce: mean}, std]` |
+| Variance of monthly means, interannual included | `[{resample: 1MS, reduce: mean}, var]` |
+| Mean annual maximum (winter MLD, bloom peak) | `[{resample: 1YS, reduce: max}, mean]` |
+| Mean diurnal range | `[{resample: 1D, reduce: range}, mean]` |
+| Month-balanced annual mean ± seasonal std | `[{groupby: month, reduce: mean}, {reduce: mean, spread: std}]` |
+
+(Written as Python dicts in your code, `{"groupby": "month", "reduce": "mean"}`; the
+table drops the quotes the way a suite YAML does.) The rules are the ones that keep a
+chain meaningful: a one-element list is the bare step, an empty list is an error, `spread`
+belongs on the last step only, nothing can `groupby`/`resample` after a `groupby` (there
+is no time left to bin), and nothing can follow a step that collapsed the axis. The whole
+chain is checked before any data is read, and a month `groupby` followed by another step
+warns when fewer than twelve months are present, since a "seasonal variance" of three
+months is not one.
+
+Units follow the statistic rather than the field: a variance is in squared units
+(`degC` becomes `delta_degC^2`, drawn `°C²`; `mg/m^3` becomes `(mg/m^3)^2`), a std or
+range in the *difference* of the field's units (no Kelvin offset applied), and a unit
+conversion scales a variance by the squared factor. Colour limits that a standard_name
+pins for the field itself (chlorophyll's log 0.01–10) are skipped for a spread
+statistic, whose values are nowhere near the field's. Titles lead with what was computed
+— `variance of monthly means over 2010-01-01–2012-12-31`, `std of annual means`, `mean of
+annual maxima` — and a plain mean is titled as it always was; `title=` replaces any of
+it. Aggregates run per lane on the native grid *before* regridding, so a variance is
+computed on each grid and then regridded, not the other way round. `compare()` takes the
+same chains.
+
 **A bare grid defaults to its surface.** `osk.field(source, variable)` with nothing
 selected keeps the whole vertical axis standing for a catalogued `featureType: grid`
 source (see "Nothing is reduced unless you ask", below) — but its own map panels have
@@ -855,6 +902,40 @@ once.
 False`) has nothing for it to fan against. Reach for `times=` when both sides genuinely
 share a calendar (two model runs, a model against a satellite record), and the
 `aggregate`/`select` pair-spec above when they don't.
+
+**All twelve months of a WOA climatology as one source.** The `woa23_<var>_month01`..
+`month12` entries each hold one undecoded step; `woa23_<var>_monthly` (nitrate, oxygen,
+phosphate, salinity, silicate, temperature) stacks all twelve into one source, with a
+`month` coordinate attached so a month `groupby` works on a time axis that has no
+calendar to read one from. That is what a question about the seasonal cycle itself needs
+(its variance, its range) rather than one month's map. Build the same thing for another
+twelve-file product by giving `build.add_source` the list of files, with
+`reader_kwargs={"combine": "nested", "concat_dim": "time"}` and
+`climatology=True, climatology_period="monthly"`. WOA's
+monthly fields reach 1500 m, so a depth list can go deeper than the annual ones usually
+get compared.
+
+**Several statistics in one call.** A *top-level* list for `aggregate=` — a list of whole
+specs, not the list of steps under one axis above — fans exactly like `variables=` and
+`depths=` do, one member per spec, crossed with the other fans. The mean and the
+seasonal-cycle variance of a model against WOA temperature, at the surface and 200 m, is
+four members and one `.plot()`:
+
+```python
+osk.compare(
+    reference="woa23_temperature_monthly", test="all_the_rest",
+    variables=["temperature"], depths=["surface", 200],
+    aggregate=[{"time": "mean"},
+               {"time": [{"groupby": "month", "reduce": "mean"}, "var"]}],
+).plot()
+```
+
+Each member is labelled by its statistic (`mean`, `variance of monthly means`) so the
+rows stay distinguishable; exact repeats are dropped with a note, `[]` is an error, and a
+one-element list is that spec (still returning a set, as `variables=[v]` does). Any entry
+may itself be a `{"test": ..., "reference": ...}` pair-spec. `osk.field(...,
+aggregate=[...])` fans the same way into a `FieldSet` (plain specs only — one source has
+no two lanes), and a suite page takes the list under `aggregate:` (docs/suites.md).
 
 `subtract_mean` takes the same `{"test": ..., "reference": ...}` shape, but — unlike
 `select`/`aggregate`, where a one-sided dict is refused as a likely typo — naming just

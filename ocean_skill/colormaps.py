@@ -232,7 +232,26 @@ def difference_cmap():
     return cmaps_for(None)[1]
 
 
-def is_log(standard_name: str | None) -> bool:
+def _pinned(standard_name: str | None, statistic: str | None):
+    """Return ``(resolved standard_name, its _RANGES entry)``, empty for a spread.
+
+    A variance, standard deviation or range of a variable is not a value of that
+    variable: the variance of chlorophyll sits orders of magnitude from the 0.01-10
+    mg/m3 its own display range was chosen for, and it is not log-distributed the way a
+    concentration is. So a field carrying a spread ``statistic``
+    (:func:`ocean_skill.units.is_spread`, i.e. ``attrs["statistic"]``) gets no pinned
+    range and no log scale -- limits come from the data, as for any unnamed variable.
+    """
+    from ocean_skill.units import is_spread
+    from ocean_skill.vocabulary import resolve_name
+
+    standard_name = resolve_name(standard_name or "")
+    if is_spread(statistic):
+        return standard_name, (None, None, False)
+    return standard_name, _RANGES.get(standard_name, (None, None, False))
+
+
+def is_log(standard_name: str | None, statistic: str | None = None) -> bool:
     """Return whether :data:`_RANGES` marks ``standard_name`` log-scale.
 
     Public so both :func:`norm_for` (matplotlib) and the holoviews renderer's
@@ -240,10 +259,12 @@ def is_log(standard_name: str | None) -> bool:
     private ``_RANGES`` dict (or, worse, a since-removed ``VarInfo.log`` — this is
     the fix for exactly that regression). Accepts any spelling
     :func:`ocean_skill.vocabulary.resolve_name` recognizes, same as :func:`cmaps_for`.
-    """
-    from ocean_skill.vocabulary import resolve_name
 
-    return _RANGES.get(resolve_name(standard_name or ""), (None, None, False))[2]
+    ``statistic`` is the field's ``attrs["statistic"]``, when it has one: a spread
+    (variance, std, range) is never log-scale whatever it is a spread *of*, see
+    :func:`_pinned`. Optional, and ``None`` changes nothing.
+    """
+    return _pinned(standard_name, statistic)[1][2]
 
 
 def norm_for(
@@ -253,6 +274,7 @@ def norm_for(
     *,
     user_vmin: float | None = None,
     user_vmax: float | None = None,
+    statistic: str | None = None,
 ) -> Any:
     """Return a matplotlib ``Normalize`` for a variable's sequential panels.
 
@@ -268,16 +290,18 @@ def norm_for(
     :data:`_RANGES` — a user who names a number gets that number, not the package's
     default display range. The scale itself (log vs linear) is unaffected; only its
     limits move.
+
+    ``statistic`` (the field's ``attrs["statistic"]``) switches :data:`_RANGES` off for
+    a spread -- variance, std, range -- so the variance of chlorophyll is drawn on a
+    linear scale between its own ``vmin``/``vmax``, not squeezed into 0.01-10 on a log
+    one. A caller's ``user_vmin``/``user_vmax`` still win.
     """
     import matplotlib.colors as mcolors
 
-    from ocean_skill.vocabulary import resolve_name
-
-    standard_name = resolve_name(standard_name or "")
-    r_vmin, r_vmax, _ = _RANGES.get(standard_name, (None, None, False))
+    standard_name, (r_vmin, r_vmax, log) = _pinned(standard_name, statistic)
     lo = user_vmin if user_vmin is not None else r_vmin if r_vmin is not None else vmin
     hi = user_vmax if user_vmax is not None else r_vmax if r_vmax is not None else vmax
-    if is_log(standard_name):
+    if log:
         lo = max(lo, 1e-6)  # LogNorm rejects vmin <= 0
         return mcolors.LogNorm(vmin=lo, vmax=hi)
     return mcolors.Normalize(vmin=lo, vmax=hi)

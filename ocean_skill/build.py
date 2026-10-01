@@ -56,6 +56,7 @@ import functools
 import importlib
 import struct
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1823,7 +1824,11 @@ def _rollup_metadata(cat) -> None:
         cat.metadata["standard_names"] = sorted(snames)
 
 
-def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwargs):
+def _reader_for(
+    url: str | Sequence[str],
+    storage_options: dict[str, Any] | None = None,
+    **kwargs,
+):
     """Build an intake reader for ``url`` (kerchunk ref, OPeNDAP, or NetCDF).
 
     ``storage_options`` are fsspec options and belong on the *data* object, not the
@@ -1835,25 +1840,45 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     :func:`add_erddap_source`/:func:`add_erddap_catalog` instead, which build via
     ``intake_erddap``'s own reader classes directly rather than this function
     inventing a URL convention to parse.
+
+    ``url`` may be a *list* of NetCDF files, which the reader opens together
+    (``xarray.open_mfdataset``, which intake's reader calls whenever it is handed more
+    than one path) -- twelve monthly files read as one source, say. How they are
+    joined is the caller's to say in ``combine=``/``concat_dim=``/... (reader
+    keywords, passed on verbatim), since there is no default that is right for both a
+    time series cut into files and a climatology's twelve months. The first file
+    decides which reader is built; a list is for files of one kind.
     """
     from intake.readers import datatypes, readers
 
     # Local paths are stored absolute: a catalog holding relative paths only resolves
     # from the directory it was built in, which breaks as soon as a notebook or script
     # in a subdirectory opens it.
-    if "://" not in str(url):
-        candidate = Path(str(url)).expanduser()
-        if candidate.exists():
-            url = str(candidate.resolve())
+    def _absolute(one) -> str:
+        if "://" not in str(one):
+            candidate = Path(str(one)).expanduser()
+            if candidate.exists():
+                return str(candidate.resolve())
+        return str(one)
+
+    urls = [str(u) for u in url] if isinstance(url, (list, tuple)) else None
+    if urls is not None:
+        if not urls:
+            raise ValueError("_reader_for was given an empty list of urls")
+        url = [_absolute(u) for u in urls]
+    else:
+        url = _absolute(url)
+    # What the readers below are handed: the list itself when there was one.
+    locator = url if urls is not None else str(url)
 
     # decode_times=False by default: ocean data is full of non-CF time units (ROMS'
     # "second", WOA's "months since ...") xarray refuses. We decode in _decode_times.
     kwargs = {"decode_times": False, **kwargs}
-    low = str(url).lower()
+    low = str(url[0] if urls is not None else url).lower()
     so = storage_options or None
 
     if low.endswith((".parquet", ".json")):
-        data = datatypes.HDF5(url=str(url))  # placeholder type; engine drives the read
+        data = datatypes.HDF5(url=locator)  # placeholder type; engine drives the read
         kwargs.setdefault("engine", "kerchunk")
         kwargs.setdefault("chunks", {})
         return readers.XArrayDatasetReader(data, **kwargs)
@@ -1864,7 +1889,7 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     # catalog holding one entry per daily file.
     dap = ("griddap", "dodsc", "opendap")
     if any(token in low for token in dap) or low.endswith(".nc.dods"):
-        return readers.XArrayDatasetReader(datatypes.OpenDAP(url=str(url)), **kwargs)
+        return readers.XArrayDatasetReader(datatypes.OpenDAP(url=locator), **kwargs)
 
     # An ARCO Zarr store, which the HDF5 branch below would hand to h5netcdf and fail
     # on. ``engine`` is set here rather than left to the caller so that passing it in
@@ -1873,7 +1898,7 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     # ``reader_kwargs={"zarr_format": 2}`` -- without it the 403 from the v3 probe
     # surfaces as an authentication failure rather than a version mismatch.
     if low.endswith(".zarr") or ".zarr/" in low:
-        data = datatypes.Zarr(url=str(url), storage_options=so)
+        data = datatypes.Zarr(url=locator, storage_options=so)
         kwargs.setdefault("engine", "zarr")
         return readers.XArrayDatasetReader(data, **kwargs)
 
@@ -1884,10 +1909,10 @@ def _reader_for(url: str, storage_options: dict[str, Any] | None = None, **kwarg
     # ``engine`` in ``reader_kwargs`` overrides this auto-detection — e.g. a remote
     # *classic-format* netCDF3 file (magic ``CDF\x01``) needs ``engine="scipy"``,
     # since h5netcdf can only read netCDF4/HDF5.
-    remote = "://" in str(url)
+    remote = "://" in low
     kwargs.setdefault("engine", "h5netcdf" if remote else "netcdf4")
     kwargs.setdefault("chunks", {})
-    data = datatypes.HDF5(url=str(url), storage_options=so)
+    data = datatypes.HDF5(url=locator, storage_options=so)
     return readers.XArrayDatasetReader(data, **kwargs)
 
 
@@ -2662,7 +2687,7 @@ def _attach(
 def add_source(
     cat,
     name: str,
-    url: str | Path | None = None,
+    url: str | Path | Sequence[str | Path] | None = None,
     *,
     reader: Any = None,
     name_map: dict[str, str] | None = ROMS_STANDARD_NAMES,
@@ -2680,8 +2705,10 @@ def add_source(
         Catalog and the entry name (``osk.read(name)``).
     url
         A kerchunk reference (``.parquet``/``.json``), an OPeNDAP URL, or a NetCDF
-        path — anything :func:`_reader_for` can pick a reader for. Omit it when
-        passing ``reader``.
+        path — anything :func:`_reader_for` can pick a reader for — or a *list* of
+        NetCDF files, opened together as one source (pair it with
+        ``reader_kwargs={"combine": "nested", "concat_dim": "time", ...}`` -- a
+        climatology's twelve monthly files, say). Omit it when passing ``reader``.
     reader
         An intake v2 reader class, or its ``"module:Class"`` import path, for a
         source no URL convention describes: a remote tarball
@@ -2752,7 +2779,9 @@ def add_source(
         if url is None:
             raise TypeError("add_source needs either a url or a reader")
         reader = _reader_for(
-            str(url), storage_options=storage_options, **(reader_kwargs or {})
+            [str(u) for u in url] if isinstance(url, (list, tuple)) else str(url),
+            storage_options=storage_options,
+            **(reader_kwargs or {}),
         )
     else:
         reader = _build_reader(reader, url, storage_options, reader_kwargs or {})

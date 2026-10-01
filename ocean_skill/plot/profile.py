@@ -29,6 +29,7 @@ from ocean_skill import _stacklevel
 from ocean_skill.plot import _titles
 from ocean_skill.plot import series as _series_layout
 from ocean_skill.plot import style as _style
+from ocean_skill.plot._statistic import statistic_of, units_text
 
 __all__ = [
     "compose",
@@ -333,6 +334,7 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
     if _series_layout.item_roles(item) == ("value",):
         source = str((item.get("labels") or (item.get("label") or "value",))[0])
         units = item.get("units") or aligned["value"].attrs.get("units")
+        units = units_text(units, statistic_of(item)) or units
         return [
             _style.LineSpec(
                 role="value",
@@ -349,6 +351,7 @@ def _line_specs(item: dict[str, Any], index: int = 0) -> list[_style.LineSpec]:
         ]
     test_source, reference_source = item.get("labels") or ("test", "reference")
     units = item.get("units") or aligned["reference"].attrs.get("units")
+    units = units_text(units, statistic_of(item)) or units
     common = {
         "variable": variable,
         "time": time,

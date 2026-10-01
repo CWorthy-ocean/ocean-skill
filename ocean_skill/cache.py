@@ -95,6 +95,14 @@ __all__ = [
 #: entirely, so a stale hit would silently keep the old refuses-to-plot
 #: behaviour rather than the new one.
 #:
+#: **7** — every aggregate step now stamps a CF ``cell_methods`` entry and an
+#: internal ``statistic`` attr on its result, and a spread reduction (``var``,
+#: ``std``, ``range``) rewrites ``units`` through
+#: :func:`ocean_skill.units.for_statistic` (``degC`` -> ``delta_degC^2`` for a
+#: variance) instead of copying the field's own. A pre-change entry holds the same
+#: values under the wrong units, and the unit conversion that reads them would
+#: shift a temperature variance by 273.15.
+#:
 #: A related fix that did *not* bump this: :func:`ocean_skill.sources.read`'s
 #: singleton-horizontal squeeze (giving an ADCP-shaped station a recoverable
 #: scalar lon/lat) changed what a *fresh* read produces without changing what
@@ -105,7 +113,7 @@ __all__ = [
 #: cache hit for exactly this shape on the way out (see
 #: ``_is_stale_positionless_station`` there) and discards only an entry that
 #: actually lacks a position, recomputing and overwriting just that one.
-_FORMAT_VERSION = 6
+_FORMAT_VERSION = 7
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline

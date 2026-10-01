@@ -43,7 +43,10 @@ __all__ = [
     "RHO_SEAWATER",
     "compatible",
     "convert_units",
+    "display",
     "find_variable",
+    "for_statistic",
+    "is_spread",
     "normalize",
     "parse",
     "registry",
@@ -248,7 +251,84 @@ def compatible(a, b) -> bool | None:
         return None
     if ua.is_compatible_with(ub):
         return True
-    return bool(ua.is_compatible_with(ub, "seawater", rho=RHO_SEAWATER))
+    if ua.is_compatible_with(ub, "seawater", rho=RHO_SEAWATER):
+        return True
+    # A variance in (mmol/m^3)^2 against one in (umol/kg)^2: the seawater context is
+    # keyed on the *un-squared* dimensionality and never fires for these, so ask about
+    # the square roots instead (see :func:`_square_roots`).
+    roots = _square_roots(ua, ub)
+    return bool(roots) and roots[0].is_compatible_with(
+        roots[1], "seawater", rho=RHO_SEAWATER
+    )
+
+
+def _square_roots(ua, ub):
+    """Return ``(sqrt(ua), sqrt(ub))`` when both are squared quantities, else ``None``.
+
+    "Squared" is read from the *dimensionality*, not the spelling: every dimension's
+    exponent even and at least one non-zero, so ``(mmol/m^3)^2``, ``delta_degC^2`` and
+    ``mg^2 m-6`` all qualify and ``mg/m^3`` or a bare ``m^3`` do not. That is what a
+    variance is (see :func:`for_statistic`), and it is the only case this exists for.
+
+    Needed because pint's ``seawater`` context is keyed on the *un-squared*
+    ``[substance]/[mass]`` <-> ``[substance]/[length]**3`` dimensionalities, so a
+    variance in ``(mmol/m^3)^2`` against one in ``(umol/kg)^2`` is "dimensionally
+    unrelated" to it -- it neither converts nor reports compatible. Converting the
+    square roots and squaring the factor is exactly right (``var(a x) = a^2 var(x)``),
+    and uses the same density, applied twice.
+    """
+    for unit in (ua, ub):
+        exponents = [e for _, e in unit.dimensionality.items()]
+        if not exponents or any(float(e) % 2 for e in exponents):
+            return None
+    return ua**0.5, ub**0.5
+
+
+def _is_offset(ureg, unit) -> bool:
+    """Whether ``unit`` has a shifted zero (degC, degF) rather than only a scale."""
+    try:
+        return float(ureg.Quantity(0.0, unit).to_root_units().magnitude) != 0.0
+    except (TypeError, ValueError):  # pint's own errors subclass these
+        return False
+
+
+def _delta(ureg, unit):
+    """Return the difference-of-temperatures twin of an offset ``unit``.
+
+    Anything without a shifted zero is returned as it came. A *difference* of two
+    temperatures -- which is what a standard deviation or a range of temperatures is --
+    scales like a temperature but is not shifted by 273.15, and pint models that as a
+    separate ``delta_`` unit (degC -> delta_degC).
+    """
+    if not _is_offset(ureg, unit):
+        return unit
+    return ureg.Unit(f"delta_{unit}")
+
+
+def _scale_and_shift(ureg, ua, ub):
+    """Return ``(factor, shift)`` taking ``ua`` to ``ub``; raise if they cannot.
+
+    ``factor`` is the image of 1 and ``shift`` that of 0, so a pure scale has
+    ``shift == 0`` and ``factor`` its multiplier, and a shifted zero shows as
+    ``shift != 0``. A squared pair the context cannot see through
+    (:func:`_square_roots`) is converted via its roots: the factor is squared and the
+    shift is zero (an offset unit cannot be squared; pint already refuses one).
+    """
+    try:
+        with _seawater(ureg):
+            # float(): cf-xarray's registry hands back 0-d arrays (force_ndarray_like)
+            return (
+                float(ureg.Quantity(1.0, ua).to(ub).magnitude),
+                float(ureg.Quantity(0.0, ua).to(ub).magnitude),
+            )
+    except Exception:
+        roots = _square_roots(ua, ub)
+        if roots is None:
+            raise
+    factor, shift = _scale_and_shift(ureg, *roots)
+    if shift != 0.0:
+        raise ValueError("an offset unit cannot be squared")
+    return factor**2, 0.0
 
 
 def to_units(da, target, *, rho: float | None = None):
@@ -259,22 +339,40 @@ def to_units(da, target, *, rho: float | None = None):
     and decides. Conversion goes through the ``seawater`` context so per-mass and
     per-volume concentrations interconvert. Offset units (degC, degF) are converted by
     value, not by a scale factor, so a K field against degC obs lands correctly.
+
+    **A spread is not a value.** A standard deviation, range or variance of a
+    temperature must never pick up the 273.15 of a K <-> degC conversion: a std of 0.3 K
+    is a std of 0.3 degC, not 273.45. So when the field is a difference -- its units
+    already say so (``delta_degC``), its ``statistic`` attribute is a spread statistic
+    (:func:`is_spread`), or the *target* is a ``delta_`` unit -- both sides are read as
+    differences (:func:`_delta`) and the conversion is a pure scale. Variances arrive
+    squared (:func:`for_statistic`) and convert with the squared factor: a variance in
+    ``(mmol/m^3)^2`` becomes ``(umol/kg)^2`` through the density *twice*
+    (:func:`_square_roots`). ``target`` is returned as spelled, so a std converted "to
+    degC" still reads ``degC`` -- the numbers are right and the ``statistic`` attribute
+    says what they are.
     """
     source = da.attrs.get("units")
     ua, ub = parse(source), parse(target)
-    if ua is None or ub is None or ua == ub:
+    if ua is None or ub is None:
         return da
     ureg = registry()
+    if (
+        "delta_" in str(ua)
+        or "delta_" in str(ub)
+        or is_spread(da.attrs.get("statistic"))
+    ):
+        ua, ub = _delta(ureg, ua), _delta(ureg, ub)
+    if ua == ub:
+        return da
     if rho is not None and rho != RHO_SEAWATER:
         raise NotImplementedError(
             "a per-call density is not supported yet; set units.RHO_SEAWATER instead"
         )
     try:
-        with _seawater(ureg):
-            # float(): cf-xarray's registry hands back 0-d arrays (force_ndarray_like)
-            factor = float(ureg.Quantity(1.0, ua).to(ub).magnitude)
-            shift = float(ureg.Quantity(0.0, ua).to(ub).magnitude)
-            if shift != 0.0:
+        factor, shift = _scale_and_shift(ureg, ua, ub)
+        if shift != 0.0:
+            with _seawater(ureg):
                 data = ureg.Quantity(da.data, ua).to(ub).magnitude
     except Exception:
         return da  # dimensionally unrelated; the caller checks compatible()
@@ -292,6 +390,153 @@ def to_units(da, target, *, rho: float | None = None):
     return out
 
 
+#: Statistics whose result is the *square* of the field's units. ``statistic`` is how a
+#: reduction names itself in ``attrs["statistic"]`` (see ``operators.aggregate``).
+_VARIANCE_STATISTICS = frozenset({"var", "variance"})
+
+#: Statistics whose result is a *difference* of two values of the field: same magnitude
+#: units, but zero means "no spread", so an offset unit must not be shifted. ``mad`` and
+#: ``iqr`` are here for the same reason as ``std``; a ``quantile`` or ``median`` is a
+#: value of the field, so it is not.
+_DIFFERENCE_STATISTICS = frozenset(
+    {
+        "std",
+        "stddev",
+        "std_dev",
+        "standard_deviation",
+        "sem",
+        "range",
+        "ptp",
+        "peak_to_peak",
+        "mad",
+        "median_abs_deviation",
+        "iqr",
+    }
+)
+
+
+def _statistic_name(statistic) -> str:
+    return statistic.strip().lower() if isinstance(statistic, str) else ""
+
+
+def is_spread(statistic) -> bool:
+    """Whether ``statistic`` measures how much a field varies rather than its level.
+
+    True for variance, standard deviation, range and the like (the sets in
+    :func:`for_statistic`). A spread has no business on a variable's own pinned display
+    range or log scale -- the variance of chlorophyll is nowhere near 0.01-10 mg/m3 --
+    and no business being shifted by a K <-> degC offset. ``None``, ``mean``, ``max``,
+    ``median``... are all False.
+    """
+    name = _statistic_name(statistic)
+    return name in _VARIANCE_STATISTICS or name in _DIFFERENCE_STATISTICS
+
+
+#: A unit that is a single bare symbol (``K``, ``degC``, ``delta_degC``, ``PSU``), as
+#: opposed to a compound that needs brackets before it is raised to a power: ``mg/m^3``
+#: squared is ``(mg/m^3)^2``, never ``mg/m^3^2``.
+_BARE_SYMBOL = re.compile(r"^[A-Za-z_°µ][A-Za-z_0-9°µ]*$")
+
+
+def _as_difference(unit_string: str) -> str:
+    """Spell the units of a *difference* of two ``unit_string`` values.
+
+    Unchanged unless the unit has a shifted zero, when it is its ``delta_`` twin
+    (``degC`` -> ``delta_degC``). Unparseable units are returned as they came: there is
+    nothing to be shifted if nobody can convert them anyway.
+    """
+    ureg = registry()
+    unit = parse(unit_string)
+    if unit is None or not _is_offset(ureg, unit):
+        return unit_string
+    spelled = f"delta_{normalize(unit_string)}"
+    return spelled if parse(spelled) is not None else f"delta_{unit}"
+
+
+def _squared(unit_string: str) -> str:
+    """Spell ``unit_string`` squared, in a form :func:`normalize` reads.
+
+    ``K`` -> ``K^2``; ``mg/m^3`` -> ``(mg/m^3)^2``. ``^`` rather than ``**`` because
+    that is how this package's own unit strings are written (``mg/m^3``). A bare number
+    (WOA's salinity ``1e-3``) is squared arithmetically, because ``normalize`` would
+    read the ``e-3`` of ``(1e-3)^2`` as a unit exponent.
+
+    Bare means bare *once normalized*: ``micromoles_per_kilogram`` looks like one
+    symbol but :func:`normalize` reads it as ``micromoles/kilogram``, so an unbracketed
+    ``micromoles_per_kilogram^2`` would square only the kilogram.
+    """
+    text = unit_string.strip()
+    if _NUMERIC.match(text):
+        return f"{float(text) ** 2:g}"
+    try:
+        bare = _BARE_SYMBOL.match(normalize(text)) is not None
+    except Exception:  # noqa: BLE001 -- an unparseable unit still gets bracketed
+        bare = False
+    return f"{text}^2" if bare and _BARE_SYMBOL.match(text) else f"({text})^2"
+
+
+def for_statistic(unit_string, statistic: str | None):
+    """Units of ``statistic`` taken over a field carrying ``unit_string``.
+
+    A reduction does not always leave a field's units alone: the variance of a
+    temperature is in degrees squared, and a standard deviation of one is a
+    *difference* of temperatures. Handing the field's own units to either is how a std
+    gets "converted to kelvin" by adding 273.15, or a variance gets its density factor
+    applied once instead of twice. ``operators.aggregate`` therefore runs the result's
+    units through here after every reduction.
+
+    * ``var`` / ``variance``: the units squared -- ``K^2``, ``(mmol/m^3)^2``. Offset
+      units (degC, degF) become the square of their delta form, ``delta_degC^2``, so a
+      conversion scales and never shifts. ``(<units>)^2`` is also what an *unparseable*
+      unit becomes (best effort, no crash; it simply stays unconvertible).
+    * ``std``, ``range``/``ptp``, ``mad``, ``iqr``, ``sem`` (:func:`is_spread`): the
+      same magnitude, as a difference -- ``delta_degC`` for degC, anything without a
+      shifted zero unchanged (``mg/m^3`` stays ``mg/m^3``).
+    * anything else -- ``mean``, ``max``, ``min``, ``median``, ``quantile``, ``None`` --
+      returns ``unit_string`` untouched, as do an empty or missing ``unit_string``
+      (``None`` stays ``None``, ``""`` stays ``""``). ``sum``/``integrate`` change units
+      too but are a different bookkeeping and not handled here.
+
+    The strings are all valid input to :func:`normalize`/:func:`parse`/:func:`to_units`
+    and survive a round trip. Not idempotent -- squaring a variance's units again gives
+    a fourth power -- so call it once per reduction, on the *field's* units. Use
+    :func:`display` for a colorbar or axis label.
+    """
+    name = _statistic_name(statistic)
+    if unit_string is None or not str(unit_string).strip():
+        return unit_string
+    text = str(unit_string).strip()
+    if name in _VARIANCE_STATISTICS:
+        return _squared(_as_difference(text))
+    if name in _DIFFERENCE_STATISTICS:
+        return _as_difference(text)
+    return unit_string
+
+
+#: ``^2`` / ``**2`` -> ``²``: the exponent characters a label can use.
+_SUPERSCRIPTS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+_EXPONENT = re.compile(r"(?:\^|\*\*)(-?\d+)")
+_DELTA_DEGREE = re.compile(r"\bdelta_(?:degree_)?(?:deg)?(C|Celsius|F|Fahrenheit)\b")
+_DEGREE = re.compile(r"\bdeg(?:ree)?s?_?(C|Celsius|F|Fahrenheit)\b")
+
+
+def display(unit_string) -> str:
+    """Return ``unit_string`` spelled for a colorbar or axis label.
+
+    The strings :func:`for_statistic` produces are written for pint, not for people:
+    ``delta_degC^2`` reads as ``°C²`` here and ``(mg/m^3)^2`` as
+    ``(mg/m³)²``. ``delta_`` is dropped (a spread of temperatures is plainly
+    in degrees), ``degC``/``degF`` become ``°C``/``°F`` and ``^n`` / ``**n``
+    become superscripts. A string with none of those is returned as it came, so it is
+    safe to run over every label; ``None`` is ``""``.
+    """
+    text = "" if unit_string is None else str(unit_string)
+    text = _DELTA_DEGREE.sub(lambda m: "°" + m.group(1)[0], text)
+    text = _DEGREE.sub(lambda m: "°" + m.group(1)[0], text)
+    text = re.sub(r"\bdelta_", "", text)
+    return _EXPONENT.sub(lambda m: m.group(1).translate(_SUPERSCRIPTS), text)
+
+
 def convert_units(da, target: str = "mmol/m^3", rho: float = RHO_SEAWATER):
     """Convert ``da`` to ``target`` when the two are the same physical quantity.
 
@@ -300,12 +545,23 @@ def convert_units(da, target: str = "mmol/m^3", rho: float = RHO_SEAWATER):
     passes through untouched and, unlike the previous string-matching version,
     **without a spurious warning** — "not the target quantity" is the normal case for
     every variable that is not a nutrient, not something to report.
+
+    A spread statistic (``attrs["statistic"]``, see :func:`for_statistic`) is moved to
+    the *same statistic of* ``target`` -- a nitrate variance in ``(umol/kg)^2`` lands
+    in ``(mmol/m^3)^2`` -- so a variance lane sits in the same convention as the mean
+    lane beside it rather than staying in whatever its source shipped.
     """
     global RHO_SEAWATER
     if rho != RHO_SEAWATER:
         RHO_SEAWATER = rho  # the context reads it on every use (see _seawater)
-    if compatible(da.attrs.get("units"), target):
+    have = da.attrs.get("units")
+    if compatible(have, target):  # a target already spelled as the statistic's units
         return to_units(da, target)
+    statistic = da.attrs.get("statistic")
+    if is_spread(statistic):
+        goal = for_statistic(target, statistic)
+        if compatible(have, goal):
+            return to_units(da, goal)
     return da
 
 

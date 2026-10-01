@@ -13,7 +13,12 @@ their sum), or a registered derived diagnostic.
 **Aggregation** — how dimensions collapse. ``{"time": "mean"}``, a climatology
 ``{"time": {"groupby": "month", "reduce": "mean"}}``, consecutive periods
 ``{"time": {"resample": "1MS", "reduce": "mean"}}``, a percentile
-``{"time": {"reduce": "quantile", "q": 0.9}}``.
+``{"time": {"reduce": "quantile", "q": 0.9}}``. An axis may also take a *chain* of
+these as a list, each step acting on the axis the previous one left:
+``{"time": [{"groupby": "month", "reduce": "mean"}, "var"]}`` is the variance of the
+twelve monthly means (the seasonal cycle's variance), and
+``{"time": [{"resample": "1YS", "reduce": "mean"}, "std"]}`` the standard deviation
+of the annual means (interannual variability). See :func:`aggregate`.
 
 ``groupby`` and ``resample`` are the two ways to keep an axis standing rather than
 collapse it, and they are not the same axis: ``groupby`` bins by *label*, giving a
@@ -47,6 +52,7 @@ from typing import Any
 __all__ = [
     "CALCULATORS",
     "CALCULATOR_INPUTS",
+    "CF_CELL_METHODS",
     "COMBINERS",
     "DERIVED",
     "REDUCERS",
@@ -54,7 +60,9 @@ __all__ = [
     "TIME_RESAMPLE_ATTR",
     "aggregate",
     "box_in_spec",
+    "cell_method_name",
     "combine",
+    "final_step",
     "is_time_fold_coord",
     "oriented_slice",
     "point_in_spec",
@@ -91,9 +99,10 @@ DERIVED: dict[str, dict[str, Any]] = {
     },
 }
 
-#: Reductions that are *not* xarray methods. Deliberately near-empty — anything
-#: xarray can already do needs no entry, and putting one here would only add a name
-#: to keep in sync. Signature: ``fn(da, dim, **kwargs) -> DataArray``.
+#: Reductions that are *not* xarray methods. Deliberately near-empty (just
+#: ``range``, below) — anything xarray can already do needs no entry, and putting
+#: one here would only add a name to keep in sync.
+#: Signature: ``fn(da, dim, **kwargs) -> DataArray``.
 REDUCERS: dict[str, Any] = {}
 
 
@@ -105,6 +114,22 @@ def register_reducer(name: str):
         return fn
 
     return decorate
+
+
+@register_reducer("range")
+def _range_reducer(obj, dim, **kwargs):
+    """Maximum minus minimum along ``dim`` -- the one built-in non-method reduction.
+
+    xarray has no ``range`` method, and it is the natural second half of a chain
+    (the seasonal range is ``[{"groupby": "month", "reduce": "mean"}, "range"]``, the
+    diurnal range ``[{"resample": "1D", "reduce": "range"}, "mean"]``). Written as two
+    reductions subtracted rather than ``ptp`` so it works unchanged on a
+    ``DataArray`` *and* on the ``GroupBy``/``Resample`` object :func:`_reduce_dim`
+    hands a reduction after a groupby or resample, neither of which has a ``ptp``.
+    ``max``/``min`` skip NaN by xarray's default, so a ragged wet-cell mask does not
+    turn a whole range to NaN.
+    """
+    return obj.max(dim, **kwargs) - obj.min(dim, **kwargs)
 
 
 #: Registered derived diagnostics -- the ``{"calculate": name}`` half of a variable
@@ -1052,6 +1077,23 @@ def _leaf_names(names) -> list[str]:
     return out
 
 
+def final_step(value: Any) -> Any:
+    """Return the step of one axis's aggregate value that decides what it ends up as.
+
+    An axis takes either one step (a reduction name, or a ``{"reduce", ...}`` dict)
+    or a *chain* of them as a list -- ``[{"groupby": "month", "reduce": "mean"},
+    "var"]`` -- applied in order. Whether the axis is collapsed, folded into a
+    climatology, or resampled is decided by the chain's last step, so every caller
+    that asks one of those questions of a spec value reads it through here rather
+    than type-checking the value itself. A non-list value is returned unchanged.
+    """
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError("an aggregate chain needs at least one step, got []")
+        return value[-1]
+    return value
+
+
 def spatial_mean_in_spec(agg: dict[str, Any] | None) -> tuple[str, str] | None:
     """Return ``(lon_key, lat_key)`` when ``agg`` asks for one joint area-weighted mean.
 
@@ -1062,6 +1104,10 @@ def spatial_mean_in_spec(agg: dict[str, Any] | None) -> tuple[str, str] | None:
     row-means is not the mean: a joint reduction is the only one that weighs every
     wet cell in the box equally, whichever row or column it sits in. See
     :func:`_horizontal_mean`, the reduction this routes to.
+
+    A chain (a list value, see :func:`aggregate`) counts only when it is a list of
+    exactly one such plain mean; a longer chain on lon/lat is sequential by
+    construction and goes the per-axis way too.
 
     Anything else — a lone ``{"lat": "mean"}`` zonal mean, ``{"lat": "mean", "lon":
     "max"}``, a groupby/resample on either axis — is not this joint path and is
@@ -1075,6 +1121,14 @@ def spatial_mean_in_spec(agg: dict[str, Any] | None) -> tuple[str, str] | None:
         return None
 
     def _is_plain_mean(value: Any) -> bool:
+        # A chain is the joint mean only when it is a chain of exactly one: a
+        # multi-step chain on lon/lat (a mean, then something else) is several
+        # reductions in sequence, so it goes through the ordinary per-axis loop
+        # like any other sequential spec, unweighted -- simplest correct reading.
+        if isinstance(value, (list, tuple)):
+            if len(value) != 1:
+                return False
+            value = final_step(value)
         if value == "mean":
             return True
         if isinstance(value, dict):
@@ -1225,6 +1279,38 @@ def aggregate(da, spec: dict[str, Any] | None):
     axis in place of time, with ``month`` spelled ``Jan``..``Dec``; ``season``
     keeps drawing as the profile family's one-line-per-season fan instead.
 
+    **Chains.** An axis's value may be a list of steps, applied in order, each acting
+    on the axis the previous step left -- after ``groupby: "month"`` that is the new
+    ``month`` dimension, after ``groupby: "season"`` it is ``season``, after a
+    ``resample`` it is still the time dimension::
+
+        # variance of the 12 monthly means: the seasonal cycle's variance
+        {"time": [{"groupby": "month", "reduce": "mean"}, "var"]}
+        # standard deviation of the annual means: interannual variability
+        {"time": [{"resample": "1YS", "reduce": "mean"}, "std"]}
+        # mean of each year's maximum
+        {"time": [{"resample": "1YS", "reduce": "max"}, "mean"]}
+        # month-balanced annual mean, with the spread across the months alongside
+        {"time": [{"groupby": "month", "reduce": "mean"},
+                  {"reduce": "mean", "spread": "std"}]}
+
+    Each step is anything an axis takes on its own. A one-step list is that step, and
+    the result is identical to writing it bare; an empty list is an error. The whole
+    chain is checked before anything is computed: a step after one that collapsed the
+    axis has nothing to act on, a ``groupby``/``resample`` after a ``groupby`` is
+    refused (the surviving ``month``/``season`` axis is a label, not a time to bin),
+    and ``spread`` is allowed only on the last step, since an earlier step's spread
+    would be gone before anything could read it. A ``groupby: "month"`` that is
+    followed by another step warns when the data covers fewer than twelve months, so
+    the statistic is taken over fewer than a full cycle. A multi-step chain on lon/lat
+    is the ordinary sequential per-axis path, not the joint spatial mean below.
+
+    Every step that reduces also stamps the result: a CF ``cell_methods`` entry per
+    step (appended to any existing one -- ``"time: mean within months time: variance
+    over months"``), the last step's reduction name as ``attrs["statistic"]``, and, for
+    a reduction that changes the physical dimension (``var``), the units from
+    :func:`ocean_skill.units.for_statistic`.
+
     **Both horizontal axes reduced by a plain "mean" together** is one joint
     area-weighted spatial mean rather than two sequential unweighted ones — see
     :func:`spatial_mean_in_spec` and :func:`_horizontal_mean`. This is the plural
@@ -1237,6 +1323,13 @@ def aggregate(da, spec: dict[str, Any] | None):
     the one that has no depth axis.
     """
     spec = dict(spec or {})
+    # Every chain is checked up front, before the joint spatial mean or any other
+    # axis has computed anything -- a malformed chain on the last key should not cost
+    # the reductions before it. Checked even for an axis ``da`` lacks: the chain's
+    # shape is the spec's fault, not the data's.
+    for name, how in spec.items():
+        if isinstance(how, (list, tuple)):
+            _validate_chain(name, how)
     pair = spatial_mean_in_spec(spec)
     if pair is not None and _horizontal_reducible(da):
         lon_key, lat_key = pair
@@ -1246,7 +1339,116 @@ def aggregate(da, spec: dict[str, Any] | None):
         dim = resolve_dim(da, name)
         if dim is None or dim not in da.dims:
             continue
-        da = _reduce_dim(da, dim, how)
+        if isinstance(how, (list, tuple)):
+            da = _reduce_chain(da, dim, how)
+        else:
+            da = _reduce_dim(da, dim, how)
+    return da
+
+
+def _step_options(step: Any, *, where: str) -> dict[str, Any]:
+    """Return one chain step as the option dict :func:`_reduce_dim` reads.
+
+    A bare string is ``{"reduce": step}``. Anything else must already be a dict --
+    in particular not a nested list, which would be a chain inside a chain with no
+    meaning to give it.
+    """
+    if isinstance(step, str):
+        return {"reduce": step}
+    if isinstance(step, dict):
+        return dict(step)
+    raise ValueError(
+        f"{where}: each step of an aggregate chain is a reduction name or a "
+        f"{{'reduce': ...}} dict, got {step!r}"
+    )
+
+
+def _validate_chain(name: str, steps) -> None:
+    """Refuse a malformed aggregate chain for axis ``name``, computing nothing.
+
+    Walks the steps tracking only whether the axis survives each one (``groupby``
+    and ``resample`` keep it, a plain reduction removes it), which is all it takes
+    to catch the specs that cannot run: an empty chain, a step with no axis left,
+    ``spread`` anywhere but the last step, a ``groupby``/``resample`` on the
+    ``month``/``season`` axis an earlier ``groupby`` left, a step with no ``reduce``
+    or with both ``groupby`` and ``resample``. Errors name the chain and the step's
+    index so a long spec is not a guessing game.
+    """
+    if not steps:
+        raise ValueError(
+            f"aggregate chain for {name!r} is empty: a list needs at least one step"
+        )
+    chain = list(steps)
+    has_axis = True
+    grouped = False
+    for i, step in enumerate(chain):
+        where = f"aggregate chain for {name!r} {chain!r}, step {i}"
+        opts = _step_options(step, where=where)
+        if not has_axis:
+            raise ValueError(
+                f"{where}: there is no {name!r} axis left to act on, because step "
+                f"{i - 1} ({chain[i - 1]!r}) already collapsed it. Put the steps "
+                "that keep the axis (groupby, resample) first and the collapsing "
+                "reduction last."
+            )
+        if not opts.get("reduce"):
+            raise ValueError(f"{where} needs a 'reduce', got {step!r}")
+        group, freq = opts.get("groupby"), opts.get("resample")
+        if group is not None and freq is not None:
+            raise ValueError(
+                f"{where} sets both 'groupby' ({group!r}) and 'resample' "
+                f"({freq!r}), which are different reductions -- pick one."
+            )
+        if opts.get("spread") is not None and i != len(chain) - 1:
+            raise ValueError(
+                f"{where} sets 'spread', which is only allowed on the last step: a "
+                "spread rides on the result as a coordinate, and the steps after "
+                "this one would reduce it away."
+            )
+        if grouped and (group is not None or freq is not None):
+            raise ValueError(
+                f"{where} bins ('groupby'/'resample') an axis an earlier groupby "
+                "already turned into labels (month, season, ...); there is no time "
+                "left to bin. Group once, then reduce."
+            )
+        if group is not None:
+            grouped = True
+        elif freq is None:
+            has_axis = False
+
+
+def _dim_after(dim: str, step: Any) -> str | None:
+    """Return the dimension a chain step leaves behind, or ``None`` if it removed it.
+
+    The inverse of what :func:`_reduce_dim` does to the dimension name: a ``groupby``
+    renames it to the grouping label (``month``, ``year``, ... or ``season``), a
+    ``resample`` keeps it, a plain reduction takes it away. The chain tracks this
+    itself rather than re-resolving the spec key on the reduced array -- after a
+    ``groupby``, ``time`` no longer exists to be found.
+    """
+    opts = _step_options(step, where="chain step")
+    group = opts.get("groupby")
+    if group is not None:
+        return "season" if group == "season" else str(group)
+    return dim if opts.get("resample") is not None else None
+
+
+def _reduce_chain(da, dim: str, steps):
+    """Apply a chain of reductions along ``dim``, each on the axis the last one left.
+
+    ``steps`` has already passed :func:`_validate_chain`. ``axis`` stays the original
+    dimension's name for every step (it is what ``cell_methods`` is written against,
+    and ``dim`` itself is ``month`` by the second step); ``over`` is the plural of the
+    label dimension a ``groupby`` left, so the step after it can say what it reduces
+    over. A one-element chain makes exactly the call a bare step would.
+    """
+    axis = dim
+    over = None
+    last = len(steps) - 1
+    for i, step in enumerate(steps):
+        da = _reduce_dim(da, dim, step, axis=axis, over=over, folded=i < last)
+        dim = _dim_after(dim, step)
+        over = f"{dim}s" if dim != axis and dim is not None else over
     return da
 
 
@@ -1540,8 +1742,128 @@ def _filter_seasons(seasons: list[str], coord, dim: str) -> list[str]:
     return kept
 
 
-def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
-    """Apply one reduction (optionally after a groupby or resample) along ``dim``."""
+#: CF ``cell_methods`` names for the xarray reductions that have one; any other
+#: reduction (``quantile``, ``count``, a registered one) is written under its own
+#: name, which is at worst an honest non-standard method rather than a wrong one.
+#: ``range`` is the CF method of that name (maximum minus minimum).
+CF_CELL_METHODS: dict[str, str] = {
+    "mean": "mean",
+    "median": "median",
+    "sum": "sum",
+    "min": "minimum",
+    "max": "maximum",
+    "var": "variance",
+    "std": "standard_deviation",
+    "range": "range",
+}
+
+#: Reductions whose result is in the same units as the field they reduce, so
+#: :func:`_reduce_dim` does not even ask :func:`ocean_skill.units.for_statistic`
+#: about them -- the answer is "unchanged", and asking would only invite a units
+#: string to be re-spelled for a reduction that has not touched it. Everything else
+#: (``var``, and any reduction this module has not heard of) goes through
+#: ``for_statistic``. ``std`` and ``range`` are *not* listed on purpose: they keep
+#: the units too, but they are the statistics the units layer is the authority on.
+UNITS_UNCHANGED_REDUCTIONS = frozenset(
+    {"mean", "median", "sum", "min", "max", "quantile", "integrate", "first", "last"}
+)
+
+
+def cell_method_name(reduction: str) -> str:
+    """Return a reduction's CF ``cell_methods`` name (``var`` -> ``variance``)."""
+    return CF_CELL_METHODS.get(reduction, reduction)
+
+
+def _units_after(units, reduction: str):
+    """``units`` of ``reduction`` taken over a field in ``units``.
+
+    Applied *per step* of a chain rather than once at the end, which is the same thing
+    for every chain that means anything and right for the rest: the variance of
+    monthly means (``[groupby month mean, var]``) is squared units from its ``var``
+    step, a mean taken over that variance (``[..., var, mean]``) keeps them, and a
+    variance of standard deviations squares them again. The decision of what a
+    statistic does to units is :func:`ocean_skill.units.for_statistic`'s, not this
+    module's -- this only decides whether to ask.
+    """
+    if reduction in UNITS_UNCHANGED_REDUCTIONS:
+        return units
+    from ocean_skill.units import for_statistic
+
+    return for_statistic(units, reduction)
+
+
+def _time_group_key(da, dim: str, group: str) -> str:
+    """Return the key ``da.groupby`` takes to group ``dim`` by ``group``.
+
+    Ordinarily ``"time.month"``, read off a decoded calendar axis by xarray's ``.dt``
+    accessor. A climatology that arrives *undecoded* -- WOA's ``time`` is the float
+    positions 1..12 of a "months since ..." unit, deliberately left that way by
+    ``build._decode_times`` -- has no calendar to read a month from, but may carry the
+    month as a 1-D coordinate of its own along the same dimension; grouping by that
+    coordinate is the same climatology. With neither, say so in this module's own
+    vocabulary instead of xarray's ``'IndexVariable' object has no attribute
+    'month'``.
+    """
+    key = f"{dim}.{group}"
+    try:
+        da[key]
+    except (KeyError, AttributeError, TypeError, ValueError):
+        label = da.coords.get(group)
+        if label is not None and label.dims == (dim,):
+            return str(group)
+        raise ValueError(
+            f"{dim!r} is not a decoded calendar axis, so a groupby {group!r} cannot "
+            f"read {group}s off it (and there is no 1-D {group!r} coordinate along "
+            f"{dim!r} to group by instead). This is usually a climatology read with "
+            "decode_times=False -- its steps are already the groups, so give it a "
+            "fixed select= instead, or supply the grouping coordinate."
+        ) from None
+    return key
+
+
+def _warn_short_months(da, key: str, dim: str) -> None:
+    """Warn that a month groupby sees fewer than the twelve months of a full cycle.
+
+    Only asked of a groupby whose months are then folded by a later chain step: a
+    plain six-month climatology is exactly what it says, but a variance, range, or
+    month-balanced mean *across* the months is a statement about the seasonal cycle,
+    and over six months of it that is a different, smaller number under the same
+    label. Read off the grouping key alone (a coordinate), like
+    :func:`_bin_counts`, so the check never touches lazy data.
+    """
+    import numpy as np
+
+    present = sorted({int(m) for m in np.unique(da[key].values)})
+    if len(present) >= 12:
+        return
+    warnings.warn(
+        f"groupby 'month' on {dim!r} finds only {len(present)} of 12 months "
+        f"(present: {present}), so the statistic taken across the months is over "
+        f"{len(present)} of 12 months -- not a full seasonal cycle. Select a whole "
+        "number of years, or read the result with that in mind.",
+        stacklevel=4,
+    )
+
+
+def _reduce_dim(
+    da,
+    dim: str,
+    how: str | dict[str, Any],
+    *,
+    axis: str | None = None,
+    over: str | None = None,
+    folded: bool = False,
+):
+    """Apply one reduction (optionally after a groupby or resample) along ``dim``.
+
+    The keyword-only arguments are for :func:`_reduce_chain`, which calls this once
+    per step: ``axis`` is the name the result's ``cell_methods`` is written against
+    (the chain's original dimension; ``dim`` itself is ``month`` by the second step),
+    ``over`` is the label an earlier ``groupby`` left (``"months"``) so this step can
+    be written ``time: variance over months``, and ``folded`` says a later step will
+    reduce across this step's groups, which is when a short month coverage matters.
+    A bare call leaves all three at their defaults.
+    """
     opts = {"reduce": how} if isinstance(how, str) else dict(how)
     group = opts.pop("groupby", None)
     freq = opts.pop("resample", None)
@@ -1604,7 +1926,10 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
         else:
             # A climatology groups along the dim, then reduces *within* each group,
             # so the reduction still names the original dim.
-            da = da.groupby(f"{dim}.{group}")
+            key = _time_group_key(da, dim, group)
+            if folded and group == "month":
+                _warn_short_months(da, key, dim)
+            da = da.groupby(key)
         weights = None
     elif freq is not None:
         # Resampling keeps the dim's *name* (unlike groupby, which renames it to the
@@ -1643,7 +1968,7 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
         spread_arr = _run(reducible, spread).rename(SPREAD_COORD)
         spread_arr.attrs = {"statistic": spread}
         if "units" in attrs:
-            spread_arr.attrs["units"] = attrs["units"]
+            spread_arr.attrs["units"] = _units_after(attrs["units"], spread)
         out = out.assign_coords({SPREAD_COORD: spread_arr})
 
     if group is not None:
@@ -1683,4 +2008,21 @@ def _reduce_dim(da, dim: str, how: str | dict[str, Any]):
             out = out.assign_coords({target: var})
 
     out.attrs = {**attrs, **out.attrs}  # reductions drop attrs; units must survive
+    if "units" in attrs:
+        out.attrs["units"] = _units_after(attrs["units"], name)
+    # What this step did, in CF's words: a groupby is a climatological statistic
+    # "within" its groups, a step on the groups a groupby left is "over" them, and a
+    # resample or plain reduction is just the method. Appended, not replaced, so a
+    # chain reads left to right and a source's own cell_methods stays in front.
+    label = axis or dim
+    if group is not None:
+        where = f" within {new_dim}s"
+    elif over is not None:
+        where = f" over {over}"
+    else:
+        where = ""
+    method = f"{label}: {cell_method_name(name)}{where}"
+    previous = out.attrs.get("cell_methods")
+    out.attrs["cell_methods"] = f"{previous} {method}" if previous else method
+    out.attrs["statistic"] = name
     return out
