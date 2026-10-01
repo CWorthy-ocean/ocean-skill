@@ -1297,11 +1297,15 @@ def _bin_counts(coord, freq: str):
     lazy multi-file model run is the entire read, and this is a check that has to be
     cheap enough to run unconditionally. A time coordinate is a small in-memory index
     and already carries everything the count needs.
+
+    An empty bin counts 0, not NaN: resample fills the bins between samples with NaN
+    (four month-end snapshots binned daily leave 89 of 93 bins empty), and ``NaN <= 0``
+    is False, so a caller skipping empty bins would otherwise keep every one of them.
     """
     import xarray as xr
 
     dim = str(coord.dims[0])
-    return xr.ones_like(coord, dtype=float).resample({dim: freq}).sum()
+    return xr.ones_like(coord, dtype=float).resample({dim: freq}).sum().fillna(0)
 
 
 def _bin_label(value) -> str:
