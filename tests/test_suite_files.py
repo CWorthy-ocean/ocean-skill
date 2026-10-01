@@ -91,7 +91,14 @@ def test_shipped_suite_loads_and_expands(path):
     _, expanded = _expand(path)
     assert expanded, f"{path.name} expanded to no pages"
     assert all(p.title for p in expanded)
-    assert {p.kind for p in expanded} <= {"field", "compare", "summary", "section"}
+    assert {p.kind for p in expanded} <= {
+        "field",
+        "compare",
+        "summary",
+        "section",
+        "XY",
+        "TS",
+    }
     # A suite of dividers alone would draw nothing at all.
     assert any(p.kind != "section" for p in expanded)
 
@@ -138,8 +145,19 @@ EXPECTED_PACMED = (
         ("section", "Carbon vs GLODAPv2"),
         ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (surface)"),
         ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (100 m)"),
+        ("section", "Water masses"),
+        ("TS", "T-S diagrams — six Pacific regions"),
     ]
 )
+
+_TS_REGIONS = [
+    "North West Pacific",
+    "Subpolar Gyre",
+    "California Current System",
+    "South West Pacific",
+    "South Pacific Gyre",
+    "Peru Current",
+]
 
 
 @pytest.fixture
@@ -162,8 +180,8 @@ def test_pacmed_review_settings(pacmed):
 
 def test_pacmed_review_expands_to_the_exact_page_sequence(pacmed):
     _, expanded = pacmed
-    assert len(expanded) == 47
-    assert sum(p.kind == "section" for p in expanded) == 8
+    assert len(expanded) == 49
+    assert sum(p.kind == "section" for p in expanded) == 9
     assert [(p.kind, p.title) for p in expanded] == EXPECTED_PACMED
 
 
@@ -273,3 +291,64 @@ def test_pacmed_review_glodap_pages_get_one_depth_each_and_the_run_window(pacmed
         assert page.kwargs["depths"] == [depth]
         assert page.kwargs["aggregate"] == {"time": "mean"}
         assert page.kwargs["select"]["test"]["time"] == RUN_WINDOW
+
+
+def test_pacmed_review_ts_page_pins_roms_to_the_run_and_leaves_the_references_alone(
+    pacmed,
+):
+    suite, expanded = pacmed
+    page = _by_title(expanded, "T-S diagrams — six Pacific regions")
+    assert page.kind == "TS"
+    members = page.kwargs["members"]
+    assert list(members) == ["ROMS", "WOA23", "GLORYS12"]
+
+    roms = members["ROMS"]
+    assert roms["source"] == suite.defaults["test"] == "all_the_rest"
+    assert roms["variable"] == ["temperature", "salinity"]
+    assert roms["select"] == {"time": RUN_WINDOW}
+    assert roms["cache"] is True
+
+    # climatologies: no run window, no select at all, and they cache with the suite
+    woa, glorys = members["WOA23"], members["GLORYS12"]
+    assert woa["source"] == ["woa23_temperature_annual", "woa23_salinity_annual"]
+    assert "select" not in woa and "select" not in glorys
+    assert glorys["source"] == "glorys_climatology_timeseries"
+    assert glorys["aggregate"] == {"time": "mean", "lon": "mean", "lat": "mean"}
+    assert woa["cache"] is True and glorys["cache"] is True
+    assert page.cache is True
+
+
+def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
+    pacmed,
+):
+    _, expanded = pacmed
+    page = _by_title(expanded, "T-S diagrams — six Pacific regions")
+
+    regions = page.kwargs["regions"]
+    assert list(regions) == _TS_REGIONS
+    for box in regions.values():
+        assert set(box) == {"lon", "lat"}
+        assert 0 <= box["lon"]["min"] < box["lon"]["max"] <= 360
+        assert -90 <= box["lat"]["min"] < box["lat"]["max"] <= 90
+    assert regions["North West Pacific"] == {
+        "lon": {"min": 155.24, "max": 156.33},
+        "lat": {"min": 20.51, "max": 21.60},
+    }
+    assert regions["South West Pacific"]["lat"] == {"min": -16.75, "max": -15.91}
+
+    # WOA23's 1-degree grid has no cell centre in two of the boxes
+    assert page.kwargs["at_center"] == ["WOA23"]
+
+    assert page.plot["ncols"] == 3
+    assert page.plot["colors"] == {
+        "ROMS": "black",
+        "WOA23": "tab:red",
+        "GLORYS12": "tab:blue",
+    }
+    annotations = page.plot["annotations"]
+    assert list(annotations) == _TS_REGIONS  # every panel is annotated
+    for texts in annotations.values():
+        for s_pos, t_pos in texts.values():
+            assert 32 < s_pos < 37 and -2 < t_pos < 30  # (S, T) in plausible ranges
+    assert "Northern\nsurface\nwaters" in annotations["Subpolar Gyre"]
+    assert annotations["Peru Current"]["ESSW"] == [34.95, 10.0]

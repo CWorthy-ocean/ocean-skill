@@ -84,11 +84,16 @@ def _rasterize(fig: Any) -> None:
     magnitude; text, axes, and colorbars stay vector. Renderer-level
     ``rasterize=`` is interactive-only (holoviews), so this is done here, once,
     on the returned figure -- after the PNG is written, so the PNG itself stays
-    fully vector/raster as the renderer already chose.
+    fully vector/raster as the renderer already chose. Contour sets are left alone:
+    matplotlib cannot rasterize them (it warns and ignores the request), and a few
+    contour lines are light as vectors anyway.
     """
+    from matplotlib.contour import ContourSet
+
     for ax in fig.axes:
         for artist in (*ax.collections, *ax.images):
-            artist.set_rasterized(True)
+            if not isinstance(artist, ContourSet):
+                artist.set_rasterized(True)
 
 
 def _page_bbox(fig: Any, stem: str) -> Any:

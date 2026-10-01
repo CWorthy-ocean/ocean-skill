@@ -2,8 +2,9 @@
 
 A suite is a YAML file describing an ordered list of **pages** -- each one a single
 `osk.field`, `osk.compare`, or `osk.summary` call (a `field:` page may chain a few more
-methods after it -- see `then:`, below), or a text-only `section:` divider that
-organizes the PDF -- plus shared defaults and output settings.
+methods after it -- see `then:`, below), a property-property plot (`osk.XY`, or `osk.TS`
+for salinity against temperature -- see `XY:` and `TS:`, below), or a text-only
+`section:` divider that organizes the PDF -- plus shared defaults and output settings.
 Running it draws every page, writes one PNG per figure, collects them into one PDF
 (unless `pdf: false`), and writes a metrics CSV and a `manifest.json` recording exactly
 what was drawn. The suite YAML is the whole interface: no Python is required to run
@@ -20,8 +21,9 @@ chlorophyll) and a closing Taylor/target summary. `suites/roms_marbl_quick.yaml`
 same `defaults:` block with only the snapshot and monthly pages -- the fast, repeated
 check with no regridding and no downloads. `suites/pacmed_review.yaml` is a larger worked
 example that organizes its PDF with `section:` divider pages and combines domain-mean
-time series with observation comparisons at each snapshot. Copy whichever fits, and edit
-the lines it calls out (`defaults.test`, `refresh:`, `output_dir:`).
+time series with observation comparisons at each snapshot and a `TS:` page of T-S
+diagrams in six Pacific boxes. Copy whichever fits, and edit the lines it calls out
+(`defaults.test`, `refresh:`, `output_dir:`).
 
 ## Before you run one: register the model
 
@@ -75,8 +77,9 @@ defaults:                             # merged into every page; a page's own key
 
 pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
-    field: {...}          # exactly one of field: / compare: / summary: / section:
+    field: {...}          # exactly one of field: / compare: / summary: / section: / XY: / TS:
     section: "..."         # a text-only divider page in report.pdf (see below): no for_each:/then:/plot:
+    XY: {members: {...}, x: ..., y: ...}   # one variable against another (see below); TS: is XY: with x/y fixed
     for_each: {...}        # optional: fan this one page into several (see below)
     then: [...]            # optional, field: pages only: a method chain (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
@@ -151,6 +154,90 @@ Keys map onto `osk.compare(test=, reference=, variables=, select=, aggregate=, .
 as one figure per family, suffixed in the PNG filename; an empty result (every pair
 `skip_missing`-ed) is a skipped page, not a fatal error.
 
+### `XY:` and `TS:` -- one variable against another
+
+```yaml
+- title: "T-S diagrams -- six Pacific regions"
+  TS:                              # XY: is the same, plus x: and y:
+    members:
+      ROMS: {}                     # source = defaults.test, variables = [y, x], whole-run window
+      WOA23: {source: [woa23_temperature_annual, woa23_salinity_annual]}
+      GLORYS12:
+        source: glorys_climatology_timeseries
+        aggregate: {time: mean, lon: mean, lat: mean}
+    regions:                       # one panel per region, in this order
+      North West Pacific: {lon: {min: 155.24, max: 156.33}, lat: {min: 20.51, max: 21.60}}
+      Subpolar Gyre: {lon: {min: 184.59, max: 185.73}, lat: {min: 47.76, max: 48.59}}
+    at_center: [WOA23]
+  plot:
+    ncols: 3
+    colors: {ROMS: black, WOA23: "tab:red", GLORYS12: "tab:blue"}
+    annotations: {North West Pacific: {STSW: [34.8, 28.0], NPIW: [34.4, 8.0]}}
+```
+
+Plots one variable against another for each data source (a **member**), one panel per
+region: `XY:` builds `osk.XY(members, x=, y=, regions=, at_center=)` and `TS:` builds
+`osk.TS(members, regions=, at_center=)`, which is `XY` with `x="salinity"`,
+`y="temperature"` (and potential-density lines drawn by default). `plot:` is forwarded
+to `.plot()`; the options (`ncols`, `colors`, `color_by`, `annotations`, `density`, ...)
+are in the XY section of `docs/plot_styling_reference.md`. Unlike `field:` and `compare:`,
+the whole page is one figure, one PNG, whatever the number of regions.
+
+- **`members:`** (required, at least one) maps a label to one `osk.field()` call. The
+  label is the legend entry and the key for `colors:` and `at_center:`, so `label:` is
+  refused in a member, and so is `cache:` (the suite's own to set, as on `field:`). Every
+  other key passes to `osk.field()`: `source:`, `variables:`, `select:`, `aggregate:`,
+  `qc:`, `detide:`, ... A member with nothing to say is written `{}`.
+- **`x:` and `y:`** name the two variables, as `osk.field` does (a nickname, or a
+  `{calculate: ...}`/`{sum: [...]}` spec). `XY:` requires both; `TS:` refuses them, since
+  it is the shorthand for `x: salinity`, `y: temperature`.
+- **Defaults.** A member's `source:` defaults to `defaults.test` (an error if there is
+  none), and its `variables:` to `[y, x]` -- `[temperature, salinity]` for `TS:`. A
+  `source:` list with a `variables:` list builds every pairing, and the pairs that do not
+  exist (WOA's temperature file has no salinity) are dropped with a warning; `XY` then
+  matches each member's `x` and `y` fields itself.
+- **The test member is windowed like a `field:` page.** The member whose `source:` is
+  `defaults.test` gets the same treatment as a `field:` page's `select:` (see
+  `time: latest` and Caching): no time key means the run's whole recorded span as a
+  literal `{"min", "max"}` window, and `time: latest` becomes the last step. Every other
+  member is passed through exactly as written, with no run window, because a climatology
+  or a different run has a time axis of its own -- its time is yours to select.
+- **`regions:`** maps a region name to a horizontal box, `{lon: {min, max}, lat: {min,
+  max}}` (or a single point). The name is the panel title. Each region *replaces* its
+  members' horizontal `select:`, so write `ROMS: {}`, not the box, and the same members
+  serve every region; their `aggregate:` stays, which is how GLORYS12 above is averaged
+  over each box. Without `regions:`, each member must already carry its own box or point
+  in `select:` -- a member that would load a whole 4-D domain is refused. The boxes are
+  checked at `--list` but kept as written in `manifest.json`.
+- **`at_center:`** lists members to sample at the nearest grid cell to each region's
+  centre instead of selecting the box (and any `lon`/`lat` mean in their `aggregate:` is
+  dropped). It exists for coarse sources: a 1-degree grid such as WOA23's can have no
+  cell centre inside a ~100 km box, and a box with no cells in it leaves that member
+  out of the panel (with a warning).
+  Each name must be a member, and it needs `regions:`.
+- **`for_each:` and `plot:` work as on any page, `then:` does not** (there is no one
+  field to chain on): a schema error. `{month.window}` and friends template into a
+  member's `select:` as usual.
+
+Several pages usually want the same regions (or the same `annotations:`). Define the
+dict once under `defaults:` and refer to it by an exact placeholder, which keeps the
+dict's type (see `{placeholder}` templating) -- each page gets its own copy:
+
+```yaml
+defaults:
+  test: all_the_rest
+  pacific: {North West Pacific: {lon: {min: 155.24, max: 156.33}, lat: {min: 20.51, max: 21.60}}}
+
+pages:
+  - title: "T-S"
+    TS: {members: {ROMS: {}}, regions: "{pacific}"}
+  - title: "Nitrate-phosphate"
+    XY: {members: {ROMS: {}}, x: phosphate, y: nitrate, regions: "{pacific}"}
+```
+
+`--list` prints these as `[TS     ]`/`[XY     ]`. A page is `(cache)` only if every
+member is: see Caching.
+
 ### `summary:` -- pool the compare pages above
 
 ```yaml
@@ -214,8 +301,8 @@ keeps only the last `N` (use this on a long run to bound the WOA page count). A
 
 ## `{placeholder}` templating
 
-A page's `title`, and every string inside its `field:`/`compare:`/`summary:`/`plot:`
-dict, may contain placeholders resolved against `defaults` plus whatever `for_each`
+A page's `title`, and every string inside its `field:`/`compare:`/`summary:`/`XY:`/`TS:`/
+`plot:` dict, may contain placeholders resolved against `defaults` plus whatever `for_each`
 bound for that combination:
 
 - **Exactly one placeholder and nothing else** (`"{depths}"`, `"{month.window}"`) is
@@ -364,6 +451,12 @@ all (it reads both lanes, so it is never rewritten, only checked), and a `times=
 speak for it) all keep `cache=False`. A `detide:` page's cutoff sits a little earlier
 still, since its PL33 filter leaves an edge of the record that keeps changing shape as
 the run grows.
+
+An `XY:`/`TS:` page decides per member, since each member is its own `osk.field()` call.
+The member that reads `defaults.test` follows the rule above (an injected whole-run window
+or `time: latest` tracks the run; an explicit window must be closed); every other member --
+a climatology, say -- has no run window to track and caches whenever the suite does. The
+page is marked `(cache)` in `--list` only when all its members are.
 
 Set the suite-level `cache: false` to disable caching for every page regardless of any
 of the above -- useful after any change that a select-identity key cannot see on its

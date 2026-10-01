@@ -2,14 +2,14 @@
 
 A suite (``ocean_skill.config.SuiteConfig``) is a YAML file listing pages -- each
 one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call (a ``field:``
-page may chain a few more methods after it -- see ``then:`` in ``docs/suites.md``), or
-a ``section:`` divider page that is only text -- plus shared defaults and output
-settings. Running it draws every page, writes a PNG per figure,
-collects them into one PDF (unless ``pdf: false``), and writes a metrics CSV and a
-``manifest.json`` recording exactly what was drawn. It also writes ``run.log`` --
-everything printed to the terminal over the course of the run, plus full tracebacks
-for skipped pages and for a fatal crash, which the terminal itself never shows. See
-``docs/suites.md``.
+page may chain a few more methods after it -- see ``then:`` in ``docs/suites.md``), an
+``osk.XY``/``osk.TS`` property-property plot (``XY:``/``TS:``), or a ``section:``
+divider page that is only text -- plus shared defaults and output settings. Running it
+draws every page, writes a PNG per figure, collects them into one PDF (unless
+``pdf: false``), and writes a metrics CSV and a ``manifest.json`` recording exactly
+what was drawn. It also writes ``run.log`` -- everything printed to the terminal over
+the course of the run, plus full tracebacks for skipped pages and for a fatal crash,
+which the terminal itself never shows. See ``docs/suites.md``.
 
 A ``section:`` page is not a figure and so is not counted as one: it appears only in
 ``report.pdf`` (and only if some page after it drew -- see

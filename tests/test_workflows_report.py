@@ -532,3 +532,18 @@ def test_compress_pdf_images_keeps_the_reports_permission_bits_with_real_gs(tmp_
     assert compress_pdf_images(pdf) is not None
 
     assert stat.S_IMODE(pdf.stat().st_mode) == 0o640
+
+
+def test_rasterize_skips_contour_sets_without_warning():
+    # matplotlib cannot rasterize a ContourSet and warns when asked to; an XY/TS page's
+    # density contours (and any section's contour lines) must not trigger that.
+    fig, ax = plt.subplots()
+    ax.scatter([0, 1], [0, 1])
+    grid = np.arange(16.0).reshape(4, 4)
+    contours = ax.contour(grid)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _report._rasterize(fig)
+    assert ax.collections[0].get_rasterized()
+    assert not contours.get_rasterized()
+    plt.close(fig)

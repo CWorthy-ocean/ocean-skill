@@ -550,6 +550,232 @@ def test_suite_yaml_copy_is_byte_identical(tmp_path, stub_model):
     assert (result.report_dir / "suite.yaml").read_bytes() == path.read_bytes()
 
 
+# -- XY: / TS: pages -----------------------------------------------------------------
+#
+# ``osk.XY``/``osk.TS`` are another worker's classes; what ``run_suite`` owns is
+# building one member per ``members:`` entry, handing them over, and drawing the
+# figure the page's ``.plot()`` returns. A stand-in class records what it was built
+# with and draws a one-axes figure, so these hold whatever the real classes do.
+
+
+@pytest.fixture
+def fake_xy(monkeypatch):
+    """Replace ``osk.XY``/``osk.TS`` with recorders; return their call log."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    import ocean_skill as osk
+
+    log = []
+
+    class _Fake:
+        def __init__(self, members, **kwargs):
+            self.members = members
+            self.kwargs = kwargs
+            log.append((type(self).__name__, members, kwargs))
+
+        def plot(self, **opts):
+            log[-1] = (*log[-1], opts)
+            fig, ax = plt.subplots()
+            ax.plot([34.0, 35.0], [10.0, 20.0])
+            return fig
+
+    class FakeXY(_Fake):
+        pass
+
+    class FakeTS(_Fake):
+        pass
+
+    monkeypatch.setattr(osk, "XY", FakeXY, raising=False)
+    monkeypatch.setattr(osk, "TS", FakeTS, raising=False)
+    # regions are validated at expand time; what counts as valid is xy.py's business
+    monkeypatch.setattr("ocean_skill.xy.normalize_regions", lambda r: {}, raising=False)
+    return log
+
+
+_BOX = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+
+
+def _ts_suite(tmp_path, kind="TS", **page_extra):
+    page = {
+        "title": "T-S diagrams",
+        kind: {
+            "members": {
+                "ROMS": {},
+                "WOA23": {"source": ["woa_temperature", "woa_salinity"]},
+            },
+            "regions": {"North West Pacific": _BOX},
+            "at_center": ["WOA23"],
+            **({"x": "phosphate", "y": "nitrate"} if kind == "XY" else {}),
+        },
+        "plot": {"ncols": 3},
+        **page_extra,
+    }
+    return {
+        "name": "quick_check",
+        "output_dir": str(tmp_path / "out"),
+        "defaults": {"test": "stub"},
+        "pages": [page],
+    }
+
+
+def test_a_ts_page_draws_and_the_manifest_records_it(tmp_path, stub_model, fake_xy):
+    result = run_suite(_write_suite(tmp_path, _ts_suite(tmp_path)))
+
+    page = result.pages[0]
+    assert page.status == "ok", page.reason
+    assert result.exit_code == 0
+    assert len(result.figures) == 1  # one figure, whatever the number of regions
+
+    kind, members, kwargs, plot_opts = fake_xy[0]
+    assert kind == "FakeTS"
+    assert list(members) == ["ROMS", "WOA23"]  # one real osk.field() per member
+    assert kwargs == {"regions": {"North West Pacific": _BOX}, "at_center": ["WOA23"]}
+    assert plot_opts == {"ncols": 3, "size": "page"}  # pdf: true pins the canvas
+
+    manifest = json.loads(result.manifest.read_text())
+    (entry,) = manifest["pages"]
+    assert entry["kind"] == "TS" and entry["status"] == "ok"
+    assert entry["cache"] is True
+    assert list(entry["kwargs"]["members"]) == ["ROMS", "WOA23"]
+    assert entry["kwargs"]["members"]["ROMS"]["source"] == "stub"
+    assert entry["kwargs"]["regions"] == {"North West Pacific": _BOX}
+    assert entry["kwargs"]["at_center"] == ["WOA23"]
+
+
+def test_an_xy_page_passes_x_and_y_to_osk_xy(tmp_path, stub_model, fake_xy):
+    result = run_suite(_write_suite(tmp_path, _ts_suite(tmp_path, kind="XY")))
+
+    assert result.pages[0].status == "ok", result.pages[0].reason
+    kind, _, kwargs, _ = fake_xy[0]
+    assert kind == "FakeXY"
+    assert (kwargs["x"], kwargs["y"]) == ("phosphate", "nitrate")
+
+
+def test_list_only_shows_an_xy_or_ts_page_with_its_cache_note(
+    tmp_path, stub_model, fake_xy, capsys
+):
+    suite = _ts_suite(tmp_path)
+    suite["pages"].append(_ts_suite(tmp_path, kind="XY")["pages"][0])
+    suite["pages"][1]["title"] = "N-P"
+    run_suite(_write_suite(tmp_path, suite), list_only=True)
+    out = capsys.readouterr().out
+    assert "[TS     ] T-S diagrams  (cache)" in out
+    assert "[XY     ] N-P  (cache)" in out
+    assert not fake_xy  # nothing was built or drawn
+
+
+def test_an_xy_page_that_cannot_be_built_is_skipped_not_fatal(
+    tmp_path, stub_model, fake_xy, monkeypatch
+):
+    import ocean_skill as osk
+
+    def boom(*a, **k):
+        raise ValueError("the 'WOA23' member has no salinity")
+
+    monkeypatch.setattr(osk, "TS", boom, raising=False)
+    result = run_suite(_write_suite(tmp_path, _ts_suite(tmp_path)))
+
+    page = result.pages[0]
+    assert page.status == "skipped" and "no salinity" in page.reason
+    assert result.exit_code == 1  # the only page was skipped
+
+
+def _ts_source(source, variable, select, aggregate, **kwargs):
+    """Synthetic T and S for a real ``osk.TS`` run: a model box and a WOA profile.
+
+    The model (``stub``) is a box of (time, s_rho, eta, xi) values with a height
+    ``z_rho``, so it draws as dots; each WOA entry carries one variable and, sampled at
+    the region's centre (``at_center``), is a profile -- a line.
+    """
+    from ocean_skill.vars import short_name
+
+    name = short_name(variable)
+    base = 10.0 if name == "temperature" else 34.5
+    lon = select["lon"]
+    lon = (lon["min"] + lon["max"]) / 2 if isinstance(lon, dict) else lon
+    shift = (lon - 155.0) / 100.0  # each region a little different
+    if source == "stub":
+        depth = np.array([500.0, 200.0, 50.0, 5.0])  # s_rho: bottom to top
+        shape = (len(_INDEX), 4, 2, 2)
+        column = -depth[None, :, None, None] / 100
+        values = base + shift + np.broadcast_to(column, shape)
+        z_rho = np.broadcast_to(-depth[None, :, None, None], shape).copy()
+        dims = ("time", "s_rho", "eta_rho", "xi_rho")
+        da = xr.DataArray(
+            values.copy(),
+            dims=dims,
+            coords={"time": _INDEX, "z_rho": (dims, z_rho)},
+            attrs={"units": "degC" if name == "temperature" else "1"},
+        )
+    else:
+        depth = np.array([0.0, 100.0, 1000.0])
+        da = xr.DataArray(
+            base + shift - depth / 200.0,
+            dims="depth",
+            coords={"depth": depth, "lon": lon, "lat": 21.0},
+            attrs={"units": "degC" if name == "temperature" else "1"},
+        )
+    return da, None
+
+
+def test_a_ts_page_runs_end_to_end_through_the_real_ts(tmp_path, monkeypatch):
+    from ocean_skill import xy as _xy_module
+    from ocean_skill.vars import short_name
+
+    monkeypatch.setattr(_comparison, "prepare_source", _ts_source)
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda source: _INDEX)
+    carries = {"woa_temperature": "temperature", "woa_salinity": "salinity"}
+    monkeypatch.setattr(
+        _comparison,
+        "_variable_available",
+        lambda source, variable, **k: (
+            carries.get(source, short_name(variable)) == short_name(variable)
+        ),
+    )
+    drawn = []
+    real_items = _xy_module.XY._items
+
+    def spy(self):
+        drawn.append(real_items(self))
+        return drawn[-1]
+
+    monkeypatch.setattr(_xy_module.XY, "_items", spy)
+    suite = _ts_suite(tmp_path)
+    suite["pages"][0]["TS"]["regions"]["Subpolar Gyre"] = {
+        "lon": {"min": 184.59, "max": 185.73},
+        "lat": {"min": 47.76, "max": 48.59},
+    }
+
+    with pytest.warns(UserWarning, match="doesn't carry the requested variable"):
+        result = run_suite(_write_suite(tmp_path, suite))
+
+    page = result.pages[0]
+    assert page.status == "ok", page.reason
+    (png,) = result.figures
+    assert Path(png).exists()
+    (items,) = drawn
+    assert [(i["region"], i["label"], i["mark"]) for i in items] == [
+        ("North West Pacific", "ROMS", "points"),
+        ("North West Pacific", "WOA23", "line"),
+        ("Subpolar Gyre", "ROMS", "points"),
+        ("Subpolar Gyre", "WOA23", "line"),
+    ]
+    # every cell, level and snapshot of the model box is a dot
+    assert items[0]["x"].size == len(_INDEX) * 4 * 2 * 2
+
+
+def test_a_bad_xy_page_is_a_schema_error_before_anything_is_drawn(
+    tmp_path, stub_model, fake_xy
+):
+    suite = _ts_suite(tmp_path)
+    suite["pages"][0]["TS"]["x"] = "salinity"  # TS: sets x and y itself
+    with pytest.raises(ValueError, match="TS: sets x=salinity"):
+        run_suite(_write_suite(tmp_path, suite), list_only=True)
+
+
 # -- catalog_search_paths: ---------------------------------------------------------
 
 

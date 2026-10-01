@@ -8,7 +8,7 @@ built-in default and is unpacked straight into one specific matplotlib/cartopy c
 so any keyword that call accepts works, not just a hand-picked subset. An eighth,
 [`frame_label_kwargs`](#frame_label_kwargs), belongs to `field_movie` alone, there being
 no per-frame label on a still, and a ninth, [`annot_kwargs`](#the-portrait-family-metrics-scoreboard),
-belongs to `portrait` alone, styling its cell-value text. A few more parameters aren't styling dicts at all
+belongs to `portrait` (its cell-value text) and [`XY`](#the-xy-family-and-ts) (its annotations). A few more parameters aren't styling dicts at all
 (`title`, `metric_keys`, `metric_names`, [`coastline_resolution`](#coastline_resolution),
 [`land`](#land), [`tiles`](#tiles-holoviews-only), `shared_limits`, `shared_axis_labels`,
 `shared_axes`) — see [Other parameters](#other-parameters-not-styling-dicts) at the end
@@ -47,7 +47,7 @@ want everything bigger or smaller.
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
 | [`legend_kwargs`](#legend_kwargs) | a `series` panel's key, or the `locations` map's | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
-| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait`), or an `XY` annotation's text | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -891,7 +891,7 @@ mooring_set.map_metrics(rows={"CIOFS3": ciofs3_set, "Hindcast": hindcast_set},
                          shared_limits=True, layout="columns")
 ```
 
-### `ncols` (`field_facet`, `skill_map`, `series`, `profile`, `time_depth_grid` and `field_map_grid`)
+### `ncols` (`field_facet`, `skill_map`, `series`, `profile`, `XY`, `time_depth_grid` and `field_map_grid`)
 
 How many columns the panels are laid out in. By default there is no fixed answer:
 [`typography.facet_layout`](../ocean_skill/plot/typography.py) picks the orientation
@@ -966,6 +966,10 @@ kwargs only decide how the resulting panels are arranged — **except** when `ro
 per (row, column) combination — see below), so `ncols`/`nrows` are refused rather than
 silently ignored.
 
+`XY` takes `ncols`/`nrows` the same way with a different default: its panels are
+regions, so it lays them out as one row of up to three and then three columns (six regions
+draw 2×3), and `ncols`/`nrows` re-wrap that.
+
 `series`' `residual=True` strip runs under each panel, so it only stacks in a single
 column — asking for `residual=True` together with a grid wider than one column
 (whether from `ncols=`/`nrows=` or from `rows=`+`cols=` together) is refused, the same
@@ -988,7 +992,7 @@ Faceting on `variable` still drops it from every legend entry the same way a sin
 whichever axis it landed on.
 
 A wrapped `profile` grid also stops repeating its axis **labels** on every panel —
-tick *numbers* stay per-panel regardless (see [`sharex`/`sharey`](#sharex--sharey-series-and-profile)).
+tick *numbers* stay per-panel regardless (see [`sharex`/`sharey`](#sharex--sharey-series-profile-and-xy)).
 "Depth [m]" prints on the left column only, and the value label (`"salinity"`, say)
 on the bottom of each column only — "is there a panel below/left of me?" is the
 question, matching the map families' own `shared_axis_labels` rule, so a ragged
@@ -1036,7 +1040,7 @@ ctdprofiles_comp_all.sel(variable="temp").plot(rows="reference")
 
 Every `Comparison` in a `ComparisonSet` is already aligned by the time `compare()`
 returns it, so `.sel()` there is a cheap filter over cached results. A bare `Field`
-loads lazily instead (see [`ncols`](#ncols-field_facet-skill_map-series-profile-time_depth_grid-and-field_map_grid)
+loads lazily instead (see [`ncols`](#ncols-field_facet-skill_map-series-profile-xy-time_depth_grid-and-field_map_grid)
 above) — narrowing with `.sel()` before `.plot()` means a dropped variable or source
 is never loaded at all, not merely left out of the figure.
 
@@ -1092,18 +1096,19 @@ non-geographic axis: with no lat/lon gridlines to draw, it decides whether the
 depth label repeats on all three panels or only the leftmost, since the other
 two share the same depth axis.
 
-### `sharex` / `sharey` (`series` and `profile`)
+### `sharex` / `sharey` (`series`, `profile` and `XY`)
 
 Matplotlib's own names, for the matplotlib-native thing they already mean in a
 multi-panel grid: whether every panel reads the same range on that axis, or each
-autoscales to its own data. Neither line family auto-solves this from the data the
-way the map families' `shared_axes` links pan/zoom by domain — the two defaults
+autoscales to its own data. No line family auto-solves this from the data the
+way the map families' `shared_axes` links pan/zoom by domain — the defaults
 instead match what each family already draws when the option is left off:
 
 | family | `sharex` | `sharey` | reading |
 |---|---|---|---|
 | `series` | `True` | `False` | every panel reads the same time axis; each keeps its own value range |
 | `profile` | `False` | `True` | every panel reads the same depth axis; each keeps its own value range |
+| `XY` | `False` | `False` | each panel fits its own region's data; `True` reads every panel against one range (the union of all of them, annotations included), which makes regions comparable by eye |
 
 ```python
 cs.plot(cols="comparison", ncols=4, sharey=False)   # profile: each station's own depth range
@@ -1130,11 +1135,11 @@ still opens on the same range, but panning one does not move the others.
 `series`' `residual=True` strip is a difference, not the panel's own value -- pairing
 it with `sharey=True` is refused, the same way a `ncols`/facet conflict is.
 
-### `wspace` / `hspace` (`series` and `profile`, static only)
+### `wspace` / `hspace` (`series`, `profile` and `XY`, static only)
 
 Matplotlib's own `constrained_layout` gutter names -- the fraction of a panel's own
 width/height reserved as space around it. Left alone, both default to `0.02`, the
-same as any other matplotlib figure.
+same as any other matplotlib figure. `XY` takes them for its grid of regions too.
 
 ```python
 cs.plot(cols="comparison", ncols=4, sharey=False, wspace=-0.2)  # pull the columns in
@@ -1155,7 +1160,7 @@ holoviews/bokeh, whose `Layout` plot class has no matching spacing parameter at
 all. Passing either to `renderer="holoviews"` warns once ("only affect the static
 renderer") and is dropped, the same as any other matplotlib-only option.
 
-### `colors` (`series` and `profile`)
+### `colors` (`series`, `profile` and `XY`)
 
 Pins the auto colour cycle to specific values instead of leaving every level at
 whatever the next unused colour in the cycle would be -- the line-family twin of
@@ -1177,7 +1182,12 @@ line's resolved colour (at a fixed opacity), so pinning a
 line's colour repaints its band too, with no separate fill-colour option. **Default:**
 `None` (today's cycle, unchanged).
 
-### `titles` (`profile`)
+`XY` reads `colors=` the same three ways, keyed on the member labels
+(`colors={"ROMS": "black", "WOA23": "tab:red"}`, or a list in member order); its own
+default is black for the first dots member and the cycle for the rest — see [the `XY`
+family](#the-xy-family-and-ts).
+
+### `titles` (`profile` and `XY`)
 
 One title per panel, in panel order, overriding whatever `panel_title` would
 otherwise write there -- the panel-title twin of `line_labels`'s legend-text
@@ -1188,6 +1198,9 @@ panel, ready to copy and edit):
 ```python
 cs.plot(cols="comparison", titles=["North mooring", "South mooring"])
 ```
+
+`XY` takes `titles=` the same way, one entry per panel in row-major order (`None` keeps a
+panel's own title, which is its region's name), with the same wrong-length error.
 
 **A `cols="comparison"`/`rows="comparison"` facet (one panel per station) already
 does this automatically**, without `titles=`: if exactly one side of the comparison
@@ -1712,14 +1725,14 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 | `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
 | `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
 | `metrics_labels` | `None` | one string per metrics-box row, figure-wide, overriding its automatic prefix; wrong count raises, quoting the current labels to copy — see [the statistics box](#the-statistics-box) |
-| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
+| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-profile-and-xy) |
 | `ylim` | `None` | y limits for every panel |
 | `panel_aspect` | `2.6` | width/height of a panel; a line panel has no data aspect to read, unlike a map |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
-| `sharex` | `True` | every panel reads the same time range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
+| `sharex` | `True` | every panel reads the same time range; see [`sharex`/`sharey`](#sharex--sharey-series-profile-and-xy) |
 | `sharey` | `False` | every panel keeps its own value range; refused with `residual=True` |
-| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
+| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-profile-and-xy-static-only) |
 | `hspace` | `None` | as `wspace`, the vertical gap |
 
 ### The statistics box
@@ -1868,16 +1881,16 @@ for example).
 | `line_labels` | `None` | one string per unique legend entry, overriding the auto-derived text; wrong count raises, quoting the current labels to copy |
 | `metrics_labels` | `None` | one string per metrics-box row, figure-wide, overriding its automatic prefix; wrong count raises, quoting the current labels to copy — matches `series` exactly, see [the statistics box](#the-statistics-box) |
 | `band_legend` | `False` | give each line's mean±spread envelope its own legend entry, `f"{label} spread"`; off by default. `series` has no equivalent -- it carries the same `spread` plumbing but draws no band yet |
-| `titles` | `None` | one string per panel, overriding the auto-derived title; see [`titles`](#titles-profile) |
-| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-and-profile) |
+| `titles` | `None` | one string per panel, overriding the auto-derived title; see [`titles`](#titles-profile-and-xy) |
+| `colors` | `None` | pin the auto colour cycle to specific values; see [`colors`](#colors-series-profile-and-xy) |
 | `xlim` | `None` | value-axis limits; bounds only the bottom (primary) axis when `secondary_x` merges a second variable in |
 | `ylim` | `None` | depth limits, `(shallow, deep)` in positive-down metres |
-| `panel_aspect` | `0.62` | height/width ratio the figure solves for — portrait, since a water column reads top-to-bottom; does **not** set panel width, see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
+| `panel_aspect` | `0.62` | height/width ratio the figure solves for — portrait, since a water column reads top-to-bottom; does **not** set panel width, see [`wspace`/`hspace`](#wspace--hspace-series-profile-and-xy-static-only) |
 | `ncols` | `None` | wrap the panels into this many columns, row-major, instead of the default single row/column; see [`ncols`/`nrows` on `series` and `profile`](#ncolsnrows-on-series-and-profile) |
 | `nrows` | `None` | a bound on rows, deriving `ncols` from it instead — the row count actually drawn is whatever `ncols` needs |
 | `sharex` | `False` | every panel keeps its own value range |
-| `sharey` | `True` | every panel reads the same depth range; see [`sharex`/`sharey`](#sharex--sharey-series-and-profile) |
-| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-and-profile-static-only) |
+| `sharey` | `True` | every panel reads the same depth range; see [`sharex`/`sharey`](#sharex--sharey-series-profile-and-xy) |
+| `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-profile-and-xy-static-only) |
 | `hspace` | `None` | as `wspace`, the vertical gap |
 
 Panel *width* is not `panel_aspect`'s doing, nor the metrics box's — neither renderer
@@ -1907,6 +1920,270 @@ picture by different means: `ax.twiny()` statically, a bokeh finalize hook
 (`extra_x_ranges` + a `LinearAxis` added `"above"` + `x_range_name` on the
 secondary glyphs) interactively — the same technique `series`' own twin-axis
 label colouring already uses to reach into a rendered bokeh figure.
+
+## The `XY` family (and `TS`)
+
+One variable against another, one panel per region: a T-S diagram, nitrate against
+phosphate, alkalinity against salinity. `osk.XY(members, x=, y=)` is the general form and
+`osk.TS(members)` the preset with salinity on x and temperature on y, which also draws
+density (σ₀) contours by default. A *member* is one data source — a label holding the
+ordinary `osk.field(...)` results that carry the two variables. Nothing is read until
+`.plot()`, so building an `XY` costs nothing.
+
+```python
+box = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+TS_VARS = ["temperature", "salinity"]
+
+roms = osk.field("all_the_rest", TS_VARS, select=box)                 # dots
+woa = osk.field(["woa23_temperature_annual", "woa23_salinity_annual"], TS_VARS,
+                select={"lon": 155.79, "lat": 21.05})                  # a profile: a line
+glorys = osk.field("glorys_climatology_timeseries", TS_VARS, select=box,
+                   aggregate={"time": "mean", "lon": "mean", "lat": "mean"})  # a line
+
+osk.TS({"ROMS": roms, "WOA23": woa, "GLORYS12": glorys}).plot(
+    title="North West Pacific water masses")
+```
+
+Six regions in a 2×3 grid, as in Fig. 7 of Damien et al.'s PACMED validation report;
+`regions=` *replaces* every member's horizontal `select`, so the members above need none of their own:
+
+```python
+PACIFIC = {   # lon (0-360), lat
+    "North West Pacific":        ((155.24, 156.33), (20.51, 21.60)),
+    "Subpolar Gyre":             ((184.59, 185.73), (47.76, 48.59)),
+    "California Current System": ((233.59, 234.83), (39.37, 40.38)),
+    "South West Pacific":        ((184.58, 185.38), (-16.75, -15.91)),
+    "South Pacific Gyre":        ((238.98, 240.00), (-22.37, -21.37)),
+    "Peru Current":              ((273.34, 274.47), (-11.73, -10.57)),
+}
+regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
+                  "lat": {"min": lat[0], "max": lat[1]}}
+           for name, (lon, lat) in PACIFIC.items()}
+
+ts = osk.TS({"ROMS": osk.field("all_the_rest", TS_VARS),
+             "WOA23": osk.field(["woa23_temperature_annual", "woa23_salinity_annual"],
+                                TS_VARS),
+             "GLORYS12": osk.field("glorys_climatology_timeseries", TS_VARS,
+                                   aggregate={"time": "mean", "lon": "mean",
+                                              "lat": "mean"})},
+            regions=regions, at_center=["WOA23"])
+ts.plot(ncols=3, colors={"ROMS": "black", "WOA23": "tab:red", "GLORYS12": "tab:blue"},
+        annotations={"North West Pacific": {"STSW": (34.8, 28.0), "PDW": (34.8, 1.5)}})
+ts.plot(color_by="depth", density=False, renderer="holoviews")
+```
+
+Any other pair works the same way — only `density=` is specific to salinity and
+temperature:
+
+```python
+osk.XY({"ROMS": osk.field("all_the_rest", ["nitrate", "phosphate"], select=box)},
+       x="phosphate", y="nitrate").plot(color_by="depth")
+```
+
+A member needs exactly one field for `x` and one for `y` (matched through the
+vocabulary, so `"temp"` and `"temperature"` are one variable); a list of sources crossed
+with a list of variables, like WOA's separate temperature and salinity files above,
+makes the cross product and drops the combinations a source does not carry, with a
+warning. A (region, member) pair that cannot give a panel — a box with no cell in it, a
+point on land — is dropped from that panel with a warning that says why.
+
+### Which mark each member draws
+
+The mark follows the data, not an option. A member whose two variables sit at **one
+position with only a vertical axis left** — a profile read at the nearest cell, or a box
+mean (`aggregate={"lon": "mean", "lat": "mean"}`) — draws as a **line**, ordered by
+depth. Anything else — every cell, level and snapshot of a model box — draws as
+**dots**. Dots go under lines, so a profile reads over the cloud it is compared to.
+
+Dots are drawn at `marker_size` (the scatter `s`, in points squared; default `2.0`) and
+`alpha` (default `0.5`), without an outline and rasterized in a PDF, so a dense cloud
+reads as a density rather than a blot.
+
+### Colour
+
+* **The first dots member is black**, so a dense model cloud is the dark body of the plot
+  and the thinner lines stand out against it.
+* **Every other member takes the next colour of the usual cycle**, counting from the
+  first, in member order. Pinning one member's colour does not shift its neighbours'.
+* **Dots change marker only when there are several dots members** (a lone cloud gains
+  nothing from a symbol); a line has none.
+
+`colors=` pins them: a string (every member alike), a list in member order, or a dict
+keyed by the members' labels naming only the ones you want. Naming a label the plot does
+not have raises, listing the ones it has:
+
+```python
+ts.plot(colors={"ROMS": "black", "WOA23": "tab:red", "GLORYS12": "tab:blue"})
+```
+
+### `color_by` — colour the cloud by depth or time
+
+`color_by="depth"` or `"time"` colours the **dots** (never the lines) instead of drawing
+them black, from each point's own depth or time. Every panel shares **one colour scale
+and one colour bar** for the figure, so a colour means the same thing everywhere; the bar
+reads surface-at-top for depth and in dates for time.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `cmap` | the package's bathymetry map (`deep`) for depth, `viridis` for time | any matplotlib colormap name or object |
+| `colorbar` | `True` | `False` keeps the colours and drops the bar |
+
+A member that carries no such array (a source with no depth coordinate, say) warns and
+stays a solid colour. Depth comes from the member's own vertical coordinate. **After a time
+average on a ROMS member it is rebuilt from the cell thicknesses**, which are all the
+average keeps, assuming a flat sea surface (zeta = 0) and s-levels ordered bottom to
+top — approximate by that much, but enough to colour by or to order a profile with, and not
+the instantaneous depth of the cell. It also feeds the interactive hover readout.
+
+### `regions=`, `at_center=` and `ncols`
+
+`regions={name: select}` makes one panel per entry, titled by the name and in the order
+given. Each is a lon/lat **box** (`{"lon": {"min": ..., "max": ...}, "lat": {...}}`) or a
+**point** (`{"lon": ..., "lat": ...}`); only horizontal keys are allowed — `time` and
+`depth` belong to each member's own `select`. A box that crosses the antimeridian
+(`{"min": 170, "max": -170}`) is fine, and a 0–360 box on a ±180 grid is too.
+
+Without `regions=`, each member keeps its own `select` and must name a box or a point in
+it; a member with neither is refused rather than loading its whole domain, every level
+and time step. The panel is then titled by the place instead.
+
+`at_center=["WOA23"]` samples the listed members at the **nearest cell to each region's
+centre** instead of cropping to its box (and drops any horizontal mean from their
+`aggregate`, since a single cell has nothing to average). It exists for a source whose
+grid is coarser than the box: a 1° climatology has no cell centre inside some ~100 km
+boxes — two of the six above — and cropping then selects nothing. It needs `regions=`.
+
+`ncols`/`nrows` arrange the panels; the default is one row of up to three panels, then
+three columns — see [`ncols`](#ncols-field_facet-skill_map-series-profile-xy-time_depth_grid-and-field_map_grid).
+The axis labels (variable and units, when every member agrees) go on the outer edges only.
+
+### `annotations=` — text at data positions
+
+Water-mass names, thresholds, anything that belongs at an (x, y) in the data. Two
+spellings, never mixed:
+
+```python
+ts.plot(annotations={"STSW": (34.8, 28.0), "PDW": (34.8, 1.5)})        # on every panel
+ts.plot(annotations={"North West Pacific": {"STSW": (34.8, 28.0), "PDW": (34.8, 1.5)},
+                     "Subpolar Gyre":      {"Northern\nsurface\nwaters": (34.0, 11.0)}})
+```
+
+The second form needs regions to key on (it is refused for a plot with none), puts each
+region's labels on its own panel — a region with no entry gets none — and warns, listing
+the real panel names, on a key that is not one. Each value is an `(x, y)` pair in the
+axes' own units; the text is **centred** on it and may contain `\n`. `annot_kwargs`
+(`Axes.text` keywords: `color`, `fontsize`, `ha`, ...) styles it. The automatic limits are
+widened to hold every position, so a label placed outside the data is not clipped.
+
+Annotations cannot be automatic: where a water mass is named is a judgement made on the
+picture, so place them by hand from a first render and adjust. The positions for the six
+panels above are the `annotations:` block of the `TS:` page in
+`suites/pacmed_review.yaml`.
+
+### `density=` — σ₀ contours
+
+`TS` draws them by default; `XY` does not. `density=True` draws grey contours of
+potential density anomaly at automatic levels (a step of 1, 0.5 or 0.25 kg m⁻³, giving 6
+to 14 lines), an **int** asks for about that many lines, a **list** gives the levels
+outright, and `False` draws none.
+
+They are computed with [`gsw`](https://teos-10.github.io/GSW-Python/) (TEOS-10), an
+optional dependency imported only here — without it, `density=` raises with the install
+line. Practical salinity becomes absolute salinity at the panel's own centre, σ₀ is
+referenced to the surface, and **every temperature is treated as potential**, whatever
+the data's own definition (see the warning below). Salinity may be on either axis, but
+`density=` is **valid only when one axis is salinity and the other temperature**: for any
+other pair (`x="phosphate"`) it raises rather than drawing lines that mean nothing.
+
+The values are printed along the lines in the static figure; interactively, hover a line.
+
+### Warnings
+
+Each is a warning, not a note drawn on the figure, and nothing is converted:
+
+* **Members disagree about what an axis is.** The one that matters is **in-situ against
+  potential temperature** — WOA's `sea_water_temperature` against a model's
+  `sea_water_potential_temperature` — which differ by about 0.1 °C at 1000 m and more
+  below, and sit in the same column of a catalog. The warning names both. Which one is
+  right for a comparison is your call; `density=` treats both as potential.
+* **Members disagree on units.** The axis label then states none.
+* **More than two million points in a panel** (`ocean_skill.plot.xy.POINT_CAP`). It
+  still draws, slowly — and the interactive renderer, which ships every point to the
+  browser, may not manage it. Nothing is thinned for you, since silently dropping model
+  cells would change what the figure shows: narrow the region, or select or aggregate
+  the member down.
+* **`color_by` on a member without the array**, as above.
+
+### `XY`-only parameters
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `title` | `None` | the figure's overall title (a `suptitle` statically, a `Layout` title interactively) |
+| `titles` | `None` | one string per panel, overriding the region names; see [`titles`](#titles-profile-and-xy) |
+| `annotations` | `None` | text at data positions, on every panel or per region; see above |
+| `density` | `False` (`True` for `TS`) | σ₀ contours: `True`, a line count, or a list of levels; salinity/temperature only |
+| `color_by` | `None` | `"depth"` or `"time"`: colour the dots on one shared scale |
+| `cmap` | `None` | the colormap for `color_by` |
+| `colorbar` | `True` | `False` colours the dots without a bar |
+| `colors` | `None` | pin member colours; see [`colors`](#colors-series-profile-and-xy) |
+| `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
+| `xlim`, `ylim` | `None` | exact limits for every panel (a `(low, high)` pair); otherwise per panel, from the data and the annotations plus a 2% margin |
+| `sharex`, `sharey` | `False` | every panel reads one range (the union of all); see [`sharex`/`sharey`](#sharex--sharey-series-profile-and-xy) |
+| `marker_size` | `2.0` | the dots' scatter `s`, in points squared |
+| `alpha` | `0.5` | the dots' opacity |
+| `panel_aspect` | `0.9` | width/height of a panel — close to square, a shade portrait; a property-property plot has no data aspect to read |
+| `ncols`, `nrows` | `None` | arrange the panels; see above |
+| `wspace`, `hspace` | `None` | the gutter between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-profile-and-xy-static-only) |
+| `size`, `zoom`, `font_scale`, `figsize`, `save`, `fit_text` | | as everywhere — [Automatic sizing](#automatic-sizing) |
+
+The styling dicts (static only) merge onto their defaults like everywhere else:
+`title_kwargs`, `tick_label_kwargs` and `suptitle_kwargs` as in the rest of this
+reference; `legend_kwargs` is `Axes.legend` for a panel's own key (not `loc`, which the
+layout chooses to stay clear of the data); `line_kwargs` is `Axes.plot` for every line
+(`linewidth`, `alpha`, ...; the colour comes from the member); `annot_kwargs` is
+`Axes.text` for the annotations; and `colorbar_kwargs` styles the `color_by` bar like any
+other colour bar (see [`colorbar_kwargs`](#colorbar_kwargs)).
+
+An unknown keyword raises a `TypeError` naming `XY.plot()` and listing the options it
+takes; one that is a nested key a level too high (`label_size`, which belongs inside
+`colorbar_kwargs`) is redirected to its dict.
+
+### Static versus interactive
+
+Both renderers draw from one layout, `ocean_skill.plot.xy.compose`, so the colours,
+markers, panels, titles, axis labels, limits, legend rows, `color_by` scale (point by
+point), contour levels and annotation positions cannot disagree — a test holds them to
+it. What differs is the drawing, all of it deliberate:
+
+* **No contour labels interactively.** Bokeh cannot print a value along a line; hover a
+  contour to read its σ₀ instead. The lines are the same ones (the same `contourpy`
+  generator on the same grid and levels).
+* **The colour bar.** Statically one figure-level bar spans the panels. A bokeh `Layout`
+  has no shared bar, so the interactive bar belongs to one panel — the last in the first
+  row, which is therefore a little wider. The scale is shared by every panel either way,
+  surface-at-top for depth (on bokeh's bars, whose low end sits at the bottom, by
+  reversing the colour range and the palette together: a value keeps its colour).
+* **The key.** When every panel has the same members the static figure draws one
+  combined key below it; bokeh has no figure-level legend, so each panel carries its own,
+  in the corner `compose` found emptiest. `legend="below"`/`"right"` push each panel's
+  own key outside its frame, and a corner name forces it. In both renderers the swatches
+  are fixed-size proxies — a plotted dot is far too small to read in a key.
+* **Dots.** `marker_size` is an area in points squared; interactively it becomes the
+  diameter it would have on screen. The cloud is not rasterized (bokeh draws every
+  point), and **hover** reads both values, the depth, and the time of any dot, and both
+  values and the depth of a line.
+* **Annotations.** An interactive label lives in data coordinates, so it pans and zooms
+  with the data, is clipped by the frame, and a multi-line one is left-aligned within its
+  block (statically each line is centred, and a label may overhang the axes).
+* **Linked axes.** `sharex`/`sharey` open every panel on the same range, but panning one
+  does not move the others, as for `profile` (see its "Static versus interactive" above).
+* **Size.** Interactive panels share a 900 px row among the columns (a lone panel is
+  wider) and are never narrower than a map panel; `size`/`zoom`/`font_scale` scale them as
+  everywhere.
+* **Static-only options.** The `*_kwargs` dicts above and `wspace`/`hspace` warn once
+  and are dropped; `figsize`, `fit_text` and `save` are dropped quietly (bokeh lays out
+  its own text, and writes its own HTML with `holoviews.save`). `domain` is not an option
+  here, and is warned about and dropped.
 
 ## The `section` family (vertical slices)
 

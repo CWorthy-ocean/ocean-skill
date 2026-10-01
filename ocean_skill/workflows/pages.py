@@ -25,6 +25,13 @@ before ``.plot()`` -- so a suite page's ``then: [{extremum: min}, {series:
 ...}]`` runs exactly the Python chain ``osk.field(...).extremum("min").series(...)``
 would.
 
+An ``XY:``/``TS:`` page is a ``members:`` mapping of label -> one ``osk.field()``
+call each, drawn together by :class:`~ocean_skill.xy.XY` (``TS:`` is the salinity-
+temperature preset). :func:`expand` gives the member that reads the test source the
+same pinned run window a ``field:`` page gets (:func:`_pin_test_lane`); every other
+member -- a climatology, say -- is passed through as written, since its time axis is
+not the run's.
+
 A ``section:`` page is the one kind :func:`build` never draws: it has no figure, just
 a title and notes text for a divider page in ``report.pdf``. :func:`expand` templates
 both against ``defaults`` (there is no ``for_each``), and the runner hands them
@@ -633,6 +640,92 @@ def _detide_margin(detide: Any, *, lane: str | None) -> Any:
     return pd.Timedelta(hours=spec["T"]) if spec else None
 
 
+def _pin_test_lane(
+    kwargs: dict[str, Any], index: Any
+) -> tuple[dict[str, Any], bool, bool]:
+    """Pin one ``field()``-style kwargs dict's time selection to the run, in place.
+
+    Shared by a ``field:`` page and an ``XY:``/``TS:`` page's test-source member.
+    Gives ``kwargs["select"]`` the whole-run window if it names no ``time`` (before
+    resolving a literal ``"latest"`` to the run's last step, or that value would look
+    like an explicit time key here) and decides whether the result is safe to cache
+    (see the section header above). Returns ``(select, had_explicit_time,
+    cacheable)``: ``select`` is the (now windowed) dict, ``had_explicit_time`` whether
+    the page named a time at all -- ``"latest"`` counts -- and ``cacheable`` that
+    verdict, before the suite-wide ``cache:`` switch is applied.
+    """
+    t0, t1 = index[0].isoformat(), index[-1].isoformat()
+    select = kwargs.setdefault("select", {})
+    had_explicit_time = "time" in select
+    was_latest = select.get("time") == "latest"
+    pinned = was_latest or not had_explicit_time
+    _inject_field_window(kwargs, t0, t1)
+    if was_latest:
+        select["time"] = t1
+    cacheable = pinned or _is_closed(
+        select, index, margin=_detide_margin(kwargs.get("detide"), lane=None)
+    )
+    return select, had_explicit_time, cacheable
+
+
+# -- XY: / TS: pages ------------------------------------------------------------------
+#
+# ``members`` maps a label (the legend entry) to one ``field()`` call's kwargs, with
+# ``source`` defaulting to ``defaults.test`` and ``variables`` to ``[y, x]``. Only the
+# page's own shape is checked here; whether the members really hold x and y, and
+# whether each region box lands on data, is XY's to say once it reads anything.
+
+#: The salinity-temperature preset ``TS:`` stands for.
+_TS_X, _TS_Y = "salinity", "temperature"
+
+#: ``field()`` keywords a member may not set: the suite owns ``cache`` (as on a
+#: ``field:`` page) and the member's key is its label.
+_XY_RESERVED_MEMBER_KEYS = ("cache", "label")
+
+
+class _XYArgs(BaseModel):
+    """An ``XY:``/``TS:`` page's mapping: ``members``, ``x``/``y``, ``regions``..."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: dict[str, dict[str, Any] | None]
+    x: Any = None
+    y: Any = None
+    regions: dict[str, dict[str, Any]] | None = None
+    at_center: list[str] = []
+
+    @field_validator("members")
+    @classmethod
+    def _members_not_empty(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if not v:
+            raise ValueError("members: needs at least one entry")
+        return v
+
+
+def _check_xy_args(raw: dict[str, Any], *, kind: str, title: str) -> _XYArgs:
+    """Validate one ``XY:``/``TS:`` page's mapping; ``x``/``y`` per ``kind``."""
+    try:
+        args = _XYArgs.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(f"page {title!r}: {kind}: {exc}") from exc
+    given = args.model_fields_set
+    if kind == "TS":
+        if given & {"x", "y"}:
+            raise ValueError(
+                f"page {title!r}: TS: sets x=salinity and y=temperature itself -- "
+                "use XY: for any other pair"
+            )
+    else:
+        missing = [k for k in ("x", "y") if getattr(args, k) is None]
+        if missing:
+            raise ValueError(
+                f"page {title!r}: XY: needs x: and y: (the variables to plot "
+                f"against each other) -- missing {missing}; TS: is the "
+                "salinity-temperature shorthand"
+            )
+    return args
+
+
 # -- semantic checks ------------------------------------------------------------------
 
 #: Variable nicknames that are 2-D (no vertical axis) -- a page selecting a real
@@ -676,7 +769,7 @@ class ExpandedPage:
     """One fully-resolved page: everything ``build`` needs to draw it."""
 
     title: str
-    kind: str  # "field" | "compare" | "summary" | "section"
+    kind: str  # "field" | "compare" | "summary" | "section" | "XY" | "TS"
     kwargs: dict[str, Any]
     plot: dict[str, Any]
     cache: bool
@@ -836,6 +929,96 @@ def _check_extremum_guardrails(
         )
 
 
+def _expand_xy_page(
+    page: Any,
+    namespace: dict[str, Any],
+    *,
+    title: str,
+    test_source: str | None,
+    get_index: Any,
+    suite_cache: bool,
+) -> dict[str, Any]:
+    """Resolve one ``XY:``/``TS:`` page into the kwargs :func:`build` draws from.
+
+    Each member becomes a ``field()`` kwargs dict (``source``, ``variable``, its own
+    ``select``/``aggregate``/..., and the ``cache`` flag decided here). The member that
+    reads ``defaults.test`` is pinned to the run exactly like a ``field:`` page
+    (:func:`_pin_test_lane`) and caches by the same rule; every other member is left
+    as written, with no run window -- its time axis is not the run's -- and caches with
+    the suite. ``regions`` and ``at_center`` are checked here (so a typo fails at
+    ``--list``) but stored as written: XY expands the boxes itself.
+    """
+    kind = page.kind
+    # Deep-copied for the same reason as a field page's kwargs (see expand()): a
+    # ``regions: "{pacific_regions}"`` placeholder resolves to the defaults' own dict.
+    raw = copy.deepcopy(
+        _template_value(dict(getattr(page, kind)), namespace, title=title)
+    )
+    args = _check_xy_args(raw, kind=kind, title=title)
+    x, y = (_TS_X, _TS_Y) if kind == "TS" else (args.x, args.y)
+
+    members: dict[str, dict[str, Any]] = {}
+    for label, spec in args.members.items():
+        m = dict(spec or {})
+        for key in _XY_RESERVED_MEMBER_KEYS:
+            if key in m:
+                why = (
+                    "caching is controlled by the suite's own cache:/cache_dir: "
+                    "settings, not a per-member kwarg"
+                    if key == "cache"
+                    else f"the member's key ({label!r}) is its label"
+                )
+                raise ValueError(
+                    f"page {title!r}: {kind}: member {label!r}: {key}: is not "
+                    f"supported -- {why}"
+                )
+        m.setdefault("source", test_source)
+        source = m["source"]
+        if source is None:
+            raise ValueError(
+                f"page {title!r}: {kind}: member {label!r} has no source (give it "
+                "a source: or set defaults.test)"
+            )
+        if "variables" in m:
+            m["variable"] = m.pop("variables")
+        m.setdefault("variable", [y, x])
+        if test_source is not None and source == test_source:
+            if m.get("select") is None:
+                m["select"] = {}
+            _, _, cacheable = _pin_test_lane(m, get_index(source))
+            m["cache"] = suite_cache and cacheable
+        else:
+            m["cache"] = suite_cache
+        members[label] = m
+
+    unknown = [a for a in args.at_center if a not in members]
+    if unknown:
+        raise ValueError(
+            f"page {title!r}: {kind}: at_center: {unknown} not among the members "
+            f"{list(members)}"
+        )
+    if args.at_center and not args.regions:
+        raise ValueError(
+            f"page {title!r}: {kind}: at_center: needs regions: -- it samples a "
+            "member at each region's centre"
+        )
+    if args.regions is not None:
+        from ocean_skill.xy import normalize_regions
+
+        try:
+            normalize_regions(args.regions)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"page {title!r}: {kind}: regions: {exc}") from exc
+
+    return {
+        "members": members,
+        "x": x,
+        "y": y,
+        "regions": args.regions,
+        "at_center": list(args.at_center),
+    }
+
+
 def expand(suite: Any) -> list[ExpandedPage]:
     """Turn ``suite.pages`` into a flat, fully-resolved list of :class:`ExpandedPage`.
 
@@ -894,6 +1077,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
             page_source = (page.field or {}).get("source", test_source)
         elif page.kind == "compare":
             page_source = (page.compare or {}).get("test", test_source)
+        elif page.kind in ("XY", "TS"):
+            page_source = test_source
 
         test_index = get_index(page_source) if page.for_each and page_source else None
         combos = _expand_for_each(
@@ -931,19 +1116,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     kwargs["variable"] = kwargs.pop("variables")
                 _check_field_depth_contradiction(title, kwargs)
                 index = get_index(source)
-                t0, t1 = index[0].isoformat(), index[-1].isoformat()
-                select = kwargs.setdefault("select", {})
-                had_explicit_time = "time" in select
-                was_latest = select.get("time") == "latest"
-                pinned = was_latest or not had_explicit_time
-                _inject_field_window(kwargs, t0, t1)
-                if was_latest:
-                    select["time"] = t1
-                cacheable = pinned or _is_closed(
-                    select,
-                    index,
-                    margin=_detide_margin(kwargs.get("detide"), lane=None),
-                )
+                select, had_explicit_time, cacheable = _pin_test_lane(kwargs, index)
 
                 steps = [
                     _normalize_step(raw, title=title)
@@ -1038,6 +1211,25 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     )
                 )
 
+            elif page.kind in ("XY", "TS"):
+                kwargs = _expand_xy_page(
+                    page,
+                    namespace,
+                    title=title,
+                    test_source=test_source,
+                    get_index=get_index,
+                    suite_cache=suite.cache,
+                )
+                out.append(
+                    ExpandedPage(
+                        title=title,
+                        kind=page.kind,
+                        kwargs=kwargs,
+                        plot=plot,
+                        cache=all(m["cache"] for m in kwargs["members"].values()),
+                    )
+                )
+
             else:  # summary
                 kwargs = _template_value(dict(page.summary), namespace, title=title)
                 if suite.pdf:
@@ -1079,7 +1271,10 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
     A ``section`` page has nothing to draw and raises :class:`ValueError` -- see the
-    module docstring.
+    module docstring. An ``XY``/``TS`` page builds each member with
+    :func:`ocean_skill.field.field` (its own ``cache`` flag, decided by
+    :func:`expand`), then draws them together with :class:`~ocean_skill.xy.XY`/
+    :class:`~ocean_skill.xy.TS` -- one figure.
 
     Almost always one pair (``suffix=""``); a ``compare`` page whose comparisons
     span more than one plot family draws one figure per family instead (see
@@ -1149,6 +1344,29 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
                     page.results.append(_extremum_record(obj))
         fig = obj.plot(**page.plot)
         return [("", fig)]
+
+    if page.kind in ("XY", "TS"):
+        members = {}
+        for label, spec in page.kwargs["members"].items():
+            m = dict(spec)
+            members[label] = osk.field(
+                m.pop("source"), m.pop("variable"), cache=m.pop("cache"), **m
+            )
+        if page.kind == "XY":
+            obj = osk.XY(
+                members,
+                x=page.kwargs["x"],
+                y=page.kwargs["y"],
+                regions=page.kwargs["regions"],
+                at_center=page.kwargs["at_center"],
+            )
+        else:
+            obj = osk.TS(
+                members,
+                regions=page.kwargs["regions"],
+                at_center=page.kwargs["at_center"],
+            )
+        return [("", obj.plot(**page.plot))]
 
     if page.kind == "compare":
         compare_kwargs = {k: v for k, v in page.kwargs.items() if k not in ("test",)}

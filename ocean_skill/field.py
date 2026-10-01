@@ -1079,6 +1079,39 @@ class Field:
             k in agg for k in time_keys
         )
 
+    def _replace(self, **changes: Any) -> Field:
+        """Return a new :class:`Field` identical to this one except for ``changes``.
+
+        The copy constructor behind :meth:`_surfaced` and
+        :class:`ocean_skill.xy.XY`'s per-region rebuild: ``source``, ``variable``,
+        ``select``, ``aggregate``, ``label``, ``cache``, ``qc`` and ``detide`` carry
+        over, and each keyword replaces one of them. The copy goes through
+        :meth:`__init__` again, so the replaced values are validated like any
+        others, and it starts unprepared -- nothing of this field's loaded data
+        carries over.
+        """
+        kept = {
+            name: getattr(self, name)
+            for name in (
+                "source",
+                "variable",
+                "select",
+                "aggregate",
+                "label",
+                "cache",
+                "qc",
+                "detide",
+            )
+        }
+        unknown = changes.keys() - kept.keys()
+        if unknown:
+            raise TypeError(
+                f"Field._replace() has no attribute(s) {sorted(unknown)}; "
+                f"it replaces any of {sorted(kept)}."
+            )
+        kept.update(changes)
+        return Field(kept.pop("source"), kept.pop("variable"), **kept)
+
     def _surfaced(self) -> Field:
         """Return a new, otherwise identical :class:`Field` selecting the surface.
 
@@ -1090,16 +1123,7 @@ class Field:
         opening a new one, and :meth:`as_item` reports the level from the select
         exactly as an explicit request would.
         """
-        return Field(
-            self.source,
-            self.variable,
-            select={**self.select, "depth": "surface"},
-            aggregate=self.aggregate,
-            label=self.label,
-            cache=self.cache,
-            qc=self.qc,
-            detide=self.detide,
-        )
+        return self._replace(select={**self.select, "depth": "surface"})
 
     def _refuse_bare_multistep_time(self) -> None:
         """Raise the "no default instant" message :meth:`plot` gives a bare grid.

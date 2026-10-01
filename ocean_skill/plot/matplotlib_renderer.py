@@ -74,6 +74,7 @@ __all__ = [
     "skill_map",
     "time_depth",
     "time_depth_grid",
+    "xy",
 ]
 
 # PAGE_W/PAGE_H (the portrait page every figure has to fit) now live in typography,
@@ -1873,6 +1874,304 @@ def profile(
     )
     if fit_text:
         _fit_text_widths(fig)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=200, bbox_inches="tight")
+    return fig
+
+
+def xy(
+    items,
+    *,
+    title: str | None = None,
+    annotations: dict[str, Any] | None = None,
+    density: bool | int | Sequence[float] = False,
+    color_by: str | None = None,
+    cmap=None,
+    colorbar: bool = True,
+    colors=None,
+    legend: bool | str = True,
+    titles: Sequence[str | None] | None = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    sharex: bool = False,
+    sharey: bool = False,
+    marker_size: float = 2.0,
+    alpha: float = 0.5,
+    panel_aspect: float | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    figsize: tuple[float, float] | None = None,
+    save: str | Path | None = None,
+    fit_text: bool = True,
+    wspace: float | None = None,
+    hspace: float | None = None,
+    title_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    legend_kwargs: dict[str, Any] | None = None,
+    line_kwargs: dict[str, Any] | None = None,
+    annot_kwargs: dict[str, Any] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+):
+    r"""Draw one variable against another, a panel per region (T-S, N-P, ...).
+
+    Each item is one data source in one region (see
+    :class:`~ocean_skill.plot.spec.PlotSpec`, family ``XY``). A source whose two
+    variables sit at a single position and vary only with depth draws as a **line**
+    (a profile, ordered by depth); anything else -- a model's every cell, level and
+    time step in a box -- draws as **dots**: ``marker_size`` (the scatter ``s``, in
+    points squared) and ``alpha``, rasterized so a PDF stays small. Dots are drawn
+    under lines. Everything about layout is decided by
+    :func:`ocean_skill.plot.xy.compose`, which the interactive renderer shares.
+
+    The first dots source is black and every other source takes the next colour of
+    the usual cycle; ``colors=`` pins them (a string, a list in source order, or a
+    dict keyed by label). Dots only change marker when several sources are dots.
+    ``color_by="depth"`` or ``"time"`` colours the dots instead, on one scale and
+    one figure-level colour bar shared by every panel (``cmap=`` picks the map,
+    ``colorbar=False`` drops the bar); lines keep their solid colours, and a source
+    without the array warns and stays solid.
+
+    ``density=True`` (or a line count, or a list of levels) draws grey sigma-0
+    contours with their values -- potential density from TEOS-10 via ``gsw``, on
+    whichever axis is salinity and whichever is temperature; every temperature is
+    treated as potential. Any other pair of axes raises. It is off by default here,
+    and on for ``TS``.
+
+    ``annotations`` puts text at data positions: ``{text: (x, y)}`` on every panel,
+    or ``{region: {text: (x, y)}}`` on each region's own (centred, ``\n`` allowed;
+    ``annot_kwargs`` styles it). Positions widen the automatic axis limits, so a
+    label placed outside the data is not clipped.
+
+    One panel per region, ``ncols`` defaulting to 3 once there are more than three.
+    Limits are per panel unless ``sharex``/``sharey``; ``xlim``/``ylim`` pin them.
+    Axis labels (variable and units) go on the outer edges only, and the legend
+    follows :func:`series`' ``legend=`` rule: one combined key below the figure when
+    the panels agree, else one per panel -- with dot and line swatches, since a
+    plotted dot is too small to read in a key.
+
+    Sized like every other line family -- ``size``/``zoom``/``figsize``, type from
+    geometry (:mod:`ocean_skill.plot.typography`). ``title`` is the figure's
+    suptitle; ``titles`` overrides the panel titles, one per panel.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.lines import Line2D
+
+    from ocean_skill.plot import xy as _xy_layout
+    from ocean_skill.plot.typography import (
+        SERIES_OVERHEAD,
+        SERIES_PANEL_W_FRACTION,
+        XY_ASPECT,
+        XY_PANEL_W_FRACTION_COLORBAR,
+    )
+
+    layout = _xy_layout.compose(
+        items,
+        annotations=annotations,
+        density=density,
+        color_by=color_by,
+        cmap=cmap,
+        colorbar=colorbar,
+        colors=colors,
+        legend=legend,
+        titles=titles,
+        xlim=xlim,
+        ylim=ylim,
+        sharex=sharex,
+        sharey=sharey,
+        ncols=ncols,
+        nrows=nrows,
+    )
+    scale_bar = layout.colorbar if layout.colorbar and layout.colorbar.show else None
+    canvas = resolve_canvas(size, zoom)
+    figsize = figsize or auto_figsize(
+        panel_aspect or XY_ASPECT,
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        panel_w_fraction=(
+            XY_PANEL_W_FRACTION_COLORBAR if scale_bar else SERIES_PANEL_W_FRACTION
+        ),
+        overhead=SERIES_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=layout.ncols,
+        nrows=layout.nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=False)
+    # an explicit size must survive _fit_text_widths, so remember it before merging
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+    suptitle_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    tick_label_kwargs = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    legend_kwargs = _merged(defaults["legend_kwargs"], legend_kwargs)
+    line_kwargs = _merged(defaults["line_kwargs"], line_kwargs)
+    annot_kwargs = _merged(
+        {"ha": "center", "va": "center", "fontsize": scale["annotation"]},
+        annot_kwargs,
+    )
+
+    fig, axes = plt.subplots(
+        nrows=layout.nrows,
+        ncols=layout.ncols,
+        figsize=figsize,
+        sharex=sharex,
+        sharey=sharey,
+        squeeze=False,
+        layout="constrained",
+    )
+    _apply_subplot_spacing(fig, wspace=wspace, hspace=hspace)
+    flat = list(axes.ravel())
+    n_panels = len(layout.panels)
+
+    per_panel: list[tuple[Any, list]] = []
+    for index, panel in enumerate(layout.panels):
+        ax = flat[index]
+        if panel.blank:
+            ax.set_visible(False)
+            per_panel.append((ax, []))
+            continue
+        if panel.density is not None and panel.density.levels:
+            grid = panel.density
+            contours = ax.contour(
+                grid.x,
+                grid.y,
+                grid.sigma,
+                levels=list(grid.levels),
+                colors="0.6",
+                linewidths=0.6,
+                zorder=0.5,
+            )
+            ax.clabel(contours, fmt="%g", fontsize=scale["contour_label"])
+        # dots first, then lines: a profile reads over the cloud it is compared to
+        for member in sorted(panel.items, key=lambda m: m.mark == "line"):
+            if member.mark == "line":
+                ax.plot(
+                    member.x,
+                    member.y,
+                    color=member.color,
+                    **{"linestyle": member.linestyle, **line_kwargs},
+                )
+                continue
+            coloured = member.color_values is not None and layout.colorbar is not None
+            ax.scatter(
+                member.x,
+                member.y,
+                s=marker_size,
+                alpha=alpha,
+                linewidths=0,
+                rasterized=True,
+                marker=member.marker,
+                **(
+                    {
+                        "c": member.color_values,
+                        "cmap": layout.colorbar.cmap,
+                        "norm": layout.colorbar.norm,
+                    }
+                    if coloured
+                    else {"color": member.color}
+                ),
+            )
+        for text, x, y in panel.annotations:
+            ax.text(x, y, text, **annot_kwargs)
+        ax.set_xlim(*panel.xlim)
+        ax.set_ylim(*panel.ylim)
+        ax.set_title(panel.title, **title_kwargs)
+        ax.title._osk_size_pinned = title_pinned
+        # Axis labels on the outer edges only, by the same rule profile() uses: is
+        # there a panel directly below/left of me (a ragged last row is not "the last
+        # row"). Tick numbers stay on every panel -- except where sharex/sharey would
+        # hide them from a panel whose neighbour below is an empty cell.
+        has_below = index + layout.ncols < n_panels
+        if not has_below:
+            ax.set_xlabel(layout.xlabel, fontsize=scale["axes_label"])
+            if sharex:
+                ax.tick_params(axis="x", labelbottom=True)
+        if layout.ncols == 1 or index % layout.ncols == 0:
+            ax.set_ylabel(layout.ylabel, fontsize=scale["axes_label"])
+        ax.tick_params(axis="both", labelsize=scale["tick_label"])
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            if tick_label_kwargs:
+                label.set(**tick_label_kwargs)
+        # proxies, not the plotted artists: a dot at marker_size is invisible in a key
+        handles = [
+            Line2D(
+                [],
+                [],
+                label=entry.label,
+                color=entry.color,
+                **(
+                    {
+                        "linestyle": "",
+                        "marker": entry.marker or "o",
+                        "markersize": 0.7 * scale["legend"],
+                    }
+                    if entry.mark == "points"
+                    else {
+                        "linestyle": entry.linestyle,
+                        "linewidth": line_kwargs.get("linewidth", 1.2),
+                    }
+                ),
+            )
+            for entry in panel.legend
+        ]
+        per_panel.append((ax, handles))
+
+    # trailing cells past the panel count are hidden, not removed, so the rest of the
+    # grid keeps the shape it was sized for (the same rule profile() follows)
+    for ax in flat[n_panels:]:
+        ax.set_visible(False)
+
+    if scale_bar is not None:
+        mappable = ScalarMappable(norm=scale_bar.norm, cmap=scale_bar.cmap)
+        used = [ax for ax, p in zip(flat, layout.panels, strict=False) if not p.blank]
+        cbar = _draw_colorbar(
+            fig,
+            mappable,
+            used,
+            scale_bar.label,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+        )
+        long_axis = cbar.ax.xaxis if cbar.orientation == "horizontal" else cbar.ax.yaxis
+        if scale_bar.is_time:
+            import matplotlib.dates as mdates
+
+            locator = mdates.AutoDateLocator()
+            long_axis.set_major_locator(locator)
+            long_axis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        elif scale_bar.inverted and cbar.orientation == "vertical":
+            cbar.ax.invert_yaxis()
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = suptitle_pinned
+    if layout.legend_placement != "off":
+        _series_legend(fig, per_panel, layout, scale, legend_kwargs)
+    _warn_if_cramped(
+        fig,
+        ncols=layout.ncols,
+        canvas=canvas,
+        nrows=layout.nrows,
+        panels=[ax for ax in flat[:n_panels] if ax.get_visible()],
+    )
+    if scale_bar is not None:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    if scale_bar is not None:
+        _centre_suptitle(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -6809,17 +7108,20 @@ def _top_level_options() -> frozenset[str]:
             locations,
             time_depth,
             time_depth_row,
+            xy,
         )
         for name in inspect.signature(fn).parameters
     )
 
 
-def _check_options(fn, opts) -> None:
+def _check_options(fn, opts, *, name: str | None = None) -> None:
     """Reject unknown options with an error that says where they belong.
 
     Python's own ``TypeError: field_grid() got an unexpected keyword argument
     'label_size'`` names the key and stops there, which does not help when the key is a
-    valid option one level down.
+    valid option one level down. ``name`` is what to call the caller's entry point in
+    the message when that is not ``fn`` itself -- an ``XY`` plot is built by ``xy`` but
+    called as ``XY.plot()``.
     """
     import inspect
 
@@ -6830,6 +7132,7 @@ def _check_options(fn, opts) -> None:
     if not unknown:
         return
 
+    shown = name or fn.__name__
     lines = []
     for key in sorted(unknown):
         owner = _nested_owner(key)
@@ -6855,13 +7158,13 @@ def _check_options(fn, opts) -> None:
                 f"  {key!r} goes inside {owner}, e.g. {owner}={{{key!r}: ...}}"
             )
         else:
-            lines.append(f"  {key!r} is not an option of {fn.__name__}()")
+            lines.append(f"  {key!r} is not an option of {shown}()")
     accepted = ", ".join(sorted(k for k in params if not k.startswith("_")))
     raise TypeError(
-        f"{fn.__name__}() got {len(unknown)} unusable option"
+        f"{shown}() got {len(unknown)} unusable option"
         f"{'' if len(unknown) == 1 else 's'}:\n"
         + "\n".join(lines)
-        + f"\n\n{fn.__name__}() accepts: {accepted}"
+        + f"\n\n{shown}() accepts: {accepted}"
     )
 
 
@@ -6947,6 +7250,8 @@ def _render(spec, **kwargs: Any):
         _check_options(time_depth_row_grid if len(spec.items) > 1 else time_depth_row, opts)
     elif family == "profile":
         _check_options(profile, opts)
+    elif family == "XY":
+        _check_options(xy, opts, name="XY.plot")
     elif family == "skill_map":
         _check_options(skill_map, opts)
     elif family == "locations":
@@ -7010,6 +7315,8 @@ def _render(spec, **kwargs: Any):
         return series(spec.items, **opts)
     if family == "profile":
         return profile(spec.items, **opts)
+    if family == "XY":
+        return xy(spec.items, **opts)
     if family == "section":
         item = spec.single
         return section(
