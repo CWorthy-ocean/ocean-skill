@@ -2,7 +2,8 @@
 
 A suite is a YAML file describing an ordered list of **pages** -- each one a single
 `osk.field`, `osk.compare`, or `osk.summary` call (a `field:` page may chain a few more
-methods after it -- see `then:`, below) -- plus shared defaults and output settings.
+methods after it -- see `then:`, below), or a text-only `section:` divider that
+organizes the PDF -- plus shared defaults and output settings.
 Running it draws every page, writes one PNG per figure, collects them into one PDF
 (unless `pdf: false`), and writes a metrics CSV and a `manifest.json` recording exactly
 what was drawn. The suite YAML is the whole interface: no Python is required to run
@@ -17,8 +18,10 @@ latest snapshot and monthly means of the key physics and BGC variables (model on
 plus model-vs-observation maps (WOA23 nutrients, GLODAPv2 alkalinity/DIC, satellite
 chlorophyll) and a closing Taylor/target summary. `suites/roms_marbl_quick.yaml` is the
 same `defaults:` block with only the snapshot and monthly pages -- the fast, repeated
-check with no regridding and no downloads. Copy whichever fits, and edit the lines it
-calls out (`defaults.test`, `refresh:`, `output_dir:`).
+check with no regridding and no downloads. `suites/pacmed_review.yaml` is a larger worked
+example that organizes its PDF with `section:` divider pages and combines domain-mean
+time series with observation comparisons at each snapshot. Copy whichever fits, and edit
+the lines it calls out (`defaults.test`, `refresh:`, `output_dir:`).
 
 ## Before you run one: register the model
 
@@ -49,6 +52,7 @@ directory keeps its own copy under `refs/` -- see Output layout.
 name: roms_marbl_diagnostic          # a label you choose: report-dir prefix, metrics CSV stem
 output_dir: /path/to/diagnostics      # report dirs go under here; unset -> $OCEAN_SKILL_OUTPUT or ./output
 pdf: true                             # report.pdf beside the PNGs; false -> PNGs only
+pdf_images: lossless                  # jpeg -> re-encode report.pdf's map rasters with Ghostscript (see Page size)
 cache: true                           # false -> never reuse a prepared field from disk (see Caching, below)
 catalog_search_paths:                 # optional: shared catalog dirs; relative = to this file
   - /anvil/projects/x-ees250129/catalogs
@@ -71,7 +75,8 @@ defaults:                             # merged into every page; a page's own key
 
 pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
-    field: {...}          # exactly one of field: / compare: / summary:
+    field: {...}          # exactly one of field: / compare: / summary: / section:
+    section: "..."         # a text-only divider page in report.pdf (see below): no for_each:/then:/plot:
     for_each: {...}        # optional: fan this one page into several (see below)
     then: [...]            # optional, field: pages only: a method chain (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
@@ -155,6 +160,43 @@ summary: {kind: both, color_by: variable}
 Pools the metric records from every `compare:` page that produced results (Taylor +
 target by default; `kind: portrait` for the scorecard heatmap). Skipped when no
 compare page succeeded.
+
+### `section:` -- a divider page
+
+```yaml
+- title: "Part 2 -- the alkalinity minimum"
+  section: >-
+    The surface alkalinity minimum on 2010-10-31, then how that point got there.
+    Observations are WOA23 and GLODAPv2 where they exist.
+- title: "Alkalinity ({test})"
+  field: {variables: [alkalinity], select: {depth: surface, time: "2010-10-31"}}
+```
+
+A page that is only text: `title:` as a large heading, centred, with the `section:`
+string wrapped beneath it, on a US Letter page of its own in `report.pdf`. It lets a long
+report have chapters. `section: ""` is a title-only divider; a YAML block scalar (`>-`
+folds the lines into one paragraph, `|` keeps your own line breaks, and a long line wraps
+either way) is the natural way to write longer notes. `{placeholder}`s in the title and
+the text resolve against `defaults:` -- there is no `for_each:` to bind anything else --
+and a literal brace needs the usual `{{ }}`.
+
+- **A divider is only drawn when a page after it draws.** It is buffered and written
+  into the PDF immediately before the next figure. A later `section:` page replaces one
+  still waiting, so a section whose pages all skipped leaves no empty divider behind, and
+  one at the very end of the suite is dropped. A run where nothing draws still writes no
+  PDF at all.
+- **PDF only.** A divider never gets a PNG and does not take a number: the
+  `figures/NN_` numbering counts figures alone, so it reads the same with or without
+  sections. Under `pdf: false` a section does nothing.
+- **Not a figure.** Sections take no part in the exit code or the "N page(s) drawn"
+  count (see Exit codes). `manifest.json` gives each one the status `ok` (written) or
+  `skipped` with a reason -- `no page after this section drew`, or `pdf: false -- section
+  pages appear only in report.pdf`. `run.log` heads it `== section: <title> ==`, and
+  `--list` prints `NN. [section] <title>`.
+- **`for_each:`, `then:` and a non-empty `plot:` are schema errors** on a section page,
+  naming it: there is no data to fan out, chain, or plot. A bare `section:` with nothing
+  after it is YAML for null, which is no kind at all and so is refused too -- write
+  `section: ""`.
 
 ## `for_each`: one page becomes several
 
@@ -287,10 +329,13 @@ guarantee every other page already gets (see `time: latest`, above). It is left 
 *range* of times, since which instant the minimum/maximum actually falls on is then
 only known once the data is read.
 
-What `extremum` finds -- value, position, and the snapshot it fell on -- is printed
-(so it lands in `run.log`) and recorded per page in `manifest.json`'s own `results:`
-list, since the figure itself only ever shows the time series, not the number that
-picked its location.
+The time-series figure's suptitle says what picked its location, by default, in the
+shape `Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at 16.1°N 97.6°E on
+2010-10-31`: the depth (when the page's `select` leaves a single level), whether it is
+the minimum or the maximum, its value with units, where it is, and the snapshot date it
+was found on. A page's own `plot: {title: "..."}` replaces it. The same value and
+position are also printed (so they land in `run.log`) and recorded per page in
+`manifest.json`'s own `results:` list.
 
 ## Caching
 
@@ -341,7 +386,7 @@ Every invocation writes its own report directory -- nothing is ever overwritten:
 ```
 <output_dir>/<name>_<test>_<t0>_to_<t1>_<run-time>/
     report.pdf                (unless pdf: false, or no page drew at all)
-    figures/NN_<slug(title)>[_<family>].png
+    figures/NN_<slug(title)>[_<family>].png      (figures only: section: pages have none)
     metrics/<name>.csv (+ .txt)
     suite.yaml                 -- byte-identical copy of the input
     manifest.json
@@ -366,12 +411,28 @@ page). Set `pdf: false` to size figures freely; PNGs are still written, as tight
 around each figure rather than letter pages. A figure whose own ink still doesn't fit
 8.5x11 even after pinning (rare -- only an explicit `figsize:` outside this grammar
 could do it) grows the page rather than clipping the figure, with its own warning.
+A `section:` divider is always an exact letter page.
+
+**Smaller PDFs: `pdf_images: jpeg`.** About 95% of a map report's bytes are its
+rasterized map images, which matplotlib's PDF backend can only store losslessly.
+`pdf_images: jpeg` (the default, `lossless`, is today's output byte-for-byte) re-encodes
+them as JPEG in a post-pass through Ghostscript (`gs`, found on `PATH`), after the PDF is
+closed. On the 13-page report it was tuned on, 7.6 MB became 4.8 MB with no visible
+change when compared against a lossless render at 300 dpi: chroma is not subsampled, so
+coastlines and fronts stay crisp, and the transparency masks that cut land out of the
+maps stay lossless. The run prints one line (`report.pdf: 20.1 MB -> 10.4 MB (JPEG via
+Ghostscript)`, so it is in `run.log`) and `manifest.json` records `"pdf_images"` (what
+the suite asked for) and `"pdf_images_applied"` (whether the pass actually ran). If `gs`
+is not installed, fails, takes more than ten minutes, or would not make the file smaller,
+the run warns, names the reason, and keeps the lossless PDF. PNGs are never touched, and
+the key does nothing under `pdf: false`.
 
 `t0`/`t1` are the test source's own first/last recorded day; `<run-time>` is when the
 command was run, down to the second, plus a short random suffix so two runs started in
 the same second still land in different directories. `manifest.json` records the fully
 expanded page list (every `time: latest`/`month: run`/window already resolved to a
-literal value), each page's outcome, the resolved `catalog_search_paths:` directories,
+literal value), each page's outcome, the `pdf_images` setting and whether it was applied,
+the resolved `catalog_search_paths:` directories,
 the effective `cache_dir` (the suite's own if set, otherwise wherever
 `osk.cache.base_dir()` already pointed), and (when the suite has a `refresh:` block) a
 `"refresh"` key -- enough that a second person with the same suite YAML and the same
@@ -403,7 +464,10 @@ absent, its observational catalog entry isn't on this machine's search path
 (`osk.catalog.search_paths()`), or the comparison itself raises; `run.log` has the
 traceback. `main`'s exit code: `0` every page drew, `3` the run completed with some
 pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn
-or written).
+or written). `section:` divider pages are not counted either way -- they are neither
+"drawn" nor "skipped" as far as these codes and the `N page(s) drawn, M skipped` line
+are concerned, so a suite whose only data pages skipped is `1` however many dividers it
+has.
 
 ## CLI
 

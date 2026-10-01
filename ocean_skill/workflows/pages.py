@@ -24,6 +24,12 @@ grammar can change without changing what any of those calls do. A ``field:`` pag
 before ``.plot()`` -- so a suite page's ``then: [{extremum: min}, {series:
 ...}]`` runs exactly the Python chain ``osk.field(...).extremum("min").series(...)``
 would.
+
+A ``section:`` page is the one kind :func:`build` never draws: it has no figure, just
+a title and notes text for a divider page in ``report.pdf``. :func:`expand` templates
+both against ``defaults`` (there is no ``for_each``), and the runner hands them
+straight to :meth:`~ocean_skill.workflows.report.PdfReport.section`; :func:`build`
+refuses one outright.
 """
 
 from __future__ import annotations
@@ -670,7 +676,7 @@ class ExpandedPage:
     """One fully-resolved page: everything ``build`` needs to draw it."""
 
     title: str
-    kind: str  # "field" | "compare" | "summary"
+    kind: str  # "field" | "compare" | "summary" | "section"
     kwargs: dict[str, Any]
     plot: dict[str, Any]
     cache: bool
@@ -858,6 +864,31 @@ def expand(suite: Any) -> list[ExpandedPage]:
 
     out: list[ExpandedPage] = []
     for page in suite.pages:
+        if page.kind == "section":
+            # Handled before everything the other kinds share: a divider has no
+            # source (so no time index to read), no plot (so ``defaults.plot`` must
+            # not be merged in, and ``_pin_to_page`` must not warn about a
+            # ``defaults.plot: {zoom: ...}`` it will never apply to), and no
+            # ``for_each`` (the schema already refused one). Title and notes are
+            # templated against ``defaults`` alone.
+            title = _template_value(page.title, defaults, title=page.title)
+            text = _template_value(page.section, defaults, title=title)
+            if not isinstance(text, str):
+                raise ValueError(
+                    f"page {title!r}: section: must resolve to text, got "
+                    f"{type(text).__name__} ({page.section!r})"
+                )
+            out.append(
+                ExpandedPage(
+                    title=title,
+                    kind="section",
+                    kwargs={"text": text},
+                    plot={},
+                    cache=False,
+                )
+            )
+            continue
+
         page_source = None
         if page.kind == "field":
             page_source = (page.field or {}).get("source", test_source)
@@ -1047,6 +1078,9 @@ def _extremum_record(ext: Any) -> dict[str, Any]:
 def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = None):
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
+    A ``section`` page has nothing to draw and raises :class:`ValueError` -- see the
+    module docstring.
+
     Almost always one pair (``suffix=""``); a ``compare`` page whose comparisons
     span more than one plot family draws one figure per family instead (see
     :meth:`ocean_skill.comparison.ComparisonSet.plot`), each suffixed by its
@@ -1072,6 +1106,12 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
     ``manifest.json`` too) -- the one place in this chain that is inherently
     data-dependent and so cannot have been resolved by :func:`expand`.
     """
+    if page.kind == "section":
+        raise ValueError(
+            f"page {page.title!r}: a section: page is a divider in report.pdf, not "
+            "a figure -- the runner hands it to PdfReport.section(), never build()"
+        )
+
     import ocean_skill as osk
 
     if page.kind == "field":

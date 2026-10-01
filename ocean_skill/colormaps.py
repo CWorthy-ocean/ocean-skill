@@ -92,7 +92,11 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "silicate": "cmo.tempo",
     "ammonium": "cmo.dense",
     "iron": "cmo.amp",
-    "oxygen": "cmo.gray_r",
+    # Dark is low, light is high -- cmo.gray, not its reverse. The reverse (gray_r)
+    # drew low oxygen as white, which on a white page reads as "nothing there" for the
+    # one quantity whose low end (hypoxia) is the thing to see. The substring key also
+    # covers oxygen_saturation, the other "oxygen" standard_name.
+    "oxygen": "cmo.gray",
     # "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water": "cmo.oxy",
     "dissolved_inorganic_carbon": "cmo.ice_r",
     "sea_water_alkalinity_expressed_as_mole_equivalent": "cmo.matter",

@@ -315,6 +315,29 @@ secondary axis by default, three or more each get their own row (see
 `docs/plot_styling_reference.md`). There is no separate multi-variable option to
 learn — the same `.plot()` keyword arguments (`rows=`, `cols=`, `secondary_y=`) apply.
 
+**A whole-domain mean through time, at several depths.** `aggregate={"lon": "mean",
+"lat": "mean"}` on a model grid is one area-weighted mean of the whole domain (true cell
+area where the grid carries it, `cos(latitude)` otherwise), not a station, and a depth *list* keeps one line
+per level — `"surface"` is allowed in it, alongside depths in metres:
+
+```python
+osk.field(
+    "run_new", ["temperature", "salinity", "oxygen"],
+    select={"depth": ["surface", 100, 200]},
+    aggregate={"lon": "mean", "lat": "mean"},
+).plot()
+# three panels (one per variable), each with three lines: surface, 100 m, 200 m
+# panel titles read e.g. "temperature · domain mean · 2010-07 to 2010-10"
+```
+
+The panel title says `domain mean` rather than naming a position (a whole-domain mean has
+none); a mean over a box — `select={"lon": {"min": 165, "max": 175}, "lat": {"min": 5,
+"max": 15}}` — reads `mean over 5–15°N, 165–175°E` instead. The surface line is
+labelled `surface` in the legend, not `0 m`. As for any depth list, colour carries the
+variable and a marker tells the levels apart; pass `encode={"color": "depth",
+"marker": None}` to colour by level instead, and `rows="variable"` to drop the variable
+name from each legend entry (the panel title already says it).
+
 **Nothing is reduced unless you ask** — for an `osk.field()` call itself: an unset
 `select`/`aggregate` leaves every native level and every native step standing, unlike
 `compare()`'s own unset vertical default (the surface). The one exception is `.plot()`/
@@ -598,6 +621,20 @@ ext.series(variables=["salinity"]).plot()          # add a line, same place/wind
 ext.series(time=slice("2013-05", "2013-07")).plot()  # a wider window instead
 ```
 
+The figure carries a suptitle saying what it is a series *of* — each panel's own title
+names only a place and a period, which on its own reads like a station record or a
+domain-wide trend:
+
+```
+Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at 16.1°N 97.6°E on 2010-10-31
+```
+
+The depth phrase (`surface`, `100 m`) is the parent field's own single-level
+`select={"depth": ...}` and is left out for none, a band or a list; a `local=True` hit
+reads `local minimum`, and the second of an `n=` search `minimum (#2)`. Pass
+`title="..."` to `.plot()` (`ext.plot(title="Where it bottoms out")`, or a suite page's
+`plot: {title: ...}`) to replace it, or `title=""` for none.
+
 A field already reduced to one place (see `Field.family`) has nothing left to search
 spatially, and `.extremum()` says so rather than returning the one value `.plot()`
 already shows.
@@ -737,14 +774,19 @@ osk.compare(
         "test": {"calculate": "mld", "method": "density_threshold"},
         "reference": "mld_by_sigma_theta",   # the name its catalog gives mld_dt_mean
     }],
-    aggregate={"time": "mean"},
+    select={"test": {"time": "2010-08"}, "reference": {"month": 8}},
+    aggregate={"test": {"time": "mean"}, "reference": {}},
 )
 ```
 
 Both sides resolve to `ocean_mixed_layer_thickness_defined_by_sigma_theta` — the same
 criterion variable, and at the calculator's defaults the same threshold as `mld_dt_mean`
-— so this scores like against like. (`holte_talley_mld_clim` is a catalog you build once;
-see "Catalogs" below for the one that gives the file's `mld_dt_mean` that name.)
+— so this scores like against like. The two sides are narrowed differently because they
+are different kinds of time: the model run is a record (August 2010, averaged over its
+steps) and the Argo product is a climatology whose time axis is the calendar `month`,
+so the reference picks August with `{"month": 8}` and has nothing left to reduce.
+(`holte_talley_mld_clim` is a catalog you build once, with `month` as a real axis; see
+"Catalogs" below for the one that gives the file's `mld_dt_mean` that name.)
 
 `standard_name` is optional here — both sides already agree, and the test side names
 the figure. Set it to name the figure and its labels yourself
@@ -866,28 +908,49 @@ wins for the variables it names and the rest of the probed map stays — and a v
 renames also has its own `standard_name` attribute set to the catalog's name when the
 source is read. The Holte & Talley Argo mixed-layer-depth climatology needs exactly
 this: its `standard_name` attributes just repeat each variable's own name, so its
-density-threshold field `mld_dt_mean` has to be told what it is:
+density-threshold field `mld_dt_mean` has to be told what it is. It also stores `lat`,
+`lon` and `month` (1 to 12) as plain variables on dimensions with no coordinates
+(`iLAT`, `iLON`, `iMONTH`), so a bare URL leaves nothing to select a month, a point or a
+box on. Pass a reader *chain* as `"reader"` instead of a `url`: it reads the
+file, promotes the three to coordinates and swaps them in for the index dimensions, so
+`month` becomes a selectable axis (`select={"month": 8}`):
 
 ```python
+from intake.readers import datatypes, readers
 from ocean_skill import build
+
+URL = "simplecache::https://mixedlayer.ucsd.edu/data/Argo_mixedlayers_monthlyclim_04142022.nc"
+ht = (
+    readers.XArrayDatasetReader(
+        datatypes.HDF5(url=URL),
+        engine="scipy",         # a classic netCDF3 file; h5netcdf can't read it
+        decode_times=False,     # `month` is a plain 1-12 axis, not a date
+        chunks={},
+    )
+    .set_coords(["lat", "lon", "month"])
+    .swap_dims({"iLAT": "lat", "iLON": "lon", "iMONTH": "month"})
+)
 
 build.build_catalog(
     {
         "holte_talley_mld_clim": {
-            "url": "simplecache::https://mixedlayer.ucsd.edu/data/"
-                   "Argo_mixedlayers_monthlyclim_04142022.nc",
-            "climatology": True,
+            "reader": ht,
             "standard_names": {
                 "mld_dt_mean": "ocean_mixed_layer_thickness_defined_by_sigma_theta",
             },
+            "climatology": True,
+            "doi": "10.1002/2017GL073426",
         },
     },
     "catalogs/mld_climatologies.yaml",
-    reader_kwargs={"engine": "scipy"},  # a classic netCDF3 file; h5netcdf can't read it
     title="Global mixed layer depth climatologies",
-    name_map=None,                      # not ROMS output: skip the ROMS name fallback
+    name_map=None,                  # not ROMS output: skip the ROMS name fallback
 )
 ```
+
+The chain is saved into the catalog entry itself (it is an ordinary intake pipeline),
+so nothing about it needs repeating at read time. `HDF5` is only the vehicle for the
+URL here — the `engine="scipy"` is what actually reads the classic file.
 
 `osk.find(variable="mld_by_sigma_theta")` now finds it, and `"mld_by_sigma_theta"` is the
 name the pair-spec above reads it by.

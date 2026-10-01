@@ -403,9 +403,23 @@ def _depth_channel(item: dict[str, Any]) -> float | str | None:
     coloured by that instead. A scalar/list depth keeps :func:`_depth_of`'s realized
     number -- the nearest real level an observational product actually reports at
     can differ from what was asked for, which the label alone would hide.
+
+    ``item["depth_label"]`` (set by :meth:`ocean_skill.field.Field._series_items`
+    from a vertical coordinate's ``level_labels``) is the third spelling and the
+    narrowest: a mixed ``["surface", 100, 200]`` list, whose surface layer carries
+    the numeric coordinate ``z = 0`` only because the axis has to stay numeric. The
+    realized number would label that line ``"0 m"``; the label ``"surface"`` is
+    what was asked for, and since the other levels' labels are the same
+    ``"100 m"``/``"200 m"`` the number would have printed, every line in the figure
+    is keyed on the same kind of value, so colour and marker still tell them apart.
+    A band label wins if both are somehow present: it is the older and more
+    specific statement.
     """
     band = item.get("depth_band")
-    return band if band is not None else _depth_of(item["aligned"])
+    if band is not None:
+        return band
+    label = item.get("depth_label")
+    return label if label is not None else _depth_of(item["aligned"])
 
 
 def season_of(aligned) -> str | None:
@@ -612,12 +626,21 @@ def _place_of(da) -> str:
     coords) is checked first, so it reads ``"mean over 45–55°N, 165°E–155°W"``
     instead. "mean over" is load-bearing, not decoration: without it the title
     is indistinguishable from a real station's.
+
+    A mean with *no* box (``attrs["spatial_mean"]`` set, no ``region``) is the whole
+    domain, and :func:`~ocean_skill.operators._horizontal_mean` parks its scalar
+    lon/lat at the domain's bounding-box midpoint -- on a curvilinear grid that can
+    be open ocean far from anything sampled, and on one straddling the dateline a
+    spot on the wrong side of the world. That midpoint is bookkeeping, not a place,
+    so this reads ``"domain mean"`` and never prints it.
     """
     region = da.attrs.get("region")
     if region is not None:
         from ocean_skill.comparison import _region_label
 
         return f"mean over {_region_label(region)}"
+    if da.attrs.get("spatial_mean"):
+        return "domain mean"
 
     from ocean_skill.align import _lat_name, _lon_name
 
@@ -627,10 +650,19 @@ def _place_of(da) -> str:
     lon, lat = da.coords.get(lon_name), da.coords.get(lat_name)
     if lon is None or lat is None or lon.dims or lat.dims:
         return ""
-    lon_v, lat_v = float(lon), float(lat)
+    return lonlat_label(float(lon), float(lat))
+
+
+def lonlat_label(lon: float, lat: float) -> str:
+    """``"50.0°N 144.2°W"`` -- a position spelled as the panel titles spell a station.
+
+    Factored out of :func:`_place_of` so the other places that name a position (the
+    default title of an :meth:`ocean_skill.extrema.Extremum.series`) read exactly
+    like the panel titles under it rather than drifting into a second format.
+    """
     return (
-        f"{abs(lat_v):.1f}°{'N' if lat_v >= 0 else 'S'} "
-        f"{abs(lon_v):.1f}°{'E' if lon_v >= 0 else 'W'}"
+        f"{abs(lat):.1f}°{'N' if lat >= 0 else 'S'} "
+        f"{abs(lon):.1f}°{'E' if lon >= 0 else 'W'}"
     )
 
 

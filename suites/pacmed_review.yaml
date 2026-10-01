@@ -1,0 +1,214 @@
+# PACMED review: domain-mean trends, the alkalinity extremes and their time series,
+# model-only snapshots at the surface / 100 m / 200 m, and the early observation
+# comparisons (satellite chlorophyll, Holte & Talley mixed layer depth, WOA23
+# nutrients, GLODAPv2 carbon), organized into PDF sections with divider pages.
+#
+# Run it:
+#     ocean-skill-run suites/pacmed_review.yaml --list    # check the page list first
+#     ocean-skill-run suites/pacmed_review.yaml
+#
+# Every run writes its own report directory under output_dir (nothing is ever
+# overwritten) with report.pdf, figures/*.png, metrics/*.csv, a copy of this file,
+# manifest.json, and a refs/ copy of the kerchunk reference as it was when the report
+# was drawn. See docs/suites.md for the full grammar, including section: pages.
+#
+# Before you run it:
+#   (a) The Holte & Talley catalog entry must expose `month` as a dimension. Rebuild
+#       it with the reader chain
+#           .set_coords(["lat", "lon", "month"]).swap_dims(
+#               {"iLAT": "lat", "iLON": "lon", "iMONTH": "month"})
+#       (see the README's Holte & Talley recipe). Without it the mixed layer depth
+#       pages are skipped.
+#   (b) The chlorophyll page reads Copernicus Marine, so log in once first:
+#           copernicusmarine login
+#   (c) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH. Without it the run warns
+#       and leaves the PDF lossless.
+#
+# The page count grows with the run: one mixed layer depth page and two WOA pages per
+# calendar month. For a long run, bound them with `month: {run: {last: N}}` in the
+# for_each of those pages.
+#
+# Lines to edit for your own run: refresh: (output and grid paths), defaults.test
+# (must match a name under refresh.sources), output_dir, catalog_search_paths.
+
+name: pacmed-review
+output_dir: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/diagnostics
+# output_dir: /anvil/projects/x-ees250133/PACMED_1yr/depth_interp/diagnostics
+pdf_images: jpeg
+catalog_search_paths:
+  - /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs
+cache_dir: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/diagnostics
+# cache_dir: /anvil/projects/x-ees250133/PACMED_1yr/depth_interp/diagnostics
+
+refresh:
+  catalog: /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs/pacmed-alltherest.yaml
+  # catalog: /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs/PACMED_1yr.yaml
+  sources:
+    - name: all_the_rest
+      files: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/output/output_rst.*.nc
+      grid: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/input/input_datasets/PACMED12km_grid.nc
+      ref: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/diagnostics/kerchunk.parquet
+      keep: latest-per-file  # restart files: keep each file's main (not repeated) time step
+
+defaults:
+  test: all_the_rest
+  depths: [surface, 100]
+
+pages:
+  # -- domain-wide trends ---------------------------------------------------------
+  - title: "Domain-wide trends"
+    section: >-
+      Area-weighted means over the whole model domain at each restart snapshot, at
+      the surface (the top model level), at 100 m and at 200 m. A mean at depth
+      covers only the water deeper than that depth, so the 100 m and 200 m lines
+      leave out the shallower parts of the domain.
+
+  - title: "Domain-mean time series"
+    field:
+      variables: [temperature, salinity, nitrate, alkalinity, dissolved_inorganic_carbon,
+                  {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}]
+      select: {depth: [surface, 100, 200]}   # explicit list -> one line per depth
+      aggregate: {lon: mean, lat: mean}      # one area-weighted whole-domain mean
+    plot:
+      title: "Domain-mean time series (area-weighted): surface, 100 m, 200 m"
+      rows: variable           # one panel per variable, one shared legend for the depths
+      encode: {color: depth}   # colour (and marker) tell surface / 100 m / 200 m apart
+
+  # -- extreme values -------------------------------------------------------------
+  - title: "Extreme values"
+    section: >-
+      Where surface alkalinity is lowest and highest at the latest snapshot, and how
+      dissolved inorganic carbon, temperature, salinity and nitrate evolved at that
+      one grid point. These are point time series at the location of the extremum,
+      not domain means.
+
+  - title: "Alkalinity minimum — time series"
+    field:
+      variables: [alkalinity]
+      select: {depth: surface, time: latest}
+    then:
+      - extremum: min
+      - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate]}
+
+  - title: "Alkalinity maximum — time series"
+    field:
+      variables: [alkalinity]
+      select: {depth: surface, time: latest}
+    then:
+      - extremum: max
+      - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate]}
+
+  # -- model snapshots: surface, 100 m, 200 m ---------------------------------------
+  # &name defines a YAML anchor and *name reuses it: the three snapshot groups share one variable list and plot block.
+  - title: "Model snapshots — surface"
+    section: >-
+      Every restart snapshot of the model on its own, with no observations. Colour
+      limits are shared across the snapshots of a variable, set robustly so a few
+      extreme cells do not wash out the rest of the map.
+
+  - title: "Snapshot — {variable} (surface)"
+    for_each:
+      variable: &snapshot_variables
+        - temperature
+        - salinity
+        - nitrate
+        - phosphate
+        - oxygen
+        - dissolved_inorganic_carbon
+        - alkalinity
+    field:
+      variables: ["{variable}"]
+      select: {depth: surface}
+    plot: &snapshot_plot {shared_limits: true, robust: true, colorbar_label_clipped: true}
+
+  - title: "Model snapshots — 100 m"
+    section: >-
+      The same snapshots at 100 m, with the same shared, robust colour limits.
+
+  - title: "Snapshot — {variable} (100 m)"
+    for_each:
+      variable: *snapshot_variables
+    field:
+      variables: ["{variable}"]
+      select: {depth: 100}
+    plot: *snapshot_plot
+
+  - title: "Model snapshots — 200 m"
+    section: >-
+      The same snapshots at 200 m, with the same shared, robust colour limits.
+
+  - title: "Snapshot — {variable} (200 m)"
+    for_each:
+      variable: *snapshot_variables
+    field:
+      variables: ["{variable}"]
+      select: {depth: 200}
+    plot: *snapshot_plot
+
+  # -- chlorophyll and mixed layer depth vs observations -------------------------------
+  - title: "Chlorophyll and mixed layer depth vs observations"
+    section: >-
+      Chlorophyll: each snapshot against the same day of the Copernicus gap-free L4
+      satellite chlorophyll product (chl_gapfree_my_daily_geo). Mixed layer depth:
+      the model's density-threshold depth (0.03 kg/m3 change in sigma-theta from
+      10 m) in each month against that calendar month of the Holte and Talley Argo
+      climatology (mld_dt_mean, which uses the same criterion).
+
+  - title: "Chlorophyll vs satellite — each snapshot"
+    compare:
+      reference: chl_gapfree_my_daily_geo
+      variables:
+        - {test: {sum: [spChl, diatChl, diazChl]}, reference: chlorophyll,
+           standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}
+      select: {test: {depth: surface}, reference: {}}
+      times: {resample: 1D, reduce: mean}   # one comparison (row) per snapshot day
+
+  - title: "Mixed layer depth vs Holte & Talley — {month.name} {month.year}"
+    for_each: {month: run}
+    compare:
+      reference: holte_talley_mld_clim
+      variables:
+        - {test: {calculate: mld, method: density_threshold}, reference: mld_by_sigma_theta}
+      select:
+        test: {time: "{month.window}"}
+        reference: {month: "{month.month}"}
+      aggregate: {test: {time: mean}, reference: {}}
+
+  # -- nutrients vs WOA23 -----------------------------------------------------------
+  - title: "Nutrients vs WOA23"
+    section: >-
+      The model's monthly mean (here, the one restart snapshot in each month)
+      against the WOA23 monthly climatology for that calendar month, at the surface
+      and at 100 m.
+
+  - title: "Nutrients vs WOA23 — {month.name} {month.year} ({depth.label})"
+    for_each:
+      month: run
+      depth: "{depths}"
+    compare:
+      reference:
+        - woa23_nitrate_month{month.mm}
+        - woa23_phosphate_month{month.mm}
+        - woa23_silicate_month{month.mm}
+        - woa23_oxygen_month{month.mm}
+      variables: [nitrate, phosphate, silicate, oxygen]
+      select:
+        test: {depth: "{depth}", time: "{month.window}"}
+        reference: {depth: "{depth}"}
+      aggregate: {time: mean}
+
+  # -- carbon vs GLODAPv2 -----------------------------------------------------------
+  - title: "Carbon vs GLODAPv2"
+    section: >-
+      GLODAPv2.2016b is a climatology, not a record of a particular year, so the
+      model is averaged over the whole run before it is compared, at the surface and
+      at 100 m.
+
+  - title: "Alkalinity & DIC vs GLODAPv2 — run mean ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference: [glodap]
+      variables: [alkalinity, dissolved_inorganic_carbon]
+      depths: ["{depth}"]
+      aggregate: {time: mean}

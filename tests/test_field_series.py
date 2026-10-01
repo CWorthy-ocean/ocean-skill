@@ -859,3 +859,347 @@ def test_plot_is_unchanged_and_silent_when_every_member_is_available(stub, unava
         fig = fs.plot()
     assert len(fig.axes) == 1
     assert len(fig.axes[0].lines) == 2
+
+
+# -- FieldSet.title: a default title the set carries ------------------------------
+#
+# Set by whatever built the set and knows something its panels cannot say (an
+# Extremum's series names the extremum -- see tests/test_extrema.py). These pin the
+# FieldSet half of that contract: it is a setdefault that every branch of plot() sees.
+
+
+def _suptitles(fs, **kwargs):
+    """Return the figure title from each renderer, as ``(static, interactive)``."""
+    fig = fs.plot(**kwargs)
+    static = fig._suptitle.get_text() if fig._suptitle is not None else None
+    obj = fs.plot(renderer="holoviews", **kwargs)
+    return static, obj.opts.get("plot").kwargs.get("title")
+
+
+def test_a_set_without_a_title_draws_none(stub):
+    stub(_point_series())
+    fs = _make_set([NITRATE, SILICATE])
+    assert fs.title is None
+    assert _suptitles(fs) == (None, "")
+
+
+def test_a_set_title_is_the_default_figure_title_in_both_renderers(stub):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    fs = FieldSet(list(_make_set([NITRATE, SILICATE])), title="Why this is here")
+    assert _suptitles(fs) == ("Why this is here", "Why this is here")
+    assert _suptitles(fs, title="Mine") == ("Mine", "Mine")  # a caller's title wins
+    static, interactive = _suptitles(fs, title="")  # ...and "" really means none
+    assert not static and not interactive
+
+
+def test_a_set_title_survives_sel(stub):
+    from ocean_skill.field import FieldSet
+
+    stub(_point_series())
+    fs = FieldSet(list(_make_set([NITRATE, SILICATE])), title="Kept")
+    assert fs.sel(variable=NITRATE).title == "Kept"
+    assert _suptitles(fs.sel(variable=NITRATE)) == ("Kept", "Kept")
+
+
+def test_a_set_title_reaches_the_lone_map_branch_too(stub):
+    """A one-member set of maps hands off to Field.plot, which must see the title."""
+    from ocean_skill.field import FieldSet
+
+    stub(_gridded_map(nt=1))
+    members = list(_make_set([NITRATE], select={"time": "2012-01"}))
+    fs = FieldSet(members, title="Map set")
+    assert fs.plot()._suptitle.get_text() == "Map set"
+    assert fs.plot(title="Own")._suptitle.get_text() == "Own"
+
+
+# -- domain-mean series: panel title and depth legend -----------------------------
+#
+# aggregate={"lon": "mean", "lat": "mean"} on a ROMS grid is one area-weighted mean of
+# the whole domain (operators._horizontal_mean), which parks its scalar lon/lat at the
+# bounding-box midpoint. That midpoint is bookkeeping, not a station -- on a dateline-
+# straddling Pacific domain it is a spot nowhere near the data -- so the panel must not
+# title it as one. And an explicit ["surface", 100, 200] list keeps a numeric z = 0 for
+# the surface, spelled honestly in the coordinate's level_labels, which the legend must
+# read instead of printing "0 m".
+
+SPATIAL_MEAN = "area-weighted mean (cell_area)"
+LEVEL_LABELS = ["surface", "100 m", "200 m"]
+
+
+def _domain_mean_levels(
+    *,
+    labels=LEVEL_LABELS,
+    depths=(0.0, -100.0, -200.0),
+    n: int = 6,
+    region=None,
+    lon: float = 166.0,
+    lat: float = 10.0,
+):
+    """Build what a whole-domain mean of a mixed-depth-list ROMS field leaves.
+
+    ``z`` is the signed model coordinate (``comparison._surface_and_levels``), the
+    scalar lon/lat the bounding-box midpoint ``_horizontal_mean`` assigns, and
+    ``spatial_mean`` the description it leaves in attrs -- plus ``region`` only when
+    a select box drove the mean.
+    """
+    time = pd.date_range("2010-07-01", periods=n, freq="MS")
+    z_attrs = {} if labels is None else {"level_labels": list(labels)}
+    values = 8.0 + np.random.default_rng(2).normal(0, 1, (n, len(depths)))
+    attrs = {"units": "degC", "spatial_mean": SPATIAL_MEAN}
+    if region is not None:
+        attrs["region"] = list(region)
+    da = xr.DataArray(
+        values,
+        dims=("time", "z"),
+        coords={"time": time, "z": ("z", np.array(depths), z_attrs)},
+        name=NITRATE,
+        attrs=attrs,
+    )
+    return da.assign_coords(lon=lon, lat=lat)
+
+
+def _mpl_panels(fig):
+    """``[(title, [line labels]), ...]`` per drawn axes, twin axes folded in."""
+    return [
+        (ax.get_title(), [ln.get_label() for ln in ax.get_lines()])
+        for ax in fig.axes
+        if ax.get_lines() and not ax.get_label().startswith("_")
+    ]
+
+
+def _hv_panels(obj):
+    """Return the same ``[(title, [curve labels]), ...]`` from the hv object."""
+    import holoviews as hv
+
+    return [
+        (
+            overlay.opts.get("plot").kwargs.get("title"),
+            [c.label for c in overlay.traverse(lambda x: x, [hv.Curve])],
+        )
+        for overlay in obj.traverse(lambda x: x, [hv.Overlay])
+    ]
+
+
+def _legend_texts(ax):
+    legend = ax.get_legend()
+    return [t.get_text() for t in legend.get_texts()] if legend else []
+
+
+def test_a_domain_mean_series_is_titled_a_domain_mean_not_a_station(stub):
+    stub(_domain_mean_levels())
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    ((title, _),) = _mpl_panels(fs.plot())
+    ((hv_title, _),) = _hv_panels(fs.plot(renderer="holoviews"))
+    assert title == hv_title
+    assert "domain mean" in title
+    assert "2010-07 to 2010-12" in title
+    # The bounding-box midpoint is not a place anyone sampled; it must not be printed.
+    assert "°N" not in title and "°E" not in title and "°W" not in title
+
+
+def test_a_box_mean_keeps_reading_mean_over_its_region(stub):
+    from ocean_skill.comparison import _region_label
+
+    region = [165.0, 5.0, 175.0, 15.0]
+    stub(_domain_mean_levels(region=region))
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    ((title, _),) = _mpl_panels(fs.plot())
+    ((hv_title, _),) = _hv_panels(fs.plot(renderer="holoviews"))
+    assert title == hv_title
+    assert f"mean over {_region_label(region)}" in title
+    assert "domain mean" not in title
+
+
+def test_a_real_station_still_titles_its_place(stub):
+    """No ``spatial_mean`` attr -> unchanged: a point is a place."""
+    stub(_point_series())
+    ((title, _),) = _mpl_panels(_make_set([NITRATE]).plot())
+    assert "50.0°N" in title and "144.2°W" in title
+    assert "domain mean" not in title
+
+
+def test_a_mixed_depth_list_legend_reads_surface_not_zero_m(stub):
+    stub(_domain_mean_levels())
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    fig = fs.plot()
+    ((_, static_lines),) = _mpl_panels(fig)
+    ((_, hv_curves),) = _hv_panels(fs.plot(renderer="holoviews"))
+    assert static_lines == LEVEL_LABELS  # in the order asked for, labels exactly
+    assert hv_curves == static_lines
+    assert _legend_texts(fig.axes[0]) == LEVEL_LABELS
+    assert "0 m" not in static_lines
+
+
+def test_the_levels_are_told_apart_by_marker_and_by_colour_on_request(stub):
+    """Same channels as a numeric list: colour is the variable, marker the depth."""
+    stub(_domain_mean_levels())
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    lines = _mpl_panels_lines(fs.plot())
+    assert len({marker for _, _, marker in lines}) == 3
+    # encode={"color": "depth"} keys colour on the labels, one hue per level.
+    by_colour = _mpl_panels_lines(fs.plot(encode={"color": "depth", "marker": None}))
+    assert len({colour for _, colour, _ in by_colour}) == 3
+    assert [label for label, _, _ in by_colour] == LEVEL_LABELS
+
+
+def _mpl_panels_lines(fig):
+    return [
+        (ln.get_label(), ln.get_color(), ln.get_marker())
+        for ax in fig.axes
+        for ln in ax.get_lines()
+    ]
+
+
+def test_several_variables_give_a_panel_each_with_the_three_depths(stub):
+    """The motivating call: ``[temperature, salinity, ...]`` over three depths."""
+    stub(_domain_mean_levels())
+    fs = _make_set(
+        [NITRATE, SILICATE, "oxygen"],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    static = _mpl_panels(fs.plot())
+    interactive = _hv_panels(fs.plot(renderer="holoviews"))
+    assert len(static) == len(interactive) == 3
+    assert static == interactive
+    for title, labels in static:
+        assert "domain mean" in title
+        assert len(labels) == 3
+        # the variable is still in each entry here (it varies across the figure);
+        # what changed is that the surface line says "surface".
+        assert [label.split(" · ")[-1] for label in labels] == LEVEL_LABELS
+    # Faceting on variable drops it from the entries: exactly the three depths.
+    faceted = _mpl_panels(fs.plot(rows="variable"))
+    assert all(labels == LEVEL_LABELS for _, labels in faceted)
+    assert all(labels == LEVEL_LABELS for _, labels in _hv_panels(
+        fs.plot(rows="variable", renderer="holoviews")
+    ))
+
+
+def test_a_plain_numeric_depth_list_reads_as_it_always_did(stub):
+    stub(_domain_mean_levels(labels=None, depths=(0.0, 100.0, 200.0)))
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": [0, 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    ((_, static_lines),) = _mpl_panels(fs.plot())
+    ((_, hv_curves),) = _hv_panels(fs.plot(renderer="holoviews"))
+    assert static_lines == ["0 m", "100 m", "200 m"]
+    assert hv_curves == static_lines
+
+
+def test_labels_that_no_longer_match_the_axis_are_ignored(stub):
+    """A stale ``level_labels`` (axis narrowed since) must not mislabel anything."""
+    stub(_domain_mean_levels(labels=["surface", "100 m"]))  # three levels, two labels
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    ((_, labels),) = _mpl_panels(fs.plot())
+    assert labels == ["0 m", "100 m", "200 m"]
+
+
+def test_each_series_item_carries_its_levels_label(stub):
+    stub(_domain_mean_levels())
+    fs = _make_set(
+        [NITRATE],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    assert [item["depth_label"] for item in fs._items()] == LEVEL_LABELS
+    # the realized number stays on the item too (stats, other consumers)
+    assert [item["aligned"].attrs["actual_depth"] for item in fs._items()] == [
+        0.0, 100.0, 200.0
+    ]
+
+
+# -- ...and end to end, through the real vertical transform and spatial mean -------
+
+
+def _roms_time_column(n: int = 5):
+    """Build a tiny ROMS-shaped dataset with time (test_depth_average.py's grid)."""
+    n_s, hc, theta_s, theta_b = 20, 250.0, 5.0, 2.0
+
+    def stretch(s):
+        c = (1 - np.cosh(theta_s * s)) / (np.cosh(theta_s) - 1)
+        return (np.exp(theta_b * c) - 1) / (1 - np.exp(-theta_b))
+
+    sigma_r = (np.arange(1, n_s + 1) - n_s - 0.5) / n_s
+    sigma_w = np.linspace(-1, 0, n_s + 1)
+    shape = (n, n_s, 2, 2)
+    dims = ("time", "s_rho", "eta_rho", "xi_rho")
+    rng = np.random.default_rng(3)
+    ds = xr.Dataset(
+        {
+            "temp": (dims, 10 + rng.random(shape), {"units": "degC"}),
+            "salt": (dims, 34 + rng.random(shape), {"units": "PSU"}),
+            "h": (("eta_rho", "xi_rho"), np.array([[2e3, 3e3], [4e3, 5e3]])),
+            "mask_rho": (("eta_rho", "xi_rho"), np.ones((2, 2))),
+            "sigma_r": (("s_rho",), sigma_r),
+            "Cs_r": (("s_rho",), stretch(sigma_r)),
+            "sigma_w": (("s_w",), sigma_w),
+            "Cs_w": (("s_w",), stretch(sigma_w)),
+        },
+        coords={
+            "time": pd.date_range("2010-07-01", periods=n, freq="MS"),
+            "lon": (("eta_rho", "xi_rho"), np.array([[-95.0, -94.0], [-95.0, -94.0]])),
+            "lat": (("eta_rho", "xi_rho"), np.array([[25.0, 25.0], [26.0, 26.0]])),
+        },
+    )
+    return ds, {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": hc}}
+
+
+def test_a_roms_domain_mean_over_surface_100_200_end_to_end(monkeypatch):
+    """Run a ROMS domain mean over surface/100/200 through the real pipeline.
+
+    ``osk.field(src, [temp, salt], select={"depth": ["surface", 100, 200]},
+    aggregate={"lon": "mean", "lat": "mean"}).plot()`` -- the real pipeline's attrs
+    (spatial_mean, the z coordinate's level_labels) must be what the plot reads.
+    """
+    from ocean_skill import comparison
+
+    ds, meta = _roms_time_column()
+    monkeypatch.setattr(
+        comparison,
+        "prepare_source",
+        lambda source, variable, select, aggregate, **k: comparison._prepare(
+            ds, meta, variable, select, aggregate
+        ),
+    )
+    monkeypatch.setattr(comparison, "_variable_available", lambda *a, **k: True)
+    fs = _make_set(
+        ["temp", "salt"],
+        select={"depth": ["surface", 100, 200]},
+        aggregate={"lon": "mean", "lat": "mean"},
+    )
+    assert fs[0].data["z"].attrs["level_labels"] == LEVEL_LABELS
+    assert fs[0].data.attrs["spatial_mean"]
+    assert "region" not in fs[0].data.attrs
+
+    static = _mpl_panels(fs.plot(secondary_y=False))
+    interactive = _hv_panels(fs.plot(secondary_y=False, renderer="holoviews"))
+    assert static == interactive
+    assert len(static) == 2
+    for title, labels in static:
+        assert "domain mean" in title and "°N" not in title
+        assert [label.split(" · ")[-1] for label in labels] == LEVEL_LABELS

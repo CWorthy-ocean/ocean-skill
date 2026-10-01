@@ -517,6 +517,151 @@ def test_plot_shortcut_delegates_to_series(stub):
     assert len(fig.axes[0].lines) == 1
 
 
+# -- default suptitle: the series says it follows an extremum ------------------------
+
+
+def _suptitles(fs, **kwargs):
+    """Return the figure title from each renderer, as ``(static, interactive)``."""
+    fig = fs.plot(**kwargs)
+    static = fig._suptitle.get_text() if fig._suptitle is not None else None
+    obj = fs.plot(renderer="holoviews", **kwargs)
+    return static, obj.opts.get("plot").kwargs.get("title")
+
+
+def test_series_title_names_the_extremum_in_both_renderers(stub):
+    stub(_rectilinear_map())
+    ext = _make(select={"depth": "surface", "time": "2012-01"}).extremum("min")
+    stub(_point_series())  # the follow-on point select reduces to a series, live
+    fs = ext.series()
+    expected = (
+        "Time series at the surface nitrate minimum: -50 mmol m-3 at 40.0°N 100.0°W"
+    )
+    assert fs.title == expected
+    assert _suptitles(fs) == (expected, expected)
+
+
+def test_series_title_adds_the_snapshot_date_when_the_extremum_has_one(stub):
+    stub(_rectilinear_map(nt=3))  # the planted max sits at the second day
+    ext = _make().extremum("max")
+    assert ext.time is not None
+    stub(_point_series())
+    fs = ext.series(time="2012-01")  # time= skips the native-index lookup
+    assert fs.title == (
+        "Time series at the nitrate maximum: 50 mmol m-3 at 20.0°N 85.0°W on 2012-01-02"
+    )
+
+
+def test_date_label_reads_every_time_type_an_extremum_carries():
+    import cftime
+
+    from ocean_skill.extrema import _date_label
+
+    assert _date_label(pd.Timestamp("2010-10-31 06:00")) == "2010-10-31"
+    assert _date_label(np.datetime64("2010-10-31T06:00:00")) == "2010-10-31"
+    assert _date_label(cftime.DatetimeNoLeap(2010, 10, 30, 12)) == "2010-10-30"
+    # An undecoded numeric axis has no date in it: omit it, don't print "3652.5".
+    assert _date_label(3652.5) is None
+    assert _date_label(None) is None
+
+
+def test_series_title_depth_phrase_follows_the_parent_vertical_select(stub):
+    stub(_rectilinear_map())
+
+    def title_for(select):
+        return _make(select=select).extremum("max").series(time="2012-01").title
+
+    assert " at the surface nitrate maximum" in title_for({"depth": "surface"})
+    assert " at the 100 m nitrate maximum" in title_for({"depth": 100})
+    assert " at the 12.5 m nitrate maximum" in title_for({"Z": 12.5})
+    # No single level named -> no depth phrase at all, rather than a guess.
+    for select in (
+        {},
+        {"depth": {"min": 0, "max": 10}},
+        {"depth": [0, 50]},
+        {"depth": "column"},
+    ):
+        title = title_for(select)
+        assert title.startswith("Time series at the nitrate maximum: "), (select, title)
+
+
+def test_series_title_reads_a_single_isopycnal_as_sigma0_not_metres(stub):
+    stub(_rectilinear_map())
+    fs = _make(select={"sigma0": 26.0}).extremum("max").series(time="2012-01")
+    assert "σ₀ = 26 kg/m³ nitrate maximum" in fs.title
+    assert " m nitrate" not in fs.title
+
+
+def test_series_title_marks_local_hits_and_ranks(stub):
+    import dataclasses
+
+    stub(_rectilinear_map())
+    ext = _make(select={"depth": "surface"}).extremum("max")
+    local = dataclasses.replace(ext, mode="local", rank=2)
+    title = local.series(time="2012-01").title
+    assert "surface nitrate local maximum (#2): 50 mmol m-3" in title
+    # The first hit of a search is unranked, and a plain hit is not "local".
+    assert "(#" not in ext.series(time="2012-01").title
+    assert "local" not in ext.series(time="2012-01").title
+
+
+def test_series_title_omits_what_it_does_not_know(stub):
+    """No snapshot time -> no date; no units -> no trailing unit; both stay quiet."""
+    import dataclasses
+
+    stub(_rectilinear_map())
+    ext = _make(select={"time": "2012-01"}).extremum("max")  # a map: no time to report
+    assert ext.time is None
+    bare = dataclasses.replace(ext, units=None, lon=None, lat=None)
+    title = bare._series_title()
+    assert title == "Time series at the nitrate maximum: 50"
+    assert " on " not in title and " at " not in title.split(":", 1)[1]
+
+
+def test_plot_title_overrides_the_default_in_both_renderers(stub):
+    stub(_rectilinear_map())
+    ext = _make(select={"time": "2012-01"}).extremum("min")
+    stub(_point_series())
+    fs = ext.series()
+    assert _suptitles(fs, title="Where it bottoms out") == (
+        "Where it bottoms out",
+        "Where it bottoms out",
+    )
+    # An explicit empty title draws nothing rather than falling back to the default.
+    static, interactive = _suptitles(fs, title="")
+    assert not static and not interactive
+
+
+def test_extremum_plot_shortcut_carries_the_default_title(stub):
+    stub(_rectilinear_map())
+    ext = _make(select={"time": "2012-01"}).extremum("max")
+    stub(_point_series())
+    fig = ext.plot()
+    assert fig._suptitle.get_text().startswith("Time series at the nitrate maximum: 50")
+    assert ext.plot(title="mine")._suptitle.get_text() == "mine"
+
+
+def test_fieldset_title_survives_sel_and_the_usable_reentry(stub, monkeypatch):
+    from ocean_skill import comparison
+    from ocean_skill.field import FieldSet
+
+    stub(_rectilinear_map())
+    ext = _make(select={"time": "2012-01"}).extremum("max")
+    stub(_point_series())
+    fs = ext.series(variables=[SILICATE])
+    assert fs.title is not None
+    assert fs.sel(variable=NITRATE).title == fs.title
+    assert FieldSet(list(fs)).title is None  # a hand-built set has no default
+
+    # A member whose source lacks its variable is dropped and the set re-enters
+    # plot() as a new FieldSet -- which has to keep the title it was given.
+    monkeypatch.setattr(
+        comparison, "_variable_available", lambda *a, **k: "silicate" not in str(a[1])
+    )
+    with pytest.warns(UserWarning, match="skipping 1 field"):
+        fig = fs.plot()
+    assert fig._suptitle.get_text() == fs.title
+
+
 # -- n= and local=True: distinct places, departure from wet neighbors --------
 
 
