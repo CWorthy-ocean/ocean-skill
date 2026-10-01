@@ -358,6 +358,29 @@ def test_a_cftime_axis_bins_the_same_way_as_a_numpy_one(monkeypatch):
     assert labels == ["2010-01", "2010-02", "2010-03"]
 
 
+@pytest.mark.parametrize("use_cftime", [False, True])
+def test_sparse_snapshots_keep_only_the_bins_with_data(monkeypatch, use_cftime):
+    """Month-end restarts binned daily: 4 snapshots, 89 empty days between them.
+
+    Resample leaves the empty days NaN; they must be skipped, not selected (an empty
+    selection used to reach ``.max()`` and raise "zero-size array ...").
+    """
+    days = [(2010, 7, 31), (2010, 8, 31), (2010, 9, 30), (2010, 10, 31)]
+    if use_cftime:
+        import cftime
+
+        time = [cftime.DatetimeGregorian(*d, 23, 45) for d in days]
+    else:
+        time = pd.to_datetime([pd.Timestamp(*d, 23, 45) for d in days])
+    sparse = xr.Dataset(
+        {"v": (("time",), np.arange(4, dtype=float))}, coords={"time": time}
+    )
+    monkeypatch.setattr("ocean_skill.sources.read", lambda source, **k: sparse)
+    bins = _time_bins("restarts", "1D", None)
+    labels = [_time_select_value(s, last, "1D") for s, last in bins]
+    assert labels == ["2010-07-31", "2010-08-31", "2010-09-30", "2010-10-31"]
+
+
 def test_time_select_value_uses_a_partial_date_for_whole_calendar_units(
     monkeypatch, daily_dataset
 ):
