@@ -257,7 +257,8 @@ def to_units(da, target, *, rho: float | None = None):
     Unchanged (rather than raising) when either side is unparseable or the two are
     dimensionally unrelated — :func:`compatible` is where a caller asks the question
     and decides. Conversion goes through the ``seawater`` context so per-mass and
-    per-volume concentrations interconvert.
+    per-volume concentrations interconvert. Offset units (degC, degF) are converted by
+    value, not by a scale factor, so a K field against degC obs lands correctly.
     """
     source = da.attrs.get("units")
     ua, ub = parse(source), parse(target)
@@ -272,13 +273,22 @@ def to_units(da, target, *, rho: float | None = None):
         with _seawater(ureg):
             # float(): cf-xarray's registry hands back 0-d arrays (force_ndarray_like)
             factor = float(ureg.Quantity(1.0, ua).to(ub).magnitude)
+            shift = float(ureg.Quantity(0.0, ua).to(ub).magnitude)
+            if shift != 0.0:
+                data = ureg.Quantity(da.data, ua).to(ub).magnitude
     except Exception:
         return da  # dimensionally unrelated; the caller checks compatible()
-    out = da * factor
+    # A shifted zero (degC/degF against K) is not a scale: 10 degC is 283.15 K, not
+    # 10 x 274.15. Pint converts the values themselves; plain arithmetic on ``da.data``
+    # keeps a dask-backed array lazy.
+    if shift == 0.0:
+        out, note = da * factor, f"x{factor:g}"
+    else:
+        out, note = da.copy(data=data), "offset"
     out.attrs = dict(da.attrs)
     out.attrs["units"] = str(target)
-    if factor != 1.0:
-        out.attrs["unit_conversion"] = f"{source} -> {target} (x{factor:g})"
+    if factor != 1.0 or shift != 0.0:
+        out.attrs["unit_conversion"] = f"{source} -> {target} ({note})"
     return out
 
 

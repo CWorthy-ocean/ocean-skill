@@ -159,6 +159,33 @@ def test_to_units_leaves_unrelated_quantities_alone():
     assert out.attrs["units"] == "degC"
 
 
+@pytest.mark.parametrize(
+    ("value", "src", "tgt", "expected"),
+    [(10.0, "degC", "K", 283.15), (283.15, "K", "degC", 10.0),
+     (10.0, "degC", "degF", 50.0), (50.0, "degF", "degC", 10.0)],
+)
+def test_offset_units_convert_by_value_not_by_factor(value, src, tgt, expected):
+    """10 degC is 283.15 K; a scale factor alone would say 2741.5."""
+    out = u.to_units(_field(value, src), tgt)
+    assert np.allclose(out.values, expected)
+    assert out.attrs["units"] == tgt
+    assert out.attrs["unit_conversion"] == f"{src} -> {tgt} (offset)"
+
+
+def test_multiplicative_conversion_record_is_unchanged():
+    out = u.to_units(_field(1.0, "umol/kg"), "mmol/m^3")
+    assert out.attrs["unit_conversion"].endswith("(x1.025)")
+
+
+def test_offset_conversion_stays_lazy():
+    """A dask-backed field must not be computed by the conversion."""
+    import dask.array
+
+    out = u.to_units(_field(10.0, "degC").chunk(1), "K")
+    assert isinstance(out.data, dask.array.Array)
+    assert out.values == pytest.approx(283.15)
+
+
 # -- dissolved oxygen: a CTD's mL/L against a model's molar mmol/m3 -----------
 
 
@@ -241,6 +268,25 @@ def test_align_converts_before_differencing():
     out = _align.align(test, reference, method="bilinear")
     expected = 100.0 * u.RHO_SEAWATER / 1000.0 - 100.0
     assert float(out["difference"].mean()) == pytest.approx(expected, rel=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("test_value", "test_units", "ref_value", "ref_units"),
+    [(285.15, "K", 10.0, "degC"), (12.0, "degC", 283.15, "K")],
+)
+def test_align_differences_kelvin_against_celsius(
+    test_value, test_units, ref_value, ref_units
+):
+    """Regression: a K model against degC obs used to come out ~274x wrong.
+
+    The conversion multiplied by the 274.15 scale factor instead of shifting the
+    zero, with no warning. Both directions should now give a 2 degree difference.
+    """
+    test, reference = _pair(test_units, ref_units)
+    test = xr.full_like(test, test_value)
+    reference = xr.full_like(reference, ref_value)
+    out = _align.align(test, reference, method="bilinear")
+    assert float(out["difference"].mean()) == pytest.approx(2.0, abs=1e-6)
 
 
 def test_align_warns_but_proceeds_when_units_are_unknown():
