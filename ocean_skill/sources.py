@@ -233,7 +233,78 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         decoded = _decode_times(obj, obj[tname])
         if decoded is not None:
             obj = obj.assign_coords({tname: decoded})
+    if not is_frame:
+        obj = _with_month_coordinate(obj, meta)
     return obj
+
+
+def _with_month_coordinate(obj, meta: dict[str, Any]):
+    """Return ``obj`` with a 1-D ``month`` coordinate (1..12) on a monthly climatology.
+
+    The time axis of WOA's monthly climatology is left undecoded on purpose (see
+    :func:`ocean_skill.build._decode_times`): ``months since 1955-01-01`` names no
+    fixed span, and the twelve steps are not dates in any year. That is exactly what
+    keeps ``aggregate={"time": {"groupby": "month", ...}}`` from working on them --
+    there is no calendar to read a month from -- unless the months are given as a
+    coordinate of their own, which :func:`ocean_skill.operators._time_group_key` then
+    groups by. This supplies it.
+
+    The month is read off the time *values*, not their order in the file: a step is
+    ``floor(value)`` months after the epoch of the units, so with an epoch in month
+    ``E`` it is month ``(E - 1 + floor(value)) % 12 + 1``. WOA stamps each month at
+    its middle (``396.5`` against ``months since 1955-01-01`` is January, ``397.5``
+    February), and flooring is what takes the half-month off. The epoch's own month
+    is honoured rather than assumed to be January, since a product is free to count
+    from anywhere.
+
+    Applied to a climatology declared ``climatology_period: monthly``, and to any
+    climatology whose undecoded time has exactly twelve steps. Everything else --
+    a single month's entry, an annual climatology, a decoded calendar axis -- is
+    returned untouched, as is an object that already has a ``month``. A declared
+    monthly climatology whose time cannot be read this way (no ``months since``
+    units, or twelve steps that are not twelve different months) warns rather than
+    staying silent, since the aggregate it was built for will then fail on grouping.
+    """
+    import re
+    import warnings
+
+    import numpy as np
+
+    from ocean_skill.operators import resolve_dim
+
+    declared = str(meta.get("climatology_period") or "").lower() == "monthly"
+    if not meta.get("climatology") or "month" in getattr(obj, "coords", {}):
+        return obj
+    dim = resolve_dim(obj, "T")
+    if dim is None or dim not in obj.coords or obj.coords[dim].dims != (dim,):
+        return obj
+    time = obj.coords[dim]
+    if np.issubdtype(time.dtype, np.datetime64) or not (declared or time.size == 12):
+        return obj
+
+    match = re.match(
+        r"\s*months\s+since\s+(\d{4})-(\d{1,2})",
+        str(time.attrs.get("units", "")),
+        re.IGNORECASE,
+    )
+    months = None
+    if match and time.size == 12:
+        values = np.asarray(time.values, dtype=float)
+        if np.isfinite(values).all():
+            months = (int(match.group(2)) - 1 + np.floor(values).astype(int)) % 12 + 1
+    if months is None or len(set(months.tolist())) != 12:
+        if declared:
+            warnings.warn(
+                f"{meta.get('title') or 'a monthly climatology'} is declared "
+                "climatology_period: monthly, but its time axis does not hold twelve "
+                "different months ('months since ...' units, twelve steps), so no "
+                "'month' coordinate was added and a groupby month will not work on it.",
+                stacklevel=2,
+            )
+        return obj
+    return obj.assign_coords(
+        month=(dim, months, {"long_name": "calendar month of the climatology step"})
+    )
 
 
 #: Keys naming the time axis in a ``select``, in any accepted spelling. An entry's own

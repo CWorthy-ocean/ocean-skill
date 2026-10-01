@@ -175,11 +175,13 @@ def _collapses_vertical(select: dict[str, Any], agg: dict[str, Any] | None) -> b
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
     if not (is_depth_band(depth) or isinstance(depth, list | tuple) or is_column_request(depth)):
         return True
+    from ocean_skill.operators import final_step
+
     agg = agg or {}
     for key in _ANY_VERTICAL_KEYS:
         if key not in agg:
             continue
-        spec = agg[key]
+        spec = final_step(agg[key])
         if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
             return False
         return True
@@ -331,12 +333,19 @@ def _collapses_time(agg: dict[str, Any] | None) -> bool:
     *keep* an axis instead (a climatology, or consecutive periods -- see
     :func:`ocean_skill.operators.aggregate`), so neither disables the inference the
     mooring recipe already depends on.
+
+    An axis may take a *chain* of steps (``[{"groupby": "month", "reduce": "mean"},
+    "var"]``); the chain's last step decides what is left, so it is read through
+    :func:`ocean_skill.operators.final_step` -- the example above ends in a plain
+    reduction and so collapses time, whatever the fold before it did.
     """
+    from ocean_skill.operators import final_step
+
     agg = agg or {}
     for key in _TIME_KEYS:
         if key not in agg:
             continue
-        spec = agg[key]
+        spec = final_step(agg[key])
         if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
             return False
         return True
@@ -355,10 +364,20 @@ def _time_is_climatology(agg: dict[str, Any] | None) -> bool:
     :func:`_collapses_time` and :func:`_time_collapsed` reporting time as "not
     collapsed", but only a fold gives each bin its own well-defined depth axis --
     an un-reduced axis has no bins to facet by yet, and is left ambiguous.
+
+    A chain is read by its *last* step (:func:`ocean_skill.operators.final_step`):
+    ``[{"groupby": "month", "reduce": "mean"}, "var"]`` folds time into months
+    only on the way to a single variance, so nothing is left to facet by and this
+    is ``False`` (its :func:`_collapses_time` is ``True``); ``[{"resample": "1D",
+    "reduce": "max"}, {"groupby": "month", "reduce": "mean"}]`` ends in a fold and
+    is ``True``. Every caller pairs this with :func:`_collapses_time`, and the two
+    never both hold for one spec.
     """
+    from ocean_skill.operators import final_step
+
     agg = agg or {}
     for key in _TIME_KEYS:
-        spec = agg.get(key)
+        spec = final_step(agg[key]) if key in agg else None
         if isinstance(spec, dict) and ("groupby" in spec or "resample" in spec):
             return True
     return False
@@ -5887,7 +5906,6 @@ class Comparison:
         # which is not a depth to name, so it is dropped rather than shown as "n/a").
         raw_depth = _display_depth(self.variable, self.select)
         depth = _depth_label(raw_depth)
-        selected_time = _display_time(self.select)
         region = _display_region(self.select)
         common = {
             "metrics": self.metrics(),
@@ -5906,7 +5924,7 @@ class Comparison:
             # -- so its label is the one true answer, threaded through here rather
             # than reconstructed from the aligned data downstream.
             "depth_band": depth if is_depth_band(raw_depth) else None,
-            "time": None if selected_time is None else _time_label(selected_time),
+            "time": _display_time_title(self.select, self.aggregate),
             "region": None if region is None else _region_label(region),
             "label": self.label,
             # this comparison's own source names, for its row's column titles —
@@ -6066,8 +6084,8 @@ class Comparison:
 
     def __repr__(self) -> str:
         scored = f" over {self.over}" if self.over else ""
-        time = _display_time(self.select)
-        at_time = f" @ {_time_label(time)}" if time is not None else ""
+        time = _display_time_title(self.select, self.aggregate)
+        at_time = f" @ {time}" if time is not None else ""
         return (
             f"<Comparison {_variable_label(self.variable)[:24]} "
             f"{self.test_name} vs {self.reference_name} "
@@ -7800,6 +7818,143 @@ def _time_label(value: Any) -> str:
     return str(value)
 
 
+#: How a reduction name reads in a title -- ``"var"`` is a method name, not a word a
+#: reader of a figure should have to decode. Anything absent (``"median"``, ``"sum"``,
+#: a registered :data:`ocean_skill.operators.REDUCERS` name) is already its own word.
+_REDUCE_WORDS = {"var": "variance", "max": "maximum", "min": "minimum"}
+
+#: The plural of a reduction word, for the bins of an earlier step in a chain
+#: ("monthly means", "annual maxima"). Everything else just takes an ``s``.
+_REDUCE_PLURALS = {"max": "maxima", "min": "minima", "var": "variances"}
+
+#: Pandas frequency aliases a ``resample`` bin width is spelled with, by the period
+#: they name (leading ``1`` already stripped, case-folded) -- both the old (``AS``,
+#: ``M``) and new (``YS``, ``ME``) offset spellings, since a spec is written either way.
+_PERIOD_WORDS = {
+    **dict.fromkeys(("h",), "hourly"),
+    **dict.fromkeys(("d",), "daily"),
+    **dict.fromkeys(("w",), "weekly"),
+    **dict.fromkeys(("m", "ms", "me"), "monthly"),
+    **dict.fromkeys(("q", "qs", "qe"), "quarterly"),
+    **dict.fromkeys(("a", "as", "y", "ys", "ye"), "annual"),
+}
+
+#: ``groupby`` names, by the period they fold the record into.
+_GROUPBY_WORDS = {"month": "monthly", "season": "seasonal", "year": "yearly"}
+
+
+def _step_parts(step: Any) -> tuple[str, str | None, dict[str, Any]]:
+    """Split one aggregate step into ``(reduce name, period word, reduce kwargs)``.
+
+    The period word is ``None`` for a plain reduction (the axis is collapsed by it)
+    and an adjective ("monthly", "annual") for a ``groupby``/``resample`` step, which
+    leaves one value per bin instead.
+    """
+    if not isinstance(step, dict):
+        return str(step), None, {}
+    kwargs = {
+        k: v
+        for k, v in step.items()
+        if k not in ("reduce", "groupby", "resample", "seasons", "spread")
+    }
+    period = None
+    if "groupby" in step:
+        period = _GROUPBY_WORDS.get(str(step["groupby"]), str(step["groupby"]))
+    elif "resample" in step:
+        freq = str(step["resample"])
+        stem = freq.lstrip("0123456789")
+        period = (
+            _PERIOD_WORDS.get(stem.lower(), freq)
+            if freq[: len(freq) - len(stem)] in ("", "1")
+            else freq
+        )
+    return str(step.get("reduce", "mean")), period, kwargs
+
+
+def _reduce_word(name: str, kwargs: dict[str, Any], *, plural: bool = False) -> str:
+    """One reduction's name as a title word, ``quantile`` carrying its ``q``."""
+    word = _REDUCE_WORDS.get(name, name)
+    if name == "quantile" and "q" in kwargs:
+        word = f"{kwargs['q']:g} quantile"
+    if not plural:
+        return word
+    return _REDUCE_PLURALS.get(name, word + "s")
+
+
+def describe_aggregate(value: Any) -> str | None:
+    """Spell one axis's aggregate value for a title, read-free -- or ``None``.
+
+    Read from the *spec* alone (never the data), so a title can name the statistic a
+    map shows before anything has been computed -- a variance map would otherwise be
+    titled exactly like a mean map. ``value`` is one axis's entry of an ``aggregate=``
+    (a step, or a chain of them -- see :func:`ocean_skill.operators.final_step`).
+
+    A single plain reduction reads as its statistic ("variance", "maximum"), except
+    ``"mean"``, which is ``None``: the unremarkable default a title has never named,
+    so every existing mean title stays as it was. A single ``groupby``/``resample``
+    is ``None`` too -- the axis survives as panels that say *when* themselves. A
+    chain reads ``<final statistic> of <earlier step, as its bins>``, nesting
+    leftward through the steps::
+
+        [{"groupby": "month", "reduce": "mean"}, "var"]   variance of monthly means
+        [{"resample": "1YS", "reduce": "mean"}, "std"]    std of annual means
+        [{"resample": "1YS", "reduce": "max"}, "mean"]    mean of annual maxima
+        [{"resample": "1D", "reduce": "range"}, "mean"]   mean of daily ranges
+
+    A chain that *ends* in a ``groupby``/``resample`` names its own last step's bins
+    instead ("monthly means of daily maxima"), since those bins are what survive.
+    """
+    from ocean_skill.operators import final_step
+
+    if value is None:
+        return None
+    last = final_step(value)
+    steps = list(value) if isinstance(value, list | tuple) else [value]
+    name, period, kwargs = _step_parts(last)
+    if len(steps) == 1:
+        if period is not None or name == "mean":
+            return None
+        return _reduce_word(name, kwargs)
+    head = (
+        _reduce_word(name, kwargs)
+        if period is None
+        else f"{period} {_reduce_word(name, kwargs, plural=True)}"
+    )
+    bins = []
+    for step in reversed(steps[:-1]):
+        s_name, s_period, s_kwargs = _step_parts(step)
+        bins.append(
+            _reduce_word(s_name, s_kwargs)
+            if s_period is None
+            else f"{s_period} {_reduce_word(s_name, s_kwargs, plural=True)}"
+        )
+    return f"{head} of {' of '.join(bins)}"
+
+
+def _time_aggregate(aggregate: dict[str, Any] | None) -> Any:
+    """Return the time entry of an ``aggregate`` (a step or a chain), else ``None``."""
+    return next((aggregate[k] for k in _TIME_KEYS if k in (aggregate or {})), None)
+
+
+def _display_time_title(
+    select: dict[str, Any], aggregate: dict[str, Any] | None
+) -> str | None:
+    """Return the time part of a comparison's title: window, led by its statistic.
+
+    ``"variance of monthly means over 2012-01-01–2012-12-31"`` for a chain with a
+    window, the bare statistic without one, the window alone for the plain mean (or
+    a ``groupby``/``resample``) -- exactly the label the window alone gave before
+    :func:`describe_aggregate`, so nothing existing re-titles. ``aggregate`` is read
+    as the *test* lane's (:func:`aggregate_for`), matching :func:`_display_time`'s
+    own precedent.
+    """
+    window = _display_time(select)
+    phrase = describe_aggregate(_time_aggregate(aggregate_for(aggregate, "test")))
+    if phrase is None:
+        return None if window is None else _time_label(window)
+    return phrase if window is None else f"{phrase} over {_time_label(window)}"
+
+
 def _normalize_time_value(value: Any) -> Any:
     """Return one ``times=`` list entry in its canonical, cache-stable spelling.
 
@@ -8110,6 +8265,174 @@ def _merged_season_aggregate(
     return {**(aggregate or {}), "time": reduction}
 
 
+def _side_aggregate_label(side: dict[str, Any] | None) -> str:
+    """Spell one lane's whole aggregate for a member label: every axis, by its phrase.
+
+    :func:`describe_aggregate` is deliberately silent on the plain mean (a title has
+    never named it), which is exactly wrong for a label whose job is to tell two
+    members apart -- "mean" has to be a word here -- so a ``None`` from it falls back
+    to the step's own reduction word (``"mean"``, ``"monthly means"``). The time axis
+    reads bare; any other axis is led by its name (``"lat mean"``), since a bare
+    "mean" would not say what was averaged.
+    """
+    from ocean_skill.operators import final_step
+
+    if not side:
+        return "unaggregated"
+    parts = []
+    for axis, value in side.items():
+        phrase = describe_aggregate(value)
+        if phrase is None:
+            name, period, kwargs = _step_parts(final_step(value))
+            phrase = _reduce_word(name, kwargs, plural=period is not None)
+            if period is not None:
+                phrase = f"{period} {phrase}"
+        parts.append(phrase if axis in _TIME_KEYS else f"{axis} {phrase}")
+    return ", ".join(parts)
+
+
+def _aggregate_label(spec: Any) -> str:
+    """Spell a whole (normalized) aggregate spec as a member label.
+
+    ``{"time": "mean"}`` is ``"mean"``; ``{"time": [{"groupby": "month", "reduce":
+    "mean"}, "var"]}`` is ``"variance of monthly means"``. A pair-spec whose two
+    sides read the same is spelled once, otherwise ``"test <a>, reference <b>"``.
+    """
+    if not is_pair_spec(spec):
+        return _side_aggregate_label(spec)
+    test, reference = (
+        _side_aggregate_label(spec["test"]),
+        _side_aggregate_label(spec["reference"]),
+    )
+    return test if test == reference else f"test {test}, reference {reference}"
+
+
+def _aggregate_fan(aggregate: Any, *, caller: str) -> list[tuple[Any, str]]:
+    """Return ``[(normalized spec, label), ...]`` for a top-level ``aggregate=[...]``.
+
+    A list *at the top* of ``aggregate=`` is a fan of whole specs -- one member per
+    entry, like ``variables=``/``depths=`` -- and is never confused with a chain of
+    steps on one axis, which is a list *under* an axis (``{"time": [step, step]}``):
+    the former holds dicts (or ``None``), the latter lives inside one. Each entry is a
+    plain spec or a ``{"test", "reference"}`` pair-spec, validated and normalized the
+    way a single ``aggregate=`` is (:func:`_normalize_pair`). Entries that normalize
+    to the same spec (compared through :func:`_canonical`, the same dumps the cache
+    key and pooling use) are dropped with a note rather than drawn twice. Labels are
+    :func:`_aggregate_label`; if two distinct specs still read alike (pair-specs that
+    differ in a way the label does not show), the later ones are numbered so the
+    members stay distinguishable.
+    """
+    if not aggregate:
+        raise ValueError(
+            f"{caller} got aggregate=[] -- an empty list names no statistic to "
+            "fan over. Pass one spec, or a list of them: "
+            "aggregate=[{'time': 'mean'}, {'time': [{'groupby': 'month', "
+            "'reduce': 'mean'}, 'var']}]."
+        )
+    specs: list[Any] = []
+    seen: dict[str, int] = {}
+    for i, raw in enumerate(aggregate):
+        if raw is not None and not isinstance(raw, dict):
+            raise TypeError(
+                f"{caller}: aggregate[{i}] is {raw!r}, but a top-level aggregate list "
+                "holds whole specs (dicts), one per member. To chain steps on one "
+                "axis put the list under the axis instead: "
+                "aggregate={'time': [{'groupby': 'month', 'reduce': 'mean'}, 'var']}."
+            )
+        spec = _normalize_pair(raw, "aggregate")
+        key = _canonical(spec)
+        if key in seen:
+            print(f"  aggregate[{i}] repeats aggregate[{seen[key]}]; dropped")
+            continue
+        seen[key] = i
+        specs.append(spec)
+    labels = [_aggregate_label(s) for s in specs]
+    counts: dict[str, int] = {}
+    for n, label in enumerate(labels):
+        counts[label] = counts.get(label, 0) + 1
+        if counts[label] > 1:
+            labels[n] = f"{label} ({counts[label]})"
+    return list(zip(specs, labels, strict=True))
+
+
+def _resolve_compare_variable(v: Any) -> Any:
+    """Resolve one ``variables=`` entry to its canonical standard_name(s), once.
+
+    A string goes through the vocabulary (warning once if what was given wasn't
+    already the canonical form); a pair-spec resolves each side the same way; any
+    other dict (a combination spec) passes through. Module level so
+    :func:`_compare_aggregate_fan` can resolve up front too, and the warning fires
+    once per variable rather than once per aggregate spec the call fans over.
+    """
+    from ocean_skill.vocabulary import resolve_and_report
+
+    if isinstance(v, dict):
+        # Validated for every dict up front, not only ones that already pass
+        # is_pair_spec (which requires *both* keys and so can never itself
+        # observe a one-sided pair) -- otherwise a one-sided {"test": ...} in a
+        # multi-variable variables=[...] surfaces only later, mid-fan-out, in
+        # Comparison.__init__, after earlier variables have already aligned.
+        _require_pair_spec(v)
+    if is_pair_spec(v):
+        return {
+            **v,
+            "test": (
+                resolve_and_report(v["test"], context="compare variables=")
+                if isinstance(v["test"], str)
+                else v["test"]
+            ),
+            "reference": (
+                resolve_and_report(v["reference"], context="compare variables=")
+                if isinstance(v["reference"], str)
+                else v["reference"]
+            ),
+        }
+    return resolve_and_report(v, context="compare variables=") if isinstance(v, str) else v
+
+
+def _compare_aggregate_fan(kwargs: dict[str, Any]) -> ComparisonSet:
+    """Run :func:`compare` once per spec of a top-level ``aggregate=[...]`` list.
+
+    ``kwargs`` is the caller's whole argument set. Each spec goes through the full
+    machinery on its own (variable, depth and ``times=`` fans, profile-reference
+    defaults -- several of which read the aggregate), so a member is exactly the
+    comparison the same call with that one spec would have built, cache key included;
+    the pooled set is ordered by spec, then by whatever order that call fans in.
+    With more than one spec, each member's label gets its aggregate's phrase appended
+    (``"temperature surface variance of monthly means"``) -- with one, nothing varies
+    and the labels are untouched, as with ``variables=[v]``.
+    """
+    fan = _aggregate_fan(kwargs["aggregate"], caller="compare()")
+    times_fan = _normalize_times(kwargs.get("times"))
+    # A spec with its own time entry cannot be combined with the resample/season
+    # forms of times= (see compare()); the single-spec call refuses it too, but only
+    # once reached -- say so before the first spec's members have been aligned.
+    if times_fan is not None and times_fan[0] in ("bins", "seasons"):
+        for spec, label in fan:
+            if _has_time_entry(spec):
+                raise ValueError(
+                    f"compare() got both times={kwargs['times']!r} and an aggregate= "
+                    f"list whose entry {label!r} has a time entry: times= already "
+                    "says how each bin reduces, so a separate aggregate time entry "
+                    "would conflict with it. Drop times=, or give the list entries "
+                    "no time entry."
+                )
+    kwargs = {
+        **kwargs,
+        "variables": [_resolve_compare_variable(v) for v in kwargs["variables"]],
+    }
+    members: list[Comparison] = []
+    for n, (spec, label) in enumerate(fan, start=1):
+        if len(fan) > 1:
+            print(f"  aggregate {n}/{len(fan)}: {label}")
+        sub = compare(**{**kwargs, "aggregate": spec})
+        for c in sub:
+            if len(fan) > 1:
+                c.label = f"{c.label} {label}" if c.label else label
+            members.append(c)
+    return ComparisonSet(members)
+
+
 def compare(
     *,
     reference,
@@ -8118,7 +8441,7 @@ def compare(
     depths=None,
     times: dict[str, Any] | list | tuple | str | None = None,
     select: dict[str, Any] | None = None,
-    aggregate: dict[str, Any] | None = None,
+    aggregate: dict[str, Any] | list[dict[str, Any]] | None = None,
     method: str = "conservative_normed",
     over: str | None = None,
     time_method: str = "auto",
@@ -8178,7 +8501,11 @@ def compare(
         Dict of axis -> reduction (e.g. ``{"time": "mean"}``), or the same
         ``{"test": ..., "reference": ...}`` pair-spec shape as ``select``.
         No default -- an axis left standing has to be either reduced here or
-        scored with ``over=``.
+        scored with ``over=``. A *list* of such specs fans like ``variables=``/
+        ``depths=`` do -- one member per spec, crossed with the variable and
+        depth fans -- see below. (A list *under* an axis is something else: a
+        chain of steps, ``{"time": [{"groupby": "month", "reduce": "mean"},
+        "var"]}``.)
     method
         Regrid/sampling method, passed through to xESMF: one of
         ``"conservative_normed"`` (default), ``"conservative"``,
@@ -8312,6 +8639,26 @@ def compare(
     ``select={"time": <one step>}`` to compare one instant. Omitting it no longer means
     "take the mean"; it means "reduce nothing", which then fails with the axis named
     rather than averaging something you did not ask for (see :data:`NO_AGGREGATION`).
+
+    A top-level ``aggregate=[spec, spec, ...]`` fans over statistics: each entry is a
+    plain spec or a ``{"test", "reference"}`` pair-spec, and each is run through the
+    whole call on its own, so the mean and the seasonal-cycle variance of a model
+    against a climatology, at two depths, is one call (four members, ordered by spec
+    then depth)::
+
+        osk.compare(
+            reference="woa23_temperature_monthly", test="his",
+            variables=["temperature"], depths=["surface", 200],
+            aggregate=[{"time": "mean"},
+                       {"time": [{"groupby": "month", "reduce": "mean"}, "var"]}],
+        ).plot()
+
+    With more than one spec, each member's label ends with its statistic ("mean",
+    "variance of monthly means"), so the rows of ``.plot()`` stay distinguishable;
+    exact repeats are dropped with a note, ``[]`` is refused, and a one-element list
+    is that spec (still returning a set, as ``variables=[v]`` does). With the
+    ``resample``/``groupby: season`` forms of ``times=``, an entry with its own time
+    entry is refused, as it is for a single ``aggregate=``.
 
     ``{"time": {"groupby": "month", "reduce": "mean"}}`` gives a climatology and
     ``{"time": {"resample": "1MS", "reduce": "mean"}}`` consecutive months. Both keep an
@@ -8610,12 +8957,18 @@ def compare(
     — what to use after rerunning a model, since entries are keyed on source and
     selection rather than on file contents.
     """
+    # A top-level list of whole aggregate specs fans like variables=/depths= do --
+    # see _compare_aggregate_fan, which re-enters this function once per spec with
+    # every other argument exactly as given. Taken before anything else is
+    # computed, so `locals()` is still just the arguments.
+    if isinstance(aggregate, list | tuple):
+        return _compare_aggregate_fan(dict(locals()))
+
     import warnings
 
     from ocean_skill import _stacklevel
     from ocean_skill.align import NoValidData
     from ocean_skill.catalog import resolve
-    from ocean_skill.vocabulary import resolve_and_report
 
     # Validated (and, for a pair, normalized to plain per-side dicts) once up front,
     # like `variables` below -- otherwise a one-sided {"test": ...} select/aggregate
@@ -8836,31 +9189,7 @@ def compare(
     # this fans out to. A pair-spec resolves each side the same way -- see
     # Comparison.__init__, which does the identical per-side resolution when the
     # spec reaches it directly rather than through this fan-out.
-    def _resolve_one(v):
-        if isinstance(v, dict):
-            # Validated for every dict up front, not only ones that already pass
-            # is_pair_spec (which requires *both* keys and so can never itself
-            # observe a one-sided pair) -- otherwise a one-sided {"test": ...} in a
-            # multi-variable variables=[...] surfaces only later, mid-fan-out, in
-            # Comparison.__init__, after earlier variables have already aligned.
-            _require_pair_spec(v)
-        if is_pair_spec(v):
-            return {
-                **v,
-                "test": (
-                    resolve_and_report(v["test"], context="compare variables=")
-                    if isinstance(v["test"], str)
-                    else v["test"]
-                ),
-                "reference": (
-                    resolve_and_report(v["reference"], context="compare variables=")
-                    if isinstance(v["reference"], str)
-                    else v["reference"]
-                ),
-            }
-        return resolve_and_report(v, context="compare variables=") if isinstance(v, str) else v
-
-    variables = [_resolve_one(v) for v in variables]
+    variables = [_resolve_compare_variable(v) for v in variables]
 
     # A source name that resolves nowhere can never contribute a comparison, no
     # matter how `variables`/`depths`/`times` fan out -- unlike a real source

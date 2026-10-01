@@ -27,6 +27,11 @@ The public API is intentionally small:
     osk.compare(..., over="time").plot()             # score against time, cell by cell
     osk.compare(..., times={"resample": "1MS", "reduce": "mean"})  # one comparison
                                                      # per month, plots or plays as one
+    osk.compare(..., aggregate={"time": [{"groupby": "month", ...}, "var"]})
+                                                     # a list of steps on one axis, in
+                                                     # order: seasonal-cycle variance
+    osk.compare(..., aggregate=[{"time": "mean"}, {"time": [...]}])  # a list of specs:
+                                                     # one member per statistic
     osk.field(source, variable, select=...)          # one source, no reference
     osk.field(...).extremum("max").plot()            # where the max is, and how it
                                                      # evolves around that snapshot

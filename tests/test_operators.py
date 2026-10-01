@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from ocean_skill import units
 from ocean_skill.operators import (
     DEFAULT_SEASONS,
     DERIVED,
@@ -131,7 +132,10 @@ def test_any_xarray_reduction_works_without_being_registered(marbl, spec):
     """None of these were implemented individually — the dispatch is the feature."""
     out = aggregate(marbl["spChl"], {"time": spec})
     assert "time" not in out.dims
-    assert out.attrs["units"] == "mg/m^3", "reductions drop attrs; units must survive"
+    # reductions drop attrs, so units must survive -- as the *statistic's* units: the
+    # variance of mg/m^3 is not mg/m^3 (units.for_statistic)
+    name = spec if isinstance(spec, str) else spec["reduce"]
+    assert out.attrs["units"] == units.for_statistic("mg/m^3", name)
 
 
 @pytest.mark.parametrize(("group", "size"), [("month", 12), ("season", 4)])
@@ -450,17 +454,17 @@ def test_a_spec_without_a_reduction_is_rejected(marbl):
 def test_a_custom_reducer_can_be_registered(marbl):
     """The escape hatch for the rare reduction xarray has no method for."""
 
-    @register_reducer("range")
-    def _range(da, dim, **kw):
+    @register_reducer("spread_width")
+    def _width(da, dim, **kw):
         return da.max(dim) - da.min(dim)
 
     try:
-        out = aggregate(marbl["spChl"], {"time": "range"})
+        out = aggregate(marbl["spChl"], {"time": "spread_width"})
         assert float(out.isel(lat=0, lon=0)) == pytest.approx(0.0)
     finally:
         from ocean_skill.operators import REDUCERS
 
-        REDUCERS.pop("range", None)
+        REDUCERS.pop("spread_width", None)
 
 
 # -- end to end through the compare layer -------------------------------------

@@ -151,6 +151,27 @@ Keys map onto `osk.compare(test=, reference=, variables=, select=, aggregate=, .
 as one figure per family, suffixed in the PNG filename; an empty result (every pair
 `skip_missing`-ed) is a skipped page, not a fatal error.
 
+`aggregate:` may be a **list of whole specs**, which fans the page over statistics the
+way `variables:` and `depths:` fan it -- one member per spec, one figure, each member
+labelled by its statistic. A list *under* an axis is something else: a chain of steps
+(`time: [{groupby: month, reduce: mean}, var]`, the variance of the seasonal cycle).
+The mean and the seasonal-cycle variance of a model against WOA, at two depths, is one
+page (the 12-month `woa23_<var>_monthly` sources exist for exactly this):
+
+```yaml
+- title: "Temperature vs WOA23 -- mean and seasonal variance"
+  compare:
+    reference: [woa23_temperature_monthly]
+    variables: [temperature]
+    depths: [surface, 200]
+    aggregate:
+      - {time: mean}
+      - {time: [{groupby: month, reduce: mean}, var]}
+```
+
+The same list works on a `field:` page (plain specs only). Chains, their rules and
+units are in the main README ("Statistics of a climatology").
+
 ### `summary:` -- pool the compare pages above
 
 ```yaml
