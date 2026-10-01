@@ -1723,10 +1723,21 @@ def _require_reduced(da, role: str, source: str, *, keep: tuple[str, ...] = ()):
     if not extra:
         return da
     sizes = ", ".join(f"{d}={da.sizes[d]}" for d in extra)
+    # A vertical axis left standing is most often a depth *list* passed through
+    # select={"depth": [...]}, which keeps those levels as one axis (the spelling
+    # over="depth" and a transect read) -- when the caller wanted a map at each of
+    # them, depths=[...] is the answer, and it is the one the generic lines miss.
+    fan = (
+        "  depths=[...]                         one map per depth (a list inside "
+        "select= keeps them as one axis)\n"
+        if _is_vertical_dim(da, extra[0])
+        else ""
+    )
     raise ValueError(
         f"the {role} lane ({source!r}) still has {sizes} beyond its horizontal axes, "
         "so it is not a single map and cannot be compared. A comparison differences "
         "two fields on one grid, so it needs the other axes collapsed — say how:\n"
+        f"{fan}"
         f'  aggregate={{"{extra[0]}": "mean"}}          one map, the mean over '
         f"{extra[0]}\n"
         f'  aggregate={{"{extra[0]}": {{"reduce": "quantile", "q": 0.9}}}}   or any '
@@ -1736,10 +1747,20 @@ def _require_reduced(da, role: str, source: str, *, keep: tuple[str, ...] = ()):
         f'  over="{extra[0]}"                     or keep it and score against it, '
         "cell by cell\n"
         "There is no default reduction: a comparison will not average an axis you did "
-        "not ask it to. The third line gives a map per metric instead of one map per "
-        "field; to keep the axis and look at one source over it, use osk.field() "
-        "rather than a comparison."
+        "not ask it to. over= gives a map per metric instead of one map per field; "
+        "to keep the axis and look at one source over it, use osk.field() rather "
+        "than a comparison."
     )
+
+
+def _is_vertical_dim(da, dim: str) -> bool:
+    """Report whether ``dim`` on ``da`` is a vertical axis, by name or CF attrs."""
+    from ocean_skill.align import SECTION_VERTICAL_DIMS
+
+    if dim in SECTION_VERTICAL_DIMS or dim in ("s_rho", "s_w"):
+        return True
+    attrs = da[dim].attrs if dim in da.coords else {}
+    return attrs.get("axis") == "Z" or "positive" in attrs
 
 
 def _select_horizontal_then_aggregate(
