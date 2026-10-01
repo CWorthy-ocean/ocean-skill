@@ -1205,6 +1205,18 @@ def _time_depth_row_item(reference: str = "woa23", row_label: str | None = None)
     }
 
 
+def _xy_items() -> list[dict]:
+    """Build the items of one XY panel: a model cloud and a profile.
+
+    Hand-made in the shape ``XY._items()`` builds (see ``PlotSpec``); ``density`` stays
+    off wherever this is used, since ``hv.Contours`` is an ``hv.Path`` and the
+    no-domain checks below count those.
+    """
+    from tests.test_xy_holoviews import _ts_items
+
+    return _ts_items(members=("ROMS", "WOA23"))
+
+
 @pytest.fixture
 def two_time_depth_rows():
     """Two time_depth_row rows from *different* stations -- a real compare()
@@ -1306,6 +1318,7 @@ _INTERACTIVE_FAMILIES = {
         }
     ],
     "time_depth_row": lambda: [_time_depth_row_item()],
+    "XY": _xy_items,
 }
 
 
@@ -1360,7 +1373,7 @@ _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 #: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
 #: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
 #: covers instead: warned and dropped, same as any other unusable option.
-_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth", "time_depth_row"}
+_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth", "time_depth_row", "XY"}
 
 
 def _hv_paths(obj) -> list:

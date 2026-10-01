@@ -31,7 +31,9 @@ dependencies:
   - xesmf            # pulls esmpy (conda-only)
   - xoak
   - gsw              # TEOS-10 potential density, scoped to ocean_skill.mld's density
-                      # criteria -- imported inside the calculator body, not core
+                      # criteria and to the density= contours of XY/TS plots
+                      # (ocean_skill.plot.xy.density_grid) -- imported inside the
+                      # calculator body, not core
   - oceans           # PL33 tidal low-pass filter (oceans.filters.pl33tn), scoped to
                       # ocean_skill.detide -- imported inside the module body, not core
   # --- metrics ---

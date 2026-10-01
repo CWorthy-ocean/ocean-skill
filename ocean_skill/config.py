@@ -1,8 +1,9 @@
 r"""Pydantic models for a suite YAML: the declarative form of ``osk.field``/``compare``.
 
 A suite is a *list of pages* -- each one a single :func:`ocean_skill.field.field`,
-:func:`ocean_skill.comparison.compare`, or :func:`ocean_skill.comparison.summary` call,
-expressed as YAML instead of Python -- plus shared defaults, output settings, and an
+:func:`ocean_skill.comparison.compare`, :func:`ocean_skill.comparison.summary`, or
+:class:`ocean_skill.xy.XY`/:class:`~ocean_skill.xy.TS` call, expressed as YAML instead
+of Python -- plus shared defaults, output settings, and an
 optional live-run refresh step. :mod:`ocean_skill.workflows.pages` expands a
 :class:`SuiteConfig` into a flat list of fully-resolved page dicts (``for_each``
 fanned out, ``{placeholder}``\ s filled in, ``time: latest``/``month: run`` resolved
@@ -20,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 __all__ = ["PageConfig", "RefreshConfig", "RefreshSourceConfig", "SuiteConfig"]
 
 #: The mutually exclusive page kinds, in the order their error messages list them.
-_PAGE_KINDS = ("field", "compare", "summary", "section")
+_PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
 
 
 class RefreshSourceConfig(BaseModel):
@@ -50,7 +51,7 @@ class RefreshConfig(BaseModel):
 
 
 class PageConfig(BaseModel):
-    """One page of a report: one of ``field``, ``compare``, ``summary`` or ``section``.
+    """One page of a report: ``field``, ``compare``, ``summary``, ``section``, XY or TS.
 
     ``field``/``compare``/``summary`` are the raw keyword dicts a page will pass to
     :func:`ocean_skill.field.field`, :func:`ocean_skill.comparison.compare`, or
@@ -58,6 +59,13 @@ class PageConfig(BaseModel):
     individually typed) because those functions already validate their own
     arguments; a page's job is only to say *which one* and *with what*, and to let
     ``for_each``/``{placeholder}`` reach into any of its values.
+
+    ``XY`` and ``TS`` are the property-property plots (:class:`ocean_skill.xy.XY`;
+    ``TS`` is the salinity-temperature preset): a ``members:`` mapping of label -> one
+    ``osk.field()`` call each, plus ``x:``/``y:`` (``XY`` only), ``regions:`` and
+    ``at_center:``. Their shape is checked in :mod:`ocean_skill.workflows.pages`, like
+    ``then:``'s. They take ``for_each:`` and ``plot:`` but not ``then:`` (there is no
+    single field to chain on).
 
     ``section`` is the odd one out: not a figure at all but a text-only divider page in
     ``report.pdf`` (a title plus the notes text it holds -- ``""`` for a title-only
@@ -89,6 +97,8 @@ class PageConfig(BaseModel):
     compare: dict[str, Any] | None = None
     summary: dict[str, Any] | None = None
     section: str | None = None
+    XY: dict[str, Any] | None = None
+    TS: dict[str, Any] | None = None
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
@@ -107,13 +117,13 @@ class PageConfig(BaseModel):
                 )
             raise ValueError(
                 f"page {self.title!r} must have exactly one of field:/compare:/"
-                f"summary:/section: -- found {kinds or 'none'}{hint}"
+                f"summary:/section:/XY:/TS: -- found {kinds or 'none'}{hint}"
             )
         return self
 
     @property
-    def kind(self) -> Literal["field", "compare", "summary", "section"]:
-        """Which of ``field``/``compare``/``summary``/``section`` this page is."""
+    def kind(self) -> Literal["field", "compare", "summary", "section", "XY", "TS"]:
+        """Which page kind this is (``field``, ``compare``, ... ``XY`` or ``TS``)."""
         for k in _PAGE_KINDS:
             if getattr(self, k) is not None:
                 return k  # type: ignore[return-value]

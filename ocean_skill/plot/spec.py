@@ -45,6 +45,7 @@ FAMILIES = (
     "time_depth",
     "time_depth_row",
     "profile",
+    "XY",
     "skill_map",
     "taylor",
     "target",
@@ -219,6 +220,22 @@ class PlotSpec:
         :meth:`ocean_skill.field.Field.as_item` (a model column at one point) and
         :meth:`ocean_skill.comparison.Comparison.as_item` (``over=`` a vertical
         axis, at a station).
+
+        ``XY`` is the property-property plot (T-S, N-P, ...): one item per
+        (region, member), carrying ``x`` and ``y`` -- equal-length, finite float arrays,
+        already paired -- instead of an ``aligned`` Dataset. The item is
+        ``{"label", "region", "mark", "x", "y", "depth", "time", "x_name", "x_units",
+        "x_standard_name", "y_name", "y_units", "y_standard_name", "x_role", "y_role",
+        "lon", "lat", "region_note", "source"}``. ``mark`` is ``"points"`` (a model
+        cloud: every cell, level and time step) or ``"line"`` (a profile, sorted by
+        ``depth``); ``region`` is the panel key (``None`` when the plot has no regions,
+        giving one panel titled by ``region_note``). ``depth`` (positive-down metres)
+        and ``time`` (``datetime64``) are per-point arrays, or ``None``, and feed
+        ``color_by``. ``x_role``/``y_role`` are ``"salinity"``, ``"temperature"`` or
+        ``None``: ``density=`` is valid only when one axis is each. ``lon``/``lat``
+        (±180) place the panel for the density contours. Items come ordered by region,
+        then member. Built by :class:`ocean_skill.xy.XY`; laid out by
+        :func:`ocean_skill.plot.xy.compose`, which both renderers share.
 
         ``field_map_grid`` is ``field_facet``'s counterpart for several *different*
         variables rather than one variable's own facet axis: a

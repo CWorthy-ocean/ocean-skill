@@ -4488,6 +4488,362 @@ def _profile(
     return out.opts(title=title or "")
 
 
+#: Width (CSS pixels) the columns of an interactive ``XY`` figure share between them on
+#: the default canvas: a lone panel takes it all up to :data:`SERIES_WIDTH_PX`, three
+#: panels (a row of T-S diagrams) get a third each, and none gets narrower than a map
+#: panel (:data:`PANEL_WIDTH_PX`), so a wide grid grows rather than crushing its panels.
+XY_ROW_PX = 900
+
+#: Milliseconds in a day. A ``color_by="time"`` scale arrives in days since 1970-01-01
+#: (see :class:`ocean_skill.plot.xy.ColorScale`); bokeh's datetimes count milliseconds.
+_MS_PER_DAY = 86_400_000.0
+
+#: The sigma-0 lines' colour: matplotlib's ``"0.6"`` grey, spelled for bokeh.
+_XY_DENSITY_COLOR = "#999999"
+
+
+def _xy_geometry(*, ncols: int, font_scale: float, canvas_factor: float, aspect):
+    """``(frame_width, frame_height, fontsize)`` for one panel of an ``XY`` grid.
+
+    :func:`_series_geometry` at the width a column gets (:data:`XY_ROW_PX` shared among
+    ``ncols``), where a time series just takes :data:`SERIES_WIDTH_PX` because it is
+    wide whatever else is on the page and a T-S panel is not.
+    """
+    width = min(SERIES_WIDTH_PX, max(PANEL_WIDTH_PX, XY_ROW_PX / max(ncols, 1)))
+    return _series_geometry(
+        font_scale=font_scale,
+        canvas_factor=canvas_factor * width / SERIES_WIDTH_PX,
+        aspect=aspect,
+    )
+
+
+def _xy_palette(cmap, *, reverse: bool = False) -> list[str]:
+    """Return a matplotlib colormap as the list of hex colours bokeh maps through.
+
+    Read off the colormap's own lookup table rather than re-sampled, so a value lands on
+    the entry the static scatter gives it (``floor(norm * N)`` in both).
+    """
+    from matplotlib.colors import to_hex
+
+    palette = [to_hex(colour) for colour in cmap(np.arange(cmap.N))]
+    return palette[::-1] if reverse else palette
+
+
+def _xy_colour_opts(scale, *, bar: bool) -> dict[str, Any]:
+    """Return the colour-mapping options of a ``color_by`` element.
+
+    Time values are milliseconds here (see :data:`_MS_PER_DAY`) and the bar's ticks are
+    dates. Depth reads surface-at-top, which bokeh's bars (low end at the bottom) have
+    no option for: the clim runs ``(deepest, shallowest)`` and the palette is reversed
+    to match, so a value keeps its colour and only the bar flips.
+    """
+    low, high = scale.vmin, scale.vmax
+    if scale.is_time:
+        low, high = low * _MS_PER_DAY, high * _MS_PER_DAY
+    opts: dict[str, Any] = {
+        "cmap": _xy_palette(scale.cmap, reverse=scale.inverted),
+        "clim": (high, low) if scale.inverted else (low, high),
+        "colorbar": bar,
+    }
+    if bar:
+        opts["clabel"] = scale.label
+        if scale.is_time:
+            from bokeh.models import DatetimeTicker, DatetimeTickFormatter
+
+            opts["colorbar_opts"] = {
+                "formatter": DatetimeTickFormatter(),
+                "ticker": DatetimeTicker(),
+            }
+    return opts
+
+
+def _xy_tooltips(layout, member) -> list[tuple[str, str]]:
+    """Return the hover readout of a member: both values, then depth and time."""
+    tips = [(layout.xlabel, "@x{0.000}"), (layout.ylabel, "@y{0.000}")]
+    if member.depth is not None:
+        tips.append(("depth [m]", "@depth{0.0}"))
+    if member.time is not None and member.mark == "points":
+        tips.append(("time", "@time{%F}"))
+    return tips
+
+
+def _xy_dots(hv, member, dims, *, size: float, alpha: float, scale, tips):
+    """Return one dots member as ``hv.Points``, coloured by value when it has a scale.
+
+    The colour channel is its own ``color`` column holding exactly
+    ``member.color_values`` (milliseconds for a time scale), so what bokeh maps through
+    the palette is what the static scatter maps through the colormap. ``depth`` and
+    ``time`` ride along as columns for the hover readout.
+    """
+    from matplotlib.colors import to_hex
+
+    from ocean_skill.plot import style
+
+    data = {"x": member.x, "y": member.y}
+    vdims = []
+    if member.depth is not None:
+        data["depth"] = member.depth
+        vdims.append("depth")
+    if member.time is not None:
+        data["time"] = member.time
+        vdims.append("time")
+    coloured = member.color_values is not None and scale is not None
+    if coloured:
+        data["color"] = member.color_values * (_MS_PER_DAY if scale.is_time else 1.0)
+        vdims.append("color")
+    return hv.Points(data, list(dims), vdims).opts(
+        color="color" if coloured else to_hex(member.color),
+        marker=style.BOKEH_MARKERS[style.MARKERS.index(member.marker or "o")],
+        size=size,
+        alpha=alpha,
+        # no outline, as the static scatter's linewidths=0
+        line_width=0,
+        tools=["hover"],
+        hover_tooltips=tips,
+        hover_formatters={"@time": "datetime"},
+    )
+
+
+def _xy_line(hv, member, dims, *, tips):
+    """Return one line member as ``hv.Curve``, in the order ``compose`` gave it.
+
+    A Curve keeps its data order (it does not sort on x, which a T-S profile is not
+    monotonic in); the depth rides along for the hover readout.
+    """
+    from matplotlib.colors import to_hex
+
+    from ocean_skill.plot import style
+
+    data = {"x": member.x, "y": member.y}
+    vdims = [dims[1]]
+    if member.depth is not None:
+        data["depth"] = member.depth
+        vdims.append("depth")
+    return hv.Curve(data, [dims[0]], vdims).opts(
+        color=to_hex(member.color),
+        line_dash=style.BOKEH_DASHES.get(member.linestyle, "solid"),
+        line_width=1.4,
+        tools=["hover"],
+        hover_tooltips=tips,
+    )
+
+
+def _xy_legend_key(hv, entry, dims, *, dot_px: float):
+    """Return one legend row as an element that draws nothing but its swatch.
+
+    A plotted dot is a pixel or two across, which is no swatch at all, so the data
+    elements carry no label and these proxies (one NaN point each, in the ``Legend``
+    group) speak for them -- the interactive form of the static renderer's ``Line2D``
+    proxies, in the same colour and kind of mark, and in ``panel.legend`` order whatever
+    order the data was drawn in.
+    """
+    from matplotlib.colors import to_hex
+
+    from ocean_skill.plot import style
+
+    nothing = ([np.nan], [np.nan])
+    colour = to_hex(entry.color)
+    if entry.mark == "points":
+        marker = style.BOKEH_MARKERS[style.MARKERS.index(entry.marker or "o")]
+        return hv.Points(nothing, list(dims), label=entry.label, group="Legend").opts(
+            color=colour, marker=marker, size=dot_px, alpha=1.0, line_width=0
+        )
+    return hv.Curve(nothing, *dims, label=entry.label, group="Legend").opts(
+        color=colour,
+        line_dash=style.BOKEH_DASHES.get(entry.linestyle, "solid"),
+        line_width=1.4,
+    )
+
+
+def _xy_density(hv, grid, dims):
+    """Return a panel's sigma-0 lines as ``hv.Contours``, one path per level.
+
+    The same contourpy generator the static renderer's ``ax.contour`` runs, on the same
+    grid and levels, so the two draw the same lines; ``hv.operation.contours`` is the
+    holoviews wrapper for it. Hovering a line reads its value, which stands in for the
+    contour labels bokeh has no way to draw along a line. No legend entry.
+    """
+    sigma = hv.Dimension("sigma", label="sigma-0 [kg m-3]")
+    image = hv.Image((grid.x, grid.y, grid.sigma), list(dims), sigma)
+    # color_index=None: a Contours element colours its lines by its first value
+    # dimension (the level) through a colormap unless told not to
+    return hv.operation.contours(image, levels=list(grid.levels)).opts(
+        color=_XY_DENSITY_COLOR,
+        color_index=None,
+        line_width=0.8,
+        tools=["hover"],
+        show_legend=False,
+    )
+
+
+def _xy(
+    items,
+    title=None,
+    annotations=None,
+    density=False,
+    color_by=None,
+    cmap=None,
+    colorbar: bool = True,
+    colors=None,
+    legend=True,
+    titles=None,
+    xlim=None,
+    ylim=None,
+    sharex: bool = False,
+    sharey: bool = False,
+    marker_size: float = 2.0,
+    alpha: float = 0.5,
+    panel_aspect=None,
+    ncols=None,
+    nrows=None,
+    size=None,
+    zoom: float = 1.0,
+    font_scale: float = 1.0,
+    **_,
+):
+    """Draw the ``XY`` family interactively -- the same layout, drawn with bokeh.
+
+    Every decision comes from :func:`ocean_skill.plot.xy.compose`, which the static
+    renderer calls too: which source is which colour, each panel's limits and labels,
+    the shared ``color_by`` scale, the legend's rows, where each annotation sits and the
+    sigma-0 grid with its levels. This function only draws: dots as ``hv.Points`` under
+    lines as ``hv.Curve``, sigma-0 as ``hv.Contours`` beneath both, annotations as
+    ``hv.Text``. Panels are separate figures in an ``hv.Layout`` with their own,
+    ``compose``-fixed limits (so ``sharex``/``sharey`` open every panel on one range,
+    but do not pan and zoom together afterwards -- see :func:`_profile`).
+
+    Differences from the static figure, all stated: the sigma-0 lines carry no printed
+    values (hover one to read it), a multi-line annotation is left-aligned within its
+    block, and bokeh has no figure-level colour bar or legend. The ``color_by`` bar sits
+    beside the last panel of the first row, and each panel carries its own key, in the
+    corner ``compose`` ranked emptiest -- or outside the frame for ``legend="below"``/
+    ``"right"``, as :func:`_series` does. ``marker_size`` (a scatter ``s``, in points
+    squared) becomes the diameter in pixels it would be on screen. A reversed depth bar
+    (surface at top) is a reversed palette on a reversed ``clim``; see
+    :func:`_xy_colour_opts`.
+
+    Dots carry hover (both values, depth, time); a source with many thousands of points
+    ships them all to the browser, which ``compose`` warns about past two million.
+    """
+    hv = _extension()
+
+    from ocean_skill.plot.typography import PT_PER_CSS_PX, XY_ASPECT
+    from ocean_skill.plot.xy import compose
+
+    layout = compose(
+        items,
+        annotations=annotations,
+        density=density,
+        color_by=color_by,
+        cmap=cmap,
+        colorbar=colorbar,
+        colors=colors,
+        legend=legend,
+        titles=titles,
+        xlim=xlim,
+        ylim=ylim,
+        sharex=sharex,
+        sharey=sharey,
+        ncols=ncols,
+        nrows=nrows,
+    )
+    width, height, fontsize = _xy_geometry(
+        ncols=layout.ncols,
+        font_scale=font_scale,
+        canvas_factor=_canvas_factor(size, zoom),
+        aspect=panel_aspect or XY_ASPECT,
+    )
+    sizes = bokeh_scale((width, height), font_scale=font_scale)
+    dot_px = marker_size**0.5 * PT_PER_CSS_PX
+    # the static legend's proxy dot is 0.7 x the legend type; bokeh's size is in pixels
+    # and its font in CSS points, which is the same ratio PT_PER_CSS_PX already took
+    key_px = 0.7 * float(sizes["legend"].removesuffix("pt"))
+    scale = layout.colorbar
+
+    # The one colour bar goes on the last panel of the first row that has something
+    # coloured to explain (bokeh draws one per figure, and a Layout has no shared one).
+    bar_panel = None
+    if scale is not None and scale.show:
+        carrying = [
+            i
+            for i, p in enumerate(layout.panels)
+            if any(m.color_values is not None for m in p.items)
+        ]
+        first_row = [i for i in carrying if i < layout.ncols]
+        bar_panel = (first_row or carrying)[-1] if carrying else None
+
+    plots = []
+    for index, panel in enumerate(layout.panels):
+        if panel.blank:
+            # compose never sets this today; hv.Empty is the Layout's "nothing here",
+            # as the static renderer hides (but keeps) an axes
+            plots.append(hv.Empty())
+            continue
+        # The axis labels are plot options, not the dimensions' labels: holoviews
+        # sanitises a label into a glyph field name, so two dimensions sharing one
+        # (blank, or both "temperature [degC]") draw nothing at all.
+        dims = (hv.Dimension("x"), hv.Dimension("y"))
+        # Labels on the outer edges only, by the static rule: is there a panel
+        # directly below / left of me?
+        has_below = index + layout.ncols < len(layout.panels)
+        left = layout.ncols == 1 or index % layout.ncols == 0
+
+        bar_here = index == bar_panel
+        elements = []
+        if panel.density is not None and panel.density.levels:
+            elements.append(_xy_density(hv, panel.density, dims))
+        # dots first, then lines: a profile reads over the cloud it is compared to
+        for member in sorted(panel.items, key=lambda m: m.mark == "line"):
+            tips = _xy_tooltips(layout, member)
+            if member.mark == "line":
+                elements.append(_xy_line(hv, member, dims, tips=tips))
+                continue
+            dots = _xy_dots(
+                hv, member, dims, size=dot_px, alpha=alpha, scale=scale, tips=tips
+            )
+            if member.color_values is not None:
+                # every coloured member maps through the same scale, but only the first
+                # of the bar's panel draws it
+                dots = dots.opts(**_xy_colour_opts(scale, bar=bar_here))
+                bar_here = False
+            elements.append(dots)
+        for text, x, y in panel.annotations:
+            elements.append(
+                hv.Text(x, y, text, halign="center", valign="center").opts(
+                    text_font_size=sizes["annotation"]
+                )
+            )
+        if layout.legend_placement != "off":
+            elements += [
+                _xy_legend_key(hv, entry, dims, dot_px=key_px)
+                for entry in panel.legend
+            ]
+
+        hooks = []
+        if layout.legend_placement in ("below", "right"):
+            hooks.append(_outside_legend_hook(layout.legend_placement))
+        overlay_opts = dict(
+            title=panel.title,
+            show_legend=layout.legend_placement != "off",
+            legend_position=_BOKEH_LEGEND_POSITION.get(
+                panel.legend_corner, "top_right"
+            ),
+            frame_width=width,
+            frame_height=height,
+            fontsize=fontsize,
+            xlim=panel.xlim,
+            ylim=panel.ylim,
+            xlabel="" if has_below else layout.xlabel,
+            ylabel=layout.ylabel if left else "",
+        )
+        if hooks:
+            overlay_opts["hooks"] = hooks
+        plots.append(hv.Overlay(elements).opts(hv.opts.Overlay(**overlay_opts)))
+
+    out = hv.Layout(plots).cols(layout.ncols).opts(hv.opts.Layout(shared_axes=False))
+    return out.opts(title=title or "")
+
+
 def _target(
     items,
     title=None,
@@ -5279,6 +5635,15 @@ def render(spec, **kwargs: Any):
             )
             opts.pop("secondary_y", None)
         return _profile(spec.items, **opts)
+    if family == "XY":
+        if "domain" in opts:
+            warnings.warn(
+                "'domain' is not an option of XY -- an XY plot has no map to "
+                "outline. Ignoring it.",
+                stacklevel=2,
+            )
+            opts.pop("domain", None)
+        return _xy(spec.items, **opts)
     if family == "section":
         if "domain" in opts:
             warnings.warn(

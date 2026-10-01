@@ -1239,3 +1239,487 @@ def test_build_refuses_a_section_page():
     (page,) = P.expand(suite)
     with pytest.raises(ValueError, match=r"Part one.*divider"):
         P.build(page)
+
+
+# -- XY: / TS: pages ------------------------------------------------------------------
+#
+# A property-property plot: ``members:`` maps a label to one ``field()`` call, and
+# ``expand`` resolves each into a kwargs dict. Only the member that reads
+# ``defaults.test`` is pinned to the run (and cached by the field-page rule); every
+# other member is passed through as written. ``regions:`` is validated by
+# ``ocean_skill.xy.normalize_regions`` (worker C's module) -- tests that only need
+# *some* regions use ``lenient_regions``, which swaps that for a recorder, so they do
+# not depend on its validation rules; the two that exercise those rules for real say so.
+
+_NWP = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+_SG = {"lon": {"min": 184.59, "max": 185.73}, "lat": {"min": 47.76, "max": 48.59}}
+
+
+@pytest.fixture
+def lenient_regions(monkeypatch):
+    """Replace ``normalize_regions`` with a recorder that accepts anything."""
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.xy.normalize_regions",
+        lambda regions: calls.append(regions) or {},
+        raising=False,
+    )
+    return calls
+
+
+def _ts_members(**extra):
+    return {
+        "ROMS": {},
+        "WOA23": {"source": ["woa_temperature_annual", "woa_salinity_annual"]},
+        "GLORYS12": {
+            "source": "glorys_climatology",
+            "aggregate": {"time": "mean", "lon": "mean", "lat": "mean"},
+        },
+        **extra,
+    }
+
+
+def _xy_suite(kind="TS", *, page=None, plot=None, defaults=None, **top):
+    body = {"members": _ts_members(), **(page or {})}
+    return _suite(
+        [{"title": "xy", kind: body, "plot": plot or {}}],
+        defaults={"test": "stub", **(defaults or {})},
+        **top,
+    )
+
+
+def test_a_ts_page_gives_the_test_member_the_default_source_and_whole_run_window():
+    (page,) = P.expand(_xy_suite())
+    assert page.kind == "TS"
+    roms = page.kwargs["members"]["ROMS"]
+    assert roms["source"] == "stub"  # defaults.test
+    assert roms["variable"] == ["temperature", "salinity"]  # [y, x]
+    assert roms["select"] == {
+        "time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()}
+    }
+    assert roms["cache"] is True  # pinned: the window's max is the run's last step
+    # TS is XY with x=salinity, y=temperature; the manifest records both
+    assert (page.kwargs["x"], page.kwargs["y"]) == ("salinity", "temperature")
+    assert page.cache is True
+
+
+def test_an_xy_page_defaults_variables_to_y_then_x_and_renames_variables():
+    suite = _xy_suite(
+        "XY",
+        page={
+            "x": "phosphate",
+            "y": "nitrate",
+            "members": {
+                "ROMS": {},
+                "other": {"source": "elsewhere", "variables": ["nitrate", "phosphate"]},
+            },
+        },
+    )
+    (page,) = P.expand(suite)
+    assert page.kind == "XY"
+    members = page.kwargs["members"]
+    assert members["ROMS"]["variable"] == ["nitrate", "phosphate"]
+    assert members["other"]["variable"] == ["nitrate", "phosphate"]
+    assert "variables" not in members["other"]
+    assert (page.kwargs["x"], page.kwargs["y"]) == ("phosphate", "nitrate")
+
+
+def test_an_xy_page_keeps_member_order_and_the_rest_of_each_members_kwargs():
+    members = {
+        "ROMS": {"select": {"depth": 100}, "qc": {"range": [-2, 40]}},
+        "WOA23": {"source": "woa"},
+    }
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    got = page.kwargs["members"]
+    assert list(got) == ["ROMS", "WOA23"]
+    assert got["ROMS"]["qc"] == {"range": [-2, 40]}
+    assert got["ROMS"]["select"]["depth"] == 100  # kept beside the injected window
+    assert "time" in got["ROMS"]["select"]
+
+
+def test_time_latest_on_the_test_member_resolves_to_the_last_step():
+    page_members = {"ROMS": {"select": {"depth": "surface", "time": "latest"}}}
+    (page,) = P.expand(_xy_suite(page={"members": page_members}))
+    roms = page.kwargs["members"]["ROMS"]
+    assert roms["select"] == {"depth": "surface", "time": INDEX[-1].isoformat()}
+    assert roms["cache"] is True  # pinned to the resolved step
+
+
+def test_a_null_member_is_the_same_as_an_empty_one():
+    (page,) = P.expand(_xy_suite(page={"members": {"ROMS": None}}))
+    roms = page.kwargs["members"]["ROMS"]
+    assert roms["source"] == "stub" and "time" in roms["select"]
+
+
+def test_reference_members_are_passed_through_with_no_run_window():
+    (page,) = P.expand(_xy_suite())
+    woa = page.kwargs["members"]["WOA23"]
+    glorys = page.kwargs["members"]["GLORYS12"]
+    # a climatology's time axis is not the run's: nothing is injected, nothing renamed
+    assert woa == {
+        "source": ["woa_temperature_annual", "woa_salinity_annual"],
+        "variable": ["temperature", "salinity"],
+        "cache": True,
+    }
+    assert "select" not in glorys
+    assert glorys["aggregate"] == {"time": "mean", "lon": "mean", "lat": "mean"}
+
+
+def test_a_reference_member_keeps_its_own_time_selection_verbatim():
+    ref = {"source": "woa", "select": {"time": "latest"}}
+    (page,) = P.expand(_xy_suite(page={"members": {"ROMS": {}, "WOA23": ref}}))
+    # "latest" means the run's last step, which is the test member's business only
+    assert page.kwargs["members"]["WOA23"]["select"] == {"time": "latest"}
+
+
+def test_only_the_test_source_member_is_pinned_even_with_another_name():
+    members = {"A": {"source": "stub"}, "B": {"source": "other"}}
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    assert "time" in page.kwargs["members"]["A"]["select"]
+    assert "select" not in page.kwargs["members"]["B"]
+
+
+def test_cache_flags_are_per_member_and_the_page_needs_all_of_them():
+    closed = {"time": {"min": "2010-01-05", "max": "2010-01-26"}}
+    (page,) = P.expand(
+        _xy_suite(page={"members": _ts_members(ROMS={"select": closed})})
+    )
+    flags = {k: m["cache"] for k, m in page.kwargs["members"].items()}
+    assert flags == {"ROMS": True, "WOA23": True, "GLORYS12": True}
+    assert page.cache is True
+
+    reaching_end = {"time": {"min": "2010-03-01", "max": "2010-03-09"}}
+    members = _ts_members(ROMS={"select": reaching_end})
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    flags = {k: m["cache"] for k, m in page.kwargs["members"].items()}
+    # the open window is the test member's alone; the climatologies still cache
+    assert flags == {"ROMS": False, "WOA23": True, "GLORYS12": True}
+    assert page.cache is False
+
+
+def test_suite_level_cache_false_forces_every_member_off():
+    (page,) = P.expand(_xy_suite(cache=False))
+    assert [m["cache"] for m in page.kwargs["members"].values()] == [False] * 3
+    assert page.cache is False
+
+
+def test_detide_on_the_test_member_pushes_its_cutoff_back():
+    window = {"time": {"min": "2010-01-01", "max": "2010-03-02"}}
+    members = {"ROMS": {"select": window, "detide": {"T": 200}}}
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    assert page.kwargs["members"]["ROMS"]["cache"] is False
+
+
+@pytest.mark.parametrize("key", ["cache", "label"])
+def test_reserved_member_keys_are_refused(key):
+    suite = _xy_suite(page={"members": {"ROMS": {key: "x"}}})
+    with pytest.raises(ValueError, match=rf"member 'ROMS'.*{key}:"):
+        P.expand(suite)
+
+
+def test_an_unknown_page_key_is_refused_and_names_it():
+    with pytest.raises(ValueError, match="bogus"):
+        P.expand(_xy_suite(page={"bogus": 1}))
+
+
+def test_a_member_without_a_source_and_no_defaults_test_is_refused():
+    suite = _suite(
+        [{"title": "xy", "TS": {"members": {"ROMS": {}}}}],
+    )
+    with pytest.raises(ValueError, match=r"member 'ROMS' has no source"):
+        P.expand(suite)
+
+
+def test_members_must_be_a_non_empty_mapping():
+    for members in ({}, ["ROMS"], "ROMS"):
+        with pytest.raises(ValueError, match="members"):
+            P.expand(_xy_suite(page={"members": members}))
+    with pytest.raises(ValueError, match="members"):
+        P.expand(_suite([{"title": "xy", "TS": {}}], defaults={"test": "stub"}))
+
+
+@pytest.mark.parametrize("extra", [{"x": "salinity"}, {"y": "temperature"}])
+def test_x_and_y_are_refused_on_a_ts_page(extra):
+    with pytest.raises(ValueError, match="TS: sets x=salinity and y=temperature"):
+        P.expand(_xy_suite("TS", page=extra))
+
+
+@pytest.mark.parametrize(
+    ("given", "missing"),
+    [({}, "['x', 'y']"), ({"x": "phosphate"}, "['y']"), ({"y": "nitrate"}, "['x']")],
+)
+def test_x_and_y_are_required_on_an_xy_page(given, missing):
+    with pytest.raises(ValueError, match=rf"XY: needs x: and y:.*{missing}"):
+        P.expand(_xy_suite("XY", page=given))
+
+
+def test_an_xy_page_accepts_a_calculate_spec_for_x_or_y():
+    y = {"calculate": "mld", "method": "density_threshold"}
+    (page,) = P.expand(_xy_suite("XY", page={"x": "temperature", "y": y}))
+    assert page.kwargs["y"] == y
+    assert page.kwargs["members"]["ROMS"]["variable"] == [y, "temperature"]
+
+
+def test_at_center_must_name_members():
+    with pytest.raises(ValueError, match=r"at_center: \['WOA'\] not among"):
+        P.expand(_xy_suite(page={"at_center": ["WOA"], "regions": {"a": _NWP}}))
+
+
+def test_at_center_needs_regions():
+    with pytest.raises(ValueError, match=r"at_center: needs regions"):
+        P.expand(_xy_suite(page={"at_center": ["WOA23"]}))
+
+
+def test_regions_are_validated_at_expand_and_stored_as_written(lenient_regions):
+    regions = {"North West Pacific": _NWP, "Subpolar Gyre": _SG}
+    suite = _xy_suite(page={"regions": regions, "at_center": ["WOA23"]})
+    (page,) = P.expand(suite)
+    assert lenient_regions == [regions]  # checked once, unexpanded
+    assert page.kwargs["regions"] == regions
+    assert list(page.kwargs["regions"]) == ["North West Pacific", "Subpolar Gyre"]
+    assert page.kwargs["at_center"] == ["WOA23"]
+
+
+def test_a_regions_error_is_reported_against_the_page(monkeypatch):
+    def refuse(regions):
+        raise ValueError("region 'a': no good")
+
+    monkeypatch.setattr("ocean_skill.xy.normalize_regions", refuse, raising=False)
+    with pytest.raises(
+        ValueError, match=r"page 'xy': TS: regions: region 'a': no good"
+    ):
+        P.expand(_xy_suite(page={"regions": {"a": _NWP}}))
+
+
+def test_no_regions_leaves_the_key_none_and_never_calls_normalize(monkeypatch):
+    def boom(regions):
+        raise AssertionError("normalize_regions called without regions")
+
+    monkeypatch.setattr("ocean_skill.xy.normalize_regions", boom, raising=False)
+    (page,) = P.expand(_xy_suite())
+    assert page.kwargs["regions"] is None and page.kwargs["at_center"] == []
+
+
+def test_valid_regions_pass_the_real_normalize_regions():
+    # needs worker C's ocean_skill.xy.normalize_regions (no stub)
+    regions = {"North West Pacific": _NWP, "Subpolar Gyre": _SG}
+    (page,) = P.expand(_xy_suite(page={"regions": regions}))
+    assert list(page.kwargs["regions"]) == list(regions)
+
+
+def test_a_bad_region_is_refused_at_expand_by_the_real_normalize_regions():
+    # needs worker C's ocean_skill.xy.normalize_regions (no stub): a region may only
+    # constrain lon/lat, so a depth range is not a region
+    bad = {"deep": {"depth": {"min": 0, "max": 100}}}
+    with pytest.raises(ValueError, match=r"page 'xy': TS: regions:"):
+        P.expand(_xy_suite(page={"regions": bad}))
+
+
+def test_regions_and_annotations_can_be_shared_through_a_defaults_placeholder(
+    lenient_regions,
+):
+    shared = {"North West Pacific": _NWP}
+    notes = {"North West Pacific": {"STSW": [34.8, 28.0]}}
+    suite = _suite(
+        [
+            {
+                "title": "a",
+                "TS": {"members": {"ROMS": {}}, "regions": "{pacific}"},
+                "plot": {"annotations": "{notes}"},
+            },
+            {
+                "title": "b",
+                "XY": {
+                    "members": {"ROMS": {}},
+                    "x": "phosphate",
+                    "y": "nitrate",
+                    "regions": "{pacific}",
+                },
+            },
+        ],
+        defaults={"test": "stub", "pacific": shared, "notes": notes},
+    )
+    a, b = P.expand(suite)
+    # an exact placeholder keeps the dict's type, and each page gets its own copy
+    assert a.kwargs["regions"] == shared and isinstance(a.kwargs["regions"], dict)
+    assert b.kwargs["regions"] == shared
+    assert a.kwargs["regions"] is not b.kwargs["regions"]
+    assert a.kwargs["regions"] is not suite.defaults["pacific"]
+    assert a.plot["annotations"] == notes
+
+
+def test_a_shared_member_select_placeholder_is_not_mutated_across_pages():
+    suite = _suite(
+        [
+            {"title": "a", "TS": {"members": {"ROMS": {"select": "{sel}"}}}},
+            {"title": "b", "TS": {"members": {"ROMS": {"select": "{sel}"}}}},
+        ],
+        defaults={"test": "stub", "sel": {"depth": "surface", "time": "latest"}},
+    )
+    a, b = P.expand(suite)
+    assert a.kwargs["members"]["ROMS"]["select"]["time"] == INDEX[-1].isoformat()
+    assert (
+        a.kwargs["members"]["ROMS"]["select"]
+        is not b.kwargs["members"]["ROMS"]["select"]
+    )
+    assert suite.defaults["sel"]["time"] == "latest"
+
+
+def test_for_each_month_run_fans_an_xy_page_over_the_runs_months():
+    suite = _suite(
+        [
+            {
+                "title": "T-S {month.name}",
+                "for_each": {"month": "run"},
+                "TS": {
+                    "members": {
+                        "ROMS": {"select": {"time": "{month.window}"}},
+                        "WOA23": {"source": "woa_month{month.mm}"},
+                    }
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert [p.title for p in out] == ["T-S January", "T-S February", "T-S March"]
+    assert [p.kind for p in out] == ["TS", "TS", "TS"]
+    assert out[1].kwargs["members"]["ROMS"]["select"]["time"] == {
+        "min": "2010-02-01T00:00:00",
+        "max": "2010-02-28T23:59:59",
+    }
+    assert out[1].kwargs["members"]["WOA23"]["source"] == "woa_month02"
+    # January and February are over; March holds the run's last step
+    assert [p.kwargs["members"]["ROMS"]["cache"] for p in out] == [True, True, False]
+
+
+def test_for_each_over_a_literal_list_templates_the_variables():
+    suite = _suite(
+        [
+            {
+                "title": "{v}",
+                "for_each": {"v": ["nitrate", "oxygen"]},
+                "XY": {
+                    "members": {"ROMS": {}},
+                    "x": "phosphate",
+                    "y": "{v}",
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert [p.kwargs["y"] for p in out] == ["nitrate", "oxygen"]
+    assert out[1].kwargs["members"]["ROMS"]["variable"] == ["oxygen", "phosphate"]
+
+
+def test_then_is_refused_on_an_xy_or_ts_page():
+    for kind in ("XY", "TS"):
+        with pytest.raises(
+            Exception, match=rf"then: is only supported on field.*{kind}"
+        ):
+            _suite(
+                [
+                    {
+                        "title": "x",
+                        kind: {"members": {"ROMS": {}}},
+                        "then": ["extremum"],
+                    }
+                ]
+            )
+
+
+def test_a_page_cannot_be_both_xy_and_ts_or_either_beside_another_kind():
+    members = {"members": {"ROMS": {}}}
+    for pair in (("XY", "TS"), ("TS", "field"), ("XY", "compare")):
+        page = {"title": "x", **{kind: members for kind in pair}}
+        with pytest.raises(Exception, match=r"exactly one of .*XY:/TS:"):
+            _suite([page])
+
+
+def test_plot_defaults_are_merged_into_and_pinned_for_an_xy_page():
+    suite = _xy_suite(
+        plot={"colors": {"ROMS": "black"}},
+        defaults={"plot": {"ncols": 3, "zoom": 1.5}},
+    )
+    with pytest.warns(UserWarning, match=r"zoom=1\.5.*ignored"):
+        (page,) = P.expand(suite)
+    assert page.plot == {"ncols": 3, "colors": {"ROMS": "black"}, "size": "page"}
+
+
+def test_expand_of_an_xy_page_is_json_serializable_and_deterministic(lenient_regions):
+    suite = _xy_suite(
+        page={
+            "regions": {"North West Pacific": _NWP, "Subpolar Gyre": _SG},
+            "at_center": ["WOA23"],
+        },
+        plot={"annotations": {"North West Pacific": {"STSW": [34.8, 28.0]}}},
+    )
+    first = [p.as_dict() for p in P.expand(suite)]
+    second = [p.as_dict() for p in P.expand(suite)]
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_build_makes_one_field_per_member_then_hands_them_to_ts(monkeypatch):
+    import ocean_skill as osk
+
+    made, drawn = [], {}
+
+    def fake_field(source, variable, **kwargs):
+        made.append((source, variable, kwargs))
+        return f"field:{source}"
+
+    class FakeTS:
+        def __init__(self, members, **kwargs):
+            drawn["members"], drawn["kwargs"] = members, kwargs
+
+        def plot(self, **opts):
+            drawn["plot"] = opts
+            return "figure"
+
+    monkeypatch.setattr(osk, "field", fake_field)
+    monkeypatch.setattr(osk, "TS", FakeTS, raising=False)
+    suite = _xy_suite(
+        page={"regions": {"a": _NWP}, "at_center": ["WOA23"]}, plot={"ncols": 3}
+    )
+    monkeypatch.setattr("ocean_skill.xy.normalize_regions", lambda r: {}, raising=False)
+    (page,) = P.expand(suite)
+
+    assert P.build(page) == [("", "figure")]
+    assert [m[0] for m in made] == [
+        "stub",
+        ["woa_temperature_annual", "woa_salinity_annual"],
+        "glorys_climatology",
+    ]
+    _, roms_variable, roms_kwargs = made[0]
+    assert roms_variable == ["temperature", "salinity"]
+    assert roms_kwargs["cache"] is True and "time" in roms_kwargs["select"]
+    assert "source" not in roms_kwargs and "variable" not in roms_kwargs
+    assert list(drawn["members"]) == ["ROMS", "WOA23", "GLORYS12"]
+    assert drawn["kwargs"] == {"regions": {"a": _NWP}, "at_center": ["WOA23"]}
+    assert drawn["plot"] == {"ncols": 3, "size": "page"}
+
+
+def test_build_passes_x_and_y_to_xy(monkeypatch):
+    import ocean_skill as osk
+
+    drawn = {}
+
+    class FakeXY:
+        def __init__(self, members, **kwargs):
+            drawn["kwargs"] = kwargs
+
+        def plot(self, **opts):
+            return "figure"
+
+    monkeypatch.setattr(osk, "field", lambda source, variable, **kw: object())
+    monkeypatch.setattr(osk, "XY", FakeXY, raising=False)
+    suite = _xy_suite("XY", page={"x": "phosphate", "y": "nitrate"})
+    (page,) = P.expand(suite)
+    P.build(page)
+    assert drawn["kwargs"] == {
+        "x": "phosphate",
+        "y": "nitrate",
+        "regions": None,
+        "at_center": [],
+    }

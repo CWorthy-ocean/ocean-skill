@@ -31,6 +31,7 @@ from ocean_skill.cf import find_coord
 __all__ = [
     "ALONG_DIM",
     "TIME_DEPTH_OVER",
+    "EmptySelection",
     "NoValidData",
     "align",
     "axis_edges",
@@ -73,6 +74,18 @@ class NoValidData(ValueError):
     skip the one unformable station rather than aborting the whole run over it. A caller
     misusing ``sample_at`` itself (a conservative regrid against a zero-area point, just
     below) is a different, non-skippable mistake and stays a bare ``ValueError``.
+    """
+
+
+class EmptySelection(ValueError):
+    """A ``select=`` lon/lat box held no cell of the source.
+
+    Raised by :func:`subset_to_box` when the box is narrower than the grid spacing (a
+    ~100 km box on a 1-degree grid can fall between cell centres) or sits outside the
+    source's extent. Subclasses ``ValueError`` so every existing caller still sees the
+    plain ``ValueError`` it always did; callers that draw many boxes at once
+    (:class:`ocean_skill.xy.XY`) catch this type to drop the one empty panel and say
+    why, rather than abort the rest.
     """
 
 
@@ -451,7 +464,7 @@ def subset_to_box(obj, bbox, *, subject: str = "the source"):
         if not empty:
             out = out.where(inside)
     if empty:
-        raise ValueError(
+        raise EmptySelection(
             f"select lon/lat box ({lon_min:g}..{lon_max:g}, {lat_min:g}..{lat_max:g}) "
             f"selects nothing from {subject}: check the box against the source's "
             "extent and longitude convention (0-360 vs +/-180)."

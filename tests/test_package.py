@@ -11,7 +11,9 @@ def test_version():
     assert isinstance(osk.__version__, str) and osk.__version__
 
 
-@pytest.mark.parametrize("name", ["read", "compare", "Comparison", "catalogs", "find"])
+@pytest.mark.parametrize(
+    "name", ["read", "compare", "Comparison", "catalogs", "find", "XY", "TS"]
+)
 def test_public_api_present(name):
     assert hasattr(osk, name)
 

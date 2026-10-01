@@ -1,7 +1,8 @@
 # PACMED review: domain-mean trends, the alkalinity extremes and their time series,
-# model-only snapshots at the surface / 100 m / 200 m, and the early observation
+# model-only snapshots at the surface / 100 m / 200 m, the early observation
 # comparisons (satellite chlorophyll, Holte & Talley mixed layer depth, WOA23
-# nutrients, GLODAPv2 carbon), organized into PDF sections with divider pages.
+# nutrients, GLODAPv2 carbon), and T-S diagrams in six Pacific boxes against WOA23 and
+# GLORYS12, organized into PDF sections with divider pages.
 #
 # Run it:
 #     ocean-skill-run suites/pacmed_review.yaml --list    # check the page list first
@@ -19,8 +20,11 @@
 #               {"iLAT": "lat", "iLON": "lon", "iMONTH": "month"})
 #       (see the README's Holte & Talley recipe). Without it the mixed layer depth
 #       pages are skipped.
-#   (b) The chlorophyll page reads Copernicus Marine, so log in once first:
+#   (b) The chlorophyll page and the GLORYS12 profiles on the T-S page read Copernicus
+#       Marine, so log in once first:
 #           copernicusmarine login
+#       The WOA23 annual temperature and salinity files (T-S page) are downloaded from
+#       NCEI the first time they are read, so that run needs network access.
 #   (c) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH. Without it the run warns
 #       and leaves the PDF lossless.
 #
@@ -212,3 +216,66 @@ pages:
       variables: [alkalinity, dissolved_inorganic_carbon]
       depths: ["{depth}"]
       aggregate: {time: mean}
+
+  # -- water masses: T-S diagrams -----------------------------------------------------
+  - title: "Water masses"
+    section: >-
+      T-S diagrams in six ~100 km boxes (after Damien et al., Fig. 7). Dots are every
+      model cell, level and restart snapshot in the box; WOA23 annual is taken at the
+      cell nearest the box centre; GLORYS12 monthly climatology is averaged over the
+      box and the year; grey lines are potential density (sigma-0). WOA temperature is
+      in situ, the others potential.
+
+  - title: "T-S diagrams — six Pacific regions"
+    TS:                                  # XY: is the same plus x: and y:
+      members:
+        ROMS: {}                         # source = defaults.test, variables = [y, x], whole-run window
+        WOA23: {source: [woa23_temperature_annual, woa23_salinity_annual]}
+        GLORYS12:
+          source: glorys_climatology_timeseries
+          aggregate: {time: mean, lon: mean, lat: mean}
+      regions:                           # panel order; longitudes 0-360
+        North West Pacific: {lon: {min: 155.24, max: 156.33}, lat: {min: 20.51, max: 21.60}}
+        Subpolar Gyre: {lon: {min: 184.59, max: 185.73}, lat: {min: 47.76, max: 48.59}}
+        California Current System: {lon: {min: 233.59, max: 234.83}, lat: {min: 39.37, max: 40.38}}
+        South West Pacific: {lon: {min: 184.58, max: 185.38}, lat: {min: -16.75, max: -15.91}}
+        South Pacific Gyre: {lon: {min: 238.98, max: 240.00}, lat: {min: -22.37, max: -21.37}}
+        Peru Current: {lon: {min: 273.34, max: 274.47}, lat: {min: -11.73, max: -10.57}}
+      at_center: [WOA23]                 # WOA's 1-degree grid has no cell centre in two of the boxes
+    plot:
+      ncols: 3
+      colors: {ROMS: black, WOA23: "tab:red", GLORYS12: "tab:blue"}
+      # color_by: depth                  # colour the model dots by depth instead of black
+      # Water-mass names as [salinity, temperature] text centres. Read off Fig. 7 by eye,
+      # so adjust after the first render.
+      annotations:
+        North West Pacific:
+          STSW: [34.8, 28.0]
+          NPTW: [34.95, 24.0]
+          NPIW: [34.4, 8.0]
+          PDW: [34.8, 1.5]
+        Subpolar Gyre:
+          "Northern\nsurface\nwaters": [34.0, 11.0]
+          PSUW: [33.2, 5.0]
+          NPIW: [34.35, 6.5]
+          PDW: [34.5, 1.0]
+        California Current System:
+          PSUW: [33.45, 13.5]
+          NPIW: [34.3, 8.0]
+          AAIW: [34.75, 3.5]
+          PDW: [34.4, 1.0]
+        South West Pacific:
+          STSW: [34.65, 28.0]
+          SPTW: [35.5, 23.5]
+          AAIW: [34.8, 5.0]
+          PDW: [34.95, 1.0]
+        South Pacific Gyre:
+          SPTW: [35.95, 25.5]
+          AAIW: [34.75, 6.0]
+          PDW: [34.95, 1.0]
+        Peru Current:
+          STSW: [35.1, 21.5]
+          SPTW: [35.45, 16.0]
+          ESSW: [34.95, 10.0]
+          AAIW: [34.7, 5.5]
+          PDW: [34.75, 1.0]

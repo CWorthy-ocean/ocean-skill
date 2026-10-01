@@ -735,11 +735,83 @@ speck that persists is reported once, at the step where it is strongest.
 A suite page runs this same chain with no Python at all — see `then:` in
 [docs/suites.md](docs/suites.md).
 
+**One property against another — T-S diagrams and beyond.** `osk.XY(members, x=, y=)`
+plots one variable against another for every data source you hand it (a *member*, built
+from ordinary `osk.field()` results), with one panel per region. `osk.TS` is the preset
+with salinity on x and temperature on y, and it draws density (sigma-0) contours by
+default. How each member is drawn follows its data: a member whose two variables sit at
+one position with only depth left (a nearest-cell profile, a box mean) is a
+depth-ordered line, and anything else — every cell, level and snapshot of a model box —
+is a cloud of dots.
+
+```python
+box = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+TS_VARS = ["temperature", "salinity"]
+
+roms = osk.field("all_the_rest", TS_VARS, select=box)                  # dots
+woa = osk.field(["woa23_temperature_annual", "woa23_salinity_annual"], TS_VARS,
+                select={"lon": 155.79, "lat": 21.05})                   # nearest cell: line
+glorys = osk.field("glorys_climatology_timeseries", TS_VARS, select=box,
+                   aggregate={"time": "mean", "lon": "mean", "lat": "mean"})  # line
+
+osk.TS({"ROMS": roms, "WOA23": woa, "GLORYS12": glorys}).plot(
+    title="North West Pacific water masses")
+
+osk.XY({"ROMS": osk.field("all_the_rest", ["nitrate", "phosphate"], select=box)},
+       x="phosphate", y="nitrate").plot()      # any pair; density contours are off
+```
+
+A member needs one field for `x` and one for `y`; a source list crossed with a variable
+list (`osk.field([woa_t, woa_s], TS_VARS)`, WOA keeping temperature and salinity in
+separate entries) makes the cross product and the combinations a source does not carry
+are dropped with a warning. Each member is read only when the figure is drawn, so
+building an `XY` costs nothing.
+
+`regions=` gives one panel per region and *replaces* every member's horizontal `select`,
+so one set of members is drawn in each. A region is a lon/lat box or point. A ~100 km box
+on a 1° grid can sit between cell centres and select nothing; `at_center=` samples the
+listed members at the nearest cell to each box centre instead:
+
+```python
+PACIFIC = {   # lon (0-360) and lat ranges, after Damien et al., Fig. 7
+    "North West Pacific":        ((155.24, 156.33), (20.51, 21.60)),
+    "Subpolar Gyre":             ((184.59, 185.73), (47.76, 48.59)),
+    "California Current System": ((233.59, 234.83), (39.37, 40.38)),
+    "South West Pacific":        ((184.58, 185.38), (-16.75, -15.91)),
+    "South Pacific Gyre":        ((238.98, 240.00), (-22.37, -21.37)),
+    "Peru Current":              ((273.34, 274.47), (-11.73, -10.57)),
+}
+regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
+                  "lat": {"min": lat[0], "max": lat[1]}}
+           for name, (lon, lat) in PACIFIC.items()}
+
+ts = osk.TS({"ROMS": osk.field("all_the_rest", TS_VARS),
+             "WOA23": osk.field(["woa23_temperature_annual", "woa23_salinity_annual"],
+                                TS_VARS),
+             "GLORYS12": osk.field("glorys_climatology_timeseries", TS_VARS,
+                                   aggregate={"time": "mean", "lon": "mean",
+                                              "lat": "mean"})},
+            regions=regions, at_center=["WOA23"])
+ts.plot(ncols=3, colors={"ROMS": "black", "WOA23": "tab:red", "GLORYS12": "tab:blue"})
+ts.plot(color_by="depth", density=False, renderer="holoviews")   # colour the cloud by depth
+ts.data                    # {region: {member: {"x": DataArray, "y": DataArray}}}
+```
+
+A member that cannot give a panel (a box with no cell in it, a point on land) is dropped
+from that panel with a warning that says why. Without `regions=`, each member needs a
+lon/lat box or point in its own `select` — otherwise it would load its whole domain, every
+level and time step, and `XY` refuses instead. Water-mass names are placed by hand with
+`annotations=`; the positions for the six panels above are the `annotations:` block of
+the `TS:` page in `suites/pacmed_review.yaml`. The same figure is a suite page — see
+`XY:`/`TS:` below.
+
 ## Suites: run a whole diagnostic from one YAML
 
 A suite is a YAML file listing **pages** — each one a single `osk.field`, `osk.compare`,
-or `osk.summary` call — plus shared defaults. One command draws every page and writes
-PNGs, a PDF, and a metrics CSV, with no Python required:
+or `osk.summary` call — plus shared defaults (an `XY:`/`TS:` page draws the
+property-property plot above from a `members:` dict, with `regions:` and `at_center:`).
+One command draws every page and writes PNGs, a PDF, and a metrics CSV, with no Python
+required:
 
 ```bash
 ocean-skill-run suites/roms_marbl_diagnostic.yaml

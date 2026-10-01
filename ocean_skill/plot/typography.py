@@ -544,6 +544,17 @@ SECTION_ASPECT = 2.2
 #: any other physical ratio) to measure a profile panel's shape from either.
 PROFILE_ASPECT = 0.62
 
+#: What a property-property (``XY``/``TS``) panel wants: close to square, a shade
+#: portrait. Two physical quantities have no natural ratio to measure a panel's shape
+#: from, so like :data:`PROFILE_ASPECT` and :data:`SERIES_ASPECT` this is a design
+#: choice; 0.9 puts a page-width 2x3 grid at about 8.5 x 7 inches.
+XY_ASPECT = 0.9
+
+#: :data:`SERIES_PANEL_W_FRACTION` less the width a figure-level vertical colour bar
+#: (``color_by=``) takes from the grid: the bar, its pad and its tick labels come to
+#: roughly 0.9in of a page-width canvas.
+XY_PANEL_W_FRACTION_COLORBAR = 0.80
+
 #: Height of a residual strip as a fraction of the panel it sits under. A difference
 #: *map* is a third panel of equal weight because it needs its own colour scale; a
 #: difference *series* is conventionally a thin strip below the data it belongs to.
