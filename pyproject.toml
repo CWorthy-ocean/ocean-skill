@@ -37,6 +37,9 @@ dependencies = [
     "pint",
     "pint-xarray",
     "pint-pandas",
+    # Imported with ocean_skill: the vocabulary registers its criteria with
+    # cf-xarray, and the units registry is cf_xarray.units' (see ocean_skill/vocab/).
+    "cf_xarray",
 ]
 
 [project.scripts]
@@ -55,7 +58,12 @@ include = ["ocean_skill*"]
 # Ship the packaged reference catalogs. ocean_skill/catalogs/ is data, not a package
 # (no __init__.py), so it needs its own entry -- a top-level "*" glob doesn't recurse
 # into it.
-"ocean_skill" = ["catalogs/*.yaml", "catalogs/*.yml", "catalogs/README.md"]
+"ocean_skill" = [
+    "catalogs/*.yaml", "catalogs/*.yml", "catalogs/README.md",
+    # The shared vocabulary and units definitions -- data, not a package, and laid out
+    # so the folder can move to its own home unchanged.
+    "vocab/*.yaml", "vocab/*.txt", "vocab/README.md",
+]
 
 # --- ruff: linter + formatter (mirrors cstar-forge / roms-tools house style) ---
 [tool.ruff]

@@ -9,7 +9,13 @@ stop a comparison rather than quietly producing a difference that looks plausibl
 
 from __future__ import annotations
 
+import importlib.resources
+import logging
+import os
+import subprocess
+import sys
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -281,6 +287,239 @@ def test_a_dataframe_column_converts_with_the_same_density_context():
     with u.registry().context("seawater"):
         converted = series.pint.to("mmol/m^3")
     assert float(converted.iloc[0].magnitude) == pytest.approx(u.RHO_SEAWATER / 1000.0)
+
+
+# -- the registry is cf-xarray's, extended from vocab/units.txt ---------------------
+
+
+def test_the_registry_is_cf_xarrays_and_the_application_registry():
+    """One registry, however it is reached: ours, cf-xarray's, pint's application one.
+
+    cf-xarray installs its own registry as pint's application registry when
+    ``cf_xarray.units`` is imported, which is what pint-pandas and pint-xarray read --
+    so sharing it is what keeps a DataFrame column, a Dataset variable and a bare
+    ``cf_xarray.units.units.Quantity`` mutually comparable.
+    """
+    import cf_xarray.units
+    import pint
+
+    ureg = u.registry()
+    assert ureg is cf_xarray.units.units
+    assert pint.get_application_registry().get() is ureg
+    # ...and the ocean additions are in that shared registry, not a private copy.
+    assert "oxygen_ml_per_l" in ureg
+    assert "eq" in ureg
+
+
+#: How the registry first gets touched, in a fresh interpreter each time: pint's
+#: behavior here depends on import order, which the test process's module cache hides.
+_ORDERINGS = {
+    "cf_xarray.units first": """
+import cf_xarray.units as cu
+from_cf = cu.units.Quantity(2.0, "mmol/m^3")
+from ocean_skill import units as u
+ours = u.registry().Quantity(1.0, "mmol/m^3")
+""",
+    "ocean-skill first": """
+from ocean_skill import units as u
+ours = u.registry().Quantity(1.0, "mmol/m^3")
+import cf_xarray.units as cu
+from_cf = cu.units.Quantity(2.0, "mmol/m^3")
+""",
+    "pint-pandas and pint-xarray first": """
+import pint_pandas, pint_xarray
+from ocean_skill import units as u
+ours = u.registry().Quantity(1.0, "mmol/m^3")
+import cf_xarray.units as cu
+from_cf = cu.units.Quantity(2.0, "mmol/m^3")
+""",
+}
+
+_ORDERING_CHECK = """
+import logging
+
+import pint
+
+app = pint.get_application_registry().Quantity(4.0, "mmol/m^3")
+# Quantities from the three routes combine only if they share one registry.
+assert float((ours + from_cf + app).magnitude) == 7.0
+assert u.registry() is cu.units and pint.get_application_registry().get() is cu.units
+# The definitions landed in cf-xarray's registry, and loading them into it was quiet.
+assert "oxygen_ml_per_l" in cu.units and "eq" in cu.units
+assert float(cu.units.Quantity(1.0, "oxygen_ml_per_l").to("mmol/m^3").magnitude) > 44
+# (cf-xarray's own import logs "Redefining ..." for the pint units it overrides, so
+# only records about what units.txt defines count.)
+MINE = (
+    "equivalent", "'eq'", "oxygen_ml_per_l", "degrees_celsius", "degrees_C", "seawater"
+)
+ours_logged = [m for m in LOGGED if any(name in m for name in MINE)]
+assert not ours_logged, ours_logged
+"""
+
+_LOG_CAPTURE = """
+import logging
+
+LOGGED = []
+
+
+class _Capture(logging.Handler):
+    def emit(self, record):
+        LOGGED.append(record.getMessage())
+
+
+logging.getLogger().addHandler(_Capture())
+"""
+
+
+@pytest.mark.parametrize("ordering", list(_ORDERINGS))
+def test_quantities_combine_whichever_package_touches_the_registry_first(
+    ordering, tmp_path
+):
+    """Regression: ocean-skill used to extend pint's application registry itself.
+
+    Importing ``cf_xarray.units`` afterwards replaced the application registry, leaving
+    those definitions behind on an orphan and pint refusing to mix the two. Using
+    cf-xarray's registry directly takes the ordering out of it. A subprocess per case,
+    so nothing is hidden by modules this process already imported.
+    """
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(root), *filter(None, [env.get("PYTHONPATH")])]
+    )
+    env["OCEAN_SKILL_DIR"] = str(tmp_path)  # importing must not touch the real cache
+    result = subprocess.run(
+        [sys.executable, "-c", _LOG_CAPTURE + _ORDERINGS[ordering] + _ORDERING_CHECK],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _bare_pint_registry():
+    import pint
+
+    return pint.UnitRegistry()
+
+
+def test_loading_the_definitions_again_is_quiet(caplog):
+    """The file is loaded once per registry: a second loader must not complain.
+
+    pint answers a repeated load with "Redefining ..." *log* records, not Python
+    warnings, so both are checked. Done on a scratch registry (and on the shared one
+    through :func:`registry`) so the test does not redefine the shared one itself.
+    """
+    path = importlib.resources.files("ocean_skill") / "vocab" / "units.txt"
+    fresh = _bare_pint_registry()
+    with caplog.at_level(logging.WARNING):
+        u._load_definitions(fresh)  # the first load is quiet too
+    assert "oxygen_ml_per_l" in fresh
+    assert not caplog.records
+
+    with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
+        warnings.simplefilter("error")
+        u._load_definitions(fresh)
+        u._load_definitions(u.registry())
+    assert not caplog.records
+
+    # The premise: loading the file twice *without* the guard is what gets noisy.
+    with caplog.at_level(logging.WARNING), importlib.resources.as_file(path) as real:
+        fresh.load_definitions(real)
+    assert any("Redefining" in r.getMessage() for r in caplog.records)
+
+
+def test_a_second_registry_call_after_a_reset_adds_nothing(monkeypatch, caplog):
+    """Another package, or a test, clearing the cached registry must not reload it."""
+    first = u.registry()
+    monkeypatch.setattr(u, "_registry", None)
+    with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
+        warnings.simplefilter("error")
+        assert u.registry() is first
+    assert not caplog.records
+
+
+def test_oxygen_unit_in_the_file_equals_the_python_constant():
+    """``vocab/units.txt`` and :data:`O2_MMOL_PER_ML` are the same number, twice."""
+    ureg = u.registry()
+    got = float(ureg.Quantity(1.0, "oxygen_ml_per_l").to("mmol/m^3").magnitude)
+    assert got == pytest.approx(u.O2_MMOL_PER_ML, rel=1e-12)
+
+
+def test_equivalents_are_moles_of_charge():
+    """Alkalinity's ``meq``: 1 eq = 1 mol, defined in the file rather than in code."""
+    ureg = u.registry()
+    one = ureg.Quantity(1.0, u.normalize("meq/m^3")).to("mmol/m^3")
+    assert float(one.magnitude) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "spelling", ["degrees_celsius", "degrees_C", "Celsius", "degC"]
+)
+def test_celsius_spellings_are_one_unit(spelling):
+    assert u.parse(spelling) == u.parse("degC")
+
+
+# -- the seawater context's density is a parameter ------------------------------------
+
+
+def test_the_contexts_default_density_is_the_modules():
+    """A bare ``context("seawater")`` (tests, other packages) agrees with RHO_SEAWATER.
+
+    The default lives in ``units.txt`` and the constant here; this is what notices one
+    being edited without the other.
+    """
+    ureg = u.registry()
+    quantity = ureg.Quantity(1.0, "umol/kg")
+    with ureg.context("seawater"):
+        bare = float(quantity.to("mmol/m^3").magnitude)
+    with ureg.context("seawater", rho=u.RHO_SEAWATER):
+        explicit = float(quantity.to("mmol/m^3").magnitude)
+    assert bare == explicit == pytest.approx(u.RHO_SEAWATER / 1000.0)
+
+
+@pytest.mark.parametrize("rho", [1000.0, 1030.0])
+def test_a_density_passed_to_the_context_converts_both_ways(rho):
+    ureg = u.registry()
+    with ureg.context("seawater", rho=rho):
+        per_volume = ureg.Quantity(1.0, "umol/kg").to("mmol/m^3")
+        per_mass = ureg.Quantity(1.0, "mmol/m^3").to("umol/kg")
+    assert float(per_volume.magnitude) == pytest.approx(rho / 1000.0, rel=1e-12)
+    assert float(per_mass.magnitude) == pytest.approx(1000.0 / rho, rel=1e-12)
+
+
+@pytest.mark.parametrize("rho", [1000.0, 1030.0])
+def test_convert_units_with_another_density_gives_the_same_numbers_as_before(
+    monkeypatch, rho
+):
+    """``convert_units(rho=)`` gives the factors it always did.
+
+    It used to rebuild the registry around the new constant; it now feeds the context's
+    ``rho``. A density once given still governs the later calls that do not repeat it
+    (``compatible``/``to_units``).
+    """
+    monkeypatch.setattr(u, "RHO_SEAWATER", u.RHO_SEAWATER)  # rebound below; undone
+    ureg = u.registry()
+
+    out = u.convert_units(_field(1.0, "umol/kg"), rho=rho)
+    assert float(out.mean()) == pytest.approx(rho / 1000.0, rel=1e-12)
+    assert u.RHO_SEAWATER == rho
+    assert u.registry() is ureg and u._registry is ureg  # nothing was rebuilt
+
+    back = u.to_units(_field(1.0, "mmol/m^3"), "umol/kg")
+    assert float(back.mean()) == pytest.approx(1000.0 / rho, rel=1e-12)
+    assert u.compatible("umol/kg", "mmol/m^3") is True
+
+    # through oxygen's own unit as well: mL/L -> umol/kg composes both definitions
+    oxygen = u.to_units(_field(1.0, "mL/L"), "umol/kg")
+    assert float(oxygen.mean()) == pytest.approx(u.O2_MMOL_PER_ML * 1000.0 / rho)
+
+
+def test_unit_conversion_records_a_plain_float_factor():
+    """cf-xarray's registry yields 0-d arrays; the recorded factor must not show it."""
+    out = u.convert_units(_field(1.0, "umol/kg"))
+    assert out.attrs["unit_conversion"] == "umol/kg -> mmol/m^3 (x1.025)"
 
 
 # -- coordinate ordering ------------------------------------------------------

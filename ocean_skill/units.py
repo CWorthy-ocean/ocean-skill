@@ -11,10 +11,14 @@ multiply. pint replaces the arithmetic and, more importantly, adds **dimensional
 analysis** — the thing that lets :func:`compatible` refuse to subtract a per-mass field
 from a per-volume one instead of silently returning a plausible wrong number.
 
-One registry is shared with ``pint-pandas`` and ``pint-xarray`` via
-:func:`pint.get_application_registry`, so a quantity in a DataFrame (point/timeseries
-observations) and one in a Dataset (gridded) are directly comparable. Mixing registries
-raises in pint, so everything must go through :func:`registry`.
+One registry is shared with ``pint-pandas`` and ``pint-xarray``, so a quantity in a
+DataFrame (point/timeseries observations) and one in a Dataset (gridded) are directly
+comparable. Mixing registries raises in pint, so everything must go through
+:func:`registry`. That registry is ``cf_xarray.units.units`` -- the one cf-xarray itself
+installs as pint's application registry, which is what those two libraries read -- with
+the ocean units (``oxygen_ml_per_l``, equivalents) and the ``seawater`` density context
+added once from ``ocean_skill/vocab/units.txt``, a plain pint definitions file other
+packages can load into the same registry.
 
 **pint alone is not enough for ocean data**, which was measured rather than assumed: of
 21 unit spellings taken from the real WOA/GLODAP/MODIS/OOI catalogs, pint's default
@@ -27,6 +31,7 @@ has seen yet still parses if it follows the conventions; only genuine typos
 
 from __future__ import annotations
 
+import importlib.resources
 import re
 import warnings
 
@@ -56,10 +61,10 @@ RHO_SEAWATER = 1025.0
 #: dissolved oxygen as a gas volume (``mL/L``) rather than a molar concentration. A
 #: constant here for the same reason :data:`RHO_SEAWATER` is: real gas behavior shifts
 #: it a little with temperature and pressure, and a source whose own processing used a
-#: different figure should override this. Unlike :data:`RHO_SEAWATER`, though, this one
-#: is baked into a concrete pint unit definition (:func:`registry`) rather than read
-#: live by a context transformation, so a change after the registry has already been
-#: built needs ``units._registry = None`` before the next call picks it up.
+#: different figure should override this. Unlike :data:`RHO_SEAWATER`, though, the value
+#: that conversions use lives in ``vocab/units.txt`` (the ``oxygen_ml_per_l`` unit, a
+#: concrete pint definition rather than a context parameter), so changing this name
+#: changes nothing -- edit the definition there. A test keeps the two equal.
 O2_MMOL_PER_ML = 1000.0 / 22.392  # ~44.661 mmol/m3 per mL/L
 
 #: Spellings no rule can recover, because they are mistakes or free text rather than a
@@ -112,57 +117,69 @@ _registry = None
 
 
 def registry():
-    """Return the shared pint registry, defining ocean units and contexts once.
+    """Return the shared pint registry: cf-xarray's, plus the ocean definitions.
 
-    Deliberately the *application* registry rather than a private one: pint refuses
-    to combine quantities from different registries, so a private one here would
-    make ocean-skill's units unusable alongside a user's own pint code, or alongside
-    pint-pandas in the same session.
+    Deliberately *cf-xarray's* registry (``cf_xarray.units.units``) rather than a
+    private one, or pint's bare application registry: pint refuses to combine
+    quantities from different registries, so a private one here would make
+    ocean-skill's units unusable alongside a user's own pint code, or alongside
+    pint-pandas in the same session. Importing ``cf_xarray.units`` also installs its
+    registry as the application registry (:func:`pint.set_application_registry`), and
+    :func:`pint.get_application_registry` is a wrapper that follows that, so
+    pint-pandas and pint-xarray end up on this very registry however the imports are
+    ordered. Building a registry of our own on the application registry instead would
+    be silently orphaned the moment anything imported ``cf_xarray.units`` afterwards.
+
+    Everything cf-xarray lacks comes from ``ocean_skill/vocab/units.txt``, loaded once
+    (:func:`_load_definitions`).
     """
     global _registry
     if _registry is not None:
         return _registry
 
-    import pint
+    import cf_xarray.units
 
-    ureg = pint.get_application_registry()
-    _define(ureg, "equivalent = mole = eq")  # alkalinity: 1 eq = 1 mol of charge
-    _define(ureg, "practical_salinity_unit = [] = PSU = psu")
-    _define(ureg, "@alias degree_Celsius = Celsius = degrees_celsius = degrees_C")
-    # A real [substance]/[length]**3 unit, not a bare dimensionless one -- see
-    # _OXYGEN_ML_PER_L's own comment for why that distinction is what keeps this from
-    # also matching PSU. Ordinary pint conversion handles the rest from here: no
-    # context needed, and it already interoperates with the seawater context below
-    # (a mL/L reading against a per-mass umol/kg one converts through both).
-    _define(ureg, f"oxygen_ml_per_l = {O2_MMOL_PER_ML} * millimole / meter ** 3")
-
-    # Per-mass <-> per-volume is not a unit conversion: it needs a density, which is
-    # physics, not arithmetic. A context is pint's way of saying "this transformation
-    # is available when you ask for it" without making it silently automatic.
-    ctx = pint.Context("seawater")
-    ctx.add_transformation(
-        "[substance] / [mass]",
-        "[substance] / [length] ** 3",
-        lambda ureg_, x: x * (RHO_SEAWATER * ureg_.kg / ureg_.m**3),
-    )
-    ctx.add_transformation(
-        "[substance] / [length] ** 3",
-        "[substance] / [mass]",
-        lambda ureg_, x: x / (RHO_SEAWATER * ureg_.kg / ureg_.m**3),
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # re-adding an identically named context
-        ureg.add_context(ctx)
+    ureg = cf_xarray.units.units
+    _load_definitions(ureg)
     _registry = ureg
     return ureg
 
 
-def _define(ureg, definition: str) -> None:
-    """Add a definition, tolerating one that a previous import already added."""
+def _definitions_loaded(ureg) -> bool:
+    """Whether ``units.txt`` is already in ``ureg``: its last unit and its context."""
+    if "oxygen_ml_per_l" not in ureg:
+        return False
     try:
-        ureg.define(definition)
-    except Exception:  # RedefinitionError, or a newer pint already shipping it
-        pass
+        with ureg.context("seawater"):
+            return True
+    except KeyError:  # pint's "no such context"
+        return False
+
+
+def _load_definitions(ureg) -> None:
+    """Add ``vocab/units.txt`` to ``ureg`` unless something already has.
+
+    pint answers a second load of the same definitions with "Redefining ..." log
+    warnings for every unit and context, and cf-xarray's registry is process-wide, so
+    another package (ROMS-Tools loads the same file) or an earlier call can have got
+    there first. Skipping is what makes loading it from several places quiet.
+    """
+    if _definitions_loaded(ureg):
+        return
+    source = importlib.resources.files("ocean_skill") / "vocab" / "units.txt"
+    with importlib.resources.as_file(source) as path:
+        ureg.load_definitions(path)
+
+
+def _seawater(ureg):
+    """Return the ``seawater`` density context at the current :data:`RHO_SEAWATER`.
+
+    Density is the context's ``rho`` parameter (kg m-3), passed on every use rather
+    than baked in, so :data:`RHO_SEAWATER` is read when a conversion happens and a
+    new value needs no registry rebuild -- which matters now that the registry is
+    cf-xarray's, shared with everyone else in the process.
+    """
+    return ureg.context("seawater", rho=RHO_SEAWATER)
 
 
 def normalize(unit_string) -> str:
@@ -231,7 +248,7 @@ def compatible(a, b) -> bool | None:
         return None
     if ua.is_compatible_with(ub):
         return True
-    return bool(ua.is_compatible_with(ub, "seawater"))
+    return bool(ua.is_compatible_with(ub, "seawater", rho=RHO_SEAWATER))
 
 
 def to_units(da, target, *, rho: float | None = None):
@@ -252,8 +269,9 @@ def to_units(da, target, *, rho: float | None = None):
             "a per-call density is not supported yet; set units.RHO_SEAWATER instead"
         )
     try:
-        with ureg.context("seawater"):
-            factor = ureg.Quantity(1.0, ua).to(ub).magnitude
+        with _seawater(ureg):
+            # float(): cf-xarray's registry hands back 0-d arrays (force_ndarray_like)
+            factor = float(ureg.Quantity(1.0, ua).to(ub).magnitude)
     except Exception:
         return da  # dimensionally unrelated; the caller checks compatible()
     out = da * factor
@@ -275,8 +293,7 @@ def convert_units(da, target: str = "mmol/m^3", rho: float = RHO_SEAWATER):
     """
     global RHO_SEAWATER
     if rho != RHO_SEAWATER:
-        RHO_SEAWATER = rho  # keep the context's density in step with an explicit rho
-        globals()["_registry"] = None
+        RHO_SEAWATER = rho  # the context reads it on every use (see _seawater)
     if compatible(da.attrs.get("units"), target):
         return to_units(da, target)
     return da

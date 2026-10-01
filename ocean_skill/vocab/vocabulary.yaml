@@ -1,0 +1,396 @@
+# ocean-skill's variable vocabulary, in cf-xarray's own `custom_criteria` shape:
+#   {key: {attribute: regex}}
+# Load it with no ocean-skill code at all:
+#   cf_xarray.set_options(custom_criteria=yaml.safe_load(open(path)))
+# See README.md in this folder for the file rules and how ocean-skill reads it.
+# Product names (thetao, so, t_an, ...) are deliberately absent: they belong in
+# each catalog entry's `standard_names`, not here.
+
+# Aliases: WOA/GLODAP's per-mass form, and NO3, ROMS/MARBL's tracer name. See the
+# iron entry below on how a short name like NO3 is matched.
+nitrate:
+  name: '^(?i:nitrate|mole_concentration_of_nitrate_in_sea_water|moles_of_nitrate_per_unit_mass_in_sea_water|NO3)$'
+  standard_name: '^(?i:mole_concentration_of_nitrate_in_sea_water)$'
+
+# A different quantity from "nitrate" above -- the combined NO3+NO2
+# concentration a discrete-sample lab often reports as one column when the
+# two species aren't separated, so deliberately its own key/standard_name
+# rather than an alias (the same reason "oxygen_saturation" stays separate
+# from "oxygen"). Nitrate_and_Nitrite is the Iceland discrete-sample column
+# spelling.
+nitrate_and_nitrite:
+  name: '^(?i:nitrate_and_nitrite|mole_concentration_of_nitrate_and_nitrite_in_sea_water|moles_of_nitrate_and_nitrite_per_unit_mass_in_sea_water|Nitrate_and_Nitrite)$'
+  standard_name: '^(?i:mole_concentration_of_nitrate_and_nitrite_in_sea_water)$'
+
+# PO4 is ROMS/MARBL's tracer name; see the iron entry below on matching.
+phosphate:
+  name: '^(?i:phosphate|mole_concentration_of_phosphate_in_sea_water|moles_of_phosphate_per_unit_mass_in_sea_water|PO4)$'
+  standard_name: '^(?i:mole_concentration_of_phosphate_in_sea_water)$'
+
+# SiO3 is ROMS/MARBL's tracer name; see the iron entry below on matching.
+silicate:
+  name: '^(?i:silicate|mole_concentration_of_silicate_in_sea_water|moles_of_silicate_per_unit_mass_in_sea_water|SiO3)$'
+  standard_name: '^(?i:mole_concentration_of_silicate_in_sea_water)$'
+
+# Aliases: the WOA/GLODAP per-mass form, and NH4, ROMS/MARBL's own tracer name;
+# see the iron entry below on matching.
+ammonium:
+  name: '^(?i:ammonium|mole_concentration_of_ammonium_in_sea_water|moles_of_ammonium_per_unit_mass_in_sea_water|NH4)$'
+  standard_name: '^(?i:mole_concentration_of_ammonium_in_sea_water)$'
+
+# Aliases:
+#   - WOA/GLODAP's per-mass spelling, the same per-volume/per-mass split the
+#     other nutrients above carry.
+#   - Fe, ROMS/MARBL's own tracer name (build.py's ROMS_STANDARD_NAMES maps `Fe`
+#     here). Short, but matched whole -- ocean-skill's index is an exact lookup and
+#     every regex in this file is anchored at both ends, so `Fe`/`fe`/`FE` resolve
+#     while a name merely starting with them (e.g. `felix`) does not. The other
+#     short tracer names in this file (NO3, O2, ...) are matched the same way.
+iron:
+  name: '^(?i:iron|mole_concentration_of_dissolved_iron_in_sea_water|moles_of_dissolved_iron_per_unit_mass_in_sea_water|Fe)$'
+  standard_name: '^(?i:mole_concentration_of_dissolved_iron_in_sea_water)$'
+
+# Alias O2 is ROMS/MARBL's tracer name; see the iron entry above on matching.
+# Patterns (see README.md on writing them):
+#   - doxy and dissolved_oxygen: Argo/OceanSITES's own code, and the common mooring
+#     spelling -- neither is a single literal worth enumerating case variants of.
+#     Must not claim "oxygen_saturation" below (a different quantity, not this
+#     pattern's alternation) or a `_qc`/`_flag`-decorated companion (no such token
+#     appears in it).
+#   - oxygen_ctd and ctd_oxygen: SEANOE's CTD-export column style, the same `_ctd`
+#     decoration as "temperature"/"salinity" below (e.g. Iceland CTD profiles'
+#     `Oxygen_CTD`).
+oxygen:
+  name: '^(?i:oxygen|mole_concentration_of_dissolved_molecular_oxygen_in_sea_water|moles_of_oxygen_per_unit_mass_in_sea_water|O2|(?:doxy)|(?:dissolved_oxygen)|(?:oxygen_ctd)|(?:ctd_oxygen))$'
+  standard_name: '^(?i:mole_concentration_of_dissolved_molecular_oxygen_in_sea_water)$'
+
+# A different quantity from "oxygen" above -- percent saturation, not a
+# concentration -- so deliberately its own key/standard_name rather than an
+# alias, the same reason "sea_level_anomaly" stays separate from "ssh".
+oxygen_saturation:
+  name: '^(?i:oxygen_saturation|fractional_saturation_of_oxygen_in_sea_water)$'
+  standard_name: '^(?i:fractional_saturation_of_oxygen_in_sea_water)$'
+
+# Aliases: the per-mass form, DIC (ROMS/MARBL tracer name; see the iron entry
+# above on matching), and TCO2 (GLODAP's total CO2 spelling for the same
+# quantity).
+dissolved_inorganic_carbon:
+  name: '^(?i:dissolved_inorganic_carbon|mole_concentration_of_dissolved_inorganic_carbon_in_sea_water|moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water|DIC|TCO2)$'
+  standard_name: '^(?i:mole_concentration_of_dissolved_inorganic_carbon_in_sea_water)$'
+
+# All of these are *total* alkalinity: CF defines the canonical name as "the
+# total alkalinity equivalent concentration (including carbonate, nitrogen,
+# silicate, and borate components)". They differ only in basis (per volume vs
+# per mass), which units.py converts through the seawater-density context --
+# the same split nitrate has between WOA and ROMS/GLODAP.
+# Aliases:
+#   - CF's per-mass form (mol kg-1); the canonical name is mol m-3.
+#   - Kept for the "seawater" (no underscore) spelling seen in the wild -- it is
+#     NOT a CF name, so it matches only products that write it that way.
+#   - total_alkalinity_in_sea_water: OceanSODA-ETHZ's `talk`
+#     (ocean_skill/catalogs/oceansoda.yaml). Also not CF: the table has no
+#     total_alkalinity_in_sea_water entry or alias. Without it,
+#     find(variable="alkalinity") returned GLODAP and ROMS but silently dropped
+#     OceanSODA, and compare() would not pair them.
+#   - ALK is ROMS/MARBL's tracer name; see the iron entry above on matching.
+#   - TA is the common discrete-sample shorthand for *total* alkalinity.
+#   - TAlk is GLODAP's own spelling of the same quantity.
+alkalinity:
+  name: '^(?i:alkalinity|sea_water_alkalinity_expressed_as_mole_equivalent|sea_water_alkalinity_per_unit_mass_expressed_as_mole_equivalent|seawater_alkalinity_per_unit_mass_expressed_as_mole_equivalent|total_alkalinity_in_sea_water|ALK|TA|TAlk)$'
+  standard_name: '^(?i:sea_water_alkalinity_expressed_as_mole_equivalent)$'
+
+# The in-situ spellings are not strictly the same quantity as potential
+# temperature -- see the module docstring of ocean_skill.vocabulary on why they are
+# aliases here and not their own tier.
+# Aliases:
+#   - temp is the ROMS tracer name; see the iron entry above on matching.
+#   - Satellite SST, in the three flavours GHRSST distinguishes. They are *not*
+#     identical: skin is the radiometric top micron, subskin the top millimetre,
+#     and foundation the temperature free of diurnal warming -- skin and
+#     foundation can differ by a few tenths of a degree on a calm sunny afternoon.
+#     They are aliased here for the same reason sea_water_temperature is: without
+#     it every satellite SST product is invisible to find(variable="temperature"),
+#     which was the whole point of asking. MUR alone declares
+#     sea_surface_foundation_temperature.
+#   - The plain surface spelling, used by every gridded surface product we carry
+#     (OceanSODA-ETHZ's `temperature`, ocean_skill/catalogs/oceansoda.yaml, as well
+#     as the CoastWatch L3 and Geo-Polar SST fields). The sampling depth is a
+#     property of where the measurement was taken, which a comparison reports
+#     separately (the metrics row's `obs_depth`, and align_series' depth caveat)
+#     rather than by refusing to pair a mooring with a surface field.
+# Patterns: SEANOE's CTD-export column style (`Temperature_CTD`, `CTD_Temperature`,
+# `temp_ctd`, any case) -- a family of decorations around one instrument name, not
+# worth enumerating literally. Must not claim `temperature_qc`/`Temperature_flag`
+# (no qc/flag token here), plain `air_temperature` (a different quantity), `atemp`,
+# or bare `ctd`.
+temperature:
+  name: '^(?i:temperature|sea_water_potential_temperature|temp|sea_water_temperature|sea_surface_foundation_temperature|sea_surface_temperature|sea_surface_subskin_temperature|sea_surface_skin_temperature|(?:(?:sea_water_)?temp(?:erature)?_ctd)|(?:ctd_temp(?:erature)?))$'
+  standard_name: '^(?i:sea_water_potential_temperature)$'
+
+# NSIDC's CDR (cdr_seaice_conc) and the ice field bundled into MUR, OISST
+# and the Geo-Polar blend all declare this one name.
+sea_ice:
+  name: '^(?i:sea_ice|sea_ice_area_fraction)$'
+  standard_name: '^(?i:sea_ice_area_fraction)$'
+
+# Deliberately not an alias of "ssh": DUACS ships both, and they are
+# different quantities -- adt is height above the geoid, sla is the
+# departure from a mean surface. Aliasing them would let compare() pair a
+# ~1 m field against a ~0.1 m one and call it agreement.
+sea_level_anomaly:
+  name: '^(?i:sea_level_anomaly|sea_surface_height_above_sea_level)$'
+  standard_name: '^(?i:sea_surface_height_above_sea_level)$'
+
+# True geographic eastward velocity -- deliberately NOT the same concept as
+# ROMS' own grid-relative x-velocity (see "x_velocity" below). The two used
+# to share one standard_name here, which silently treated a rotated ROMS
+# grid's `u` as if it were geographic east. ocean_skill.roms.standardize now
+# derives this from ROMS' staggered u/v by averaging to rho points and
+# rotating by the grid `angle`, so a model field pairs correctly against an
+# in-situ instrument's own eastward reading (e.g. an ADCP mooring).
+# Aliases:
+#   - eastward_velocity: the pre-split key; old callers still resolve.
+#   - DUACS/MULTIOBS ugos and ugosa: geostrophic velocity is derived from
+#     sea-surface slope, not read off a model grid, so it IS geographic
+#     east/north and belongs here rather than with "x_velocity". The
+#     "_assuming_sea_level_for_geoid" form is the one computed from sla
+#     rather than adt.
+east_velocity:
+  name: '^(?i:east_velocity|eastward_sea_water_velocity|eastward_velocity|surface_geostrophic_eastward_sea_water_velocity|surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid)$'
+  standard_name: '^(?i:eastward_sea_water_velocity)$'
+
+# Aliases: northward_velocity is this entry's pre-split key; the others are the
+# DUACS/MULTIOBS geostrophic forms (see "east_velocity" above).
+north_velocity:
+  name: '^(?i:north_velocity|northward_sea_water_velocity|northward_velocity|surface_geostrophic_northward_sea_water_velocity|surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid)$'
+  standard_name: '^(?i:northward_sea_water_velocity)$'
+
+# ROMS' own grid-relative x-velocity (build.py's ROMS_STANDARD_NAMES maps
+# `u` here) -- the raw STAGGERED component (on xi_u, not xi_rho), not
+# interpolated to rho points or rotated to geographic east. Kept as its own
+# concept rather than folded into "east_velocity" above: on a rotated grid
+# grid-x is not true east, and ocean_skill.roms.to_depth (and the transect
+# regridder) deliberately skip this variable rather than silently
+# interpolate a staggered field. `u` itself is not an alias here -- like the
+# other ROMS/MARBL tracer letters (see the `_TYPEABLE_TRACERS` note in
+# tests/test_vocabulary.py), it reaches this concept through this friendly
+# key instead of being directly typeable.
+x_velocity:
+  name: '^(?i:x_velocity|sea_water_x_velocity)$'
+  standard_name: '^(?i:sea_water_x_velocity)$'
+
+# ROMS' grid-relative y-velocity (`v`); the staggered sibling of
+# "x_velocity" above -- see that entry's note.
+y_velocity:
+  name: '^(?i:y_velocity|sea_water_y_velocity)$'
+  standard_name: '^(?i:sea_water_y_velocity)$'
+
+# ROMS' vertical velocity `w` (build.py's ROMS_STANDARD_NAMES). `w` is a
+# single letter but matched whole (see the iron entry), so only a variable
+# named exactly `w`/`W` resolves, not one merely starting with it.
+upward_velocity:
+  name: '^(?i:upward_velocity|upward_sea_water_velocity|w)$'
+  standard_name: '^(?i:upward_sea_water_velocity)$'
+
+eastward_wind:
+  name: '^(?i:eastward_wind)$'
+  standard_name: '^(?i:eastward_wind)$'
+
+northward_wind:
+  name: '^(?i:northward_wind)$'
+  standard_name: '^(?i:northward_wind)$'
+
+wind_speed:
+  name: '^(?i:wind_speed)$'
+  standard_name: '^(?i:wind_speed)$'
+
+# Verified from CoastWatch's VIIRS kd_490: "diffuse_", not the "volume_"
+# spelling the CF table also carries.
+kd490:
+  name: '^(?i:kd490|diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water)$'
+  standard_name: '^(?i:diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water)$'
+
+# Aliases: salt is the ROMS tracer name (see the iron entry above on matching);
+# sea_water_salinity is near-identical (see "temperature" above); and
+# sea_surface_salinity is the surface spelling, as for temperature.
+# Pattern: Argo/OceanSITES's `PSAL`, and the plain/CTD-export `sal`/`sal_psu`
+# family. Must not claim `psalm`, `salt_flux`, `sla` (sea_level_anomaly is its own
+# entry), `salinity_flag`, or `basalt` -- the anchoring refuses all of them.
+# Deliberately does not extend to `salt` itself; that stays the exact literal alias.
+salinity:
+  name: '^(?i:salinity|sea_water_practical_salinity|salt|sea_water_salinity|sea_surface_salinity|(?:p?sal(?:inity)?(?:_(?:psu|ctd))?))$'
+  standard_name: '^(?i:sea_water_practical_salinity)$'
+
+ssh:
+  name: '^(?i:ssh|sea_surface_height_above_geoid)$'
+  standard_name: '^(?i:sea_surface_height_above_geoid)$'
+
+# OOI Papa's own name (ocean_skill/catalogs/ooi_papa.yaml) needs no alias here
+# -- it already spells the CF name in full.
+conductivity:
+  name: '^(?i:conductivity|sea_water_electrical_conductivity)$'
+  standard_name: '^(?i:sea_water_electrical_conductivity)$'
+
+# Also ROMS/MARBL's own concept via build.py's ROMS_STANDARD_NAMES (there
+# mapped from `hbls`'s sibling depth-related tracers); tabular.py's
+# depth_of() treats this standard_name as the pressure-to-depth conversion
+# rung, so this key resolving correctly matters beyond just find(variable=).
+# Patterns: SEANOE/Iceland CTD-export column style (`CTDPRES`, `CTD_Pressure`,
+# `pressure_ctd`), the same `_ctd` decoration family as "temperature"/"salinity".
+# Must not claim a `_qc`/`_flag` companion (no such token appears in it).
+pressure:
+  name: '^(?i:pressure|sea_water_pressure|(?:ctd_?pres(?:sure)?)|(?:pres(?:sure)?_ctd))$'
+  standard_name: '^(?i:sea_water_pressure)$'
+
+# Photosynthetically active radiation measured by a CTD-mounted sensor
+# (distinct from the *surface* PAR a satellite or met station reports --
+# this is light attenuated through the water column, hence "in_sea_water").
+# Patterns: the SEANOE/Iceland CTD-export `_ctd` decoration family, as for
+# "temperature"/"pressure" above.
+par:
+  name: '^(?i:par|downwelling_photosynthetic_photon_flux_in_sea_water|PAR|(?:par_ctd)|(?:ctd_par))$'
+  standard_name: '^(?i:downwelling_photosynthetic_photon_flux_in_sea_water)$'
+
+# Patterns: the same `_ctd` decoration family as above.
+turbidity:
+  name: '^(?i:turbidity|sea_water_turbidity|(?:turbidity_ctd)|(?:ctd_turbidity))$'
+  standard_name: '^(?i:sea_water_turbidity)$'
+
+# ROMS' own diagnostic (ocean_skill.mld computes it the same way offline; see
+# mld.py's sigma0.name assignment) and the standard CTD-derived quantity a
+# mooring reports directly.
+sigma_theta:
+  name: '^(?i:sigma_theta|sea_water_sigma_theta)$'
+  standard_name: '^(?i:sea_water_sigma_theta)$'
+
+# SEANOE's SeapHOx mooring members report this after the QC recipe's build-
+# time rename drops the provider's own (wrong -- pH is unitless) units label
+# ``pH_qc[mL/L]`` down to the plain ``pH`` column this key/alias resolves.
+# Aliases: pH, ph_total, and pH_T_measured -- the discrete-sample column style
+# (e.g. Iceland's bottle-data sheet): pH on the total scale, measured (as opposed
+# to calculated).
+ph:
+  name: '^(?i:ph|sea_water_ph_reported_on_total_scale|pH|ph_total|pH_T_measured)$'
+  standard_name: '^(?i:sea_water_ph_reported_on_total_scale)$'
+
+co2_flux:
+  name: '^(?i:co2_flux|surface_downward_mole_flux_of_carbon_dioxide)$'
+  standard_name: '^(?i:surface_downward_mole_flux_of_carbon_dioxide)$'
+
+# Aliases:
+#   - Chl: common shorthand for the concept. Unlike NO3/O2/... above, `Chl` is NOT
+#     a single model tracer -- ROMS/MARBL carry per-PFT spChl/diatChl/diazChl
+#     summed via {"sum": [...]} (see ocean_skill.operators). Matched whole (the
+#     iron entry), so `Chl`/`chl`/`CHL` resolve but spChl/diatChl/diazChl do not.
+#   - mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled: OOI
+#     Papa's profiler-mounted fluorometer (ocean_skill/catalogs/ooi_papa.yaml) --
+#     same quantity, a different instrument's naming convention.
+#   - concentration_of_chlorophyll_in_sea_water: NOAA CoastWatch's ERDDAP griddap
+#     MODIS datasets (erdMH1chla1day and relatives) drop the "mass_" prefix.
+#     Without this, the one entry that carries the whole daily MODIS record is
+#     invisible to find(variable=...).
+# Patterns: the common short spellings. Must not claim the per-PFT ROMS/MARBL
+# tracers spChl/diatChl/diazChl (a different, un-summed quantity --
+# test_chl_shorthand_resolves_but_does_not_grab_per_pft_tracers pins this) or a
+# `_qc`-decorated companion. Deliberately excludes `chlor_a`: that spelling is kept
+# as the documented example of extending the vocabulary live via add_alias (see
+# its docstring and examples/vocabulary_demo.py) rather than shipped recognized
+# already.
+chlorophyll:
+  name: '^(?i:chlorophyll|mass_concentration_of_chlorophyll_a_in_sea_water|Chl|mass_concentration_of_chlorophyll_in_sea_water|mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled|concentration_of_chlorophyll_in_sea_water|(?:chla)|(?:chl_a)|(?:chlorophyll_a))$'
+  standard_name: '^(?i:mass_concentration_of_chlorophyll_a_in_sea_water)$'
+
+# A CTD-mounted fluorometer's *raw* signal -- a proxy for chlorophyll, not
+# the same quantity (it isn't calibrated/extracted the way a discrete
+# chlorophyll sample is), so deliberately its own key/standard_name rather
+# than an alias of "chlorophyll" above (the same reason "temperature" and
+# "oxygen_saturation" stay separate from their near-neighbors). CF has no
+# standard_name for this quantity, so this is a descriptive name, not CF's.
+# Patterns: the SEANOE/Iceland CTD-export `_ctd` decoration family, as for
+# "temperature"/"oxygen" above.
+fluorescence:
+  name: '^(?i:fluorescence|sea_water_chlorophyll_fluorescence|(?:fluor(?:escence)?_ctd)|(?:ctd_fluor(?:escence)?))$'
+  standard_name: '^(?i:sea_water_chlorophyll_fluorescence)$'
+
+# The chlorophyll degradation product a discrete-sample lab reports
+# alongside chlorophyll-a -- a different pigment, not an alias of
+# "chlorophyll" above. Alias phaeo is the Iceland discrete-sample column
+# spelling.
+phaeopigment:
+  name: '^(?i:phaeopigment|mass_concentration_of_phaeopigments_in_sea_water|phaeo|phaeopigments)$'
+  standard_name: '^(?i:mass_concentration_of_phaeopigments_in_sea_water)$'
+
+# Organism abundance/count, not a concentration -- CF has no standard_name
+# for this quantity, so this is a descriptive name, not CF's.
+ciliate:
+  name: '^(?i:ciliate|number_concentration_of_ciliates_in_sea_water|Ciliate)$'
+  standard_name: '^(?i:number_concentration_of_ciliates_in_sea_water)$'
+
+# Matched whole (the iron entry above), so `Diatom`/`diatom` resolves but
+# ROMS/MARBL's per-PFT tracer `diatChl` (a different quantity -- see
+# "chlorophyll" above) does not.
+diatom:
+  name: '^(?i:diatom|number_concentration_of_diatoms_in_sea_water|Diatom)$'
+  standard_name: '^(?i:number_concentration_of_diatoms_in_sea_water)$'
+
+dinoflagellate:
+  name: '^(?i:dinoflagellate|number_concentration_of_dinoflagellates_in_sea_water|Dinoflagellate)$'
+  standard_name: '^(?i:number_concentration_of_dinoflagellates_in_sea_water)$'
+
+# The *generic* name: mixed layer depth, definition unspecified -- what older
+# catalogs, and any product that does not say how it draws the base of the
+# layer, carry. The base is a judgement call (a threshold on density or on
+# temperature, or a turbulence closure's own boundary layer), and CF only
+# says which *kind* through the definition-specific names, which are the
+# separate entries just below, each naming this one as its `broader`. Asking
+# for "mld" finds any of them -- when searching sources (covers) and inside a
+# dataset (this entry's regexes include theirs, which is why `name` and
+# `standard_name` here also list every definition) -- while asking for a
+# specific one never finds the generic name or a sibling definition. This
+# used to be the one name ROMS' KPP `hbls` and the MLD calculator's output
+# shared on purpose, so that comparing them was a plain "mld" request; that
+# request still reaches both, but each now says which definition it is rather
+# than posing as the generic one.
+mld:
+  name: '^(?i:mld|ocean_mixed_layer_thickness|mixed_layer_depth|mixed_layer_thickness|mld_by_sigma_theta|ocean_mixed_layer_thickness_defined_by_sigma_theta|mld_by_sigma_t|ocean_mixed_layer_thickness_defined_by_sigma_t|mld_by_temperature|ocean_mixed_layer_thickness_defined_by_temperature|mld_by_mixing_scheme|ocean_mixed_layer_thickness_defined_by_mixing_scheme)$'
+  standard_name: '^(?i:ocean_mixed_layer_thickness|ocean_mixed_layer_thickness_defined_by_sigma_theta|ocean_mixed_layer_thickness_defined_by_sigma_t|ocean_mixed_layer_thickness_defined_by_temperature|ocean_mixed_layer_thickness_defined_by_mixing_scheme)$'
+
+# The definition-specific mixed layer depths, all one kind of the generic entry
+# above (README.md: how that link is written). CF: "The base of the mixed layer defined by temperature, sigma or
+# sigma_theta is the level at which the quantity indicated differs from its
+# surface value by a certain amount" -- and neither that amount (0.03 vs 0.125 kg
+# m-3 for density, say) nor the reference depth is in the name, so two sources
+# sharing one of these names agree on the *kind* of criterion, not necessarily its
+# threshold. Deliberately no aliases or patterns here: a raw product name
+# (`mld_dt_mean`, `hbls`) is renamed to the definition-specific standard_name in
+# its own catalog, where its definition is known, and never made a global alias --
+# `mlotst` alone is sigma_theta in Copernicus but sigma_t in CMIP's own naming,
+# which is exactly why it could not be one.
+# Base = where potential density (sigma_theta) exceeds its surface value by a
+# threshold: Holte & Talley's Argo climatology (`mld_dt_mean`), Copernicus'
+# `mlotst`, and the "density_threshold" method of ocean_skill.mld.
+mld_by_sigma_theta:
+  name: '^(?i:mld_by_sigma_theta|ocean_mixed_layer_thickness_defined_by_sigma_theta)$'
+  standard_name: '^(?i:ocean_mixed_layer_thickness_defined_by_sigma_theta)$'
+
+# The same criterion on sigma_t -- density at surface pressure but the
+# *in-situ* temperature, where sigma_theta uses the potential temperature --
+# e.g. a CMIP-style `mlotst`. Its own concept rather than an alias of
+# sigma_theta: the two differ (a little near the surface, more with depth),
+# and a request for one is never answered by the other.
+mld_by_sigma_t:
+  name: '^(?i:mld_by_sigma_t|ocean_mixed_layer_thickness_defined_by_sigma_t)$'
+  standard_name: '^(?i:ocean_mixed_layer_thickness_defined_by_sigma_t)$'
+
+# Base = where temperature differs from its surface value by a threshold:
+# the "temperature_threshold" method of ocean_skill.mld.
+mld_by_temperature:
+  name: '^(?i:mld_by_temperature|ocean_mixed_layer_thickness_defined_by_temperature)$'
+  standard_name: '^(?i:ocean_mixed_layer_thickness_defined_by_temperature)$'
+
+# Not a threshold on any property: the depth a model's own mixing scheme
+# diagnoses as the base of its turbulent boundary layer -- ROMS' KPP `hbls`
+# (build.py's ROMS_STANDARD_NAMES maps it here).
+mld_by_mixing_scheme:
+  name: '^(?i:mld_by_mixing_scheme|ocean_mixed_layer_thickness_defined_by_mixing_scheme)$'
+  standard_name: '^(?i:ocean_mixed_layer_thickness_defined_by_mixing_scheme)$'

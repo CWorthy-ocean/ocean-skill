@@ -1,13 +1,18 @@
 """The one editable vocabulary mapping a concept to its known real-world spellings.
 
-Edit :data:`VOCABULARY` and nothing else needs to change: :func:`resolve_name` (used
-everywhere a variable name is accepted, from :func:`ocean_skill.comparison.compare`
-down to :func:`ocean_skill.units.find_variable`, :func:`ocean_skill.vars.lookup` and
-:func:`ocean_skill.colormaps.cmaps_for`) and the `cf-xarray <https://cf-xarray.
-readthedocs.io>`_ registration below are both derived from it automatically.
+The data is ``ocean_skill/vocab/vocabulary.yaml``, written in `cf-xarray <https://
+cf-xarray.readthedocs.io>`_'s own ``custom_criteria`` shape so any tool can load it
+with plain ``cf_xarray.set_options(custom_criteria=yaml.safe_load(...))`` and no
+ocean-skill code (``ocean_skill/vocab/README.md`` has the file rules). Edit that file
+and nothing else needs to change: it is parsed at import into :data:`VOCABULARY`, and
+:func:`resolve_name` (used everywhere a variable name is accepted, from
+:func:`ocean_skill.comparison.compare` down to :func:`ocean_skill.units.find_variable`,
+:func:`ocean_skill.vars.lookup` and :func:`ocean_skill.colormaps.cmaps_for`) and the
+cf-xarray registration below are both derived from that dict automatically.
 
-Each entry is one concept, keyed by a short mnemonic (the name to actually type — it
-need not be a real CF name, it's just what's easy to read and call by):
+Each entry of :data:`VOCABULARY` is one concept, keyed by a short mnemonic (the name to
+actually type — it need not be a real CF name, it's just what's easy to read and call
+by):
 
 - ``standard_name``: the canonical CF standard_name used internally everywhere else
   in ocean-skill (as ``da.attrs["standard_name"]``, dict keys in
@@ -79,21 +84,27 @@ variables" case, which :func:`ocean_skill.units.find_variable` reports rather th
 resolves. Catalog search has no cf-xarray equivalent — a catalog's declared names
 are not a Dataset — so :func:`covers` is the one piece that stays code.
 
-Note this vocabulary's shape is ours, not cf-xarray's: cf-xarray's own
+The in-memory shape above is ours, not cf-xarray's: cf-xarray's own
 ``custom_criteria`` only understands attribute names as keys (``"name"``,
 ``"standard_name"``, ``"units"``, ..., matched against each variable's own
-attributes) — it has no native concept of an "alias". That grouping is this
-module's; :func:`_register_custom_criteria` below flattens each entry into the one
-``{"name": pattern}`` shape cf-xarray does understand.
+attributes) — it has no native concept of an "alias". The file is written in
+cf-xarray's shape (one ``{"name": regex, "standard_name": regex}`` per key);
+:func:`_from_criteria` reads it into the grouping above, :func:`_to_criteria` writes
+the grouping back out as the file's shape, and :func:`_register_custom_criteria`
+flattens each entry into the one ``{"name": pattern}`` per spelling that cf-xarray
+does understand.
 """
 
 from __future__ import annotations
 
 import html
+import importlib.resources
 import re
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+import yaml
 
 from ocean_skill import _stacklevel
 
@@ -121,445 +132,109 @@ __all__ = [
     "same_quantity",
 ]
 
-VOCABULARY: dict[str, dict[str, object]] = {
-    "nitrate": {
-        "standard_name": "mole_concentration_of_nitrate_in_sea_water",
-        "aliases": [
-            "moles_of_nitrate_per_unit_mass_in_sea_water",
-            "NO3",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-        ],
-    },
-    "nitrate_and_nitrite": {
-        # A different quantity from "nitrate" above -- the combined NO3+NO2
-        # concentration a discrete-sample lab often reports as one column when the
-        # two species aren't separated, so deliberately its own key/standard_name
-        # rather than an alias (the same reason "oxygen_saturation" stays separate
-        # from "oxygen").
-        "standard_name": "mole_concentration_of_nitrate_and_nitrite_in_sea_water",
-        "aliases": [
-            "moles_of_nitrate_and_nitrite_per_unit_mass_in_sea_water",
-            "Nitrate_and_Nitrite",  # Iceland discrete-sample column spelling
-        ],
-    },
-    "phosphate": {
-        "standard_name": "mole_concentration_of_phosphate_in_sea_water",
-        "aliases": [
-            "moles_of_phosphate_per_unit_mass_in_sea_water",
-            "PO4",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-        ],
-    },
-    "silicate": {
-        "standard_name": "mole_concentration_of_silicate_in_sea_water",
-        "aliases": [
-            "moles_of_silicate_per_unit_mass_in_sea_water",
-            "SiO3",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-        ],
-    },
-    "ammonium": {
-        "standard_name": "mole_concentration_of_ammonium_in_sea_water",
-        "aliases": [
-            "moles_of_ammonium_per_unit_mass_in_sea_water",  # WOA/GLODAP per-mass form
-            "NH4",  # ROMS/MARBL's own tracer name; see the `Fe` note below on matching
-        ],
-    },
-    "iron": {
-        "standard_name": "mole_concentration_of_dissolved_iron_in_sea_water",
-        "aliases": [
-            # WOA/GLODAP's per-mass spelling, the same per-volume/per-mass split the
-            # other nutrients above carry.
-            "moles_of_dissolved_iron_per_unit_mass_in_sea_water",
-            # ROMS/MARBL's own tracer name (build.py's ROMS_STANDARD_NAMES maps `Fe`
-            # here). Short, but matched whole -- the index is an exact lookup and the
-            # cf-xarray pattern is anchored, so `Fe`/`fe`/`FE` resolve while a name
-            # merely starting with them (e.g. `felix`) does not.
-            "Fe",
-        ],
-    },
-    "oxygen": {
-        "standard_name": (
-            "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
-        ),
-        "aliases": [
-            "moles_of_oxygen_per_unit_mass_in_sea_water",
-            "O2",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-        ],
-        "patterns": [
-            # Argo/OceanSITES's own code, and the common mooring spelling --
-            # neither is a single literal worth enumerating case variants of (see
-            # the module docstring's "patterns" bullet). Must not claim
-            # "oxygen_saturation" above (a different quantity, not this pattern's
-            # alternation) or a `_qc`/`_flag`-decorated companion (no such token
-            # appears in it).
-            "doxy",
-            "dissolved_oxygen",
-            # SEANOE's CTD-export column style, the same `_ctd` decoration as
-            # "temperature"/"salinity" below (e.g. Iceland CTD profiles' `Oxygen_CTD`).
-            r"oxygen_ctd",
-            r"ctd_oxygen",
-        ],
-    },
-    "oxygen_saturation": {
-        # A different quantity from "oxygen" above -- percent saturation, not a
-        # concentration -- so deliberately its own key/standard_name rather than an
-        # alias, the same reason "sea_level_anomaly" stays separate from "ssh".
-        "standard_name": "fractional_saturation_of_oxygen_in_sea_water",
-    },
-    "dissolved_inorganic_carbon": {
-        "standard_name": (
-            "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water"
-        ),
-        "aliases": [
-            "moles_of_dissolved_inorganic_carbon_per_unit_mass_in_sea_water",
-            "DIC",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-            "TCO2",  # GLODAP's total CO2 spelling for the same quantity
-        ],
-    },
-    "alkalinity": {
-        # All of these are *total* alkalinity: CF defines the canonical name as "the
-        # total alkalinity equivalent concentration (including carbonate, nitrogen,
-        # silicate, and borate components)". They differ only in basis (per volume vs
-        # per mass), which units.py converts through the seawater-density context --
-        # the same split nitrate has between WOA and ROMS/GLODAP.
-        "standard_name": "sea_water_alkalinity_expressed_as_mole_equivalent",
-        "aliases": [
-            # CF's per-mass form (mol kg-1); the canonical name is mol m-3.
-            "sea_water_alkalinity_per_unit_mass_expressed_as_mole_equivalent",
-            # Kept for the "seawater" (no underscore) spelling seen in the wild --
-            # it is NOT a CF name, so it matches only products that write it that way.
-            "seawater_alkalinity_per_unit_mass_expressed_as_mole_equivalent",
-            # OceanSODA-ETHZ's `talk` (ocean_skill/catalogs/oceansoda.yaml). Also not CF: the
-            # table has no total_alkalinity_in_sea_water entry or alias. Without it,
-            # find(variable="alkalinity") returned GLODAP and ROMS but silently
-            # dropped OceanSODA, and compare() would not pair them.
-            "total_alkalinity_in_sea_water",
-            "ALK",  # ROMS/MARBL tracer name; see the `Fe` note below on matching
-            "TA",  # common discrete-sample shorthand for *total* alkalinity
-            "TAlk",  # GLODAP's own spelling of the same quantity
-        ],
-    },
-    "temperature": {
-        "standard_name": "sea_water_potential_temperature",
-        # in-situ, not strictly the same quantity as potential temperature -- see
-        # the module docstring on why that is an alias here and not its own tier
-        "aliases": [
-            "temp",  # ROMS tracer name; see the `Fe` note below on matching
-            "sea_water_temperature",
-            # Satellite SST, in the three flavours GHRSST distinguishes. They are
-            # *not* identical: skin is the radiometric top micron, subskin the top
-            # millimetre, and foundation the temperature free of diurnal warming --
-            # skin and foundation can differ by a few tenths of a degree on a calm
-            # sunny afternoon. They are aliased here for the same reason
-            # sea_water_temperature is: without it every satellite SST product is
-            # invisible to find(variable="temperature"), which was the whole point
-            # of asking. MUR alone declares sea_surface_foundation_temperature.
-            "sea_surface_foundation_temperature",
-            # The plain surface spelling, used by every gridded surface product we
-            # carry (OceanSODA-ETHZ's `temperature`, ocean_skill/catalogs/oceansoda.yaml, as well
-            # as the CoastWatch L3 and Geo-Polar SST fields). The sampling depth is a
-            # property of where the measurement was taken, which a comparison reports
-            # separately (the metrics row's `obs_depth`, and align_series' depth
-            # caveat) rather than by refusing to pair a mooring with a surface field.
-            "sea_surface_temperature",
-            "sea_surface_subskin_temperature",
-            "sea_surface_skin_temperature",
-        ],
-        "patterns": [
-            # SEANOE's CTD-export column style (`Temperature_CTD`, `CTD_Temperature`,
-            # `temp_ctd`, any case) -- a family of decorations around one instrument
-            # name, not worth enumerating literally. Must not claim
-            # `temperature_qc`/`Temperature_flag` (no qc/flag token here), plain
-            # `air_temperature` (a different quantity), `atemp`, or bare `ctd`.
-            r"(?:sea_water_)?temp(?:erature)?_ctd",
-            r"ctd_temp(?:erature)?",
-        ],
-    },
-    "sea_ice": {
-        # NSIDC's CDR (cdr_seaice_conc) and the ice field bundled into MUR, OISST
-        # and the Geo-Polar blend all declare this one name.
-        "standard_name": "sea_ice_area_fraction",
-    },
-    "sea_level_anomaly": {
-        # Deliberately not an alias of "ssh": DUACS ships both, and they are
-        # different quantities -- adt is height above the geoid, sla is the
-        # departure from a mean surface. Aliasing them would let compare() pair a
-        # ~1 m field against a ~0.1 m one and call it agreement.
-        "standard_name": "sea_surface_height_above_sea_level",
-    },
-    "east_velocity": {
-        # True geographic eastward velocity -- deliberately NOT the same concept as
-        # ROMS' own grid-relative x-velocity (see "x_velocity" below). The two used
-        # to share one standard_name here, which silently treated a rotated ROMS
-        # grid's `u` as if it were geographic east. ocean_skill.roms.standardize now
-        # derives this from ROMS' staggered u/v by averaging to rho points and
-        # rotating by the grid `angle`, so a model field pairs correctly against an
-        # in-situ instrument's own eastward reading (e.g. an ADCP mooring).
-        "standard_name": "eastward_sea_water_velocity",
-        "aliases": [
-            "eastward_velocity",  # pre-split key; old callers still resolve
-            # DUACS/MULTIOBS ugos and ugosa: geostrophic velocity is derived from
-            # sea-surface slope, not read off a model grid, so it IS geographic
-            # east/north and belongs here rather than with "x_velocity". The
-            # "_assuming_sea_level_for_geoid" form is the one computed from sla
-            # rather than adt.
-            "surface_geostrophic_eastward_sea_water_velocity",
-            "surface_geostrophic_eastward_sea_water_velocity_assuming_sea_level_for_geoid",
-        ],
-    },
-    "north_velocity": {
-        "standard_name": "northward_sea_water_velocity",
-        "aliases": [
-            "northward_velocity",  # this entry's pre-split key
-            "surface_geostrophic_northward_sea_water_velocity",
-            "surface_geostrophic_northward_sea_water_velocity_assuming_sea_level_for_geoid",
-        ],
-    },
-    "x_velocity": {
-        # ROMS' own grid-relative x-velocity (build.py's ROMS_STANDARD_NAMES maps
-        # `u` here) -- the raw STAGGERED component (on xi_u, not xi_rho), not
-        # interpolated to rho points or rotated to geographic east. Kept as its own
-        # concept rather than folded into "east_velocity" above: on a rotated grid
-        # grid-x is not true east, and ocean_skill.roms.to_depth (and the transect
-        # regridder) deliberately skip this variable rather than silently
-        # interpolate a staggered field. `u` itself is not an alias here -- like the
-        # other ROMS/MARBL tracer letters (see the `_TYPEABLE_TRACERS` note in
-        # tests/test_vocabulary.py), it reaches this concept through this friendly
-        # key instead of being directly typeable.
-        "standard_name": "sea_water_x_velocity",
-    },
-    "y_velocity": {
-        # ROMS' grid-relative y-velocity (`v`); the staggered sibling of
-        # "x_velocity" above -- see that entry's note.
-        "standard_name": "sea_water_y_velocity",
-    },
-    "upward_velocity": {
-        # ROMS' vertical velocity `w` (build.py's ROMS_STANDARD_NAMES). `w` is a
-        # single letter but matched whole (see the `Fe` note), so only a variable
-        # named exactly `w`/`W` resolves, not one merely starting with it.
-        "standard_name": "upward_sea_water_velocity",
-        "aliases": ["w"],
-    },
-    "eastward_wind": {"standard_name": "eastward_wind"},
-    "northward_wind": {"standard_name": "northward_wind"},
-    "wind_speed": {"standard_name": "wind_speed"},
-    "kd490": {
-        # Verified from CoastWatch's VIIRS kd_490: "diffuse_", not the "volume_"
-        # spelling the CF table also carries.
-        "standard_name": (
-            "diffuse_attenuation_coefficient_of_downwelling_radiative_flux_in_sea_water"
-        ),
-    },
-    "salinity": {
-        "standard_name": "sea_water_practical_salinity",
-        "aliases": [
-            "salt",  # ROMS tracer name; see the `Fe` note above on matching
-            "sea_water_salinity",  # near-identical; see "temperature" above
-            "sea_surface_salinity",  # the surface spelling, as for temperature
-        ],
-        "patterns": [
-            # Argo/OceanSITES's `PSAL`, and the plain/CTD-export `sal`/`sal_psu`
-            # family. Must not claim `psalm`, `salt_flux`, `sla` (sea_level_anomaly
-            # is its own entry), `salinity_flag`, or `basalt` -- fullmatch refuses
-            # all of them. Deliberately does not extend to `salt` itself; that
-            # stays the exact literal alias above.
-            r"p?sal(?:inity)?(?:_(?:psu|ctd))?",
-        ],
-    },
-    "ssh": {
-        "standard_name": "sea_surface_height_above_geoid",
-    },
-    "conductivity": {
-        # OOI Papa's own name (ocean_skill/catalogs/ooi_papa.yaml) needs no alias here
-        # -- it already spells the CF name in full.
-        "standard_name": "sea_water_electrical_conductivity",
-    },
-    "pressure": {
-        # Also ROMS/MARBL's own concept via build.py's ROMS_STANDARD_NAMES (there
-        # mapped from `hbls`'s sibling depth-related tracers); tabular.py's
-        # depth_of() treats this standard_name as the pressure-to-depth conversion
-        # rung, so this key resolving correctly matters beyond just find(variable=).
-        "standard_name": "sea_water_pressure",
-        "patterns": [
-            # SEANOE/Iceland CTD-export column style (`CTDPRES`, `CTD_Pressure`,
-            # `pressure_ctd`), the same `_ctd` decoration family as
-            # "temperature"/"salinity" below. Must not claim a `_qc`/`_flag`
-            # companion (no such token appears in it).
-            r"ctd_?pres(?:sure)?",
-            r"pres(?:sure)?_ctd",
-        ],
-    },
-    "par": {
-        # Photosynthetically active radiation measured by a CTD-mounted sensor
-        # (distinct from the *surface* PAR a satellite or met station reports --
-        # this is light attenuated through the water column, hence "in_sea_water").
-        "standard_name": "downwelling_photosynthetic_photon_flux_in_sea_water",
-        "aliases": ["PAR"],
-        "patterns": [
-            # The SEANOE/Iceland CTD-export `_ctd` decoration family, as for
-            # "temperature"/"pressure" above.
-            r"par_ctd",
-            r"ctd_par",
-        ],
-    },
-    "turbidity": {
-        "standard_name": "sea_water_turbidity",
-        "patterns": [
-            r"turbidity_ctd",
-            r"ctd_turbidity",
-        ],
-    },
-    "sigma_theta": {
-        # ROMS' own diagnostic (ocean_skill.mld computes it the same way offline; see
-        # mld.py's sigma0.name assignment) and the standard CTD-derived quantity a
-        # mooring reports directly.
-        "standard_name": "sea_water_sigma_theta",
-    },
-    "ph": {
-        # SEANOE's SeapHOx mooring members report this after the QC recipe's build-
-        # time rename drops the provider's own (wrong -- pH is unitless) units label
-        # ``pH_qc[mL/L]`` down to the plain ``pH`` column this key/alias resolves.
-        "standard_name": "sea_water_ph_reported_on_total_scale",
-        "aliases": [
-            "pH",
-            "ph_total",
-            # Discrete-sample column style (e.g. Iceland's bottle-data sheet):
-            # pH on the total scale, measured (as opposed to calculated).
-            "pH_T_measured",
-        ],
-    },
-    "co2_flux": {
-        "standard_name": "surface_downward_mole_flux_of_carbon_dioxide",
-    },
-    "chlorophyll": {
-        "standard_name": "mass_concentration_of_chlorophyll_a_in_sea_water",
-        "aliases": [
-            # Common shorthand for the concept. Unlike NO3/O2/... above, `Chl` is NOT
-            # a single model tracer -- ROMS/MARBL carry per-PFT spChl/diatChl/diazChl
-            # summed via {"sum": [...]} (see ocean_skill.operators). Matched whole (the
-            # `Fe` note), so `Chl`/`chl`/`CHL` resolve but spChl/diatChl/diazChl do not.
-            "Chl",
-            "mass_concentration_of_chlorophyll_in_sea_water",
-            # OOI Papa's profiler-mounted fluorometer (ocean_skill/catalogs/ooi_papa.yaml) --
-            # same quantity, a different instrument's naming convention.
-            "mass_concentration_of_chlorophyll_a_in_sea_water_profiler_depth_enabled",
-            # NOAA CoastWatch's ERDDAP griddap MODIS datasets (erdMH1chla1day and
-            # relatives) drop the "mass_" prefix. Without this, the one entry that
-            # carries the whole daily MODIS record is invisible to find(variable=...).
-            "concentration_of_chlorophyll_in_sea_water",
-        ],
-        "patterns": [
-            # The common short spellings. Must not claim the per-PFT ROMS/MARBL
-            # tracers spChl/diatChl/diazChl (a different, un-summed quantity --
-            # test_chl_shorthand_resolves_but_does_not_grab_per_pft_tracers pins
-            # this) or a `_qc`-decorated companion. Deliberately excludes
-            # `chlor_a`: that spelling is kept as the documented example of
-            # extending the vocabulary live via add_alias (see its docstring and
-            # examples/vocabulary_demo.py) rather than shipped recognized already.
-            "chla",
-            "chl_a",
-            "chlorophyll_a",
-        ],
-    },
-    "fluorescence": {
-        # A CTD-mounted fluorometer's *raw* signal -- a proxy for chlorophyll, not
-        # the same quantity (it isn't calibrated/extracted the way a discrete
-        # chlorophyll sample is), so deliberately its own key/standard_name rather
-        # than an alias of "chlorophyll" above (the same reason "temperature" and
-        # "oxygen_saturation" stay separate from their near-neighbors). CF has no
-        # standard_name for this quantity, so this is a descriptive name, not CF's.
-        "standard_name": "sea_water_chlorophyll_fluorescence",
-        "patterns": [
-            # The SEANOE/Iceland CTD-export `_ctd` decoration family, as for
-            # "temperature"/"oxygen" above.
-            r"fluor(?:escence)?_ctd",
-            r"ctd_fluor(?:escence)?",
-        ],
-    },
-    "phaeopigment": {
-        # The chlorophyll degradation product a discrete-sample lab reports
-        # alongside chlorophyll-a -- a different pigment, not an alias of
-        # "chlorophyll" above.
-        "standard_name": "mass_concentration_of_phaeopigments_in_sea_water",
-        "aliases": [
-            "phaeo",  # Iceland discrete-sample column spelling
-            "phaeopigment",
-            "phaeopigments",
-        ],
-    },
-    "ciliate": {
-        # Organism abundance/count, not a concentration -- CF has no standard_name
-        # for this quantity, so this is a descriptive name, not CF's.
-        "standard_name": "number_concentration_of_ciliates_in_sea_water",
-        "aliases": ["Ciliate"],
-    },
-    "diatom": {
-        # Matched whole (the `Fe` note above), so `Diatom`/`diatom` resolves but
-        # ROMS/MARBL's per-PFT tracer `diatChl` (a different quantity -- see
-        # "chlorophyll" above) does not.
-        "standard_name": "number_concentration_of_diatoms_in_sea_water",
-        "aliases": ["Diatom"],
-    },
-    "dinoflagellate": {
-        "standard_name": "number_concentration_of_dinoflagellates_in_sea_water",
-        "aliases": ["Dinoflagellate"],
-    },
-    "mld": {
-        # The *generic* name: mixed layer depth, definition unspecified -- what older
-        # catalogs, and any product that does not say how it draws the base of the
-        # layer, carry. The base is a judgement call (a threshold on density or on
-        # temperature, or a turbulence closure's own boundary layer), and CF only
-        # says which *kind* through the definition-specific names, which are the
-        # separate entries just below, each naming this one as its `broader`. Asking
-        # for "mld" finds any of them -- when searching sources (covers) and inside a
-        # dataset (this entry's cf-xarray criteria include theirs) -- while asking for
-        # a specific one never finds the generic name or a sibling definition. This
-        # used to be the one name ROMS' KPP `hbls` and the MLD calculator's output
-        # shared on purpose, so that comparing them was a plain "mld" request; that
-        # request still reaches both, but each now says which definition it is rather
-        # than posing as the generic one.
-        "standard_name": "ocean_mixed_layer_thickness",
-        "aliases": ["mixed_layer_depth", "mixed_layer_thickness"],
-    },
-    # The definition-specific mixed layer depths, all one kind of the generic entry
-    # above. CF: "The base of the mixed layer defined by temperature, sigma or
-    # sigma_theta is the level at which the quantity indicated differs from its
-    # surface value by a certain amount" -- and neither that amount (0.03 vs 0.125 kg
-    # m-3 for density, say) nor the reference depth is in the name, so two sources
-    # sharing one of these names agree on the *kind* of criterion, not necessarily its
-    # threshold. Deliberately no aliases or patterns here: a raw product name
-    # (`mld_dt_mean`, `hbls`) is renamed to the definition-specific standard_name in
-    # its own catalog, where its definition is known, and never made a global alias --
-    # `mlotst` alone is sigma_theta in Copernicus but sigma_t in CMIP's own naming,
-    # which is exactly why it could not be one.
-    "mld_by_sigma_theta": {
-        # Base = where potential density (sigma_theta) exceeds its surface value by a
-        # threshold: Holte & Talley's Argo climatology (`mld_dt_mean`), Copernicus'
-        # `mlotst`, and the "density_threshold" method of ocean_skill.mld.
-        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_theta",
-        "broader": "mld",
-    },
-    "mld_by_sigma_t": {
-        # The same criterion on sigma_t -- density at surface pressure but the
-        # *in-situ* temperature, where sigma_theta uses the potential temperature --
-        # e.g. a CMIP-style `mlotst`. Its own concept rather than an alias of
-        # sigma_theta: the two differ (a little near the surface, more with depth),
-        # and a request for one is never answered by the other.
-        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_t",
-        "broader": "mld",
-    },
-    "mld_by_temperature": {
-        # Base = where temperature differs from its surface value by a threshold:
-        # the "temperature_threshold" method of ocean_skill.mld.
-        "standard_name": "ocean_mixed_layer_thickness_defined_by_temperature",
-        "broader": "mld",
-    },
-    "mld_by_mixing_scheme": {
-        # Not a threshold on any property: the depth a model's own mixing scheme
-        # diagnoses as the base of its turbulent boundary layer -- ROMS' KPP `hbls`
-        # (build.py's ROMS_STANDARD_NAMES maps it here).
-        "standard_name": "ocean_mixed_layer_thickness_defined_by_mixing_scheme",
-        "broader": "mld",
-    },
-}
+
+def _split_alternatives(regex: str) -> list[str]:
+    r"""Split ``a|b|(?:c|d)`` on its top-level ``|`` only.
+
+    A ``|`` inside a group, inside a character class, or escaped (``\|``) belongs to
+    its alternative. Enough regex awareness for the file rules and no more: the
+    alternatives of a ``name`` are escaped literals and ``(?:...)``-wrapped patterns.
+    """
+    parts: list[str] = []
+    depth, start, i, in_class = 0, 0, 0, False
+    while i < len(regex):
+        ch = regex[i]
+        if ch == "\\":
+            i += 1  # the escaped character is never structure
+        elif in_class:
+            in_class = ch != "]"
+        elif ch == "[":
+            in_class = True
+            if regex.startswith("^]", i + 1):  # a leading ] is a literal member
+                i += 2
+            elif regex.startswith("]", i + 1):
+                i += 1
+        elif ch in "()":
+            depth += 1 if ch == "(" else -1
+        elif ch == "|" and depth == 0:
+            parts.append(regex[start:i])
+            start = i + 1
+        i += 1
+    return [*parts, regex[start:]]
+
+
+def _alternatives_of(regex: str) -> list[str]:
+    """Split a file regex shaped ``^(?i:a|b|...)$`` into its top-level alternatives."""
+    if not (regex.startswith("^(?i:") and regex.endswith(")$")):
+        raise ValueError(f"vocabulary.yaml: {regex!r} is not shaped '^(?i:a|b|...)$'")
+    return _split_alternatives(regex[len("^(?i:") : -len(")$")])
+
+
+def _is_wrapped(part: str) -> bool:
+    """Whether an alternative is a ``(?:...)`` pattern, not an escaped alias."""
+    return part.startswith("(?:") and part.endswith(")")
+
+
+def _unescape(literal: str) -> str:
+    """Invert :func:`re.escape` (which only ever prefixes a backslash)."""
+    return re.sub(r"\\(.)", r"\1", literal)
+
+
+def _from_criteria(criteria: dict[str, dict[str, str]]) -> dict[str, dict[str, object]]:
+    """Parse the vocabulary file's cf-xarray shape into :data:`VOCABULARY`'s.
+
+    The inverse of :func:`_to_criteria`; the file rules are in
+    ``ocean_skill/vocab/README.md``. A ``standard_name`` with one alternative is that
+    entry's canonical name; a *broad* entry lists its own plus its narrower entries',
+    so its canonical one is the alternative that is not another key's, and each
+    narrower entry gets ``broader`` set to it. From an entry's ``name`` alternatives
+    drop its key, its canonical name and (broad entries) its narrower entries'
+    alternatives; of the rest a ``(?:...)`` one is a pattern and any other an escaped
+    alias.
+    """
+    std = {k: _alternatives_of(c["standard_name"]) for k, c in criteria.items()}
+    names = {k: _alternatives_of(c["name"]) for k, c in criteria.items()}
+    single = {alts[0]: k for k, alts in std.items() if len(alts) == 1}
+    narrower = {
+        k: [single[a] for a in alts if a in single] if len(alts) > 1 else []
+        for k, alts in std.items()
+    }
+    broader_of = {n: k for k, ns in narrower.items() for n in ns}
+    vocab: dict[str, dict[str, object]] = {}
+    for key, alts in std.items():
+        if len(alts) == 1:
+            canonical = alts[0]
+        else:  # a broad entry: its own name, among the narrower entries' (each a sole)
+            canonical = next(a for a in alts if a not in single)
+        drop = {re.escape(key), canonical}
+        for n in narrower[key]:
+            drop.update(names[n])
+        rest = [p for p in names[key] if p not in drop]
+        patterns = [p[3:-1] for p in rest if _is_wrapped(p)]
+        literals = [p for p in rest if not _is_wrapped(p)]
+        aliases = [_unescape(p) for p in literals]
+        if [re.escape(a) for a in aliases] != literals:
+            raise ValueError(f"vocabulary.yaml: {key!r}: an alias is not re.escape()d")
+        entry: dict[str, object] = {"standard_name": _unescape(canonical)}
+        if aliases:
+            entry["aliases"] = aliases
+        if patterns:
+            entry["patterns"] = patterns
+        if key in broader_of:
+            entry["broader"] = broader_of[key]
+        vocab[key] = entry
+    return vocab
+
+
+def _load_vocabulary() -> dict[str, dict[str, object]]:
+    """Read the packaged ``vocab/vocabulary.yaml`` into :data:`VOCABULARY`'s shape."""
+    source = importlib.resources.files("ocean_skill") / "vocab" / "vocabulary.yaml"
+    return _from_criteria(yaml.safe_load(source.read_text(encoding="utf-8")))
+
+
+#: Mutable on purpose: :func:`register`/:func:`add_alias`/:func:`add_pattern` edit it
+#: in memory, never the file it was loaded from.
+VOCABULARY: dict[str, dict[str, object]] = _load_vocabulary()
 
 
 def _all_names(entry: dict[str, object]) -> list[str]:
@@ -579,6 +254,83 @@ def _matchable_names(key: str, entry: dict[str, object]) -> list[str]:
     keys equal their own standard_name.
     """
     return list(dict.fromkeys([key, *_all_names(entry)]))
+
+
+def _alternatives(key: str, entry: dict[str, object]) -> list[str]:
+    """One entry's own ``name`` alternatives: escaped literals, then wrapped patterns.
+
+    The literals are :func:`_matchable_names` escaped; each pattern is wrapped
+    ``(?:...)`` so it can sit in an alternation whatever it contains -- and so a
+    pattern that happens to have no regex metacharacter (``doxy``) can still be told
+    from an escaped alias when :func:`_from_criteria` reads the file back. The one
+    builder behind both the file shape (:func:`_to_criteria`) and cf-xarray's
+    registration (:func:`_register_custom_criteria`).
+    """
+    return [
+        *(re.escape(n) for n in _matchable_names(key, entry)),
+        *(f"(?:{p})" for p in entry.get("patterns", [])),  # type: ignore[union-attr]
+    ]
+
+
+def _anchor(alternatives: Iterable[str]) -> str:
+    """Join alternatives (deduplicated, in order) as ``^(?i:a|b|...)$``."""
+    return "^(?i:" + "|".join(dict.fromkeys(alternatives)) + ")$"
+
+
+def _narrower_keys(vocab: dict[str, dict[str, object]]) -> dict[str, list[str]]:
+    """Map each broad entry's key to its narrower entries' keys, in ``vocab`` order.
+
+    :func:`_build_narrower` for a bare dict: each ``broader`` is resolved against
+    ``vocab`` itself (any spelling or pattern match of the broad entry) rather than
+    through the live index, and a link that function would warn about -- naming
+    nothing known, the entry itself, or an entry that is itself one specific kind of
+    another -- is left out, silently.
+    """
+
+    def target(broader: object) -> str | None:
+        wanted = str(broader)
+        for k, e in vocab.items():
+            if wanted.lower() in {n.lower() for n in _matchable_names(k, e)} or any(
+                re.fullmatch(p, wanted, re.IGNORECASE)
+                for p in e.get("patterns", [])  # type: ignore[union-attr]
+            ):
+                return k
+        return None
+
+    kids: dict[str, list[str]] = {}
+    for key, entry in vocab.items():
+        parent = target(entry["broader"]) if "broader" in entry else None
+        if (
+            parent is not None
+            and parent != key
+            and vocab[parent].get("broader") is None
+            and vocab[parent]["standard_name"] != entry["standard_name"]
+        ):
+            kids.setdefault(parent, []).append(key)
+    return kids
+
+
+def _to_criteria(vocab: dict[str, dict[str, object]]) -> dict[str, dict[str, str]]:
+    """Write ``vocab`` in the vocabulary file's shape (see :func:`_from_criteria`).
+
+    One ``{"name": ..., "standard_name": ...}`` per key, each an anchored
+    case-insensitive ``^(?i:...)$``: ``name`` lists the entry's own alternatives
+    (:func:`_alternatives`), ``standard_name`` its canonical name. A *broad* entry
+    (one that others name as their ``broader``) additionally lists every narrower
+    entry's, in both, so a plain cf-xarray ``ds.cf["mld"]`` finds any definition. What
+    a ``save()`` would write; the lossless-parse test pins that loading the packaged
+    file and writing it back gives the same dict.
+    """
+    kids = _narrower_keys(vocab)
+    criteria: dict[str, dict[str, str]] = {}
+    for key, entry in vocab.items():
+        names = _alternatives(key, entry)
+        canonical = [re.escape(str(entry["standard_name"]))]
+        for kid in kids.get(key, []):
+            names += _alternatives(kid, vocab[kid])
+            canonical.append(re.escape(str(vocab[kid]["standard_name"])))
+        criteria[key] = {"name": _anchor(names), "standard_name": _anchor(canonical)}
+    return criteria
 
 
 def _build_index() -> dict[str, str]:
@@ -1186,6 +938,11 @@ def coord_report(names: Iterable[str]) -> CoordReport:
     return CoordReport(matched=matched, missing=missing)
 
 
+#: The dict :func:`_register_custom_criteria` last handed to cf-xarray, so the next
+#: registration can find it again among whatever else is registered (see there).
+_REGISTERED: dict[str, dict[str, str]] = {}
+
+
 def _register_custom_criteria() -> None:
     """Register every :data:`VOCABULARY` entry's spellings with cf-xarray.
 
@@ -1202,19 +959,20 @@ def _register_custom_criteria() -> None:
     ``standard_name`` as the actual data variable, which cf-xarray then (correctly,
     on that input) reports as ambiguous.
 
-    Each pattern is ``(?i)(?:...)$``: case-insensitive (see :func:`_build_index`)
-    and **anchored at both ends**. The trailing ``$`` is load-bearing — cf-xarray
-    matches with :func:`re.match`, which anchors only the *start*, so an unanchored
-    pattern also matches anything merely *prefixed* by a registered spelling. That
-    silently returned an ERDDAP/OOI QC-flag companion
-    (``..._in_sea_water_qc_agg``) as if it were the data variable whenever the real
-    one was absent — found by testing, not hypothetical.
+    Each pattern is ``^(?i:...)$``, the shape the shared vocabulary file uses:
+    case-insensitive (see :func:`_build_index`) and **anchored at both ends**. The
+    trailing ``$`` is load-bearing — cf-xarray matches with :func:`re.match`, which
+    anchors only the *start*, so an unanchored pattern also matches anything merely
+    *prefixed* by a registered spelling. That silently returned an ERDDAP/OOI QC-flag
+    companion (``..._in_sea_water_qc_agg``) as if it were the data variable whenever
+    the real one was absent — found by testing, not hypothetical.
 
-    An entry's ``patterns`` join the same alternation, each wrapped ``(?:...)`` so
-    they inherit the anchors without escaping them. They are never registered as
-    criteria *keys* the way literal spellings are — every dataset-side lookup
-    (:func:`ocean_skill.units.find_variable`) arrives here already canonicalized by
-    :func:`resolve_name`, and the canonical standard_name is always a literal key.
+    An entry's ``patterns`` join the same alternation, each wrapped ``(?:...)`` (see
+    :func:`_alternatives`) so they inherit the anchors without escaping them. They are
+    never registered as criteria *keys* the way literal spellings are — every
+    dataset-side lookup (:func:`ocean_skill.units.find_variable`) arrives here already
+    canonicalized by :func:`resolve_name`, and the canonical standard_name is always a
+    literal key.
 
     A *broad* entry — one that others name as their ``broader`` (see
     :func:`narrower_names`) — also matches every spelling and pattern of those
@@ -1232,18 +990,25 @@ def _register_custom_criteria() -> None:
     sibling. A dataset carrying two definitions matches the broad key twice, which
     is cf-xarray's own "multiple variables" error — reported, not guessed at (see
     :func:`ocean_skill.units.find_variable`).
+
+    The criteria are *merged* into cf-xarray's global list, not set over it:
+    ``cf_xarray.set_options(custom_criteria=...)`` replaces the whole list, which
+    would wipe another package's criteria (ROMS-Tools', xroms', the user's own). What
+    is registered is ``[ours, *others]``, where ``others`` is the list as it stands
+    minus the dict this function registered last -- found by equality with
+    :data:`_REGISTERED`, since cf-xarray deep-copies what it is given and identity
+    cannot be tracked -- so refreshing never duplicates ours, and leaves the rest as
+    it was. Ours comes first because cf-xarray looks a key up through a
+    :class:`~collections.ChainMap`, where the first dict defining it wins.
     """
     import cf_xarray
 
-    def own_parts(key: str, entry: dict[str, object]) -> list[str]:
-        parts = [re.escape(n) for n in _matchable_names(key, entry)]
-        parts += [f"(?:{p})" for p in entry.get("patterns", [])]  # type: ignore[union-attr]
-        return parts
+    global _REGISTERED
 
     # One standard_name per entry is guaranteed (see _build_key_by_standard_name), so
     # the specific entries' own alternations can be looked up by standard_name.
     by_standard_name = {
-        str(entry["standard_name"]): own_parts(key, entry)
+        str(entry["standard_name"]): _alternatives(key, entry)
         for key, entry in VOCABULARY.items()
     }
     criteria: dict[str, dict[str, str]] = {}
@@ -1253,7 +1018,7 @@ def _register_custom_criteria() -> None:
         parts = list(by_standard_name[sn])
         for specific in narrower:
             parts += by_standard_name.get(specific, [])
-        entry_criteria = {"name": "(?i)(?:" + "|".join(parts) + ")$"}
+        entry_criteria = {"name": _anchor(parts)}
         if narrower:
             # A variable under a raw product name that states its specific definition
             # only as an attribute: cf-xarray already finds it by that attribute when
@@ -1261,12 +1026,13 @@ def _register_custom_criteria() -> None:
             # broad name finds it the same way. Only the *specific* names are listed --
             # the broad entry's own standard_name attribute is cf-xarray's built-in
             # match already, and widening it is what misfires on WOA-style companions.
-            entry_criteria["standard_name"] = (
-                "(?i)(?:" + "|".join(re.escape(n) for n in narrower) + ")$"
-            )
+            entry_criteria["standard_name"] = _anchor(re.escape(n) for n in narrower)
         for name in _matchable_names(key, entry):
             criteria[name] = entry_criteria
-    cf_xarray.set_options(custom_criteria=criteria)
+    registered = cf_xarray.options.OPTIONS["custom_criteria"]
+    others = [c for c in registered if c != _REGISTERED]
+    cf_xarray.set_options(custom_criteria=[criteria, *others])
+    _REGISTERED = criteria
 
 
 def _refresh() -> None:
