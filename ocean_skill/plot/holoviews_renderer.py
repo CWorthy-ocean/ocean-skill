@@ -30,6 +30,7 @@ import numpy as np
 from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for
 from ocean_skill.plot import _weighting
+from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
     nearest_ne_resolution,
@@ -585,10 +586,11 @@ def _field_row(
     aligned = item["aligned"]
     t, r, d = aligned["test"], aligned["reference"], aligned["difference"]
     tiles = _tiles_for(_check_tiles(tiles), t, r)
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     seq, div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     vmin, vmax = _limits(t, r, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
@@ -904,7 +906,8 @@ def _field_facet(
     tiles = _tiles_for(_check_tiles(tiles), field)
     n = int(field.sizes[facet_dim]) if facet_dim else 1
     nrows = int(field.sizes[row_dim]) if row_dim else 1
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     title = (
         field_suptitle(
@@ -923,7 +926,7 @@ def _field_facet(
         else title
     )
     seq, _div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
     loc_xform = _location_xform(field, tiles, geo=geo)
     # one panel's worth of cells, not the whole faceted field, which would overcount by
@@ -1081,7 +1084,8 @@ def _section(
     _extension()
     factor = _canvas_factor(size, zoom)
     field, geometry = prepare_section(item["field"])
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     if title is None:
         title = suptitle_text(
@@ -1089,7 +1093,7 @@ def _section(
             label=item.get("label"),
         )
     seq, _div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     lo, hi = _limits(field, robust=robust, vmin=vmin, vmax=vmax)
     if log:
         lo = max(lo, 1e-6)
@@ -1275,7 +1279,8 @@ def _time_depth(
     field, geometry = prepare_time_depth(item["field"])
     if mark is None:
         mark = default_mark(field)
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     if title is None:
         title = suptitle_text(
@@ -1284,7 +1289,7 @@ def _time_depth(
             label=item.get("label"),
         )
     seq, _div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     lo, hi = (
         clim
         if clim is not None
@@ -1540,7 +1545,10 @@ def _time_depth_grid(
             )
             reach = _data_range(
                 *(prepared[i][0] for i in group_indices),
-                log=is_log(cell_items[group_indices[0]].get("standard_name")),
+                log=is_log(
+                    cell_items[group_indices[0]].get("standard_name"),
+                    statistic_of(cell_items[group_indices[0]]),
+                ),
             )
             for i in group_indices:
                 clims[i] = span
@@ -1776,7 +1784,10 @@ def _field_map_grid(
             # the shared bar answers for the whole group, as the static norm does
             reach = _data_range(
                 *fields,
-                log=is_log(cell_items[group_indices[0]].get("standard_name")),
+                log=is_log(
+                    cell_items[group_indices[0]].get("standard_name"),
+                    statistic_of(cell_items[group_indices[0]]),
+                ),
             )
             for i in group_indices:
                 clims[i] = span
@@ -1795,8 +1806,9 @@ def _field_map_grid(
             continue
         field = item["field"]
         standard_name = item.get("standard_name")
+        statistic = statistic_of(item)
         seq, _div = cmaps_for(standard_name)
-        log = is_log(standard_name)
+        log = is_log(standard_name, statistic)
         lo, hi = clims.get(i) or _limits(field, robust=robust)
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
@@ -1806,7 +1818,7 @@ def _field_map_grid(
             cmap=seq,
             clim=clim,
             data_range=reaches.get(i),
-            units=item.get("units") or "",
+            units=units_text(item.get("units"), statistic),
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -1887,14 +1899,15 @@ def _section_row(
     factor = _canvas_factor(size, zoom)
     values, geometry = prepare_section_row(item["aligned"])
     t, r, d = values["test"], values["reference"], values["difference"]
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     if title is None:
         title = suptitle_text(
             standard_name, (item.get("depth"), item.get("time"), geometry.path_note)
         )
     seq, div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     vmin, vmax = _limits(t, r, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
@@ -2018,7 +2031,8 @@ def _time_depth_row(
     t, r, d = values["test"], values["reference"], values["difference"]
     if mark is None:
         mark = default_mark(r)
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     if title is None:
         title = suptitle_text(
@@ -2031,7 +2045,7 @@ def _time_depth_row(
             ),
         )
     seq, div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     if seq_clim is None:
         vmin, vmax = _limits(t, r, robust=robust)
         if log:
@@ -2221,14 +2235,16 @@ def _time_depth_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         vmin, vmax = _limits(*all_t, *all_r, robust=robust)
-        if is_log(items[0].get("standard_name")):
+        if is_log(items[0].get("standard_name"), statistic_of(items[0])):
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
         all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
         dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
         shared_div_clim = (-dmax, dmax)
         shared_seq_range = _data_range(
-            *all_t, *all_r, log=is_log(items[0].get("standard_name"))
+            *all_t,
+            *all_r,
+            log=is_log(items[0].get("standard_name"), statistic_of(items[0])),
         )
         shared_div_range = _data_range(*all_d)
 
@@ -3269,10 +3285,12 @@ def _facet_movie(
     )
     keys = _unique_keys([labels[i] for i in indices])
 
-    units = item.get("units") or ""
+    statistic = statistic_of(item)
+
+    units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
     seq, _div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
     frames_da = _preload_frames(field.isel({facet_dim: indices}))
     if shared_limits:
         # the selected frames *are* the whole field unless every= thinned them, so the
@@ -3402,10 +3420,11 @@ def _field_movie(
     keys = _frame_keys(items)
 
     first = items[0]
-    units = first.get("units") or ""
+    statistic = statistic_of(first)
+    units = units_text(first.get("units"), statistic)
     standard_name = first.get("standard_name")
     seq, div = cmaps_for(standard_name)
-    log = is_log(standard_name)
+    log = is_log(standard_name, statistic)
 
     # One clim for the whole movie, from every frame or just the first. Computed here
     # rather than per panel because _quadmesh is called once per frame per panel and

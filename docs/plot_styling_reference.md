@@ -421,7 +421,13 @@ whichever the collapse actually was:
 - a *collapsing* `aggregate` (a plain `"mean"`/other reduce, no `groupby`/`resample`)
   — the window it averaged, from `select`'s own time key, e.g. `alkalinity · 50 m ·
   mean over 2012-01-01–2012-12-31`, or a bare `alkalinity · 50 m · time mean` when no
-  window was named;
+  window was named. A *chain* (`{"time": [{"groupby": "month", "reduce": "mean"},
+  "var"]}`) or a non-mean single reduction leads that part with what it computed —
+  `variance of monthly means over 2012-01-01–2012-12-31`, `std of annual means`, `mean
+  of annual maxima`, `maximum over …` — read off the spec alone, so a variance map is
+  never titled like a mean map. When a static title is too long, the matplotlib
+  elision shortens only the statistic phrase and keeps the window after `" over "` whole. A `compare()` takes the same phrase in its
+  time part, and a statistic fan's members (`aggregate=[...]`) carry it as their label;
 - time still standing over several steps (an ordinary facet) — nothing; the panels
   already say `Jan 2012`, `Feb 2012`, ... down their own titles.
 

@@ -831,7 +831,8 @@ def _field_member_count(kwargs: dict[str, Any]) -> int:
     r"""How many ``Field``\ s this page's ``source``/``variable`` would build.
 
     Mirrors :func:`ocean_skill.field.field`'s own fan-out rule (a list on either
-    side builds one member per (source, variable) pair) without importing it --
+    side builds one member per (source, variable) pair, and a top-level
+    ``aggregate`` list one more factor per spec) without importing it --
     ``expand()`` stays a data-free, dependency-light pass. Variable-name dedup
     (aliases of the same canonical name collapse to one member) can only make the
     real count *smaller* than this, never larger, so a chain this refuses would
@@ -843,7 +844,9 @@ def _field_member_count(kwargs: dict[str, Any]) -> int:
     variable = kwargs.get("variable")
     n_sources = len(source) if isinstance(source, list) else 1
     n_variables = len(variable) if isinstance(variable, list) else 1
-    return n_sources * n_variables
+    aggregate = kwargs.get("aggregate")
+    n_aggregates = len(aggregate) if isinstance(aggregate, list) else 1
+    return n_sources * n_variables * n_aggregates
 
 
 def _has_any_key(select: Any, keys: Any) -> bool:

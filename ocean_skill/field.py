@@ -165,24 +165,34 @@ def _map_time_label(
     time_entry = next((aggregate[k] for k in _TIME_KEYS if k in aggregate), None)
     if time_entry is None:
         return None
-    kept_axis = isinstance(time_entry, dict) and (
-        "groupby" in time_entry or "resample" in time_entry
+    from ocean_skill.comparison import (
+        _reduce_word,
+        _selected_time,
+        _step_parts,
+        _time_label,
+        describe_aggregate,
     )
+    from ocean_skill.operators import final_step
+
+    # An axis may take a chain of steps; the last one decides what became of it.
+    last = final_step(time_entry)
+    kept_axis = isinstance(last, dict) and ("groupby" in last or "resample" in last)
     if kept_axis:
         # A kept-axis reduction with nothing scalar surviving is a standing facet
         # axis this helper does not narrate -- the panels already say when.
         return None
-    reduce_name = (
-        time_entry if isinstance(time_entry, str) else time_entry.get("reduce")
-    )
-    if reduce_name is None:
+    if isinstance(last, dict) and "reduce" not in last:
         return None
-    from ocean_skill.comparison import _selected_time, _time_label
-
+    # A chain (or a plain reduction that is not the unremarkable mean) says what
+    # statistic the map shows -- read-free, off the spec; a bare mean keeps the
+    # "mean over ..." / "time mean" wording every existing title already has.
+    name, _, kwargs = _step_parts(last)
+    phrase = describe_aggregate(time_entry) or _reduce_word(name, kwargs)
     window = _selected_time(select or {})
     if window is not None:
-        return f"{reduce_name} over {_time_label(window)}"
-    return f"time {reduce_name}"
+        return f"{phrase} over {_time_label(window)}"
+    is_chain = isinstance(time_entry, list | tuple) and len(time_entry) > 1
+    return phrase if is_chain else f"time {phrase}"
 
 
 def _grid_has_vertical_axis(meta: dict[str, Any]) -> bool:
@@ -2252,12 +2262,77 @@ def _cross_field(
     return Cross(along, across, labels=labels)
 
 
+def _field_aggregate_fan(
+    source: Any,
+    variable: Any,
+    *,
+    select: dict[str, Any] | None,
+    aggregate: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    label: str | None,
+    cache: bool | None,
+    qc: Any,
+    detide: Any,
+) -> FieldSet:
+    """Build a :class:`FieldSet` from :func:`field`'s top-level ``aggregate=[...]``.
+
+    :func:`field` re-entered once per spec, so every ``source``/``variable`` fan,
+    refusal and dedupe applies per spec exactly as it would to that spec alone; the
+    members are then pooled in spec order. See
+    :func:`ocean_skill.comparison._aggregate_fan` for what a spec list may hold.
+    With more than one spec, each member's ``label`` carries its statistic -- an
+    unset one becomes ``"<source> <statistic>"``, a given one has it appended -- so
+    the members stay distinguishable in a legend. A ``cross`` select is refused: it
+    already builds two members from one source and has nothing left to fan.
+    """
+    from ocean_skill.comparison import _aggregate_fan
+
+    transect = select.get("transect") if isinstance(select, dict) else None
+    if isinstance(transect, dict) and "cross" in transect:
+        raise ValueError(
+            "select={'transect': {'cross': ...}} draws two sections from one "
+            "source and one variable -- it has no aggregate= fan-out either. "
+            "Call osk.field() once per aggregate instead."
+        )
+    fan = _aggregate_fan(aggregate, caller="field()")
+    # Resolved once here, so the "name resolved to..." warning fires once per
+    # variable rather than once per spec each re-entry would otherwise repeat it for.
+    from ocean_skill.vocabulary import resolve_and_report
+
+    def _resolved(v: Any) -> Any:
+        if isinstance(v, str) and v != "all":
+            return resolve_and_report(v, context="Field variable=")
+        return v
+
+    variable = (
+        [_resolved(v) for v in variable]
+        if isinstance(variable, (list, tuple))
+        else _resolved(variable)
+    )
+    members: list[Field] = []
+    for spec, phrase in fan:
+        sub = field(
+            source,
+            variable,
+            select=select,
+            aggregate=spec,
+            label=label,
+            cache=cache,
+            qc=qc,
+            detide=detide,
+        )
+        for f in sub.fields if isinstance(sub, FieldSet) else [sub]:
+            if len(fan) > 1:
+                f.label = f"{label or f.source} {phrase}"
+            members.append(f)
+    return FieldSet(members)
+
+
 def field(
     source: Any,
     variable: Any,
     *,
     select: dict[str, Any] | None = None,
-    aggregate: dict[str, Any] | None = None,
+    aggregate: dict[str, Any] | list[dict[str, Any]] | None = None,
     label: str | None = None,
     cache: bool | None = None,
     qc: Any = None,
@@ -2290,7 +2365,9 @@ def field(
         ``dict[str, Any] | None`` -- axis name -> reduction, e.g. ``{"time":
         "mean"}``, ``{"time": {"resample": "1MS", "reduce": "mean"}}``, or
         ``{"time": {"groupby": "month"}}``. ``None`` (default) aggregates
-        nothing.
+        nothing. A *list* of such specs fans into a :class:`FieldSet`, one
+        :class:`Field` per spec (crossed with any ``source``/``variable`` fan) --
+        see below. A list *under* an axis is a chain of steps, not a fan.
     label
         ``str | None`` -- legend/title label override, shared by every member
         when ``source``/``variable`` fan out. ``None`` (default) uses each
@@ -2418,6 +2495,22 @@ def field(
     (see :meth:`Field._map_item`); a time-invariant variable like ``h`` needs no
     ``select={"time": ...}`` of its own, since it has no time axis to narrow.
 
+    A top-level ``aggregate`` list fans over statistics the same way, mirroring
+    :func:`ocean_skill.comparison.compare` -- the mean and the seasonal-cycle
+    variance of a run, side by side::
+
+        osk.field(
+            "run_new", "temperature", select={"depth": "surface"},
+            aggregate=[{"time": "mean"},
+                       {"time": [{"groupby": "month", "reduce": "mean"}, "var"]}],
+        ).plot()
+
+    Each entry is a plain spec (a ``{"test", "reference"}`` pair-spec is refused, as
+    for a single ``aggregate=``); exact repeats are dropped with a note and ``[]`` is
+    refused. With more than one spec, an unset ``label`` becomes ``"<source>
+    <statistic>"`` (a given one gets the statistic appended), so the members stay
+    distinguishable; the map titles already name the statistic.
+
     ``source`` accepts a list the same way -- one :class:`Field` per source, sharing
     this same ``variable``/``select``/``aggregate``/``label``/``cache``, pooled into
     a :class:`FieldSet`. This is what :func:`ocean_skill.catalog.find` chains into
@@ -2430,6 +2523,17 @@ def field(
     a list for *both* ``source`` and ``variable`` fans the full cross product --
     one ``Field`` per ``(source, variable)`` pair, deduplicated the same way.
     """
+    if isinstance(aggregate, (list, tuple)):
+        return _field_aggregate_fan(
+            source,
+            variable,
+            select=select,
+            aggregate=aggregate,
+            label=label,
+            cache=cache,
+            qc=qc,
+            detide=detide,
+        )
     source_is_list = isinstance(source, (list, tuple))
     variable_is_list = isinstance(variable, (list, tuple))
     if source_is_list and not source:

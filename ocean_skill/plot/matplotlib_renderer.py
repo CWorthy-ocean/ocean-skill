@@ -26,6 +26,7 @@ import numpy as np
 from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, norm_for
 from ocean_skill.plot import _titles
+from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
     is_gshhs,
@@ -873,6 +874,7 @@ def _draw_row(
     land: bool | float = True,
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
+    statistic: str | None = None,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -897,6 +899,10 @@ def _draw_row(
     from the figure's geometry, merged with the fixed style choices. Passed in rather
     than recomputed because the sizes belong to the whole figure, and a row cannot see
     how many other rows are sharing the page with it.
+
+    ``statistic`` is the reduction the row's fields are the result of, if they are one
+    (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
+    log scale, and its units are printed readably (``°C²``) on the colour bars.
     """
     import matplotlib.colors as mcolors
 
@@ -914,7 +920,9 @@ def _draw_row(
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, robust=robust)
-        seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
+        seq_norm = _with_range(
+            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+        )
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
@@ -963,7 +971,7 @@ def _draw_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units}]" if units else "")
+    return ims, (f"[{units_text(units, statistic)}]" if units else "")
 
 
 def _draw_section_row(
@@ -984,6 +992,7 @@ def _draw_section_row(
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
+    statistic: str | None = None,
 ):
     """Draw one test|reference|difference section row into three existing axes.
 
@@ -999,6 +1008,10 @@ def _draw_section_row(
     row's three panel titles by hand -- test, reference, difference, in that
     order -- with ``None`` at a position keeping that panel's own title; see
     :func:`ocean_skill.plot._titles.resolve_titles`.
+
+    ``statistic`` is the reduction the row's fields are the result of, if they are one
+    (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
+    log scale, and its units are printed readably (``°C²``) on the colour bars.
     """
     import matplotlib.colors as mcolors
 
@@ -1010,7 +1023,9 @@ def _draw_section_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     vmin, vmax = _limits(t, r, robust=robust)
-    seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
+    seq_norm = _with_range(
+        norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+    )
     dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
     div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
@@ -1050,7 +1065,7 @@ def _draw_section_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units}]" if units else "")
+    return ims, (f"[{units_text(units, statistic)}]" if units else "")
 
 
 def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
@@ -2475,6 +2490,7 @@ def field_row(
         land=land,
         robust=robust,
         titles=titles,
+        statistic=statistic_of(aligned),
     )
     _draw_colorbar(
         fig,
@@ -2879,10 +2895,13 @@ def _shared_norms(
     import matplotlib.colors as mcolors
 
     standard_name = comparisons[0].get("standard_name")
+    statistic = statistic_of(comparisons[0])
     all_t = [np.asarray(c["aligned"][test_name]) for c in comparisons]
     all_r = [np.asarray(c["aligned"][reference_name]) for c in comparisons]
     vmin, vmax = _limits(*all_t, *all_r, robust=robust)
-    seq_norm = _with_range(norm_for(standard_name, vmin, vmax), *all_t, *all_r)
+    seq_norm = _with_range(
+        norm_for(standard_name, vmin, vmax, statistic=statistic), *all_t, *all_r
+    )
 
     all_d = np.concatenate(
         [np.asarray(c["aligned"]["difference"]).ravel() for c in comparisons]
@@ -3092,6 +3111,7 @@ def field_grid(
             land=land,
             robust=robust,
             titles=resolved_titles[i * 3 : i * 3 + 3],
+            statistic=statistic_of(comp),
         )
         _draw_colorbar(
             fig,
@@ -3277,9 +3297,22 @@ def _elide(text: str, limit: int = _MAX_TITLE_PART_CHARS) -> str:
     Breaks on the last space within the limit so the cut does not land mid-word;
     falls back to a hard cut when there is no space to break on (one long token,
     e.g. a run-together identifier). Text at or under the limit is returned as-is.
+
+    A time part that names a reduction *and* its window -- ``"variance of monthly
+    means over 2012-01-01–2012-12-31"``, as
+    :func:`ocean_skill.comparison._display_time_title` spells it -- is longer than any
+    one phrase this backstop was sized for, and cutting it at a word break would drop
+    exactly the window, the half that says which data the statistic is over. So a part
+    with an `` over `` in it is elided on the statistic side of that word only, and the
+    window after it is kept whole (itself elided only if it alone is past ``limit``):
+    the title can run past ``limit`` by the window's length, which is a date range or a
+    depth and short by construction.
     """
     if len(text) <= limit:
         return text
+    phrase, over, window = text.rpartition(" over ")
+    if over and phrase:
+        return f"{_elide(phrase, limit)}{over}{_elide(window, limit)}"
     head = text[:limit].rstrip()
     space = head.rfind(" ")
     if space > 0:
@@ -3700,11 +3733,20 @@ def field_facet(
     merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
+    statistic = statistic_of(field)
 
     def _norm_of(sub):
         lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
         return _with_range(
-            norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), sub
+            norm_for(
+                standard_name,
+                lo,
+                hi,
+                user_vmin=vmin,
+                user_vmax=vmax,
+                statistic=statistic,
+            ),
+            sub,
         )
 
     # Computed before drawing so each panel is drawn against its scale rather than
@@ -3791,7 +3833,7 @@ def field_facet(
     for ax in flat[n_panels:]:
         ax.set_visible(False)
 
-    bar_label = f"[{units}]" if units else ""
+    bar_label = f"[{units_text(units, statistic)}]" if units else ""
     if per_row_bars:
         for row in range(nrows):
             span = slice(row * ncols, (row + 1) * ncols)
@@ -3988,9 +4030,13 @@ def section(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
+    statistic = statistic_of(field)
     lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
     norm = _with_range(
-        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), values
+        norm_for(
+            standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+        ),
+        values,
     )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
@@ -4011,7 +4057,7 @@ def section(
     ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
     ax.tick_params(axis="both", labelsize=scale["tick_label"])
 
-    lab = units or ""
+    lab = units_text(units, statistic)
     _draw_colorbar(
         fig,
         im,
@@ -4151,11 +4197,14 @@ def cross(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
+    statistic = statistic_of(items[0])
     lo, hi = _limits(
         *(values for values, _ in prepared), robust=robust, vmin=vmin, vmax=vmax
     )
     norm = _with_range(
-        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+        norm_for(
+            standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+        ),
         *(values for values, _ in prepared),
     )
 
@@ -4193,7 +4242,7 @@ def cross(
         t._osk_size_pinned = title_pinned
         ims.append(im)
 
-    lab = units or ""
+    lab = units_text(units, statistic)
     _draw_colorbar(
         fig,
         ims[-1],
@@ -4357,9 +4406,13 @@ def time_depth(
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
     cmap, _ = cmaps_for(standard_name)
+    statistic = statistic_of(field)
     lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
     norm = _with_range(
-        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax), values
+        norm_for(
+            standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+        ),
+        values,
     )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
@@ -4370,7 +4423,7 @@ def time_depth(
         ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
     )
 
-    lab = units or ""
+    lab = units_text(units, statistic)
     _draw_colorbar(
         fig,
         im,
@@ -4682,7 +4735,14 @@ def time_depth_grid(
                 vmax=vmax,
             )
             norm = _with_range(
-                norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+                norm_for(
+                    standard_name,
+                    lo,
+                    hi,
+                    user_vmin=vmin,
+                    user_vmax=vmax,
+                    statistic=statistic_of(cell_items[group_indices[0]]),
+                ),
                 *(prepared[i][0] for i in group_indices),
             )
             for i in group_indices:
@@ -4713,7 +4773,12 @@ def time_depth_grid(
             lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
             norm = _with_range(
                 norm_for(
-                    item.get("standard_name"), lo, hi, user_vmin=vmin, user_vmax=vmax
+                    item.get("standard_name"),
+                    lo,
+                    hi,
+                    user_vmin=vmin,
+                    user_vmax=vmax,
+                    statistic=statistic_of(item),
                 ),
                 values,
             )
@@ -4732,7 +4797,7 @@ def time_depth_grid(
         _x_axis(
             ax, scale, tick_label_kwargs, date=geometry.date_axis, ticks=geometry.x_ticks
         )
-        lab = item.get("units") or ""
+        lab = units_text(item.get("units"), statistic_of(item))
         _draw_colorbar(
             fig,
             im,
@@ -4806,6 +4871,7 @@ def _draw_time_depth_row(
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
+    statistic: str | None = None,
 ):
     """Draw one test|reference|difference ``time_depth`` row into three existing axes.
 
@@ -4839,6 +4905,10 @@ def _draw_time_depth_row(
     reference, difference, in that order -- with ``None`` at a position
     keeping that panel's own (``labels``-derived, or ``"difference"``) title;
     see :func:`ocean_skill.plot._titles.resolve_titles`.
+
+    ``statistic`` is the reduction the row's fields are the result of, if they are one
+    (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
+    log scale, and its units are printed readably (``°C²``) on the colour bars.
     """
     import matplotlib.colors as mcolors
 
@@ -4853,7 +4923,9 @@ def _draw_time_depth_row(
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, robust=robust)
-        seq_norm = _with_range(norm_for(standard_name, vmin, vmax), t, r)
+        seq_norm = _with_range(
+            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+        )
     if div_norm is None:
         dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
@@ -4893,7 +4965,7 @@ def _draw_time_depth_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units}]" if units else "")
+    return ims, (f"[{units_text(units, statistic)}]" if units else "")
 
 
 def time_depth_row(
@@ -5014,6 +5086,7 @@ def time_depth_row(
         scale=scale,
         defaults=defaults,
         robust=robust,
+        statistic=statistic_of(aligned),
     )
     _draw_colorbar(
         fig,
@@ -5198,6 +5271,7 @@ def time_depth_row_grid(
             defaults=defaults,
             robust=robust,
             titles=resolved_titles[i * 3 : i * 3 + 3],
+            statistic=statistic_of(item),
         )
         _draw_colorbar(
             fig,
@@ -5462,7 +5536,12 @@ def field_map_grid(
                 *(cell_items[i]["field"] for i in group_indices), robust=robust
             )
             norm = _with_range(
-                norm_for(standard_name, vmin, vmax),
+                norm_for(
+                    standard_name,
+                    vmin,
+                    vmax,
+                    statistic=statistic_of(cell_items[group_indices[0]]),
+                ),
                 *(cell_items[i]["field"] for i in group_indices),
             )
             for i in group_indices:
@@ -5478,7 +5557,10 @@ def field_map_grid(
         else:
             cmap, _ = cmaps_for(standard_name)
             vmin, vmax = _limits(field, robust=robust)
-            norm = _with_range(norm_for(standard_name, vmin, vmax), field)
+            norm = _with_range(
+                norm_for(standard_name, vmin, vmax, statistic=statistic_of(item)),
+                field,
+            )
         # No drawn cell to my left in this row (the grid's own edge, or an
         # interior/trailing blank standing in for one) keeps the latitude
         # labels; no drawn cell below me in this column keeps the longitude
@@ -5505,7 +5587,11 @@ def field_map_grid(
             land=land,
         )
         ax.title._osk_size_pinned = title_pinned
-        bar_label = f"[{item['units']}]" if item.get("units") else ""
+        bar_label = (
+            f"[{units_text(item['units'], statistic_of(item))}]"
+            if item.get("units")
+            else ""
+        )
         _draw_colorbar(
             fig,
             im,
@@ -5644,6 +5730,7 @@ def section_row(
         defaults=defaults,
         robust=robust,
         titles=titles,
+        statistic=statistic_of(aligned),
     )
     _draw_colorbar(
         fig,
@@ -6511,6 +6598,7 @@ def field_movie(
         coastline_resolution=coastline_resolution,
         land=land,
         robust=robust,
+        statistic=statistic_of(first),
     )
     # The scale came from the first frame (or every one, when shared) but the bars are
     # drawn once for the whole movie, so their arrows have to answer for every frame: a
@@ -6718,8 +6806,11 @@ def facet_movie(
     lo, hi = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
     # the arrow is about every frame, even when the scale was set by the first alone: a
     # later frame that outruns it is exactly the clipping the arrow is there to flag
+    statistic = statistic_of(field)
     norm = _with_range(
-        norm_for(standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax),
+        norm_for(
+            standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+        ),
         *(field.isel({facet_dim: i}) for i in indices),
     )
     cmap, _ = cmaps_for(standard_name)
@@ -6757,7 +6848,7 @@ def facet_movie(
         fig,
         im,
         ax,
-        f"[{units}]" if units else "",
+        f"[{units_text(units, statistic)}]" if units else "",
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
