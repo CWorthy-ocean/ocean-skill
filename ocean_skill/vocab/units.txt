@@ -1,0 +1,42 @@
+# Ocean units and the seawater-density context, in plain pint definition syntax.
+#
+# This is the *addition* to cf_xarray.units, not a registry of its own: cf-xarray's
+# registry already carries UDUNITS-style exponents ("m2 s-2"), "%", PSU/psu, the
+# degC/Celsius family, degrees_north/east and year = 365.25 days, so none of that is
+# repeated here. Only what ocean data needs beyond it is defined, and nothing here is
+# specific to ocean-skill -- any package can add the same units to cf-xarray's registry:
+#
+#     import cf_xarray.units
+#     cf_xarray.units.units.load_definitions("units.txt")
+#
+# Loading it into a registry that already has it logs pint's "Redefining ..." warnings
+# (not a Python warning), so load it once per registry. Units first, the context last.
+
+# Alkalinity is reported in equivalents (meq/m3): 1 eq = 1 mol of charge.
+equivalent = mole = eq
+
+# Two more spellings of degrees Celsius found in real files; cf-xarray has the others.
+@alias degree_Celsius = degrees_celsius = degrees_C
+
+# Dissolved oxygen as a gas volume (mL of O2 per L of seawater), the way Winkler
+# titration and CTD oxygen-sensor software report it. To pint a bare mL/L is plain
+# dimensionless -- the same as PSU -- so this is a concretely-dimensioned unit, which
+# the spelling is rewritten to (ocean_skill.units.normalize) instead of a context
+# that would also happily, and wrongly, convert a salinity to a concentration.
+# 22.392 L/mol is the UNESCO/WOCE molar volume of O2 (Garcia & Gordon 1992), i.e.
+# 1000 / 22.392 = 44.661 mmol of O2 per mL of O2 gas. ocean_skill.units.O2_MMOL_PER_ML
+# is the same number, there for code that wants it without going through pint.
+oxygen_ml_per_l = 1000 / 22.392 * millimole / meter ** 3
+
+# Per-mass <-> per-volume (umol/kg <-> mmol/m3) is not a unit conversion: it needs a
+# density, which is physics rather than arithmetic, so it is a context -- available when
+# asked for (``ureg.context("seawater")``), never silently automatic. rho is the nominal
+# seawater density in kg/m3 and is a parameter of the context, so a different one is
+# ``ureg.context("seawater", rho=1030)`` rather than a redefinition. A constant is an
+# approximation: true density varies with T/S/P by a few parts per thousand near the
+# surface (use gsw with in-situ T/S if that matters). Each direction is its own one-way
+# transformation so the two are easy to tell apart and change separately.
+@context(rho = 1025) seawater
+    [substance] / [mass] -> [substance] / [length] ** 3: value * rho * kilogram / meter ** 3
+    [substance] / [length] ** 3 -> [substance] / [mass]: value / (rho * kilogram / meter ** 3)
+@end

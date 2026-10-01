@@ -14,8 +14,8 @@ rather than reading anything over the network. Shows:
 5. ``register(..., broader=)`` -- file a new *specific kind of* an existing concept
    under it (mixed layer depth by sigma_theta, by temperature, ...): asking for the
    broad name is satisfied by any of them, asking for a specific one never by another.
-6. How to make an addition permanent: edit ``ocean_skill/vocabulary.py``'s
-   ``VOCABULARY`` dict directly instead of calling these at runtime.
+6. How to make an addition permanent: edit ``ocean_skill/vocab/vocabulary.yaml``
+   (the shared file ``VOCABULARY`` is loaded from) instead of calling these at runtime.
 
 Run:  python examples/vocabulary_demo.py
 """
@@ -211,12 +211,11 @@ print(
     """
 add_alias()/add_pattern()/register() only last for the current Python session --
 they mutate the in-memory VOCABULARY dict and refresh the resolver + cf-xarray
-registration, but a fresh `import ocean_skill` starts from vocabulary.py's own
-file again.
+registration, but a fresh `import ocean_skill` loads the vocabulary file again.
 
-To make a new alias or concept permanent, edit VOCABULARY in
-ocean_skill/vocabulary.py directly (the same dict these functions mutate at
-runtime) and it's there for every future session -- no other file needs to change,
-per the module's own docstring.
+To make a new alias or concept permanent, edit ocean_skill/vocab/vocabulary.yaml
+(the file VOCABULARY is parsed from at import; its rules are in the README next to
+it) and it's there for every future session -- and for any other package that loads
+the same file with plain cf-xarray.
 """
 )

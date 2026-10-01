@@ -153,7 +153,7 @@ osk.find(variable="nitrate")                # 15
 osk.find(featureType="timeSeries")          # 41
 ```
 
-`variable` takes anything the [vocabulary](../ocean_skill/vocabulary.py) knows — a
+`variable` takes anything the [vocabulary](../ocean_skill/vocab/vocabulary.yaml) knows — a
 short key, a canonical CF standard_name, or any alias, in any case. All of these
 return the same 15 sources:
 
