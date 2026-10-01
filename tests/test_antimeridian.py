@@ -130,6 +130,22 @@ def test_a_dateline_straddling_test_stays_inside_its_own_longitudes(method):
     assert float(t.min()) >= 5.0 - 1e-6 and float(t.max()) <= 15.0 + 1e-6
 
 
+@pytest.mark.parametrize("method", ["bilinear", "conservative_normed"])
+def test_a_global_test_against_a_straddling_reference_follows_the_reference(method):
+    """The roles swapped: WOA as the *test*, a Pacific model as the reference.
+
+    A global test has no convention of its own, so "auto" used to keep ±180 and the
+    test was never cropped -- the pair came back on the test's whole (coarser) grid,
+    and the map frame centred on 0 tore the Pacific across both edges.
+    """
+    out = A.align(_global_reference(), _pacific_test(ny=80, nx=200), method=method)
+    assert out.attrs["regrid_target"] == "test"  # the coarse global grid is kept
+    assert out.attrs["lon_convention"] == "0-360"
+    assert float(out.lon.min()) >= 150.0 - 2 * A.DEFAULT_PAD - 2.0
+    assert float(out.lon.max()) <= 250.0 + 2 * A.DEFAULT_PAD + 2.0
+    assert A.natural_convention(out["test"]) == "0-360"
+
+
 def test_folded_corners_do_not_paint_the_far_side_of_the_planet():
     """Forced ±180, the fold is unavoidable — the corner unwrap must absorb it."""
     out = A.align(
