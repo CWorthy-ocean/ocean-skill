@@ -723,7 +723,13 @@ class Field:
         One item, unless a vertical axis also survives the reduction — then one
         item per level, each carrying its own ``actual_depth`` so the depth-as-
         marker channel (:mod:`ocean_skill.plot.style`) and the legend
-        (:func:`ocean_skill.plot.style.series_label`) tell the levels apart.
+        (:func:`ocean_skill.plot.style.series_label`) tell the levels apart. A
+        level axis that carries ``level_labels`` (a mixed ``["surface", 100, 200]``
+        request, whose surface layer sits at a numeric ``z = 0``) also puts each
+        level's label on its item as ``depth_label``, which the legend and the
+        colour/marker channels then key on in place of the number, so the surface
+        line reads ``surface`` rather than ``0 m``
+        (:func:`ocean_skill.plot.series._depth_channel`).
         Anything else left standing beyond time and depth is refused, the same as
         :func:`_facet_dims` refuses a third map axis — a line has only one axis to
         give away.
@@ -778,10 +784,25 @@ class Field:
         zcoord = vertical_coord_on(da, zdim)
         zcoord_name = str(zcoord.name) if zcoord is not None else None
 
+        # A mixed depth list (``["surface", 100, 200]``, see
+        # comparison._surface_and_levels) keeps its axis numeric -- the surface
+        # layer sits at z=0 -- and rides the honest spelling on the coordinate as
+        # ``level_labels``. The legend would otherwise read the surface line as
+        # "0 m", a depth nobody asked for; each item carries its own label instead
+        # (item["depth_label"], read by plot.series._depth_channel). Only when the
+        # coordinate has one label per level: a stale attr on a since-narrowed axis
+        # is worse than none, and a plain numeric list never had it, so those
+        # legends are exactly what they were.
+        level_labels = zcoord.attrs.get("level_labels") if zcoord is not None else None
+        if level_labels is not None and len(level_labels) != da.sizes[zdim]:
+            level_labels = None
+
         items = []
         for k in range(da.sizes[zdim]):
             level = da.isel({zdim: k})
             item = {"aligned": xr.Dataset({"value": level}), "metrics": None, **base}
+            if level_labels is not None:
+                item["depth_label"] = str(level_labels[k])
             # actual_depth lives on the *item's* Dataset, not the DataArray, since
             # that is what _depth_of (plot/series.py) reads -- the same convention
             # Comparison.align() uses for its own aligned pair. Converted by
@@ -1597,6 +1618,15 @@ class FieldSet:
         from a list ``source`` and/or ``variable``; constructing a ``FieldSet``
         directly from hand-built :class:`Field` objects works the same way but
         is not the ordinary path.
+    title
+        ``str | None`` -- the figure's default title, or ``None`` (default) for
+        whatever the layout would draw on its own. :meth:`plot` hands it to the
+        renderer as ``title=`` unless the caller passes one, so an explicit
+        ``plot(title=...)`` always wins and ``plot(title="")`` draws none. Set by
+        whatever built the set and knows something the panels cannot say for
+        themselves -- :meth:`ocean_skill.extrema.Extremum.series` names the extremum
+        its point series follows, which each panel's own title (a place and a
+        period) leaves out. Kept by :meth:`sel`.
 
     ``osk.field()`` builds one :class:`Field` per entry whenever ``source`` and/or
     ``variable`` is a list, sharing the same ``select``/``aggregate``/``label``/
@@ -1630,7 +1660,7 @@ class FieldSet:
     because the composition rule *is* the feature.
     """
 
-    def __init__(self, fields: list[Field]):
+    def __init__(self, fields: list[Field], *, title: str | None = None):
         for f in fields:
             if not isinstance(f, Field):
                 raise TypeError(
@@ -1639,6 +1669,7 @@ class FieldSet:
                     "way rather than by hand."
                 )
         self.fields = list(fields)
+        self.title = title
 
     def __len__(self) -> int:
         return len(self.fields)
@@ -1718,7 +1749,7 @@ class FieldSet:
                 for k, v in filters.items()
             )
             raise ValueError(f"no fields match {detail}")
-        return FieldSet(kept)
+        return FieldSet(kept, title=self.title)
 
     def _items(self) -> list[dict[str, Any]]:
         """Every member's items (series or profile), concatenated into one figure."""
@@ -1756,6 +1787,10 @@ class FieldSet:
             styling dicts. See ``docs/plot_styling_reference.md`` for the full
             list.
 
+        A set built with a :attr:`title` (an extremum's point series names the
+        extremum it follows) draws it as the figure's ``title=``, whichever layout
+        follows; passing ``title=`` here replaces it, and ``title=""`` draws none.
+
         Every member has to draw the same way -- all a :attr:`Field.family` of
         ``"series"`` (a point over time), all ``"profile"`` (a point down depth,
         at one instant), all ``"time_depth"`` (depth against time, at one
@@ -1777,6 +1812,12 @@ class FieldSet:
         from ocean_skill.comparison import _short_variable_label, _variable_available
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
+
+        # First, before any branch below dispatches, so every route out of here --
+        # the usable re-entry, the lone-map hand-off to Field.plot, each family's
+        # own renderer -- draws the set's title; a caller's own title= still wins.
+        if self.title is not None:
+            kwargs.setdefault("title", self.title)
 
         usable = [
             f
@@ -1806,7 +1847,7 @@ class FieldSet:
                 f"requested variable: {detail}",
                 stacklevel=_stacklevel.find(),
             )
-            return FieldSet(usable).plot(renderer=renderer, **kwargs)
+            return FieldSet(usable, title=self.title).plot(renderer=renderer, **kwargs)
 
         time_depth = [f for f in self.fields if f.family == "time_depth"]
         if time_depth and len(time_depth) < len(self.fields):

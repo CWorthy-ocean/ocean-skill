@@ -1016,6 +1016,74 @@ def test_a_list_region_attr_formats_too():
     assert any(f"mean over {_region_label(region)}" in t for t in static)
 
 
+def test_lonlat_label_spells_a_position_the_way_a_station_title_does():
+    """The one spelling shared by panel titles and an extremum's default title."""
+    assert _series.lonlat_label(-144.245, 49.978) == "50.0°N 144.2°W"
+    assert _series.lonlat_label(97.6, -16.1) == "16.1°S 97.6°E"
+    item = _single_item()
+    assert _series._place_of(item["aligned"]["value"]) == "50.0°N 144.2°W"
+
+
+def test_a_whole_domain_mean_reads_domain_mean_not_its_midpoint():
+    """``spatial_mean`` without a ``region`` is a mean of the whole domain.
+
+    ``_horizontal_mean`` parks its scalar lon/lat at the domain's bounding-box
+    midpoint (here a spot well off any data); printing that as a station's place is
+    exactly the misreading this title exists to prevent.
+    """
+    item = _single_item(lon=-166.0, lat=10.0)
+    item["aligned"]["value"].attrs["spatial_mean"] = "area-weighted mean (cell_area)"
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_titles(render(_spec([item]), renderer="holoviews"))
+    assert static == interactive
+    assert any("domain mean" in t for t in static)
+    assert not any("166" in t or "°N" in t for t in static)
+
+
+def test_a_box_mean_beats_domain_mean_when_both_attrs_are_present():
+    """A select box drove this mean: ``region`` is the more specific statement."""
+    from ocean_skill.comparison import _region_label
+
+    item = _single_item()
+    region = [-149.0, 47.0, -142.0, 53.0]
+    item["aligned"]["value"].attrs["spatial_mean"] = "area-weighted mean (cell_area)"
+    item["aligned"]["value"].attrs["region"] = region
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    assert any(f"mean over {_region_label(region)}" in t for t in static)
+    assert not any("domain mean" in t for t in static)
+
+
+def test_a_depth_label_replaces_the_realized_depth_in_the_legend_and_channels():
+    """``item["depth_label"]`` ("surface" at a numeric z = 0) is what the legend reads.
+
+    The labels are strings like a band's, so colour and marker still key on distinct
+    levels, in the order the items were given, and both renderers agree.
+    """
+    items = []
+    for depth, label in ((0.0, "surface"), (100.0, "100 m"), (200.0, "200 m")):
+        item = _single_item(depth=depth)
+        item["depth_label"] = label
+        items.append(item)
+    assert [_series._depth_channel(i) for i in items] == ["surface", "100 m", "200 m"]
+
+    static = _matplotlib_lines(render(_spec(items), renderer="matplotlib"))
+    interactive = _holoviews_lines(render(_spec(items), renderer="holoviews"))
+    assert [row[0] for row in static] == ["surface", "100 m", "200 m"]
+    assert [row[:3] for row in static] == [row[:3] for row in interactive]
+    assert len({marker for *_, marker in static}) == 3, "depth still marks levels"
+
+    # Without the label the same items read their numbers, as they always did.
+    plain = [_single_item(depth=d) for d in (0.0, 100.0, 200.0)]
+    drawn = _matplotlib_lines(render(_spec(plain), renderer="matplotlib"))
+    assert [row[0] for row in drawn] == ["0 m", "100 m", "200 m"]
+
+
+def test_a_band_label_still_wins_over_a_depth_label():
+    item = _band_item("0-5 m")
+    item["depth_label"] = "surface"
+    assert _series._depth_channel(item) == "0-5 m"
+
+
 def test_depth_fanned_single_source_items_get_markers_and_depth_labels():
     """One Field, several levels -- markers and legend labels tell them apart."""
     items = [_single_item(depth=10.0), _single_item(depth=50.0)]

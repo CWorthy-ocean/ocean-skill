@@ -694,7 +694,14 @@ def test_declared_attr_still_wins_over_the_vocabulary():
 # corrected -- one variable of it, not the whole thing.
 
 
-def _holte_talley_like(path, *, da_standard_name="mld_da_mean"):
+def _holte_talley_like(
+    path,
+    *,
+    da_standard_name="mld_da_mean",
+    n_months=2,
+    month_valued=False,
+    fmt=None,
+):
     """Write a tiny file shaped like the Holte & Talley Argo MLD climatology.
 
     Every variable sits on a bare dimension (no coordinate variables), ``lat``/``lon``
@@ -703,18 +710,31 @@ def _holte_talley_like(path, *, da_standard_name="mld_da_mean"):
     the probe trusts, so the probed map is close to an identity map and a caller has to
     correct it. ``da_standard_name`` lets a test have the *other* MLD field claim a
     different name -- say, the one the caller is about to hand to the first.
+
+    ``n_months`` is the length of the month axis (the real file has 12), and
+    ``month_valued`` makes every ``mld_dt_mean`` cell equal its own month number so a
+    test can tell which month it was handed; ``mld_da_mean`` is that plus 100.
+    ``fmt`` is xarray's ``to_netcdf(format=...)`` -- the real file is classic
+    (``"NETCDF3_CLASSIC"``), read with the scipy engine.
     """
     grid = ("iMONTH", "iLAT", "iLON")
+    shape = (n_months, 3, 4)
+    months = np.arange(1, n_months + 1)
+    values = (
+        np.broadcast_to(months[:, None, None].astype(float), shape).copy()
+        if month_valued
+        else np.ones(shape)
+    )
     xr.Dataset(
         {
             "mld_dt_mean": (
                 grid,
-                np.ones((2, 3, 4)),
+                values,
                 {"standard_name": "mld_dt_mean", "units": "m"},
             ),
             "mld_da_mean": (
                 grid,
-                np.ones((2, 3, 4)),
+                values + 100.0 if month_valued else values,
                 {"standard_name": da_standard_name, "units": "m"},
             ),
             "lat": (
@@ -727,9 +747,9 @@ def _holte_talley_like(path, *, da_standard_name="mld_da_mean"):
                 np.linspace(0.0, 270.0, 4),
                 {"standard_name": "longitude", "units": "degrees_east"},
             ),
-            "month": (("iMONTH",), np.array([1, 2]), {"standard_name": "Month"}),
+            "month": (("iMONTH",), months, {"standard_name": "Month"}),
         }
-    ).to_netcdf(path)
+    ).to_netcdf(path, format=fmt)
     return str(path)
 
 
@@ -830,6 +850,110 @@ def test_a_probed_claim_on_the_callers_name_is_dropped_and_recorded(tmp_path):
     }
     assert md["duplicate_standard_names"] == {"mld_da_mean": SIGMA_THETA}
     assert md["variables"] == sorted(["Month", "latitude", "longitude", SIGMA_THETA])
+
+
+def _holte_talley_reader_chain(path):
+    """Return the reader chain that gives the H&T file real lat/lon/month axes.
+
+    The file keeps ``lat``/``lon``/``month`` as plain variables on coordinate-less
+    dimensions (``iLAT``/``iLON``/``iMONTH``), so a bare URL leaves nothing to select
+    on. This is the README's recipe: read it, promote the three to coordinates, and
+    swap them in for the index dimensions. The ``HDF5`` datatype is only a vehicle for
+    the path -- the classic file is read by the scipy engine.
+    """
+    from intake.readers import datatypes, readers
+
+    return (
+        readers.XArrayDatasetReader(
+            datatypes.HDF5(url=path), engine="scipy", decode_times=False, chunks={}
+        )
+        .set_coords(["lat", "lon", "month"])
+        .swap_dims({"iLAT": "lat", "iLON": "lon", "iMONTH": "month"})
+    )
+
+
+def test_a_reader_chain_makes_the_holte_talley_month_axis_selectable(
+    isolated_catalogs, tmp_path
+):
+    """Catalogue the H&T file through a reader chain; ``month`` becomes an axis.
+
+    Build it the README way (a ``set_coords``/``swap_dims`` pipeline passed as
+    ``"reader"``), read it back through ocean-skill's own read path, and pick August:
+    the month dimension is gone, the scalar ``month`` is 8, and the cells are the
+    August ones.
+    """
+    from ocean_skill import operators, sources
+
+    path = _holte_talley_like(
+        tmp_path / "ht.nc", n_months=12, month_valued=True, fmt="NETCDF3_CLASSIC"
+    )
+    out = build_catalog(
+        {
+            "holte_talley_mld_clim": {
+                "reader": _holte_talley_reader_chain(path),
+                "standard_names": {"mld_dt_mean": SIGMA_THETA},
+                "climatology": True,
+                "doi": "10.1002/2017GL073426",
+            }
+        },
+        isolated_catalogs / "mld_climatologies.yaml",
+        title="Global mixed layer depth climatologies",
+        name_map=None,
+    )
+
+    # The saved entry survived a YAML round trip as a pipeline, and the probe saw the
+    # promoted axes: only the two MLD fields are variables, and the lat/lon extent is
+    # now real rather than missing.
+    md = _entry_metadata(out, "holte_talley_mld_clim")
+    assert md["variables"] == sorted([SIGMA_THETA, "mld_da_mean"])
+    assert md["geospatial_lat_min"] == -60.0 and md["geospatial_lat_max"] == 60.0
+    assert md["climatology"] is True
+    assert md["doi"] == "10.1002/2017GL073426"
+
+    ds = sources.read("holte_talley_mld_clim")
+    assert set(ds.dims) == {"month", "lat", "lon"}
+    assert list(ds["month"].values) == list(range(1, 13))
+    assert SIGMA_THETA in ds  # the catalog's name, stamped on the read
+
+    august = operators.select(ds, {"month": 8})
+    assert "month" not in august.dims
+    assert int(august["month"]) == 8
+    assert set(august[SIGMA_THETA].dims) == {"lat", "lon"}
+    assert bool((august[SIGMA_THETA] == 8.0).all())  # the month-8 slice, nothing else
+    assert bool((august["mld_da_mean"] == 108.0).all())
+
+
+def test_a_bare_url_leaves_the_holte_talley_month_axis_unselectable(
+    isolated_catalogs, tmp_path
+):
+    """The contrast that motivates the reader chain: no coordinates, nothing to pick.
+
+    Without the chain the three axes are ordinary variables on dimensions with no
+    coordinate, so ``select={"month": 8}`` matches nothing and quietly returns all
+    twelve months.
+    """
+    from ocean_skill import operators, sources
+
+    path = _holte_talley_like(
+        tmp_path / "ht.nc", n_months=12, month_valued=True, fmt="NETCDF3_CLASSIC"
+    )
+    build_catalog(
+        {
+            "ht_bare": {
+                "url": path,
+                "standard_names": {"mld_dt_mean": SIGMA_THETA},
+            }
+        },
+        isolated_catalogs / "bare.yaml",
+        name_map=None,
+        reader_kwargs={"engine": "scipy"},
+    )
+    ds = sources.read("ht_bare")
+    assert "month" not in ds.dims and "iMONTH" in ds.dims
+    assert "month" not in ds.coords
+
+    picked = operators.select(ds, {"month": 8})
+    assert picked.sizes["iMONTH"] == 12  # not narrowed: there was no axis to select on
 
 
 def test_an_explicit_variables_list_is_kept_verbatim(tmp_path):

@@ -19,6 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 __all__ = ["PageConfig", "RefreshConfig", "RefreshSourceConfig", "SuiteConfig"]
 
+#: The mutually exclusive page kinds, in the order their error messages list them.
+_PAGE_KINDS = ("field", "compare", "summary", "section")
+
 
 class RefreshSourceConfig(BaseModel):
     """One stream to rebuild before the suite runs -- forwarded to ``make_kerchunk``."""
@@ -47,7 +50,7 @@ class RefreshConfig(BaseModel):
 
 
 class PageConfig(BaseModel):
-    """One page of a report: exactly one of ``field``, ``compare``, or ``summary``.
+    """One page of a report: one of ``field``, ``compare``, ``summary`` or ``section``.
 
     ``field``/``compare``/``summary`` are the raw keyword dicts a page will pass to
     :func:`ocean_skill.field.field`, :func:`ocean_skill.comparison.compare`, or
@@ -55,6 +58,14 @@ class PageConfig(BaseModel):
     individually typed) because those functions already validate their own
     arguments; a page's job is only to say *which one* and *with what*, and to let
     ``for_each``/``{placeholder}`` reach into any of its values.
+
+    ``section`` is the odd one out: not a figure at all but a text-only divider page in
+    ``report.pdf`` (a title plus the notes text it holds -- ``""`` for a title-only
+    divider; a YAML block scalar, ``>-`` or ``|``, works for longer notes). It has no
+    data to fan out, chain, or plot, so ``for_each:``, ``then:`` and a non-empty
+    ``plot:`` beside it are schema errors rather than silently ignored keys. Written
+    ``section:`` with nothing after it, YAML reads ``None`` -- which is "no kind at
+    all" here, not an empty divider; the error says to write ``section: ""``.
 
     ``for_each`` fans this one page into several -- one page per element of the
     Cartesian product of its lists (see :mod:`ocean_skill.workflows.pages`).
@@ -77,29 +88,56 @@ class PageConfig(BaseModel):
     field: dict[str, Any] | None = None
     compare: dict[str, Any] | None = None
     summary: dict[str, Any] | None = None
+    section: str | None = None
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> PageConfig:
-        kinds = [
-            k for k in ("field", "compare", "summary") if getattr(self, k) is not None
-        ]
+        kinds = [k for k in _PAGE_KINDS if getattr(self, k) is not None]
         if len(kinds) != 1:
+            hint = ""
+            if not kinds and "section" in self.model_fields_set:
+                # ``section:`` (or ``section: null``) reads as None, i.e. absent --
+                # the title-only divider is spelled with an empty string.
+                hint = (
+                    ' -- a title-only divider is written section: "", not a bare '
+                    "section: (YAML reads that as null)"
+                )
             raise ValueError(
                 f"page {self.title!r} must have exactly one of field:/compare:/"
-                f"summary: -- found {kinds or 'none'}"
+                f"summary:/section: -- found {kinds or 'none'}{hint}"
             )
         return self
 
     @property
-    def kind(self) -> Literal["field", "compare", "summary"]:
-        """Which of ``field``/``compare``/``summary`` this page is."""
-        for k in ("field", "compare", "summary"):
+    def kind(self) -> Literal["field", "compare", "summary", "section"]:
+        """Which of ``field``/``compare``/``summary``/``section`` this page is."""
+        for k in _PAGE_KINDS:
             if getattr(self, k) is not None:
                 return k  # type: ignore[return-value]
         raise AssertionError("_exactly_one_kind already enforces this")
+
+    @model_validator(mode="after")
+    def _section_is_text_only(self) -> PageConfig:
+        if self.kind != "section":
+            return self
+        # Checked before the then: validator below, so a section carrying a chain
+        # gets this message (a divider has no data to chain on) rather than the
+        # generic "then: is only supported on field: pages".
+        for key, present in (
+            ("for_each", self.for_each is not None),
+            ("then", self.then is not None),
+            ("plot", bool(self.plot)),
+        ):
+            if present:
+                raise ValueError(
+                    f"page {self.title!r}: a section: page is a text-only divider "
+                    f"in report.pdf -- it takes no {key}: (only title: and the "
+                    "section: text itself)"
+                )
+        return self
 
     @model_validator(mode="after")
     def _then_is_field_only_and_well_shaped(self) -> PageConfig:
@@ -155,6 +193,13 @@ class SuiteConfig(BaseModel):
     would otherwise fall back to ``$OCEAN_SKILL_DIR`` or a per-user platformdirs cache --
     keeps reading from and adding to one particular directory across repeated runs. See
     "Caching" in ``docs/suites.md``.
+
+    ``pdf_images`` picks how ``report.pdf`` stores the rasterized map images that are
+    ~95% of its bytes: ``"lossless"`` (the default, matplotlib's own output, untouched)
+    or ``"jpeg"`` (re-encoded afterwards with Ghostscript -- see
+    :func:`ocean_skill.workflows.report.compress_pdf_images`; roughly a third smaller
+    with no visible change, and a warning plus the lossless PDF if ``gs`` is not
+    available). PNGs are never touched, and it does nothing under ``pdf: false``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -162,6 +207,7 @@ class SuiteConfig(BaseModel):
     name: str
     output_dir: str | None = None
     pdf: bool = True
+    pdf_images: Literal["lossless", "jpeg"] = "lossless"
     cache: bool = True
     cache_dir: str | None = None
     refresh: RefreshConfig | None = None

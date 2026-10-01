@@ -140,3 +140,41 @@ def test_h_is_not_a_vocabulary_alias():
 
     assert resolve_name("h") == "h"
     assert not is_known("h")
+
+
+# --- oxygen: low is dark ------------------------------------------------------------
+
+
+def _luminance(rgba) -> float:
+    """Return the Rec. 709 relative luminance of an RGBA colour (0 black, 1 white)."""
+    r, g, b = rgba[:3]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "oxygen",
+        "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water",
+        "oxygen_saturation",
+    ],
+)
+def test_oxygen_is_dark_at_the_low_end_and_light_at_the_high_end(name):
+    """Low oxygen must not draw white (the old ``gray_r`` did).
+
+    Compared by luminance of the resolved matplotlib colormap itself at its two ends,
+    not by its name, so a future map that is merely *called* something else but runs
+    the wrong way still fails.
+    """
+    seq, _ = cmaps_for(name)
+    assert _luminance(seq(0.0)) < _luminance(seq(1.0))
+    assert _luminance(seq(0.0)) < 0.2, "the low end is near black"
+    assert _luminance(seq(1.0)) > 0.8, "the high end is near white"
+
+
+def test_oxygen_keeps_a_map_of_its_own():
+    """Flipping the direction must not collide it with another BGC species' map."""
+    seq, _ = cmaps_for("oxygen")
+    assert seq.name == "gray"
+    others = {s: cmaps_for(s)[0].name for s in _BGC_SPECIES if s != "oxygen"}
+    assert "gray" not in others.values(), others

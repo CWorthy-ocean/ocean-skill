@@ -1041,3 +1041,201 @@ def test_summary_pages_own_kwargs_are_pinned_too():
     summary_page = next(p for p in out if p.kind == "summary")
     assert summary_page.kwargs["size"] == "page"
     assert "zoom" not in summary_page.kwargs
+
+
+# -- section: text-only divider pages -------------------------------------------------
+
+
+def test_a_section_page_validates_with_text_or_an_empty_string():
+    suite = _suite(
+        [
+            {"title": "Part one", "section": "Some notes."},
+            {"title": "Title only", "section": ""},
+        ]
+    )
+    assert [p.kind for p in suite.pages] == ["section", "section"]
+    assert [p.section for p in suite.pages] == ["Some notes.", ""]
+
+
+def test_a_section_page_accepts_a_yaml_block_scalar():
+    import yaml
+
+    raw = yaml.safe_load(
+        """
+name: t
+pages:
+  - title: Part one
+    section: >-
+      Folded notes that
+      run over two lines.
+  - title: Part two
+    section: |
+      Literal line one.
+      Literal line two.
+"""
+    )
+    suite = SuiteConfig.model_validate(raw)
+    assert suite.pages[0].section == "Folded notes that run over two lines."
+    assert suite.pages[1].section == "Literal line one.\nLiteral line two.\n"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"field": {"variables": ["temperature"]}},
+        {"compare": {"reference": ["x"]}},
+        {"summary": {}},
+    ],
+)
+def test_a_section_cannot_share_a_page_with_another_kind(extra):
+    with pytest.raises(Exception, match=r"exactly one of.*section"):
+        SuiteConfig.model_validate(
+            {"name": "t", "pages": [{"title": "x", "section": "notes", **extra}]}
+        )
+
+
+def test_a_bare_null_section_is_refused_with_a_hint_to_write_an_empty_string():
+    with pytest.raises(Exception, match=r'section: ""'):
+        SuiteConfig.model_validate(
+            {"name": "t", "pages": [{"title": "Part one", "section": None}]}
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra", "key"),
+    [
+        ({"for_each": {"variable": ["a", "b"]}}, "for_each"),
+        ({"then": ["extremum"]}, "then"),
+        ({"plot": {"title": "x"}}, "plot"),
+    ],
+)
+def test_a_section_refuses_for_each_then_and_plot_naming_the_page(extra, key):
+    with pytest.raises(Exception, match=rf"Part one.*no {key}:"):
+        SuiteConfig.model_validate(
+            {
+                "name": "t",
+                "pages": [{"title": "Part one", "section": "notes", **extra}],
+            }
+        )
+
+
+def test_a_section_with_an_empty_plot_is_fine():
+    suite = _suite([{"title": "Part one", "section": "", "plot": {}}])
+    assert suite.pages[0].kind == "section"
+
+
+def test_pdf_images_defaults_to_lossless_and_accepts_jpeg():
+    page = [{"title": "x", "field": {"variables": ["temperature"]}}]
+    assert _suite(page).pdf_images == "lossless"
+    assert _suite(page, pdf_images="jpeg").pdf_images == "jpeg"
+
+
+def test_pdf_images_refuses_any_other_value():
+    page = [{"title": "x", "field": {"variables": ["temperature"]}}]
+    for bad in ("png", "JPEG", True, ""):
+        with pytest.raises(Exception, match="pdf_images"):
+            _suite(page, pdf_images=bad)
+
+
+def test_expand_turns_a_section_into_a_templated_text_page_without_a_source():
+    # no defaults.test at all: a divider reads no time axis and needs no source
+    suite = _suite(
+        [
+            {
+                "title": "Part: {region}",
+                "section": "Everything below is {region}.\n\nSecond paragraph.",
+            }
+        ],
+        defaults={"region": "the Pacific"},
+    )
+    (page,) = P.expand(suite)
+
+    assert page.kind == "section"
+    assert page.title == "Part: the Pacific"
+    assert page.kwargs == {
+        "text": "Everything below is the Pacific.\n\nSecond paragraph."
+    }
+    assert page.plot == {}
+    assert page.steps == []
+    assert page.cache is False
+    json.dumps(page.as_dict())  # still JSON-serializable for the manifest
+
+
+def test_a_sections_literal_braces_follow_the_usual_doubling_rule():
+    suite = _suite([{"title": "Part", "section": "Use {{depth}} here."}])
+    (page,) = P.expand(suite)
+    assert page.kwargs["text"] == "Use {depth} here."
+
+
+def test_an_unresolvable_placeholder_in_section_text_names_the_page():
+    suite = _suite([{"title": "Part one", "section": "About {nope}."}])
+    with pytest.raises(ValueError, match=r"Part one.*nope"):
+        P.expand(suite)
+
+
+def test_section_text_that_resolves_to_a_non_string_is_refused():
+    suite = _suite(
+        [{"title": "Part one", "section": "{depths}"}],
+        defaults={"depths": ["surface", 100]},
+    )
+    with pytest.raises(ValueError, match=r"Part one.*must resolve to text"):
+        P.expand(suite)
+
+
+def test_defaults_plot_is_never_merged_into_or_warned_about_for_a_section():
+    """A divider has no plot: ``defaults.plot`` neither leaks in nor trips the pin."""
+    import warnings
+
+    suite = _suite(
+        [
+            {"title": "Part one", "section": "notes"},
+            {"title": "a", "field": {"variable": "temperature"}},
+        ],
+        defaults={"test": "stub", "plot": {"zoom": 1.5}},
+    )
+    assert suite.pdf
+    with pytest.warns(UserWarning, match=r"zoom=1\.5.*ignored") as caught:
+        out = P.expand(suite)
+
+    # exactly one pin warning, from the field page, not the section ahead of it
+    assert sum("zoom=1.5" in str(w.message) for w in caught.list) == 1
+    assert out[0].kind == "section" and out[0].plot == {}
+    assert out[1].plot == {"size": "page"}
+
+    only_section = _suite(
+        [{"title": "Part one", "section": "notes"}],
+        defaults={"test": "stub", "plot": {"zoom": 1.5}},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        (page,) = P.expand(only_section)
+    assert page.plot == {}
+
+
+def test_sections_keep_their_place_among_the_expanded_pages():
+    suite = _suite(
+        [
+            {"title": "Part one", "section": ""},
+            {
+                "title": "{v}",
+                "for_each": {"v": ["temperature", "salinity"]},
+                "field": {"variables": ["{v}"]},
+            },
+            {"title": "Part two", "section": "notes"},
+        ],
+        defaults={"test": "stub"},
+    )
+    out = P.expand(suite)
+    assert [(p.kind, p.title) for p in out] == [
+        ("section", "Part one"),
+        ("field", "temperature"),
+        ("field", "salinity"),
+        ("section", "Part two"),
+    ]
+
+
+def test_build_refuses_a_section_page():
+    suite = _suite([{"title": "Part one", "section": "notes"}])
+    (page,) = P.expand(suite)
+    with pytest.raises(ValueError, match=r"Part one.*divider"):
+        P.build(page)

@@ -2,14 +2,19 @@
 
 A suite (``ocean_skill.config.SuiteConfig``) is a YAML file listing pages -- each
 one a single ``osk.field``, ``osk.compare``, or ``osk.summary`` call (a ``field:``
-page may chain a few more methods after it -- see ``then:`` in ``docs/suites.md``) --
-plus shared defaults and output settings. Running it draws every page, writes a PNG
-per figure,
+page may chain a few more methods after it -- see ``then:`` in ``docs/suites.md``), or
+a ``section:`` divider page that is only text -- plus shared defaults and output
+settings. Running it draws every page, writes a PNG per figure,
 collects them into one PDF (unless ``pdf: false``), and writes a metrics CSV and a
 ``manifest.json`` recording exactly what was drawn. It also writes ``run.log`` --
 everything printed to the terminal over the course of the run, plus full tracebacks
 for skipped pages and for a fatal crash, which the terminal itself never shows. See
 ``docs/suites.md``.
+
+A ``section:`` page is not a figure and so is not counted as one: it appears only in
+``report.pdf`` (and only if some page after it drew -- see
+:meth:`~ocean_skill.workflows.report.PdfReport.section`), and
+:attr:`SuiteResult.exit_code` and ``main``'s "N page(s) drawn" count both ignore it.
 
 A suite whose ``refresh:`` block rebuilds a live run's kerchunk reference gets a copy
 of that reference under the report directory's own ``refs/``, so the report stays
@@ -274,9 +279,11 @@ class SuiteResult:
 
     @property
     def exit_code(self) -> int:
-        if not self.pages:
+        # A section: divider is not a figure: whether it was written to the PDF says
+        # nothing about whether the report drew, so it takes no part in the code.
+        statuses = {p.status for p in self.pages if p.kind != "section"}
+        if not statuses:
             return 1
-        statuses = {p.status for p in self.pages}
         if statuses == {"ok"}:
             return 0
         if "ok" not in statuses:
@@ -307,6 +314,7 @@ def _write_manifest(
     report_dir: Path,
     catalog_dirs: list[Path] | None = None,
     refresh: dict[str, Any] | None = None,
+    pdf_images_applied: bool = False,
 ) -> None:
     import ocean_skill
     from ocean_skill import cache as _cache
@@ -319,6 +327,10 @@ def _write_manifest(
         "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
         "cache_dir": str(_cache.base_dir()),
         "refresh": refresh,
+        # What the suite asked of report.pdf's rasters, and whether the Ghostscript
+        # pass actually ran (False for "lossless", pdf: false, no PDF, or a fallback).
+        "pdf_images": suite.pdf_images,
+        "pdf_images_applied": pdf_images_applied,
         "pages": [
             {
                 **p.as_dict(),
@@ -423,6 +435,9 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
             print(f"cache: {_cache.base_dir()}")
             for i, p in enumerate(expanded, 1):
+                if p.kind == "section":
+                    print(f"{i:2d}. [section] {p.title}")
+                    continue
                 if p.cache:
                     cache_note = "cache"
                 elif not suite.cache:
@@ -478,6 +493,14 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
         with PdfReport(pdf_path, report_dir / "figures") as report:
             n = len(expanded)
             for i, page in enumerate(expanded, 1):
+                if page.kind == "section":
+                    # Not drawn by build(): a divider is queued on the report and is
+                    # only written if a figure follows it (see PdfReport.section).
+                    # Its status is settled after the loop, once it is known whether
+                    # one did.
+                    print(f"== section: {page.title} ==")
+                    report.section(i, page.title, page.kwargs["text"])
+                    continue
                 print(f"== page {i}/{n}: {page.title} ==")
                 t0 = time.perf_counter()
                 try:
@@ -505,6 +528,33 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                     pooled_records, report_dir, stem=suite.name
                 )
 
+        # A divider is "ok" only if PdfReport actually wrote it, i.e. some page after
+        # it drew before the next section (or the end of the run) came up.
+        for i, page in enumerate(expanded, 1):
+            if page.kind != "section":
+                continue
+            if i in report.written_sections:
+                page.status = "ok"
+            else:
+                page.status = "skipped"
+                page.reason = (
+                    "pdf: false -- section pages appear only in report.pdf"
+                    if pdf_path is None
+                    else "no page after this section drew"
+                )
+
+        pdf_images_applied = False
+        if suite.pdf_images == "jpeg" and pdf_path is not None and pdf_path.exists():
+            from ocean_skill.workflows.report import compress_pdf_images
+
+            sizes = compress_pdf_images(pdf_path)
+            if sizes is not None:
+                pdf_images_applied = True
+                print(
+                    f"report.pdf: {sizes[0] / 1e6:.1f} MB -> {sizes[1] / 1e6:.1f} MB "
+                    "(JPEG via Ghostscript)"
+                )
+
         _write_manifest(
             manifest_path,
             suite=suite,
@@ -512,6 +562,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             report_dir=report_dir,
             catalog_dirs=catalog_dirs,
             refresh=refresh_info,
+            pdf_images_applied=pdf_images_applied,
         )
 
         latest_path = output_dir / "latest.txt"
@@ -572,8 +623,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         return 0
 
-    n_ok = sum(1 for p in result.pages if p.status == "ok")
-    n_skipped = len(result.pages) - n_ok
+    figure_pages = [p for p in result.pages if p.kind != "section"]
+    n_ok = sum(1 for p in figure_pages if p.status == "ok")
+    n_skipped = len(figure_pages) - n_ok
     summary_lines = [
         f"{n_ok} page(s) drawn, {n_skipped} skipped -> {result.report_dir}"
     ]

@@ -24,6 +24,7 @@ from ocean_skill.config import SuiteConfig
 from ocean_skill.workflows import pages as _pages
 from ocean_skill.workflows.run import _refresh_sources, main, run_suite
 from tests.test_catalog import _write_catalog
+from tests.test_workflows_report import _pagecount_by_bytes
 
 
 def _segment(path, t0, value):
@@ -1326,3 +1327,309 @@ def test_manifest_refresh_is_null_without_a_refresh_block(tmp_path, stub_model):
     manifest = json.loads(result.manifest.read_text())
     assert manifest["refresh"] is None
     assert result.refs == []
+
+
+# ======================================================================================
+# ``section:`` divider pages: PDF-only, buffered until a figure follows, and ignored by
+# the exit code and the "N page(s) drawn" count (a divider is not a figure).
+# ======================================================================================
+
+
+def _field_page(title="Physics latest"):
+    return {
+        "title": title,
+        "field": {
+            "variables": ["temperature", "salinity"],
+            "select": {"depth": "surface", "time": "latest"},
+        },
+    }
+
+
+def _section_page(title, text=""):
+    return {"title": title, "section": text}
+
+
+def _suite_with_pages(tmp_path, pages, **extra):
+    suite = _model_only_suite(tmp_path, **extra)
+    suite["pages"] = pages
+    return suite
+
+
+def _fail_titles(monkeypatch, titles):
+    """Make ``_pages.build`` raise for pages titled in ``titles``; log the kinds."""
+    real_build = _pages.build
+    seen = []
+
+    def fake_build(page, *, pooled_records=None):
+        seen.append(page.kind)
+        if page.title in titles:
+            raise RuntimeError("regrid failed")
+        return real_build(page, pooled_records=pooled_records)
+
+    monkeypatch.setattr(_pages, "build", fake_build)
+    return seen
+
+
+def test_sections_are_pdf_only_and_settle_to_ok_or_skipped_after_the_run(
+    tmp_path, stub_model, monkeypatch
+):
+    seen = _fail_titles(monkeypatch, set())
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path,
+            [
+                _section_page("Part one", "Notes for part one."),
+                _field_page(),
+                _section_page("Nothing follows", "Orphan."),
+            ],
+        ),
+    )
+    result = run_suite(path)
+
+    first, field_page, trailing = result.pages
+    assert (first.status, first.reason) == ("ok", None)
+    assert field_page.status == "ok"
+    assert trailing.status == "skipped"
+    assert trailing.reason == "no page after this section drew"
+    assert result.exit_code == 0
+    assert seen == ["field"]  # a section never reaches build()
+
+    # divider + figure; the trailing divider was dropped
+    assert _pagecount_by_bytes(result.pdf) == 2
+    # PNG numbering is the figures' alone
+    assert [p.name for p in result.figures] == ["01_Physics_latest.png"]
+    assert [p.name for p in (result.report_dir / "figures").iterdir()] == [
+        "01_Physics_latest.png"
+    ]
+
+    manifest = json.loads(result.manifest.read_text())
+    assert [(p["kind"], p["status"]) for p in manifest["pages"]] == [
+        ("section", "ok"),
+        ("field", "ok"),
+        ("section", "skipped"),
+    ]
+    assert manifest["pages"][0]["kwargs"] == {"text": "Notes for part one."}
+    assert manifest["pages"][2]["reason"] == "no page after this section drew"
+
+    log_text = result.log.read_text()
+    assert "== section: Part one ==" in log_text
+    assert "== page 2/3: Physics latest ==" in log_text
+    assert "== section: Nothing follows ==" in log_text
+    assert log_text.count("done in") == 1  # only the one figure page
+
+
+def test_a_section_whose_pages_all_skipped_leaves_no_orphan_divider(
+    tmp_path, stub_model, monkeypatch
+):
+    _fail_titles(monkeypatch, {"Bad page"})
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path,
+            [
+                _section_page("Doomed part"),
+                _field_page("Bad page"),
+                _section_page("Good part"),
+                _field_page("Good page"),
+            ],
+        ),
+    )
+    result = run_suite(path)
+
+    doomed, bad, good, _ = result.pages
+    assert doomed.status == "skipped"
+    assert doomed.reason == "no page after this section drew"
+    assert bad.status == "skipped"
+    assert good.status == "ok"
+    assert _pagecount_by_bytes(result.pdf) == 2  # "Good part" divider + "Good page"
+    assert result.exit_code == 3  # one data page skipped, one drew
+
+
+def test_pdf_false_leaves_every_section_skipped_with_its_own_reason(
+    tmp_path, stub_model
+):
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path,
+            [_section_page("Part one", "Notes"), _field_page()],
+            pdf=False,
+        ),
+    )
+    result = run_suite(path)
+
+    assert result.pdf is None
+    assert len(result.figures) == 1  # the PNG is still written
+    section = result.pages[0]
+    assert section.status == "skipped"
+    assert section.reason == "pdf: false -- section pages appear only in report.pdf"
+    assert result.exit_code == 0
+
+
+def test_a_run_where_nothing_drew_writes_no_pdf_despite_its_sections(
+    tmp_path, stub_model, monkeypatch
+):
+    _fail_titles(monkeypatch, {"Physics latest"})
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path, [_section_page("Part one", "Notes"), _field_page()]
+        ),
+    )
+    result = run_suite(path)
+
+    assert result.pdf is None
+    assert not (result.report_dir / "report.pdf").exists()
+    assert result.pages[0].status == "skipped"
+    assert result.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    ("pages", "failing", "code", "counts"),
+    [
+        # a drawn data page: 0, whatever the sections around it did
+        (["S", "F"], set(), 0, "1 page(s) drawn, 0 skipped"),
+        (["S", "F", "S"], set(), 0, "1 page(s) drawn, 0 skipped"),
+        # an undrawn data page: 1 -- the divider that *was* written does not rescue it
+        (["S", "F"], {"F"}, 1, "0 page(s) drawn, 1 skipped"),
+        # mixed data pages: 3
+        (["S", "F", "S", "G"], {"G"}, 3, "1 page(s) drawn, 1 skipped"),
+        # nothing but dividers: still no report to speak of
+        (["S", "S"], set(), 1, "0 page(s) drawn, 0 skipped"),
+    ],
+    ids=["ok", "ok-trailing", "skipped", "mixed", "sections-only"],
+)
+def test_exit_code_and_drawn_counts_ignore_section_pages(
+    tmp_path, stub_model, monkeypatch, capsys, pages, failing, code, counts
+):
+    _fail_titles(monkeypatch, failing)
+    built = {
+        "S": lambda n: _section_page(f"Divider {n}", "Notes"),
+        "F": lambda n: _field_page("F"),
+        "G": lambda n: _field_page("G"),
+    }
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(tmp_path, [built[k](i) for i, k in enumerate(pages)]),
+    )
+
+    assert main([str(path)]) == code
+    assert counts in capsys.readouterr().out
+
+
+def test_list_only_prints_a_section_line_with_no_cache_note(
+    tmp_path, stub_model, capsys
+):
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path, [_section_page("Part one", "Notes"), _field_page()]
+        ),
+    )
+    result = run_suite(path, list_only=True)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert " 1. [section] Part one" in lines  # the whole line: no cache note, no chain
+    assert any(line.startswith(" 2. [field  ] Physics latest") for line in lines)
+    assert [p.kind for p in result.pages] == ["section", "field"]
+    assert not (tmp_path / "out").exists()  # --list still writes nothing
+
+
+# -- pdf_images: jpeg ---------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_compress(monkeypatch):
+    """Replace ``compress_pdf_images`` with a recorder returning ``fake.result``."""
+    calls = []
+
+    def fake(path):
+        calls.append(Path(path))
+        return fake.result
+
+    fake.calls = calls
+    fake.result = (2_000_000, 1_000_000)
+    monkeypatch.setattr("ocean_skill.workflows.report.compress_pdf_images", fake)
+    return fake
+
+
+def test_pdf_images_jpeg_compresses_after_the_pdf_closes_and_logs_the_sizes(
+    tmp_path, stub_model, fake_compress
+):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg"))
+    result = run_suite(path)
+
+    assert fake_compress.calls == [result.pdf]
+    assert (
+        "report.pdf: 2.0 MB -> 1.0 MB (JPEG via Ghostscript)" in result.log.read_text()
+    )
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["pdf_images"] == "jpeg"
+    assert manifest["pdf_images_applied"] is True
+    assert len(result.figures) == 1  # PNGs are untouched
+
+
+def test_pdf_images_jpeg_that_fell_back_is_recorded_as_not_applied(
+    tmp_path, stub_model, fake_compress
+):
+    fake_compress.result = None
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg"))
+    result = run_suite(path)
+
+    assert result.pdf is not None and result.pdf.exists()  # the lossless PDF stays
+    assert "JPEG via Ghostscript" not in result.log.read_text()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["pdf_images"] == "jpeg"
+    assert manifest["pdf_images_applied"] is False
+
+
+def test_pdf_images_defaults_to_lossless_and_never_calls_ghostscript(
+    tmp_path, stub_model, fake_compress
+):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path)
+
+    assert fake_compress.calls == []
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["pdf_images"] == "lossless"
+    assert manifest["pdf_images_applied"] is False
+
+
+def test_pdf_images_jpeg_is_skipped_without_a_pdf_to_compress(
+    tmp_path, stub_model, monkeypatch, fake_compress
+):
+    # pdf: false -- there is no report.pdf
+    path = _write_suite(
+        tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg", pdf=False)
+    )
+    result = run_suite(path)
+    assert fake_compress.calls == []
+    assert json.loads(result.manifest.read_text())["pdf_images_applied"] is False
+
+    # pdf: true, but no page drew -- PdfPages never wrote a file
+    _fail_titles(monkeypatch, {"Physics latest"})
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg"))
+    result = run_suite(path)
+    assert result.pdf is None
+    assert fake_compress.calls == []
+
+
+def test_pdf_images_jpeg_without_ghostscript_warns_and_keeps_the_lossless_pdf(
+    tmp_path, stub_model, monkeypatch
+):
+    from ocean_skill.workflows import report as _report
+
+    monkeypatch.setattr(_report.shutil, "which", lambda name: None)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg"))
+    with pytest.warns(UserWarning, match="Ghostscript"):
+        result = run_suite(path)
+
+    assert result.exit_code == 0
+    assert result.pdf is not None and result.pdf.exists()
+    assert json.loads(result.manifest.read_text())["pdf_images_applied"] is False
+
+
+def test_main_refuses_an_unknown_pdf_images_value(tmp_path):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="png"))
+    assert main([str(path)]) == 2

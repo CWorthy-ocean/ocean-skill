@@ -545,6 +545,21 @@ class Extremum:
         the depth/sigma0/s-level pin: :func:`ocean_skill.operators.select` skips a key
         naming an axis a given variable does not have.
 
+        The returned set carries a default suptitle (its
+        :attr:`~ocean_skill.field.FieldSet.title`) saying what the point *is*, since
+        each panel's own title only names a place and a period and so reads like a
+        station record or a domain-wide trend::
+
+            Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at
+            16.1°N 97.6°E on 2010-10-31
+
+        The depth phrase (``surface``, ``100 m``) comes from the parent field's own
+        single-level vertical select and is left out for none, a band or a list; a
+        ``local=True`` hit reads ``local minimum``, the second of an ``n=`` search
+        ``minimum (#2)``; the position and date are left out when unknown.
+        ``.plot(title=...)`` replaces it (so does a suite page's ``plot: {title:
+        ...}``), and ``title=""`` draws none.
+
         Refused when the parent's own ``select`` names a ``transect`` -- once cut
         to a transect, lon/lat lie along the cut's own ``along`` axis rather than
         standing as ordinary coordinates, so there is no longer a plain lon/lat
@@ -657,7 +672,7 @@ class Extremum:
             # character, or a dict's keys.
             extra = [variables]
 
-        return field(
+        made = field(
             parent.source,
             [parent.variable, *extra],
             select=sel,
@@ -667,6 +682,87 @@ class Extremum:
             qc=parent.qc,
             detide=parent.detide,
         )
+        # field() returns a FieldSet here: the variable is always a list, even of
+        # one. The default title rides on the set (FieldSet.title) rather than
+        # being a plot() argument, so every route to a drawing -- this series'
+        # own .plot(), Extremum.plot(), a suite page -- starts from it, and an
+        # explicit plot(title=...) still wins (FieldSet.plot only setdefaults).
+        made.title = self._series_title()
+        return made
+
+    def _series_title(self) -> str:
+        """Return the default suptitle of :meth:`series`: what the point *is*.
+
+        ``"Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at 16.1°N
+        97.6°E on 2010-10-31"``. Each panel's own title names a place and a period
+        (``alkalinity · 16.1°N 97.6°E · 2010-07 to 2010-10``), and read alone that is
+        indistinguishable from a station's record -- or worse, from a domain-wide
+        trend. This line says the point was *found* as an extremum, which one, and
+        how extreme it was, so nobody has to guess.
+
+        Parts, each left out rather than guessed when it is not known:
+
+        * ``the <depth> `` -- from the parent field's own vertical select: the
+          literal ``"surface"``, or a single depth spelled as every other label
+          here spells it (``"100 m"``; an isopycnal ``sigma0`` request reads
+          ``"σ₀ = 26 kg/m³"``). Omitted for no vertical select, or a band, list or
+          anything else that does not name one level.
+        * the variable, in the vocabulary's short name
+          (:func:`ocean_skill.comparison._short_variable_label`).
+        * ``minimum``/``maximum``, or ``local minimum``/``local maximum`` for a
+          ``local=True`` hit, with `` (#n)`` after it for any but the first of an
+          ``n=`` search.
+        * the value (four significant figures) and its units.
+        * `` at <lon/lat>`` -- spelled as the panel titles spell a station
+          (:func:`ocean_skill.plot.series.lonlat_label`).
+        * `` on YYYY-MM-DD`` -- the snapshot the extremum was found on; omitted when
+          there is none (:attr:`time_reason` says why).
+
+        Set on the :class:`~ocean_skill.field.FieldSet` :meth:`series` returns, as its
+        :attr:`~ocean_skill.field.FieldSet.title`, and so applied by ``.plot()`` unless
+        a ``title=`` is passed there (a suite page's ``plot: {title: ...}`` does).
+        """
+        from ocean_skill.comparison import _short_variable_label
+        from ocean_skill.plot.series import lonlat_label
+
+        depth = self._parent_depth_phrase()
+        kind = {"max": "maximum", "min": "minimum"}.get(self.kind, self.kind)
+        if self.mode == "local":
+            kind = f"local {kind}"
+        if self.rank > 1:
+            kind = f"{kind} (#{self.rank})"
+        name = _short_variable_label(self.variable)
+        subject = f"{depth} {name}" if depth else name
+        value = f"{self.value:.4g}" + (f" {self.units}" if self.units else "")
+        title = f"Time series at the {subject} {kind}: {value}"
+        if self.lon is not None and self.lat is not None:
+            title += f" at {lonlat_label(self.lon, self.lat)}"
+        date = _date_label(self.time)
+        if date is not None:
+            title += f" on {date}"
+        return title
+
+    def _parent_depth_phrase(self) -> str | None:
+        """How the parent field's vertical select names one level, or ``None``.
+
+        ``"surface"`` for the sentinel, a single depth through
+        :func:`ocean_skill.comparison._depth_label` (``"100 m"``), a single
+        ``sigma0`` through the same function's isopycnal spelling, and ``None`` for
+        everything that does not name exactly one level -- no vertical select, a
+        band (``{"min", "max"}``), a list, a ``"column"`` request.
+        """
+        from ocean_skill.comparison import _ANY_VERTICAL_KEYS, _depth_label
+
+        select = self._parent.select or {}
+        key = next((k for k in _ANY_VERTICAL_KEYS if k in select), None)
+        if key is None:
+            return None
+        value = select[key]
+        if isinstance(value, str):
+            return "surface" if value.lower() == "surface" else None
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+            return None
+        return _depth_label({"sigma0": value} if key == "sigma0" else value)
 
     def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Shortcut for ``.series().plot(...)`` -- the default window, drawn now.
@@ -677,7 +773,8 @@ class Extremum:
             One of ``"matplotlib"``, ``"holoviews"`` (default ``"matplotlib"``).
         **kwargs
             Plot styling kwargs forwarded to the resulting series' ``.plot()`` --
-            see ``docs/plot_styling_reference.md`` for the full list.
+            see ``docs/plot_styling_reference.md`` for the full list. ``title=``
+            replaces the default suptitle (see :meth:`series`).
 
         Use :meth:`series` directly when ``variables=``/``time=``/``pad=`` need to
         be set; this only forwards ``renderer=`` and plot styling kwargs.
@@ -866,6 +963,28 @@ def _scalar_time(coord) -> Any:
 
         return pd.Timestamp(values)
     return values.item()
+
+
+def _date_label(time: Any) -> str | None:
+    """``"2010-10-31"`` for a snapshot time, or ``None`` when there is no date in it.
+
+    Reads the first ten characters of the time's own string, which the three
+    shapes :func:`_scalar_time` hands back all spell the same way -- a
+    :class:`pandas.Timestamp` (any ``datetime64`` resolution is routed through one),
+    a ``cftime`` date on a model run's own calendar, a ``datetime``. A bare number (a
+    time axis nobody decoded) has no date to print, so it comes back ``None`` rather
+    than as ``"3652.5"`` passed off as one.
+    """
+    import re
+
+    if time is None:
+        return None
+    if isinstance(time, np.datetime64):
+        import pandas as pd
+
+        time = pd.Timestamp(time)
+    match = re.match(r"\d{4}-\d{2}-\d{2}", str(time))
+    return match.group(0) if match else None
 
 
 def _window_select(index, snapshot: Any, pad: int) -> dict[str, str]:
