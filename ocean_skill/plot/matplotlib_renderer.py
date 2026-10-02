@@ -7030,6 +7030,11 @@ def _draw_location_legend(ax, handles, *, fontsize, legend_kwargs=None) -> None:
 
     Framed, unlike the series default: this key floats over a map, and unbacked text
     over coastlines and extent boxes is unreadable.
+
+    An explicit corner, not matplotlib's axes default ``loc="best"``: "best" scores
+    every artist on the axes, and for the field's mesh that is one cartopy transform per
+    grid cell on every layout pass -- minutes for a basin-scale grid. ``legend_kwargs``
+    can still name another corner.
     """
     if not handles:
         return
@@ -7037,6 +7042,7 @@ def _draw_location_legend(ax, handles, *, fontsize, legend_kwargs=None) -> None:
         handles=handles,
         **_merged(
             {
+                "loc": "upper right",
                 "frameon": True,
                 "framealpha": 0.85,
                 "edgecolor": "0.6",
