@@ -1265,6 +1265,43 @@ def test_the_holoviews_time_depth_grid(two_time_depth_rows):
     assert len(figs) == 6
 
 
+def test_matplotlib_stacked_section_row_labels_each_row_from_its_own_source():
+    """The ``section_row`` analogue of the ``time_depth_row`` grid test above."""
+    items = [
+        {**_section_row_item(), "labels": ("GOM_bgc", ref), "row_label": row}
+        for ref, row in (("woa_a", "A"), ("woa_b", "B"))
+    ]
+    fig = render(PlotSpec(family="section_row", items=items, options={}))
+    titles = _matplotlib_panel_titles(fig)
+    assert "woa_a" in titles
+    assert "woa_b" in titles
+    row_labels = {
+        ax._osk_row_label.get_text() for ax in fig.axes if hasattr(ax, "_osk_row_label")
+    }
+    assert row_labels == {"A", "B"}
+
+
+def test_the_holoviews_stacked_section_row_keeps_each_rows_labels_and_metrics():
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    items = [
+        {**_section_row_item(), "labels": ("GOM_bgc", ref), "row_label": row}
+        for ref, row in (("woa_a", "A"), ("woa_b", "B"))
+    ]
+    out = render(
+        PlotSpec(family="section_row", items=items, options={}), renderer="holoviews"
+    )
+    titles = _holoviews_panel_titles(out)
+    assert any("woa_a" in t for t in titles)
+    assert any("woa_b" in t for t in titles)
+    assert any(t.startswith("A — ") for t in titles)
+    assert any(t.startswith("B — ") for t in titles)
+    assert any("bias=0.125" in t for t in titles)
+    figs = list(hv.render(out, backend="bokeh").select({"type": figure}))
+    assert len(figs) == 6
+
+
 _INTERACTIVE_FAMILIES = {
     "field_row": lambda: [
         _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n")
@@ -1283,6 +1320,22 @@ _INTERACTIVE_FAMILIES = {
         }
     ],
     "section_row": lambda: [_section_row_item()],
+    # A stacked form is a different code path from the single one (a grid function
+    # of its own in each renderer), so it gets its own entry: "family[stacked]" is the
+    # family "family" given several items, see _family_of.
+    "section[stacked]": lambda: [
+        {
+            "field": _section_field(),
+            "units": "mmol m-3",
+            "standard_name": None,
+            "depth": None,
+            "label": label,
+        }
+        for label in ("GOM_bgc", "GOM_other")
+    ],
+    "section_row[stacked]": lambda: [
+        {**_section_row_item(), "row_label": label} for label in ("A", "B")
+    ],
     "field_facet": lambda: [
         {
             "field": _facet_field(),
@@ -1322,10 +1375,19 @@ _INTERACTIVE_FAMILIES = {
 }
 
 
+def _family_of(key: str) -> str:
+    """Return the family a ``_INTERACTIVE_FAMILIES`` key stands for.
+
+    ``"section[stacked]"`` is the ``section`` family handed several items.
+    """
+    return key.split("[")[0]
+
+
 @pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
 def test_zoom_grows_the_interactive_frame_in_every_family(family):
     """A family that forgets to name ``zoom`` absorbs it into ``**_``, silently."""
     items = _INTERACTIVE_FAMILIES[family]()
+    family = _family_of(family)
     plain = _hv_frame_widths(
         render(PlotSpec(family=family, items=items), renderer="holoviews")
     )
@@ -1344,6 +1406,7 @@ def test_zoom_grows_the_interactive_frame_in_every_family(family):
 @pytest.mark.parametrize("family", sorted(_INTERACTIVE_FAMILIES))
 def test_a_named_canvas_reaches_the_interactive_frame_too(family):
     items = _INTERACTIVE_FAMILIES[family]()
+    family = _family_of(family)
     page = _hv_frame_widths(
         render(
             PlotSpec(family=family, items=items, options={"size": "page"}),
@@ -1373,7 +1436,15 @@ _DOMAIN_BBOX = (261.0, 19.0, 269.0, 25.0)
 #: the exclusion :func:`test_domain_reaches_every_interactive_family` needs, and the
 #: positive case :func:`test_domain_warns_and_is_dropped_for_a_domainless_family`
 #: covers instead: warned and dropped, same as any other unusable option.
-_NO_DOMAIN_FAMILIES = {"section", "section_row", "time_depth", "time_depth_row", "XY"}
+_NO_DOMAIN_FAMILIES = {
+    "section",
+    "section[stacked]",
+    "section_row",
+    "section_row[stacked]",
+    "time_depth",
+    "time_depth_row",
+    "XY",
+}
 
 
 def _hv_paths(obj) -> list:
@@ -1420,7 +1491,7 @@ def test_domain_reaches_every_interactive_family(family):
     """
     items = _INTERACTIVE_FAMILIES[family]()
     out = render(
-        PlotSpec(family=family, items=items, options={"domain": _DOMAIN_RING}),
+        PlotSpec(family=_family_of(family), items=items, options={"domain": _DOMAIN_RING}),
         renderer="holoviews",
     )
     assert _hv_paths(out), f"{family}: domain= was accepted and dropped"
@@ -1432,7 +1503,9 @@ def test_domain_warns_and_is_dropped_for_a_domainless_family(family):
     items = _INTERACTIVE_FAMILIES[family]()
     with pytest.warns(UserWarning, match="not an option"):
         out = render(
-            PlotSpec(family=family, items=items, options={"domain": _DOMAIN_RING}),
+            PlotSpec(
+                family=_family_of(family), items=items, options={"domain": _DOMAIN_RING}
+            ),
             renderer="holoviews",
         )
     assert not _hv_paths(out)

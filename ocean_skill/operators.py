@@ -72,6 +72,8 @@ __all__ = [
     "resolve_dim",
     "resolve_variable",
     "select",
+    "slab_axis",
+    "slab_in_spec",
     "spatial_mean_in_spec",
     "spec_names",
     "time_axis_dim",
@@ -1119,25 +1121,121 @@ def spatial_mean_in_spec(agg: dict[str, Any] | None) -> tuple[str, str] | None:
     lat_key = next((k for k in _POINT_LAT_KEYS if k in agg), None)
     if lon_key is None or lat_key is None:
         return None
-
-    def _is_plain_mean(value: Any) -> bool:
-        # A chain is the joint mean only when it is a chain of exactly one: a
-        # multi-step chain on lon/lat (a mean, then something else) is several
-        # reductions in sequence, so it goes through the ordinary per-axis loop
-        # like any other sequential spec, unweighted -- simplest correct reading.
-        if isinstance(value, (list, tuple)):
-            if len(value) != 1:
-                return False
-            value = final_step(value)
-        if value == "mean":
-            return True
-        if isinstance(value, dict):
-            return value.get("reduce") == "mean" and set(value) <= {"reduce"}
-        return False
-
     if _is_plain_mean(agg[lon_key]) and _is_plain_mean(agg[lat_key]):
         return lon_key, lat_key
     return None
+
+
+def _is_plain_mean(value: Any) -> bool:
+    """Whether one ``aggregate`` value is a bare mean, with nothing else attached.
+
+    ``"mean"`` or ``{"reduce": "mean"}`` -- no ``groupby``/``resample``/other
+    kwargs. A chain counts only when it is a chain of exactly one: a multi-step
+    chain on lon/lat (a mean, then something else) is several reductions in
+    sequence, so it goes through the ordinary per-axis loop like any other
+    sequential spec, unweighted -- simplest correct reading. Shared by
+    :func:`spatial_mean_in_spec` (both horizontal axes) and :func:`slab_in_spec`
+    (exactly one of them).
+    """
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            return False
+        value = final_step(value)
+    if value == "mean":
+        return True
+    if isinstance(value, dict):
+        return value.get("reduce") == "mean" and set(value) <= {"reduce"}
+    return False
+
+
+def slab_in_spec(
+    select: dict[str, Any] | None, agg: dict[str, Any] | None
+) -> tuple[str, str] | None:
+    """Return ``(axis, collapsed_key)`` when a spec asks for a *slab*, else ``None``.
+
+    A slab is a box averaged over **one** horizontal axis: the band
+    ``lon`` 180-200 averaged to a single value leaves latitude standing, so with a
+    vertical axis beside it the result is a depth-against-latitude section, the
+    same shape of figure a ``transect`` draws (see :func:`ocean_skill.comparison.
+    _slab_to_section`). ``axis`` is the horizontal axis that *survives* --
+    ``"lat"`` for a longitude mean, ``"lon"`` for a latitude mean -- and
+    ``collapsed_key`` is the spelling the ``aggregate`` used for the one that was
+    averaged (``"lon"``, ``"X"``, ``"lon_rho"``, ...), so a caller can pull that
+    entry out of the spec.
+
+    Decided from the spec alone, before any data is read, so every caller that has
+    to treat a slab differently from a map (the grid surface default, a
+    comparison's depth injection, the held-back mean in ``_prepare``) asks the same
+    question through here:
+
+    - exactly one of lon/lat carries a plain ``"mean"`` (:func:`_is_plain_mean`);
+      both together is the joint area-weighted box mean
+      (:func:`spatial_mean_in_spec`), and neither is no slab at all;
+    - the other horizontal axis is not reduced by the aggregate, and is either
+      absent from ``select`` (the whole domain) or a range -- a scalar there makes
+      a line, not a section;
+    - the averaged axis is absent from ``select`` or a range too (a scalar has
+      nothing to average over);
+    - no ``transect`` (that is a different cut through space), no ``sigma0``, and
+      a vertical that can survive: none named, a list of levels, or ``"column"``.
+      A single level, a ``"surface"`` request or a depth band leaves no vertical
+      axis, and a vertical entry in the ``aggregate`` collapses it explicitly.
+    """
+    select = select or {}
+    agg = agg or {}
+    if "transect" in select:
+        return None
+    lon_key = next((k for k in _POINT_LON_KEYS if k in agg), None)
+    lat_key = next((k for k in _POINT_LAT_KEYS if k in agg), None)
+    lon_mean = lon_key is not None and _is_plain_mean(agg[lon_key])
+    lat_mean = lat_key is not None and _is_plain_mean(agg[lat_key])
+    if lon_mean == lat_mean:
+        return None  # neither axis, or both (the joint spatial mean)
+    if lon_mean:
+        axis, collapsed_key, kept_agg_key = "lat", lon_key, lat_key
+        kept_keys, collapsed_keys = _POINT_LAT_KEYS, _POINT_LON_KEYS
+    else:
+        axis, collapsed_key, kept_agg_key = "lon", lat_key, lon_key
+        kept_keys, collapsed_keys = _POINT_LON_KEYS, _POINT_LAT_KEYS
+    if kept_agg_key is not None:
+        return None  # the surviving axis is itself being reduced
+    for keys in (kept_keys, collapsed_keys):
+        present = next((k for k in keys if k in select), None)
+        if present is not None and _range_bounds(select[present]) is None:
+            return None
+    from ocean_skill.comparison import (
+        _ANY_VERTICAL_KEYS,
+        _ISOPYCNAL_KEYS,
+        _VERTICAL_KEYS,
+        is_column_request,
+    )
+
+    if any(k in agg for k in _ANY_VERTICAL_KEYS) or any(
+        k in select for k in _ISOPYCNAL_KEYS
+    ):
+        return None
+    depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
+    if (
+        depth is not None
+        and not is_column_request(depth)
+        and not (isinstance(depth, (list, tuple)) and len(depth) >= 2)
+    ):
+        return None
+    return axis, collapsed_key
+
+
+def slab_axis(
+    select: dict[str, Any] | None, agg: dict[str, Any] | None
+) -> str | None:
+    """Return the horizontal axis a slab spec leaves standing, or ``None``.
+
+    ``"lat"`` after a longitude mean, ``"lon"`` after a latitude mean.
+
+    The yes/no-and-which form of :func:`slab_in_spec`; see there for what makes a
+    spec a slab.
+    """
+    hit = slab_in_spec(select, agg)
+    return None if hit is None else hit[0]
 
 
 def _horizontal_reducible(da) -> bool:
@@ -1242,6 +1340,156 @@ def _horizontal_mean(da):
     return out
 
 
+def _horizontal_axis_of(name: str) -> str | None:
+    """Return ``"lon"``/``"lat"`` for a horizontal-axis spelling, else ``None``."""
+    if name in _POINT_LON_KEYS:
+        return "lon"
+    if name in _POINT_LAT_KEYS:
+        return "lat"
+    return None
+
+
+def _curvilinear_coords(da):
+    """Return ``(lon_coord, lat_coord)`` for a 2-D lon/lat pair, else ``None``.
+
+    The gate for :func:`_binned_mean`: a rectilinear grid's lon/lat are dimensions
+    a plain ``mean`` reduces directly, and a Dataset (or a trajectory's 1-D
+    ``lon(time)``) has no single 2-D grid to bin.
+    """
+    from ocean_skill.cf import find_coord
+
+    if hasattr(da, "data_vars"):
+        return None
+    lon_coord, lat_coord = find_coord(da, "longitude"), find_coord(da, "latitude")
+    if lon_coord is None or lat_coord is None:
+        return None
+    if lon_coord.ndim != 2 or lat_coord.ndim != 2:
+        return None
+    return lon_coord, lat_coord
+
+
+def _cell_spacing(values, *, periodic: bool) -> float:
+    """Median spacing of a 2-D coordinate between neighbouring cells, in its own units.
+
+    Measured along each of the grid's two axes separately and the *larger* of the
+    two medians taken: a latitude field on an unrotated ROMS grid changes only
+    along ``eta``, so its ``xi`` differences are all zero and would drag a pooled
+    median to nothing; on a rotated grid both axes contribute and the larger is
+    still the honest per-cell step. ``periodic`` wraps differences into +/-180
+    first, for a longitude that jumps by 360 across the seam.
+    """
+    import numpy as np
+
+    medians = []
+    for axis in (0, 1):
+        diff = np.abs(np.diff(values, axis=axis))
+        if periodic:
+            diff = np.abs((diff + 180.0) % 360.0 - 180.0)
+        diff = diff[np.isfinite(diff) & (diff > 0)]
+        if diff.size:
+            medians.append(float(np.median(diff)))
+    return max(medians) if medians else float("nan")
+
+
+#: Most bins :func:`_binned_mean` will cut a surviving coordinate into -- a guard
+#: against a pathological spacing estimate turning a mean into a million groups.
+MAX_BINS = 4000
+
+
+def _binned_mean(da, collapse: str):
+    """Mean ``da`` over one horizontal axis of a curvilinear grid, by binning.
+
+    On a rectilinear grid ``aggregate={"lon": "mean"}`` is a plain mean along the
+    ``lon`` dimension. A curvilinear grid has no such dimension -- ``lon`` and
+    ``lat`` are 2-D fields over ``(eta_rho, xi_rho)`` -- so the same request used
+    to skip silently (the key resolves to no dimension), which is the worst way
+    to fail: a figure of the unreduced field under a title saying it was
+    averaged. This is the reading it gets instead.
+
+    ``collapse`` is the axis being averaged (``"lon"`` or ``"lat"``); the *other*
+    coordinate -- the survivor -- is cut into bins of one typical grid step
+    (:func:`_cell_spacing`, the median spacing between neighbouring cells across
+    the grid), spanning the ``select`` box's own range when ``attrs["region"]``
+    names one (:func:`ocean_skill.align.subset_to_box` stamps it) and the data's
+    extent otherwise. Every cell is assigned to the bin its survivor coordinate
+    falls in, and each bin takes the unweighted, NaN-aware mean of its cells --
+    unweighted for the same reason a rectilinear lone-axis mean is: the cells of
+    one latitude band on a grid are of comparable size, and the weighting
+    :func:`_horizontal_mean` applies belongs to the joint box mean.
+
+    The result has one new 1-D dimension named after the survivor (``"lat"`` for
+    a longitude mean) whose coordinate holds the bin centres, with every other
+    dimension (vertical, time) kept; the grid's 2-D coordinates and anything that
+    rode on its two index dimensions are gone, as after any reduction over them.
+    A bin that no cell fell into does not appear. Dask-backed input stays lazy.
+    """
+    import numpy as np
+    import xarray as xr
+
+    lon_coord, lat_coord = _curvilinear_coords(da)  # type: ignore[misc]
+    survivor, name = (lat_coord, "lat") if collapse == "lon" else (lon_coord, "lon")
+    dims = tuple(str(d) for d in survivor.dims)
+    values = np.asarray(survivor.values, dtype="float64")
+    periodic = name == "lon"
+    region = da.attrs.get("region")
+    if region is not None:
+        lo, hi = (
+            (float(region[1]), float(region[3]))
+            if name == "lat"
+            else (float(region[0]), float(region[2]))
+        )
+        if lo > hi:
+            lo, hi = hi, lo
+        if periodic:
+            # The box was asked for in its own convention (180-200), the grid may
+            # store the same meridians the other way round (-180..180): put the
+            # survivor on the box's side of the seam before binning.
+            values = lo + ((values - lo) % 360.0)
+    else:
+        lo, hi = float(np.nanmin(values)), float(np.nanmax(values))
+    step = _cell_spacing(values, periodic=periodic)
+    if not np.isfinite(step) or step <= 0 or hi <= lo:
+        raise ValueError(
+            f"cannot average over {collapse!r} on this curvilinear grid: no "
+            f"usable cell spacing could be measured along {name!r} (range "
+            f"{lo:g}..{hi:g}), so there is no way to bin it."
+        )
+    n_bins = max(1, round((hi - lo) / step))
+    if n_bins > MAX_BINS:
+        raise ValueError(
+            f"averaging over {collapse!r} would cut {name!r} into {n_bins} bins "
+            f"(range {lo:g}..{hi:g}, step {step:g}) -- more than {MAX_BINS}; "
+            "narrow the select box."
+        )
+    edges = np.linspace(lo, hi, n_bins + 1)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    finite = np.isfinite(values)
+    index = np.full(values.shape, -1, dtype=int)
+    index[finite] = np.digitize(values[finite], edges) - 1
+    index[finite & (values == hi)] = n_bins - 1
+    index[(index >= n_bins) | (index < 0)] = -1
+
+    stacked = da.drop_vars([lon_coord.name, lat_coord.name]).stack(
+        _cell=dims, create_index=False
+    )
+    keep = np.flatnonzero(index.ravel() >= 0)
+    stacked = stacked.isel(_cell=keep)
+    labels = xr.DataArray(index.ravel()[keep], dims="_cell", name=name)
+    attrs = dict(da.attrs)
+    out = stacked.groupby(labels).mean("_cell", skipna=True)
+    out = out.assign_coords({name: centres[np.asarray(out[name].values)]})
+    out[name].attrs.update(
+        units="degrees_north" if name == "lat" else "degrees_east",
+        long_name="latitude" if name == "lat" else "longitude",
+    )
+    out.attrs = {**attrs, **out.attrs}  # a reduction drops attrs; units must survive
+    previous = out.attrs.get("cell_methods")
+    method = f"{collapse}: mean"
+    out.attrs["cell_methods"] = f"{previous} {method}" if previous else method
+    out.attrs["statistic"] = "mean"
+    return out
+
+
 def aggregate(da, spec: dict[str, Any] | None):
     """Reduce ``da`` over each dimension in ``spec``. Returns ``da`` unchanged if empty.
 
@@ -1318,6 +1566,14 @@ def aggregate(da, spec: dict[str, Any] | None):
     spellings, reduced together rather than sliced together, because a mean of
     means is not a mean once the wet-cell mask is ragged.
 
+    **One horizontal axis reduced by a plain "mean"** is a slab -- a band averaged
+    along one direction, leaving the other standing (see :func:`slab_in_spec`). On a
+    rectilinear grid that is the ordinary mean along the ``lon``/``lat`` dimension.
+    On a curvilinear grid (2-D lon/lat, no dimension of that name) it is a binned
+    mean over the surviving coordinate instead (:func:`_binned_mean`); it used to
+    be skipped without a word. Only the plain mean does this, and only when the
+    other horizontal axis is not in the spec too.
+
     Dimensions absent from ``da`` are skipped rather than raising: a selection may
     already have collapsed one, and a spec shared across variables should not fail on
     the one that has no depth axis.
@@ -1338,6 +1594,21 @@ def aggregate(da, spec: dict[str, Any] | None):
     for name, how in spec.items():
         dim = resolve_dim(da, name)
         if dim is None or dim not in da.dims:
+            # A lone lon/lat mean on a curvilinear grid names no dimension to
+            # reduce along -- binned instead of skipped (see _binned_mean). Only
+            # the plain mean, and only when the other horizontal axis is left
+            # alone: anything else keeps the ordinary skip.
+            axis = _horizontal_axis_of(name)
+            if (
+                axis is not None
+                and _is_plain_mean(how)
+                and _curvilinear_coords(da) is not None
+                and not any(
+                    k in spec
+                    for k in (_POINT_LAT_KEYS if axis == "lon" else _POINT_LON_KEYS)
+                )
+            ):
+                da = _binned_mean(da, axis)
             continue
         if isinstance(how, (list, tuple)):
             da = _reduce_chain(da, dim, how)

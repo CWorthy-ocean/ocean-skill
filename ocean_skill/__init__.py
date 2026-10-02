@@ -39,6 +39,9 @@ The public API is intentionally small:
                                                      # osk.XY: any two variables
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
                                                      # pooled onto Taylor + target
+    osk.plot([eq, band_a, band_b])                   # comparisons (or fields) built
+                                                     # separately, one figure; a
+                                                     # {label: item} dict names rows
     osk.map_metrics(mooring_set)                     # per-station metrics, interpolated
                                                      # onto a map, one panel per metric
     comparison.map_locations()                       # where a plotted selection sits
@@ -49,6 +52,9 @@ The public API is intentionally small:
     osk.catalog.search_paths()              # where catalogs are discovered, in order
     osk.catalog.add_search_path("/shared")  # register a shared/team catalog dir in code
 """
+
+import importlib as _importlib
+import types as _types
 
 from ocean_skill import cache, catalog, outputs, qc
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
@@ -62,6 +68,7 @@ from ocean_skill.catalog import (
     match_report,
     overlap,
 )
+from ocean_skill.combine import plot as _plot_items
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
 from ocean_skill.detide import detide
 from ocean_skill.extrema import Extrema, Extremum
@@ -73,6 +80,24 @@ from ocean_skill.sources import read
 from ocean_skill.xy import TS, XY
 
 __version__ = "0.0.1"
+
+
+# ``osk.plot(...)`` draws several comparisons or fields on one figure (see
+# ocean_skill.combine), but ``ocean_skill.plot`` is also the plotting subpackage, and
+# a plain ``from ocean_skill.combine import plot`` here would replace it as a
+# *package attribute*: ``import ocean_skill.plot.registry as r``, and every
+# ``monkeypatch.setattr("ocean_skill.plot.registry.render", ...)``, resolve through
+# ``getattr(ocean_skill, "plot")`` and would land on a function with no submodules.
+# So the subpackage itself is made callable instead -- one object that is both the
+# module (``osk.plot.registry`` keeps working) and the function.
+class _CallablePlotPackage(_types.ModuleType):
+    def __call__(self, items, *, renderer="matplotlib", **plot_kwargs):
+        return _plot_items(items, renderer=renderer, **plot_kwargs)
+
+    __call__.__doc__ = _plot_items.__doc__
+
+
+_importlib.import_module("ocean_skill.plot").__class__ = _CallablePlotPackage
 
 __all__ = [
     "TS",
@@ -102,6 +127,7 @@ __all__ = [
     "outputs",
     "overlap",
     "pick_path",
+    "plot",
     "qc",
     "read",
     "summary",

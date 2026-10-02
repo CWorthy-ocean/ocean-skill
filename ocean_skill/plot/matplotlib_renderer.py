@@ -984,9 +984,13 @@ def _draw_section_row(
     standard_name: str | None,
     metrics: dict[str, Any] | None,
     mark: str,
+    row_label: str | None = None,
     metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
     title_kwargs: dict[str, Any] | None = None,
     metrics_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    seq_norm: Any = None,
+    div_norm: Any = None,
     shared_axis_labels: bool = True,
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
@@ -1004,10 +1008,21 @@ def _draw_section_row(
 
     ``values``/``geometry`` are :func:`ocean_skill.plot.section.prepare_section_row`'s
     own return, unpacked by the caller so this function stays a pure drawing step.
-    ``robust`` means what it does in :func:`_limits`. ``titles=`` overrides this
-    row's three panel titles by hand -- test, reference, difference, in that
-    order -- with ``None`` at a position keeping that panel's own title; see
-    :func:`ocean_skill.plot._titles.resolve_titles`.
+    ``robust`` means what it does in :func:`_limits`, and is ignored once ``seq_norm``
+    is given. ``titles=`` overrides this row's three panel titles by hand -- test,
+    reference, difference, in that order -- with ``None`` at a position keeping that
+    panel's own title; see :func:`ocean_skill.plot._titles.resolve_titles`.
+
+    ``seq_norm``/``div_norm``, if given, override this row's own colour limits -- how
+    :func:`section_row_grid`'s ``shared_limits=True`` makes every row share one scale
+    instead of each computing its own, the same convention
+    :func:`_draw_time_depth_row` uses. ``row_label``/``row_label_kwargs``, if given,
+    draw a rotated label down the leftmost panel's edge -- a stacked grid's per-row
+    identity, unused by the single-row caller.
+
+    The x label is read off ``geometry`` (this row's own), never assumed: in a stacked
+    grid one row can run along a transect (kilometres) and the next along a meridian
+    (degrees of latitude), and nothing here links their x axes.
 
     ``statistic`` is the reduction the row's fields are the result of, if they are one
     (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
@@ -1016,18 +1031,22 @@ def _draw_section_row(
     import matplotlib.colors as mcolors
 
     title_pinned = _pinned(title_kwargs, "title_kwargs")
+    row_label_pinned = _pinned(row_label_kwargs, "row_label_kwargs")
     title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    row_label_kwargs = _merged(defaults["row_label_kwargs"], row_label_kwargs)
     metrics_kwargs = _merged(defaults["metrics_kwargs"], metrics_kwargs)
 
     t, r, d = values["test"], values["reference"], values["difference"]
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
-    vmin, vmax = _limits(t, r, robust=robust)
-    seq_norm = _with_range(
-        norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
-    )
-    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-    div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
+    if seq_norm is None:
+        vmin, vmax = _limits(t, r, robust=robust)
+        seq_norm = _with_range(
+            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+        )
+    if div_norm is None:
+        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
@@ -1037,25 +1056,27 @@ def _draw_section_row(
     ]
     ims = []
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
-        ax.set_facecolor("0.85")
-        draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-        kw = _contour_kw(norm) if mark == "contourf" else {}
-        im = draw(
-            da[geometry.x_name], da[geometry.y_name], da, cmap=cmap, norm=norm, **kw
-        )
-        ax.invert_yaxis()
-        ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
         # Only the leftmost panel labels depth -- the other two share the same axis,
         # the same convention _draw_row uses for latitude on a row of maps.
-        if not shared_axis_labels or j == 0:
-            ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
-        ax.tick_params(axis="both", labelsize=scale["tick_label"])
+        im = _draw_section(
+            ax,
+            da,
+            geometry,
+            cmap=cmap,
+            norm=norm,
+            mark=mark,
+            scale=scale,
+            ylabel=not shared_axis_labels or j == 0,
+        )
         if shared_axis_labels and j != 0:
             ax.tick_params(axis="y", labelleft=False)
         ax.set_title(lab, **title_kwargs)
         ax.title._osk_size_pinned = title_pinned
         ims.append(im)
 
+    if row_label:
+        _add_row_label(axes[0], row_label, row_label_kwargs)
+        axes[0]._osk_row_label._osk_size_pinned = row_label_pinned
     if metrics:
         axes[2]._osk_metrics_text = axes[2].text(
             0.02,
@@ -2585,6 +2606,16 @@ def _clear_row_labels(fig, renderer=None) -> None:
             if text.get_visible() and text.get_text()
         ]
         if not lefts:
+            # A plain Cartesian panel (a section or time_depth row) has no cartopy
+            # gridliner labels: what the row label has to clear is the axes' own tick
+            # labels and y label, which constrained_layout *does* reserve room for --
+            # so, unlike the map case, they are drawn exactly where they are measured.
+            lefts = [
+                text.get_window_extent(renderer).x0
+                for text in (*ax.get_yticklabels(), ax.yaxis.label)
+                if text.get_visible() and text.get_text()
+            ]
+        if not lefts:
             continue
         pad_px = _ROW_LABEL_PAD * fig.dpi / 72.0
         # the label is rotated 90°, so its *width* is what intrudes horizontally
@@ -3940,6 +3971,43 @@ def metric_arrays(skill, names) -> dict[str, Any]:
     return out
 
 
+def _draw_section(
+    ax, values, geometry, *, cmap, norm, mark: str, scale: dict[str, float],
+    ylabel: bool = True,
+):
+    """Draw one vertical-section panel into ``ax`` and return its mappable.
+
+    The one place a section panel's conventions live, shared by :func:`section` (one
+    panel), :func:`cross` and :func:`section_grid` (several, one per axes) so they
+    cannot drift: the below-bathymetry/off-domain grey a map's land does the job of
+    (``set_facecolor`` -- a cell with no data is genuinely absent, not zero),
+    positive-down depth with the y-axis inverted so 0 m sits at the top, and the
+    axis labels taken from *this panel's own* ``geometry`` (``x_label``/``y_label``)
+    rather than a figure-wide constant -- panels of one figure can differ in what
+    runs along x (kilometres along a transect, degrees along a meridional slab), so
+    nothing here shares an x axis or assumes the next panel's label matches.
+    ``ylabel=False`` leaves the depth label off, for a panel whose neighbour
+    already carries it.
+    """
+    ax.set_facecolor("0.85")
+    draw = ax.contourf if mark == "contourf" else ax.pcolormesh
+    kw = _contour_kw(norm) if mark == "contourf" else {}
+    im = draw(
+        values[geometry.x_name],
+        values[geometry.y_name],
+        values,
+        cmap=cmap,
+        norm=norm,
+        **kw,
+    )
+    ax.invert_yaxis()
+    ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+    if ylabel:
+        ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
+    ax.tick_params(axis="both", labelsize=scale["tick_label"])
+    return im
+
+
 def section(
     field,
     *,
@@ -4040,22 +4108,9 @@ def section(
     )
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-    ax.set_facecolor("0.85")  # the map families' land grey, doing the same job here:
-    # a below-bathymetry (or off-domain) cell is genuinely absent data, not zero.
-    draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-    kw = _contour_kw(norm) if mark == "contourf" else {}
-    im = draw(
-        values[geometry.x_name],
-        values[geometry.y_name],
-        values,
-        cmap=cmap,
-        norm=norm,
-        **kw,
+    im = _draw_section(
+        ax, values, geometry, cmap=cmap, norm=norm, mark=mark, scale=scale
     )
-    ax.invert_yaxis()
-    ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
-    ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
-    ax.tick_params(axis="both", labelsize=scale["tick_label"])
 
     lab = units_text(units, statistic)
     _draw_colorbar(
@@ -4076,6 +4131,347 @@ def section(
     if fit_text:
         _fit_text_widths(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=[ax])
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def section_grid_layout(
+    items: list[dict[str, Any]],
+    geometries: list[Any],
+    *,
+    rows: str | None = None,
+    cols: str | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    titles: Sequence[str | None] | None = None,
+):
+    """Arrange several sections into a grid; return how, and what each panel is called.
+
+    Everything about a stacked ``section`` that is *not* drawing, shared by
+    :func:`section_grid` and the interactive ``_section_grid`` so the two cannot
+    disagree about the grid's shape or titles. ``geometries`` is one
+    :class:`~ocean_skill.plot.section.SectionGeometry` per item (``items`` order).
+
+    Returns ``(grid_nrows, grid_ncols, cell_items, drawn, panel_titles, suptitle)``:
+    ``cell_items`` is one item per grid cell, row-major, ``None`` at a blank;
+    ``drawn`` the ``(grid index, item)`` pairs actually drawn; ``panel_titles`` one
+    resolved title per cell (blanks ``""``); ``suptitle`` the shared identity.
+
+    The shape follows the other one-item-per-panel grids (:func:`time_depth_grid`,
+    :func:`field_map_grid`): a single column by default, ``ncols=``/``nrows=`` to
+    wrap, or ``rows=``/``cols=`` on ``variable``/``source`` to facet (naming one
+    implies the other; combining either with ``ncols=``/``nrows=`` is refused).
+    Titles are the same shared-identity split those grids use
+    (:func:`~ocean_skill.plot._facets.facet_grid_titles`) over each panel's variable,
+    its ``label`` and its ``path_note`` (joined ``label — path_note``, the form
+    :func:`cross` titles with, since the path is what a section's panels differ in
+    even when their label does not), plus the depth when every item shares one:
+    whatever every panel shares is lifted to the suptitle, whatever varies stays on
+    the panel.
+    """
+    from ocean_skill.plot._facets import (
+        facet_grid_titles,
+        one_item_cells,
+        resolve_facets,
+    )
+    from ocean_skill.plot.series import grid_shape
+
+    faceted = rows is not None or cols is not None
+    if faceted and (ncols is not None or nrows is not None):
+        raise ValueError(
+            f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- "
+            "ncols=/nrows= (for wrapping the unfaceted stacked column) do not "
+            "also apply. Drop ncols=/nrows=."
+        )
+    geometry_of = {id(item): g for item, g in zip(items, geometries, strict=True)}
+
+    n = len(items)
+    if faceted:
+        cells, row_values, col_values, _, _ = resolve_facets(
+            items, rows, cols, family="a set of sections"
+        )
+        cell_items: list[dict[str, Any] | None] = one_item_cells(
+            cells, row_values, col_values, family="a set of sections"
+        )
+        grid_nrows, grid_ncols = len(row_values), len(col_values)
+    else:
+        grid_nrows, grid_ncols = grid_shape(
+            n, as_columns=False, ncols=ncols, nrows=nrows
+        )
+        cell_items = list(items)
+        cell_items += [None] * (grid_nrows * grid_ncols - len(cell_items))
+    drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
+
+    depths = {item.get("depth") for item in items}
+    shared_depth = next(iter(depths)) if len(depths) == 1 else None
+    components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
+    for i, item in drawn:
+        label = item.get("label") or ""
+        note = geometry_of[id(item)].path_note
+        components[i] = (
+            field_title(item.get("standard_name")),
+            shared_depth,
+            f"{label} — {note}" if label and note else label or note,
+        )
+    if faceted:
+        suptitle, cell_titles = facet_grid_titles(components, grid_nrows, grid_ncols)
+    else:
+        # a flat list of panels: lay the drawn components out as one column, so a
+        # part that varies stays on every panel (nothing is "constant down a column"
+        # of a wrapped grid) -- the flat rule time_depth_grid_titles applies
+        suptitle, flat_titles = facet_grid_titles(
+            [components[i] for i, _ in drawn], len(drawn), 1
+        )
+        cell_titles = [""] * len(cell_items)
+        for (i, _), t in zip(drawn, flat_titles, strict=True):
+            cell_titles[i] = t
+    if faceted:
+        panel_titles = _titles.resolve_titles(cell_titles, titles)
+    else:
+        resolved = _titles.resolve_titles([cell_titles[i] for i, _ in drawn], titles)
+        panel_titles = [""] * len(cell_items)
+        for (i, _), t in zip(drawn, resolved, strict=True):
+            panel_titles[i] = t
+    return grid_nrows, grid_ncols, cell_items, drawn, panel_titles, suptitle
+
+
+def section_limit_groups(drawn_items: list[dict[str, Any]], shared_limits):
+    """Return the colour-scale groups of a stacked ``section`` (``None``: none shared).
+
+    ``shared_limits=None`` (the default) is automatic: every panel on **one** scale
+    and one colorbar when all items carry the same ``standard_name``, ``units`` and
+    statistic -- the same variable cut through different places, which reads as
+    directly comparable only on a common scale -- and each panel on its own scale
+    otherwise (different variables, or the same one in different units, have nothing
+    meaningful to share). ``True``/``False``/``"variable"``/``"source"`` are passed
+    through to :func:`~ocean_skill.plot._facets.resolve_limit_groups`, the vocabulary
+    :func:`time_depth_grid` and :func:`field_map_grid` accept. Each returned group is
+    a list of indices into ``drawn_items``.
+    """
+    from ocean_skill.plot._facets import resolve_limit_groups
+
+    if shared_limits is None:
+        identities = {
+            (item.get("standard_name"), item.get("units"), statistic_of(item))
+            for item in drawn_items
+        }
+        shared_limits = len(identities) == 1
+    return resolve_limit_groups(drawn_items, shared_limits)
+
+
+def section_grid(
+    items: list[dict[str, Any]],
+    *,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    rows: str | None = None,
+    cols: str | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    shared_limits: bool | str | None = None,
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
+    title_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+    robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    titles: Sequence[str | None] | None = None,
+):
+    """Stack several vertical sections -- one panel per item -- in a single figure.
+
+    The ``section`` counterpart of :func:`time_depth_grid` and :func:`cross`: a
+    :class:`~ocean_skill.field.FieldSet` of several sections (the same variable
+    through several transects, or several variables through one) draws as one figure
+    instead of one each. Each item is :func:`section`'s own (``field``, ``units``,
+    ``standard_name``, ``depth``, ``label``), and each panel draws exactly as
+    :func:`section` draws its single one (:func:`_draw_section`) -- the same
+    below-bathymetry grey and inverted positive-down depth axis -- titled by its
+    ``label`` and its own ``path_note`` (see :func:`section_grid_layout`).
+
+    **Panels do not share an x axis.** What runs along x is each panel's own --
+    kilometres along a transect, degrees of latitude along a meridional slab -- so
+    every panel takes its x label and extent from its own geometry, and none is
+    linked to another. Depth is the common quantity: every panel reads positive-down
+    with 0 m at the top.
+
+    Panels stack in a single column by default; ``ncols=``/``nrows=`` wrap them into a
+    rectangular grid and ``rows=``/``cols=`` facet on ``variable`` or ``source``
+    (``label``), exactly as :func:`time_depth_grid` does -- see
+    :func:`section_grid_layout` for the shared rules and how titles split between the
+    suptitle and the panels. ``title`` overrides the suptitle (``""`` drops it).
+
+    **Colour scale.** ``shared_limits=None`` (the default) puts every panel on one
+    scale with a single colorbar when all items are the same variable in the same
+    units, and gives each panel its own scale and colorbar otherwise -- see
+    :func:`section_limit_groups`. ``True``/``False`` force either, and
+    ``"variable"``/``"source"`` pool only the panels sharing that fact, the same
+    vocabulary :func:`time_depth_grid` accepts. A single shared colorbar sits below
+    the panels (``colorbar_kwargs={"orientation": ...}`` overrides), per-panel ones
+    beside each. ``robust`` means what it does in :func:`_limits`; ``vmin``/``vmax``
+    pin an exact range (applied to every panel/group alike), overriding ``robust`` and
+    a variable's own declared display range wherever either end is given.
+
+    There is no ``domain``, ``metrics``/``metrics_kwargs`` or ``labels``: a section
+    panel has no map to outline and no reference to score against. Everything else --
+    sizing (``size``/``zoom``/``figsize``), ``font_scale``, ``fit_text``,
+    ``align_colorbars``, the ``*_kwargs`` dicts, ``mark`` -- means what it does in
+    :func:`section`. ``rasterize``/``hover`` are accepted only so ``renderer="both"``
+    can pass one option set to each renderer (see :func:`_warn_if_interactive_only`).
+
+    ``titles=`` overrides each panel's own title by hand: one string per item in
+    ``items`` order unfaceted, or -- faceted -- one per *grid cell*, row-major, blanks
+    included. ``None`` at a position keeps that panel's own title; the wrong count
+    raises a copy-pasteable ``ValueError`` listing the current titles.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.section import prepare_section
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+    if not items:
+        raise ValueError("section_grid needs at least one section, got none")
+
+    prepared = [prepare_section(item["field"]) for item in items]
+    prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
+    grid_nrows, grid_ncols, cell_items, drawn, panel_titles, auto_suptitle = (
+        section_grid_layout(
+            items,
+            [g for _, g in prepared],
+            rows=rows,
+            cols=cols,
+            ncols=ncols,
+            nrows=nrows,
+            titles=titles,
+        )
+    )
+    if title is None:
+        title = auto_suptitle
+
+    drawn_items = [item for _, item in drawn]
+    groups = section_limit_groups(drawn_items, shared_limits)
+    one_bar = groups is not None and len(groups) == 1
+
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=one_bar,  # one shared bar: below, panels keep their width
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=grid_nrows,
+        ncols=grid_ncols,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=grid_ncols,
+        nrows=grid_nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+    title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
+    suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+
+    def _scale_of(members: list[dict[str, Any]]):
+        """``(cmap, norm)`` spanning ``members`` -- one item, or one shared group."""
+        standard_name = members[0].get("standard_name")
+        fields = [prepared_of[id(m)][0] for m in members]
+        cmap, _ = cmaps_for(standard_name)
+        lo, hi = _limits(*fields, robust=robust, vmin=vmin, vmax=vmax)
+        norm = _with_range(
+            norm_for(
+                standard_name,
+                lo,
+                hi,
+                user_vmin=vmin,
+                user_vmax=vmax,
+                statistic=statistic_of(members[0]),
+            ),
+            *fields,
+        )
+        return cmap, norm
+
+    scale_of_cell: dict[int, tuple[Any, Any]] = {}
+    if groups is not None:
+        for group in groups:
+            members = [drawn[g] for g in group]
+            cmap_norm = _scale_of([item for _, item in members])
+            for i, _ in members:
+                scale_of_cell[i] = cmap_norm
+    else:
+        for i, item in drawn:
+            scale_of_cell[i] = _scale_of([item])
+
+    fig, axes_grid = plt.subplots(
+        grid_nrows,
+        grid_ncols,
+        figsize=figsize,
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes_grid.ravel())
+    ims: dict[int, Any] = {}
+    for i, item in drawn:
+        values, geometry = prepared_of[id(item)]
+        cmap, norm = scale_of_cell[i]
+        ims[i] = _draw_section(
+            flat[i], values, geometry, cmap=cmap, norm=norm, mark=mark, scale=scale
+        )
+        t = flat[i].set_title(panel_titles[i], **title_kwargs)
+        t._osk_size_pinned = title_pinned
+    for i, cell in enumerate(cell_items):
+        if cell is None:
+            flat[i].set_visible(False)
+
+    if groups is None:
+        bars = [([flat[i]], i) for i, _ in drawn]
+    else:
+        bars = [
+            ([flat[drawn[g][0]] for g in group], drawn[group[-1]][0])
+            for group in groups
+        ]
+    for bar_axes, last in bars:
+        item = cell_items[last]
+        _draw_colorbar(
+            fig,
+            ims[last],
+            bar_axes if len(bar_axes) > 1 else bar_axes[0],
+            units_text(item.get("units"), statistic_of(item)),
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
+        )
+
+    if title:
+        sup = fig.suptitle(title, **suptitle_kwargs)
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _warn_if_cramped(
+        fig, canvas=canvas, nrows=grid_nrows, panels=[flat[i] for i, _ in drawn]
+    )
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -4223,21 +4619,9 @@ def cross(
     for ax, (values, geometry), panel_title in zip(
         axes, prepared, resolved_titles, strict=True
     ):
-        ax.set_facecolor("0.85")  # section()'s below-bathymetry/off-domain grey
-        draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-        kw = _contour_kw(norm) if mark == "contourf" else {}
-        im = draw(
-            values[geometry.x_name],
-            values[geometry.y_name],
-            values,
-            cmap=cmap,
-            norm=norm,
-            **kw,
+        im = _draw_section(
+            ax, values, geometry, cmap=cmap, norm=norm, mark=mark, scale=scale
         )
-        ax.invert_yaxis()
-        ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
-        ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
-        ax.tick_params(axis="both", labelsize=scale["tick_label"])
         t = ax.set_title(panel_title, **title_kwargs)
         t._osk_size_pinned = title_pinned
         ims.append(im)
@@ -5671,8 +6055,10 @@ def section_row(
 
     There is no ``domain``, ``region``, ``gridline_kwargs``, ``tick_label_kwargs``
     or ``row_label``: a section has no map to outline or gridline, and this is
-    always the only (and so also the bottom) row — see :func:`section` for the
-    single-panel case these omissions also apply to.
+    the only (and so also the bottom) row — see :func:`section` for the
+    single-panel case these omissions also apply to. Several section comparisons
+    (a ``ComparisonSet``) stack as :func:`section_row_grid` instead, one row each,
+    which is where ``row_label`` and a shared colour scale live.
 
     ``title`` defaults to the variable name followed by the depth list, time and
     the path's own endpoints (``29.0°N, 94.5°W → 27.5°N, 90.0°W``) —
@@ -5761,6 +6147,244 @@ def section_row(
     if fit_text:
         _fit_text_widths(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=list(axes))
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def section_row_grid_title(items, geometries) -> tuple[str, bool]:
+    """Return ``(suptitle, paths_differ)`` for a stacked ``section_row``.
+
+    Shared by :func:`section_row_grid` and the interactive ``_section_row_grid`` so the
+    two name a stack the same way. The suptitle is :func:`grid_suptitle`'s shared
+    identity (variable, depth, time) plus the path note (``29.0°N, 94.5°W → 27.5°N,
+    90.0°W``) *when every row runs along the same path*. ``paths_differ`` says they do
+    not, in which case the note is left out of the title and each caller puts a row's
+    own on that row's label instead -- it is part of what distinguishes the rows, so
+    it is moved, never dropped.
+    """
+    notes = {geometry.path_note for geometry in geometries}
+    paths_differ = len(notes) > 1
+    shared_note = "" if paths_differ else next(iter(notes), "")
+    shared = _elide(shared_note) if shared_note else ""
+    title = " · ".join(p for p in (grid_suptitle(items), shared) if p)
+    return title, paths_differ
+
+
+def section_row_grid(
+    items: list[dict[str, Any]],
+    *,
+    labels: tuple[str, str] | None = None,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    figsize: tuple[float, float] | None = None,
+    metric_keys: tuple[str, ...] = DEFAULT_METRIC_KEYS,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
+    title_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    metrics_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_limits: bool = False,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    rasterize: bool | str | None = None,
+    hover: bool | None = None,
+    robust: bool | float = False,
+    titles: Sequence[str | None] | None = None,
+):
+    """Stack one ``test | reference | difference`` section row per comparison.
+
+    The ``section_row`` counterpart of :func:`time_depth_row_grid` (and, through it,
+    of :func:`field_grid`): a :class:`~ocean_skill.comparison.ComparisonSet` of several
+    section comparisons -- the same variable through several transects, say, or one
+    transect at several depths-of-interest or times -- draws as one figure with a row
+    per comparison instead of one figure each. Each item is a dict with ``aligned``
+    and optionally ``row_label``, ``units``, ``standard_name``, ``metrics`` and
+    ``labels`` -- :func:`field_grid`'s own item shape minus the map-only fields
+    (``domain``, ``region``). A one-item list is :func:`section_row`'s business, not
+    this function's.
+
+    Every row gets its own colour scales, its own two colorbars (shared for
+    test/reference, separate for the difference), and its own column titles from its
+    own ``labels`` -- rows commonly come from different places with different ranges,
+    so one shared pair of titles or one shared scale would misrepresent all but the
+    first. The top-level ``labels`` is only the fallback for a row that doesn't carry
+    its own. ``shared_limits=True`` reverses that for the colour scale, exactly as it
+    does in :func:`field_grid` -- meaningful only when every row is the same variable,
+    and warns if the rows' ``standard_name``s actually differ.
+
+    **Rows do not share an x axis.** What runs along x is each row's own: kilometres
+    along a transect for one row, degrees of latitude along a meridional slab for the
+    next (see :class:`ocean_skill.plot.section.SectionGeometry`'s ``x_label``). Every
+    row therefore takes its x quantity, label and extent from its own geometry, and
+    only its three panels share an axis with each other. Depth is the one thing every
+    row agrees on: positive-down, y-axis inverted, 0 m at the top of every panel.
+
+    Where a row's section runs (its ``path_note``, ``29.0°N, 94.5°W → 27.5°N,
+    90.0°W``) is part of the title the same way :func:`section_row` has it, with one
+    twist a single row does not need. If every row runs along the *same* path, the
+    note joins the overall title once. If the paths differ, each row's own note rides
+    on that row's test-panel title instead (``model (mean over 180–200°E)``), so
+    nothing that distinguishes the rows is lost to the shared title.
+
+    There is no ``domain``, ``region`` or ``gridline_kwargs``: a section has no map to
+    outline or gridline, the same omission :func:`section_row` makes for its own row.
+    Row height follows :func:`section_row`'s sizing (``SECTION_ASPECT``), for ``n``
+    rows instead of one, with the colorbars beside the panels rather than below (a
+    stack's height is the scarce dimension) -- see that function's docstring for
+    ``size``/``zoom``/``font_scale``/``fit_text``/``align_colorbars``/``metric_keys``.
+
+    ``title`` defaults to whatever identity every row shares (ordinarily the variable
+    and depth) via :func:`grid_suptitle`, plus the common path note described above;
+    the part the rows *differ* in is already their left-edge row label, so it is left
+    off the top title -- the same convention as :func:`field_grid`. Pass ``title=""``
+    to drop it.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list (row 0's test/reference/difference, then row 1's, ...), so a grid
+    of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps that panel's
+    own title; the wrong count raises a copy-pasteable ``ValueError`` listing the
+    current titles.
+
+    ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
+    option set to each renderer -- neither changes anything here.
+    """
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.section import prepare_section_row
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    _warn_if_interactive_only(rasterize, hover)
+
+    prepared = [(item, *prepare_section_row(item["aligned"])) for item in items]
+
+    auto_title, paths_differ = section_row_grid_title(
+        items, [geometry for _, _, geometry in prepared]
+    )
+    if title is None:
+        title = auto_title
+    # rows on different paths: the path is part of what tells the rows apart, so it
+    # goes on the row's own test-panel title rather than being dropped (or averaged
+    # into a title). Not on the rotated row label: a short, wide section row has no
+    # height for a second rotated line, which then ran off the figure's left edge.
+    row_titles = [item.get("row_label") for item, _, _ in prepared]
+    row_notes = [
+        geometry.path_note if paths_differ and geometry.path_note else ""
+        for _, _, geometry in prepared
+    ]
+
+    n = len(items)
+    canvas = resolve_canvas(size, zoom)
+    horizontal = colorbar_is_horizontal(
+        SECTION_ASPECT,
+        default_horizontal=False,  # stacked rows: bars beside, height is scarce
+        requested=(colorbar_kwargs or {}).get("orientation"),
+    )
+    figsize = figsize or auto_figsize(
+        SECTION_ASPECT,
+        nrows=n,
+        canvas=canvas,
+        font_scale=font_scale,
+        horizontal_colorbar=horizontal,
+        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+    )
+    scale = _scale_for(figsize, nrows=n, font_scale=font_scale)
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    # no sharex: each row's x quantity is its own (see the docstring), and the
+    # panels within a row share their one x range by being drawn from one geometry
+    fig, axes = plt.subplots(
+        n, 3, figsize=figsize, constrained_layout=True, squeeze=False
+    )
+
+    shared_seq_norm = shared_div_norm = None
+    if shared_limits:
+        import warnings
+
+        names = {item.get("standard_name") for item in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but rows use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every row.",
+                stacklevel=2,
+            )
+        shared_seq_norm, shared_div_norm = _shared_norms(
+            items, "test", "reference", robust=robust
+        )
+
+    row_labels = [
+        item.get("labels") or labels or ("test", "reference") for item in items
+    ]
+    auto_titles = [
+        t
+        for (tl, rl), note in zip(row_labels, row_notes, strict=True)
+        for t in (f"{tl} ({note})" if note else tl, rl, "difference")
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    for i, (item, values, geometry) in enumerate(prepared):
+        ims, lab = _draw_section_row(
+            axes[i],
+            values,
+            geometry,
+            labels=row_labels[i],
+            units=item.get("units"),
+            standard_name=item.get("standard_name"),
+            metrics=item.get("metrics"),
+            mark=mark,
+            row_label=row_titles[i],
+            metric_keys=metric_keys,
+            title_kwargs=title_kwargs,
+            metrics_kwargs=metrics_kwargs,
+            row_label_kwargs=row_label_kwargs,
+            seq_norm=shared_seq_norm,
+            div_norm=shared_div_norm,
+            shared_axis_labels=shared_axis_labels,
+            scale=scale,
+            defaults=defaults,
+            robust=robust,
+            titles=resolved_titles[i * 3 : i * 3 + 3],
+            statistic=statistic_of(item),
+        )
+        _draw_colorbar(
+            fig,
+            ims[1],
+            axes[i][:2],
+            lab,
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
+        )
+        _draw_colorbar(
+            fig,
+            ims[2],
+            axes[i][2],
+            f"difference {lab}",
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
+        )
+
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _fit_left_margin(fig)
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+        _clear_row_labels(fig)
+    _warn_if_cramped(fig, canvas=canvas, nrows=n)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -7201,7 +7825,9 @@ def _top_level_options() -> frozenset[str]:
             field_facet,
             series,
             section,
+            section_grid,
             section_row,
+            section_row_grid,
             cross,
             profile,
             skill_map,
@@ -7339,9 +7965,11 @@ def _render(spec, **kwargs: Any):
     elif family == "series":
         _check_options(series, opts)
     elif family == "section":
-        _check_options(section, opts)
+        _check_options(section_grid if len(spec.items) > 1 else section, opts)
     elif family == "section_row":
-        _check_options(section_row, opts)
+        _check_options(
+            section_row_grid if len(spec.items) > 1 else section_row, opts
+        )
     elif family == "cross":
         _check_options(cross, opts)
     elif family == "time_depth":
@@ -7418,6 +8046,8 @@ def _render(spec, **kwargs: Any):
     if family == "XY":
         return xy(spec.items, **opts)
     if family == "section":
+        if len(spec.items) > 1:
+            return section_grid(spec.items, **opts)
         item = spec.single
         return section(
             item["field"],
@@ -7428,6 +8058,8 @@ def _render(spec, **kwargs: Any):
             **opts,
         )
     if family == "section_row":
+        if len(spec.items) > 1:
+            return section_row_grid(spec.items, **opts)
         item = spec.single
         return section_row(
             item["aligned"],

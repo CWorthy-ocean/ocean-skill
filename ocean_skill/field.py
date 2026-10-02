@@ -620,7 +620,11 @@ class Field:
         if self.is_profile:
             return "drawn as a profile: the selection leaves one place and one instant, so the surviving depth axis is the y"
         if self.is_section:
-            return "drawn as a section: select={'transect': ...} leaves a cut through space, with depth on the other axis"
+            return (
+                "drawn as a section: select={'transect': ...}, or a box averaged "
+                "along one horizontal axis (aggregate={'lon': 'mean'} over a lon "
+                "range), leaves a cut through space, with depth on the other axis"
+            )
         return "drawn as map panels: a horizontal extent survives"
 
     def extremum(
@@ -1040,8 +1044,9 @@ class Field:
 
         The grid defaults (:meth:`_surfaced`, the bare-multi-step-time refusal in
         :meth:`plot`) are read-free shortcuts for the common case -- a catalogued
-        ``featureType: grid`` source, narrowed to neither a horizontal point nor a
-        transect (either of those draws as a line/section/profile instead, see
+        ``featureType: grid`` source, narrowed to neither a horizontal point, a
+        transect nor a slab (a box averaged along one horizontal axis -- each of
+        those draws as a line/section/profile instead, see
         :attr:`family`, where the catalog's own vertical/time metadata says
         nothing about what the *reduced* shape needs). ``None`` here means one of
         those does not hold, or the source is not catalogued at all -- the
@@ -1049,9 +1054,18 @@ class Field:
         :meth:`_facet_field_and_depth`) and the ordinary time-based refusal still
         apply once the data is actually loaded.
         """
-        from ocean_skill.operators import point_in_spec
+        from ocean_skill.operators import point_in_spec, slab_in_spec
 
-        if point_in_spec(self.select) is not None or "transect" in self.select:
+        # A slab -- a box averaged along one horizontal axis, aggregate={"lon":
+        # "mean"} over a lon range -- keeps its vertical axis and draws as a depth
+        # section (see slab_in_spec), so it is exempt from the surface default for
+        # the same reason a transect is: surfacing it would throw away the very
+        # axis it is a section *of*.
+        if (
+            point_in_spec(self.select) is not None
+            or "transect" in self.select
+            or slab_in_spec(self.select, self.aggregate) is not None
+        ):
             return None
         meta = self._catalog_metadata()
         if meta.get("featureType") != "grid":
@@ -1667,7 +1681,8 @@ class FieldSet:
     ``cache`` (there is no per-entry select yet — see :func:`field`), and pools
     them here. Every member has to reduce the same way for that to mean one
     figure -- all a :attr:`Field.family` of ``"series"``, all ``"profile"``, all
-    ``"time_depth"``, or all ``"field_facet"`` (a map) -- and :meth:`plot` says
+    ``"time_depth"``, all ``"section"``, or all ``"field_facet"`` (a map) -- and
+    :meth:`plot` says
     so rather than guessing which one it should be when they don't.
 
     **Series or profile** members overlay: the layout is whatever
@@ -1680,6 +1695,13 @@ class FieldSet:
     colour by source instead).
 
     **Time_depth** members stack: one panel per member, down the page.
+
+    **Section** members stack too, one row per member down the page: a transect
+    (``select={"transect": ...}``), or a box averaged along one horizontal axis
+    (``aggregate={"lon": "mean"}`` over a lon range, a *slab* -- see
+    :func:`ocean_skill.operators.slab_in_spec`). Each must have exactly depth and
+    the along axis left standing. A set that mixes sections with maps or lines is
+    refused; mixed-panel figures are not supported yet.
 
     **Map** (``field_facet``) members stack too, but side by side rather than
     down a page -- one map panel per member, each with its own colour scale and
@@ -1795,6 +1817,22 @@ class FieldSet:
         """Every member's own single ``time_depth`` item, one panel each."""
         return [f._time_depth_item() for f in self.fields]
 
+    def _section_items(self) -> list[dict[str, Any]]:
+        """Every member's own single ``section`` item, one row each.
+
+        Each member is checked with :meth:`Field._require_section_shape` first -- a
+        section figure has only depth and the along axis, so a member with a
+        further axis left standing (time most often) is refused by name rather than
+        handed to a renderer that cannot draw it -- and then contributes
+        :meth:`Field.as_item` plus its ``label``, which a stacked figure uses to
+        say which row is which.
+        """
+        items = []
+        for f in self.fields:
+            f._require_section_shape()
+            items.append({**f.as_item(), "label": f.label or f.source})
+        return items
+
     def _map_items(self) -> list[dict[str, Any]]:
         """Every member's own single map item, one panel each.
 
@@ -1829,8 +1867,11 @@ class FieldSet:
         ``"series"`` (a point over time), all ``"profile"`` (a point down depth,
         at one instant), all ``"time_depth"`` (depth against time, at one
         point -- drawn as a stacked column of panels rather than overlaid or
-        faceted lines), or all ``"field_facet"`` (a map, one panel per member,
-        each with its own colour scale -- see :meth:`_map_items`) -- for that to
+        faceted lines), all ``"section"`` (a vertical section -- a transect, or a
+        box averaged along one horizontal axis -- one row per member, stacked in
+        one figure; see :meth:`_section_items`), or all ``"field_facet"`` (a map,
+        one panel per member, each with its own colour scale -- see
+        :meth:`_map_items`) -- for that to
         mean anything. A set that mixes any of those has no single figure that
         is all of them, so this refuses rather than picking one arbitrarily.
 
@@ -1906,6 +1947,36 @@ class FieldSet:
                 family="time_depth", items=self._time_depth_items(), options=kwargs
             )
             return render(spec, renderer=renderer)
+        sections = [f for f in self.fields if f.family == "section"]
+        if sections and len(sections) < len(self.fields):
+            multi_source = len({f.source for f in self.fields}) > 1
+            detail = "; ".join(
+                (
+                    f"{f.source} {_short_variable_label(f.variable)}"
+                    if multi_source
+                    else _short_variable_label(f.variable)
+                )
+                + f": {f.family_reason}"
+                for f in self.fields
+            )
+            raise ValueError(
+                f"some fields draw as vertical sections (see .family) and others "
+                f"do not -- {detail}. A section is a depth-against-distance panel "
+                "with no overlay or facet composition with a map or a line, and "
+                "mixed-panel figures (sections beside maps, say) are not "
+                "supported yet, so plot each group separately with "
+                "osk.field(source, variable)."
+            )
+        if sections:
+            # Every member is a section: one row each, stacked, like a set of
+            # section comparisons. A lone member is drawn by its own Field.plot()
+            # -- the same single-panel path, with nothing to stack against.
+            if len(self.fields) == 1:
+                return self.fields[0].plot(renderer=renderer, **kwargs)
+            spec = PlotSpec(
+                family="section", items=self._section_items(), options=kwargs
+            )
+            return render(spec, renderer=renderer)
         maps = [f for f in self.fields if f.family == "field_facet"]
         if maps and len(maps) == len(self.fields):
             # Every member draws as a map -- one panel each, its own colour
@@ -1942,7 +2013,8 @@ class FieldSet:
                 "select= to one lon/lat position -- keeping time standing draws "
                 "a series, keeping depth standing with no time draws a profile "
                 "-- so every member draws the same way, or plot each one's "
-                "maps separately with osk.field(source, variable)."
+                "maps separately with osk.field(source, variable). Mixed-panel "
+                "figures (maps beside lines, say) are not supported yet."
             )
         family = self.fields[0].family
         spec = PlotSpec(family=family, items=self._items(), options=kwargs)

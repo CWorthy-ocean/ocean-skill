@@ -706,6 +706,27 @@ NO_VERTICAL_AXIS = "n/a"
 _MAX_ENUMERATED_LEVELS = 4
 
 
+def _is_fixed_depth_list(depth: Any) -> bool:
+    """Report whether ``depth`` is the explicit list of 2+ fixed depths a section needs.
+
+    A list of at least two entries, each a number (metres) or the ``"surface"``
+    sentinel. A scalar, a ``{"min", "max"}`` band, ``"column"`` or an absent entry
+    is not: the two lanes of a section comparison share no native vertical axis, so
+    the depth list is the section's whole y axis and there is nothing to default it
+    from. Shared by the transect and slab validations in
+    :meth:`Comparison._validate_section_request`.
+    """
+    return (
+        isinstance(depth, list | tuple)
+        and len(depth) >= 2
+        and all(
+            is_surface_request(d)
+            or (isinstance(d, int | float) and not isinstance(d, bool))
+            for d in depth
+        )
+    )
+
+
 def _numeric_span(values: list) -> str | None:
     """``[1, 2, 3, ..., 36] -> "1–36"``, or ``None`` if not a plain numeric run.
 
@@ -1938,6 +1959,91 @@ def _reindex_onto_literal_depths(
     return da
 
 
+def _slab_band(da, axis: str) -> tuple[float, float]:
+    """Return ``(lo, hi)`` of the horizontal axis a slab is averaged over.
+
+    ``axis`` is the axis that *survives* (``"lat"`` for a longitude mean), so the
+    band is the other one: read from ``attrs["region"]`` when a ``select`` box
+    drove the crop -- the box as asked, which is what lets two lanes of one
+    comparison, each cropped to the same box, agree on it exactly -- and from the
+    data's own extent (:func:`ocean_skill.align.bbox_of`) for a whole-domain slab.
+    """
+    from ocean_skill.align import bbox_of
+
+    region = da.attrs.get("region")
+    lon_min, lat_min, lon_max, lat_max = region if region is not None else bbox_of(da)
+    if axis == "lat":
+        return float(lon_min), float(lon_max)
+    return float(lat_min), float(lat_max)
+
+
+def _slab_to_section(da, axis: str, band: tuple[float, float]):
+    """Re-spell a slab -- a box averaged along one axis -- as a vertical section.
+
+    ``axis`` is the horizontal axis that survived the mean (``"lat"`` after a
+    longitude mean) and ``band`` the ``(lo, hi)`` range of the one that did not.
+    What comes out is the shape a ``transect`` produces
+    (:func:`ocean_skill.transect.grid_slice`): the surviving dimension renamed
+    :data:`~ocean_skill.align.ALONG_DIM`, 1-D ``lon(along)``/``lat(along)`` riding
+    on it with the averaged one held constant at the band's midpoint, and
+    ``along`` the cumulative great-circle distance in km
+    (:func:`ocean_skill.transect._attach_along_coord`, the one place that decides
+    what "along" means). Everything downstream that already knows a section --
+    :func:`ocean_skill.align.path_of`, ``_align_along_path``, the section plots --
+    then handles a slab with no special case of its own.
+
+    Two things say it was a slab rather than a path, both on ``along``'s attrs so
+    they survive a cache round trip: ``axis_coord`` (the coordinate -- ``"lat"``
+    or ``"lon"`` -- that should label the x axis, in degrees, instead of
+    kilometres), and ``band_axis``/``band`` (what was averaged, and over what
+    range, for a title to say "mean over 180-200E"). The surviving axis is sorted
+    ascending first, so a north-to-south grid still draws left to right.
+
+    Returned unchanged when there is nothing to make a section of: the surviving
+    horizontal dimension is not there, or no vertical axis stands beside it (a
+    slab of a 2-D field is just a line along the surviving axis, which whatever
+    drew it before still draws).
+    """
+    import numpy as np
+
+    from ocean_skill import operators
+    from ocean_skill.align import ALONG_DIM
+    from ocean_skill.transect import _attach_along_coord
+
+    hdim = operators.resolve_dim(da, "Y" if axis == "lat" else "X")
+    if hdim is None or hdim not in da.dims:
+        return da
+    others = [str(d) for d in da.dims if d != hdim]
+    zdim = operators.resolve_dim(da, "Z")
+    if not any(d == zdim or _is_vertical_dim(da, d) for d in others):
+        return da
+
+    values = np.asarray(da[hdim].values, dtype="float64")
+    if values.size > 1 and values[0] > values[-1]:
+        da = da.isel({hdim: slice(None, None, -1)})
+        values = values[::-1]
+    stale = [
+        str(n)
+        for n in da.coords
+        if n in (operators._POINT_LON_KEYS | operators._POINT_LAT_KEYS)
+        and n != hdim
+    ]
+    da = da.drop_vars(stale).rename({hdim: ALONG_DIM})
+    # `rename` turned the surviving coordinate into `along` itself; the real
+    # lon/lat pair is rebuilt from the values captured above.
+    da = da.drop_vars(ALONG_DIM, errors="ignore")
+    constant = np.full(values.shape, 0.5 * (band[0] + band[1]))
+    lon, lat = (constant, values) if axis == "lat" else (values, constant)
+    da = da.assign_coords({"lon": (ALONG_DIM, lon), "lat": (ALONG_DIM, lat)})
+    da = _attach_along_coord(da, "lon", "lat", path_method="slab")
+    da[ALONG_DIM].attrs.update(
+        axis_coord=axis,
+        band_axis="lon" if axis == "lat" else "lat",
+        band=[float(band[0]), float(band[1])],
+    )
+    return da
+
+
 def _prepare(
     obj,
     meta: dict[str, Any],
@@ -2136,9 +2242,38 @@ def _prepare(
     # *creates* (groupby renames its dim to the grouping key) rather than one already
     # standing -- see :func:`_select_horizontal_then_aggregate`, which gives such a
     # key a second try once the aggregate has run.
+    #
+    # A slab -- a box averaged along exactly one horizontal axis, leaving the other
+    # standing (see ocean_skill.operators.slab_in_spec) -- is held back the same way
+    # the joint mean is, and for the same reason: on a model grid the averaged axis
+    # has to be averaged at *fixed depths*, after to_depth has interpolated every
+    # column onto them, not across native s-levels whose depths differ column to
+    # column. It runs just after the vertical aggregate below, then
+    # _slab_to_section re-spells what is left as a section. A transect is a
+    # different cut through space, so it is never also a slab.
     horizontal = {k: v for k, v in select.items() if k not in _ANY_VERTICAL_KEYS}
-    early_agg = _without_horizontal_mean(_without_vertical(agg))
+    slab_hit = None if is_section else operators.slab_in_spec(select, agg)
+    slab_mean = {slab_hit[1]: agg[slab_hit[1]]} if slab_hit is not None else {}
+    early_agg = {
+        k: v
+        for k, v in _without_horizontal_mean(_without_vertical(agg)).items()
+        if k not in slab_mean
+    }
     horizontal_mean = _horizontal_mean_part(_without_vertical(agg))
+    if slab_hit is not None and operators._curvilinear_coords(da) is not None:
+        _horizontal_keys = operators._POINT_LON_KEYS | operators._POINT_LAT_KEYS
+        if (
+            operators.box_in_spec(horizontal) is None
+            and any(k in horizontal for k in _horizontal_keys)
+        ):
+            raise ValueError(
+                f"{source!r}: select={horizontal!r} narrows only one of longitude/"
+                "latitude, but this source's grid is curvilinear -- a lone range "
+                "on a 2-D coordinate has no axis to narrow along, so it would "
+                "silently match nothing. Give both as ranges (a box), e.g. "
+                "select={'lon': {'min': ..., 'max': ...}, 'lat': {'min': ..., "
+                "'max': ...}}, so the slab is averaged over the band you meant."
+            )
     da = _select_horizontal_then_aggregate(da, horizontal, early_agg, source)
 
     _tsp_tdim = operators.resolve_dim(da, "T")
@@ -2236,6 +2371,15 @@ def _prepare(
             # guards against da naming one of its own coordinates (a promoted
             # grid constant that -- unlike h/mask_rho above -- does carry a
             # vertical axis, e.g. Cs_r/sigma_r).
+            if slab_hit is not None and (depth is None or column):
+                raise ValueError(
+                    f"{source!r}: a slab (a box averaged along "
+                    f"{'longitude' if slab_hit[0] == 'lat' else 'latitude'}) needs "
+                    "fixed depths to average at -- a model's native s-levels sit at "
+                    "a different depth in every column, so averaging them across "
+                    "columns would mix depths. Give a depth list, e.g. "
+                    "select={'depth': [0, 50, 100, 200, 500]}."
+                )
             sub = _as_named_dataset(da, name)
             # A DataArray only carries coordinates sharing its dimensions, so the
             # interface-grid variables (on s_w, which a tracer has no part of) are
@@ -2530,6 +2674,14 @@ def _prepare(
     # what select= narrowed it to, whatever vertical shape that field is in.
     if horizontal_mean:
         da = operators.aggregate(da, horizontal_mean)
+    if slab_mean:
+        # The band the averaged axis spanned, read before the mean removes the
+        # coordinate it would come from: the box as asked (attrs["region"], the
+        # same source _horizontal_mean uses for its midpoint, so two lanes sharing
+        # one select land on exactly the same constant) or the data's own extent.
+        band = _slab_band(da, slab_hit[0])
+        da = operators.aggregate(da, slab_mean)
+        da = _slab_to_section(da, slab_hit[0], band)
     # A station carries its instrument depth as a scalar coordinate rather than an axis
     # to select from (see ocean_skill.tabular.depth_of), so the depth actually compared
     # is read off the lane itself. Reported the same way as an observational level's:
@@ -3607,6 +3759,10 @@ class Comparison:
         has already been read and reduced. A no-op for any comparison whose
         select names no transect at all.
         """
+        slab_axes = self._slab_axes()
+        if slab_axes != (None, None):
+            self._validate_slab_request(*slab_axes)
+            return
         has_transect = (
             (
                 "transect" in (self.select.get("test") or {})
@@ -3672,16 +3828,7 @@ class Comparison:
             )
 
         depth = next((self.select[k] for k in _VERTICAL_KEYS if k in self.select), None)
-        valid_list = (
-            isinstance(depth, list | tuple)
-            and len(depth) >= 2
-            and all(
-                is_surface_request(d)
-                or (isinstance(d, int | float) and not isinstance(d, bool))
-                for d in depth
-            )
-        )
-        if not valid_list:
+        if not _is_fixed_depth_list(depth):
             raise ValueError(
                 f"select={{'transect': ..., 'depth': {depth!r}}}: a section "
                 "comparison needs an explicit list of at least 2 fixed depths "
@@ -3697,6 +3844,47 @@ class Comparison:
                     "...}} would collapse a section's own vertical axis -- "
                     "drop the vertical entry from aggregate= for a section "
                     "comparison."
+                )
+
+    def _validate_slab_request(
+        self, test_axis: str | None, reference_axis: str | None
+    ) -> None:
+        """Refuse the ways a slab comparison (a box averaged along one axis) cannot run.
+
+        A slab -- see :func:`ocean_skill.operators.slab_in_spec` -- becomes a vertical
+        section, so it inherits a section comparison's preconditions: both lanes must
+        be a slab on the same surviving axis (a slab against a map, or a latitude
+        slab against a longitude one, share nothing to difference), ``over=`` is not
+        built for a section, and the two lanes' native verticals share no axis, so
+        every lane needs an explicit list of at least 2 fixed depths. Called from
+        :meth:`_validate_section_request`, once, at construction.
+        """
+        if test_axis != reference_axis:
+            raise ValueError(
+                "the test and reference lanes do not ask for the same slab: the "
+                f"test's select/aggregate leaves {test_axis or 'a map'!r} standing "
+                f"and the reference's leaves {reference_axis or 'a map'!r}. A "
+                "section comparison needs both lanes averaged along the same "
+                "horizontal axis, e.g. aggregate={'lon': 'mean'} on both."
+            )
+        if self.over is not None:
+            raise ValueError(
+                "over= scores a pair cell by cell along one further axis, but "
+                "a vertical section already stands on two axes (depth and "
+                "along-path distance) -- scoring a third axis per section "
+                "cell is a follow-up, not yet built. Drop over= for a "
+                "slab comparison."
+            )
+        for role in ("test", "reference"):
+            select = select_for(self.select, role)
+            depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
+            if not _is_fixed_depth_list(depth):
+                raise ValueError(
+                    f"select={{'depth': {depth!r}}}: a slab comparison (a box "
+                    f"averaged along one axis, {self.aggregate!r}) draws as a depth "
+                    "section and needs an explicit list of at least 2 fixed depths "
+                    "-- the two lanes' native verticals share no axis, so there is "
+                    "no default to guess: select={..., 'depth': [50, 200, ...]}."
                 )
 
     def _point_select_implies_time(self) -> bool:
@@ -3788,6 +3976,36 @@ class Comparison:
         from ocean_skill.transect import as_transect
 
         return as_transect(self.select["transect"])
+
+    def _slab_axes(self) -> tuple[str | None, str | None]:
+        """``(test_axis, reference_axis)``: the horizontal axis each lane's slab leaves.
+
+        :func:`ocean_skill.operators.slab_axis` read per lane, so a pair-spec select
+        or aggregate (the two lanes asking for different things) is judged on what
+        each lane actually receives. ``(None, None)`` for an ordinary comparison.
+        """
+        from ocean_skill.operators import slab_axis
+
+        return tuple(  # type: ignore[return-value]
+            slab_axis(
+                select_for(self.select, role), aggregate_for(self.aggregate, role)
+            )
+            for role in ("test", "reference")
+        )
+
+    def _slab_route(self) -> str | None:
+        """Return the surviving axis when both lanes are one slab, else ``None``.
+
+        A slab is a box averaged along one horizontal axis -- see
+        :func:`ocean_skill.operators.slab_in_spec`. Both lanes must be one, on the
+        *same* axis: a slab against a map has no shared shape to difference, and
+        :meth:`_validate_section_request` refuses that mix at construction, so by
+        the time :meth:`align` asks, a non-``None`` answer here is consistent.
+        Used by :meth:`align` to keep the vertical axis standing on both lanes and
+        by :attr:`_cache_key` to mark a slab comparison's cache entry.
+        """
+        test_axis, reference_axis = self._slab_axes()
+        return test_axis if test_axis == reference_axis else None
 
     def _resolved_path(
         self, t, troute: dict[str, Any]
@@ -4272,6 +4490,13 @@ class Comparison:
             # naming the identical points directly would share a key despite
             # not being guaranteed to mean the same thing forever.
             extra["_transect_sample"] = True
+        if self._slab_route() is not None:
+            # A slab comparison's lanes are reduced to sections (see
+            # _slab_to_section) -- a shape the same select and aggregate never
+            # produced before slabs were sections, so no entry from before then
+            # can match; marked anyway, like the routes above, so the key says
+            # what the entry is rather than leaving it to be inferred.
+            extra["_slab_section"] = True
         # Not gated on `over` the way the block above is -- _reference_narrowing()
         # applies to a profile reference too, which keeps over=None. Carried as the
         # actual values rather than a boolean flag (contrast `_point_sample`, which
@@ -4451,7 +4676,19 @@ class Comparison:
         # idiom _transect_route's extra_select already relies on, just above).
         # A section keeps its native levels standing instead, matching what an
         # unset depth already means for a transect in _prepare.
-        if not _names_vertical(select) and "transect" not in select:
+        #
+        # A slab (a box averaged along one horizontal axis, see
+        # ocean_skill.operators.slab_in_spec) is a section too: its vertical axis
+        # stays standing, so no surface default is injected for it either. The
+        # constructor already requires a depth list for one (see
+        # _validate_section_request), so this is the belt to that pair of braces.
+        from ocean_skill.operators import slab_axis
+
+        if (
+            not _names_vertical(select)
+            and "transect" not in select
+            and slab_axis(select, aggregate_for(self.aggregate, role)) is None
+        ):
             select = {**select, "depth": SURFACE}
         return prepare_source(
             source,
@@ -4980,7 +5217,16 @@ class Comparison:
             troute = self._transect_route()
             from ocean_skill.align import SECTION_VERTICAL_DIMS
 
-            keep = SECTION_VERTICAL_DIMS if troute is not None else ()
+            # A slab is a section whose path is a band rather than a line, so it
+            # keeps the vertical axis standing just as a transect does. Unlike a
+            # transect the reference is not sampled at the test lane's points: both
+            # lanes are reduced the same way from the same select, each to a
+            # (vertical, along) lane over the same band, and _align_along_path
+            # bins the finer onto the coarser -- so `troute` stays None and no
+            # path-derived bbox is built (a slab's collapsed axis is a constant,
+            # which as a bbox would crop the reference to a zero-width strip).
+            slab = self._slab_route()
+            keep = SECTION_VERTICAL_DIMS if troute is not None or slab else ()
             try:
                 t, _ = self._prepare_lane(
                     self.test_name,
@@ -5578,7 +5824,8 @@ class Comparison:
         if self.is_section:
             return (
                 "drawn as test | reference | difference sections: the select cuts "
-                "a transect, so the vertical and along-path axes are kept"
+                "a transect (or a box is averaged along one horizontal axis), so "
+                "the vertical and along-path axes are kept"
             )
         if self.over is not None:
             return f"drawn as metric maps: {self.over_reason}"
@@ -6810,21 +7057,14 @@ class ComparisonSet:
             kwargs["domain"] = (
                 outline if outline is not None else _domain_of(first.test_name)
             )
-        if family == "section_row" and len(self.comparisons) > 1:
-            # field_row's own >1 case stacks as field_grid below; a section has no
-            # such stacked family yet (section_grid is a follow-up), so this says so
-            # rather than silently rendering N comparisons as if they were one.
-            raise ValueError(
-                f"{len(self.comparisons)} section comparisons in one figure would "
-                "need a section_grid family, which does not exist yet -- plot "
-                "each comparison separately."
-            )
         # A set of more than one time_depth comparison stacks as a grid (one
         # test | reference | difference row per station), the same way field_row
         # stacks as field_grid -- the render family stays "time_depth_row" and the
         # renderer dispatches on the item count, mirroring the single-source
-        # time_depth family's own single/grid switch. (section_row above still has
-        # no such stacked family, hence its refusal.)
+        # time_depth family's own single/grid switch. A set of more than one section
+        # comparison stacks the same way -- the render family stays "section_row" and
+        # the renderer branches on the item count, one test | reference | difference
+        # row per comparison.
         # field_row is one comparison's family; a set of *more than one* stacks as a
         # grid. A lone comparison keeps field_row and its single-row title.
         family = "field_grid" if family == "field_row" and not single_row else family
@@ -8931,6 +9171,19 @@ def compare(
     follow-up, not yet built — and so is ``over=`` alongside a transect, a section
     already standing on two axes with no third one to score.
 
+    A box **averaged along one horizontal axis** is a vertical section too, a
+    *slab*: ``select={"lon": {"min": 180, "max": 200}, "lat": {"min": -30, "max":
+    30}, "depth": [50, 200, ...]}`` with ``aggregate={"lon": "mean"}`` leaves
+    latitude and depth standing, drawn as depth against latitude (and
+    ``aggregate={"lat": "mean"}`` the same against longitude). Both lanes are
+    reduced the same way from the same box and paired column by column on the
+    surviving axis, the finer binned onto the coarser. It follows a transect's
+    rules for the same reasons -- the depth list lives in ``select``, not
+    ``depths=``; ``over=`` is refused; both lanes must be a slab on the same axis --
+    and a model on native s-levels is averaged at those fixed depths, never across
+    levels whose depths differ by column. See
+    :func:`ocean_skill.operators.slab_in_spec`.
+
     ``times=`` is the month-by-month analogue of ``depths=``: instead of one map,
     fan out one comparison per time bin, each reduced on its own. A dict names how
     to *derive* the bins from the **test** source's own time axis, in the same
@@ -8990,6 +9243,7 @@ def compare(
     from ocean_skill import _stacklevel
     from ocean_skill.align import NoValidData
     from ocean_skill.catalog import resolve
+    from ocean_skill.operators import slab_in_spec
 
     # Validated (and, for a pair, normalized to plain per-side dicts) once up front,
     # like `variables` below -- otherwise a one-sided {"test": ...} select/aggregate
@@ -9068,6 +9322,50 @@ def compare(
                 "along-path distance) -- scoring a third axis per section "
                 "cell is a follow-up, not yet built. Drop over= for a "
                 "section comparison."
+            )
+
+    # A slab -- a box averaged along one horizontal axis, e.g. aggregate={"lon":
+    # "mean"} over a lon range -- draws as a section too (see
+    # ocean_skill.operators.slab_in_spec), so it wants the same treatment as a
+    # transect and for the same reasons: no ("surface",) sentinel, no fan across
+    # depths (the depth list is its whole y axis), no per-cell over=. Read per lane,
+    # since a pair-spec select/aggregate may give the two sides different recipes.
+    slab_lanes = {
+        role: slab_in_spec(select_for(select, role), aggregate_for(aggregate, role))
+        for role in ("test", "reference")
+    }
+    if not has_transect and any(slab_lanes.values()):
+        axes = {hit[0] if hit else None for hit in slab_lanes.values()}
+        if len(axes) > 1:
+            raise ValueError(
+                "the test and reference lanes do not ask for the same slab: "
+                f"aggregate={aggregate!r} leaves "
+                f"{ {r: (h[0] if h else 'a map') for r, h in slab_lanes.items()} } "
+                "standing. A section comparison needs both lanes averaged along "
+                "the same horizontal axis."
+            )
+        if depths_was_explicit:
+            raise ValueError(
+                "compare() got both depths= and a slab aggregate "
+                f"({aggregate!r}, a box averaged along one horizontal axis, drawn "
+                "as a section) -- a section's depth list belongs in the select: "
+                "select={..., 'depth': [50, 200, ...]}."
+            )
+        if not explicit_vertical_select:
+            raise ValueError(
+                f"aggregate={aggregate!r} averages a box along one horizontal "
+                "axis, which draws as a depth section -- it needs an explicit "
+                "depth list alongside it. The two lanes' native verticals share no "
+                "axis, so there is no default to guess: select={..., 'depth': "
+                "[50, 200, ...]}."
+            )
+        if over is not None:
+            raise ValueError(
+                "over= scores a pair cell by cell along one further axis, but "
+                "a vertical section already stands on two axes (depth and "
+                "along-path distance) -- scoring a third axis per section "
+                "cell is a follow-up, not yet built. Drop over= for a "
+                "slab comparison."
             )
 
     # select={"transect": {"from": "reference"}} asks the inverse of an

@@ -1058,6 +1058,8 @@ def _section(
     colorbar_label_clipped: bool = False,
     vmin: float | None = None,
     vmax: float | None = None,
+    clim: tuple[float, float] | None = None,
+    data_range: tuple[float, float] | None = None,
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -1074,7 +1076,9 @@ def _section(
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``section`` docstring. ``vmin``/``vmax``
     pin an exact colour range instead, overriding ``robust`` wherever either end is
-    given.
+    given. ``clim``/``data_range``, if given, are a colour range and the extent of the
+    data it answers for, computed across several panels by a caller
+    (:func:`_section_grid`'s shared scale) -- they replace this panel's own.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -1094,16 +1098,19 @@ def _section(
         )
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
-    lo, hi = _limits(field, robust=robust, vmin=vmin, vmax=vmax)
-    if log:
-        lo = max(lo, 1e-6)
+    if clim is None:
+        lo, hi = _limits(field, robust=robust, vmin=vmin, vmax=vmax)
+        if log:
+            lo = max(lo, 1e-6)
+        clim = (lo, hi)
     raster = _should_rasterize(field, rasterize)
 
     return _quadmesh(
         field,
         title=title,
         cmap=seq,
-        clim=(lo, hi),
+        clim=clim,
+        data_range=data_range,
         units=units,
         geo=False,
         log=log,
@@ -1215,6 +1222,125 @@ def _cross(
     if title:
         layout = layout.opts(title=str(title))
     return layout
+
+
+def _section_grid(
+    items: list[dict[str, Any]],
+    title: str | None = None,
+    rows: str | None = None,
+    cols: str | None = None,
+    ncols: int | None = None,
+    nrows: int | None = None,
+    shared_limits: bool | str | None = None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    titles=None,
+    **_,
+):
+    """Several interactive vertical sections -- one panel per item -- in one layout.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.section_grid` -- see its docstring for
+    what it mirrors. The grid's shape (a single column by default, ``ncols=``/
+    ``nrows=`` to wrap, ``rows=``/``cols=`` to facet on ``variable``/``source``), its
+    titles and its shared-identity suptitle all come from the very same
+    :func:`~ocean_skill.plot.matplotlib_renderer.section_grid_layout`, and the colour
+    scale groups from :func:`~ocean_skill.plot.matplotlib_renderer
+    .section_limit_groups` (``shared_limits=None``: one common scale when every item
+    is the same variable in the same units, a scale per panel otherwise), so the two
+    renderers cannot arrange or title the same panels differently. Every panel draws
+    through :func:`_section` itself, so the axis conventions (positive-down depth,
+    inverted y, grey off-domain background) are the single panel's. A blank cell of a
+    faceted grid draws as ``hv.Empty()``.
+
+    Bokeh attaches a colorbar to each plot, so a shared scale here is one *range*
+    imposed on every panel's own bar rather than the single bar the static renderer
+    draws -- the panels read identically, the bars just repeat.
+
+    **No axis is linked between panels** (``shared_axes=False``): what runs along x is
+    each panel's own -- kilometres along a transect, degrees along a meridional slab --
+    so panning one has no business moving another.
+
+    ``vmin``/``vmax`` pin an exact range for every panel/group, overriding ``robust``.
+    ``titles=`` overrides each panel's title by hand (one per item, or one per grid
+    cell faceted); see the static renderer's ``section_grid``.
+    """
+    hv = _extension()
+
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot.matplotlib_renderer import (
+        _limits,
+        section_grid_layout,
+        section_limit_groups,
+    )
+    from ocean_skill.plot.section import prepare_section
+
+    if not items:
+        raise ValueError("section_grid needs at least one section, got none")
+    prepared = [prepare_section(item["field"]) for item in items]
+    prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
+    _grid_nrows, grid_ncols, cell_items, drawn, panel_titles, auto_suptitle = (
+        section_grid_layout(
+            items,
+            [g for _, g in prepared],
+            rows=rows,
+            cols=cols,
+            ncols=ncols,
+            nrows=nrows,
+            titles=titles,
+        )
+    )
+    if title is None:
+        title = auto_suptitle
+
+    clims: dict[int, tuple[float, float]] = {}
+    reaches: dict[int, tuple[float, float]] = {}
+    groups = section_limit_groups([item for _, item in drawn], shared_limits)
+    if groups is not None:
+        for group in groups:
+            members = [drawn[g] for g in group]
+            first = members[0][1]
+            log = is_log(first.get("standard_name"), statistic_of(first))
+            fields = [prepared_of[id(item)][0] for _, item in members]
+            lo, hi = _limits(*fields, robust=robust, vmin=vmin, vmax=vmax)
+            if log:
+                lo = max(lo, 1e-6)
+            reach = _data_range(*fields, log=log)
+            for i, _ in members:
+                clims[i] = (lo, hi)
+                reaches[i] = reach
+
+    plots: list[Any] = []
+    for i, item in enumerate(cell_items):
+        if item is None:
+            plots.append(hv.Empty())
+            continue
+        plots.append(
+            _section(
+                item,
+                title=panel_titles[i],
+                font_scale=font_scale,
+                size=size,
+                zoom=zoom,
+                hover=hover,
+                rasterize=rasterize,
+                robust=robust,
+                colorbar_label_clipped=colorbar_label_clipped,
+                vmin=vmin,
+                vmax=vmax,
+                clim=clims.get(i),
+                data_range=reaches.get(i),
+            )
+        )
+    out = hv.Layout(plots).cols(grid_ncols).opts(hv.opts.Layout(shared_axes=False))
+    return out.opts(title=title or "")
 
 
 def _time_depth(
@@ -1855,6 +1981,7 @@ def _section_row(
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
+    row_label: str | None = None,
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
@@ -1862,6 +1989,11 @@ def _section_row(
     rasterize: bool | str = "auto",
     robust: bool | float = False,
     colorbar_label_clipped: bool = False,
+    seq_clim: tuple[float, float] | None = None,
+    div_clim: tuple[float, float] | None = None,
+    seq_range: tuple[float, float] | None = None,
+    div_range: tuple[float, float] | None = None,
+    x_alias: str | None = None,
     titles=None,
     **_,
 ):
@@ -1874,16 +2006,27 @@ def _section_row(
     (``geo=False``, a section's own axis names/aspect/inverted-y/grey background)
     rather than the geographic one :func:`_field_row` uses.
 
-    A comparison section is never stacked into a grid (see
-    :class:`~ocean_skill.comparison.ComparisonSet`'s own refusal on more than one
-    ``section_row``), so unlike :func:`_field_row` there is no ``row_label`` or
-    ``domain`` to thread through here. The title default is likewise owned inside
+    A lone section row has no ``row_label`` (bokeh has no rotated left-edge text; a
+    stacked grid -- :func:`_section_row_grid` -- folds it into the test panel's title
+    instead, the convention :func:`_field_row` and :func:`_time_depth_row` use) and no
+    ``domain`` (a section has no map to outline). The title default is owned inside
     this function rather than a grid caller passing one in: it needs the path's own
     endpoints (:attr:`~ocean_skill.plot.section.SectionGeometry.path_note`), which
     only :func:`~ocean_skill.plot.section.prepare_section_row` can supply.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits` — see the static renderer's ``section_row`` docstring.
+    ._limits` — see the static renderer's ``section_row`` docstring, and is ignored
+    once ``seq_clim`` is given. ``seq_clim``/``div_clim``, if given, override this
+    row's own colour limits -- how :func:`_section_row_grid`'s ``shared_limits=True``
+    makes every row share one scale -- and ``seq_range``/``div_range`` are the
+    matching extents of the data those limits answer for, which the clipped-end
+    marks on the colour bars are tested against (see :func:`_quadmesh`).
+
+    ``x_alias``, if given, renames this row's along-path coordinate (keeping the
+    original name as its label) so that bokeh, which links panels' axes by dimension
+    *name*, does not tie this row's x range to a row whose x runs over something else
+    -- kilometres along a transect against degrees along a meridian. See
+    :func:`_section_row_grid`.
 
     ``titles=`` overrides the three panel titles by hand -- test, reference,
     difference, in that order -- with ``None`` at a position keeping that
@@ -1898,6 +2041,19 @@ def _section_row(
     hv = _extension()
     factor = _canvas_factor(size, zoom)
     values, geometry = prepare_section_row(item["aligned"])
+    x_name = geometry.x_name
+    if x_alias is not None:
+        # a fresh coordinate carrying the label (never an in-place attrs edit, which
+        # could reach back into the caller's own along-path coordinate)
+        values = {
+            lane: (
+                renamed := da.rename({x_name: x_alias})
+            ).assign_coords(
+                {x_alias: renamed[x_alias].assign_attrs(long_name=x_name)}
+            )
+            for lane, da in values.items()
+        }
+        x_name = x_alias
     t, r, d = values["test"], values["reference"], values["difference"]
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
@@ -1908,11 +2064,18 @@ def _section_row(
         )
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
-    vmin, vmax = _limits(t, r, robust=robust)
-    if log:
-        vmin = max(vmin, 1e-6)
-    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
-    scale_range = _data_range(t, r, log=log)  # the one scale both bars answer for
+    if seq_clim is None:
+        vmin, vmax = _limits(t, r, robust=robust)
+        if log:
+            vmin = max(vmin, 1e-6)
+        seq_clim = (vmin, vmax)
+    if div_clim is None:
+        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        div_clim = (-dmax, dmax)
+    # the one scale both bars answer for: the row's own data unless a grid's shared
+    # scale says more
+    if seq_range is None:
+        seq_range = _data_range(t, r, log=log)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -1920,11 +2083,14 @@ def _section_row(
     summary = _metrics_summary(item.get("metrics"), metric_keys)
     if summary:
         diff_title = f"difference ({summary})"
-    tl, rl, diff_title = _titles.resolve_titles([str(tl), str(rl), diff_title], titles)
+    test_title = f"{row_label} — {tl}" if row_label else str(tl)
+    tl, rl, diff_title = _titles.resolve_titles(
+        [test_title, str(rl), diff_title], titles
+    )
 
     section_opts = dict(
         geo=False,
-        x=geometry.x_name,
+        x=x_name,
         y=geometry.y_name,
         aspect=SECTION_ASPECT,
         invert_y=True,
@@ -1937,21 +2103,22 @@ def _section_row(
     )
     panels = [
         _quadmesh(
-            t, title=tl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
-            data_range=scale_range, **section_opts,
+            t, title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
+            data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
-            r, title=rl, cmap=seq, clim=(vmin, vmax), units=units, log=log,
-            data_range=scale_range, **section_opts,
+            r, title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
+            data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
             d,
             title=diff_title,
             cmap=div,
-            clim=(-dmax, dmax),
+            clim=div_clim,
             units=f"test − reference {units}",
+            data_range=div_range,
             **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
@@ -1961,6 +2128,166 @@ def _section_row(
     if title:
         row = row.opts(title=str(title))
     return row
+
+
+def _section_row_grid(
+    items,
+    labels=("test", "reference"),
+    shared_axes: bool = True,
+    metric_keys=DEFAULT_METRIC_KEYS,
+    title: str | None = None,
+    shared_limits: bool = False,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    robust: bool | float = False,
+    colorbar_label_clipped: bool = False,
+    titles=None,
+    **_,
+):
+    """One interactive ``section_row`` per comparison, stacked.
+
+    The interactive twin of
+    :func:`ocean_skill.plot.matplotlib_renderer.section_row_grid`, built the way
+    :func:`_time_depth_row_grid` is: a ``ComparisonSet`` of several section
+    comparisons stacks here, one linked ``test | reference | difference`` row each
+    via :func:`_section_row`, laid out ``.cols(3)``, the row label folded into the
+    test panel's title (bokeh has no rotated left-edge text).
+
+    Each row is titled from *its own* ``labels``, the top-level ``labels`` being only
+    the fallback. ``shared_limits=True`` computes one shared colour scale (a
+    sequential range from every row's test+reference, a diverging range from every
+    row's difference) instead of each row's own, warning once if the rows'
+    ``standard_name``s differ -- the static renderer's convention.
+
+    Where rows run is named as the static renderer names it
+    (:func:`~ocean_skill.plot.matplotlib_renderer.section_row_grid_title`): one path
+    shared by every row joins the overall title, differing paths ride on each row's
+    own label instead -- ``Feb (30.0°N, 95.0°W → 32.0°N, 93.0°W) — roms``.
+
+    **Rows do not share an x axis** unless they truly share an x. Bokeh links panels
+    by dimension *name*, so rows whose along-path quantity differs (kilometres along a
+    transect, degrees of latitude along a meridian) or merely differs in extent are
+    given distinct x names (:func:`_section_row`'s ``x_alias``) and stay unlinked from
+    each other, while the three panels of one row remain linked. Depth, which every
+    row agrees on, stays linked across rows when ``shared_axes=True``.
+
+    ``titles=`` overrides every row's three panel titles by hand -- one flat,
+    row-major list, ``3 * n`` entries; ``None`` keeps a panel's own title.
+    """
+    from ocean_skill.colormaps import is_log
+    from ocean_skill.plot import _titles
+    from ocean_skill.plot.matplotlib_renderer import (
+        _limits,
+        section_row_grid_title,
+    )
+    from ocean_skill.plot.section import prepare_section_row
+
+    hv = _extension()
+    prepared = [prepare_section_row(it["aligned"]) for it in items]
+    auto_title, paths_differ = section_row_grid_title(
+        items, [geometry for _, geometry in prepared]
+    )
+    if title is None:
+        title = auto_title
+    row_labels = [it.get("labels") or labels for it in items]
+    row_prefixes = [
+        it.get("row_label")
+        if not paths_differ or not geometry.path_note
+        else (
+            f"{it['row_label']} ({geometry.path_note})"
+            if it.get("row_label")
+            else geometry.path_note
+        )
+        for it, (_, geometry) in zip(items, prepared, strict=True)
+    ]
+
+    def _row_auto_titles(it, prefix, tl, rl):
+        test_title = f"{prefix} — {tl}" if prefix else str(tl)
+        summary = _metrics_summary(it.get("metrics"), metric_keys)
+        diff_title = f"difference ({summary})" if summary else "difference"
+        return test_title, str(rl), diff_title
+
+    auto_titles = [
+        t
+        for it, prefix, (tl, rl) in zip(items, row_prefixes, row_labels, strict=True)
+        for t in _row_auto_titles(it, prefix, tl, rl)
+    ]
+    resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    # Rows are linked by dimension name, so give rows whose x genuinely differs their
+    # own name (rows with an identical x name *and* extent can share one).
+    signatures = []
+    for values, geometry in prepared:
+        x = np.asarray(values["test"][geometry.x_name], dtype="float64")
+        signatures.append(
+            (geometry.x_name, float(np.nanmin(x)), float(np.nanmax(x)))
+        )
+    distinct = list(dict.fromkeys(signatures))
+    x_aliases = [
+        f"{sig[0]}_{distinct.index(sig)}" if len(distinct) > 1 else None
+        for sig in signatures
+    ]
+
+    shared_seq_clim = shared_div_clim = None
+    shared_seq_range = shared_div_range = None
+    if shared_limits:
+        import warnings
+
+        names = {it.get("standard_name") for it in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but rows use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every row.",
+                stacklevel=2,
+            )
+        all_t = [values["test"] for values, _ in prepared]
+        all_r = [values["reference"] for values, _ in prepared]
+        all_d = [values["difference"] for values, _ in prepared]
+        log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
+        vmin, vmax = _limits(*all_t, *all_r, robust=robust)
+        if log:
+            vmin = max(vmin, 1e-6)
+        shared_seq_clim = (vmin, vmax)
+        all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
+        dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
+        shared_div_clim = (-dmax, dmax)
+        shared_seq_range = _data_range(*all_t, *all_r, log=log)
+        shared_div_range = _data_range(*all_d)
+
+    rows = [
+        _section_row(
+            it,
+            labels=row_labels[i],
+            shared_axes=shared_axes,
+            metric_keys=metric_keys,
+            row_label=row_prefixes[i],
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            hover=hover,
+            rasterize=rasterize,
+            robust=robust,
+            colorbar_label_clipped=colorbar_label_clipped,
+            seq_clim=shared_seq_clim,
+            div_clim=shared_div_clim,
+            seq_range=shared_seq_range,
+            div_range=shared_div_range,
+            x_alias=x_aliases[i],
+            titles=resolved_titles[i * 3 : i * 3 + 3],
+        )
+        for i, it in enumerate(items)
+    ]
+    layout = rows[0]
+    for extra in rows[1:]:
+        layout = layout + extra
+    layout = layout.cols(3).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
 
 
 def _time_depth_row(
@@ -5640,6 +5967,8 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
             opts.pop("domain", None)
+        if len(spec.items) > 1:
+            return _section_grid(spec.items, **opts)
         return _section(spec.single, **opts)
     if family == "section_row":
         if "domain" in opts:
@@ -5649,6 +5978,8 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
             opts.pop("domain", None)
+        if len(spec.items) > 1:
+            return _section_row_grid(spec.items, **opts)
         return _section_row(spec.single, **opts)
     if family == "cross":
         if "domain" in opts:
