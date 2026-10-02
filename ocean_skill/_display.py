@@ -84,6 +84,11 @@ class Description(Text):
     """The catalog's source names (``kind == "catalog"``), or this one source's own
     name as a single-element tuple (``kind == "source"``)."""
 
+    shadowed: dict[str, Path]
+    """``{entry name: winning file}`` for this catalog's entries that a
+    differently-named catalog file also defines and wins (``kind == "catalog"``);
+    empty when nothing is shadowed, and always empty for ``kind == "source"``."""
+
     def __new__(
         cls,
         text: str,
@@ -96,6 +101,7 @@ class Description(Text):
         catalog_paths: tuple[Path, ...],
         metadata: dict[str, Any],
         sources: tuple[str, ...],
+        shadowed: dict[str, Path],
     ) -> Self:
         self = super().__new__(cls, text)
         self.kind = kind
@@ -105,4 +111,5 @@ class Description(Text):
         self.catalog_paths = catalog_paths
         self.metadata = metadata
         self.sources = sources
+        self.shadowed = shadowed
         return self

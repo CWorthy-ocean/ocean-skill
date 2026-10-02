@@ -1320,6 +1320,87 @@ def test_describe_catalog_lists_every_file_it_spans(isolated_catalogs, tmp_path)
     assert text.metadata["title"] == "example catalog v2"
 
 
+def _write_entries(path, names):
+    """Write an intake v2 catalog at ``path`` with one entry per name."""
+    import intake
+    from intake.readers import datatypes, readers
+
+    cat = intake.entry.Catalog(metadata={"title": path.stem})
+    for entry in names:
+        reader = readers.XArrayDatasetReader(
+            datatypes.HDF5(url=str(path.parent / f"{entry}.nc"))  # never read
+        )
+        reader.metadata.update(
+            {"featureType": "grid", "variables": ["sea_water_temperature"]}
+        )
+        cat[entry] = reader
+        cat.aliases[entry] = entry
+    cat.to_yaml_file(str(path))
+
+
+def test_describe_catalog_reports_entries_shadowed_by_another_file(isolated_catalogs):
+    """``zzz.yaml`` sorts after ``example.yaml`` in the same dir, so it wins ``bar``.
+
+    ``describe("example")`` then lists only ``foo`` -- it has to say why ``bar``
+    is missing rather than look like a stale catalog.
+    """
+    _write_entries(isolated_catalogs / "example.yaml", ["foo", "bar"])
+    zzz = isolated_catalogs / "zzz.yaml"
+    _write_entries(zzz, ["bar"])
+
+    text = catalog.describe("example")
+
+    assert text.sources == ("foo",)
+    assert text.shadowed == {"bar": zzz}
+    assert f"  shadowed (1) by {zzz}: bar" in text.splitlines()
+    assert catalog.describe("zzz").shadowed == {}  # the winner has nothing shadowed
+
+
+def test_describe_catalog_groups_shadowed_entries_by_winning_file(isolated_catalogs):
+    """One line per winning file, names sorted; entries not collided with stay out."""
+    _write_entries(isolated_catalogs / "example.yaml", ["foo", "bar", "baz", "qux"])
+    yyy, zzz = isolated_catalogs / "yyy.yaml", isolated_catalogs / "zzz.yaml"
+    _write_entries(yyy, ["qux", "baz"])
+    _write_entries(zzz, ["bar"])
+
+    text = catalog.describe("example")
+    shadow_lines = [line for line in text.splitlines() if "shadowed (" in line]
+
+    assert text.sources == ("foo",)
+    assert text.shadowed == {"bar": zzz, "baz": yyy, "qux": yyy}
+    assert shadow_lines == [
+        f"  shadowed (2) by {yyy}: baz, qux",
+        f"  shadowed (1) by {zzz}: bar",
+    ]
+
+
+def test_describe_catalog_without_collisions_has_no_shadowed_line(isolated_catalogs):
+    text = catalog.describe("example")
+
+    assert "shadowed (" not in text
+    assert text.shadowed == {}
+
+
+def test_describe_catalog_overridden_by_same_named_file_is_not_shadowed(
+    isolated_catalogs, tmp_path
+):
+    """A higher-tier ``example.yaml`` winning ``foo`` is still the same catalog."""
+    user_path = _write_catalog(
+        tmp_path / "user-catalogs", title="v2", name="foo", filename="example.yaml"
+    )
+    catalog.add_search_path(user_path.parent)
+
+    text = catalog.describe("example")
+
+    assert text.sources == ("foo",)
+    assert "shadowed (" not in text
+    assert text.shadowed == {}
+
+
+def test_describe_source_has_no_shadowed(isolated_catalogs):
+    assert catalog.describe("foo").shadowed == {}
+
+
 # -- coordinate report ---------------------------------------------------------
 
 
