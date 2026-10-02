@@ -164,7 +164,10 @@ class ColorScale:
     ``cmap`` is a :class:`~matplotlib.colors.Colormap`. ``show`` is ``False`` when
     the caller passed ``colorbar=False``: the points are still coloured, the figure
     just carries no bar. ``inverted`` is ``True`` when a vertical bar should read with
-    its low end at the top (depth: the surface up).
+    its low end at the top (depth: the surface up). ``data_range`` is the coloured
+    values' own finite ``(min, max)`` in the same units as ``vmin``/``vmax``, ``None``
+    when none is finite: it differs from them only where ``vmin=``/``vmax=`` pinned
+    the scale inside the data, which is where a renderer marks the bar as clipped.
     """
 
     field: str
@@ -174,6 +177,7 @@ class ColorScale:
     cmap: Any
     show: bool = True
     inverted: bool = False
+    data_range: tuple[float, float] | None = None
 
     @property
     def is_time(self) -> bool:
@@ -182,10 +186,15 @@ class ColorScale:
 
     @property
     def norm(self):
-        """The shared :class:`~matplotlib.colors.Normalize`."""
+        """The shared :class:`~matplotlib.colors.Normalize`.
+
+        ``clip=True``: a value beyond a pinned end takes that end's colour, whatever
+        the colormap's own over/under colours say -- what the interactive palette,
+        which carries none, does anyway.
+        """
         import matplotlib.colors as mcolors
 
-        return mcolors.Normalize(vmin=self.vmin, vmax=self.vmax)
+        return mcolors.Normalize(vmin=self.vmin, vmax=self.vmax, clip=True)
 
 
 @dataclass(frozen=True)
@@ -552,6 +561,68 @@ def _check_color_by(color_by) -> None:
         )
 
 
+def _check_pin(name: str, value, color_by: str) -> float | None:
+    """``vmin=``/``vmax=`` as a position on the scale: metres, or days since 1970.
+
+    ``None`` stays ``None`` (that end comes from the data). A depth is a finite number;
+    a time is anything pandas reads as a date, but never a bare number, which could be
+    seconds or days or nanoseconds and is refused rather than guessed at.
+    """
+    if value is None:
+        return None
+    if color_by == "depth":
+        if (
+            not isinstance(value, numbers.Real)
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(
+                f"{name}={value!r} is not a finite depth in metres (positive down), "
+                "which color_by='depth' needs."
+            )
+        return float(value)
+    import pandas as pd
+
+    stamp = pd.NaT
+    if not isinstance(value, numbers.Number):  # pd.Timestamp(5) reads nanoseconds
+        try:
+            stamp = pd.Timestamp(value)
+        except (TypeError, ValueError):
+            pass
+    if pd.isna(stamp):
+        raise ValueError(
+            f"{name}={value!r} is not a date, which color_by='time' needs: pass a "
+            "string such as '2012-06-01', a datetime or a Timestamp (a bare number "
+            "could be any unit)."
+        )
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert("UTC").tz_localize(None)
+    return float(_time_days(stamp.to_datetime64()))
+
+
+def _check_pins(color_by, vmin, vmax) -> tuple[float | None, float | None]:
+    """Return the pinned ends of the ``color_by`` scale (see :func:`_check_pin`)."""
+    if color_by is None:
+        if vmin is not None or vmax is not None:
+            raise ValueError(
+                "vmin=/vmax= pin the color_by scale, so pass color_by='depth' or "
+                "'time' as well."
+            )
+        return None, None
+    return _check_pin("vmin", vmin, color_by), _check_pin("vmax", vmax, color_by)
+
+
+def _scale_text(value: float, color_by: str) -> str:
+    """Return a position on the scale as the caller writes it: metres, or a date."""
+    if color_by != "time":
+        return f"{value:g}"
+    import pandas as pd
+
+    stamp = pd.Timestamp(value, unit="D")
+    midnight = stamp == stamp.normalize()
+    return stamp.strftime("%Y-%m-%d" if midnight else "%Y-%m-%d %H:%M")
+
+
 # --- limits, labels, legend ----------------------------------------------------------
 
 
@@ -760,6 +831,8 @@ def compose(
     density: bool | int | Sequence[float] = False,
     color_by: str | None = None,
     cmap=None,
+    vmin=None,
+    vmax=None,
     colorbar: bool = True,
     colors=None,
     legend: bool | str = True,
@@ -786,7 +859,13 @@ def compose(
     points members from their arrays on one scale shared by every panel (default map:
     the package's bathymetry map for depth, viridis for time; ``cmap=`` overrides);
     lines stay solid, and a points member with no such array warns and stays solid
-    too. ``colorbar=False`` keeps the colours and drops the bar.
+    too. ``colorbar=False`` keeps the colours and drops the bar. ``vmin=``/``vmax=``
+    pin either end of that scale, the other staying the data's own: metres for depth,
+    a date (a string, ``datetime``, ``numpy.datetime64`` or ``pandas.Timestamp``) for
+    time. Points beyond a pinned end take the end colour, and
+    :attr:`ColorScale.data_range` tells a renderer which ends to mark as clipped. They
+    need ``color_by``, and ends that leave no interval (``vmin`` not below ``vmax``,
+    counting an unpinned end's data value) raise ``ValueError``.
 
     Limits are per panel, from the data and the panel's annotations plus a 2% margin;
     ``sharex``/``sharey`` use one union of all panels instead, and ``xlim``/``ylim``
@@ -802,6 +881,7 @@ def compose(
     items = _validate(items)
     placement = _series_layout._normalize_legend(legend)
     _check_color_by(color_by)
+    pin_lo, pin_hi = _check_pins(color_by, vmin, vmax)
     swap = _density_orientation(items, density)
     xlim, ylim = _check_lim("xlim", xlim), _check_lim("ylim", ylim)
     _warn_standard_names(items)
@@ -837,15 +917,28 @@ def compose(
     scale = None
     if color_by is not None and coloured:
         lo, hi = _series_layout.value_span(coloured)
+        finite = np.concatenate([v[np.isfinite(v)] for v in coloured])
+        data_range = (float(finite.min()), float(finite.max())) if finite.size else None
+        scale_lo = float(lo) if pin_lo is None else pin_lo
+        scale_hi = float(hi) if pin_hi is None else pin_hi
+        if scale_lo >= scale_hi:
+            first, last = (_scale_text(v, color_by) for v in data_range or (lo, hi))
+            raise ValueError(
+                f"vmin={_scale_text(scale_lo, color_by)} must be less than "
+                f"vmax={_scale_text(scale_hi, color_by)} for color_by={color_by!r}; "
+                f"the {color_by} values run from {first} to {last}, and an end you "
+                "leave unset takes its value from them."
+            )
         label = "depth [m]" if color_by == "depth" else "time"
         scale = ColorScale(
             field=color_by,
             label=label,
-            vmin=float(lo),
-            vmax=float(hi),
+            vmin=scale_lo,
+            vmax=scale_hi,
             cmap=_resolve_cmap(cmap, color_by),
             show=bool(colorbar),
             inverted=color_by == "depth",
+            data_range=data_range,
         )
     elif color_by is not None and not missing:
         _warn(f"color_by={color_by!r} colours points members, and there are none.")

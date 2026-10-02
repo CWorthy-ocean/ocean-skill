@@ -409,6 +409,120 @@ def test_color_by_without_depth_warns_and_stays_solid():
     assert cloud.opts.get("style").kwargs["color"] == "#000000"
 
 
+def _bars(out) -> list:
+    """Return the bokeh colour bars among the figures of ``out``."""
+    from bokeh.models import ColorBar
+
+    return [
+        b for f in _figures(out).values() for b in f.right if isinstance(b, ColorBar)
+    ]
+
+
+def _static_extend(items, **opts) -> str:
+    """Return the ``extend`` the static colour bar was drawn with."""
+    fig = _static(items, **opts)
+    (bar,) = [ax for ax in fig.axes if ax.get_label() == "<colorbar>"]
+    return bar._colorbar.extend
+
+
+def test_a_depth_pin_clamps_deeper_dots_to_the_deepest_colour():
+    items = _ts_items()
+    layout = _xy.compose(items, color_by="depth", vmax=500)
+    scale = layout.colorbar
+    figures = _figures(_interactive(items, color_by="depth", vmax=500))
+    (cloud,) = [_cloud(f) for f in figures.values()]
+    mapper = cloud.glyph.fill_color.transform
+    # surface at the top: the clim runs (deepest, shallowest), the palette reversed
+    assert (mapper.low, mapper.high) == (500, scale.vmin)
+    assert mapper.palette[0] == to_hex(scale.cmap(1.0)).lower()
+    assert mapper.palette[-1] == to_hex(scale.cmap(0.0)).lower()
+    # bokeh's mapper clamps beyond its ends unless given low_color/high_color
+    assert mapper.low_color is None and mapper.high_color is None
+    depth = layout.panels[0].items[0].color_values
+    colours = np.array(_bokeh_colours(cloud))
+    assert (depth > 500).any()
+    assert set(colours[depth > 500]) == {to_hex(scale.cmap(1.0)).lower()}
+    # and it is the colour the static scatter gives those dots
+    static = _static(items, color_by="depth", vmax=500)
+    (static_cloud,) = _scatter(_panel_axes(static)[0])
+    assert list(colours) == _static_colours(static_cloud)
+
+
+def test_a_depth_pin_labels_the_clipped_end_of_the_bar():
+    out = _interactive(_ts_items(), color_by="depth", vmax=500)
+    (bar,) = _bars(out)
+    assert bar.major_label_overrides == {500.0: "≥ 500"}
+    assert type(bar.ticker).__name__ == "FixedTicker"
+    assert 500.0 in bar.ticker.ticks
+    assert all(5 < t <= 500 for t in bar.ticker.ticks)
+    (bar,) = _bars(_interactive(_ts_items(), color_by="depth", vmin=100, vmax=500))
+    assert bar.major_label_overrides == {100.0: "≤ 100", 500.0: "≥ 500"}
+
+
+def test_a_bar_the_pins_leave_whole_keeps_its_own_ticks():
+    (bar,) = _bars(_interactive(_ts_items(), color_by="depth"))
+    assert type(bar.ticker).__name__ == "BasicTicker" and not bar.major_label_overrides
+    (bar,) = _bars(_interactive(_ts_items(), color_by="depth", vmin=0, vmax=5000))
+    assert type(bar.ticker).__name__ == "BasicTicker" and not bar.major_label_overrides
+    (bar,) = _bars(_interactive(_ts_items(), color_by="time"))
+    assert type(bar.ticker).__name__ == "DatetimeTicker"
+    assert not bar.major_label_overrides
+
+
+def test_a_time_pin_labels_the_clipped_end_as_a_date():
+    from bokeh.models import DatetimeTickFormatter
+
+    items = _ts_items()
+    pin = np.datetime64("2020-06-01")
+    ms = float((pin - np.datetime64(0, "ms")) / np.timedelta64(1, "ms"))
+    out = _interactive(items, color_by="time", vmax="2020-06-01")
+    (bar,) = _bars(out)
+    assert bar.major_label_overrides == {ms: "≥ 2020-06-01"}
+    assert isinstance(bar.formatter, DatetimeTickFormatter)
+    assert type(bar.ticker).__name__ == "FixedTicker"
+    assert ms in bar.ticker.ticks
+    assert len(bar.ticker.ticks) >= 3
+    mapper = _cloud(next(iter(_figures(out).values()))).glyph.fill_color.transform
+    assert mapper.high == ms
+    both = _interactive(items, color_by="time", vmin="2020-03-01", vmax="2020-09-01")
+    (bar,) = _bars(both)
+    assert list(bar.major_label_overrides.values()) == ["≤ 2020-03-01", "≥ 2020-09-01"]
+
+
+@pytest.mark.parametrize(
+    "opts",
+    [
+        {"color_by": "depth"},
+        {"color_by": "depth", "vmax": 500},
+        {"color_by": "depth", "vmin": 100},
+        {"color_by": "depth", "vmin": 100, "vmax": 500},
+        {"color_by": "depth", "vmin": 0, "vmax": 5000},
+        {"color_by": "time"},
+        {"color_by": "time", "vmax": "2020-06-01"},
+        {"color_by": "time", "vmin": "2020-03-01"},
+        {"color_by": "time", "vmin": "2020-03-01", "vmax": "2020-09-01"},
+        {"color_by": "time", "vmin": "2019-01-01", "vmax": "2021-01-01"},
+    ],
+)
+def test_both_renderers_mark_the_same_ends_of_a_pinned_bar(opts):
+    items = _ts_items()
+    static = _static_extend(items, **opts)
+    (bar,) = _bars(_interactive(items, **opts))
+    text = list(bar.major_label_overrides.values())
+    interactive = {
+        (True, True): "both",
+        (True, False): "min",
+        (False, True): "max",
+        (False, False): "neither",
+    }[(any(t.startswith("≤") for t in text), any(t.startswith("≥") for t in text))]
+    assert static == interactive
+
+
+def test_pins_without_color_by_are_refused_interactively_too():
+    with pytest.raises(ValueError, match=r"vmin=/vmax= pin the color_by scale"):
+        _interactive(_ts_items(), vmin=0)
+
+
 # --- members: colours, legend ---------------------------------------------------------
 
 
@@ -755,6 +869,8 @@ def test_every_contract_option_is_accepted():
         "density": False,
         "color_by": "depth",
         "cmap": "viridis",
+        "vmin": 0,
+        "vmax": 1500,
         "colorbar": True,
         "colors": ["k", "r", "b"],
         "legend": True,

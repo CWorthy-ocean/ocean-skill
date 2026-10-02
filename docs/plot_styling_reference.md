@@ -725,6 +725,9 @@ itself is unaffected. Not available on the comparison families (`field_row`,
 reference pair's shared scale and a difference panel's own symmetric one are a
 different question, unaddressed here.
 
+`XY` and `TS` take the same two names to pin the ends of their `color_by` scale (metres
+for depth, dates for time); see [`color_by`](#color_by--colour-the-cloud-by-depth-or-time).
+
 ### Clipped colourbar ends
 
 Whenever a colourbar's limits cut off data — `robust=`, a pinned `vmin`/`vmax`, a
@@ -2060,7 +2063,24 @@ reads surface-at-top for depth and in dates for time.
 | Parameter | Default | Effect |
 |---|---|---|
 | `cmap` | the package's bathymetry map (`deep`) for depth, `viridis` for time | any matplotlib colormap name or object |
+| `vmin`, `vmax` | `None` | pin either end of the scale: metres for depth, a date for time; `None` takes that end from the data |
 | `colorbar` | `True` | `False` keeps the colours and drops the bar |
+
+Use `vmin`/`vmax` when the deep ocean would otherwise take over the scale: a T-S cloud
+down to 5500 m gives the upper ocean a sliver of the map, and `vmin=0, vmax=1500` spends
+all of it on the top 1500 m. A point beyond a pinned end is drawn in that end's colour,
+never dropped, and the bar says so — statically a triangle on that end (the bottom for
+depth, which reads surface-at-top), interactively a tick labelled `≥ 1500` or `≤ 3`, as
+for [any other clipped bar](#clipped-colourbar-ends). Nothing is marked on a bar the pins
+leave whole. For time, give the ends as dates — a string such as `"2012-06-01"`, a
+`datetime`, `numpy.datetime64` or `pandas.Timestamp`; a bare number is refused, since it
+could be any unit. They need `color_by`, and ends that leave no interval (`vmin` not
+below `vmax`, an end you leave unset counting at its data value) raise.
+
+```python
+ts.plot(ncols=3, color_by="depth", vmin=0, vmax=1500)          # the upper ocean, in full
+ts.plot(color_by="time", vmin="2012-03-01", vmax="2012-09-01")
+```
 
 A member that carries no such array (a source with no depth coordinate, say) warns and
 stays a solid colour. Depth comes from the member's own vertical coordinate. **After a time
@@ -2158,6 +2178,7 @@ Each is a warning, not a note drawn on the figure, and nothing is converted:
 | `density` | `False` (`True` for `TS`) | σ₀ contours: `True`, a line count, or a list of levels; salinity/temperature only |
 | `color_by` | `None` | `"depth"` or `"time"`: colour the dots on one shared scale |
 | `cmap` | `None` | the colormap for `color_by` |
+| `vmin`, `vmax` | `None` | pin either end of the `color_by` scale (metres, or dates for time); see above |
 | `colorbar` | `True` | `False` colours the dots without a bar |
 | `colors` | `None` | pin member colours; see [`colors`](#colors-series-profile-and-xy) |
 | `legend` | `True` | `True`/`False` for the usual auto/off, or `"below"`/`"right"` for one combined key, or a corner name to force every panel's own key there |
@@ -2197,6 +2218,8 @@ it. What differs is the drawing, all of it deliberate:
   row, which is therefore a little wider. The scale is shared by every panel either way,
   surface-at-top for depth (on bokeh's bars, whose low end sits at the bottom, by
   reversing the colour range and the palette together: a value keeps its colour).
+  A pinned `vmin`/`vmax` that cuts off dots is a triangle on the static bar and a tick
+  labelled `≥ 1500` (`≥ 2012-06-01`) on the interactive one, on the same ends in both.
 * **The key.** When every panel has the same members the static figure draws one
   combined key below it; bokeh has no figure-level legend, so each panel carries its own,
   in the corner `compose` found emptiest. `legend="below"`/`"right"` push each panel's

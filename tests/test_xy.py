@@ -789,6 +789,21 @@ def test_xy_plot_passes_options_through_untouched(table, captured):
     assert captured["spec"].options == {"color_by": "depth", "alpha": 0.2}
 
 
+def test_plot_pins_the_color_by_scale_to_the_depths_given(table):
+    import matplotlib.pyplot as plt
+
+    _put_roms(table)
+    fig = XY(_members(), x="salinity", y="temperature").plot(
+        color_by="depth", vmin=0, vmax=50
+    )
+    try:
+        (bar,) = [ax for ax in fig.axes if ax.get_label() == "<colorbar>"]
+        assert bar.get_ylim()[0] == 50  # the deep end, at the bottom
+        assert bar._colorbar.extend == "max"  # the 60 m and 90 m levels are deeper
+    finally:
+        plt.close(fig)
+
+
 def test_save_writes_under_the_figures_dir_and_returns_the_path(
     table, captured, monkeypatch, tmp_path
 ):
