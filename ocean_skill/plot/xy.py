@@ -582,29 +582,49 @@ def _check_lim(name: str, lim) -> tuple[float, float] | None:
 def _axis_label(items, axis: str) -> str:
     """``"temperature [degC]"``: the short name, plus units when every member agrees.
 
-    A dimensionless unit (``"1"``, as practical salinity is often tagged) is not worth
-    a bracket and does not count as disagreeing with a member that has none.
+    Units agree when they parse to the same unit, so WOA's ``degrees_celsius`` and
+    GLORYS's ``degrees_C`` are one unit, and the first member's spelling is shown.
+    Every dimensionless spelling of practical salinity (``1``, ``1e-3``, ``PSU``)
+    agrees with the others; a bare number is not worth a bracket, and a member with
+    no units disagrees with nobody.
     """
     from ocean_skill.plot.summary import pretty_level
 
     names = list(
         dict.fromkeys(pretty_level("variable", i[f"{axis}_name"]) for i in items)
     )
-    units = list(
-        dict.fromkeys(
-            i[f"{axis}_units"]
-            for i in items
-            if i.get(f"{axis}_units") not in (None, "", "1")
-        )
-    )
+    by_unit: dict[str, list[str]] = {}
+    for item in items:
+        spelling = item.get(f"{axis}_units")
+        if spelling not in (None, ""):
+            by_unit.setdefault(_unit_key(spelling), []).append(str(spelling))
     label = " / ".join(names)
-    if len(units) > 1:
+    if len(by_unit) > 1:
+        first = ", ".join(spellings[0] for spellings in by_unit.values())
         _warn(
-            f"members disagree on the units of the {axis} axis ({', '.join(units)}); "
+            f"members disagree on the units of the {axis} axis ({first}); "
             "the label gives none. Nothing is converted."
         )
         return label
-    return f"{label} [{units[0]}]" if units else label
+    shown = [s for spellings in by_unit.values() for s in spellings if not _bare(s)]
+    return f"{label} [{shown[0]}]" if shown else label
+
+
+def _unit_key(spelling: str) -> str:
+    """Return what a units string is compared by: its parsed unit, else itself."""
+    from ocean_skill.units import parse
+
+    unit = parse(spelling)
+    if unit is None:
+        return spelling
+    return "dimensionless" if unit.dimensionless else str(unit)
+
+
+def _bare(spelling: str) -> bool:
+    """Return whether a units string is only a number (``1``, ``1e-3``)."""
+    from ocean_skill.units import parse
+
+    return str(parse(spelling)) == "dimensionless"
 
 
 #: Standard names that say the same thing for this check: CF's generic
