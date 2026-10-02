@@ -338,8 +338,19 @@ def _geo_key(geo: dict[str, Any]) -> tuple:
     return tuple((k, _round_geo_value(v)) for k, v in sorted(geo.items()))
 
 
-def _selection_item(geo: dict[str, Any], hover: dict[str, str]) -> dict[str, Any]:
-    """One ``locations``-family item for a lane's selection geometry."""
+def _selection_item(
+    geo: dict[str, Any], hover: dict[str, str], legend_label: str | None = None
+) -> dict[str, Any]:
+    """One ``locations``-family item for a lane's selection geometry.
+
+    ``legend_label`` is the plot's explicit ``label=`` (``None`` when the user gave
+    none): the key :func:`~ocean_skill.plot.locations.legend_groups` files this
+    item under, so a selection the user named gets its own legend entry (and
+    colour) instead of joining the shared "selection" one. It is carried apart
+    from ``hover["name"]`` on purpose -- the hover record falls back to the
+    variable's name for an unlabelled selection, which is no reason to split the
+    legend.
+    """
     from ocean_skill.plot.locations import _seam_split, _split_bbox
 
     shape = geo["shape"]
@@ -349,27 +360,46 @@ def _selection_item(geo: dict[str, Any], hover: dict[str, str]) -> dict[str, Any
             "lon": geo["lon"],
             "lat": geo["lat"],
             "featureType": "selection",
+            "legend_label": legend_label,
             **hover,
         }
     if shape == "box":
         bboxes = _split_bbox(
             geo["lon_min"], geo["lat_min"], geo["lon_max"], geo["lat_max"]
         )
-        return {"kind": "extent", "featureType": "selection", "bboxes": bboxes, **hover}
+        return {
+            "kind": "extent",
+            "featureType": "selection",
+            "legend_label": legend_label,
+            "bboxes": bboxes,
+            **hover,
+        }
     if shape == "path":
         # A transect's requested waypoints: walked vertex to vertex, exactly
         # like a real domain perimeter, since the path -- unlike a box's
         # declared bounds -- isn't straight, so only walking it edge by edge
         # can tell where it actually crosses the seam.
         paths = _seam_split(geo["lons"], geo["lats"])
-        return {"kind": "line", "featureType": "selection", "paths": paths, **hover}
+        return {
+            "kind": "line",
+            "featureType": "selection",
+            "legend_label": legend_label,
+            "paths": paths,
+            **hover,
+        }
     # "line": the same declared-bounds splitting a box uses, since a lone-lon/lat
     # span is a degenerate box (zero width or height) with exactly the same
     # antimeridian ambiguity — only the bounds themselves say whether it goes the
     # long way through the seam.
     pieces = _split_bbox(geo["lon0"], geo["lat0"], geo["lon1"], geo["lat1"])
     paths = [np.array([[lo, la], [hi, ha]]) for lo, la, hi, ha in pieces]
-    return {"kind": "line", "featureType": "selection", "paths": paths, **hover}
+    return {
+        "kind": "line",
+        "featureType": "selection",
+        "legend_label": legend_label,
+        "paths": paths,
+        **hover,
+    }
 
 
 def footprint_item(source: str) -> dict[str, Any] | None:
@@ -527,10 +557,15 @@ def _comparison_items(
                 time_coverage=time_label,
                 title=_selection_title(geo),
             )
+            # an explicit label= names this selection's legend entry; a pair-spec
+            # select names its two lanes apart the same way the hover row does
+            legend_label = (
+                None if not c.label else (f"{c.label} ({role})" if paired else c.label)
+            )
             key = _geo_key(geo)
             if key not in seen_geo:
                 seen_geo.add(key)
-                items.append(_selection_item(geo, hover))
+                items.append(_selection_item(geo, hover, legend_label))
         else:
             item = footprint_item(source)
             if item is not None:
@@ -590,7 +625,7 @@ def _field_items(
         key = _geo_key(geo)
         if key not in seen_geo:
             seen_geo.add(key)
-            items.append(_selection_item(geo, hover))
+            items.append(_selection_item(geo, hover, f.label or None))
     else:
         item = footprint_item(f.source)
         if item is not None:

@@ -6926,9 +6926,16 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
     """Draw ``locations``-family items into ``ax`` and return the legend handles.
 
     Markers for points, dashed boxes for extents and rings, solid lines for selection
-    slices -- coloured by ``featureType`` off :func:`~ocean_skill.plot.locations.
-    style_for`. Shared by :func:`locations` (its own figure) and :func:`field_facet`
-    (drawn on top of a field map), so a location looks the same on either.
+    slices -- grouped, labelled and coloured by :func:`~ocean_skill.plot.locations.
+    legend_groups` (``featureType`` via :func:`~ocean_skill.plot.locations.style_for`,
+    except that each labelled selection is its own group, in its own colour). Shared
+    by :func:`locations` (its own figure) and :func:`field_facet` (drawn on top of a
+    field map), so a location looks the same on either.
+
+    Exactly one legend handle comes back per group, however many shapes it drew: a
+    group with points is keyed by its marker; otherwise by a solid line when it
+    drew a selection line or a solid-style extent (a labelled box, say, which keeps
+    the selection's solid linestyle); otherwise by its own (dashed) style.
 
     ``proj`` is the **data** transform, always plain
     :class:`~cartopy.crs.PlateCarree`, never the axes projection: items are pre-wrapped
@@ -6937,23 +6944,17 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
     """
     from matplotlib.lines import Line2D
 
-    from ocean_skill.plot.locations import FEATURE_TYPE_ORDER, style_for
+    from ocean_skill.plot.locations import legend_groups
     from ocean_skill.plot.summary import _MARKERS
 
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        groups.setdefault(item["featureType"], []).append(item)
-    ordered = [ft for ft in FEATURE_TYPE_ORDER if ft in groups]
-    ordered += [ft for ft in groups if ft not in FEATURE_TYPE_ORDER]
-
     handles = []
-    for feature_type in ordered:
-        style = style_for(feature_type)
+    for label, style, group_items in legend_groups(items):
         color = style["color"]
         linestyle = style["linestyle"]
-        points = [i for i in groups[feature_type] if i["kind"] == "point"]
-        extents = [i for i in groups[feature_type] if i["kind"] == "extent"]
-        paths = [i for i in groups[feature_type] if i["kind"] in ("line", "ring")]
+        points = [i for i in group_items if i["kind"] == "point"]
+        extents = [i for i in group_items if i["kind"] == "extent"]
+        paths = [i for i in group_items if i["kind"] in ("line", "ring")]
+        marker = None
         if points:
             marker = style["marker"] or _MARKERS[style["marker_index"] % len(_MARKERS)]
             ax.scatter(
@@ -6967,6 +6968,32 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
                 linewidth=0.7,
                 zorder=5,
             )
+        for item in extents:
+            for lo, la, hi, ha in item["bboxes"]:
+                ax.plot(
+                    [lo, hi, hi, lo, lo],
+                    [la, la, ha, ha, la],
+                    transform=proj,
+                    color=color,
+                    lw=1.0,
+                    ls=linestyle,
+                    zorder=4,
+                )
+        # "line" (a selection slice) draws solid and on top; "ring" (a domain
+        # outline) draws dashed and beneath.
+        for item in paths:
+            solid = item["kind"] == "line"
+            for seg in item["paths"]:
+                ax.plot(
+                    seg[:, 0],
+                    seg[:, 1],
+                    transform=proj,
+                    color=color,
+                    lw=1.8 if solid else 1.0,
+                    ls="-" if solid else linestyle,
+                    zorder=5 if solid else 4,
+                )
+        if points:
             handles.append(
                 Line2D(
                     [],
@@ -6976,42 +7003,15 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
                     markersize=8,
                     color=color,
                     markeredgecolor="white",
-                    label=feature_type,
+                    label=label,
                 )
             )
-        if extents:
-            for item in extents:
-                for lo, la, hi, ha in item["bboxes"]:
-                    ax.plot(
-                        [lo, hi, hi, lo, lo],
-                        [la, la, ha, ha, la],
-                        transform=proj,
-                        color=color,
-                        lw=1.0,
-                        ls=linestyle,
-                        zorder=4,
-                    )
-            handles.append(
-                Line2D([], [], linestyle=linestyle, color=color, label=feature_type)
+        else:
+            # one entry per group: a group that drew a solid line reads as a solid
+            # line, whatever else (a dashed ring) it also drew
+            any_solid = any(i["kind"] == "line" for i in paths) or (
+                bool(extents) and linestyle == "-"
             )
-        if paths:
-            # "line" (a selection slice) draws solid and on top; "ring" (a domain
-            # outline) draws dashed and beneath — the same convention the
-            # extent/point split above keeps, so a mixed group's legend entry
-            # still reads as one thing even though it drew two ways.
-            for item in paths:
-                solid = item["kind"] == "line"
-                for seg in item["paths"]:
-                    ax.plot(
-                        seg[:, 0],
-                        seg[:, 1],
-                        transform=proj,
-                        color=color,
-                        lw=1.8 if solid else 1.0,
-                        ls="-" if solid else linestyle,
-                        zorder=5 if solid else 4,
-                    )
-            any_solid = any(item["kind"] == "line" for item in paths)
             handles.append(
                 Line2D(
                     [],
@@ -7019,7 +7019,7 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
                     linestyle="-" if any_solid else linestyle,
                     lw=1.8 if any_solid else 1.0,
                     color=color,
-                    label=feature_type,
+                    label=label,
                 )
             )
     return handles
@@ -7079,9 +7079,12 @@ def locations(
     Items come from :func:`ocean_skill.plot.locations.build_items` (pure catalog
     metadata) and/or :func:`ocean_skill.plot.map_locations.build_map_items` (a
     plotted selection) — no field, no colormap and no colorbar either way; colour
-    keys the item's ``featureType`` instead, off the shared constants and
-    :func:`~ocean_skill.plot.locations.style_for` in
-    :mod:`ocean_skill.plot.locations`, and the legend is the key to it.
+    keys the item's ``featureType`` instead, off the shared constants,
+    :func:`~ocean_skill.plot.locations.style_for` and
+    :func:`~ocean_skill.plot.locations.legend_groups` in
+    :mod:`ocean_skill.plot.locations`, and the legend is the key to it. A selection
+    the user gave a ``label=`` is the exception: it keys that label, in a colour of
+    its own, rather than joining the shared ``"selection"`` entry.
 
     ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
     ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
