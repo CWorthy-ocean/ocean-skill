@@ -17,7 +17,7 @@ have been.
 from __future__ import annotations
 
 import functools
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -3565,6 +3565,7 @@ def field_facet(
     legend: bool = True,
     legend_kwargs: dict[str, Any] | None = None,
     marker_size: float = 80.0,
+    colors: str | Sequence[str] | Mapping[str, str] | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -3633,7 +3634,11 @@ def field_facet(
     fills this in) on top of every panel: markers, transect lines, extent boxes, a
     dashed domain ring. They are context, not data -- a station outside the field does
     not widen the map -- and the framed featureType key (``legend``, ``legend_kwargs``,
-    ``marker_size``) is drawn once, on the first panel.
+    ``marker_size``) is drawn once, on the first panel. ``colors`` recolours the legend
+    groups the locations draw (a string for every selection group, a list as their
+    palette, or a ``{legend label: colour}`` dict -- see
+    :func:`~ocean_skill.plot.locations.legend_groups`); with no ``location_items`` it
+    has nothing to colour and is ignored, as ``marker_size`` and ``legend`` are.
     """
     import matplotlib.pyplot as plt
 
@@ -3818,6 +3823,7 @@ def field_facet(
                 ax,
                 location_items,
                 marker_size=marker_size,
+                colors=colors,
                 legend=legend and i == 0,
                 legend_kwargs=legend_kwargs,
                 legend_fontsize=scale["legend"],
@@ -6899,6 +6905,7 @@ def _overlay_locations(
     legend: bool,
     legend_kwargs: dict[str, Any] | None,
     legend_fontsize: float,
+    colors=None,
 ) -> None:
     """Draw ``locations``-family items over a field map already on ``ax``.
 
@@ -6912,7 +6919,7 @@ def _overlay_locations(
 
     xlim, ylim = ax.get_xlim(), ax.get_ylim()
     handles = _draw_location_items(
-        ax, items, proj=ccrs.PlateCarree(), marker_size=marker_size
+        ax, items, proj=ccrs.PlateCarree(), marker_size=marker_size, colors=colors
     )
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -6922,13 +6929,16 @@ def _overlay_locations(
         )
 
 
-def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
+def _draw_location_items(
+    ax, items, *, proj, marker_size: float = 80.0, colors=None
+) -> list:
     """Draw ``locations``-family items into ``ax`` and return the legend handles.
 
     Markers for points, dashed boxes for extents and rings, solid lines for selection
     slices -- grouped, labelled and coloured by :func:`~ocean_skill.plot.locations.
     legend_groups` (``featureType`` via :func:`~ocean_skill.plot.locations.style_for`,
-    except that each labelled selection is its own group, in its own colour). Shared
+    except that each labelled selection is its own group, in its own colour; ``colors``
+    overrides those colours, shape and legend handle alike). Shared
     by :func:`locations` (its own figure) and :func:`field_facet` (drawn on top of a
     field map), so a location looks the same on either.
 
@@ -6948,7 +6958,7 @@ def _draw_location_items(ax, items, *, proj, marker_size: float = 80.0) -> list:
     from ocean_skill.plot.summary import _MARKERS
 
     handles = []
-    for label, style, group_items in legend_groups(items):
+    for label, style, group_items in legend_groups(items, colors):
         color = style["color"]
         linestyle = style["linestyle"]
         points = [i for i in group_items if i["kind"] == "point"]
@@ -7060,6 +7070,7 @@ def locations(
     extent: tuple[float, float, float, float] | None = None,
     legend: bool = True,
     marker_size: float = 80.0,
+    colors: str | Sequence[str] | Mapping[str, str] | None = None,
     tiles: str | bool | None = None,
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
@@ -7085,6 +7096,13 @@ def locations(
     :mod:`ocean_skill.plot.locations`, and the legend is the key to it. A selection
     the user gave a ``label=`` is the exception: it keys that label, in a colour of
     its own, rather than joining the shared ``"selection"`` entry.
+
+    ``colors`` overrides those colours: a string colours every selection group, a list
+    replaces the selection palette (cycling), and a ``{legend label: colour}`` dict pins
+    only the groups it names -- featureTypes and ``"domain"`` included (see
+    :func:`~ocean_skill.plot.locations.legend_groups`). Shapes and legend handles take
+    the same colour; ``legend_kwargs={"labelcolor": "linecolor"}`` also colours the
+    legend text to match.
 
     ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
     ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
@@ -7143,7 +7161,9 @@ def locations(
         land=land,
     )
 
-    handles = _draw_location_items(ax, items, proj=proj, marker_size=marker_size)
+    handles = _draw_location_items(
+        ax, items, proj=proj, marker_size=marker_size, colors=colors
+    )
 
     if legend:
         _draw_location_legend(

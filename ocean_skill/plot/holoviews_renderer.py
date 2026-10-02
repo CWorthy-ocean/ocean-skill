@@ -816,6 +816,7 @@ def _field_facet(
     location_items=None,
     legend: bool = True,
     marker_size: float = 9.0,
+    colors=None,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -878,7 +879,9 @@ def _field_facet(
     ``location_items`` draws :mod:`ocean_skill.plot.locations`-family items over every
     panel (see :func:`_location_elements`); ``legend`` keys them on the first panel
     only, and they are context rather than data -- a station outside the field does not
-    widen the map.
+    widen the map. ``colors`` recolours the legend groups they draw (see
+    :func:`~ocean_skill.plot.locations.legend_groups`) and is ignored without
+    ``location_items``, as ``marker_size`` and ``legend`` are.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -1015,6 +1018,7 @@ def _field_facet(
                 location_items,
                 xform=loc_xform,
                 marker_size=marker_size,
+                colors=colors,
                 legend=keyed,
             ):
                 panel = panel * element
@@ -5288,7 +5292,9 @@ def _location_xform(field, tiles, *, geo: bool = True):
     return _identity_xform
 
 
-def _location_elements(items, *, xform, marker_size: float, legend: bool) -> list:
+def _location_elements(
+    items, *, xform, marker_size: float, legend: bool, colors=None
+) -> list:
     """Build the holoviews elements for ``locations``-family items, in draw order.
 
     One run of elements per legend group (see
@@ -5312,6 +5318,9 @@ def _location_elements(items, *, xform, marker_size: float, legend: bool) -> lis
     on a field map these are context for the field, not something the view should
     widen to hold -- the interactive counterpart of the static view-freeze in
     :func:`ocean_skill.plot.matplotlib_renderer._overlay_locations`.
+
+    ``colors`` is :func:`~ocean_skill.plot.locations.legend_groups`'s override; each
+    group's colour reaches its glyphs and so its legend entry alike.
     """
     import geoviews as gv
     import pandas as pd
@@ -5329,7 +5338,7 @@ def _location_elements(items, *, xform, marker_size: float, legend: bool) -> lis
 
     elements: list = []
 
-    for label, style, group_items in legend_groups(items):
+    for label, style, group_items in legend_groups(items, colors):
         extent_items = [i for i in group_items if i["kind"] == "extent"]
         point_items = [i for i in group_items if i["kind"] == "point"]
         path_items = [i for i in group_items if i["kind"] in ("line", "ring")]
@@ -5418,6 +5427,7 @@ def _locations(
     tiles: str | bool | None = "EsriOceanBase",
     legend: bool = True,
     marker_size: float = 9.0,
+    colors=None,
     size=None,
     zoom: float = 1.0,
     font_scale: float = 1.0,
@@ -5447,6 +5457,10 @@ def _locations(
 
     ``land=False`` drops that offline coastline outline too, for a bare basemap; it
     has no effect with ``tiles`` on, the tile layer already showing land.
+
+    ``colors`` overrides the legend groups' colours -- a string for every selection
+    group, a list as the selection palette, or a ``{legend label: colour}`` dict; see
+    :func:`~ocean_skill.plot.locations.legend_groups`.
     """
     import geoviews as gv
 
@@ -5486,6 +5500,7 @@ def _locations(
         items,
         xform=to_mercator if tiles else _identity_xform,
         marker_size=marker_size,
+        colors=colors,
         legend=legend,
     ):
         overlay = overlay * element

@@ -407,6 +407,39 @@ def test_field_plot_locations_works_interactively_too(stub):
     assert _elements(obj, "Path")
 
 
+def test_field_plot_colors_recolours_the_transect_line_and_its_key(stub):
+    from matplotlib.colors import to_rgba
+
+    from ocean_skill.field import field as make_field
+
+    stub(PLAIN)
+    with patch("ocean_skill.catalog.resolve", _resolver({"grid_src": PLAIN_META})):
+        fig = make_field("stub", "nitrate").plot(
+            locations=[_transect_field()], colors="k"
+        )
+
+    ax = _map_axes(fig)
+    (line,) = [ln for ln in ax.lines if ln.get_linestyle() == "-"]
+    assert to_rgba(line.get_color()) == to_rgba("k")
+    (handle,) = ax.get_legend().legend_handles
+    assert to_rgba(handle.get_color()) == to_rgba("k")
+
+
+def test_field_plot_colors_works_interactively_too(stub):
+    from ocean_skill.field import field as make_field
+
+    stub(PLAIN)
+    with patch("ocean_skill.catalog.resolve", _resolver({"grid_src": PLAIN_META})):
+        obj = make_field("stub", "nitrate").plot(
+            renderer="holoviews",
+            tiles=False,
+            locations=[_transect_field()],
+            colors="navy",
+        )
+    (path,) = _elements(obj, "Path")
+    assert path.opts.get().kwargs["color"] == "navy"
+
+
 def test_field_plot_locations_is_refused_where_there_is_no_map(stub):
     from ocean_skill.field import field as make_field
 
