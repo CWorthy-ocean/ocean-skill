@@ -605,6 +605,7 @@ is `h` on a ROMS source and draws in `cmo.deep`.
 | `legend` | `True` | the featureType key (plus one entry per labelled `Field`/`Comparison`, each in its own colour), drawn once (on the first panel of a facet) |
 | `legend_kwargs` | — | `Axes.legend` properties (static renderer only, as ever) |
 | `marker_size` | `80` static / `9` interactive | marker size (points² / pixels) |
+| `colors` | automatic | recolour the legend groups — a string, a list or a `{legend label: colour}` dict ([below](#recolouring-the-groups-colors)); both renderers |
 
 Things worth knowing:
 
@@ -619,8 +620,35 @@ Things worth knowing:
   frame as the field, on both renderers.
 - **Interactive:** hovering a marker or box reads that dataset's record, as it does on a
   `map_locations()` map.
+- **`colors=` without `locations=`** has nothing to colour and is ignored, as
+  `legend` and `marker_size` are.
 
 **Default:** `None` (nothing drawn)
+
+#### Recolouring the groups (`colors`)
+
+```python
+osk.field(reference, "h").plot(locations=[eq, b180, b160], colors=["k", "r", "g"],
+                               legend_kwargs={"loc": "upper right"}, title="Pacific topography")
+```
+
+`colors=` takes the same three shapes as the [line families'](#colors-series-profile-and-xy),
+and changes the **colour only** — markers and linestyles stay, and each group's
+shapes and its legend entry always agree:
+
+| form | effect |
+|---|---|
+| not given | the automatic colours (featureType palette, the selection palette, black domain) |
+| a string | every **selection** group (each labelled `Field`/`Comparison`, plus the shared `"selection"` entry) |
+| a list | replaces the selection palette, in legend order, cycling if shorter than the groups; catalog featureTypes and `domain` keep their colours |
+| a `{legend label: colour}` dict | pins only the groups it names — a label (`"Eq"`), `"selection"`, a featureType (`"timeSeries"`) or `"domain"` |
+
+A dict leaves every other group at its automatic colour, and a selection group's
+automatic colour is its palette position among *all* the selection groups, so pinning
+`"Eq"` never shifts its neighbours. A key that is not a legend entry raises, listing the
+entries that exist; an empty list raises too. On the static renderer,
+`legend_kwargs={"labelcolor": "linecolor"}` also colours each legend entry's text to match its
+handle (matplotlib only, like the rest of `legend_kwargs`).
 
 ### `tiles` (holoviews only)
 
@@ -2598,6 +2626,7 @@ stations and transects — pass them as [`locations=`](#locations-field-maps) to
 | `extent` | frames every item | `(lon_min, lat_min, lon_max, lat_max)`, the same bbox shape `find(bbox=...)` takes |
 | `legend` | `True` | draw the featureType key at all |
 | `marker_size` | `80` static / `9` interactive | station marker size (matplotlib points² / bokeh pixels) |
+| `colors` | automatic | recolour the legend groups: a string (every selection group), a list (replaces the selection palette) or a `{legend label: colour}` dict (any group, `"domain"` and featureTypes included) — same forms as [`locations=` on a field map](#recolouring-the-groups-colors); both renderers |
 | `tiles` | `"EsriOceanBase"` (interactive only) | any `geoviews.tile_sources` name; `None` for the offline coastline basemap. The static renderer accepts-and-warns so `renderer="both"` can share one set of options. Carto sources (`"CartoLight"`, etc.) now require an API key geoviews can't supply and render watermarked — avoid them |
 
 Of the styling dicts, `title_kwargs`, `gridline_kwargs`, `tick_label_kwargs` and

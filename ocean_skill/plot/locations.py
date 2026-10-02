@@ -27,7 +27,7 @@ seam, so one code path serves both renderers.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -180,6 +180,7 @@ def style_for(feature_type: str) -> dict[str, Any]:
 
 def legend_groups(
     items: Iterable[dict[str, Any]],
+    colors: str | Sequence[str] | Mapping[str, str] | None = None,
 ) -> list[tuple[str, dict[str, Any], list[dict[str, Any]]]]:
     """Group ``locations`` items into legend entries: ``(label, style, members)``.
 
@@ -202,6 +203,23 @@ def legend_groups(
     groups only (marker and linestyle stay :data:`GROUP_STYLES`'s ``"selection"``).
     A lone selection group is therefore still crimson.
 
+    ``colors`` overrides those automatic colours (``color`` only -- marker and
+    linestyle never change), in the three shapes the line families' ``colors=`` takes:
+
+    * a string colours **every selection group** alike;
+    * a list or tuple **replaces** :data:`SELECTION_PALETTE` for the selection groups,
+      in their legend order, cycling when it is shorter than the groups;
+    * a ``{legend label: colour}`` dict pins only the groups it names -- any group, a
+      catalog featureType (``"timeSeries"``), ``"selection"`` or ``"domain"``
+      included -- and every other group keeps its automatic colour. A selection
+      group's automatic colour is its palette position among *all* selection groups,
+      named or not, so pinning ``"Eq"`` never shifts a neighbour's colour.
+
+    The string and list forms leave catalog featureTypes and ``domain`` alone; use the
+    dict to recolour those. A dict key matching no group raises a ``ValueError`` listing
+    the legend labels that do exist; an empty list raises one too, and any other type a
+    ``TypeError``. ``None`` (default) is every colour above, unchanged.
+
     Group membership is decided by the first item that opens it, so a label that
     happens to equal a featureType name (``label="grid"``) lands in that
     featureType's group; the styles in the returned list are copies, safe to edit.
@@ -219,6 +237,8 @@ def legend_groups(
     keys += [k for k in rest if members[k][0]["featureType"] == "selection"]
     keys += [k for k in rest if members[k][0]["featureType"] != "selection"]
 
+    palette, by_label = _resolve_group_colors(colors, keys)
+
     groups = []
     n_selection = 0
     for key in keys:
@@ -226,10 +246,47 @@ def legend_groups(
         feature_type = group_items[0]["featureType"]
         style = style_for(feature_type)
         if feature_type == "selection":
-            style["color"] = SELECTION_PALETTE[n_selection % len(SELECTION_PALETTE)]
+            style["color"] = palette[n_selection % len(palette)]
             n_selection += 1
+        if key in by_label:
+            style["color"] = by_label[key]
         groups.append((key, style, group_items))
     return groups
+
+
+def _resolve_group_colors(
+    colors: Any, labels: list[str]
+) -> tuple[Sequence[str], Mapping[str, str]]:
+    """``colors=`` as ``(selection palette, {label: colour})`` for ``legend_groups``.
+
+    A string is a one-colour palette, a list or tuple *is* the palette, and a dict
+    leaves the palette alone and pins labels. ``labels`` are the legend entries that
+    exist, which a dict's keys are checked against.
+    """
+    if colors is None:
+        return SELECTION_PALETTE, {}
+    if isinstance(colors, str):
+        return (colors,), {}
+    if isinstance(colors, Mapping):
+        unknown = [k for k in colors if k not in labels]
+        if unknown:
+            available = ", ".join(repr(lab) for lab in labels)
+            raise ValueError(
+                f"colors={{...}} names {', '.join(repr(u) for u in unknown)}, which "
+                f"is not a legend entry of this map -- available entries: {available}"
+            )
+        return SELECTION_PALETTE, colors
+    if isinstance(colors, (list, tuple)):
+        if not colors:
+            raise ValueError(
+                "colors is empty -- give at least one colour, or None for the default "
+                "palette."
+            )
+        return tuple(colors), {}
+    raise TypeError(
+        "colors must be a colour string, a list of colours or a "
+        f"{{legend label: colour}} dict, not {type(colors).__name__}"
+    )
 
 
 def _wrap(lon: float) -> float:

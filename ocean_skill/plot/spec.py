@@ -282,7 +282,10 @@ class PlotSpec:
         :data:`ocean_skill.plot.locations.SELECTION_PALETTE` (see
         :func:`ocean_skill.plot.locations.legend_groups`) -- so three labelled
         transects and boxes read as three differently-coloured entries, while a
-        lone selection, labelled or not, stays crimson.
+        lone selection, labelled or not, stays crimson. The ``colors`` option
+        overrides those colours: a string for every selection group, a list as
+        the selection palette (cycling), or a ``{legend label: colour}`` dict pinning
+        only the groups it names -- a catalog featureType and ``"domain"`` included.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.
@@ -292,6 +295,8 @@ class PlotSpec:
         :func:`ocean_skill.plot.map_locations.location_items`) drawn on top of every
         map panel -- how ``Field.plot(locations=...)`` puts stations and transects over
         a bathymetry map. They are context rather than data: they never widen the view.
+        ``options["colors"]`` recolours their legend groups (and is ignored when there
+        are no ``location_items``).
     """
 
     family: str

@@ -798,7 +798,9 @@ def map_locations(
     **kwargs
         Other plot options forwarded to the renderer -- ``extent`` (default:
         frames everything mapped, with a margin), ``title``, ``save``, ``tiles``,
-        ``legend``, and the rest of the ``"locations"`` family's styling options.
+        ``legend``, ``colors`` (recolour the legend groups; see
+        :func:`~ocean_skill.plot.locations.legend_groups`), and the rest of the
+        ``"locations"`` family's styling options.
         See ``docs/plot_styling_reference.md`` for the full list.
 
     ::
@@ -829,7 +831,7 @@ def map_locations(
 
     Everything else beyond ``what``/``catalog``/``renderer``/``domain`` is a
     plot option (``extent=``, ``title=``, ``save=``, ``tiles=``, ``legend=``,
-    ...), passed to the renderer like any other family's. The default
+    ``colors=``, ...), passed to the renderer like any other family's. The default
     ``extent`` frames everything mapped, with a margin.
     """
     from ocean_skill.plot.locations import _default_extent

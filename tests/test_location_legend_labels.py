@@ -393,3 +393,254 @@ def test_selection_palette_avoids_tab10():
     from ocean_skill.plot.locations import TAB10
 
     assert not set(SELECTION_PALETTE) & set(TAB10)
+
+
+# -- colors= ---------------------------------------------------------------------------
+
+
+def _rgba(colors):
+    from matplotlib.colors import to_rgba
+
+    return [to_rgba(c) for c in colors]
+
+
+def _same_colors(got, expected):
+    """Colours equal as RGBA, to 1/255 -- holoviews spells ``"g"`` as ``#007f00``."""
+    return np.allclose(_rgba(got), _rgba(expected), atol=1.0 / 255)
+
+
+def _mixed_items():
+    return [
+        _item("point", "timeSeries"),
+        _item("ring", "domain"),
+        _item("line", "selection", "Eq"),
+        _item("extent", "selection", "box"),
+        _item("line", "selection"),
+    ]
+
+
+def test_legend_groups_colors_none_is_todays_behaviour():
+    assert legend_groups(_mixed_items(), None) == legend_groups(_mixed_items())
+
+
+def test_legend_groups_colors_string_colours_every_selection_group_only():
+    groups = {g[0]: g[1] for g in legend_groups(_mixed_items(), colors="k")}
+
+    assert [groups[k]["color"] for k in ("Eq", "box", "selection")] == ["k"] * 3
+    assert groups["timeSeries"] == style_for("timeSeries")
+    assert groups["domain"] == style_for("domain")
+    # colour only: the rest of the selection style is untouched
+    assert groups["Eq"]["marker"] == style_for("selection")["marker"]
+    assert groups["Eq"]["linestyle"] == "-"
+
+
+def test_legend_groups_colors_list_replaces_the_palette_and_cycles():
+    groups = {g[0]: g[1] for g in legend_groups(_mixed_items(), colors=["k", "r"])}
+
+    assert [groups[k]["color"] for k in ("Eq", "box", "selection")] == ["k", "r", "k"]
+    assert groups["timeSeries"] == style_for("timeSeries")
+    assert groups["domain"] == style_for("domain")
+    # a tuple is a palette too
+    groups = {g[0]: g[1] for g in legend_groups(_mixed_items(), colors=("g", "b", "c"))}
+    assert [groups[k]["color"] for k in ("Eq", "box", "selection")] == ["g", "b", "c"]
+
+
+def test_legend_groups_colors_dict_pins_only_the_named_groups():
+    colors = {"box": "k", "timeSeries": "m", "domain": "0.5"}
+    groups = {g[0]: g[1] for g in legend_groups(_mixed_items(), colors=colors)}
+
+    assert groups["box"]["color"] == "k"
+    assert groups["timeSeries"]["color"] == "m"
+    assert groups["domain"]["color"] == "0.5"
+    # unnamed selection groups keep their palette position, as if nothing was pinned
+    assert groups["Eq"]["color"] == SELECTION_PALETTE[0]
+    assert groups["selection"]["color"] == SELECTION_PALETTE[2]
+    # colour only
+    assert groups["domain"]["linestyle"] == "--"
+    expected = style_for("timeSeries")["marker_index"]
+    assert groups["timeSeries"]["marker_index"] == expected
+
+
+def test_legend_groups_colors_dict_can_name_the_shared_selection_group():
+    items = [_item("line", "selection", "A"), _item("line", "selection")]
+    groups = {g[0]: g[1]["color"] for g in legend_groups(items, {"selection": "k"})}
+    assert groups == {"A": "crimson", "selection": "k"}
+
+
+def test_legend_groups_colors_dict_unknown_key_lists_the_legend_labels():
+    with pytest.raises(ValueError) as err:
+        legend_groups(_mixed_items(), colors={"Eqq": "k", "nope": "r", "Eq": "g"})
+
+    message = str(err.value)
+    assert "'Eqq'" in message and "'nope'" in message
+    assert "available entries" in message
+    for label in ("timeSeries", "Eq", "box", "selection", "domain"):
+        assert repr(label) in message
+
+
+@pytest.mark.parametrize("empty", [[], ()])
+def test_legend_groups_colors_empty_list_raises(empty):
+    with pytest.raises(ValueError, match="empty"):
+        legend_groups(_mixed_items(), colors=empty)
+
+
+@pytest.mark.parametrize("bad", [3, 1.5, {"k", "r"}, object()])
+def test_legend_groups_colors_bad_type_raises(bad):
+    with pytest.raises(TypeError, match="colors must be"):
+        legend_groups(_mixed_items(), colors=bad)
+
+
+def test_static_colors_list_colours_handles_and_drawn_shapes():
+    fig = map_locations(_three_fields(), colors=["k", "r", "g"], domain=None)
+    ax = _static_axes(fig)
+
+    labels, handle_colors = _legend(ax)
+    assert labels == ["Eq", "180-160", "160-120"]
+    assert _rgba(handle_colors) == _rgba(["k", "r", "g"])
+    assert {to_rgba_ for to_rgba_ in _rgba(ln.get_color() for ln in ax.lines)} == set(
+        _rgba(["k", "r", "g"])
+    )
+
+
+def test_static_colors_dict_and_string():
+    fig = map_locations(_three_fields(), colors={"Eq": "k"}, domain=None)
+    _, handle_colors = _legend(_static_axes(fig))
+    assert _rgba(handle_colors) == _rgba(["k", *SELECTION_PALETTE[1:3]])
+
+    fig = map_locations(_three_fields(), colors="navy", domain=None)
+    _, handle_colors = _legend(_static_axes(fig))
+    assert _rgba(handle_colors) == _rgba(["navy"] * 3)
+
+
+def test_static_colors_can_recolour_the_domain_ring():
+    fig = map_locations(_three_fields(), colors={"domain": "orange"})
+    labels, handle_colors = _legend(_static_axes(fig))
+    assert dict(zip(labels, _rgba(handle_colors), strict=True))["domain"] == _rgba(
+        ["orange"]
+    )[0]
+
+
+def test_static_labelcolor_linecolor_matches_legend_text_to_the_entries():
+    fig = map_locations(
+        _three_fields(),
+        colors=["k", "r", "g"],
+        domain=None,
+        legend_kwargs={"labelcolor": "linecolor"},
+    )
+    legend = _static_axes(fig).get_legend()
+    assert _rgba(t.get_color() for t in legend.get_texts()) == _rgba(["k", "r", "g"])
+
+
+def test_static_colors_bad_key_raises_through_the_renderer():
+    with pytest.raises(ValueError, match="available entries"):
+        map_locations(_three_fields(), colors={"nope": "k"})
+
+
+def _facet_spec(**options):
+    import xarray as xr
+
+    from ocean_skill.plot.spec import PlotSpec
+
+    lat = np.linspace(-30.0, 30.0, 12)
+    lon = np.linspace(150.0, 250.0, 20)
+    da = xr.DataArray(
+        np.add.outer(lat, lon) * 0.0,
+        dims=("lat", "lon"),
+        coords={"lat": lat, "lon": lon},
+        attrs={"units": "m"},
+    )
+    facet = {
+        "field": da,
+        "facet_dim": None,
+        "row_dim": None,
+        "units": "m",
+        "standard_name": "sea_floor_depth_below_geoid",
+    }
+    items = location_items(_three_fields(), domain=None)
+    return PlotSpec("field_facet", [facet], {"location_items": items, **options})
+
+
+def test_static_field_map_overlay_takes_colors():
+    from ocean_skill.plot.registry import render
+
+    fig = render(_facet_spec(colors=["k", "r", "g"]))
+
+    ax = next(a for a in fig.axes if hasattr(a, "projection"))
+    labels, handle_colors = _legend(ax)
+    assert labels == ["Eq", "180-160", "160-120"]
+    assert _rgba(handle_colors) == _rgba(["k", "r", "g"])
+    drawn = _rgba(ln.get_color() for ln in ax.lines)
+    assert set(_rgba(["k", "r", "g"])) <= set(drawn)
+
+
+def test_static_field_map_colors_without_locations_is_ignored():
+    from ocean_skill.plot.registry import render
+
+    spec = _facet_spec(colors=["k"])
+    del spec.options["location_items"]
+    fig = render(spec)
+    assert not any(a.get_legend() for a in fig.axes)
+
+
+def test_interactive_colors_list_colours_each_entry():
+    obj = map_locations(
+        _three_fields(),
+        renderer="holoviews",
+        tiles=None,
+        colors=["k", "r", "g"],
+        domain=None,
+    )
+    colors = _bokeh_colors(obj)
+    assert _same_colors(
+        [colors[lab] for lab in ("Eq", "180-160", "160-120")], ["k", "r", "g"]
+    )
+
+
+def test_interactive_colors_dict_and_domain():
+    obj = map_locations(
+        _three_fields(),
+        renderer="holoviews",
+        tiles=None,
+        colors={"180-160": "navy", "domain": "orange"},
+    )
+    colors = _bokeh_colors(obj)
+    assert _same_colors(
+        [colors[k] for k in ("180-160", "domain", "Eq", "160-120")],
+        ["navy", "orange", SELECTION_PALETTE[0], SELECTION_PALETTE[2]],
+    )
+
+
+def test_interactive_colors_string_reaches_markers_too():
+    import holoviews as hv
+
+    from ocean_skill.plot.holoviews_renderer import _extension, _location_elements
+
+    _extension()
+    hover = dict.fromkeys(HOVER_FIELDS, "")
+    items = [
+        {**hover, "kind": "point", "featureType": "selection", "legend_label": "P",
+         "lon": 4.0, "lat": 4.0},
+    ]
+    elements = _location_elements(
+        items, xform=lambda x, y: (x, y), marker_size=9.0, legend=True, colors="k"
+    )
+    glyph = hv.render(hv.Overlay(elements), backend="bokeh").legend[0].items[0]
+    assert _same_colors([glyph.renderers[0].glyph.fill_color], ["k"])
+
+
+def test_interactive_field_map_overlay_takes_colors():
+    from ocean_skill.plot.registry import render
+
+    obj = render(_facet_spec(colors=["k", "r", "g"]), renderer="holoviews", tiles=None)
+    colors = _bokeh_colors(obj)
+    assert _same_colors(
+        [colors[lab] for lab in ("Eq", "180-160", "160-120")], ["k", "r", "g"]
+    )
+
+
+def test_interactive_field_map_colors_without_locations_is_ignored():
+    from ocean_skill.plot.registry import render
+
+    spec = _facet_spec(colors=["k"])
+    del spec.options["location_items"]
+    assert render(spec, renderer="holoviews", tiles=None) is not None

@@ -1395,7 +1395,10 @@ class Field:
             source names, a :func:`~ocean_skill.catalog.find` result, a
             ``Field``/``Comparison`` (or a set of either), or a list mixing them --
             as markers, transect lines and extent boxes, keyed by a legend
-            (``legend``, ``legend_kwargs``, ``marker_size``). A ``Field`` whose
+            (``legend``, ``legend_kwargs``, ``marker_size``) and recoloured with
+            ``colors`` (a colour for every labelled selection, a list of colours
+            for them in legend order, or a ``{legend label: colour}`` dict -- see
+            :func:`~ocean_skill.plot.locations.legend_groups`). A ``Field`` whose
             ``select`` cuts a transect draws that transect's path, so the section
             you analyse and the line on the map cannot disagree. The model's own
             outline is not repeated here -- the map draws that through ``domain``.
