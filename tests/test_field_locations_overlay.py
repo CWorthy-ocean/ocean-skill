@@ -154,6 +154,20 @@ def test_static_no_items_is_the_map_it_always_was():
         assert ax.get_legend() is None
 
 
+def test_static_legend_sits_in_a_corner_not_best():
+    # loc="best" transforms every mesh cell through cartopy on each layout pass --
+    # minutes on a basin grid -- so the key takes a fixed corner instead.
+    legend = _map_axes(_static(PLAIN, PLAIN_ITEMS)).get_legend()
+    assert legend._loc == legend.codes["upper right"]
+
+
+def test_static_legend_corner_can_be_overridden():
+    legend = _map_axes(
+        _static(PLAIN, PLAIN_ITEMS, legend_kwargs={"loc": "lower left"})
+    ).get_legend()
+    assert legend._loc == legend.codes["lower left"]
+
+
 def test_static_legend_can_be_switched_off():
     ax = _map_axes(_static(PLAIN, PLAIN_ITEMS, legend=False))
     assert ax.get_legend() is None
