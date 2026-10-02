@@ -658,10 +658,11 @@ class XY:
             One of ``"matplotlib"`` (default, static) or ``"holoviews"`` (interactive).
         **opts
             Plot options forwarded untouched to the renderer: ``title``,
-            ``annotations``, ``density``, ``color_by``, ``colors``, ``ncols``, ``xlim``/
-            ``ylim``, ``marker_size``, ``alpha``, ``save`` and the ``*_kwargs`` styling
-            dicts -- every one is documented under "Forwarded keyword
-            arguments" below, and in ``docs/plot_styling_reference.md``.
+            ``annotations``, ``density``, ``color_by`` (with ``vmin``/``vmax`` to pin
+            its scale), ``colors``, ``ncols``, ``xlim``/``ylim``, ``marker_size``,
+            ``alpha``, ``save`` and the ``*_kwargs`` styling dicts -- every one is
+            documented under "Forwarded keyword arguments" below, and in
+            ``docs/plot_styling_reference.md``.
 
         Reads each member the first time it is needed. A member that cannot be read is
         dropped with a warning (see :meth:`_items`); ``ValueError`` if none can.

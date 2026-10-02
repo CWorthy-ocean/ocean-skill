@@ -4533,6 +4533,63 @@ def _xy_palette(cmap, *, reverse: bool = False) -> list[str]:
     return palette[::-1] if reverse else palette
 
 
+def _xy_colorbar_opts(scale) -> dict[str, Any] | None:
+    """Return the bar's ``colorbar_opts``: dates, with clipped ends forced and labelled.
+
+    A pinned ``vmin``/``vmax`` that cuts off data is told as the other families tell it
+    (:func:`_clip_colorbar_opts`), from the scale's own ``(vmin, vmax)`` and
+    ``data_range`` -- never the reversed depth clim, whose low end is the deep one and
+    would send the static renderer's ``_extend``, which decides the ends, the wrong way.
+    That helper writes numbers; a time bar is in dates, so here the date formatter
+    stays, the ticks are a date locator's (few of them, clear of a forced end) and a
+    clipped end reads ``≥ 2012-06-01``.
+
+    ``None`` when there is nothing to say: depth with no end cut off keeps bokeh's own
+    ticks.
+    """
+    if not scale.is_time:
+        return _clip_colorbar_opts((scale.vmin, scale.vmax), scale.data_range)
+
+    import matplotlib.dates as mdates
+    from bokeh.models import DatetimeTicker, DatetimeTickFormatter, FixedTicker
+
+    from ocean_skill.plot.matplotlib_renderer import _extend
+    from ocean_skill.plot.xy import _scale_text
+
+    lo, hi = scale.vmin, scale.vmax
+    formatter = DatetimeTickFormatter()
+    extend = _extend(lo, hi, scale.data_range)
+    if extend == "neither":
+        return {"formatter": formatter, "ticker": DatetimeTicker()}
+    ends = [
+        (value, sign)
+        for value, sign, marked in (
+            (lo, "≤", extend in ("min", "both")),
+            (hi, "≥", extend in ("max", "both")),
+        )
+        if marked
+    ]
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=5)
+    locator.create_dummy_axis()
+    locator.axis.set_view_interval(lo, hi)
+    # interior ticks, minus any that would sit on top of a forced end label
+    ticks = [
+        float(t)
+        for t in locator()
+        if lo < t < hi and all(abs(t - end) / (hi - lo) > 0.1 for end, _ in ends)
+    ]
+    return {
+        "formatter": formatter,
+        "ticker": FixedTicker(
+            ticks=[t * _MS_PER_DAY for t in sorted(ticks + [end for end, _ in ends])]
+        ),
+        "major_label_overrides": {
+            end * _MS_PER_DAY: f"{sign} {_scale_text(end, 'time')}"
+            for end, sign in ends
+        },
+    }
+
+
 def _xy_colour_opts(scale, *, bar: bool) -> dict[str, Any]:
     """Return the colour-mapping options of a ``color_by`` element.
 
@@ -4540,6 +4597,12 @@ def _xy_colour_opts(scale, *, bar: bool) -> dict[str, Any]:
     dates. Depth reads surface-at-top, which bokeh's bars (low end at the bottom) have
     no option for: the clim runs ``(deepest, shallowest)`` and the palette is reversed
     to match, so a value keeps its colour and only the bar flips.
+
+    A value beyond the clim -- a pinned ``vmin``/``vmax`` -- takes the palette's end
+    colour on that side (bokeh's mapper clamps unless given ``low_color`` and
+    ``high_color``, which are left alone), the same colour the static scatter gives it,
+    so the reversed depth clim still sends a point deeper than ``vmax`` to the deepest
+    colour.
     """
     low, high = scale.vmin, scale.vmax
     if scale.is_time:
@@ -4551,13 +4614,9 @@ def _xy_colour_opts(scale, *, bar: bool) -> dict[str, Any]:
     }
     if bar:
         opts["clabel"] = scale.label
-        if scale.is_time:
-            from bokeh.models import DatetimeTicker, DatetimeTickFormatter
-
-            opts["colorbar_opts"] = {
-                "formatter": DatetimeTickFormatter(),
-                "ticker": DatetimeTicker(),
-            }
+        colorbar_opts = _xy_colorbar_opts(scale)
+        if colorbar_opts:
+            opts["colorbar_opts"] = colorbar_opts
     return opts
 
 
@@ -4687,6 +4746,8 @@ def _xy(
     density=False,
     color_by=None,
     cmap=None,
+    vmin=None,
+    vmax=None,
     colorbar: bool = True,
     colors=None,
     legend=True,
@@ -4724,7 +4785,10 @@ def _xy(
     ``"right"``, as :func:`_series` does. ``marker_size`` (a scatter ``s``, in points
     squared) becomes the diameter in pixels it would be on screen. A reversed depth bar
     (surface at top) is a reversed palette on a reversed ``clim``; see
-    :func:`_xy_colour_opts`.
+    :func:`_xy_colour_opts`. ``vmin``/``vmax`` pin the ``color_by`` scale as they do
+    statically: a dot beyond a pinned end takes the end colour, and bokeh, which cannot
+    draw the bar's arrow, forces a tick onto that end labelled ``≥ 1500`` or ``≤ 3``
+    (``≥ 2012-06-01`` for time) -- on exactly the ends the static bar gives an arrow.
 
     Dots carry hover (both values, depth, time); a source with many thousands of points
     ships them all to the browser, which ``compose`` warns about past two million.
@@ -4740,6 +4804,8 @@ def _xy(
         density=density,
         color_by=color_by,
         cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
         colorbar=colorbar,
         colors=colors,
         legend=legend,

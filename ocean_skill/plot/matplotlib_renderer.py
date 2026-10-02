@@ -1904,6 +1904,8 @@ def xy(
     density: bool | int | Sequence[float] = False,
     color_by: str | None = None,
     cmap=None,
+    vmin=None,
+    vmax=None,
     colorbar: bool = True,
     colors=None,
     legend: bool | str = True,
@@ -1950,7 +1952,10 @@ def xy(
     ``color_by="depth"`` or ``"time"`` colours the dots instead, on one scale and
     one figure-level colour bar shared by every panel (``cmap=`` picks the map,
     ``colorbar=False`` drops the bar); lines keep their solid colours, and a source
-    without the array warns and stays solid.
+    without the array warns and stays solid. ``vmin=``/``vmax=`` pin either end of that
+    scale -- metres for depth, a date such as ``"2012-06-01"`` for time -- with the
+    other end still the data's own: a dot beyond a pinned end takes the end colour, and
+    the bar gets an arrow there. They need ``color_by``.
 
     ``density=True`` (or a line count, or a list of levels) draws grey sigma-0
     contours with their values -- potential density from TEOS-10 via ``gsw``, on
@@ -1992,6 +1997,8 @@ def xy(
         density=density,
         color_by=color_by,
         cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
         colorbar=colorbar,
         colors=colors,
         legend=legend,
@@ -2004,6 +2011,13 @@ def xy(
         nrows=nrows,
     )
     scale_bar = layout.colorbar if layout.colorbar and layout.colorbar.show else None
+    # one norm for the dots and the bar; a range is its own two ends, so this is the
+    # data range _draw_colorbar turns into an arrow wherever a pinned end cuts it off
+    norm = (
+        _with_range(layout.colorbar.norm, layout.colorbar.data_range)
+        if layout.colorbar
+        else None
+    )
     canvas = resolve_canvas(size, zoom)
     figsize = figsize or auto_figsize(
         panel_aspect or XY_ASPECT,
@@ -2092,7 +2106,7 @@ def xy(
                     {
                         "c": member.color_values,
                         "cmap": layout.colorbar.cmap,
-                        "norm": layout.colorbar.norm,
+                        "norm": norm,
                     }
                     if coloured
                     else {"color": member.color}
@@ -2149,7 +2163,7 @@ def xy(
         ax.set_visible(False)
 
     if scale_bar is not None:
-        mappable = ScalarMappable(norm=scale_bar.norm, cmap=scale_bar.cmap)
+        mappable = ScalarMappable(norm=norm, cmap=scale_bar.cmap)
         used = [ax for ax, p in zip(flat, layout.panels, strict=False) if not p.blank]
         cbar = _draw_colorbar(
             fig,

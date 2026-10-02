@@ -329,6 +329,143 @@ def test_colorbar_false_keeps_the_colours():
     assert scale is not None and scale.show is False
 
 
+def _spread_item(lo: float = 10.0, hi: float = 400.0) -> dict:
+    """Return a cloud with depths evenly from ``lo`` to ``hi`` m, times across 2020."""
+    item = _item()
+    item["depth"] = np.linspace(lo, hi, item["x"].size)
+    return item
+
+
+def test_vmax_pins_the_top_and_the_bottom_stays_the_data():
+    scale = _xy.compose([_spread_item()], color_by="depth", vmax=100).colorbar
+    assert (scale.vmin, scale.vmax) == (10, 100)
+    assert scale.data_range == (10, 400)
+    assert (scale.norm.vmin, scale.norm.vmax) == (10, 100)
+    only_min = _xy.compose([_spread_item()], color_by="depth", vmin=50).colorbar
+    assert (only_min.vmin, only_min.vmax) == (50, 400)
+
+
+def test_both_ends_pinned_may_lie_outside_the_data():
+    scale = _xy.compose([_spread_item()], color_by="depth", vmin=0, vmax=1500).colorbar
+    assert (scale.vmin, scale.vmax) == (0, 1500)
+    assert scale.data_range == (10, 400)  # the true span, not the scale's
+
+
+def test_nothing_pinned_leaves_the_scale_equal_to_the_data_range():
+    scale = _xy.compose([_spread_item()], color_by="depth").colorbar
+    assert scale.data_range == (scale.vmin, scale.vmax) == (10, 400)
+    item = _spread_item()
+    item["time"] = np.array(
+        ["1970-01-02", "1970-01-12"] * (item["x"].size // 2), "M8[ns]"
+    )
+    scale = _xy.compose([item], color_by="time").colorbar
+    assert scale.data_range == (scale.vmin, scale.vmax) == (1.0, 11.0)
+
+
+def test_data_range_is_the_finite_span_across_every_coloured_member():
+    a, b = _spread_item(10, 400), _spread_item(50, 900)
+    a["depth"][0] = np.nan
+    b["label"] = "OTHER"
+    scale = _xy.compose([a, b], color_by="depth", vmax=100).colorbar
+    assert scale.data_range == pytest.approx((a["depth"][1], 900))
+
+
+def test_a_one_valued_cloud_still_has_a_scale_and_no_clipped_ends():
+    from ocean_skill.plot.matplotlib_renderer import _extend
+
+    item = _item()
+    item["depth"] = np.full(item["x"].size, 100.0)
+    scale = _xy.compose([item], color_by="depth").colorbar
+    assert scale.data_range == (100, 100) and scale.vmin < scale.vmax
+    assert _extend(scale.vmin, scale.vmax, scale.data_range) == "neither"
+    assert _xy.compose([item], color_by="depth", vmin=0).colorbar.vmax > 100
+
+
+def test_values_beyond_a_pinned_end_take_the_end_colour_whatever_the_cmap_says():
+    import matplotlib
+
+    cmap = matplotlib.colormaps["plasma"].copy()
+    cmap.set_over("red")
+    cmap.set_under("cyan")
+    scale = _xy.compose(
+        [_spread_item()], color_by="depth", cmap=cmap, vmin=100, vmax=200
+    ).colorbar
+    ends = np.array([cmap(0.0), cmap(1.0)])
+    np.testing.assert_allclose(scale.cmap(scale.norm([5.0, 399.0])), ends)
+
+
+def test_pinned_ends_must_leave_an_interval():
+    item = _spread_item()
+    with pytest.raises(
+        ValueError,
+        match=r"vmin=500 must be less than vmax=100 for color_by='depth'; "
+        r"the depth values run from 10 to 400",
+    ):
+        _xy.compose([item], color_by="depth", vmin=500, vmax=100)
+    with pytest.raises(ValueError, match="vmin=100 must be less than vmax=100"):
+        _xy.compose([item], color_by="depth", vmin=100, vmax=100)
+
+
+def test_a_pin_beyond_the_datas_other_end_is_refused():
+    item = _spread_item()
+    # every point is deeper than 1 m, so the unpinned bottom (10) is already past it
+    with pytest.raises(ValueError, match=r"vmin=10 must be less than vmax=1 "):
+        _xy.compose([item], color_by="depth", vmax=1)
+    with pytest.raises(ValueError, match=r"vmin=500 must be less than vmax=400 "):
+        _xy.compose([item], color_by="depth", vmin=500)
+
+
+def test_vmin_vmax_without_color_by_say_what_they_pin():
+    with pytest.raises(ValueError, match=r"pin the color_by scale.*pass color_by="):
+        _xy.compose([_item()], vmax=1500)
+    with pytest.raises(ValueError, match=r"vmin=/vmax= pin the color_by scale"):
+        _xy.compose([_item()], vmin=0)
+
+
+def test_time_pins_are_dates_in_any_spelling():
+    import datetime
+
+    import pandas as pd
+
+    item = _item()
+    days = _xy._time_days(np.datetime64("2020-06-01"))
+    spellings = [
+        "2020-06-01",
+        datetime.datetime(2020, 6, 1),
+        np.datetime64("2020-06-01"),
+        pd.Timestamp("2020-06-01"),
+        pd.Timestamp("2020-06-01", tz="UTC"),
+    ]
+    for pin in spellings:
+        scale = _xy.compose([item], color_by="time", vmax=pin).colorbar
+        assert scale.vmax == days, pin
+        assert scale.vmin == scale.data_range[0] < days < scale.data_range[1], pin
+    both = _xy.compose([item], color_by="time", vmin="2020-03-01", vmax="2020-09-01")
+    assert both.colorbar.vmin < days < both.colorbar.vmax
+
+
+@pytest.mark.parametrize(
+    "pin", [18000, 1.5e9, True, "not a date", "", np.datetime64("NaT")]
+)
+def test_a_time_pin_that_is_not_a_date_is_refused(pin):
+    with pytest.raises(ValueError, match=r"vmax=.* is not a date.*color_by='time'"):
+        _xy.compose([_item()], color_by="time", vmax=pin)
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["deep", "1500", True, float("nan"), float("inf"), np.datetime64("2020-01-01")],
+)
+def test_a_depth_pin_that_is_not_a_number_of_metres_is_refused(pin):
+    with pytest.raises(ValueError, match=r"vmin=.* is not a finite depth in metres"):
+        _xy.compose([_item()], color_by="depth", vmin=pin)
+
+
+def test_a_numpy_number_is_a_fine_depth():
+    scale = _xy.compose([_item()], color_by="depth", vmax=np.float32(500)).colorbar
+    assert scale.vmax == 500.0
+
+
 # --- compose: limits and labels -------------------------------------------------------
 
 
@@ -954,6 +1091,118 @@ def test_color_by_without_depth_warns_at_draw_time_too():
     assert cloud.get_array() is None
 
 
+def _cbar(fig):
+    """Return the one colour bar's :class:`~matplotlib.colorbar.Colorbar`."""
+    (bar,) = _colorbars(fig)
+    return bar._colorbar
+
+
+def test_a_depth_vmax_arrows_the_deep_end_of_the_inverted_bar():
+    items = _ts_items()
+    fig = _draw(items, color_by="depth", vmax=500)
+    (bar,) = _colorbars(fig)
+    cmap = _scatter(_panel_axes(fig)[0])[0].get_cmap()
+    assert bar._colorbar.extend == "max"
+    # the surface is at the top, so the deep end -- vmax -- is at the bottom ...
+    assert bar.yaxis_inverted() and bar.get_ylim()[0] == 500
+    # ... and the one triangle hangs below the bar (axes fractions: below 0), in the
+    # deepest colour
+    (arrow,) = bar.patches
+    ys = arrow.get_path().vertices[:, 1]
+    assert ys.min() < 0 and ys.max() <= 0
+    np.testing.assert_allclose(arrow.get_facecolor(), cmap(1.0))
+
+
+def test_a_depth_vmin_arrows_the_shallow_end_at_the_top():
+    fig = _draw(_ts_items(), color_by="depth", vmin=100)
+    (bar,) = _colorbars(fig)
+    assert bar._colorbar.extend == "min" and bar.yaxis_inverted()
+    (arrow,) = bar.patches
+    ys = arrow.get_path().vertices[:, 1]
+    assert ys.max() > 1 and ys.min() >= 1
+    cmap = _scatter(_panel_axes(fig)[0])[0].get_cmap()
+    np.testing.assert_allclose(arrow.get_facecolor(), cmap(0.0))
+
+
+def test_both_depth_pins_cutting_data_arrow_both_ends():
+    fig = _draw(_ts_items(), color_by="depth", vmin=100, vmax=500)
+    assert _cbar(fig).extend == "both"
+    assert len(_colorbars(fig)[0].patches) == 2
+
+
+def test_a_time_vmax_arrows_the_late_end_at_the_top():
+    fig = _draw(_ts_items(), color_by="time", vmax="2020-06-01")
+    (bar,) = _colorbars(fig)
+    assert bar._colorbar.extend == "max" and not bar.yaxis_inverted()
+    (arrow,) = bar.patches
+    assert arrow.get_path().vertices[:, 1].min() >= 1
+    labels = [t.get_text() for t in bar.get_yticklabels()]
+    assert any(label for label in labels)  # still dates, with the arrow added
+
+
+@pytest.mark.parametrize(
+    "opts",
+    [
+        {},
+        {"vmin": 0, "vmax": 5000},
+        {"vmin": 0},
+    ],
+    ids=["nothing-pinned", "roomy-pins", "vmin-above-the-surface"],
+)
+def test_a_bar_the_pins_leave_whole_has_no_arrow(opts):
+    fig = _draw(_ts_items(), color_by="depth", **opts)
+    assert _cbar(fig).extend == "neither"
+    assert len(_colorbars(fig)[0].patches) == 0
+
+
+def test_dots_beyond_a_pin_are_clamped_to_the_end_colour_and_not_dropped():
+    import matplotlib
+
+    cmap = matplotlib.colormaps["plasma"].copy()
+    cmap.set_over("red")  # the map's own over/under colours do not repaint the dots
+    cmap.set_under("cyan")
+    fig = _draw(
+        _ts_items(), color_by="depth", cmap=cmap, vmin=200, vmax=500, colorbar=False
+    )
+    (cloud,) = _scatter(_panel_axes(fig)[0])
+    assert (cloud.norm.vmin, cloud.norm.vmax) == (200, 500)
+    depth = np.asarray(cloud.get_array())
+    assert len(depth) == 200 and (depth > 500).any() and (depth < 200).any()
+    fig.canvas.draw()
+    rgb = cloud.get_facecolor()[:, :3]
+    assert np.allclose(rgb[depth > 500], cmap(1.0)[:3])
+    assert np.allclose(rgb[depth < 200], cmap(0.0)[:3])
+
+
+def test_the_package_depth_map_clamps_to_its_deepest_colour_beyond_vmax():
+    from ocean_skill.colormaps import cmaps_for
+
+    fig = _draw(_ts_items(), color_by="depth", vmax=500)
+    (cloud,) = _scatter(_panel_axes(fig)[0])
+    depth = np.asarray(cloud.get_array())
+    fig.canvas.draw()
+    deepest = cmaps_for("sea_floor_depth")[0](1.0)[:3]
+    assert (depth > 500).any()
+    assert np.allclose(cloud.get_facecolor()[depth > 500, :3], deepest)
+
+
+def test_an_explicit_extend_in_colorbar_kwargs_wins_over_the_pins():
+    fig = _draw(
+        _ts_items(),
+        color_by="depth",
+        vmax=500,
+        colorbar_kwargs={"extend": "neither"},
+    )
+    assert _cbar(fig).extend == "neither"
+    fig = _draw(_ts_items(), color_by="depth", colorbar_kwargs={"extend": "both"})
+    assert _cbar(fig).extend == "both"
+
+
+def test_pins_without_color_by_are_refused_at_draw_time():
+    with pytest.raises(ValueError, match=r"vmin=/vmax= pin the color_by scale"):
+        _draw(_ts_items(), vmax=1500)
+
+
 # --- renderer: annotations ------------------------------------------------------------
 
 
@@ -1114,12 +1363,12 @@ def test_contract_two_options_are_all_accepted():
     from ocean_skill.plot.matplotlib_renderer import xy
 
     expected = {
-        "title", "annotations", "density", "color_by", "cmap", "colorbar", "colors",
-        "legend", "titles", "xlim", "ylim", "sharex", "sharey", "marker_size", "alpha",
-        "panel_aspect", "ncols", "nrows", "size", "zoom", "font_scale", "figsize",
-        "save", "fit_text", "wspace", "hspace", "title_kwargs", "tick_label_kwargs",
-        "suptitle_kwargs", "legend_kwargs", "line_kwargs", "annot_kwargs",
-        "colorbar_kwargs",
+        "title", "annotations", "density", "color_by", "cmap", "vmin", "vmax",
+        "colorbar", "colors", "legend", "titles", "xlim", "ylim", "sharex", "sharey",
+        "marker_size", "alpha", "panel_aspect", "ncols", "nrows", "size", "zoom",
+        "font_scale", "figsize", "save", "fit_text", "wspace", "hspace",
+        "title_kwargs", "tick_label_kwargs", "suptitle_kwargs", "legend_kwargs",
+        "line_kwargs", "annot_kwargs", "colorbar_kwargs",
     }  # fmt: skip
     assert set(inspect.signature(xy).parameters) - {"items"} == expected
 
