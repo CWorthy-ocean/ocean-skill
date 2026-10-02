@@ -14,7 +14,9 @@ through the renderer registry like every other family.
 Non-gridded feature types (a mooring, a profile, a track) become scatter markers at
 their bounding box's midpoint; ``grid`` datasets become dashed extent rectangles.
 Both renderers colour by featureType off the same constants here, so the static and
-interactive maps cannot disagree about what a timeSeries looks like.
+interactive maps cannot disagree about what a timeSeries looks like. A selection the
+user labelled is the exception: it is a legend entry (and a colour) of its own, off
+:func:`legend_groups`.
 
 Longitudes are always normalised to the −180..180 frame, whatever convention each
 catalog declared, following the same rules as :func:`ocean_skill.catalog._bbox_overlaps`
@@ -36,8 +38,10 @@ __all__ = [
     "FEATURE_TYPE_ORDER",
     "GROUP_STYLES",
     "HOVER_FIELDS",
+    "SELECTION_PALETTE",
     "TAB10",
     "build_items",
+    "legend_groups",
     "style_for",
 ]
 
@@ -126,6 +130,22 @@ GROUP_STYLES: dict[str, dict[str, Any]] = {
     },
 }
 
+#: The colours a map's *selection* groups cycle through, in order of appearance.
+#: Crimson first -- the colour of :data:`GROUP_STYLES`' ``"selection"`` entry, so a
+#: map with a single selection group (labelled or not) looks exactly as it always
+#: has -- then Dark2-ish colours chosen to stay clear of :data:`TAB10`, so a
+#: labelled selection can never be mistaken for a catalog featureType's colour
+#: either. Past six selection groups the palette wraps; at that point the labels,
+#: not the colours, are what tell them apart. See :func:`legend_groups`.
+SELECTION_PALETTE = (
+    "crimson",
+    "#1b9e77",
+    "#7570b3",
+    "#e6ab02",
+    "navy",
+    "#a6761d",
+)
+
 
 def _style_index(feature_type: str) -> int:
     """The colour/marker index for a featureType (unknown types style as ``unknown``)."""
@@ -156,6 +176,60 @@ def style_for(feature_type: str) -> dict[str, Any]:
         "linestyle": "--",
         "marker_index": index,
     }
+
+
+def legend_groups(
+    items: Iterable[dict[str, Any]],
+) -> list[tuple[str, dict[str, Any], list[dict[str, Any]]]]:
+    """Group ``locations`` items into legend entries: ``(label, style, members)``.
+
+    The one grouping rule both renderers draw from, so the static and interactive
+    maps cannot disagree about what is in the legend or what colour it is. An item
+    joins the group named by its ``legend_label`` when it carries a truthy one (a
+    selection the user labelled -- see
+    :func:`ocean_skill.plot.map_locations._selection_item`), else the group named by
+    its ``featureType``. So three labelled selections are three entries -- however
+    many shapes (a box, a transect line) each is drawn as -- while every unlabelled
+    selection still shares the single ``"selection"`` entry it always had.
+
+    Groups come back in draw order: featureTypes in :data:`FEATURE_TYPE_ORDER`
+    first, then every selection group (the unlabelled ``"selection"`` one and the
+    labelled ones) in first-seen order, then everything else (``domain``) -- so the
+    selections read as one block however many domain rings their lanes added. A group's style is :func:`style_for` its ``featureType``,
+    except that **selection groups** -- the labelled ones and the unlabelled
+    ``"selection"`` group alike -- take their ``color`` from
+    :data:`SELECTION_PALETTE`, cycled in order of appearance among the selection
+    groups only (marker and linestyle stay :data:`GROUP_STYLES`'s ``"selection"``).
+    A lone selection group is therefore still crimson.
+
+    Group membership is decided by the first item that opens it, so a label that
+    happens to equal a featureType name (``label="grid"``) lands in that
+    featureType's group; the styles in the returned list are copies, safe to edit.
+    """
+    members: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        members.setdefault(
+            item.get("legend_label") or item["featureType"], []
+        ).append(item)
+    keys = [k for k in FEATURE_TYPE_ORDER if k in members]
+    rest = [k for k in members if k not in FEATURE_TYPE_ORDER]
+    # selections before anything else (the domain ring): every Field in a
+    # locations=[...] list adds its own ring, so first-seen order alone would
+    # wedge "domain" between one labelled selection and the next
+    keys += [k for k in rest if members[k][0]["featureType"] == "selection"]
+    keys += [k for k in rest if members[k][0]["featureType"] != "selection"]
+
+    groups = []
+    n_selection = 0
+    for key in keys:
+        group_items = members[key]
+        feature_type = group_items[0]["featureType"]
+        style = style_for(feature_type)
+        if feature_type == "selection":
+            style["color"] = SELECTION_PALETTE[n_selection % len(SELECTION_PALETTE)]
+            n_selection += 1
+        groups.append((key, style, group_items))
+    return groups
 
 
 def _wrap(lon: float) -> float:

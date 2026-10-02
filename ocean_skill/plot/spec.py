@@ -275,7 +275,14 @@ class PlotSpec:
         two groups (see
         :data:`ocean_skill.plot.locations.GROUP_STYLES`), so a selection can never
         collide with a catalog featureType's colour, and every ``locations`` map
-        agrees on what a model footprint looks like.
+        agrees on what a model footprint looks like. Selections are crimson,
+        except that a selection item carrying a ``legend_label`` (the ``label=``
+        its Field/Comparison was given) is a legend entry of its own, and each
+        such group, in order of appearance, takes the next colour of
+        :data:`ocean_skill.plot.locations.SELECTION_PALETTE` (see
+        :func:`ocean_skill.plot.locations.legend_groups`) -- so three labelled
+        transects and boxes read as three differently-coloured entries, while a
+        lone selection, labelled or not, stays crimson.
     options
         Renderer-agnostic styling (title, labels, mark, colour grouping, figsize, ...).
         Renderers ignore options they do not understand rather than failing.

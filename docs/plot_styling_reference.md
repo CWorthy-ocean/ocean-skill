@@ -602,7 +602,7 @@ is `h` on a ROMS source and draws in `cmo.deep`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `legend` | `True` | the featureType key, drawn once (on the first panel of a facet) |
+| `legend` | `True` | the featureType key (plus one entry per labelled `Field`/`Comparison`, each in its own colour), drawn once (on the first panel of a facet) |
 | `legend_kwargs` | — | `Axes.legend` properties (static renderer only, as ever) |
 | `marker_size` | `80` static / `9` interactive | marker size (points² / pixels) |
 
@@ -2648,9 +2648,16 @@ requested offset (the few kilometres between where you asked and the nearest mod
 cell): that offset is already a warning where alignment actually happens, and stays
 a warning there rather than becoming a second marker or an annotation here.
 
-Selection geometry always draws **crimson** (a colour outside the catalog
-featureType palette, so it can never collide with one); the domain outline always
-draws **black, dashed** — the same style the `domain=` option draws everywhere
+Selection geometry draws **crimson** (a colour outside the catalog
+featureType palette, so it can never collide with one) — unless you gave the Field or
+Comparison a `label=`. A labelled selection gets one legend entry under that label,
+however many shapes it draws, and each labelled selection,
+plus the shared "selection" entry the unlabelled ones fall into, takes the next colour
+of a small palette of crimson, green, purple, mustard, navy and brown, in the order
+they are plotted. Several overlaid transects and boxes
+(`field.plot(locations=[eq, west, east])`, with `label="Eq"`, `"180-160"`, ...) thus
+read as named, distinct entries; one lone selection stays crimson. The domain outline
+always draws **black, dashed** — the same style the `domain=` option draws everywhere
 else, so every map in this package agrees on what a model's footprint looks like.
 The domain ring is on by default (one per distinct test source); pass `domain=None`
 to suppress it, or a `(lon_min, lat_min, lon_max, lat_max)` bbox / `(N, 2)` ring to
