@@ -6218,7 +6218,9 @@ class Comparison:
         }
 
     @graft_plot_options()
-    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def plot(
+        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+    ):
         """Render as a ``test | reference | difference`` row, or as metric maps.
 
         Parameters
@@ -6227,6 +6229,14 @@ class Comparison:
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive) -- goes through the same renderer registry either
             way.
+        contours
+            Sections only. Another :class:`Comparison` of a second variable, built
+            the same way (same sources, ``select`` and ``aggregate``) so it lands on
+            the same section grid, drawn as black, labelled contour lines: its test
+            over the test panel and its reference over the reference panel (the
+            difference panel gets none). ``contour_levels=`` picks the lines
+            (``True`` for about six round values, an int for about that many, or a
+            list) and ``contour_kwargs=`` styles them.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -6275,7 +6285,13 @@ class Comparison:
         # itself, so introspecting a comparison's own shape (family, family_reason)
         # keeps naming it "time_depth" regardless of whether it ever gets plotted.
         plot_family = "time_depth_row" if family == "time_depth" else family
-        spec = PlotSpec(family=plot_family, items=[self.as_item()], options=kwargs)
+        item = self.as_item()
+        if contours is not None:
+            from ocean_skill._overlay import comparison_contour, contour_members
+
+            (overlay,) = contour_members(contours, 1, kind="comparison")
+            item.update(comparison_contour(overlay, plotted=self))
+        spec = PlotSpec(family=plot_family, items=[item], options=kwargs)
         return render(spec, renderer=renderer)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -6982,7 +6998,9 @@ class ComparisonSet:
         return items
 
     @graft_plot_options()
-    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def plot(
+        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+    ):
         """Render all comparisons as stacked rows in one figure.
 
         Parameters
@@ -6990,6 +7008,11 @@ class ComparisonSet:
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive).
+        contours
+            Sections only. A :class:`ComparisonSet` (or a list of comparisons) of
+            the same length, paired with this set's rows by position, drawn as
+            contour lines over each row's test and reference panels -- see
+            :meth:`Comparison.plot`.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -7013,6 +7036,18 @@ class ComparisonSet:
                 "'variables') or a real-but-missing time/depth in that source."
             )
         items = self._items()
+        if contours is not None:
+            from ocean_skill._overlay import comparison_contour, contour_members
+
+            overlays = contour_members(
+                contours, len(self.comparisons), kind="comparison"
+            )
+            items = [
+                {**item, **comparison_contour(overlay, plotted=c)}
+                for item, overlay, c in zip(
+                    items, overlays, self.comparisons, strict=True
+                )
+            ]
         first = self.comparisons[0]
         families = {c.family for c in self.comparisons}
         if len(families) > 1:

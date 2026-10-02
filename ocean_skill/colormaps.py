@@ -479,6 +479,8 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
     """
     import numpy as np
 
+    from ocean_skill.plot._colorbar import round_limits
+
     seq_cmap, div_cmap = cmaps_for(standard_name)
     finite = _finite(values)
     # Only the variable-like metrics can be log; a log bar cannot show a value <= 0, so
@@ -495,6 +497,9 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
         # the field itself: the variable's own colours, range and log-ness
         lo = float(np.percentile(finite, 10)) if finite.size else 0.0
         hi = float(np.percentile(finite, 90)) if finite.size else 1.0
+        # snapped outward to round values like every automatic colour range (see
+        # ocean_skill.plot._colorbar); a variable's declared range still wins below
+        lo, hi = round_limits(lo, hi, log=log)
         norm = norm_for(standard_name, lo, hi)
         return MetricColors(
             cmap=seq_cmap,
@@ -525,6 +530,8 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
         )
         if not np.isfinite(spread) or spread <= 0:
             spread = _DEGENERATE_SPREAD
+        else:  # a round half-range: ±1.734 reads ±1.8
+            spread = round_limits(-spread, spread, log=False)[1]
         if vmin is not None:  # a floor: keep the symmetric low end above it
             spread = min(spread, center - float(vmin))
         return MetricColors(
@@ -546,4 +553,13 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
         hi = float(np.percentile(finite, 98))
     if hi <= lo:  # a constant field: give the bar somewhere to go
         hi = lo + 1.0
+    # round the data-derived ends outward; a registered end, and a count's true
+    # maximum (_METRIC_EXACT_MAX), stay exactly as they are
+    lo, hi = round_limits(
+        lo,
+        hi,
+        log=False,
+        keep_lo=vmin is not None,
+        keep_hi=vmax is not None or metric in _METRIC_EXACT_MAX,
+    )
     return MetricColors(cmap=cmap, vmin=lo, vmax=hi, **extremes)
