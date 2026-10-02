@@ -822,3 +822,544 @@ def test_domain_is_not_an_option_of_section_row():
             ),
             renderer="matplotlib",
         )
+
+
+# -- stacked section_row: one row per comparison, both renderers ---------------------
+#
+# A ComparisonSet of several section comparisons hands section_row several items; the
+# renderers stack them as rows (section_row_grid / _section_row_grid), time_depth_row's
+# own convention. Rows can run along different x quantities, so no x axis is shared
+# between rows -- only depth's direction is common.
+
+
+def _stacked_row_items(n: int = 2, *, same_path: bool = False) -> list[dict]:
+    """``n`` section_row items with their own row labels and offsets.
+
+    Each row's path is shifted in latitude (so the rows' ``path_note``s differ) unless
+    ``same_path``; the offset also differs, so each row has its own colour range.
+    """
+    items = []
+    for i in range(n):
+        item = _section_row_item(
+            labels=("roms_run", f"ref_{i}"), offset=1.0 + 2.0 * i
+        )
+        item["row_label"] = f"row {i}"
+        if not same_path:
+            item["aligned"] = {
+                lane: da.assign_coords(
+                    lat=(ALONG_DIM, np.linspace(24.0, 26.0, 8) + 5.0 * i)
+                )
+                for lane, da in item["aligned"].items()
+            }
+        items.append(item)
+    return items
+
+
+def _panels(fig):
+    """Return the figure's data panels: every axes that is not a colorbar."""
+    return [ax for ax in fig.axes if not getattr(ax, "_osk_cbar_parents", None)]
+
+
+def _colorbars(fig):
+    return [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_stacked_section_row_draws_n_by_3_panels_and_two_bars_per_row(n):
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(n)),
+        renderer="matplotlib",
+    )
+    assert len(_panels(fig)) == 3 * n
+    assert len(_colorbars(fig)) == 2 * n
+
+
+def test_stacked_section_row_labels_each_row_and_titles_it_from_its_own_labels():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(3)),
+        renderer="matplotlib",
+    )
+    panels = _panels(fig)
+    row_labels = [
+        ax._osk_row_label.get_text() for ax in panels if hasattr(ax, "_osk_row_label")
+    ]
+    assert len(row_labels) == 3
+    # the rows' paths differ, so each row's own path rides on its test-panel title --
+    # not on the rotated label, which has no height in a short section row to spare
+    assert row_labels == ["row 0", "row 1", "row 2"]
+    titles = [ax.get_title() for ax in panels]
+    assert all("→" in t for t in titles[0::3])
+    assert titles[1::3] == ["ref_0", "ref_1", "ref_2"]  # each row's reference column
+    assert titles[2::3] == ["difference"] * 3
+
+
+def test_stacked_section_row_with_a_shared_path_names_it_once_in_the_suptitle():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2, same_path=True)),
+        renderer="matplotlib",
+    )
+    assert "→" in fig._suptitle.get_text()
+    labels = [
+        ax._osk_row_label.get_text()
+        for ax in _panels(fig)
+        if hasattr(ax, "_osk_row_label")
+    ]
+    assert labels == ["row 0", "row 1"]  # nothing to add to the labels
+
+
+def test_stacked_section_row_with_differing_paths_keeps_them_out_of_the_suptitle():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="matplotlib",
+    )
+    assert "→" not in (fig._suptitle.get_text() if fig._suptitle else "")
+
+
+def test_stacked_section_row_panels_are_inverted_grey_and_do_not_share_x_across_rows():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="matplotlib",
+    )
+    panels = _panels(fig)
+    for ax in panels:
+        ylim = ax.get_ylim()
+        assert ylim[0] > ylim[1] and ylim[0] >= 0  # positive-down, 0 m at the top
+        assert ax.get_facecolor() == (0.85, 0.85, 0.85, 1.0)
+    joined = panels[0].get_shared_x_axes()
+    assert not joined.joined(panels[0], panels[3])  # row 0 vs row 1
+    assert not panels[0].get_shared_y_axes().joined(panels[0], panels[3])
+
+
+def test_stacked_section_row_takes_each_rows_x_label_from_its_own_geometry(monkeypatch):
+    """A meridian row (degrees) beside a transect (km) keeps both x labels."""
+    import dataclasses
+
+    from ocean_skill.plot import section as section_module
+
+    real = section_module.prepare_section_row
+    calls = {"n": 0}
+
+    def fake(aligned):
+        values, geometry = real(aligned)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            geometry = dataclasses.replace(geometry, x_label="latitude (°N)")
+        return values, geometry
+
+    monkeypatch.setattr(section_module, "prepare_section_row", fake)
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="matplotlib",
+    )
+    xlabels = [ax.get_xlabel() for ax in _panels(fig)]
+    assert set(xlabels[:3]) == {"distance along transect (km)"}
+    assert set(xlabels[3:]) == {"latitude (°N)"}
+
+
+def _mesh_norms(fig):
+    from matplotlib.collections import QuadMesh
+
+    return [
+        next(c for c in ax.collections if isinstance(c, QuadMesh)).norm
+        for ax in _panels(fig)
+    ]
+
+
+def test_stacked_section_row_scales_each_row_on_its_own_by_default():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="matplotlib",
+    )
+    norms = _mesh_norms(fig)
+    assert (norms[0].vmin, norms[0].vmax) == (norms[1].vmin, norms[1].vmax)  # in a row
+    assert (norms[0].vmin, norms[0].vmax) != (norms[3].vmin, norms[3].vmax)  # across
+
+
+def test_stacked_section_row_shared_limits_puts_every_row_on_one_scale():
+    fig = render(
+        PlotSpec(
+            family="section_row",
+            items=_stacked_row_items(3),
+            options={"shared_limits": True},
+        ),
+        renderer="matplotlib",
+    )
+    norms = _mesh_norms(fig)
+    seq = {(norms[i].vmin, norms[i].vmax) for i in (0, 1, 3, 4, 6, 7)}
+    div = {(norms[i].vmin, norms[i].vmax) for i in (2, 5, 8)}
+    assert len(seq) == 1
+    assert len(div) == 1
+    (lo, hi) = next(iter(div))
+    assert lo == pytest.approx(-hi)
+
+
+def test_stacked_section_row_metrics_box_sits_in_every_rows_difference_panel():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="matplotlib",
+    )
+    boxed = [ax for ax in _panels(fig) if getattr(ax, "_osk_metrics_text", None)]
+    assert len(boxed) == 2
+    assert all("bias=0.125" in ax._osk_metrics_text.get_text() for ax in boxed)
+
+
+def test_stacked_section_row_titles_takes_three_per_row():
+    fig = render(
+        PlotSpec(
+            family="section_row",
+            items=_stacked_row_items(2),
+            options={"titles": [None, None, None, "A", None, "B"]},
+        ),
+        renderer="matplotlib",
+    )
+    titles = [ax.get_title() for ax in _panels(fig)]
+    assert titles[3] == "A"
+    assert titles[5] == "B"
+    assert titles[1] == "ref_0"
+
+    with pytest.raises(ValueError, match="needs one entry per panel"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=_stacked_row_items(2),
+                options={"titles": ["only three", None, None]},
+            ),
+            renderer="matplotlib",
+        )
+
+
+def test_a_single_item_section_row_still_draws_one_row_with_no_row_label():
+    fig = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(1)),
+        renderer="matplotlib",
+    )
+    assert len(_panels(fig)) == 3
+    assert not any(hasattr(ax, "_osk_row_label") for ax in _panels(fig))
+
+
+def test_domain_is_not_an_option_of_a_stacked_section_row():
+    with pytest.raises(TypeError, match="not an option of section_row_grid"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=_stacked_row_items(2),
+                options={"domain": (0.0, 0.0, 1.0, 1.0)},
+            ),
+            renderer="matplotlib",
+        )
+
+
+def test_stacked_section_row_renders_interactively_as_n_linked_rows():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(3)),
+        renderer="holoviews",
+    )
+    qms = obj.traverse(lambda x: x, [hv.QuadMesh])
+    assert len(qms) == 9
+    titles = [qm.opts.get("plot").kwargs.get("title") for qm in qms]
+    assert titles[0].startswith("row 0 (") and titles[0].endswith("— roms_run")
+    assert titles[3].startswith("row 1 (")
+    assert [t for t in titles[1::3]] == ["ref_0", "ref_1", "ref_2"]
+    for qm in qms:
+        plot_kwargs = qm.opts.get("plot").kwargs
+        assert plot_kwargs.get("bgcolor") == "#d9d9d9"
+        assert plot_kwargs.get("invert_yaxis") is True
+
+
+def test_stacked_section_row_interactive_shared_limits_matches_across_rows():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(
+            family="section_row",
+            items=_stacked_row_items(2),
+            options={"shared_limits": True},
+        ),
+        renderer="holoviews",
+    )
+    clims = [qm.vdims[0].range for qm in obj.traverse(lambda x: x, [hv.QuadMesh])]
+    assert clims[0] == clims[1] == clims[3] == clims[4]
+    assert clims[2] == clims[5]
+
+
+def test_stacked_section_row_interactive_keeps_rows_with_different_x_unlinked():
+    """Rows with different along-path extents get distinct x names.
+
+    So bokeh does not tie their x ranges together; rows with the same x share one name.
+    """
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    same = render(
+        PlotSpec(family="section_row", items=_stacked_row_items(2)),
+        renderer="holoviews",
+    )
+    assert {
+        qm.kdims[0].name for qm in same.traverse(lambda x: x, [hv.QuadMesh])
+    } == {"distance"}
+
+    items = _stacked_row_items(2)
+    items[1]["aligned"] = {
+        lane: da.assign_coords({ALONG_DIM: np.linspace(0.0, 400.0, 8)})
+        for lane, da in items[1]["aligned"].items()
+    }
+    mixed = render(PlotSpec(family="section_row", items=items), renderer="holoviews")
+    names = [qm.kdims[0].name for qm in mixed.traverse(lambda x: x, [hv.QuadMesh])]
+    assert names[:3] == [names[0]] * 3 and names[3:] == [names[3]] * 3
+    assert names[0] != names[3]
+    labels = {qm.kdims[0].label for qm in mixed.traverse(lambda x: x, [hv.QuadMesh])}
+    assert labels == {"distance"}  # the alias never reaches a reader
+
+
+def test_domain_is_dropped_with_a_warning_for_a_stacked_section_row_interactively():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+
+    with pytest.warns(UserWarning, match="not an option of section_row"):
+        render(
+            PlotSpec(
+                family="section_row",
+                items=_stacked_row_items(2),
+                options={"domain": (0.0, 0.0, 1.0, 1.0)},
+            ),
+            renderer="holoviews",
+        )
+
+
+# -- stacked section: one panel per member (section_grid), both renderers ------------
+
+
+def _stacked_section_items(n: int = 2, *, units=("degC",), **overrides) -> list[dict]:
+    """``n`` section items: same variable by default, each shifted and labelled."""
+    items = []
+    for i in range(n):
+        item = _section_item()
+        item["field"] = item["field"] + 4.0 * i
+        item["label"] = f"run {i}"
+        item["units"] = units[i % len(units)]
+        item["standard_name"] = "sea_water_potential_temperature"
+        item["depth"] = None
+        item.update(overrides)
+        items.append(item)
+    return items
+
+
+def test_stacked_section_draws_a_panel_per_item_in_one_column():
+    fig = render(
+        PlotSpec(family="section", items=_stacked_section_items(3)),
+        renderer="matplotlib",
+    )
+    panels = _panels(fig)
+    assert len(panels) == 3
+    lefts = {round(ax.get_position().x0, 3) for ax in panels}
+    assert len(lefts) == 1  # one column
+    for ax in panels:
+        ylim = ax.get_ylim()
+        assert ylim[0] > ylim[1]
+        assert ax.get_facecolor() == (0.85, 0.85, 0.85, 1.0)
+
+
+def test_stacked_section_of_one_variable_shares_one_scale_and_one_colorbar():
+    fig = render(
+        PlotSpec(family="section", items=_stacked_section_items(3)),
+        renderer="matplotlib",
+    )
+    assert len(_colorbars(fig)) == 1
+    norms = _mesh_norms(fig)
+    assert len({(n.vmin, n.vmax) for n in norms}) == 1
+    # the shared scale spans every panel, not just the first
+    assert norms[0].vmax > 5.0 + 1.0 + 4.0
+
+
+def test_stacked_section_of_mixed_units_gets_a_scale_and_colorbar_per_panel():
+    fig = render(
+        PlotSpec(
+            family="section", items=_stacked_section_items(2, units=("degC", "psu"))
+        ),
+        renderer="matplotlib",
+    )
+    assert len(_colorbars(fig)) == 2
+    norms = _mesh_norms(fig)
+    assert (norms[0].vmin, norms[0].vmax) != (norms[1].vmin, norms[1].vmax)
+
+
+def test_stacked_section_shared_limits_false_forces_a_scale_per_panel():
+    fig = render(
+        PlotSpec(
+            family="section",
+            items=_stacked_section_items(2),
+            options={"shared_limits": False},
+        ),
+        renderer="matplotlib",
+    )
+    assert len(_colorbars(fig)) == 2
+
+
+def test_stacked_section_vmin_vmax_pin_the_shared_range():
+    fig = render(
+        PlotSpec(
+            family="section",
+            items=_stacked_section_items(2),
+            options={"vmin": 0.0, "vmax": 30.0},
+        ),
+        renderer="matplotlib",
+    )
+    assert {(n.vmin, n.vmax) for n in _mesh_norms(fig)} == {(0.0, 30.0)}
+
+
+def test_stacked_section_titles_each_panel_by_label_and_path_and_shares_the_rest():
+    fig = render(
+        PlotSpec(family="section", items=_stacked_section_items(2)),
+        renderer="matplotlib",
+    )
+    titles = [ax.get_title() for ax in _panels(fig)]
+    assert titles[0].startswith("run 0 — ") and "→" in titles[0]
+    assert titles[1].startswith("run 1 — ")
+    # the variable every panel shares is named once, on top
+    assert fig._suptitle.get_text().lower() == "temperature"
+
+
+def test_stacked_section_ncols_wraps_and_hides_the_blank_cell():
+    fig = render(
+        PlotSpec(
+            family="section",
+            items=_stacked_section_items(3),
+            options={"ncols": 2},
+        ),
+        renderer="matplotlib",
+    )
+    visible = [ax for ax in _panels(fig) if ax.get_visible()]
+    assert len(visible) == 3
+    assert len(_panels(fig)) == 4  # 2 x 2 grid, one blank
+
+
+def test_stacked_section_cols_variable_facets_a_grid():
+    items = _stacked_section_items(4)
+    for i, item in enumerate(items):
+        item["standard_name"] = (
+            "sea_water_potential_temperature",
+            "sea_water_salinity",
+        )[i % 2]
+        item["label"] = ("north", "south")[i // 2]
+        item["units"] = ("degC", "1")[i % 2]
+    fig = render(
+        PlotSpec(family="section", items=items, options={"cols": "variable"}),
+        renderer="matplotlib",
+    )
+    panels = _panels(fig)
+    assert len(panels) == 4
+    assert len({round(ax.get_position().x0, 3) for ax in panels}) == 2  # 2 columns
+    with pytest.raises(ValueError, match="already fix this grid's shape"):
+        render(
+            PlotSpec(
+                family="section",
+                items=items,
+                options={"cols": "variable", "ncols": 2},
+            ),
+            renderer="matplotlib",
+        )
+
+
+def test_stacked_section_takes_each_panels_x_label_from_its_own_geometry(monkeypatch):
+    import dataclasses
+
+    from ocean_skill.plot import section as section_module
+
+    real = section_module.prepare_section
+    calls = {"n": 0}
+
+    def fake(da):
+        values, geometry = real(da)
+        calls["n"] += 1
+        if calls["n"] == 2:
+            geometry = dataclasses.replace(geometry, x_label="latitude (°N)")
+        return values, geometry
+
+    monkeypatch.setattr(section_module, "prepare_section", fake)
+    fig = render(
+        PlotSpec(family="section", items=_stacked_section_items(2)),
+        renderer="matplotlib",
+    )
+    assert [ax.get_xlabel() for ax in _panels(fig)] == [
+        "distance along transect (km)",
+        "latitude (°N)",
+    ]
+    ax0, ax1 = _panels(fig)
+    assert not ax0.get_shared_x_axes().joined(ax0, ax1)
+
+
+def test_a_single_item_section_is_unchanged_by_the_stacked_form():
+    fig = render(
+        PlotSpec(family="section", items=[_section_item()]), renderer="matplotlib"
+    )
+    assert len(_panels(fig)) == 1 and len(_colorbars(fig)) == 1
+
+
+def test_domain_is_not_an_option_of_a_stacked_section():
+    with pytest.raises(TypeError, match="not an option of section_grid"):
+        render(
+            PlotSpec(
+                family="section",
+                items=_stacked_section_items(2),
+                options={"domain": (0.0, 0.0, 1.0, 1.0)},
+            ),
+            renderer="matplotlib",
+        )
+
+
+def test_stacked_section_renders_interactively_as_a_layout_of_panels():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(family="section", items=_stacked_section_items(3)),
+        renderer="holoviews",
+    )
+    qms = obj.traverse(lambda x: x, [hv.QuadMesh])
+    assert len(obj) == 3 and len(qms) == 3
+    clims = {qm.vdims[0].range for qm in qms}
+    assert len(clims) == 1  # one shared range (every panel is the same variable)
+    for qm in qms:
+        plot_kwargs = qm.opts.get("plot").kwargs
+        assert plot_kwargs.get("bgcolor") == "#d9d9d9"
+        assert plot_kwargs.get("invert_yaxis") is True
+    titles = [qm.opts.get("plot").kwargs.get("title") for qm in qms]
+    assert titles[0].startswith("run 0 — ")
+
+
+def test_stacked_section_interactive_gives_mixed_units_a_range_per_panel():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+    import holoviews as hv
+
+    obj = render(
+        PlotSpec(
+            family="section", items=_stacked_section_items(2, units=("degC", "psu"))
+        ),
+        renderer="holoviews",
+    )
+    clims = [qm.vdims[0].range for qm in obj.traverse(lambda x: x, [hv.QuadMesh])]
+    assert clims[0] != clims[1]
+
+
+def test_domain_is_dropped_with_a_warning_for_a_stacked_section_interactively():
+    pytest.importorskip("holoviews")
+    pytest.importorskip("hvplot")
+
+    with pytest.warns(UserWarning, match="not an option of section"):
+        render(
+            PlotSpec(
+                family="section",
+                items=_stacked_section_items(2),
+                options={"domain": (0.0, 0.0, 1.0, 1.0)},
+            ),
+            renderer="holoviews",
+        )

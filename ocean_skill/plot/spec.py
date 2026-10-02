@@ -120,7 +120,15 @@ class PlotSpec:
         1-D ``lon``/``lat`` coordinates (see
         :func:`ocean_skill.align.path_of`) — so it draws as one depth-by-distance
         panel rather than map panels. Built by
-        :meth:`ocean_skill.field.Field.as_item`.
+        :meth:`ocean_skill.field.Field.as_item`. More than one item (a
+        :class:`~ocean_skill.field.FieldSet` of several sections) draws as a
+        stacked column of panels, one per item -- see
+        :func:`ocean_skill.plot.matplotlib_renderer.section_grid` /
+        :func:`ocean_skill.plot.holoviews_renderer._section_grid` -- sharing one
+        colour scale and colorbar when every item is the same variable in the same
+        units, and each panel its own otherwise. Different items may run along
+        different x quantities (kilometres along a transect, degrees along a
+        meridional slab), so no x axis is shared between panels.
 
         ``section_row`` is that comparison counterpart: ``field_row``'s item shape
         (``aligned`` carrying the ``test``/``reference``/``difference`` trio, plus
@@ -131,10 +139,15 @@ class PlotSpec:
         section is never native s-levels the way a model-only ``section`` may be.
         Built by :meth:`ocean_skill.comparison.Comparison.as_item` for a
         comparison whose ``select`` cuts a transect (see
-        :attr:`~ocean_skill.comparison.Comparison.is_section`); has no
-        ``field_grid``-style stack of its own (``section_grid`` is a follow-up —
-        see :class:`~ocean_skill.comparison.ComparisonSet`'s refusal on more than
-        one ``section_row``).
+        :attr:`~ocean_skill.comparison.Comparison.is_section`). A single item draws
+        as one ``test | reference | difference`` row; more than one (a
+        :class:`~ocean_skill.comparison.ComparisonSet` of several section
+        comparisons) draws as a stacked grid, one row per item, each carrying its
+        ``row_label`` -- see :func:`ocean_skill.plot.matplotlib_renderer
+        .section_row_grid` / :func:`ocean_skill.plot.holoviews_renderer
+        ._section_row_grid`. Every row takes its x quantity from its own geometry
+        (kilometres along a transect, degrees along a meridional slab), so no x
+        axis is shared between rows; depth reads positive-down on every panel.
 
         ``cross`` carries exactly two ``section``-shaped items -- one along each
         grid direction through one lon/lat point or grid-index pair (see
@@ -189,10 +202,11 @@ class PlotSpec:
         built (:meth:`~ocean_skill.comparison.Comparison.plot`,
         :meth:`~ocean_skill.comparison.ComparisonSet.plot`), the same split
         ``section``/``section_row`` already makes for the analogous single-source
-        vs. comparison shapes. Has no stacked-grid form of its own (``ComparisonSet``
-        refuses more than one, mirroring ``section_row``'s own refusal) — a set's
-        ``.movie()`` refuses it outright too, having no further axis left to step
-        through as frames once both are already pooled into one metric.
+        vs. comparison shapes. A set of several stacks as a grid of rows, one per item
+        (:func:`ocean_skill.plot.matplotlib_renderer.time_depth_row_grid`), the
+        same way ``section_row`` does — a set's ``.movie()`` refuses it outright,
+        having no further axis left to step through as frames once both are already
+        pooled into one metric.
 
         ``profile`` carries ``field_grid``'s list, one item per station/cast, each
         ``aligned`` 1-D on the vertical axis (``z``, ``depth``, or ``sigma0`` for an

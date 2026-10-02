@@ -3117,6 +3117,34 @@ def _bin_into_frame(frame, moving, *, frame_lon: str, frame_lat: str):
     return frame_trimmed, binned, offsets_km
 
 
+def _observational_vertical_to_z(da):
+    """Return ``da`` with an observational vertical axis renamed onto ``"z"``.
+
+    A gridded observational or reanalysis test lane (WOA, GLORYS) carries its
+    levels as a positive-down ``depth`` (or ``lev``/``depth_surface``) axis, where
+    a ROMS lane run through :func:`ocean_skill.roms.to_depth` arrives with ``"z"``,
+    negative-down. :func:`_align_along_path` speaks the latter, so the former is
+    brought onto it the way the reference's own levels are (see there): renamed,
+    and negated so it reads negative-down. Only an axis named in
+    :data:`SECTION_VERTICAL_DIMS` with non-negative values qualifies; anything
+    else -- a native ``s_rho``/``s_w``, a negative-down axis of another name --
+    comes back untouched for the caller's own refusal to name.
+    """
+    for name in SECTION_VERTICAL_DIMS[1:]:
+        if name not in da.dims or name not in da.coords:
+            continue
+        values = np.asarray(da[name].values, dtype="float64")
+        if values.size == 0 or not np.nanmin(values) >= 0:
+            continue
+        attrs = dict(da[name].attrs)
+        out = da.rename({name: "z"})
+        out = out.assign_coords(z=-out["z"])
+        attrs.update(positive="up")
+        out["z"].attrs.update(attrs)
+        return out
+    return da
+
+
 def _align_along_path(
     test,
     reference,
@@ -3140,6 +3168,8 @@ def _align_along_path(
     reports its own cells' positions, not the request's (see
     :func:`ocean_skill.transect.sample_along`).
     """
+    if "z" not in test.dims:
+        test = _observational_vertical_to_z(test)
     test_extra = [d for d in test.dims if d not in (ALONG_DIM, "z")]
     if "z" not in test.dims:
         raise ValueError(
@@ -3188,6 +3218,7 @@ def _align_along_path(
 
     # Captured before binning replaces each lane's own along coordinate (and so
     # loses whatever attrs rode on it) with the frame's.
+    test_along_attrs = dict(test[ALONG_DIM].attrs)
     test_path_method = test[ALONG_DIM].attrs.get("path_method", "")
     reference_path_method = reference[ALONG_DIM].attrs.get("path_method", "")
 
@@ -3237,6 +3268,13 @@ def _align_along_path(
         "long_name": f"{test_name} − {reference_name}",
         "units": reference.attrs.get("units", ""),
     }
+    # The binning above replaced each lane's along coordinate with the frame's,
+    # attrs and all, and whichever lane merged first into the Dataset decides what
+    # the merged one carries -- so the test lane's own are put back explicitly. What
+    # a slab section says about itself rides there (`axis_coord`, `band_axis`,
+    # `band`: see comparison._slab_to_section), and the plots read it back from the
+    # aligned pair, cache round trip included.
+    out[ALONG_DIM].attrs.update(test_along_attrs)
     out.attrs["section_length_km"] = float(np.asarray(frame[ALONG_DIM]).max())
     out.attrs["n_points"] = int(frame.sizes[ALONG_DIM])
     out.attrs["path_method"] = test_path_method

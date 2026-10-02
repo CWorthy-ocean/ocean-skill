@@ -41,7 +41,7 @@ want everything bigger or smaller.
 | [`colorbar_kwargs`](#colorbar_kwargs) | both colorbars (shape, label, ticks) | [`Figure.colorbar`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.colorbar.html) + [`Colorbar.set_label`](https://matplotlib.org/stable/api/_as_gen/matplotlib.colorbar.Colorbar.html) + [`Axes.tick_params`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.tick_params.html) |
 | [`gridline_kwargs`](#gridline_kwargs) | the lat/lon grid lines | [`GeoAxes.gridlines`](https://scitools.org.uk/cartopy/docs/latest/reference/generated/cartopy.mpl.geoaxes.GeoAxes.gridlines.html) |
 | [`tick_label_kwargs`](#tick_label_kwargs) | the lat/lon tick **labels** | [`Gridliner.xlabel_style`/`ylabel_style`](https://scitools.org.uk/cartopy/docs/latest/reference/generated/cartopy.mpl.gridliner.Gridliner.html) |
-| [`row_label_kwargs`](#row_label_kwargs) | the rotated variable name (field_grid/time_depth_row_grid only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`row_label_kwargs`](#row_label_kwargs) | the rotated row name (stacked `field_row`/`time_depth_row`/`section_row` grids only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`metrics_kwargs`](#metrics_kwargs) | the bias/rmse/corr corner box | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`suptitle_kwargs`](#suptitle_kwargs) | the overall figure title | [`Figure.suptitle`](https://matplotlib.org/stable/api/_as_gen/matplotlib.figure.Figure.suptitle.html) |
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
@@ -754,8 +754,9 @@ osk.field(run, "temp", select={"time": "2012-01"}).plot(robust=True, colorbar_la
 
 ### `shared_limits`
 
-`field_grid` and a two-axis `field_facet`. Makes every row's colour scale — and, in
-`field_grid`, its difference range — span *all* rows' data combined, instead of each
+`field_grid`, a stacked `section_row` or `time_depth_row`, and a two-axis
+`field_facet`. Makes every row's colour scale — and, in the stacked comparison
+grids, its difference range — span *all* rows' data combined, instead of each
 row scaling to its own. Meaningful only when every row is the same variable over a
 comparable range: different variables have unrelated ranges and units, so sharing
 across those makes the colours meaningless relative to the numbers on the bar.
@@ -2315,6 +2316,50 @@ osk.field("run_new", "temperature",
 `half_width` defaults to 15 cells. A window that reaches past the domain edge is
 clamped there, with one warning.
 
+### A box averaged along one axis (slabs)
+
+A lon/lat box with one horizontal axis averaged away is a section too: the other
+horizontal axis and depth are left standing.
+
+```python
+osk.field("woa23_temperature_annual", "temp",
+          select={"lon": {"min": 180, "max": 200}, "lat": {"min": -30, "max": 30}},
+          aggregate={"time": "mean", "lon": "mean"}).plot()
+```
+
+- **x is the surviving axis, in degrees.** `{"lon": "mean"}` draws against
+  latitude (°N), and `{"lat": "mean"}` draws against longitude (°E).
+- **The title names the band**, e.g. "mean over 180–200°E".
+- **Curvilinear grids (ROMS):** the cells inside the box are binned along the
+  surviving axis at the grid's median spacing, then averaged unweighted. A ROMS
+  slab needs a fixed `depth` list.
+- **Comparisons:** a slab compare needs an explicit `depth` list, the same as a
+  transect, and draws as a `section_row`.
+- **Not a slab:** both axes averaged is the joint area-weighted box mean (a
+  point), and a scalar `depth` leaves no vertical axis standing.
+
+### Several sections, one figure
+
+A `FieldSet` whose members are all sections draws one panel per member, stacked
+down the page. Build it with `osk.plot([...])`, or with a `{label: field}` dict to
+name the panels, or with `osk.FieldSet([...])`:
+
+```python
+osk.plot({"Eq": eq, "180-160": b180, "160-120": b160})
+```
+
+- **Panels keep their own x axis** (km along a transect, degrees for a slab).
+- **Panel titles** are `label — path note`, and the shared variable and depth go in
+  the suptitle.
+- **Colour scale:** one shared scale and colorbar when every member has the same
+  variable, units and statistic, otherwise one per panel. `shared_limits=True`,
+  `False`, `"variable"` or `"source"` overrides it, and so do `vmin`/`vmax`.
+- **Layout:** `ncols=`/`nrows=` wrap the stack, and `rows=`/`cols=` (`"variable"` or
+  `"source"`) facet it, the same way as a `time_depth` grid.
+- **Other options:** `robust=`, `titles=` and `mark=` work as on a single section.
+- **What can't share a figure:** a set mixing a section with a map, line or
+  `time_depth` panel is refused, because mixed-panel figures don't exist yet.
+
 ## The `cross` family (two sections through one point)
 
 `select={"transect": {"cross": ...}}` is sugar for the common case of *two*
@@ -2561,8 +2606,8 @@ renderer itself branches on the item count, mirroring `time_depth`'s own
 single-panel/grid switch). Each row keeps its own colour scales, its own two
 colorbars, and its own column titles from its own `labels` by default;
 `shared_limits=True` puts every row on one shared scale instead — `field_grid`'s
-own convention. `section_row` has no such stacked family yet (`section_grid` is a
-follow-up); `time_depth_row` no longer shares that gap.
+own convention. A stacked `section_row` works the same way — see
+[The `section_row` family](#the-section_row-family-a-section-matched-against-a-dataset).
 
 `ComparisonSet.movie()` still refuses a set containing a `time_depth_row`
 comparison (stacked grid or not), having no further axis left to step through as
@@ -2619,16 +2664,40 @@ draws a gridded comparison, just against depth and along-path distance rather
 than longitude and latitude. The title carries the depth list, time and the
 path's own endpoints (`29.0°N, 94.5°W → 27.5°N, 90.0°W`) in place of a region.
 
-There is no `domain`, `region`, `gridline_kwargs`, `tick_label_kwargs` or
-`row_label` — a section has no map to outline, and it is always the only (and
-so also the bottom) row. `metrics(weighted=False)` — cos-lat area weights mean
+There is no `domain`, `region`, `gridline_kwargs` or `tick_label_kwargs` — a
+section has no map to outline. `metrics(weighted=False)` — cos-lat area weights mean
 nothing for section cells — and `pointwise_metrics()` is refused (there is no
 further axis to score over).
 
-A `section_row` is never stacked into a grid: more than one in a
-`ComparisonSet.plot()` is refused (`section_grid` is a follow-up), and
-`ComparisonSet.movie()` refuses a set containing one (time-animated sections
-are a follow-up too).
+### Several section comparisons, one figure
+
+More than one `section_row` comparison in a `ComparisonSet.plot()` — or in
+`osk.plot([...])`, which builds the set for you — stacks as a grid, one
+`test | reference | difference` row per comparison (the render family name stays
+`"section_row"`; the renderer branches on the item count, as `time_depth_row` does):
+
+```python
+osk.plot({"Eq": eq, "180-160": b180, "160-120": b160}, shared_limits=True)
+```
+
+- **Rows keep their own x axis.** A transect row runs in km along the path, a
+  lon-averaged slab row in degrees of latitude, so x is never shared across rows.
+  Depth is positive-down and inverted on every panel.
+- **Row labels** come from each comparison's label, or the dict keys, drawn rotated
+  at the left edge (`row_label_kwargs`).
+- **Path notes:** when every row runs along the same path, its note joins the
+  suptitle once. Otherwise each row's note goes on its test-panel title
+  (`model (mean over 180–200°E)` statically, `Eq (mean over 180–200°E) — model`
+  interactively).
+- **Colour scales:** each row has its own two colorbars by default.
+  `shared_limits=True` shares one scale across rows, and warns if the rows'
+  variables differ.
+- **`titles=`** is one flat, row-major list of `3 * n` panel titles.
+- **Size:** a stack of wide section rows is short per row at the default canvas, so
+  reach for `size=`/`zoom=`/`figsize=`.
+
+`ComparisonSet.movie()` still refuses a set containing a `section_row`
+(time-animated sections are a follow-up).
 
 ## The `locations` family (dataset map, and selection map)
 

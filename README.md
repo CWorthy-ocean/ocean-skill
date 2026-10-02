@@ -633,6 +633,42 @@ requested waypoint path (or fixed lon/lat line) over the model's domain outline;
 a grid-aligned/`cross`/reference-derived transect draws each source's own
 footprint instead, since those name no lon/lat without opening a dataset.
 
+**A box averaged along one axis is a section too.** `aggregate={"lon": "mean"}` over a
+lon/lat box leaves latitude and depth standing — a meridional slab, drawn against
+latitude (°N) instead of along-path distance, titled "mean over 180–200°E". `{"lat":
+"mean"}` gives the zonal counterpart, drawn against longitude. On a curvilinear grid
+(ROMS) the cells inside the box are binned along the surviving axis at the grid's own
+spacing, then averaged. As with a transect, a comparison needs an explicit depth list.
+
+**Several sections, one figure.** Build each one separately, then hand the list to
+`osk.plot`. Comparisons stack as `test | reference | difference` rows, and fields
+stack one panel per member. A `{label: item}` dict names the rows:
+
+```python
+depths = [0, 25, 50, 100, 150, 200, 300, 400]
+pair = dict(test="all_the_rest", reference="woa23_temperature_annual",
+            variables=["temp"])
+box = {"lat": {"min": -30, "max": 30}, "depth": depths}
+
+eq   = osk.compare(**pair, aggregate={"time": "mean"},
+                   select={"transect": {"lat": 0, "lon": {"min": 143, "max": 267}},
+                           "depth": depths})
+b180 = osk.compare(**pair, aggregate={"time": "mean", "lon": "mean"},
+                   select={**box, "lon": {"min": 180, "max": 200}})
+b160 = osk.compare(**pair, aggregate={"time": "mean", "lon": "mean"},
+                   select={**box, "lon": {"min": 200, "max": 240}})
+
+osk.plot({"Eq": eq, "180-160": b180, "160-120": b160}, shared_limits=True)
+```
+
+Each row keeps its own x axis (km along the equator for the first row, latitude for
+the others), and `shared_limits=True` puts every row on one colour scale.
+`osk.plot([field_a, field_b])` does the same for fields. It is the same as
+`osk.ComparisonSet([...]).plot()` or `osk.FieldSet([...]).plot()`, without naming the
+set. Only plots of one kind combine: sections with sections, maps with maps, lines with
+lines. A list mixing a section with a map is refused, because mixed-panel figures
+don't exist yet.
+
 **Where is the hot spot, and how did it get there?** — a map naturally raises that
 question, and `Field.extremum()` answers it: value, position (lon/lat *and* grid
 indices), and the snapshot it fell on.

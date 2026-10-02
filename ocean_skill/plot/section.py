@@ -30,6 +30,17 @@ class SectionGeometry:
     or a fixed-depth list (where it is 1-D values repeated across the other axis):
     one shape of coordinate for a renderer to read either way, no special case for
     which kind of vertical axis it is drawing.
+
+    For a path section ``x_name`` holds the distance along it (km) and ``x_label``
+    says so. For a slab -- a box averaged along one horizontal axis, whose along
+    coordinate carries ``axis_coord`` (see
+    :func:`ocean_skill.comparison._slab_to_section`) -- ``x_name`` still names the
+    coordinate to draw against, but it now holds the *surviving* coordinate's
+    degrees, and ``x_label`` reads "latitude (°N)" / "longitude (°E)". A renderer
+    needs no branch for it: it draws ``x_name`` against ``y_name`` and labels the
+    axes with ``x_label``/``y_label`` either way. ``x_axis`` records which it is
+    (``"distance"``, ``"lat"`` or ``"lon"``) for a caller that does care, such as
+    one deciding whether two sections can share an x axis.
     """
 
     x_name: str
@@ -38,6 +49,31 @@ class SectionGeometry:
     y_label: str
     native_s: bool
     path_note: str
+    x_axis: str = "distance"
+
+
+def _band_note(axis: str, band) -> str:
+    """``"mean over 180–200°E"`` / ``"mean over 5°S–5°N"``: what a slab averaged.
+
+    ``axis`` is the averaged axis (``"lon"`` or ``"lat"``) and ``band`` its
+    ``(lo, hi)`` range, both read off the along coordinate's attrs (see
+    :func:`ocean_skill.comparison._slab_to_section`). A longitude band whose ends
+    both sit in 0-360 reads as one run of east longitude ("180–200°E", even past
+    180 -- the convention the box was asked for in); any other spells each end with
+    its own hemisphere letter.
+    """
+    lo, hi = float(band[0]), float(band[1])
+    if axis == "lat":
+        return (
+            f"mean over {abs(lo):g}°{'N' if lo >= 0 else 'S'}–"
+            f"{abs(hi):g}°{'N' if hi >= 0 else 'S'}"
+        )
+    if lo >= 0 and hi >= 0:
+        return f"mean over {lo:g}–{hi:g}°E"
+    return (
+        f"mean over {abs(lo):g}°{'E' if lo >= 0 else 'W'}–"
+        f"{abs(hi):g}°{'E' if hi >= 0 else 'W'}"
+    )
 
 
 def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
@@ -48,7 +84,16 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     uses for a station, extended to a pair of points rather than one. Empty when
     the field carries no lon/lat coordinates to read (should not happen for a
     real section, but a title with nothing to say is better than one that raises).
+
+    A slab -- a box averaged along one axis, whose "path" is the band it was
+    averaged over rather than a line anywhere -- says so instead
+    (:func:`_band_note`), when the along coordinate's attrs record it.
     """
+    from ocean_skill.align import ALONG_DIM
+
+    along_attrs = da[ALONG_DIM].attrs if ALONG_DIM in da.coords else {}
+    if along_attrs.get("band_axis") and along_attrs.get("band") is not None:
+        return _band_note(along_attrs["band_axis"], along_attrs["band"])
     if lon_name is None or lat_name is None:
         return ""
     lon = np.asarray(da[lon_name], dtype="float64")
@@ -123,14 +168,33 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
         and str(aux_depth.name) != vertical
     )
     depth_source = aux_depth if native_s else da[vertical]
-    if not native_s and float(np.nanmax(np.asarray(depth_source))) > 0:
+    if native_s or vertical == "z":
+        positive_down = False
+    else:
+        # An observational axis (WOA's/GLORYS's own "depth", "lev", ...) arrives
+        # as the product reports it, positive-down -- there is no model convention
+        # to hold it to, and no earlier step that renamed it onto "z" and flipped
+        # it (a *comparison* lane gets that treatment in _align_along_path; a
+        # bare Field never passes through there). Read as positive-down when it
+        # says so (CF's `positive: down`) or, with no word either way, when it
+        # has no negative value; an axis that says `positive: up`, or runs
+        # negative, is the model's own negative-down and is negated below.
+        positive = str(depth_source.attrs.get("positive", "")).lower()
+        values = np.asarray(depth_source, dtype="float64")
+        positive_down = positive == "down" or (
+            positive != "up" and bool(np.nanmin(values) >= 0)
+        )
+    if not native_s and not positive_down and float(
+        np.nanmax(np.asarray(depth_source))
+    ) > 0:
         # Fixed-z only: this coordinate is about to be negated below, on the
         # assumption that it already reads negative-down (the model's own
-        # convention, from roms.to_depth). A positive-down coordinate reaching
-        # here instead -- an observational "depth"/"lev" axis that was renamed
-        # onto "z" without being sign-flipped first -- would silently draw
-        # upside-down: negative tick values, the seafloor at the top. Native-s
-        # is exempt, since z_rho under a positive free surface is legitimately
+        # convention, from roms.to_depth). A positive-down "z" reaching here
+        # instead -- a lane renamed onto "z" without being sign-flipped first --
+        # would silently draw upside-down: negative tick values, the seafloor at
+        # the top. (An observational axis under its own name is handled just
+        # above; "z" is the one name that promises negative-down.) Native-s is
+        # exempt, since z_rho under a positive free surface is legitimately
         # slightly positive right at the surface, not a sign-convention bug.
         raise ValueError(
             f"prepare_section expects {vertical!r} to be negative-down (the "
@@ -138,7 +202,7 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
             "this coordinate needs to be sign-flipped to negative-down before "
             "reaching here, not drawn as given."
         )
-    depth = (-depth_source).rename("depth")
+    depth = (depth_source if positive_down else -depth_source).rename("depth")
     depth.attrs["units"] = "m"
 
     # Native-s only: a land column's z_rho/z_w would be NaN if built from the
@@ -152,8 +216,27 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     # seafloor under land is still known (it's h, never masked), so the mesh has
     # no business going NaN there in the first place.
 
-    distance = da[ALONG_DIM].rename("distance")
-    distance.attrs["units"] = da[ALONG_DIM].attrs.get("units", "km")
+    lon_name, lat_name = _lon_name(da), _lat_name(da)
+    # A slab (see ocean_skill.comparison._slab_to_section) names the coordinate its
+    # x axis should be -- the one that survived the averaging -- and draws it in
+    # degrees; a path section's x is the distance along it, in km. Same coordinate
+    # name either way ("distance"), so a renderer needs no branch for which it got.
+    x_axis = da[ALONG_DIM].attrs.get("axis_coord")
+    if x_axis in ("lat", "lon") and (lat_name if x_axis == "lat" else lon_name):
+        source = da[lat_name if x_axis == "lat" else lon_name]
+        distance = xr.DataArray(
+            np.asarray(source, dtype="float64"),
+            dims=ALONG_DIM,
+            coords={ALONG_DIM: da[ALONG_DIM]},
+            name="distance",
+        )
+        distance.attrs["units"] = "degrees_north" if x_axis == "lat" else "degrees_east"
+        x_label = "latitude (°N)" if x_axis == "lat" else "longitude (°E)"
+    else:
+        x_axis = "distance"
+        distance = da[ALONG_DIM].rename("distance")
+        distance.attrs["units"] = da[ALONG_DIM].attrs.get("units", "km")
+        x_label = "distance along transect (km)"
 
     depth2d, distance2d, values2d = xr.broadcast(depth, distance, da)
     order = tuple(values2d.dims)
@@ -161,14 +244,14 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     distance2d = distance2d.transpose(*order)
     result = values2d.assign_coords(depth=depth2d, distance=distance2d)
 
-    lon_name, lat_name = _lon_name(da), _lat_name(da)
     geometry = SectionGeometry(
         x_name="distance",
         y_name="depth",
-        x_label="distance along transect (km)",
+        x_label=x_label,
         y_label="depth (m)",
         native_s=native_s,
         path_note=_path_note(da, lon_name, lat_name),
+        x_axis=x_axis,
     )
     return result, geometry
 

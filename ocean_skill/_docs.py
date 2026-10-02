@@ -106,8 +106,9 @@ _PLOT_OPTIONS_DOC = """\
 Forwarded keyword arguments
 ---------------------------
 Forwarded to whichever renderer family the data selects (``field_row``,
-``field_grid``, ``field_facet``, ``series``, ``profile``, ``section_row``,
-``time_depth``, or ``skill_map`` -- see :attr:`family`), so the exact set
+``field_grid``, ``field_facet``, ``series``, ``profile``, ``section``,
+``section_row``, ``time_depth``, or ``skill_map`` -- see :attr:`family`), so the
+exact set
 accepted varies with the data rather than with this method. Option families
 shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``title``, ``domain`` (map extent), ``robust`` (colour-limit clipping),
@@ -115,7 +116,9 @@ shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``vmin``/``vmax`` (exact colour limits -- single-field families only:
 ``field_facet``, ``section``, ``cross``, ``time_depth``),
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
-``nrows`` (grid layout), ``shared_limits``/``shared_axes``, and the
+``nrows`` (grid layout; ``rows``/``cols`` facet a stacked ``section``/``time_depth``
+grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
+``section_row``/``field_grid``), and the
 ``*_kwargs`` styling dicts (``title_kwargs``, ``colorbar_kwargs``,
 ``gridline_kwargs``, ``legend_kwargs``, ...), each merging onto a built-in
 default and unpacked straight into one matplotlib/cartopy call. See

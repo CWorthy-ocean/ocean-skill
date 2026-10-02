@@ -656,7 +656,7 @@ def test_transect_sample_marks_the_cache_key(patched_sources):
     assert c._transect_route() is not None
 
 
-# -- ComparisonSet: the >1 section_row and movie refusals ---------------------------
+# -- ComparisonSet: stacked section rows, and the movie refusal ---------------------------
 
 
 def _two_section_comparisons(patched_sources):
@@ -688,12 +688,33 @@ def _two_section_comparisons(patched_sources):
     return a, b
 
 
-def test_comparison_set_refuses_more_than_one_section_row(patched_sources):
+def test_comparison_set_stacks_more_than_one_section_row(patched_sources, monkeypatch):
+    """Several section comparisons are one ``section_row`` figure, a row each.
+
+    The render family stays ``section_row`` -- the renderers branch on how many items
+    it carries, the way ``field_row``/``field_grid`` and ``time_depth_row`` do -- and
+    each item carries its own row label.
+    """
     from ocean_skill.comparison import ComparisonSet
+    from ocean_skill.plot import registry
 
     a, b = _two_section_comparisons(patched_sources)
-    with pytest.raises(ValueError, match="section_grid"):
-        ComparisonSet([a, b]).plot(renderer="matplotlib")
+    a.label, b.label = "first", "second"
+    captured = {}
+
+    def fake_render(spec, **kwargs):
+        captured["spec"] = spec
+        captured["renderer"] = kwargs.get("renderer")
+        return "figure"
+
+    monkeypatch.setattr(registry, "render", fake_render)
+    assert ComparisonSet([a, b]).plot(renderer="matplotlib") == "figure"
+    spec = captured["spec"]
+    assert spec.family == "section_row"
+    assert len(spec.items) == 2
+    assert [item["row_label"] for item in spec.items] == ["first", "second"]
+    assert [item["label"] for item in spec.items] == ["first", "second"]
+    assert "domain" not in spec.options  # a section has no map to outline
 
 
 def test_comparison_set_movie_refuses_sections(patched_sources):
