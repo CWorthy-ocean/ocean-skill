@@ -1234,13 +1234,14 @@ def describe(name: str) -> Description:
     standard_names, extents, ...), followed by a live vocabulary match report over
     its declared variables, then a live coordinate report over its declared
     columns (which of T/X/Y/Z are recognized, and as which column). For a catalog:
-    its title/description/extents, the catalog file(s) it is read from, and the
-    sources it contains, followed by the same two reports over the union of every
-    source's columns. Meant for interactive use, e.g. ``osk.describe(name)``. See
-    :func:`match_report` and :func:`coord_report` for either report alone, and
-    :class:`ocean_skill.vocabulary.MatchReport`/:class:`~ocean_skill.vocabulary.
-    CoordReport` for why neither is ever cached or stored: both always reflect the
-    vocabulary as it stands right now.
+    its title/description/extents, the catalog file(s) it is read from, the sources
+    it contains, and any of its entries that a differently-named catalog file now
+    wins (a ``shadowed`` line per winning file), followed by the same two reports
+    over the union of every source's columns. Meant for interactive use, e.g.
+    ``osk.describe(name)``. See :func:`match_report` and :func:`coord_report` for
+    either report alone, and :class:`ocean_skill.vocabulary.MatchReport`/
+    :class:`~ocean_skill.vocabulary.CoordReport` for why neither is ever cached or
+    stored: both always reflect the vocabulary as it stands right now.
 
     Returns
     -------
@@ -1249,7 +1250,9 @@ def describe(name: str) -> Description:
         summary's structured fields as attributes: ``kind`` (``"source"`` or
         ``"catalog"``), ``catalog``, ``catalog_path`` (the file currently winning
         for this name), ``catalog_paths`` (every file contributing to it, low to
-        high precedence), ``metadata``, and ``sources``. e.g.
+        high precedence), ``metadata``, ``sources``, and ``shadowed`` (``{entry
+        name: winning file}`` for this catalog's entries that another catalog file
+        defines under the same name and wins; empty for a source). e.g.
         ``osk.describe("glodap").catalog_path``.
     """
     from ocean_skill.vocabulary import coord_report as _vocab_coord_report
@@ -1269,6 +1272,7 @@ def describe(name: str) -> Description:
             "catalog_paths": (ref.path,),
             "metadata": dict(ref.metadata),
             "sources": (ref.name,),
+            "shadowed": {},
         }
     elif name in catalog_names():
         md = catalog_metadata(name)
@@ -1280,6 +1284,22 @@ def describe(name: str) -> Description:
         for k, v in sorted(md.items()):
             lines.append(f"  {k}: {v}")
         lines.append(f"  sources ({len(srcs)}): {', '.join(srcs)}")
+        # A catalog's own entries that another file now wins: the winner's
+        # `shadowed_path` is one of this catalog's files. `ref.catalog != name`
+        # leaves out entries only a same-named file in a higher tier beat -- those
+        # still belong here. (`shadowed_path` is just the one file directly beaten.)
+        own_files = {p for p in _iter_catalog_files() if p.stem == name}
+        shadowed = {
+            ref.name: ref.path
+            for ref in sorted(index.values(), key=lambda r: r.name)
+            if ref.catalog != name and ref.shadowed_path in own_files
+        }
+        by_file: dict[Path, list[str]] = {}
+        for entry, path in shadowed.items():
+            by_file.setdefault(path, []).append(entry)
+        for path in _precedence_rank(list(by_file)):
+            entries = by_file[path]
+            lines.append(f"  shadowed ({len(entries)}) by {path}: {', '.join(entries)}")
         fields = {
             "kind": "catalog",
             "name": name,
@@ -1288,6 +1308,7 @@ def describe(name: str) -> Description:
             "catalog_paths": paths,
             "metadata": dict(md),
             "sources": tuple(srcs),
+            "shadowed": shadowed,
         }
     else:
         raise KeyError(
