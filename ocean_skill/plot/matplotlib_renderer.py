@@ -24,8 +24,9 @@ from typing import Any
 import numpy as np
 
 from ocean_skill import _stacklevel
-from ocean_skill.colormaps import cmaps_for, norm_for
+from ocean_skill.colormaps import cmaps_for, is_log, norm_for
 from ocean_skill.plot import _titles
+from ocean_skill.plot._colorbar import colorbar_ticks, difference_limit, round_limits
 from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
@@ -85,27 +86,38 @@ __all__ += ["PAGE_H", "PAGE_W"]
 
 def _limits(
     *arrays,
+    log: bool,
     robust: bool | float = False,
     vmin: float | None = None,
     vmax: float | None = None,
+    snap: bool = True,
 ) -> tuple[float, float]:
-    """Shared colour limits across all arrays.
+    """Shared colour limits across all arrays, snapped outward to round values.
 
-    Default is the full finite range (min, max), so a colourbar's top always
-    matches what :meth:`~ocean_skill.field.Field.extremum` and ``.series()``
-    report at the same cell — nothing is clipped unless asked for. ``robust=True``
-    clips to the 10th/90th percentile instead (the classic xarray-style "robust
-    to outliers" scaling); a float ``q`` in ``(0, 1)`` clips to the central
-    fraction ``q`` of the data (``q=0.8`` is the same as ``robust=True``).
+    Default is the full finite range (min, max), so nothing is clipped unless asked
+    for: a colourbar's top is what :meth:`~ocean_skill.field.Field.extremum` and
+    ``.series()`` report at the same cell *rounded up to the next round value*
+    (2.987 reads 3.0), never short of it. ``robust=True`` clips to the 10th/90th
+    percentile instead (the classic xarray-style "robust to outliers" scaling); a
+    float ``q`` in ``(0, 1)`` clips to the central fraction ``q`` of the data
+    (``q=0.8`` is the same as ``robust=True``).
 
     ``vmin``/``vmax`` pin either end exactly, overriding whatever ``robust`` would
     otherwise compute for that end — pass one to pin just that end, or both for an
-    exact range regardless of the data.
+    exact range regardless of the data. A pinned end is never moved by the snap.
+
+    ``log`` says whether the scale is logarithmic (``is_log(standard_name,
+    statistic)`` for a variable's colour scale), which decides how the ends round --
+    to one significant digit on a log scale, to a fifth of a tick step on a linear
+    one; see :func:`ocean_skill.plot._colorbar.round_limits`. Required, so a caller
+    has to say. ``snap=False`` returns the raw limits instead, for a caller whose
+    range is not a colour scale. Empty data returns ``(0.0, 1.0)``, unsnapped.
     """
     if vmin is not None and vmax is not None and vmin >= vmax:
         raise ValueError(f"vmin={vmin!r} must be less than vmax={vmax!r}")
     vals = np.concatenate([np.asarray(a).ravel() for a in arrays])
     vals = vals[np.isfinite(vals)]
+    derived = vals.size > 0
     if vals.size == 0:
         lo, hi = 0.0, 1.0
     elif robust is False or robust is None:
@@ -120,7 +132,15 @@ def _limits(
             )
         lo_pct, hi_pct = (1 - q) / 2 * 100, (1 + q) / 2 * 100
         lo, hi = float(np.percentile(vals, lo_pct)), float(np.percentile(vals, hi_pct))
-    return (vmin if vmin is not None else lo, vmax if vmax is not None else hi)
+    lo, hi = (vmin if vmin is not None else lo), (vmax if vmax is not None else hi)
+    if snap and derived and (vmin is None or vmax is None):
+        new_lo, new_hi = round_limits(
+            lo, hi, log=log, keep_lo=vmin is not None, keep_hi=vmax is not None
+        )
+        # a pinned end stays the caller's own object, not a float() of it
+        lo = lo if vmin is not None else new_lo
+        hi = hi if vmax is not None else new_hi
+    return lo, hi
 
 
 def _data_range(*arrays, log: bool = False) -> tuple[float, float] | None:
@@ -146,10 +166,17 @@ def _extend(lo: float, hi: float, data_range: tuple[float, float] | None) -> str
 
     One rule for both renderers, so the static arrow and the interactive ``≥``/``≤``
     end label can only ever appear together. ``"neither"`` when the range is unknown.
+
+    Data past an end by no more than float noise (a millionth of the bar's span) does
+    not count: a limit snapped to a round value (:func:`ocean_skill.plot._colorbar.
+    round_limits`) can sit a rounding error inside data it was meant to cover --
+    3.0 against 3.0000000000000004 -- and that is not clipping anything a reader
+    could see.
     """
     if data_range is None:
         return "neither"
-    below, above = data_range[0] < lo, data_range[1] > hi
+    tol = 1e-6 * abs(hi - lo)
+    below, above = data_range[0] < lo - tol, data_range[1] > hi + tol
     return (
         "both" if below and above else "min" if below else "max" if above else "neither"
     )
@@ -180,24 +207,38 @@ def _extend_of(norm) -> str:
     return _extend(norm.vmin, norm.vmax, getattr(norm, "_osk_data_range", None))
 
 
-def _contour_kw(norm, n: int = 21) -> dict[str, Any]:
-    """``contourf`` keywords matching ``norm``: its levels, and the ends left open.
+def _contour_kw(norm, n: Any = 21) -> dict[str, Any]:
+    """``contourf`` keywords matching ``norm``: its band edges, and the ends left open.
 
     ``contourf`` fills only between its first and last level, so on a clipped scale the
     data past either end would be bare holes -- unlike ``pcolormesh``, which saturates
     it to the end colour. ``extend`` fills those regions and is also what the colour
     bar reads its arrows from.
+
+    ``n`` is how many bands to cut the scale into -- see :func:`_contour_levels`.
     """
     return {"levels": _contour_levels(norm, n), "extend": _extend_of(norm)}
 
 
-def _contour_levels(norm, n: int = 21):
-    """Level edges matching ``norm`` — geometrically spaced under a ``LogNorm``."""
+def _contour_levels(norm, n: Any = 21):
+    """Band edges matching ``norm``: round values, geometric under a ``LogNorm``.
+
+    :func:`ocean_skill.plot.section.fill_edges` decides them, so every round tick of the
+    colour bar (:func:`ocean_skill.plot._colorbar.colorbar_ticks`) sits on a band edge
+    rather than between two. ``n`` is its ``fill_levels``: about that many bands (21 for
+    a map or a movie, whatever the caller asked for in a section), ``None`` the section
+    default, or a list of exact edges.
+    """
     import matplotlib.colors as mcolors
 
-    if isinstance(norm, mcolors.LogNorm):
-        return np.geomspace(norm.vmin, norm.vmax, n)
-    return np.linspace(norm.vmin, norm.vmax, n)
+    from ocean_skill.plot.section import fill_edges
+
+    return fill_edges(
+        norm.vmin,
+        norm.vmax,
+        log=isinstance(norm, mcolors.LogNorm),
+        fill_levels=n,
+    )
 
 
 #: Metric keys shown in the corner box by default — the first three of the set
@@ -487,6 +528,48 @@ def _label_clipped_ends(cbar, norm, *, size: float) -> None:
         )
 
 
+def _takes_round_ticks(norm) -> bool:
+    """Report whether ``norm`` is a plain linear or log scale a bar can tick by value.
+
+    A ``Normalize``, ``LogNorm`` (or the two-sided ``TwoSlopeNorm``/``CenteredNorm``)
+    puts a number on the bar at the place that number sits on the scale, which is what
+    round ticks assume. Anything else keeps the ticks it already has: a
+    ``BoundaryNorm`` is bands rather than a scale, ``NoNorm`` ticks category indices,
+    and a ``PowerNorm`` or ``SymLogNorm`` is not spaced linearly or by decades. Exact
+    ``Normalize`` rather than ``isinstance``, since every one of those subclasses it.
+    """
+    import matplotlib.colors as mcolors
+
+    return type(norm) is mcolors.Normalize or isinstance(
+        norm, mcolors.LogNorm | mcolors.TwoSlopeNorm | mcolors.CenteredNorm
+    )
+
+
+def _round_ticks(cbar, norm) -> None:
+    """Tick ``cbar`` at round values, spelled as :func:`colorbar_ticks` spells them.
+
+    The one place a static bar's ticks are decided, so every family's bar reads the
+    same -- ``0.0, 0.5, 1.0`` rather than a filled-contour bar's ``0.466, 0.911`` band
+    edges, a log bar's plain ``0.01, 0.1, 1, 10`` rather than ``10⁻²``, and a true
+    minus sign rather than a hyphen. The labels are set verbatim with the ticks, so
+    nothing downstream reformats them. A range with nothing to tick leaves the bar's
+    own ticks alone.
+
+    Minor tick *labels* go: a log bar spanning less than a few decades otherwise prints
+    ``2×10⁻¹`` between the round ones. The minor tick marks themselves may stay.
+    """
+    import matplotlib.colors as mcolors
+    from matplotlib.ticker import NullFormatter
+
+    ticks = colorbar_ticks(norm.vmin, norm.vmax, log=isinstance(norm, mcolors.LogNorm))
+    if not ticks.values:
+        return
+    cbar.set_ticks(list(ticks.values), labels=list(ticks.labels))
+    # the bar's long axis is x for a horizontal bar, y for a vertical one
+    axis = cbar.ax.xaxis if cbar.orientation == "horizontal" else cbar.ax.yaxis
+    axis.set_minor_formatter(NullFormatter())
+
+
 def _draw_colorbar(
     fig,
     im,
@@ -496,6 +579,7 @@ def _draw_colorbar(
     defaults,
     *,
     label_clipped: bool = False,
+    round_ticks: bool = True,
 ):
     """Draw one colorbar from a single merged kwargs dict, split by key prefix.
 
@@ -509,6 +593,12 @@ def _draw_colorbar(
     a difference panel's 98th-percentile range -- says so rather than looking like the
     whole story. An ``extend`` in ``colorbar_kwargs`` wins, ``"neither"`` included.
     ``label_clipped=True`` also writes the true extreme at each arrow's tip.
+
+    The bar is ticked at round values (:func:`_round_ticks`), the same ones the
+    interactive bar carries. A ``ticks`` or ``format`` in ``colorbar_kwargs`` wins
+    outright, a norm that is not a plain linear or log scale
+    (:func:`_takes_round_ticks`) keeps its own ticks, and ``round_ticks=False`` leaves
+    the bar for a caller that ticks it itself -- the dates on ``color_by="time"``.
     """
     merged = _merged(defaults, colorbar_kwargs)
     cbar_kw, label_kw, tick_kw = {}, {}, {}
@@ -521,6 +611,13 @@ def _draw_colorbar(
             cbar_kw[k] = v
     cbar_kw.setdefault("extend", _extend_of(im.norm))
     cbar = fig.colorbar(im, ax=ax, **cbar_kw)
+    if (
+        round_ticks
+        and cbar_kw.get("ticks") is None
+        and cbar_kw.get("format") is None
+        and _takes_round_ticks(im.norm)
+    ):
+        _round_ticks(cbar, im.norm)
     if label_clipped:
         _label_clipped_ends(cbar, im.norm, size=tick_kw.get("labelsize", 8))
     if label:
@@ -919,12 +1016,12 @@ def _draw_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, robust=robust)
+        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
             norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
         )
     if div_norm is None:
-        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        dmax = difference_limit(d)
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
@@ -997,6 +1094,10 @@ def _draw_section_row(
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
     statistic: str | None = None,
+    fill_levels: Any = None,
+    overlays: Mapping[str, Any] | None = None,
+    levels: Sequence[float] = (),
+    contour_kwargs: Mapping[str, Any] | None = None,
 ):
     """Draw one test|reference|difference section row into three existing axes.
 
@@ -1027,8 +1128,17 @@ def _draw_section_row(
     ``statistic`` is the reduction the row's fields are the result of, if they are one
     (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
     log scale, and its units are printed readably (``°C²``) on the colour bars.
+
+    ``fill_levels`` cuts every panel's ``contourf`` fill, the difference panel's too,
+    into bands (see :func:`_draw_section`). ``overlays`` is the row's prepared lines
+    (:func:`_prepare_overlay`'s ``{"test": ..., "reference": ...}``, or ``None``),
+    drawn at ``levels`` over those two panels only: a difference of two fields has no
+    isotherm of its own to draw. The caller labels them (:func:`_label_overlays`) once
+    the figure is laid out.
     """
     import matplotlib.colors as mcolors
+
+    from ocean_skill.plot.section import difference_fill_levels
 
     title_pinned = _pinned(title_kwargs, "title_kwargs")
     row_label_pinned = _pinned(row_label_kwargs, "row_label_kwargs")
@@ -1040,22 +1150,24 @@ def _draw_section_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, robust=robust)
+        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
             norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
         )
     if div_norm is None:
-        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        dmax = difference_limit(d)
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
-        (t, resolved_titles[0], seq, seq_norm),
-        (r, resolved_titles[1], seq, seq_norm),
-        (d, resolved_titles[2], div, div_norm),
+        ("test", t, resolved_titles[0], seq, seq_norm),
+        ("reference", r, resolved_titles[1], seq, seq_norm),
+        ("difference", d, resolved_titles[2], div, div_norm),
     ]
     ims = []
-    for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
+    for j, (ax, (lane, da, lab, cmap, norm)) in enumerate(
+        zip(axes, panels, strict=True)
+    ):
         # Only the leftmost panel labels depth -- the other two share the same axis,
         # the same convention _draw_row uses for latitude on a row of maps.
         im = _draw_section(
@@ -1067,6 +1179,14 @@ def _draw_section_row(
             mark=mark,
             scale=scale,
             ylabel=not shared_axis_labels or j == 0,
+            fill_levels=(
+                difference_fill_levels(fill_levels)
+                if lane == "difference"
+                else fill_levels
+            ),
+            overlay=(overlays or {}).get(lane),
+            levels=levels,
+            contour_kwargs=contour_kwargs,
         )
         if shared_axis_labels and j != 0:
             ax.tick_params(axis="y", labelleft=False)
@@ -2193,6 +2313,8 @@ def xy(
             scale_bar.label,
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
+            # a time bar is in days since 1970 and reads as dates, ticked just below
+            round_ticks=not scale_bar.is_time,
         )
         long_axis = cbar.ax.xaxis if cbar.orientation == "horizontal" else cbar.ax.yaxis
         if scale_bar.is_time:
@@ -2943,7 +3065,9 @@ def _shared_norms(
     statistic = statistic_of(comparisons[0])
     all_t = [np.asarray(c["aligned"][test_name]) for c in comparisons]
     all_r = [np.asarray(c["aligned"][reference_name]) for c in comparisons]
-    vmin, vmax = _limits(*all_t, *all_r, robust=robust)
+    vmin, vmax = _limits(
+        *all_t, *all_r, log=is_log(standard_name, statistic), robust=robust
+    )
     seq_norm = _with_range(
         norm_for(standard_name, vmin, vmax, statistic=statistic), *all_t, *all_r
     )
@@ -2952,10 +3076,8 @@ def _shared_norms(
         [np.asarray(c["aligned"]["difference"]).ravel() for c in comparisons]
     )
     finite = all_d[np.isfinite(all_d)]
-    dmax = float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0
-    div_norm = _with_range(
-        mcolors.Normalize(vmin=-(dmax or 1.0), vmax=dmax or 1.0), finite
-    )
+    dmax = difference_limit(finite)
+    div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), finite)
     return seq_norm, div_norm
 
 
@@ -3786,7 +3908,13 @@ def field_facet(
     statistic = statistic_of(field)
 
     def _norm_of(sub):
-        lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _limits(
+            sub,
+            log=is_log(standard_name, statistic),
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         return _with_range(
             norm_for(
                 standard_name,
@@ -3991,9 +4119,203 @@ def metric_arrays(skill, names) -> dict[str, Any]:
     return out
 
 
+#: Where an overlay's lines sit: one above the fill, which draws at matplotlib's default
+#: of 1 whether it is a ``pcolormesh`` mesh or a ``contourf`` set. The labels follow at
+#: ``clabel``'s own offset above the lines.
+_OVERLAY_ZORDER = 2
+
+
+def _check_section_contours(
+    has_overlay: bool,
+    *,
+    mark: str,
+    contour_levels: Any,
+    contour_kwargs: Any,
+    fill_levels: Any,
+) -> None:
+    """Refuse a contour or band option with nothing to act on, before any figure exists.
+
+    The shared refusals (:func:`ocean_skill.plot.section.check_section_options`, worded
+    once for both renderers), plus three this renderer adds: ``contour_kwargs`` has to
+    be a mapping and may not carry ``levels``, and a ``fill_levels`` that is not a valid
+    spec is refused here rather than from inside the first panel, by which time a figure
+    is already open.
+    """
+    from ocean_skill.plot.section import check_section_options, fill_edges
+
+    check_section_options(
+        has_contours=has_overlay,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
+    if contour_kwargs is not None and not isinstance(contour_kwargs, Mapping):
+        raise TypeError(
+            "contour_kwargs= takes a dict of ax.contour keywords (colors, linewidths, "
+            "linestyles, ...) plus fmt= and labels= for the labels -- got "
+            f"{type(contour_kwargs).__name__}."
+        )
+    if contour_kwargs and "levels" in contour_kwargs:
+        raise ValueError(
+            "contour_kwargs holds 'levels', but which lines are drawn is "
+            "contour_levels=, decided once so every panel shows the same ones."
+        )
+    if fill_levels is not None:
+        fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
+
+
+def _prepare_overlay(raw, values):
+    """Put one item's raw overlay on the mesh of its panel(s), or ``None`` without one.
+
+    A section item's overlay is one DataArray over its one panel. A ``section_row``
+    item's is a ``{"test", "reference"}`` pair, each lane over its own panel -- the
+    difference panel never gets lines -- so the result is a dict of the same two lanes.
+    :func:`ocean_skill.plot.section.prepare_overlay` raises, naming the axis, if a
+    mesh differs; nothing is regridded.
+    """
+    from ocean_skill.plot.section import prepare_overlay
+
+    if raw is None:
+        return None
+    if isinstance(raw, Mapping):
+        return {
+            lane: prepare_overlay(raw[lane], values[lane])
+            for lane in ("test", "reference")
+        }
+    return prepare_overlay(raw, values)
+
+
+def _section_overlays(raws, panels, spec) -> tuple[list[Any], tuple[float, ...]]:
+    """Prepare every panel's overlay, and pick the one set of levels the figure draws.
+
+    ``raws`` and ``panels`` are the figure's items' raw overlays (``None`` where an item
+    has none) and prepared values, in the same order. The levels are decided once, over
+    every overlay array of every item and lane pooled
+    (:func:`ocean_skill.plot.section.contour_levels`, whose own spec checks apply), so a
+    row of panels, or a stack of rows, shows the same isotherms in each. ``spec=None``
+    means ``True``: about six round levels. Everything is prepared before anything is
+    drawn, so a mismatched mesh fails before a figure exists.
+    """
+    from ocean_skill.plot import section as _section_layout
+
+    overlays = [_prepare_overlay(raw, v) for raw, v in zip(raws, panels, strict=True)]
+    arrays = [
+        array
+        for overlay in overlays
+        if overlay is not None
+        for array in (overlay.values() if isinstance(overlay, dict) else (overlay,))
+    ]
+    if not arrays:
+        return overlays, ()
+    return overlays, _section_layout.contour_levels(
+        True if spec is None else spec, arrays
+    )
+
+
+def _draw_overlay(
+    ax,
+    overlay,
+    geometry,
+    levels: Sequence[float],
+    contour_kwargs: Mapping[str, Any] | None,
+    *,
+    fontsize: float,
+) -> None:
+    """Draw ``overlay``'s contour lines at ``levels`` over one section panel.
+
+    ``overlay`` is :func:`ocean_skill.plot.section.prepare_overlay`'s return -- the line
+    variable on the panel's own mesh, so lines and fill agree to the last bit -- and
+    ``levels`` the figure's one set, so every panel draws the same isotherms. The
+    lines are black and thin (:data:`~ocean_skill.plot.section.CONTOUR_COLOR`,
+    :data:`~ocean_skill.plot.section.CONTOUR_WIDTH`) and solid at every level, where
+    matplotlib dashes the negative ones of a single-coloured set: the interactive lines
+    do not, and a -1 degC isotherm is not a different kind of line from a 5 degC one.
+
+    ``contour_kwargs`` restyles them -- ``colors`` (or a ``cmap``, which then replaces
+    the default colour), ``linewidths``, ``linestyles``, or any other ``ax.contour``
+    keyword -- apart from ``fmt`` (the labels' number format, ``"%g"`` by default) and
+    ``labels`` (``False`` for no labels), which style the labels instead. Which levels
+    are drawn is ``contour_levels=``'s business, not a key of this dict (a ``levels``
+    key is refused up front, by :func:`_check_section_contours`).
+
+    A panel with nothing to draw -- all missing, flat, or no line crossing it -- draws
+    nothing and gets no labels. The labels are not placed here: ``ax.clabel`` fixes a
+    label's spacing and tilt from the axes' size at the moment it runs, which is not the
+    saved size until the layout has settled, so this only leaves what it needs on the
+    axes for :func:`_label_overlays` to place once it has.
+    """
+    from ocean_skill.plot.section import CONTOUR_COLOR, CONTOUR_WIDTH
+
+    style = dict(contour_kwargs or {})
+    fmt = style.pop("fmt", "%g")
+    labelled = style.pop("labels", True)
+    if "cmap" not in style:  # lines coloured by level, not also by a fixed colour
+        style.setdefault("colors", CONTOUR_COLOR)
+    style.setdefault("linewidths", CONTOUR_WIDTH)
+    style.setdefault("linestyles", "solid")
+    style.setdefault("zorder", _OVERLAY_ZORDER)
+
+    z = np.ma.masked_invalid(np.asarray(overlay, dtype="float64"))
+    finite = z.compressed()
+    if finite.size == 0 or not finite.min() < finite.max():
+        return
+    lines = ax.contour(
+        overlay[geometry.x_name],
+        overlay[geometry.y_name],
+        z,
+        levels=list(levels),
+        **style,
+    )
+    if labelled and any(len(segments) for segments in lines.allsegs):
+        ax._osk_overlay = (lines, fmt, fontsize)
+
+
+def _label_overlays(fig) -> None:
+    """Label the overlay lines of every section panel, now that the layout is final.
+
+    ``ax.clabel`` decides where a label goes, how far to break the line around it and
+    how to tilt it from the axes' size at the moment it is called, and a figure under
+    ``constrained_layout`` is not its final size until it has been drawn: the colour
+    bars, the axis labels and the titles all move the panels. Labelled any earlier, a
+    line breaks around a gap sized for a different panel and a label is tilted for a
+    different slope; labelled here, they fit the figure that is saved. The last step of
+    every section family before it saves.
+    """
+    from ocean_skill.plot.section import contour_label
+
+    pending = [
+        (ax, ax._osk_overlay)
+        for ax in fig.axes
+        if getattr(ax, "_osk_overlay", None) is not None
+    ]
+    if not pending:
+        return
+    fig.draw_without_rendering()
+    for ax, (lines, fmt, fontsize) in pending:
+        ax.clabel(
+            lines,
+            fmt=lambda level, fmt=fmt: contour_label(level, fmt),
+            fontsize=fontsize,
+            inline=True,
+        )
+        ax._osk_overlay = None
+
+
 def _draw_section(
-    ax, values, geometry, *, cmap, norm, mark: str, scale: dict[str, float],
+    ax,
+    values,
+    geometry,
+    *,
+    cmap,
+    norm,
+    mark: str,
+    scale: dict[str, float],
     ylabel: bool = True,
+    fill_levels: Any = None,
+    overlay=None,
+    levels: Sequence[float] = (),
+    contour_kwargs: Mapping[str, Any] | None = None,
 ):
     """Draw one vertical-section panel into ``ax`` and return its mappable.
 
@@ -4008,10 +4330,18 @@ def _draw_section(
     nothing here shares an x axis or assumes the next panel's label matches.
     ``ylabel=False`` leaves the depth label off, for a panel whose neighbour
     already carries it.
+
+    ``mark="contourf"`` cuts the fill into ``fill_levels`` bands (``None``: about
+    :data:`~ocean_skill.plot.section.DEFAULT_FILL_BANDS` round ones; an int: about that
+    many; a list: exactly those edges) -- every colour-bar tick sits on a band edge.
+    ``overlay`` -- :func:`ocean_skill.plot.section.prepare_overlay`'s return, or
+    ``None`` -- is drawn over the fill as contour lines at ``levels``, styled by
+    ``contour_kwargs`` (see :func:`_draw_overlay`); the returned mappable is always the
+    fill's, whatever is drawn over it. Its labels wait for :func:`_label_overlays`.
     """
     ax.set_facecolor("0.85")
     draw = ax.contourf if mark == "contourf" else ax.pcolormesh
-    kw = _contour_kw(norm) if mark == "contourf" else {}
+    kw = _contour_kw(norm, fill_levels) if mark == "contourf" else {}
     im = draw(
         values[geometry.x_name],
         values[geometry.y_name],
@@ -4020,7 +4350,18 @@ def _draw_section(
         norm=norm,
         **kw,
     )
+    # inverted before the lines go on, and only once: invert_yaxis flips whatever the
+    # axis is now, so a second call would put the seafloor back at the top
     ax.invert_yaxis()
+    if overlay is not None and len(levels):
+        _draw_overlay(
+            ax,
+            overlay,
+            geometry,
+            levels,
+            contour_kwargs,
+            fontsize=scale["contour_label"],
+        )
     ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
     if ylabel:
         ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
@@ -4036,6 +4377,7 @@ def section(
     standard_name: str | None = None,
     depth: str | None = None,
     label: str | None = None,
+    contour: Any = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
@@ -4052,6 +4394,9 @@ def section(
     robust: bool | float = False,
     vmin: float | None = None,
     vmax: float | None = None,
+    fill_levels: int | Sequence[float] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one vertical section: depth against along-path distance.
 
@@ -4085,14 +4430,37 @@ def section(
     ``robust=True``. ``vmin``/``vmax`` pin an exact colour range instead, overriding
     ``robust`` and a variable's own declared display range wherever either end is
     given.
+
+    ``fill_levels`` sets the bands of a ``mark="contourf"`` fill: ``None`` (the
+    default) about :data:`~ocean_skill.plot.section.DEFAULT_FILL_BANDS` round bands, an
+    int about that many, a list exactly those edges -- every colour-bar tick sits on a
+    band edge. It is refused with ``mark="pcolormesh"``, which draws cells.
+
+    ``contour`` is the raw section of a second variable to draw as black, labelled
+    lines over the fill (``contours=`` on ``Field.plot()`` hands it over; see
+    :mod:`ocean_skill._overlay`). It has to sit on the fill's own mesh
+    (:func:`ocean_skill.plot.section.prepare_overlay` refuses one that does not, naming
+    the axis). ``contour_levels`` picks the lines -- ``None`` or ``True`` about six
+    round values, an int about that many, a list exactly those, ``False`` none;
+    ``contour_kwargs`` styles them (``colors``, ``linewidths``, ``linestyles``, any
+    other ``ax.contour`` keyword; ``fmt`` for the labels' number format, ``"%g"`` by
+    default; ``labels=False`` for none). Either is refused without a ``contour``.
     """
     import matplotlib.pyplot as plt
 
     from ocean_skill.plot.section import prepare_section
     from ocean_skill.plot.typography import SECTION_ASPECT
 
+    _check_section_contours(
+        contour is not None,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     _warn_if_interactive_only(rasterize, hover)
     values, geometry = prepare_section(field)
+    (overlay,), levels = _section_overlays([contour], [values], contour_levels)
     if title is None:
         title = suptitle_text(standard_name, (depth, geometry.path_note), label=label)
 
@@ -4119,7 +4487,13 @@ def section(
 
     cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(field)
-    lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+    lo, hi = _limits(
+        values,
+        log=is_log(standard_name, statistic),
+        robust=robust,
+        vmin=vmin,
+        vmax=vmax,
+    )
     norm = _with_range(
         norm_for(
             standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
@@ -4129,7 +4503,17 @@ def section(
 
     fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
     im = _draw_section(
-        ax, values, geometry, cmap=cmap, norm=norm, mark=mark, scale=scale
+        ax,
+        values,
+        geometry,
+        cmap=cmap,
+        norm=norm,
+        mark=mark,
+        scale=scale,
+        fill_levels=fill_levels,
+        overlay=overlay,
+        levels=levels,
+        contour_kwargs=contour_kwargs,
     )
 
     lab = units_text(units, statistic)
@@ -4150,6 +4534,7 @@ def section(
         _align_colorbars(fig)
     if fit_text:
         _fit_text_widths(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=[ax])
     if save:
         save = Path(save).expanduser()
@@ -4309,6 +4694,9 @@ def section_grid(
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
+    fill_levels: int | Sequence[float] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Stack several vertical sections -- one panel per item -- in a single figure.
 
@@ -4355,6 +4743,13 @@ def section_grid(
     ``items`` order unfaceted, or -- faceted -- one per *grid cell*, row-major, blanks
     included. ``None`` at a position keeps that panel's own title; the wrong count
     raises a copy-pasteable ``ValueError`` listing the current titles.
+
+    ``fill_levels`` sets the bands of a ``mark="contourf"`` fill on every panel -- see
+    :func:`section`, whose ``contour_levels``/``contour_kwargs`` this also takes, for
+    the lines an item's ``contour`` (the raw section of a second variable, the same
+    shape as its ``field``) draws over its panel. The lines' levels are decided once
+    for the whole figure, over every panel's overlay, so each panel shows the same
+    ones.
     """
     import matplotlib.pyplot as plt
 
@@ -4364,9 +4759,22 @@ def section_grid(
     _warn_if_interactive_only(rasterize, hover)
     if not items:
         raise ValueError("section_grid needs at least one section, got none")
+    _check_section_contours(
+        any(item.get("contour") is not None for item in items),
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
 
     prepared = [prepare_section(item["field"]) for item in items]
     prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
+    overlays, levels = _section_overlays(
+        [item.get("contour") for item in items],
+        [values for values, _ in prepared],
+        contour_levels,
+    )
+    overlay_of = {id(item): o for item, o in zip(items, overlays, strict=True)}
     grid_nrows, grid_ncols, cell_items, drawn, panel_titles, auto_suptitle = (
         section_grid_layout(
             items,
@@ -4415,9 +4823,16 @@ def section_grid(
     def _scale_of(members: list[dict[str, Any]]):
         """``(cmap, norm)`` spanning ``members`` -- one item, or one shared group."""
         standard_name = members[0].get("standard_name")
+        statistic = statistic_of(members[0])
         fields = [prepared_of[id(m)][0] for m in members]
         cmap, _ = cmaps_for(standard_name)
-        lo, hi = _limits(*fields, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _limits(
+            *fields,
+            log=is_log(standard_name, statistic),
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         norm = _with_range(
             norm_for(
                 standard_name,
@@ -4425,7 +4840,7 @@ def section_grid(
                 hi,
                 user_vmin=vmin,
                 user_vmax=vmax,
-                statistic=statistic_of(members[0]),
+                statistic=statistic,
             ),
             *fields,
         )
@@ -4455,7 +4870,17 @@ def section_grid(
         values, geometry = prepared_of[id(item)]
         cmap, norm = scale_of_cell[i]
         ims[i] = _draw_section(
-            flat[i], values, geometry, cmap=cmap, norm=norm, mark=mark, scale=scale
+            flat[i],
+            values,
+            geometry,
+            cmap=cmap,
+            norm=norm,
+            mark=mark,
+            scale=scale,
+            fill_levels=fill_levels,
+            overlay=overlay_of[id(item)],
+            levels=levels,
+            contour_kwargs=contour_kwargs,
         )
         t = flat[i].set_title(panel_titles[i], **title_kwargs)
         t._osk_size_pinned = title_pinned
@@ -4489,6 +4914,7 @@ def section_grid(
         _align_colorbars(fig)
     if fit_text:
         _fit_text_widths(fig)
+    _label_overlays(fig)
     _warn_if_cramped(
         fig, canvas=canvas, nrows=grid_nrows, panels=[flat[i] for i, _ in drawn]
     )
@@ -4615,7 +5041,11 @@ def cross(
     cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(items[0])
     lo, hi = _limits(
-        *(values for values, _ in prepared), robust=robust, vmin=vmin, vmax=vmax
+        *(values for values, _ in prepared),
+        log=is_log(standard_name, statistic),
+        robust=robust,
+        vmin=vmin,
+        vmax=vmax,
     )
     norm = _with_range(
         norm_for(
@@ -4811,7 +5241,13 @@ def time_depth(
 
     cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(field)
-    lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+    lo, hi = _limits(
+        values,
+        log=is_log(standard_name, statistic),
+        robust=robust,
+        vmin=vmin,
+        vmax=vmax,
+    )
     norm = _with_range(
         norm_for(
             standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
@@ -5131,9 +5567,11 @@ def time_depth_grid(
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
             standard_name = cell_items[group_indices[0]].get("standard_name")
+            statistic = statistic_of(cell_items[group_indices[0]])
             cmap, _ = cmaps_for(standard_name)
             lo, hi = _limits(
                 *(prepared[i][0] for i in group_indices),
+                log=is_log(standard_name, statistic),
                 robust=robust,
                 vmin=vmin,
                 vmax=vmax,
@@ -5145,7 +5583,7 @@ def time_depth_grid(
                     hi,
                     user_vmin=vmin,
                     user_vmax=vmax,
-                    statistic=statistic_of(cell_items[group_indices[0]]),
+                    statistic=statistic,
                 ),
                 *(prepared[i][0] for i in group_indices),
             )
@@ -5174,7 +5612,13 @@ def time_depth_grid(
             cmap, norm = panel_scale[grid_index]
         else:
             cmap, _ = cmaps_for(item.get("standard_name"))
-            lo, hi = _limits(values, robust=robust, vmin=vmin, vmax=vmax)
+            lo, hi = _limits(
+                values,
+                log=is_log(item.get("standard_name"), statistic_of(item)),
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
+            )
             norm = _with_range(
                 norm_for(
                     item.get("standard_name"),
@@ -5326,12 +5770,12 @@ def _draw_time_depth_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, robust=robust)
+        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
             norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
         )
     if div_norm is None:
-        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        dmax = difference_limit(d)
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
@@ -5936,16 +6380,14 @@ def field_map_grid(
             group_indices = [drawn_indices[g] for g in group]
             standard_name = cell_items[group_indices[0]].get("standard_name")
             cmap, _ = cmaps_for(standard_name)
+            statistic = statistic_of(cell_items[group_indices[0]])
             vmin, vmax = _limits(
-                *(cell_items[i]["field"] for i in group_indices), robust=robust
+                *(cell_items[i]["field"] for i in group_indices),
+                log=is_log(standard_name, statistic),
+                robust=robust,
             )
             norm = _with_range(
-                norm_for(
-                    standard_name,
-                    vmin,
-                    vmax,
-                    statistic=statistic_of(cell_items[group_indices[0]]),
-                ),
+                norm_for(standard_name, vmin, vmax, statistic=statistic),
                 *(cell_items[i]["field"] for i in group_indices),
             )
             for i in group_indices:
@@ -5960,9 +6402,12 @@ def field_map_grid(
             cmap, norm = panel_scale[index]
         else:
             cmap, _ = cmaps_for(standard_name)
-            vmin, vmax = _limits(field, robust=robust)
+            statistic = statistic_of(item)
+            vmin, vmax = _limits(
+                field, log=is_log(standard_name, statistic), robust=robust
+            )
             norm = _with_range(
-                norm_for(standard_name, vmin, vmax, statistic=statistic_of(item)),
+                norm_for(standard_name, vmin, vmax, statistic=statistic),
                 field,
             )
         # No drawn cell to my left in this row (the grid's own edge, or an
@@ -6040,6 +6485,7 @@ def section_row(
     depth: str | None = None,
     time: str | None = None,
     metrics: dict[str, Any] | None = None,
+    contour: Mapping[str, Any] | None = None,
     mark: str = "pcolormesh",
     save: str | Path | None = None,
     figsize: tuple[float, float] | None = None,
@@ -6059,6 +6505,9 @@ def section_row(
     hover: bool | None = None,
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
+    fill_levels: int | Sequence[float] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -6091,14 +6540,30 @@ def section_row(
     :func:`_warn_if_interactive_only`), ``titles=`` (the three panels' own
     titles, ``None`` keeping a panel's own) — means exactly what it does in
     :func:`field_row`.
+
+    ``fill_levels`` sets the bands of a ``mark="contourf"`` fill on all three panels,
+    the difference panel included (see :func:`section`). ``contour`` is the overlay's
+    aligned ``{"test": ..., "reference": ...}`` pair -- the same variable's sections for
+    another comparison, built the same way -- drawn as black, labelled lines over the
+    test and reference panels respectively; the difference panel never gets any. Their
+    levels are decided once over both, so the two panels show the same isotherms, and
+    ``contour_levels``/``contour_kwargs`` mean what they do in :func:`section`.
     """
     import matplotlib.pyplot as plt
 
     from ocean_skill.plot.section import prepare_section_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
+    _check_section_contours(
+        contour is not None,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     _warn_if_interactive_only(rasterize, hover)
     values, geometry = prepare_section_row(aligned)
+    (overlay,), levels = _section_overlays([contour], [values], contour_levels)
     if title is None:
         title = suptitle_text(standard_name, (depth, time, geometry.path_note))
 
@@ -6137,6 +6602,10 @@ def section_row(
         robust=robust,
         titles=titles,
         statistic=statistic_of(aligned),
+        fill_levels=fill_levels,
+        overlays=overlay,
+        levels=levels,
+        contour_kwargs=contour_kwargs,
     )
     _draw_colorbar(
         fig,
@@ -6166,6 +6635,7 @@ def section_row(
         _align_colorbars(fig)
     if fit_text:
         _fit_text_widths(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1, panels=list(axes))
     if save:
         save = Path(save).expanduser()
@@ -6219,6 +6689,9 @@ def section_row_grid(
     hover: bool | None = None,
     robust: bool | float = False,
     titles: Sequence[str | None] | None = None,
+    fill_levels: int | Sequence[float] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Stack one ``test | reference | difference`` section row per comparison.
 
@@ -6276,6 +6749,14 @@ def section_row_grid(
 
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
     option set to each renderer -- neither changes anything here.
+
+    ``fill_levels`` sets the bands of a ``mark="contourf"`` fill on every panel of every
+    row, difference panels included (see :func:`section`). A row item's ``contour``
+    (the overlay's aligned ``{"test", "reference"}`` pair, see :func:`section_row`)
+    draws black, labelled lines over that row's test and reference panels. Their levels
+    are decided once for the whole figure, over every row's overlays pooled, so each
+    row shows the same isotherms; ``contour_levels``/``contour_kwargs`` mean what they
+    do in :func:`section`.
     """
     import matplotlib.pyplot as plt
 
@@ -6283,8 +6764,20 @@ def section_row_grid(
     from ocean_skill.plot.typography import SECTION_ASPECT
 
     _warn_if_interactive_only(rasterize, hover)
+    _check_section_contours(
+        any(item.get("contour") is not None for item in items),
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
 
     prepared = [(item, *prepare_section_row(item["aligned"])) for item in items]
+    overlays, levels = _section_overlays(
+        [item.get("contour") for item in items],
+        [values for _, values, _ in prepared],
+        contour_levels,
+    )
 
     auto_title, paths_differ = section_row_grid_title(
         items, [geometry for _, _, geometry in prepared]
@@ -6373,6 +6866,10 @@ def section_row_grid(
             robust=robust,
             titles=resolved_titles[i * 3 : i * 3 + 3],
             statistic=statistic_of(item),
+            fill_levels=fill_levels,
+            overlays=overlays[i],
+            levels=levels,
+            contour_kwargs=contour_kwargs,
         )
         _draw_colorbar(
             fig,
@@ -6404,6 +6901,7 @@ def section_row_grid(
     if fit_text:
         _fit_text_widths(fig)
         _clear_row_labels(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=n)
     if save:
         save = Path(save).expanduser()
@@ -7447,10 +7945,16 @@ def facet_movie(
     # spirit either way: a scale re-derived per frame would make the ruler move with the
     # field. field_facet shares one scale across its panels for the same reason.
     scope = field if shared_limits else field.isel({facet_dim: indices[0]})
-    lo, hi = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
+    statistic = statistic_of(field)
+    lo, hi = _limits(
+        scope,
+        log=is_log(standard_name, statistic),
+        robust=robust,
+        vmin=vmin,
+        vmax=vmax,
+    )
     # the arrow is about every frame, even when the scale was set by the first alone: a
     # later frame that outruns it is exactly the clipping the arrow is there to flag
-    statistic = statistic_of(field)
     norm = _with_range(
         norm_for(
             standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
@@ -8089,6 +8593,7 @@ def _render(spec, **kwargs: Any):
             standard_name=item.get("standard_name"),
             depth=item.get("depth"),
             label=item.get("label"),
+            contour=item.get("contour"),
             **opts,
         )
     if family == "section_row":
@@ -8102,6 +8607,7 @@ def _render(spec, **kwargs: Any):
             depth=item.get("depth"),
             time=item.get("time"),
             metrics=item.get("metrics"),
+            contour=item.get("contour"),
             **opts,
         )
     if family == "cross":

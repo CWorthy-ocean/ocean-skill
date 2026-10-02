@@ -855,7 +855,16 @@ def test_no_two_metric_panels_share_a_colour_scale(skill_item):
             continue
         mesh = next(c for c in ax.collections if isinstance(c, QuadMesh))
         norms[ax.get_title()] = (mesh.norm.vmin, mesh.norm.vmax)
-    assert len(set(norms.values())) == len(_SKILL_METRICS), "scales must not coincide"
+    assert len(norms) == len(_SKILL_METRICS), "one scale per metric panel"
+    # Each scale follows its own metric's rule, checked below. Two can still coincide
+    # in value now that automatic limits read round -- this bias spans about ±0.98,
+    # which reads ±1, correlation's own fixed scale -- without sharing anything.
+    from ocean_skill.plot._colorbar import round_limits
+
+    bias = np.asarray(_skill_dataset()["bias"])
+    spread = float(np.percentile(np.abs(bias), 98))
+    rounded = round_limits(-spread, spread, log=False)[1]
+    assert norms["bias"][1] == pytest.approx(rounded)
     assert norms["crmsd"][0] == 0.0, "a magnitude's zero is pinned"
     assert norms["bias"][0] == pytest.approx(-norms["bias"][1]), "bias is symmetric"
     assert norms["corr"] == (-1.0, 1.0), "correlation has an absolute scale"
@@ -1981,3 +1990,82 @@ def test_static_skill_map_accepts_tiles_with_a_warning():
     spec = _skill_spec(_skill_item(), tiles=True)
     with pytest.warns(UserWarning, match="only affect the interactive renderer"):
         render(spec, renderer="matplotlib")
+
+
+# --- round colourbar ticks: the same values and text in both renderers ---------------
+
+
+def _static_bar_labels(fig) -> set[tuple[str, ...]]:
+    """Return each static colourbar's tick labels, as the reader sees them."""
+    fig.canvas.draw()
+    bars = set()
+    for cax, _ in _colorbar_axes(fig):
+        axis = cax.xaxis if getattr(cax, "_osk_cbar_horizontal", False) else cax.yaxis
+        bars.add(tuple(t.get_text() for t in axis.get_ticklabels() if t.get_text()))
+    return bars
+
+
+def _interactive_bar_labels(obj) -> set[tuple[str, ...]]:
+    """Return each bokeh colour bar's labels: its fixed ticks, spelled by overrides."""
+    import holoviews as hv
+    from bokeh.models import ColorBar
+
+    hv.extension("bokeh")
+    bars = set()
+    for bar in hv.render(obj, backend="bokeh").select({"type": ColorBar}):
+        overrides = bar.major_label_overrides
+        bars.add(tuple(overrides[t] for t in bar.ticker.ticks))
+    return bars
+
+
+@pytest.mark.parametrize(
+    ("family", "item"),
+    [
+        (
+            "field_row",
+            lambda: _item("mole_concentration_of_nitrate_in_sea_water", "woa", "n"),
+        ),
+        ("section_row", _section_row_item),
+    ],
+)
+def test_both_renderers_tick_every_colourbar_at_the_same_round_labels(family, item):
+    """One rule (``plot._colorbar``) for both, so a bar reads the same either way."""
+    import matplotlib.pyplot as plt
+
+    spec = PlotSpec(family=family, items=[item()], options={})
+    fig = render(spec)
+    static = _static_bar_labels(fig)
+    plt.close(fig)
+    interactive = _interactive_bar_labels(render(spec, renderer="holoviews"))
+
+    assert static == interactive
+    for labels in static:
+        assert labels, "every bar should carry round ticks"
+        # round: on these ranges of a unit or two, no label needs a second decimal
+        decimals = {len(text.partition(".")[2]) for text in labels}
+        assert decimals <= {0, 1}
+
+
+def test_the_interactive_renderer_loads_bokeh_even_after_a_bare_hvplot_import():
+    """``import hvplot`` registers bokeh's renderer but leaves ``hv.opts`` empty.
+
+    The renderer used to take a registered renderer as "loaded" and skip the extension,
+    so any family reaching for ``hv.opts.Curve`` first then raised -- whichever test
+    happened to import hvplot first decided whether a later one passed.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    # this checkout's ocean_skill, not whichever one is installed
+    root = str(Path(__file__).resolve().parents[1])
+    env = {**os.environ, "PYTHONPATH": root}
+    code = (
+        "import hvplot, holoviews as hv\n"
+        "assert hv.Store.renderers.get('bokeh') and not hasattr(hv.opts, 'Curve')\n"
+        "from ocean_skill.plot.holoviews_renderer import _extension\n"
+        "_extension()\n"
+        "assert hasattr(hv.opts, 'Curve')\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, env=env)

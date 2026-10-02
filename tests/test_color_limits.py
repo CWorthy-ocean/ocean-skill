@@ -28,29 +28,38 @@ NITRATE = "mole_concentration_of_nitrate_in_sea_water"
 
 
 # --- _limits itself: the one function every family's colour scale goes through --------
+#
+# These pin the *range rules* -- the full range, robust's percentiles, the pins -- so
+# they ask for the raw range (snap=False). Snapping the result outward to round values
+# is its own step, tested with the round ticks in test_colorbar_static.py.
+
+
+def _raw(*arrays, **kwargs):
+    """``_limits`` on a linear scale, unsnapped: the range rules alone."""
+    return _limits(*arrays, log=False, snap=False, **kwargs)
 
 
 def test_default_is_the_full_finite_range():
     vals = np.array([1.0, 1.0, 1.0, 1.0, 100.0])
-    assert _limits(vals) == (1.0, 100.0)
+    assert _raw(vals) == (1.0, 100.0)
 
 
 def test_robust_true_clips_to_the_10th_90th_percentile():
     vals = np.linspace(0.0, 100.0, 101)  # 0, 1, .., 100
-    lo, hi = _limits(vals, robust=True)
+    lo, hi = _raw(vals, robust=True)
     assert lo == pytest.approx(10.0)
     assert hi == pytest.approx(90.0)
 
 
 def test_robust_point_eight_is_the_same_central_fraction_as_true():
     vals = np.linspace(0.0, 100.0, 101)
-    assert _limits(vals, robust=0.8) == _limits(vals, robust=True)
+    assert _raw(vals, robust=0.8) == _raw(vals, robust=True)
 
 
 def test_a_narrower_robust_fraction_clips_more():
     vals = np.linspace(0.0, 100.0, 101)
-    lo_wide, hi_wide = _limits(vals, robust=0.8)
-    lo_narrow, hi_narrow = _limits(vals, robust=0.5)
+    lo_wide, hi_wide = _raw(vals, robust=0.8)
+    lo_narrow, hi_narrow = _raw(vals, robust=0.5)
     assert lo_narrow > lo_wide
     assert hi_narrow < hi_wide
 
@@ -58,29 +67,29 @@ def test_a_narrower_robust_fraction_clips_more():
 @pytest.mark.parametrize("bad", [0.0, 1.0, -0.1, 1.5])
 def test_an_out_of_range_robust_fraction_is_refused(bad):
     with pytest.raises(ValueError, match="robust"):
-        _limits(np.linspace(0.0, 10.0, 5), robust=bad)
+        _raw(np.linspace(0.0, 10.0, 5), robust=bad)
 
 
 def test_robust_false_and_none_both_mean_the_plain_range():
     vals = np.array([2.0, 4.0, 6.0])
-    assert _limits(vals, robust=False) == _limits(vals)
-    assert _limits(vals, robust=None) == _limits(vals)
+    assert _raw(vals, robust=False) == _raw(vals)
+    assert _raw(vals, robust=None) == _raw(vals)
 
 
 def test_all_nan_or_empty_still_falls_back_to_zero_one():
-    assert _limits(np.full(5, np.nan)) == (0.0, 1.0)
-    assert _limits(np.array([])) == (0.0, 1.0)
+    assert _raw(np.full(5, np.nan)) == (0.0, 1.0)
+    assert _raw(np.array([])) == (0.0, 1.0)
 
 
 def test_nan_values_are_dropped_not_counted():
     vals = np.array([1.0, 2.0, 3.0, np.nan])
-    assert _limits(vals) == (1.0, 3.0)
+    assert _raw(vals) == (1.0, 3.0)
 
 
 def test_several_arrays_are_pooled_before_taking_the_range():
     a = np.array([1.0, 2.0])
     b = np.array([0.0, 100.0])
-    assert _limits(a, b) == (0.0, 100.0)
+    assert _raw(a, b) == (0.0, 100.0)
 
 
 # --- vmin/vmax: exact pinned limits, overriding both the plain range and robust -------
@@ -88,33 +97,33 @@ def test_several_arrays_are_pooled_before_taking_the_range():
 
 def test_vmin_pins_the_low_end_only():
     vals = np.array([2.0, 4.0, 6.0])
-    assert _limits(vals, vmin=-10.0) == (-10.0, 6.0)
+    assert _raw(vals, vmin=-10.0) == (-10.0, 6.0)
 
 
 def test_vmax_pins_the_high_end_only():
     vals = np.array([2.0, 4.0, 6.0])
-    assert _limits(vals, vmax=100.0) == (2.0, 100.0)
+    assert _raw(vals, vmax=100.0) == (2.0, 100.0)
 
 
 def test_vmin_and_vmax_together_ignore_the_data_entirely():
     vals = np.array([2.0, 4.0, 6.0])
-    assert _limits(vals, vmin=0.0, vmax=1.0) == (0.0, 1.0)
+    assert _raw(vals, vmin=0.0, vmax=1.0) == (0.0, 1.0)
 
 
 def test_vmin_vmax_override_robust_only_for_the_end_they_pin():
     vals = np.linspace(0.0, 100.0, 101)
-    lo, hi = _limits(vals, robust=True, vmin=-5.0)
+    lo, hi = _raw(vals, robust=True, vmin=-5.0)
     assert lo == -5.0
     assert hi == pytest.approx(90.0)  # the unpinned end still comes from robust
 
 
 def test_vmin_applies_even_when_the_data_is_empty():
-    assert _limits(np.array([]), vmin=2.0, vmax=3.0) == (2.0, 3.0)
+    assert _raw(np.array([]), vmin=2.0, vmax=3.0) == (2.0, 3.0)
 
 
 def test_vmin_not_less_than_vmax_is_refused():
     with pytest.raises(ValueError, match="vmin"):
-        _limits(np.array([1.0, 2.0]), vmin=5.0, vmax=1.0)
+        _raw(np.array([1.0, 2.0]), vmin=5.0, vmax=1.0)
 
 
 # --- norm_for: user vmin/vmax outrank a variable's own declared display range ---------

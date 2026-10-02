@@ -47,7 +47,8 @@ def _extension():
     """
     import holoviews as hv
 
-    if not hv.Store.renderers.get("bokeh"):
+    # the option builders too: ``import hvplot`` registers the renderer alone
+    if not hv.Store.renderers.get("bokeh") or not hasattr(hv.opts, "Curve"):
         hv.extension("bokeh", logo=False)
     return hv
 

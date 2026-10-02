@@ -118,7 +118,10 @@ shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
 ``nrows`` (grid layout; ``rows``/``cols`` facet a stacked ``section``/``time_depth``
 grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
-``section_row``/``field_grid``), and the
+``section_row``/``field_grid``), the section options ``contours`` (a second
+variable's object drawn as contour lines over the fill), ``contour_levels``,
+``contour_kwargs`` and ``fill_levels`` (band count/edges for ``mark="contourf"``),
+and the
 ``*_kwargs`` styling dicts (``title_kwargs``, ``colorbar_kwargs``,
 ``gridline_kwargs``, ``legend_kwargs``, ...), each merging onto a built-in
 default and unpacked straight into one matplotlib/cartopy call. See

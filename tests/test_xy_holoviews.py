@@ -448,22 +448,33 @@ def test_a_depth_pin_clamps_deeper_dots_to_the_deepest_colour():
     assert list(colours) == _static_colours(static_cloud)
 
 
+def _end_marks(bar) -> dict:
+    """Return the forced ``≥``/``≤`` end labels among a bar's round tick labels."""
+    return {
+        value: text
+        for value, text in bar.major_label_overrides.items()
+        if text[:1] in ("≥", "≤")
+    }
+
+
 def test_a_depth_pin_labels_the_clipped_end_of_the_bar():
     out = _interactive(_ts_items(), color_by="depth", vmax=500)
     (bar,) = _bars(out)
-    assert bar.major_label_overrides == {500.0: "≥ 500"}
+    assert _end_marks(bar) == {500.0: "≥ 500"}
     assert type(bar.ticker).__name__ == "FixedTicker"
     assert 500.0 in bar.ticker.ticks
-    assert all(5 < t <= 500 for t in bar.ticker.ticks)
+    # the unpinned top of the data (~5 m) snaps to a round 0 m; nothing past the pin
+    assert all(0 <= t <= 500 for t in bar.ticker.ticks)
     (bar,) = _bars(_interactive(_ts_items(), color_by="depth", vmin=100, vmax=500))
-    assert bar.major_label_overrides == {100.0: "≤ 100", 500.0: "≥ 500"}
+    assert _end_marks(bar) == {100.0: "≤ 100", 500.0: "≥ 500"}
 
 
-def test_a_bar_the_pins_leave_whole_keeps_its_own_ticks():
-    (bar,) = _bars(_interactive(_ts_items(), color_by="depth"))
-    assert type(bar.ticker).__name__ == "BasicTicker" and not bar.major_label_overrides
-    (bar,) = _bars(_interactive(_ts_items(), color_by="depth", vmin=0, vmax=5000))
-    assert type(bar.ticker).__name__ == "BasicTicker" and not bar.major_label_overrides
+def test_a_bar_the_pins_leave_whole_marks_no_end():
+    """Nothing clipped: round ticks (as on every bar), and no end marked."""
+    for options in ({}, {"vmin": 0, "vmax": 5000}):
+        (bar,) = _bars(_interactive(_ts_items(), color_by="depth", **options))
+        assert type(bar.ticker).__name__ == "FixedTicker"
+        assert bar.major_label_overrides and not _end_marks(bar)
     (bar,) = _bars(_interactive(_ts_items(), color_by="time"))
     assert type(bar.ticker).__name__ == "DatetimeTicker"
     assert not bar.major_label_overrides

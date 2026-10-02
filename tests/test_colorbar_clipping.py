@@ -402,18 +402,35 @@ def _color_bars(obj):
     return list(hv.render(obj, backend="bokeh").select({"type": ColorBar}))
 
 
-def test_clip_opts_are_none_when_nothing_is_clipped():
+def _end_marks(opts) -> dict:
+    """Return the forced ``≥``/``≤`` end labels among a bar's tick labels."""
+    return {
+        value: text
+        for value, text in opts["major_label_overrides"].items()
+        if text[:1] in ("≥", "≤")
+    }
+
+
+def test_clip_opts_tick_an_unclipped_bar_round_with_no_end_marks():
+    """Nothing clipped: the shared round ticks, and no end is marked."""
+    from ocean_skill.plot._colorbar import colorbar_ticks
     from ocean_skill.plot.holoviews_renderer import _clip_colorbar_opts
 
-    assert _clip_colorbar_opts((0.0, 10.0), (0.0, 10.0)) is None
-    assert _clip_colorbar_opts((0.0, 10.0), None) is None
+    round_ticks = colorbar_ticks(0.0, 10.0, log=False)
+    for data_range in ((0.0, 10.0), None):
+        opts = _clip_colorbar_opts((0.0, 10.0), data_range)
+        assert list(opts["ticker"].ticks) == list(round_ticks.values)
+        assert opts["major_label_overrides"] == dict(
+            zip(round_ticks.values, round_ticks.labels, strict=True)
+        )
+        assert _end_marks(opts) == {}
 
 
 def test_clip_opts_force_and_label_a_tick_on_each_clipped_end():
     from ocean_skill.plot.holoviews_renderer import _clip_colorbar_opts
 
     opts = _clip_colorbar_opts((3.0, 27.0), (-1.8, 29.9))
-    assert opts["major_label_overrides"] == {
+    assert _end_marks(opts) == {
         3.0: "≤ 3",
         27.0: "≥ 27",
     }
@@ -425,14 +442,14 @@ def test_clip_opts_mark_only_the_clipped_end():
     from ocean_skill.plot.holoviews_renderer import _clip_colorbar_opts
 
     opts = _clip_colorbar_opts((3.0, 27.0), (3.0, 29.9))
-    assert opts["major_label_overrides"] == {27.0: "≥ 27"}
+    assert _end_marks(opts) == {27.0: "≥ 27"}
 
 
 def test_clip_opts_label_clipped_adds_the_true_extreme():
     from ocean_skill.plot.holoviews_renderer import _clip_colorbar_opts
 
     opts = _clip_colorbar_opts((3.0, 27.0), (-1.8, 29.9), label_clipped=True)
-    assert opts["major_label_overrides"] == {
+    assert _end_marks(opts) == {
         3.0: "≤ 3 (min \N{MINUS SIGN}1.8)",
         27.0: "≥ 27 (max 29.9)",
     }
@@ -454,7 +471,7 @@ def test_clip_opts_under_log_use_positive_ticks():
 
     opts = _clip_colorbar_opts((0.01, 10.0), (0.001, 50.0), log=True)
     assert all(t > 0 for t in opts["ticker"].ticks)
-    assert set(opts["major_label_overrides"]) == {0.01, 10.0}
+    assert set(_end_marks(opts)) == {0.01, 10.0}
 
 
 def _interactive(field, **options):
@@ -463,16 +480,18 @@ def _interactive(field, **options):
 
 def test_interactive_bar_marks_the_clipped_ends_under_robust():
     (bar,) = _color_bars(_interactive(_ramp_map(), robust=True))
-    labels = sorted(bar.major_label_overrides.values())
-    assert len(labels) == 2
-    assert any(text.startswith("≤") for text in labels)
-    assert any(text.startswith("≥") for text in labels)
+    overrides = {"major_label_overrides": bar.major_label_overrides}
+    marks = sorted(_end_marks(overrides).values())
+    assert len(marks) == 2
+    assert any(text.startswith("≤") for text in marks)
+    assert any(text.startswith("≥") for text in marks)
 
 
-def test_interactive_bar_of_the_full_range_keeps_bokehs_own_ticks():
+def test_interactive_bar_of_the_full_range_ticks_round_with_no_end_marks():
     (bar,) = _color_bars(_interactive(_ramp_map()))
-    assert bar.major_label_overrides == {}
-    assert type(bar.ticker).__name__ == "BasicTicker"
+    assert type(bar.ticker).__name__ == "FixedTicker"
+    labels = list(bar.major_label_overrides.values())
+    assert labels and not any(text[:1] in ("≥", "≤") for text in labels)
 
 
 def test_interactive_label_clipped_adds_the_true_extreme():

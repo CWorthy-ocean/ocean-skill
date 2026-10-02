@@ -67,6 +67,40 @@ def _relabelled(field: Any, label: str) -> Any:
     return out
 
 
+def _overlay_like(contours: Any, names: list[Any] | None, n: int) -> list[Any]:
+    """``contours`` as a list parallel to the plotted members, checked for shape.
+
+    A ``{label: item}`` figure takes a dict with the same keys (in any order); a list
+    figure takes a list of the same length; a single plotted object takes a single
+    overlay. Each entry is then the overlay for the member at that position --
+    flattened later by the same walk as the member itself.
+    """
+    if names is not None:
+        if not isinstance(contours, dict):
+            raise TypeError(
+                "osk.plot() was given a {label: item} dict, so contours= must be a "
+                "dict with the same labels, each naming the overlay for that item -- "
+                f"got {type(contours).__name__}."
+            )
+        missing = [k for k in names if k not in contours]
+        extra = [k for k in contours if k not in names]
+        if missing or extra:
+            raise ValueError(
+                "contours= must have exactly the labels the figure has -- "
+                f"missing {missing}, unexpected {extra}."
+            )
+        return [contours[k] for k in names]
+    if n == 1 and not isinstance(contours, list | tuple):
+        return [contours]
+    if not isinstance(contours, list | tuple) or len(contours) != n:
+        got = len(contours) if isinstance(contours, list | tuple) else 1
+        raise ValueError(
+            f"contours= must parallel the {n} plotted item(s), one overlay each in "
+            f"the same order -- got {got}."
+        )
+    return list(contours)
+
+
 def plot(items: Any, *, renderer: str = "matplotlib", **plot_kwargs: Any):
     """Draw several comparisons, or several fields, as one figure.
 
@@ -85,7 +119,14 @@ def plot(items: Any, *, renderer: str = "matplotlib", **plot_kwargs: Any):
     **plot_kwargs
         Plot options, forwarded unchanged to the set's own ``plot`` -- ``title``,
         ``shared_limits``, ``save``, the ``*_kwargs`` styling dicts, and the rest of
-        ``docs/plot_styling_reference.md``.
+        ``docs/plot_styling_reference.md``. ``contours=`` (vertical sections only)
+        takes overlays shaped like ``items`` itself -- a list of the same length,
+        or a dict with the same labels -- each drawn as contour lines over the
+        member at the same place::
+
+            osk.plot({"ROMS": roms_po4, "WOA": woa_po4},
+                     contours={"ROMS": roms_temp, "WOA": woa_temp},
+                     mark="contourf", contour_levels=[10, 15, 20, 25])
 
     Comparisons are pooled with :class:`~ocean_skill.comparison.ComparisonSet`
     (so ``labels`` and nesting behave exactly as they do there) and fields with
@@ -140,6 +181,15 @@ def plot(items: Any, *, renderer: str = "matplotlib", **plot_kwargs: Any):
             "comparison is a test | reference | difference row and a field is a "
             f"single panel, with no shared layout between them ({what}). Plot "
             "the comparisons together and the fields together, separately."
+        )
+
+    if plot_kwargs.get("contours") is not None:
+        # The overlay mirrors the figure's own structure -- a list for a list, a
+        # {label: item} dict for a dict -- put in member order here, then flattened
+        # by the set's own plot() exactly as the members are, so the two pair up by
+        # position.
+        plot_kwargs["contours"] = _overlay_like(
+            plot_kwargs["contours"], names, len(members)
         )
 
     if kinds[0] == "comparison":

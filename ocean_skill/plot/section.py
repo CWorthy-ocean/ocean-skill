@@ -7,16 +7,50 @@ which coordinate is "depth" and which sign it reads positive, how the along-path
 axis is labelled, and what a title calls the path itself. A renderer's own drawing
 function calls this first and then only draws — it makes no convention decisions
 of its own.
+
+A section drawn as smooth filled bands with black contour lines of a second variable
+on top (isotherms over phosphate) has more decisions of the same kind, and they live
+here for the same reason -- a static and an interactive figure that each made them
+would eventually disagree about where a line or a band edge sits:
+
+* :func:`prepare_overlay` puts the line variable on the fill's own mesh, or refuses;
+* :func:`contour_levels` picks which values get a line, once for the whole figure;
+* :func:`contour_paths` computes the lines themselves, for a renderer with no
+  contour primitive of its own (bokeh);
+* :func:`fill_edges` places the filled bands' edges so every colour-bar tick sits on
+  one.
 """
 
 from __future__ import annotations
 
+import math
+import numbers
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 import xarray as xr
 
-__all__ = ["SectionGeometry", "prepare_section", "prepare_section_row"]
+from ocean_skill.plot._colorbar import _clean, tick_step
+
+__all__ = [
+    "CONTOUR_COLOR",
+    "CONTOUR_WIDTH",
+    "DEFAULT_CONTOUR_LEVELS",
+    "DEFAULT_FILL_BANDS",
+    "SECTION_MARKS",
+    "ContourLevel",
+    "SectionGeometry",
+    "check_section_options",
+    "contour_label",
+    "contour_levels",
+    "contour_paths",
+    "difference_fill_levels",
+    "fill_edges",
+    "prepare_overlay",
+    "prepare_section",
+    "prepare_section_row",
+]
 
 
 @dataclass
@@ -299,3 +333,628 @@ def prepare_section_row(
             geometry = lane_geometry
     assert geometry is not None
     return values, geometry
+
+
+# --- contour overlay: lines of a second variable on a filled section ------------------
+
+#: About how many contour lines an overlay draws when it is just switched on. Six reads
+#: as a handful of isotherms to follow rather than a hatching over the fill.
+DEFAULT_CONTOUR_LEVELS = 6
+
+#: The target number of filled bands :func:`fill_edges` cuts a section into when
+#: ``fill_levels`` does not say. Chosen by eye against the paper's figure -- narrow
+#: enough that the fill reads as a smooth field, wide enough that a band edge is
+#: still a line the eye can follow -- and may be tuned.
+DEFAULT_FILL_BANDS = 50
+
+#: What a band's width may be, as ``1/k`` of the colour bar's tick step. Every ``k``
+#: is a whole number, so a tick is always on a band edge.
+_FILL_DIVISORS = (1, 2, 5, 10, 20)
+
+#: How closely two section meshes must agree to count as the same one. Tight: one
+#: select/aggregate gives bit-identical meshes, so this only forgives float32-versus-
+#: float64 round-off, never a shifted level or a different position.
+_MESH_TOL = 1e-6
+
+_CONTOUR_ACCEPTED = (
+    f"Accepted: True (about {DEFAULT_CONTOUR_LEVELS} round levels), an int n >= 1 "
+    "(about n levels), a list/tuple/array of numbers (exactly those levels), or "
+    "False/None (no lines)."
+)
+_FILL_ACCEPTED = (
+    f"Accepted: None (about {DEFAULT_FILL_BANDS} round bands), an int n >= 1 (about n "
+    "bands), or a list/tuple/array of at least two numbers (exactly those band edges)."
+)
+
+_UNIT_TEXT = {"km": " km", "m": " m", "degrees_north": "°N", "degrees_east": "°E"}
+
+
+def _unit_text(units) -> str:
+    """Return a ``units`` attribute as it reads after a number: ``" km"``, ``"°N"``."""
+    units = str(units or "")
+    return _UNIT_TEXT.get(units, f" {units}" if units else "")
+
+
+def _span_text(values: np.ndarray) -> str:
+    """``"0–500"``: the finite range of ``values``, or ``"no finite values"``."""
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return "no finite values"
+    # "+ 0.0" turns a negated zero (-0.0, which "{:g}" spells "-0") back into 0
+    return f"{float(finite.min()) + 0.0:g}–{float(finite.max()) + 0.0:g}"
+
+
+def _same_mesh(a: np.ndarray, b: np.ndarray) -> bool:
+    """Whether two coordinate arrays have one shape and agree to within round-off."""
+    return a.shape == b.shape and bool(
+        np.allclose(a, b, rtol=_MESH_TOL, atol=_MESH_TOL, equal_nan=True)
+    )
+
+
+def _along_positions(prepared: xr.DataArray, vertical: str) -> np.ndarray:
+    """Return the position of every column as 1-D values (``distance`` repeats down)."""
+    axis = prepared.dims.index(vertical)
+    return np.take(np.asarray(prepared["distance"], dtype="float64"), 0, axis=axis)
+
+
+def _mismatch_text(
+    noun: str,
+    where: str,
+    overlay: tuple[int, str],
+    panel: tuple[int, str],
+) -> str:
+    """``"overlay 37 levels 0–500 m, panel 20 levels 0–500 m"``, plus a hint if alike.
+
+    ``overlay``/``panel`` are each ``(count, "range with units")``. When both read the
+    same -- same count, same range -- the two still differ *inside* the range (one
+    spaced evenly, the other not), which the bare numbers would not show, so the text
+    says so rather than leaving a reader to look for a difference that is not printed.
+    """
+    text = (
+        f"overlay {overlay[0]} {noun} {overlay[1]}, panel {panel[0]} {noun} {panel[1]}"
+    )
+    if overlay == panel:
+        text += f" -- the same count and range, but not at the same {where}"
+    return text
+
+
+def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
+    """Return ``overlay`` prepared on the same section grid as ``panel``, or raise.
+
+    An overlay is the second variable of a section figure -- the isotherms drawn over
+    the phosphate fill. Its lines are read against the fill's own axes, so it has to
+    sit on the fill's mesh: the same positions along the section and the same depth
+    levels. This runs :func:`prepare_section` on it (so it gets the same axis
+    conventions as the panel, a native-s overlay's depth flipped to positive-down
+    included), puts it in the panel's dimension order, and checks the two meshes
+    agree.
+
+    It never regrids. Two variables of one source, cut with one ``select`` and
+    ``aggregate``, always share a mesh, so a mismatch means the two were built
+    differently -- a temperature on 37 levels under a phosphate on 20, say -- and
+    resampling one onto the other would draw lines where the data never put them, with
+    nothing on the figure to say so. A refusal that names the axis that differs, and
+    how to fix it, is the honest answer. The two fields' NaN masks may differ (a
+    variable can be missing where another is not); only the mesh must match.
+
+    Parameters
+    ----------
+    overlay
+        The raw section of the line variable: an ``along`` dimension plus one
+        vertical dimension, ``z`` or the native ``s_rho`` with its 2-D ``z_rho`` --
+        exactly what :func:`prepare_section` takes.
+    panel
+        The fill's already-prepared values: :func:`prepare_section`'s own return,
+        carrying 2-D ``distance`` and ``depth`` coordinates.
+
+    Returns
+    -------
+    xarray.DataArray
+        The prepared overlay, its dimensions in the panel's order. Its ``distance``
+        and ``depth`` coordinates are the panel's own arrays (just checked equal to
+        within round-off), so a renderer draws fill and lines on one mesh to the last
+        bit.
+
+    Raises
+    ------
+    ValueError
+        If ``panel`` is not a prepared section, or the two do not share a vertical
+        axis, depth levels, or positions along the section. The message says which
+        axis differs, with the count and range on each side.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    if ALONG_DIM not in panel.dims or not {"distance", "depth"} <= set(panel.coords):
+        raise ValueError(
+            "prepare_overlay expects the panel to be prepare_section's own return "
+            f"(an {ALONG_DIM!r} dimension and 2-D 'distance' and 'depth' coordinates) "
+            f"-- got dims {sorted(panel.dims)} and coordinates {sorted(panel.coords)}."
+        )
+    prepared, _ = prepare_section(overlay)
+    vertical_o = next(d for d in prepared.dims if d != ALONG_DIM)
+    vertical_p = next(d for d in panel.dims if d != ALONG_DIM)
+    advice = (
+        "Build both with the same select/aggregate so they share one section grid; "
+        "nothing is regridded here, since a line drawn from resampled values would "
+        "sit where the data never put it."
+    )
+    if vertical_o != vertical_p:
+        raise ValueError(
+            "The overlay and the panel are drawn on different meshes: vertical axes "
+            f"differ (overlay on {vertical_o!r} with {prepared.sizes[vertical_o]} "
+            f"levels, panel on {vertical_p!r} with {panel.sizes[vertical_p]} levels). "
+            + advice
+        )
+    prepared = prepared.transpose(*panel.dims)
+
+    n_levels = (prepared.sizes[vertical_o], panel.sizes[vertical_p])
+    n_along = (prepared.sizes[ALONG_DIM], panel.sizes[ALONG_DIM])
+    depth_o = np.asarray(prepared["depth"], dtype="float64")
+    depth_p = np.asarray(panel["depth"].transpose(*panel.dims), dtype="float64")
+    along_o = _along_positions(prepared, vertical_o)
+    along_p = _along_positions(panel, vertical_p)
+    units_o = _unit_text(prepared["distance"].attrs.get("units"))
+    units_p = _unit_text(panel["distance"].attrs.get("units"))
+
+    # Depth is compared value by value only when the two have as many columns: with
+    # different numbers of them a native-s mesh has nothing to line up against, and
+    # the position problem is the one to fix first.
+    levels_differ = n_levels[0] != n_levels[1] or (
+        n_along[0] == n_along[1] and not _same_mesh(depth_o, depth_p)
+    )
+    along_differs = (
+        n_along[0] != n_along[1]
+        or units_o != units_p
+        or not _same_mesh(along_o, along_p)
+    )
+    problems = []
+    if levels_differ:
+        text = _mismatch_text(
+            "levels",
+            "depths",
+            (n_levels[0], _span_text(depth_o) + " m"),
+            (n_levels[1], _span_text(depth_p) + " m"),
+        )
+        problems.append(f"depth levels differ ({text})")
+    if along_differs:
+        text = _mismatch_text(
+            "positions",
+            "positions",
+            (n_along[0], _span_text(along_o) + units_o),
+            (n_along[1], _span_text(along_p) + units_p),
+        )
+        problems.append(f"positions along the section differ ({text})")
+    if problems:
+        raise ValueError(
+            "The overlay and the panel are drawn on different meshes: "
+            + "; ".join(problems)
+            + ". "
+            + advice
+        )
+
+    # The panel's own mesh arrays, not the overlay's near-identical ones.
+    mesh = {
+        name: (
+            prepared.dims,
+            panel[name].transpose(*prepared.dims).values,
+            prepared[name].attrs,
+        )
+        for name in ("distance", "depth")
+    }
+    return prepared.assign_coords(mesh)
+
+
+# --- which lines, and where they run --------------------------------------------------
+
+
+def _as_float_array(values) -> np.ndarray:
+    """Return ``values`` as float64 with masked entries as NaN.
+
+    Takes a DataArray, an ndarray or a numpy masked array alike, so a mask a caller
+    set is honoured the way a NaN is rather than read as the data under it.
+    """
+    if isinstance(values, np.ma.MaskedArray):
+        return values.astype("float64").filled(np.nan)
+    return np.asarray(values, dtype="float64")
+
+
+def _finite_span(arrays) -> tuple[float, float] | None:
+    """Return ``(min, max)`` over every finite value in ``arrays``, or ``None``."""
+    if arrays is None:
+        return None
+    if isinstance(arrays, xr.DataArray | np.ndarray):
+        arrays = (arrays,)
+    lo, hi = np.inf, -np.inf
+    for array in arrays:
+        values = _as_float_array(array)
+        values = values[np.isfinite(values)]
+        if values.size:
+            lo, hi = min(lo, float(values.min())), max(hi, float(values.max()))
+    return (lo, hi) if lo <= hi else None
+
+
+def _check_count(spec, accepted: str) -> int:
+    """``spec`` as a count of lines or bands, or ``ValueError`` if it is below one."""
+    if spec < 1:
+        raise ValueError(f"{spec!r} is a count below 1. {accepted}")
+    return int(spec)
+
+
+def _explicit_levels(spec, accepted: str) -> np.ndarray:
+    """``spec`` as sorted, unique, finite float levels -- or raise saying what works.
+
+    A list, tuple or array of numbers is the only form that gets here; a string (itself
+    a sequence), a dict, a float, a list of strings or booleans, or nested lists is a
+    ``TypeError``, and a list holding NaN or infinity a ``ValueError``.
+    """
+    if isinstance(spec, str | bytes) or not isinstance(spec, Sequence | np.ndarray):
+        raise TypeError(f"{spec!r} is not a valid levels spec. {accepted}")
+    try:
+        levels = np.asarray(spec)
+    except ValueError:  # ragged nesting, e.g. [[1, 2], [3]]
+        levels = np.empty((), dtype=object)
+    if levels.ndim != 1 or levels.dtype.kind not in "iuf":
+        raise TypeError(f"{spec!r} is not a flat list of numbers. {accepted}")
+    levels = levels.astype("float64")
+    if not np.isfinite(levels).all():
+        raise ValueError(f"{spec!r} holds a level that is not finite. {accepted}")
+    return np.unique(levels)
+
+
+def _round_levels(lo: float, hi: float, count: int) -> tuple[float, ...]:
+    """About ``count`` round levels strictly inside ``(lo, hi)``, noise-free."""
+    from matplotlib.ticker import MaxNLocator
+
+    ticks = MaxNLocator(nbins=count, steps=[1, 2, 5, 10]).tick_values(lo, hi)
+    if len(ticks) < 2 or not ticks[1] > ticks[0]:
+        return ()
+    step = float(ticks[1] - ticks[0])
+    tol = step * 1e-9
+    levels = (_clean(float(tick), step) for tick in ticks)
+    return tuple(v for v in levels if lo + tol < v < hi - tol)
+
+
+def contour_levels(spec, arrays) -> tuple[float, ...]:
+    """Return the contour-line levels for ``spec``, pooled over every overlay array.
+
+    Levels are decided once for the whole figure, not per panel: a test | reference |
+    difference row (or several rows) must show the same isotherms in each, or the eye
+    is left comparing 10, 15 and 20 °C lines in one panel against 12.5, 15 and 17.5 in
+    the next. So ``arrays`` is every overlay array the figure draws, and the automatic
+    rule reads the range they cover together.
+
+    Parameters
+    ----------
+    spec
+        ``True``: about 6 round levels. An ``int`` ``n >= 1``: about ``n``. A list,
+        tuple or array of numbers: exactly those, sorted and de-duplicated, whatever
+        the data holds. ``False`` or ``None``: no lines.
+    arrays
+        The overlay arrays to pool -- an iterable of arrays or DataArrays, or just
+        one. Only finite values count; NaN is ignored.
+
+    Returns
+    -------
+    tuple of float
+        Ascending levels. The automatic ones are 1, 2 or 5 times a power of ten -- the
+        rule a colour bar's ticks follow, matplotlib's ``MaxNLocator`` over
+        ``steps=[1, 2, 5, 10]`` -- free of float noise (``0.6``, not
+        ``0.6000000000000001``), and strictly inside the pooled range: a line at the
+        data's own minimum or maximum would be a scrap of the field's edge. "About
+        ``n``" means at most ``n``, and sometimes fewer, since round values rarely
+        divide a range into exactly ``n`` pieces. Empty when there is no finite data
+        or the range is flat -- nothing to contour, and not an error.
+
+    Raises
+    ------
+    TypeError
+        If ``spec`` is a string, a float, a dict, or a sequence that is not a flat list
+        of numbers.
+    ValueError
+        If ``spec`` is an int below 1 or a list holding NaN or infinity. Every message
+        spells out the forms that are accepted.
+    """
+    if isinstance(spec, bool | np.bool_):
+        if not spec:
+            return ()
+        count = DEFAULT_CONTOUR_LEVELS
+    elif spec is None:
+        return ()
+    elif isinstance(spec, numbers.Integral):
+        count = _check_count(spec, _CONTOUR_ACCEPTED)
+    else:
+        return tuple(float(v) for v in _explicit_levels(spec, _CONTOUR_ACCEPTED))
+    span = _finite_span(arrays)
+    return () if span is None else _round_levels(*span, count)
+
+
+@dataclass(frozen=True)
+class ContourLevel:
+    """One contour level's lines: where they run, and where its label goes.
+
+    ``lines`` is every separate piece at ``level`` -- an isotherm breaks at a seamount
+    or the edge of the data, and can close on itself -- each ``(N, 2)`` of ``x, y``
+    vertices (a closed one repeats its first vertex last). ``anchor`` is the one point
+    a label for the level goes: a vertex of the longest piece, at the middle of its
+    length, so the label sits on the line a reader is most likely to follow and not at
+    the panel's edge. Both are empty (``lines=()``, ``anchor=None``) for a level that
+    crosses nothing.
+    """
+
+    level: float
+    lines: tuple[np.ndarray, ...]
+    anchor: tuple[float, float] | None
+
+
+def _extent(values: np.ndarray) -> float:
+    """Return the peak-to-peak range of ``values``, or 1 if it has none to divide by."""
+    extent = float(np.ptp(values)) if values.size else 0.0
+    return extent if extent > 0 and math.isfinite(extent) else 1.0
+
+
+def _label_anchor(
+    lines: Sequence[np.ndarray], scale: tuple[float, float]
+) -> tuple[float, float] | None:
+    """Return the vertex at the arclength midpoint of the longest line, or ``None``.
+
+    Length is measured with each axis divided by its extent (``scale``) -- as the
+    panel is drawn, full width by full height -- rather than in raw data units, where
+    a section's kilometres against its metres (or degrees against metres) would let
+    whichever axis has the bigger numbers decide where the middle of a line is: an
+    isotherm that runs level across the whole section and drops steeply at one end
+    would put its label at the drop.
+    """
+    best, best_cum = None, None
+    for line in lines:
+        steps = np.hypot(np.diff(line[:, 0]) / scale[0], np.diff(line[:, 1]) / scale[1])
+        cum = np.concatenate(([0.0], np.cumsum(steps)))
+        if best_cum is None or cum[-1] > best_cum[-1]:
+            best, best_cum = line, cum
+    if best is None or best_cum is None:
+        return None
+    middle = int(np.argmin(np.abs(best_cum - best_cum[-1] / 2.0)))
+    return float(best[middle, 0]), float(best[middle, 1])
+
+
+def contour_paths(x, y, z, levels) -> list[ContourLevel]:
+    """Return the contour lines of ``z`` at each of ``levels``, one entry per level.
+
+    The interactive renderer draws its overlay from these: bokeh has no contour
+    primitive, and re-contouring with some other library would let the two renderers
+    disagree about where a line runs. This is contourpy, the engine behind matplotlib's
+    own ``ax.contour``, run on the same arrays, so the lines are the ones the static
+    figure draws, vertex for vertex.
+
+    Parameters
+    ----------
+    x, y, z
+        2-D arrays of one shape -- a prepared section's ``distance``, ``depth`` and
+        values. ``y`` may vary along both axes (native s-levels, where depth really
+        does change along the path). A point where ``z`` is NaN is masked, so lines
+        stop at it as matplotlib's do; so is one where ``x`` or ``y`` is not finite,
+        which would otherwise put a NaN vertex on a line.
+    levels
+        The values to contour, for instance from :func:`contour_levels`.
+
+    Returns
+    -------
+    list of ContourLevel
+        One entry per requested level, in the order given, even for a level that
+        crosses nothing (empty ``lines``, ``anchor`` ``None``) -- a caller never has
+        to ask which levels came back. A field with fewer than two points along either
+        axis, or no finite point, has no lines at all.
+
+    Raises
+    ------
+    ValueError
+        If ``x``, ``y`` and ``z`` are not 2-D arrays of one shape.
+
+    Notes
+    -----
+    The label ``anchor`` is placed by length measured in the panel's own proportions
+    (each axis over its extent), not in raw data units; see :class:`ContourLevel`.
+    """
+    import contourpy
+
+    x, y, z = _as_float_array(x), _as_float_array(y), _as_float_array(z)
+    if not (x.ndim == y.ndim == z.ndim == 2 and x.shape == y.shape == z.shape):
+        raise ValueError(
+            "contour_paths needs x, y and z as 2-D arrays of one shape (a prepared "
+            f"section's distance, depth and values) -- got shapes {x.shape}, "
+            f"{y.shape} and {z.shape}."
+        )
+    wanted = [float(v) for v in np.atleast_1d(np.asarray(levels, dtype="float64"))]
+    usable = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    if min(z.shape) < 2 or not usable.any():
+        return [ContourLevel(v, (), None) for v in wanted]
+
+    scale = (_extent(x[usable]), _extent(y[usable]))
+    generator = contourpy.contour_generator(
+        np.where(usable, x, 0.0),
+        np.where(usable, y, 0.0),
+        np.ma.masked_array(np.where(usable, z, 0.0), mask=~usable),
+        line_type=contourpy.LineType.Separate,
+    )
+    out = []
+    for level in wanted:
+        lines = tuple(
+            np.asarray(line, dtype="float64") for line in generator.lines(level)
+        )
+        out.append(ContourLevel(level, lines, _label_anchor(lines, scale)))
+    return out
+
+
+# --- where the filled bands break -----------------------------------------------------
+
+
+def _flat_edges(lo: float, hi: float) -> np.ndarray:
+    """Two edges bracketing a flat or reversed range ``lo >= hi``: one band."""
+    centre = 0.5 * (lo + hi)
+    half = 0.05 * abs(centre) or 0.05  # as matplotlib's autoscaler widens a flat range
+    return np.array([centre - half, centre + half])
+
+
+def fill_edges(vmin, vmax, *, log: bool, fill_levels=None) -> np.ndarray:
+    """Return the band edges for a filled-contour fill from ``vmin`` to ``vmax``.
+
+    ``contourf`` cuts its colour scale into bands, and where it cuts decides how the
+    figure reads. Edges at ``np.linspace(vmin, vmax, 21)`` fall at 0.15, 0.3, 0.45 --
+    none of them where the colour bar has a tick, so the bar and the picture never
+    quite line up and a band edge can only be read as "about 0.3". These edges are
+    round, and every colour-bar tick (:func:`ocean_skill.plot._colorbar.colorbar_ticks`)
+    sits on one.
+
+    **Linear.** The band width is the bar's tick step divided by ``k`` in
+    ``(1, 2, 5, 10, 20)`` -- a whole fraction, so the ticks are always band edges --
+    with the ``k`` whose number of bands lands closest to the target
+    (:data:`DEFAULT_FILL_BANDS`, or ``fill_levels`` when that is an int; a tie goes
+    to the finer ``k``). The edges are the multiples of that width inside
+    ``[vmin, vmax]``, float-noise free, plus ``vmin`` and ``vmax`` themselves when
+    they are not multiples: a limit the user pinned may not be round, and the fill
+    must still span the colour range exactly.
+
+    **Log** (``log=True`` and ``vmin > 0``). ``np.geomspace(vmin, vmax, n + 1)`` for
+    ``n`` bands, as before; log sections are rare and a log bar's ticks (1, 2, 5 times
+    a power of ten) are not edges of this.
+
+    Parameters
+    ----------
+    vmin, vmax
+        The colour range the fill spans.
+    log
+        Whether the colour scale is logarithmic.
+    fill_levels
+        ``None`` (or ``True``): the default band count. An ``int`` ``n >= 1``: about
+        ``n`` bands (the nearest count the round widths allow, so a small ``n`` gives
+        the coarsest width and a large one the finest). A list, tuple or array of at
+        least two numbers: exactly those edges, sorted and de-duplicated, whatever the
+        range.
+
+    Returns
+    -------
+    numpy.ndarray
+        Ascending float edges, at least two. A range with nothing to band --
+        non-finite, or ``vmin >= vmax`` -- still returns edges ``contourf`` accepts
+        rather than the "levels must be increasing" error a constant field would give:
+        a flat range ``c`` comes back as ``[c - h, c + h]`` (``h`` five percent of
+        ``|c|``, as matplotlib's own autoscaler widens it) and a non-finite one as
+        ``[0, 1]``, so the panel draws as one band, or as nothing.
+
+    Raises
+    ------
+    TypeError, ValueError
+        For a ``fill_levels`` that is not one of the forms above; the message says
+        which are accepted.
+    """
+    if isinstance(fill_levels, bool | np.bool_):
+        if not fill_levels:
+            raise TypeError(
+                f"fill_levels={fill_levels!r} is not valid. {_FILL_ACCEPTED}"
+            )
+        target = DEFAULT_FILL_BANDS
+    elif fill_levels is None:
+        target = DEFAULT_FILL_BANDS
+    elif isinstance(fill_levels, numbers.Integral):
+        target = _check_count(fill_levels, _FILL_ACCEPTED)
+    else:
+        edges = _explicit_levels(fill_levels, _FILL_ACCEPTED)
+        if edges.size < 2:
+            raise ValueError(
+                f"fill_levels={fill_levels!r} gives fewer than two distinct band "
+                f"edges. {_FILL_ACCEPTED}"
+            )
+        return edges
+
+    try:
+        lo, hi = float(vmin), float(vmax)
+    except (TypeError, ValueError):
+        lo = hi = math.nan
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return np.array([0.0, 1.0])
+    if lo >= hi:
+        return _flat_edges(lo, hi)
+    if log and lo > 0:
+        return np.geomspace(lo, hi, target + 1)
+
+    step = tick_step(lo, hi)
+    bands = {k: k * (hi - lo) / step for k in _FILL_DIVISORS}
+    # round() so two counts equally far from the target compare as a tie, not by the
+    # last bit of a float; -k then sends the tie to the finer width
+    divisor = min(bands, key=lambda k: (round(abs(bands[k] - target), 9), -k))
+    width = step / divisor
+    tol = width * 1e-9
+    first, last = math.ceil((lo - tol) / width), math.floor((hi + tol) / width)
+    edges = [_clean(i * width, width) for i in range(first, last + 1)]
+    if not edges or edges[0] - lo > tol:
+        edges.insert(0, lo)
+    if hi - edges[-1] > tol:
+        edges.append(hi)
+    return np.array(edges, dtype="float64")
+
+
+#: The two ways a section panel is filled: cells as they are, or smooth filled bands.
+SECTION_MARKS = ("pcolormesh", "contourf")
+
+#: Overlay contour lines' default colour and width, read by both renderers: black, thin
+#: enough to sit on a filled field without hiding it (Fig. 19's isotherms).
+CONTOUR_COLOR = "black"
+CONTOUR_WIDTH = 0.8
+
+
+def contour_label(level: float, fmt: str = "%g") -> str:
+    """Spell one contour line's label: ``fmt % level`` with a true minus sign.
+
+    Shared so a static ``clabel`` and the interactive text label read the same --
+    ``15``, ``34.5``, ``−1`` -- and a caller's ``contour_kwargs={"fmt": "%.1f"}``
+    changes both.
+    """
+    return (fmt % level).replace("-", "\N{MINUS SIGN}")
+
+
+def check_section_options(
+    *,
+    has_contours: bool,
+    mark: str,
+    contour_levels=None,
+    contour_kwargs=None,
+    fill_levels=None,
+) -> None:
+    """Refuse a section option with nothing to act on -- one wording, both renderers.
+
+    ``contour_levels=``/``contour_kwargs=`` style the lines ``contours=`` draws, so
+    either one without an overlay on any panel would be silently ignored; so would
+    ``fill_levels=`` -- the bands of a filled-contour fill -- on a ``pcolormesh``
+    panel. Both are refused by name instead, as is a ``mark`` a section cannot draw
+    (``None`` is the default, cells).
+    """
+    if mark is not None and mark not in SECTION_MARKS:
+        raise ValueError(
+            f"mark={mark!r} is not a section mark; expected one of {SECTION_MARKS}. "
+            "(Line marks -- 'line', 'step' -- belong to a series, not a vertical "
+            "section.)"
+        )
+    if not has_contours and (contour_levels is not None or contour_kwargs is not None):
+        given = "contour_levels=" if contour_levels is not None else "contour_kwargs="
+        raise ValueError(
+            f"{given} styles the lines contours= draws, but no panel here has an "
+            "overlay -- pass contours= as well (another field or comparison of the "
+            "variable to draw as lines, built the same way)."
+        )
+    if fill_levels is not None and mark != "contourf":
+        raise ValueError(
+            f"fill_levels= sets the bands of a filled-contour fill, but mark={mark!r} "
+            'draws cells -- pass mark="contourf" as well.'
+        )
+
+
+def difference_fill_levels(fill_levels):
+    """Return the ``fill_levels`` a row's difference panel takes from its row's.
+
+    A band *count* means the same on any range, so the difference panel shares it. A
+    list of band *edges* is in the variable's own units -- phosphate's 0-3, say -- and
+    on a difference spanning ±0.4 would fill nothing but its two open ends, so the
+    difference panel keeps its own round default instead.
+    """
+    if fill_levels is None or isinstance(fill_levels, bool | int | np.integer):
+        return fill_levels
+    return None

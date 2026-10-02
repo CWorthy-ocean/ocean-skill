@@ -22,7 +22,10 @@ delegates.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from itertools import pairwise
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -30,6 +33,7 @@ import numpy as np
 from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for
 from ocean_skill.plot import _weighting
+from ocean_skill.plot._colorbar import difference_limit
 from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
@@ -43,8 +47,20 @@ from ocean_skill.plot.matplotlib_renderer import (
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
+from ocean_skill.plot.section import (
+    CONTOUR_COLOR,
+    CONTOUR_WIDTH,
+    check_section_options,
+    contour_label,
+    contour_paths,
+    difference_fill_levels,
+    fill_edges,
+    prepare_overlay,
+)
+from ocean_skill.plot.section import contour_levels as _contour_levels_for
 from ocean_skill.plot.typography import (
     PAGE_W,
+    PT_PER_CSS_PX,
     bokeh_fontsize,
     bokeh_scale,
     diagram_scale_factor,
@@ -97,10 +113,15 @@ _STATIC_ONLY_KWARGS = {
 
 
 def _extension():
-    """Activate the bokeh backend once, quietly."""
+    """Activate the bokeh backend once, quietly.
+
+    Checks the option builders as well as the renderer: ``import hvplot`` registers
+    bokeh's renderer without loading the extension, which leaves ``hv.opts`` empty --
+    ``hv.opts.Curve`` then raises -- so a renderer alone does not mean it is loaded.
+    """
     import holoviews as hv
 
-    if not hv.Store.renderers.get("bokeh"):
+    if not hv.Store.renderers.get("bokeh") or not hasattr(hv.opts, "Curve"):
         hv.extension("bokeh", logo=False)
     return hv
 
@@ -220,57 +241,71 @@ def _lonlat_extent(da) -> tuple[float, float, float, float] | None:
 def _clip_colorbar_opts(
     clim, data_range, *, log: bool = False, label_clipped: bool = False
 ) -> dict[str, Any] | None:
-    """Bokeh ``colorbar_opts`` marking each end of the bar that has data beyond it.
+    """Bokeh ``colorbar_opts`` giving a bar the round ticks both renderers share.
 
-    Bokeh's colour bar cannot grow the extension arrows matplotlib draws, so the same
-    fact -- "some data is clipped at this end" -- is told with a tick forced onto the
-    bar's end and labelled ``≥ 27`` / ``≤ 3``. Which ends is decided by the static
-    renderer's own :func:`~ocean_skill.plot.matplotlib_renderer._extend`, so the two
-    can only ever agree. ``label_clipped=True`` adds the true extreme to that label,
-    ``≥ 27 (max 29.9)``, in the words the static renderer's arrow tip uses.
+    **Always on.** Every colour bar here ticks at the values
+    :func:`~ocean_skill.plot._colorbar.colorbar_ticks` picks for its range -- the same
+    ones the static renderer's bar uses -- each labelled with the text that function
+    spells for it (``0.0, 0.5, 1.0``; ``0.01, 0.1, 1``; a Unicode minus): a
+    ``FixedTicker`` plus a ``major_label_overrides`` entry for *every* tick. Left to
+    itself bokeh picks its own ticks and formats them itself, which is how an
+    interactive bar came to read ``0.466, 0.911`` where the static one read
+    ``0.5, 1.0``.
 
-    ``None`` when nothing is clipped, leaving bokeh's own ticks untouched -- the forced
-    ticker replaces them, so it is only worth the swap when there is an end to mark.
+    Bokeh's colour bar also cannot grow the extension arrows matplotlib draws, so the
+    fact "some data is clipped at this end" is told with a tick forced onto the bar's
+    end and labelled ``≥ 3.0`` / ``≤ 0.5``, spelled like the bar's own labels
+    (:meth:`~ocean_skill.plot._colorbar.Ticks.text`). Which ends is decided by the
+    static renderer's own :func:`~ocean_skill.plot.matplotlib_renderer._extend`, so the
+    two can only ever agree; a round tick that would sit within a tenth of the bar of a
+    forced end is dropped rather than printed over it. ``label_clipped=True`` adds the
+    true extreme to that label, ``≥ 27 (max 29.9)``, in the words the static renderer's
+    arrow tip uses.
+
+    ``None`` only when there is nothing to say: a range with nothing to tick (not
+    finite, or ``lo >= hi``) and no clipped end, which leaves bokeh's own ticks alone.
     """
     from bokeh.models import FixedTicker
-    from matplotlib.ticker import LogLocator, MaxNLocator
 
+    from ocean_skill.plot._colorbar import colorbar_ticks
     from ocean_skill.plot.matplotlib_renderer import _clip_text, _extend
 
     lo, hi = float(clim[0]), float(clim[1])
+    ticks = colorbar_ticks(lo, hi, log=log)
     extend = _extend(lo, hi, data_range)
-    if extend == "neither":
-        return None
     marked_low, marked_high = extend in ("min", "both"), extend in ("max", "both")
 
-    locator = LogLocator(numticks=6) if log else MaxNLocator(nbins=5)
+    # a log bar is spaced by decades, but only where it can be: a non-positive end has
+    # no logarithm (colorbar_ticks falls back to linear ticks there too)
+    spaced_log = log and lo > 0
 
     def _pos(value: float) -> float:
-        """Where along the bar ``value`` sits, in the bar's own (log or linear) units."""
-        return float(np.log10(value)) if log else float(value)
+        """Where along the bar ``value`` sits, in its own (log or linear) units."""
+        return float(np.log10(value)) if spaced_log else float(value)
 
     span = (_pos(hi) - _pos(lo)) or 1.0
     ends = [e for e, marked in ((lo, marked_low), (hi, marked_high)) if marked]
-    # interior ticks, minus any that would sit on top of a forced end label
-    ticks = [
-        float(t)
-        for t in locator.tick_values(lo, hi)
-        if lo < t < hi and all(abs(_pos(t) - _pos(e)) / span > 0.1 for e in ends)
-    ]
-    overrides = {}
+    # the round ticks, each with its own label, minus any that would sit on top of a
+    # forced end label
+    overrides = {
+        float(value): label
+        for value, label in zip(ticks.values, ticks.labels, strict=True)
+        if all(abs(_pos(value) - _pos(e)) / span > 0.1 for e in ends)
+    }
     for value, marked, sign, end, extreme in (
         (lo, marked_low, "≤", "min", None if data_range is None else data_range[0]),
         (hi, marked_high, "≥", "max", None if data_range is None else data_range[1]),
     ):
         if not marked:
             continue
-        ticks.append(value)
-        text = f"{sign} {value:.4g}"
+        text = f"{sign} {ticks.text(value)}"
         if label_clipped and extreme is not None:
             text += f" ({_clip_text(end, extreme)})"
         overrides[value] = text.replace("-", "\N{MINUS SIGN}")
+    if not overrides:
+        return None
     return {
-        "ticker": FixedTicker(ticks=sorted(ticks)),
+        "ticker": FixedTicker(ticks=sorted(overrides)),
         "major_label_overrides": overrides,
     }
 
@@ -278,11 +313,17 @@ def _clip_colorbar_opts(
 def _mark_clipped(obj, clim, data_range, *, log: bool = False, label_clipped=False):
     """Apply :func:`_clip_colorbar_opts` to every colour-mapped element inside ``obj``.
 
+    This is where every colour bar of this module gets its round ticks (and, for an end
+    with data beyond it, its ``≥``/``≤`` label) -- so a colour-mapped element is built
+    and then handed here, whether or not anything is clipped.
+
     Option-by-type rather than ``obj.opts(colorbar_opts=...)``: a map is an overlay of
     mesh, coastline and tiles, and the overlay itself rejects the option. The four types
     are the ones this module colour-maps -- a mesh, the ``Image`` it becomes once
     rasterized, scatter ``Points`` and a portrait's ``HeatMap`` -- and an element type
     the object does not contain is skipped, not an error.
+
+    ``Polygons`` is the fifth: the filled bands of a ``mark="contourf"`` section.
     """
     import holoviews as hv
 
@@ -292,7 +333,7 @@ def _mark_clipped(obj, clim, data_range, *, log: bool = False, label_clipped=Fal
     return obj.opts(
         *(
             getattr(hv.opts, kind)(colorbar_opts=opts)
-            for kind in ("QuadMesh", "Image", "Points", "HeatMap")
+            for kind in ("QuadMesh", "Image", "Points", "HeatMap", "Polygons")
         )
     )
 
@@ -353,12 +394,13 @@ def _quadmesh(
     a float has no fill to fade and is treated as truthy; only ``land=False`` has a
     visible effect here, dropping the coastline outline too for a fully bare map.
 
-    A colour bar whose ``clim`` has data beyond it gets that end marked ``≥``/``≤`` (see
-    :func:`_clip_colorbar_opts`) -- bokeh's counterpart of the static renderer's
-    extension arrow. ``data_range`` is the ``(min, max)`` to test ``clim`` against, for
-    a panel whose bar answers for more than its own data (a row's test and reference
-    share one scale); it defaults to this panel's. ``label_clipped=True`` adds the true
-    extreme to the marked label.
+    Every colour bar ticks at the round values and reads in the text the static
+    renderer's bar does (see :func:`_clip_colorbar_opts`), and one whose ``clim`` has
+    data beyond it also gets that end marked ``≥``/``≤`` -- bokeh's counterpart of the
+    static renderer's extension arrow. ``data_range`` is the ``(min, max)`` to test
+    ``clim`` against, for a panel whose bar answers for more than its own data (a row's
+    test and reference share one scale); it defaults to this panel's.
+    ``label_clipped=True`` adds the true extreme to the marked label.
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
@@ -493,6 +535,500 @@ def _quadmesh(
     )
 
 
+# --- vertical sections: filled-contour bands and contour-line overlays ----------------
+#
+# A section can be drawn as coloured cells (``mark="pcolormesh"``, the default) or as
+# smooth filled bands (``mark="contourf"``), and may carry black, labelled contour lines
+# of a second variable. The static renderer has ``ax.contourf``/``ax.contour``/
+# ``ax.clabel`` for those; bokeh has no contour primitive at all, so the bands are
+# polygons from holoviews' ``contours`` operation and the lines are paths from
+# :func:`ocean_skill.plot.section.contour_paths` -- contourpy, the engine under
+# matplotlib's own ``contour``, on the same arrays -- so the two renderers draw the same
+# band edges, the same line levels and the same label text.
+
+#: The two ways a section's fill can be drawn: coloured cells, or smooth filled bands.
+_SECTION_MARKS = ("pcolormesh", "contourf")
+
+#: Steps in the palette a banded fill is coloured through. A bokeh colour mapper is
+#: continuous, so the bands' constant colours are laid out as this many equal steps of
+#: the colour range, each holding the colour of the band its centre falls in: fine
+#: enough that a band's edge on the bar is within a pixel of where the band really
+#: ends, and a palette of a few kilobytes.
+_BAND_PALETTE_STEPS = 512
+
+#: The ``contour_kwargs`` keys this renderer draws. Every other key is a matplotlib call
+#: signature (``Axes.contour``, ``Axes.clabel``) bokeh has no counterpart for.
+_CONTOUR_KWARGS = ("colors", "linewidths", "linestyles", "fmt", "labels")
+
+#: matplotlib's line-style spellings, as the names bokeh's ``line_dash`` takes.
+_LINE_DASH = {
+    "solid": "solid",
+    "-": "solid",
+    "dashed": "dashed",
+    "--": "dashed",
+    "dotted": "dotted",
+    ":": "dotted",
+    "dashdot": "dashdot",
+    "-.": "dashdot",
+}
+
+#: The plot-frame options a panel's own mesh carries (:func:`_quadmesh`) and a banded
+#: fill needs the same of, so the polygons sit in the very same frame, axes and type.
+_PANEL_OPTS = (
+    "bgcolor",
+    "fontsize",
+    "frame_height",
+    "frame_width",
+    "invert_yaxis",
+    "responsive",
+    "shared_axes",
+    "show_grid",
+    "title",
+    "xlabel",
+    "ylabel",
+)
+
+
+def _section_mark(mark) -> str:
+    """Return a section's ``mark`` (``None`` is the default, cells), or raise."""
+    if mark is None:
+        return "pcolormesh"
+    if mark not in _SECTION_MARKS:
+        raise ValueError(
+            f"mark={mark!r} is not a section mark; expected one of {_SECTION_MARKS}. "
+            "(Line marks -- 'line', 'step' -- belong to a series, not a vertical "
+            "section.)"
+        )
+    return mark
+
+
+@dataclass(frozen=True)
+class _ContourStyle:
+    """How an overlay's lines are drawn: ``contour_kwargs`` as bokeh spells them."""
+
+    color: str = CONTOUR_COLOR
+    #: in CSS pixels: the shared width is matplotlib points, which bokeh draws at
+    #: 4/3 pixel each, as it does a font's
+    width: float = CONTOUR_WIDTH * PT_PER_CSS_PX
+    dash: str = "solid"
+    fmt: str = "%g"
+    labels: bool = True
+
+
+def _only(value):
+    """Return ``value``, or the one item of a one-item list (matplotlib takes both)."""
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        if len(value) == 1:
+            return value[0]
+    return value
+
+
+def _contour_style(contour_kwargs) -> _ContourStyle:
+    """Read ``contour_kwargs`` into a :class:`_ContourStyle`, warning about the rest.
+
+    Honours the keys that name something bokeh can draw -- ``colors`` (one colour),
+    ``linewidths`` (one width), ``linestyles`` (``"solid"``/``"dashed"``/``"dotted"``/
+    ``"dashdot"``), ``fmt`` (the labels' ``%``-format) and ``labels=False`` (no
+    labels). Any other key -- or one of these given a value only matplotlib can use, a
+    list of several colours -- only affects the static renderer, and is said so in one
+    warning rather than silently dropped. An already-built style passes through, so a
+    grid can read its keywords once and hand every panel the result.
+    """
+    import matplotlib.colors as mcolors
+
+    if contour_kwargs is None:
+        return _ContourStyle()
+    if isinstance(contour_kwargs, _ContourStyle):
+        return contour_kwargs
+    if not isinstance(contour_kwargs, Mapping):
+        raise TypeError(
+            "contour_kwargs= takes a dict of contour-line options "
+            f"({', '.join(_CONTOUR_KWARGS)}), got {type(contour_kwargs).__name__}."
+        )
+    if "levels" in contour_kwargs:
+        raise ValueError(
+            "contour_kwargs holds 'levels', but which lines are drawn is "
+            "contour_levels=, decided once so every panel shows the same ones."
+        )
+    static_only = [str(k) for k in contour_kwargs if k not in _CONTOUR_KWARGS]
+    fields: dict[str, Any] = {}
+    if "colors" in contour_kwargs:
+        try:
+            fields["color"] = mcolors.to_hex(_only(contour_kwargs["colors"]))
+        except (ValueError, TypeError):
+            static_only.append("colors")
+    if "linewidths" in contour_kwargs:
+        width = _only(contour_kwargs["linewidths"])
+        if isinstance(width, Real) and not isinstance(width, bool) and width > 0:
+            fields["width"] = float(width) * PT_PER_CSS_PX
+        else:
+            static_only.append("linewidths")
+    if "linestyles" in contour_kwargs:
+        try:
+            fields["dash"] = _LINE_DASH[_only(contour_kwargs["linestyles"])]
+        except (KeyError, TypeError):
+            static_only.append("linestyles")
+    if "fmt" in contour_kwargs:
+        fmt = contour_kwargs["fmt"]
+        if not isinstance(fmt, str):
+            static_only.append("fmt")
+        else:
+            try:
+                fmt % 1.0
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"contour_kwargs fmt={fmt!r} is not a %-format for one number "
+                    "(for instance '%g', '%.1f' or '%d °C')."
+                ) from None
+            fields["fmt"] = fmt
+    if "labels" in contour_kwargs:
+        fields["labels"] = bool(contour_kwargs["labels"])
+    if static_only:
+        warnings.warn(
+            f"contour_kwargs {sorted(set(static_only))} only affect the static "
+            "(matplotlib) renderer and have no effect here — pass "
+            "renderer='matplotlib' for them to apply.",
+            stacklevel=3,
+        )
+    return _ContourStyle(**fields)
+
+
+def _section_options(
+    *, has_contours: bool, mark, contour_levels, contour_kwargs, fill_levels
+) -> tuple[str, _ContourStyle | None]:
+    """Check a section family's mark and contour/band options; return ``(mark, style)``.
+
+    Run first by every section family, before anything is drawn: ``mark`` is read
+    (:func:`_section_mark`), the options with nothing to act on are refused in the one
+    wording both renderers share
+    (:func:`~ocean_skill.plot.section.check_section_options`), a ``fill_levels`` that is
+    not a valid spec is refused here rather than from inside the first panel, and
+    ``contour_kwargs`` is read into a :class:`_ContourStyle` (``None`` without an
+    overlay), once, so a grid warns about a static-only key once and not per panel.
+    """
+    mark = _section_mark(mark)
+    check_section_options(
+        has_contours=has_contours,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
+    if fill_levels is not None:
+        fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
+    return mark, (_contour_style(contour_kwargs) if has_contours else None)
+
+
+def _figure_levels(spec, overlays) -> tuple[float, ...]:
+    """Return the contour levels for a whole figure: ``spec`` pooled over ``overlays``.
+
+    ``spec`` is ``contour_levels=`` as given; ``None`` means the lines are on at the
+    default count, since an overlay was passed at all. Decided once for every panel, so
+    a test, reference and second row all draw the same isotherms.
+    """
+    return _contour_levels_for(True if spec is None else spec, overlays)
+
+
+def _contour_caption(item) -> tuple[str, str]:
+    """Return ``(name, units)`` of a section item's overlay, as its hover reads them."""
+    from ocean_skill.plot.summary import pretty_level
+    from ocean_skill.units import display
+
+    name = item.get("contour_standard_name")
+    units = item.get("contour_units")
+    return (
+        pretty_level("variable", name) if name else "contour",
+        display(units) if units else "",
+    )
+
+
+def _contour_label_size(field, *, font_scale, width_px, canvas_factor) -> str:
+    """Return the font size of the lines' labels on a section panel of this frame."""
+    from ocean_skill.plot.typography import SECTION_ASPECT
+
+    frame_w, frame_h, _ = _panel_geometry(
+        field,
+        font_scale=font_scale,
+        width_px=width_px,
+        canvas_factor=canvas_factor,
+        aspect=SECTION_ASPECT,
+    )
+    return bokeh_scale((frame_w, frame_h), font_scale=font_scale)["contour_label"]
+
+
+def _line_layers(overlay, levels, *, x, y, style, name, units, label_size) -> list:
+    """Return the elements drawing ``overlay``'s lines: ``hv.Contours``, ``hv.Labels``.
+
+    ``overlay`` is :func:`~ocean_skill.plot.section.prepare_overlay`'s own return, so
+    the lines are drawn on the panel's own mesh. The lines are black (or the style's
+    colour), thin, with no legend entry, and a hover that reads ``temperature 15 °C``;
+    one label per level sits at the anchor :func:`~ocean_skill.plot.section.
+    contour_paths` picks, black on white as matplotlib's inline ``clabel`` is. A figure
+    with no line to draw (every level misses the data) gets no elements at all.
+    """
+    import holoviews as hv
+
+    paths = contour_paths(
+        overlay["distance"].values, overlay["depth"].values, overlay.values, levels
+    )
+    suffix = f" {units}" if units else ""
+    lines = [
+        {
+            x: line[:, 0],
+            y: line[:, 1],
+            "level": path.level,
+            "text": contour_label(path.level, style.fmt) + suffix,
+        }
+        for path in paths
+        for line in path.lines
+    ]
+    if not lines:
+        return []
+    layers = [
+        hv.Contours(lines, kdims=[x, y], vdims=["level", "text"]).opts(
+            # color_index=None: a Contours element colours by its first value dimension
+            # unless told not to, and these are one colour
+            color=style.color,
+            color_index=None,
+            line_width=style.width,
+            line_dash=style.dash,
+            show_legend=False,
+            tools=["hover"],
+            hover_tooltips=[(name, "@text")],
+        )
+    ]
+    anchors = [
+        (path.anchor[0], path.anchor[1], contour_label(path.level, style.fmt))
+        for path in paths
+        if path.anchor is not None
+    ]
+    if style.labels and anchors:
+        layers.append(
+            hv.Labels(anchors, kdims=[x, y], vdims=["text"]).opts(
+                text_color=style.color,
+                text_font_size=label_size,
+                text_align="center",
+                text_baseline="middle",
+                background_fill_color="white",
+                background_fill_alpha=0.85,
+                show_legend=False,
+            )
+        )
+    return layers
+
+
+def _layers(edges: np.ndarray, *, log: bool) -> np.ndarray:
+    """Return each band's value: the midpoint of its edges, as ``contourf`` colours it.
+
+    The geometric midpoint on a log scale, as matplotlib's ``ContourSet`` takes it.
+    """
+    if log and edges[0] > 0:
+        return np.sqrt(edges[:-1]) * np.sqrt(edges[1:])
+    return 0.5 * (edges[:-1] + edges[1:])
+
+
+def _band_palette(cmap, edges, clim, *, log: bool) -> tuple[list[str], str, str]:
+    """Return ``(palette, under, over)``: the colours of a banded fill.
+
+    **The colours are matplotlib's.** ``contourf`` colours each band by the midpoint of
+    its edges through the norm (:func:`_layers`), and fills data beyond the ends of the
+    colour range -- when that end is clipped -- in the colormap's own end colours, its
+    ``under``/``over``. ``palette`` is :data:`_BAND_PALETTE_STEPS` equal steps across
+    ``clim`` (equal in log space on a log scale), each holding the colour of the band
+    its centre falls in, so a continuous bokeh colour mapper over it gives every band
+    one flat colour -- on the polygons and on the colour bar alike -- and a polygon
+    valued at its band's midpoint reads that band's colour back.
+    """
+    import matplotlib.colors as mcolors
+
+    lo, hi = float(clim[0]), float(clim[1])
+    use_log = log and lo > 0
+    norm = mcolors.LogNorm(lo, hi) if use_log else mcolors.Normalize(lo, hi)
+    colours = [mcolors.to_hex(cmap(float(norm(v)))) for v in _layers(edges, log=log)]
+    steps = (np.arange(_BAND_PALETTE_STEPS) + 0.5) / _BAND_PALETTE_STEPS
+    values = lo * (hi / lo) ** steps if use_log else lo + steps * (hi - lo)
+    band = np.clip(
+        np.searchsorted(edges, values, side="right") - 1, 0, len(colours) - 1
+    )
+    return (
+        [colours[i] for i in band],
+        mcolors.to_hex(cmap.get_under()),
+        mcolors.to_hex(cmap.get_over()),
+    )
+
+
+def _band_polygons(field, *, x, y, edges, clim, log: bool, extend: str):
+    """Return the filled bands of ``field`` between ``edges`` as ``hv.Polygons``.
+
+    One polygon (with its holes) per band that holds any data, from holoviews'
+    ``contours`` operation -- contourpy again, on the section's own 2-D mesh. Each
+    carries ``lower``/``upper`` (its band's edges) and ``value`` (what colours it, see
+    :func:`_band_palette`): the midpoint of its edges, so the colour is the one
+    ``contourf`` gives the band.
+
+    ``extend`` is matplotlib's: ``"min"``/``"max"``/``"both"`` open the band at that end
+    out to infinity (matplotlib's own ``+-1e250``), so data past a clipped end is filled
+    rather than left as a hole. Those bands are valued one colour-range past ``clim`` --
+    below ``lo`` or above ``hi`` -- which the colour mapper draws in the under/over
+    colour, and carry an infinite ``lower``/``upper``.
+    """
+    import holoviews as hv
+
+    lo, hi = float(clim[0]), float(clim[1])
+    edges = np.asarray(edges, dtype="float64")
+    use_log = log and edges[0] > 0
+    below, above = extend in ("min", "both"), extend in ("max", "both")
+    levels = list(edges)
+    if below:
+        levels.insert(0, 1e-250 if use_log else -1e250)
+    if above:
+        levels.append(1e250)
+    mesh = hv.QuadMesh(
+        (field[x].values, field[y].values, field.values),
+        kdims=[x, y],
+        vdims=["value"],
+    )
+    bands = hv.operation.contours(mesh, filled=True, levels=levels)
+
+    bounds = np.asarray(levels)
+    mids = _layers(edges, log=log)
+    # a value on either side of the colour range, for the open-ended bands
+    span = (hi - lo) or abs(lo) or 1.0
+    under = lo * (lo / hi if hi > lo else 0.1) if use_log else lo - span
+    over = hi * (hi / lo if hi > lo else 10.0) if use_log else hi + span
+    offset = 1 if below else 0
+    polygons = []
+    for geometry in bands.data:
+        band = int(np.searchsorted(bounds, geometry["value"], side="right")) - 1
+        inner = band - offset
+        if below and band == 0:
+            value, lower, upper = under, -np.inf, edges[0]
+        elif above and band == len(bounds) - 2:
+            value, lower, upper = over, edges[-1], np.inf
+        else:
+            value, lower, upper = mids[inner], edges[inner], edges[inner + 1]
+        polygons.append(
+            {**geometry, "value": value, "lower": float(lower), "upper": float(upper)}
+        )
+    return hv.Polygons(
+        polygons,
+        kdims=[x, y],
+        vdims=[hv.Dimension("value", range=(lo, hi)), "lower", "upper"],
+    )
+
+
+def _banded_fill(
+    mesh,
+    field,
+    *,
+    x,
+    y,
+    cmap,
+    clim,
+    units,
+    log: bool,
+    data_range,
+    fill_levels,
+    hover: bool,
+    label_clipped,
+):
+    """Return ``field`` drawn as filled bands: ``mark="contourf"`` for one panel.
+
+    ``mesh`` is the panel's own cell mesh from :func:`_quadmesh`, which supplies the
+    frame (size, type, title, axes, inverted depth, grey background); the bands are
+    polygons in that same frame, coloured through the same colormap over the same
+    ``clim`` and carrying the colour bar -- round ticks and ``≥``/``≤`` ends included.
+    Their edges are :func:`~ocean_skill.plot.section.fill_edges` of the range, the very
+    call the static renderer's ``contourf`` takes its levels from. Which ends of the
+    range have data beyond them is the static renderer's own
+    :func:`~ocean_skill.plot.matplotlib_renderer._extend`.
+
+    The cells stay on top, fully transparent and with no colour bar of their own, so the
+    panel still hovers an exact value per cell. A rasterized mesh stays a rasterized
+    image (also transparent): the bands come from the section's own arrays, never from
+    that image. ``hover=False`` leaves the mesh out altogether.
+    """
+    import holoviews as hv
+
+    from ocean_skill.plot.matplotlib_renderer import _extend
+
+    lo, hi = float(clim[0]), float(clim[1])
+    edges = fill_edges(lo, hi, log=log, fill_levels=fill_levels)
+    if data_range is None:
+        data_range = _data_range(field, log=log)
+    polygons = _band_polygons(
+        field,
+        x=x,
+        y=y,
+        edges=edges,
+        clim=(lo, hi),
+        log=log,
+        extend=_extend(lo, hi, data_range),
+    )
+    palette, under, over = _band_palette(cmap, edges, (lo, hi), log=log)
+    frame = {
+        k: v for k, v in mesh.opts.get("plot").kwargs.items() if k in _PANEL_OPTS
+    }
+    polygons = polygons.opts(
+        color="value",
+        cmap=palette,
+        clim=(lo, hi),
+        logz=log,
+        colorbar=True,
+        clabel=units or "",
+        clipping_colors={"min": under, "max": over},
+        # a hairline in each band's own colour: bands drawn with no stroke leave a faint
+        # seam of background along every shared edge (each is anti-aliased on its own)
+        line_color="value",
+        line_width=0.5,
+        show_legend=False,
+        tools=[],
+        **frame,
+    )
+    polygons = _mark_clipped(
+        polygons, (lo, hi), data_range, log=log, label_clipped=label_clipped
+    )
+    if not hover:
+        return polygons
+    return polygons * mesh.opts(
+        hv.opts.QuadMesh(fill_alpha=0, line_alpha=0, colorbar=False),
+        hv.opts.Image(alpha=0, colorbar=False),
+    )
+
+
+def _section_panel(
+    field, *, mark: str = "pcolormesh", fill_levels=None, lines=(), **mesh_opts
+):
+    """Return one section panel: its fill, with any contour lines over it.
+
+    ``mesh_opts`` are :func:`_quadmesh`'s. ``mark="pcolormesh"`` is that mesh as it
+    always was; ``"contourf"`` is :func:`_banded_fill` instead. ``lines`` -- the
+    elements :func:`_line_layers` built -- are laid over the fill, lines and then their
+    labels, above everything else; a panel with none is exactly what it was before
+    there were overlays.
+    """
+    mesh = _quadmesh(field, **mesh_opts)
+    panel = mesh
+    if mark == "contourf":
+        panel = _banded_fill(
+            mesh,
+            field,
+            x=mesh_opts["x"],
+            y=mesh_opts["y"],
+            cmap=mesh_opts["cmap"],
+            clim=mesh_opts["clim"],
+            units=mesh_opts["units"],
+            log=mesh_opts.get("log", False),
+            data_range=mesh_opts.get("data_range"),
+            fill_levels=fill_levels,
+            hover=mesh_opts.get("hover", True),
+            label_clipped=mesh_opts.get("label_clipped", False),
+        )
+    for layer in lines:
+        panel = panel * layer
+    return panel
+
+
 def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
     """Build a short ``"bias=.., rmse=.., corr=.."`` string for a panel title.
 
@@ -591,10 +1127,10 @@ def _field_row(
     standard_name = item.get("standard_name")
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
-    vmin, vmax = _limits(t, r, robust=robust)
+    vmin, vmax = _limits(t, r, log=log, robust=robust)
     if log:
         vmin = max(vmin, 1e-6)
-    dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+    dmax = difference_limit(d)
     scale_range = _data_range(t, r, log=log)  # the one scale both bars answer for
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
@@ -938,7 +1474,7 @@ def _field_facet(
     raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
-        lo, hi = _limits(sub, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _limits(sub, log=log, robust=robust, vmin=vmin, vmax=vmax)
         return (max(lo, 1e-6) if log else lo, hi)
 
     # One scale per row when the rows are levels, matching the static renderer: depths
@@ -1064,6 +1600,10 @@ def _section(
     vmax: float | None = None,
     clim: tuple[float, float] | None = None,
     data_range: tuple[float, float] | None = None,
+    mark: str | None = None,
+    fill_levels=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -1083,12 +1623,32 @@ def _section(
     given. ``clim``/``data_range``, if given, are a colour range and the extent of the
     data it answers for, computed across several panels by a caller
     (:func:`_section_grid`'s shared scale) -- they replace this panel's own.
+
+    ``mark="pcolormesh"`` (default) draws coloured cells; ``"contourf"`` draws smooth
+    filled bands instead (:func:`_banded_fill`) cut at
+    :func:`~ocean_skill.plot.section.fill_edges` of the colour range -- ``fill_levels``
+    says where (an int for about that many bands, a list for exactly those edges) and is
+    refused with the cell mark. An item carrying ``contour`` -- a second variable on
+    this section's own mesh, see :mod:`ocean_skill._overlay` -- is drawn over the fill
+    as black lines labelled with their level (:func:`_line_layers`), at
+    ``contour_levels`` (``True`` or unset: about six round values; an int; a list) and
+    styled by ``contour_kwargs`` (``colors``, ``linewidths``, ``linestyles``, ``fmt``,
+    ``labels=False``; any other key is static-only and warns). An overlay on a
+    different mesh is refused, never regridded.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
     from ocean_skill.plot.section import prepare_section
     from ocean_skill.plot.typography import SECTION_ASPECT
 
+    raw = item.get("contour")
+    mark, style = _section_options(
+        has_contours=raw is not None,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     _extension()
     factor = _canvas_factor(size, zoom)
     field, geometry = prepare_section(item["field"])
@@ -1103,14 +1663,37 @@ def _section(
     seq, _div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
     if clim is None:
-        lo, hi = _limits(field, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
         if log:
             lo = max(lo, 1e-6)
         clim = (lo, hi)
     raster = _should_rasterize(field, rasterize)
 
-    return _quadmesh(
+    lines = ()
+    if raw is not None:
+        overlay = prepare_overlay(raw, field)
+        name, line_units = _contour_caption(item)
+        lines = _line_layers(
+            overlay,
+            _figure_levels(contour_levels, [overlay]),
+            x=geometry.x_name,
+            y=geometry.y_name,
+            style=style,
+            name=name,
+            units=line_units,
+            label_size=_contour_label_size(
+                field,
+                font_scale=font_scale,
+                width_px=SOLO_PANEL_WIDTH_PX,
+                canvas_factor=factor,
+            ),
+        )
+
+    return _section_panel(
         field,
+        mark=mark,
+        fill_levels=fill_levels,
+        lines=lines,
         title=title,
         cmap=seq,
         clim=clim,
@@ -1131,7 +1714,6 @@ def _section(
         bgcolor="#d9d9d9",
         label_clipped=colorbar_label_clipped,
     )
-
 
 def _cross(
     items: list[dict[str, Any]],
@@ -1246,6 +1828,10 @@ def _section_grid(
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
+    mark: str | None = None,
+    fill_levels=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """Several interactive vertical sections -- one panel per item -- in one layout.
@@ -1275,6 +1861,11 @@ def _section_grid(
     ``vmin``/``vmax`` pin an exact range for every panel/group, overriding ``robust``.
     ``titles=`` overrides each panel's title by hand (one per item, or one per grid
     cell faceted); see the static renderer's ``section_grid``.
+
+    ``mark``/``fill_levels`` are :func:`_section`'s. Items carrying a ``contour``
+    overlay draw its lines over their own panel; the lines' levels are decided **once**
+    for the whole grid, from every overlay at once, so every panel shows the same
+    isotherms.
     """
     hv = _extension()
 
@@ -1288,8 +1879,24 @@ def _section_grid(
 
     if not items:
         raise ValueError("section_grid needs at least one section, got none")
+    mark, style = _section_options(
+        has_contours=any(item.get("contour") is not None for item in items),
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     prepared = [prepare_section(item["field"]) for item in items]
     prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
+    # the lines' levels and style, read once for the grid and handed to every panel
+    levels = None
+    overlays = [
+        prepare_overlay(item["contour"], prepared_of[id(item)][0])
+        for item in items
+        if item.get("contour") is not None
+    ]
+    if overlays:
+        levels = _figure_levels(contour_levels, overlays)
     _grid_nrows, grid_ncols, cell_items, drawn, panel_titles, auto_suptitle = (
         section_grid_layout(
             items,
@@ -1313,7 +1920,7 @@ def _section_grid(
             first = members[0][1]
             log = is_log(first.get("standard_name"), statistic_of(first))
             fields = [prepared_of[id(item)][0] for _, item in members]
-            lo, hi = _limits(*fields, robust=robust, vmin=vmin, vmax=vmax)
+            lo, hi = _limits(*fields, log=log, robust=robust, vmin=vmin, vmax=vmax)
             if log:
                 lo = max(lo, 1e-6)
             reach = _data_range(*fields, log=log)
@@ -1341,6 +1948,10 @@ def _section_grid(
                 vmax=vmax,
                 clim=clims.get(i),
                 data_range=reaches.get(i),
+                mark=mark,
+                fill_levels=fill_levels,
+                contour_levels=levels if item.get("contour") is not None else None,
+                contour_kwargs=style if item.get("contour") is not None else None,
             )
         )
     out = hv.Layout(plots).cols(grid_ncols).opts(hv.opts.Layout(shared_axes=False))
@@ -1423,7 +2034,7 @@ def _time_depth(
     lo, hi = (
         clim
         if clim is not None
-        else _limits(field, robust=robust, vmin=vmin, vmax=vmax)
+        else _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
     )
     if log:
         lo = max(lo, 1e-6)
@@ -1667,19 +2278,17 @@ def _time_depth_grid(
         drawn_indices = [i for i, _ in drawn]
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
+            first = cell_items[group_indices[0]]
+            # the group's scale is the first member's, as its reach below already is
+            log = is_log(first.get("standard_name"), statistic_of(first))
             span = _limits(
                 *(prepared[i][0] for i in group_indices),
+                log=log,
                 robust=robust,
                 vmin=vmin,
                 vmax=vmax,
             )
-            reach = _data_range(
-                *(prepared[i][0] for i in group_indices),
-                log=is_log(
-                    cell_items[group_indices[0]].get("standard_name"),
-                    statistic_of(cell_items[group_indices[0]]),
-                ),
-            )
+            reach = _data_range(*(prepared[i][0] for i in group_indices), log=log)
             for i in group_indices:
                 clims[i] = span
                 reaches[i] = reach
@@ -1910,15 +2519,12 @@ def _field_map_grid(
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
             fields = [cell_items[i]["field"] for i in group_indices]
-            span = _limits(*fields, robust=robust)
+            first = cell_items[group_indices[0]]
+            # the group's scale is the first member's, as its reach below already is
+            log = is_log(first.get("standard_name"), statistic_of(first))
+            span = _limits(*fields, log=log, robust=robust)
             # the shared bar answers for the whole group, as the static norm does
-            reach = _data_range(
-                *fields,
-                log=is_log(
-                    cell_items[group_indices[0]].get("standard_name"),
-                    statistic_of(cell_items[group_indices[0]]),
-                ),
-            )
+            reach = _data_range(*fields, log=log)
             for i in group_indices:
                 clims[i] = span
                 reaches[i] = reach
@@ -1939,7 +2545,7 @@ def _field_map_grid(
         statistic = statistic_of(item)
         seq, _div = cmaps_for(standard_name)
         log = is_log(standard_name, statistic)
-        lo, hi = clims.get(i) or _limits(field, robust=robust)
+        lo, hi = clims.get(i) or _limits(field, log=log, robust=robust)
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
@@ -1999,6 +2605,10 @@ def _section_row(
     div_range: tuple[float, float] | None = None,
     x_alias: str | None = None,
     titles=None,
+    mark: str | None = None,
+    fill_levels=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -2035,6 +2645,13 @@ def _section_row(
     ``titles=`` overrides the three panel titles by hand -- test, reference,
     difference, in that order -- with ``None`` at a position keeping that
     panel's own title.
+
+    ``mark="contourf"`` fills all three panels as smooth bands (:func:`_banded_fill`),
+    the difference panel too, each on its own colour range; ``fill_levels`` is
+    :func:`_section`'s. An item's ``contour`` is a ``{"test", "reference"}`` pair: the
+    test overlay's lines go over the test panel and the reference's over the reference
+    panel, at one set of levels decided from both, and the difference panel gets none --
+    a difference of two fields has no isotherm of its own.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2042,9 +2659,26 @@ def _section_row(
     from ocean_skill.plot.section import prepare_section_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
+    raw = item.get("contour")
+    mark, style = _section_options(
+        has_contours=raw is not None,
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     hv = _extension()
     factor = _canvas_factor(size, zoom)
     values, geometry = prepare_section_row(item["aligned"])
+    # the overlays go onto the panels' own meshes, ahead of the x alias renaming them
+    overlays = (
+        {
+            lane: prepare_overlay(raw[lane], values[lane])
+            for lane in ("test", "reference")
+        }
+        if raw is not None
+        else {}
+    )
     x_name = geometry.x_name
     if x_alias is not None:
         # a fresh coordinate carrying the label (never an in-place attrs edit, which
@@ -2069,12 +2703,12 @@ def _section_row(
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, robust=robust)
+        vmin, vmax = _limits(t, r, log=log, robust=robust)
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
     if div_clim is None:
-        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        dmax = difference_limit(d)
         div_clim = (-dmax, dmax)
     # the one scale both bars answer for: the row's own data unless a grid's shared
     # scale says more
@@ -2105,19 +2739,43 @@ def _section_row(
         hover=hover,
         rasterize=raster,
     )
+    lines = {"test": (), "reference": ()}
+    if overlays:
+        levels = _figure_levels(contour_levels, list(overlays.values()))
+        name, line_units = _contour_caption(item)
+        label_size = _contour_label_size(
+            t, font_scale=font_scale, width_px=PANEL_WIDTH_PX, canvas_factor=factor
+        )
+        lines = {
+            lane: _line_layers(
+                overlay,
+                levels,
+                x=x_name,
+                y=geometry.y_name,
+                style=style,
+                name=name,
+                units=line_units,
+                label_size=label_size,
+            )
+            for lane, overlay in overlays.items()
+        }
     panels = [
-        _quadmesh(
-            t, title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
+        _section_panel(
+            t, mark=mark, fill_levels=fill_levels, lines=lines["test"],
+            title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
-        _quadmesh(
-            r, title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
+        _section_panel(
+            r, mark=mark, fill_levels=fill_levels, lines=lines["reference"],
+            title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
-        _quadmesh(
+        _section_panel(
             d,
+            mark=mark,
+            fill_levels=difference_fill_levels(fill_levels),
             title=diff_title,
             cmap=div,
             clim=div_clim,
@@ -2149,6 +2807,10 @@ def _section_row_grid(
     robust: bool | float = False,
     colorbar_label_clipped: bool = False,
     titles=None,
+    mark: str | None = None,
+    fill_levels=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """One interactive ``section_row`` per comparison, stacked.
@@ -2180,6 +2842,10 @@ def _section_row_grid(
 
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list, ``3 * n`` entries; ``None`` keeps a panel's own title.
+
+    ``mark``/``fill_levels`` are :func:`_section_row`'s. The lines' levels are decided
+    **once** for the whole grid, pooled over every row's test and reference overlay, so
+    every row shows the same isotherms.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2189,8 +2855,24 @@ def _section_row_grid(
     )
     from ocean_skill.plot.section import prepare_section_row
 
+    mark, style = _section_options(
+        has_contours=any(it.get("contour") is not None for it in items),
+        mark=mark,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+        fill_levels=fill_levels,
+    )
     hv = _extension()
     prepared = [prepare_section_row(it["aligned"]) for it in items]
+    levels = None
+    overlays = [
+        prepare_overlay(it["contour"][lane], values[lane])
+        for it, (values, _geometry) in zip(items, prepared, strict=True)
+        if it.get("contour") is not None
+        for lane in ("test", "reference")
+    ]
+    if overlays:
+        levels = _figure_levels(contour_levels, overlays)
     auto_title, paths_differ = section_row_grid_title(
         items, [geometry for _, geometry in prepared]
     )
@@ -2252,12 +2934,12 @@ def _section_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
-        vmin, vmax = _limits(*all_t, *all_r, robust=robust)
+        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
         if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
         all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
-        dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
+        dmax = difference_limit(all_d_flat)
         shared_div_clim = (-dmax, dmax)
         shared_seq_range = _data_range(*all_t, *all_r, log=log)
         shared_div_range = _data_range(*all_d)
@@ -2282,6 +2964,10 @@ def _section_row_grid(
             div_range=shared_div_range,
             x_alias=x_aliases[i],
             titles=resolved_titles[i * 3 : i * 3 + 3],
+            mark=mark,
+            fill_levels=fill_levels,
+            contour_levels=levels if it.get("contour") is not None else None,
+            contour_kwargs=style if it.get("contour") is not None else None,
         )
         for i, it in enumerate(items)
     ]
@@ -2378,12 +3064,12 @@ def _time_depth_row(
     seq, div = cmaps_for(standard_name)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, robust=robust)
+        vmin, vmax = _limits(t, r, log=log, robust=robust)
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
     if div_clim is None:
-        dmax = float(np.nanpercentile(np.abs(np.asarray(d)), 98)) or 1.0
+        dmax = difference_limit(d)
         div_clim = (-dmax, dmax)
     # what the bars answer for: the row's own data unless a grid's shared scale says more
     if seq_range is None:
@@ -2565,18 +3251,15 @@ def _time_depth_row_grid(
         all_t = [values["test"] for values, _ in prepared]
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
-        vmin, vmax = _limits(*all_t, *all_r, robust=robust)
-        if is_log(items[0].get("standard_name"), statistic_of(items[0])):
+        log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
+        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
+        if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
         all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
-        dmax = float(np.nanpercentile(np.abs(all_d_flat), 98)) or 1.0
+        dmax = difference_limit(all_d_flat)
         shared_div_clim = (-dmax, dmax)
-        shared_seq_range = _data_range(
-            *all_t,
-            *all_r,
-            log=is_log(items[0].get("standard_name"), statistic_of(items[0])),
-        )
+        shared_seq_range = _data_range(*all_t, *all_r, log=log)
         shared_div_range = _data_range(*all_d)
 
     rows = [
@@ -3630,7 +4313,7 @@ def _facet_movie(
         scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
     else:
         scope = frames_da.isel({facet_dim: 0})
-    vmin, vmax = _limits(scope, robust=robust, vmin=vmin, vmax=vmax)
+    vmin, vmax = _limits(scope, log=log, robust=robust, vmin=vmin, vmax=vmax)
     if log:
         vmin = max(vmin, 1e-6)
     # the bar is built once for the slider, so its ends are marked for every frame
@@ -3780,22 +4463,15 @@ def _field_movie(
     vmin, vmax = _limits(
         *[f["aligned"]["test"] for f in scope],
         *[f["aligned"]["reference"] for f in scope],
+        log=log,
         robust=robust,
     )
     if log:
         vmin = max(vmin, 1e-6)
-    dmax = (
-        float(
-            np.nanpercentile(
-                np.abs(
-                    np.concatenate(
-                        [np.asarray(f["aligned"]["difference"]).ravel() for f in scope]
-                    )
-                ),
-                98,
-            )
+    dmax = difference_limit(
+        np.concatenate(
+            [np.asarray(f["aligned"]["difference"]).ravel() for f in scope]
         )
-        or 1.0
     )
 
     # one bar per panel serves the whole slider, so its ends are marked for every frame
@@ -4861,18 +5537,21 @@ def _xy_palette(cmap, *, reverse: bool = False) -> list[str]:
 
 
 def _xy_colorbar_opts(scale) -> dict[str, Any] | None:
-    """Return the bar's ``colorbar_opts``: dates, with clipped ends forced and labelled.
+    """Return the bar's ``colorbar_opts``: round ticks, or dates for a time bar.
 
-    A pinned ``vmin``/``vmax`` that cuts off data is told as the other families tell it
-    (:func:`_clip_colorbar_opts`), from the scale's own ``(vmin, vmax)`` and
+    A depth bar ticks as every other family's does (:func:`_clip_colorbar_opts`): the
+    shared round values, always, from the scale's own ``(vmin, vmax)`` and
     ``data_range`` -- never the reversed depth clim, whose low end is the deep one and
-    would send the static renderer's ``_extend``, which decides the ends, the wrong way.
-    That helper writes numbers; a time bar is in dates, so here the date formatter
-    stays, the ticks are a date locator's (few of them, clear of a forced end) and a
-    clipped end reads ``≥ 2012-06-01``.
+    would send the static renderer's ``_extend``, which decides the clipped ends, the
+    wrong way. A pinned ``vmin``/``vmax`` that cuts off data also forces and labels that
+    end there, ``≥ 1500``.
 
-    ``None`` when there is nothing to say: depth with no end cut off keeps bokeh's own
-    ticks.
+    A time bar is in dates, which that helper cannot spell, so it is left as it was:
+    the date formatter stays, the ticks are a date locator's (few of them, clear of a
+    forced end) and a clipped end reads ``≥ 2012-06-01``. With no end cut off it is
+    bokeh's own ``DatetimeTicker``.
+
+    ``None`` only for a depth bar with nothing to tick and no end cut off.
     """
     if not scale.is_time:
         return _clip_colorbar_opts((scale.vmin, scale.vmax), scale.data_range)
@@ -5115,7 +5794,9 @@ def _xy(
     :func:`_xy_colour_opts`. ``vmin``/``vmax`` pin the ``color_by`` scale as they do
     statically: a dot beyond a pinned end takes the end colour, and bokeh, which cannot
     draw the bar's arrow, forces a tick onto that end labelled ``≥ 1500`` or ``≤ 3``
-    (``≥ 2012-06-01`` for time) -- on exactly the ends the static bar gives an arrow.
+    (``≥ 2012-06-01`` for time) -- on exactly the ends the static bar gives an arrow. A
+    depth bar's other ticks are the round values every colour bar of this renderer
+    carries (:func:`_clip_colorbar_opts`); a time bar keeps its dates.
 
     Dots carry hover (both values, depth, time); a source with many thousands of points
     ships them all to the browser, which ``compose`` warns about past two million.
@@ -5984,6 +6665,11 @@ def render(spec, **kwargs: Any):
         # unlike a map family, it genuinely changes which of two drawing calls this
         # renderer makes, not just a matplotlib-only mark keyword. time_depth_row
         # shares the same load-bearing mark, for the same reason, one row over.
+        drops = [d for d in drops if d != "mark"]
+    if family in ("section", "section_row"):
+        # a section's mark picks coloured cells ("pcolormesh") or smooth filled bands
+        # ("contourf") -- two different drawings here, so it is read, not dropped. (A
+        # cross's two panels are drawn by _section too, but a cross offers no mark.)
         drops = [d for d in drops if d != "mark"]
     if family not in _MOVIES:
         # a movie is the only family with something to write here (a standalone HTML

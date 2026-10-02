@@ -921,6 +921,19 @@ def compose(
         data_range = (float(finite.min()), float(finite.max())) if finite.size else None
         scale_lo = float(lo) if pin_lo is None else pin_lo
         scale_hi = float(hi) if pin_hi is None else pin_hi
+        if color_by == "depth" and scale_lo < scale_hi:
+            # a depth bar ends on a round depth like every automatic colour range
+            # (0-1487 m reads 0-1500 m); a pinned end stays exactly as given, and a
+            # time scale keeps its own date ticks
+            from ocean_skill.plot._colorbar import round_limits
+
+            scale_lo, scale_hi = round_limits(
+                scale_lo,
+                scale_hi,
+                log=False,
+                keep_lo=pin_lo is not None,
+                keep_hi=pin_hi is not None,
+            )
         if scale_lo >= scale_hi:
             first, last = (_scale_text(v, color_by) for v in data_range or (lo, hi))
             raise ValueError(

@@ -752,6 +752,34 @@ labelled. In a movie the extremes are taken over every frame; the station dots o
 osk.field(run, "temp", select={"time": "2012-01"}).plot(robust=True, colorbar_label_clipped=True)
 ```
 
+### Round colourbar ticks and limits
+
+Every colourbar ticks at round numbers in both renderers, with the same values and the
+same label text:
+- **Linear bars** use 1, 2 or 5 times a power of ten, and every label carries the
+  decimals that step needs: `0.0, 0.5, 1.0`, `34, 35, 36`, with a true minus sign and no
+  offset notation.
+- **Log bars** read as plain decimals: the decades (`0.01, 0.1, 1, 10`) across three or
+  more of them, otherwise 1, 2 and 5 times each (`0.05, 0.1, 0.2, 0.5`).
+- **A `mark="contourf"` bar** ticks the same round values rather than its band edges.
+
+Colour limits the package chooses itself also snap **outward** to a round value, so
+nothing is clipped by the snap:
+- **The data's own range, or `robust=`'s percentiles:** each end moves to a fifth of the
+  tick step, so 0.0213–2.987 becomes 0–3 and 33.81–36.42 becomes 33.8–36.5. On a log
+  scale an end moves to one significant digit.
+- **A difference panel's 98th-percentile half-range:** snapped up the same way, so ±1.734
+  becomes ±1.8.
+- **What this changes:** a bar's top is the data's maximum rounded up, no longer that
+  maximum exactly. The extremum itself is still reported where it always was, for
+  example by `Field.extremum()` and in a suptitle.
+
+Limits you name are never moved: a `vmin`/`vmax`, and a variable's built-in display
+range such as chlorophyll's. To pick the ticks yourself, pass
+`colorbar_kwargs={"ticks": [...]}` (or `"format"`) to the static renderer. That
+switches the round ticks off for that bar. Date colour bars (`color_by="time"`) keep
+their own date ticks.
+
 ### `shared_limits`
 
 `field_grid`, a stacked `section_row` or `time_depth_row`, and a two-axis
@@ -2359,6 +2387,53 @@ osk.plot({"Eq": eq, "180-160": b180, "160-120": b160})
 - **Other options:** `robust=`, `titles=` and `mark=` work as on a single section.
 - **What can't share a figure:** a set mixing a section with a map, line or
   `time_depth` panel is refused, because mixed-panel figures don't exist yet.
+
+### Smooth fills and contour-line overlays (`mark="contourf"`, `contours=`)
+
+Two things make a section look like a paper figure, such as phosphate filled with
+temperature isotherms drawn on top. Both work the same in the static and interactive
+renderers, on a single section, a stacked set, and comparison rows.
+
+```python
+po4 = [osk.field("woa23_phosphate_annual", "phosphate", select=s, aggregate=a)
+       for s, a in panels]
+temp = [osk.field("woa23_temperature_annual", "temperature", select=s, aggregate=a)
+        for s, a in panels]
+osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], ncols=3)
+```
+
+- **`mark="contourf"`** fills the panel with smooth filled bands instead of cells.
+  - The band edges are round numbers, about 50 of them by default (0.05 apart on a
+    0–3 bar), so every colourbar tick sits on a band edge.
+  - **`fill_levels=`** changes the number of bands (an int) or sets the edges outright
+    (a list).
+  - A comparison's difference panel is filled the same way. It keeps a band count,
+    but not a list of edges, which is in the variable's units, not the difference's.
+  - Filled contours leave up to half a cell bare next to missing data, such as the
+    seafloor, where the grey background shows through.
+  - A finer `select` depth list draws smoother bands.
+- **`contours=`** draws black, labelled contour lines of a second variable over the
+  fill.
+  - Pass an object of the same shape as the one plotted, built the same way (same
+    source, `select` and `aggregate`) so it sits on the same section grid:
+    - a `Field` for a `Field`;
+    - a `FieldSet` or list for a set, paired by position;
+    - for `osk.plot`, a list or `{label: ...}` dict shaped like its items.
+  - Over a comparison, the overlay comparison's test lines go on the test panel and
+    its reference lines on the reference panel. The difference panel gets none.
+  - An overlay on a different grid is refused, naming the axis that differs. Nothing
+    is regridded.
+- **`contour_levels=`** picks the lines: `True` (the default) for about six round
+  values, an int for about that many, or a list. The levels are chosen once for the
+  whole figure, so every panel shows the same isotherms.
+- **`contour_kwargs=`** styles the lines and labels:
+  - `colors`, `linewidths`, `linestyles`;
+  - `fmt` (label format, default `"%g"`);
+  - `labels=False` to drop the labels.
+  
+  Statically, any other `ax.contour` keyword works too. The interactive renderer
+  honours a single colour, a scalar width and the named line styles, and warns for
+  the rest. Interactively, hovering a line shows its value, such as `temperature 15 °C`.
 
 ## The `cross` family (two sections through one point)
 

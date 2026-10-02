@@ -1394,7 +1394,12 @@ class Field:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", locations: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        locations: Any = None,
+        contours: Any = None,
+        **kwargs: Any,
     ):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
 
@@ -1419,6 +1424,14 @@ class Field:
             They are context, not data: a location outside the field does not widen
             the map. Refused for the other shapes (a series, section, profile...),
             which have no map to draw on.
+        contours
+            Sections only. Another :class:`Field` -- a second variable from the same
+            source, built with the same ``select``/``aggregate`` so it lands on the
+            same section grid -- drawn as black, labelled contour lines over this
+            one's fill: isotherms over phosphate, say. ``contour_levels=`` picks the
+            lines (``True`` for about six round values, an int for about that many,
+            or a list), ``contour_kwargs=`` styles them. An overlay on a different
+            grid is refused by name, never regridded.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -1451,9 +1464,16 @@ class Field:
         if grid_meta is not None:
             if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
                 return self._surfaced().plot(
-                    renderer=renderer, locations=locations, **kwargs
+                    renderer=renderer, locations=locations, contours=contours, **kwargs
                 )
             self._refuse_bare_multistep_time_precheck()
+
+        contour_keys: dict[str, Any] = {}
+        if contours is not None:
+            from ocean_skill._overlay import contour_members, field_contour
+
+            (overlay,) = contour_members(contours, 1, kind="field")
+            contour_keys = field_contour(overlay, plotted=self)
 
         if locations is not None:
             if self.family != "field_facet":
@@ -1483,7 +1503,11 @@ class Field:
             )
         elif self.family == "section":
             self._require_section_shape()
-            spec = PlotSpec(family="section", items=[self.as_item()], options=kwargs)
+            spec = PlotSpec(
+                family="section",
+                items=[{**self.as_item(), **contour_keys}],
+                options=kwargs,
+            )
         else:
             # Every other refusal a map needs -- the point-with-no-extent and
             # fixed-station diagnostics, the bare-multistep-time and
@@ -1844,7 +1868,9 @@ class FieldSet:
         return [f._map_item() for f in self.fields]
 
     @graft_plot_options()
-    def plot(self, *, renderer: str = "matplotlib", **kwargs: Any):
+    def plot(
+        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+    ):
         """Draw every member on one figure, laid out by :mod:`plot.series`,
         :mod:`plot.profile`, one panel per member for ``time_depth``, or one map
         panel per member for a set of maps.
@@ -1861,6 +1887,10 @@ class FieldSet:
             ``encode`` (e.g. ``{"color": "source"}``), and the ``*_kwargs``
             styling dicts. See ``docs/plot_styling_reference.md`` for the full
             list.
+        contours
+            Sections only. A :class:`FieldSet` (or a list of fields) of the same
+            length, paired with this set's members by position, drawn as contour
+            lines over each member's fill -- see :meth:`Field.plot`.
 
         A set built with a :attr:`title` (an extremum's point series names the
         extremum it follows) draws it as the figure's ``title=``, whichever layout
@@ -1897,6 +1927,12 @@ class FieldSet:
         if self.title is not None:
             kwargs.setdefault("title", self.title)
 
+        overlays = None
+        if contours is not None:
+            from ocean_skill._overlay import contour_members
+
+            overlays = contour_members(contours, len(self.fields), kind="field")
+
         usable = [
             f
             for f in self.fields
@@ -1925,7 +1961,22 @@ class FieldSet:
                 f"requested variable: {detail}",
                 stacklevel=_stacklevel.find(),
             )
+            if overlays is not None:
+                # keep each overlay with its own member: pairing is by position
+                kwargs["contours"] = [
+                    o for f, o in zip(self.fields, overlays, strict=True) if f in usable
+                ]
             return FieldSet(usable, title=self.title).plot(renderer=renderer, **kwargs)
+
+        if overlays is not None:
+            from ocean_skill._overlay import field_contour
+
+            # every member must be a section for an overlay to mean anything; this
+            # refuses the first that is not, by name, before any figure is built
+            contour_keys = [
+                field_contour(o, plotted=f)
+                for f, o in zip(self.fields, overlays, strict=True)
+            ]
 
         time_depth = [f for f in self.fields if f.family == "time_depth"]
         if time_depth and len(time_depth) < len(self.fields):
@@ -1975,10 +2026,16 @@ class FieldSet:
             # section comparisons. A lone member is drawn by its own Field.plot()
             # -- the same single-panel path, with nothing to stack against.
             if len(self.fields) == 1:
-                return self.fields[0].plot(renderer=renderer, **kwargs)
-            spec = PlotSpec(
-                family="section", items=self._section_items(), options=kwargs
-            )
+                return self.fields[0].plot(
+                    renderer=renderer, contours=overlays, **kwargs
+                )
+            items = self._section_items()
+            if overlays is not None:
+                items = [
+                    {**item, **keys}
+                    for item, keys in zip(items, contour_keys, strict=True)
+                ]
+            spec = PlotSpec(family="section", items=items, options=kwargs)
             return render(spec, renderer=renderer)
         maps = [f for f in self.fields if f.family == "field_facet"]
         if maps and len(maps) == len(self.fields):

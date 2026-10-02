@@ -1037,7 +1037,8 @@ def test_color_by_depth_colours_the_dots_on_one_shared_scale_with_one_bar():
     norms = {(c.norm.vmin, c.norm.vmax) for c in clouds}
     assert len(norms) == 1
     ((vmin, vmax),) = norms
-    assert vmin < vmax and 5 <= vmin and vmax <= 1000
+    # the data's ~5-1000 m, its shallow end snapped to a round 0 m
+    assert vmin < vmax and 0 <= vmin and vmax <= 1000
     assert all(c.get_array() is not None and len(c.get_array()) == 200 for c in clouds)
     assert len({c.get_cmap().name for c in clouds}) == 1
     (bar,) = _colorbars(fig)
