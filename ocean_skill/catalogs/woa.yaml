@@ -2002,10 +2002,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (annual, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '00'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2031,10 +2031,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month01, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '01'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2060,10 +2060,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month02, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '02'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2089,10 +2089,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month03, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '03'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2118,10 +2118,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month04, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '04'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2147,10 +2147,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month05, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '05'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2176,10 +2176,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month06, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '06'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2205,10 +2205,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month07, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '07'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2234,10 +2234,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month08, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: 08
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2263,10 +2263,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month09, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: 09
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2292,10 +2292,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month10, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '10'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2321,10 +2321,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month11, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '11'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2350,10 +2350,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (month12, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
       woa_period_code: '12'
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
@@ -2384,10 +2384,10 @@ entries:
       lon_convention: -180-180
       nominal_resolution_km: 111
       standard_names:
-        s_an: sea_water_salinity
+        s_an: sea_water_practical_salinity
       title: WOA23 salinity (monthly, 1 deg)
       variables:
-      - sea_water_salinity
+      - sea_water_practical_salinity
     output_instance: xarray:Dataset
     reader: intake.readers.readers:XArrayDatasetReader
     user_parameters: {}
@@ -3225,7 +3225,7 @@ metadata:
   - moles_of_oxygen_per_unit_mass_in_sea_water
   - moles_of_phosphate_per_unit_mass_in_sea_water
   - moles_of_silicate_per_unit_mass_in_sea_water
-  - sea_water_salinity
+  - sea_water_practical_salinity
   - sea_water_temperature
   title: "World Ocean Atlas 2023 (1 deg) \u2014 annual + monthly climatology"
 user_parameters: {}

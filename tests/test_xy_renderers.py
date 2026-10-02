@@ -387,6 +387,22 @@ def test_label_units_disagreement_warns_and_drops_them():
     assert layout.ylabel == "temperature"
 
 
+def test_label_units_compare_by_unit_not_spelling():
+    # ROMS, WOA and GLORYS spell degrees Celsius and practical salinity differently
+    items = [
+        _item("ROMS", y_units="degC", x_units="PSU"),
+        _item("WOA23", y_units="degrees_celsius", x_units="1"),
+        _item("GLORYS12", y_units="degrees_C", x_units="1e-3"),
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        layout = _xy.compose(items)
+    assert layout.ylabel == "temperature [degC]"  # the first member's spelling
+    assert layout.xlabel == "salinity [PSU]"  # a bare number is not shown
+    numbers_only = [_item("A", x_units="1"), _item("B", x_units="1e-3")]
+    assert _xy.compose(numbers_only).xlabel == "salinity"
+
+
 # --- compose: annotations -------------------------------------------------------------
 
 
