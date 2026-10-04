@@ -726,6 +726,16 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     lo, hi = lo[in_span], hi[in_span]
     pos = np.unique(np.concatenate([lo, hi]))
     cropped = obj.isel({name: pos})
+    if values.dtype.kind == "M" and targets.dtype.kind == "M":
+        # One resolution on both sides first: interp reads a datetime64 axis and its
+        # targets each in their own unit, so a model clock in seconds (what
+        # roms._decode_time builds) against a reference's finer stamps put every target
+        # outside the span -- an all-NaN lane, with no warning.
+        stamps = cropped[name]
+        cropped = cropped.assign_coords(
+            {name: (stamps.dims, stamps.values.astype("datetime64[ns]"), stamps.attrs)}
+        )
+        targets = targets.astype("datetime64[ns]")
     return cropped.interp({name: targets}, method="linear")
 
 

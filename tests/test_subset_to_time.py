@@ -143,6 +143,21 @@ def test_targets_interp_on_a_non_monotonic_axis_brackets_by_value():
     assert out["x"].item() == pytest.approx(lo + frac * (hi - lo))
 
 
+@pytest.mark.parametrize("unit", ["s", "us", "ns"])
+def test_targets_interp_on_a_second_resolution_axis_is_not_all_nan(unit):
+    """A model clock in seconds (``roms._decode_time`` builds ``datetime64[s]``)
+    interpolated onto a reference's finer stamps: interp used to read the two in
+    different units, put every target outside the span, and return all-NaN."""
+    hourly = np.datetime64("2024-07-01") + np.arange(4) * np.timedelta64(3600, "s")
+    ds = xr.Dataset(
+        {"x": ("time", np.arange(4.0))},
+        coords={"time": ("time", hourly.astype(f"datetime64[{unit}]"), {"a": 1})},
+    )
+    targets = pd.to_datetime(["2024-07-01T00:30", "2024-07-01T01:45"]).values
+    out = subset_to_time_targets(ds, targets, method="interp")
+    np.testing.assert_allclose(out["x"].values, [0.5, 1.75])
+
+
 def test_targets_none_or_empty_or_no_time_dim_is_a_no_op():
     ds = _dataset(pd.date_range("2024-01-01", "2024-03-01", freq="7D"))
     assert subset_to_time_targets(ds, None) is ds
