@@ -92,9 +92,9 @@ def test_a_point_lane_is_materialized_before_the_transform(monkeypatch):
     captured = {}
     real_to_depth = roms.to_depth
 
-    def spy(sub, meta, targets):
+    def spy(sub, meta, targets, **kwargs):
         captured["chunks"] = sub["temp"].chunks
-        return real_to_depth(sub, meta, targets)
+        return real_to_depth(sub, meta, targets, **kwargs)
 
     monkeypatch.setattr(roms, "to_depth", spy)
 
@@ -123,9 +123,9 @@ def test_a_gridded_lane_is_never_eagerly_loaded(monkeypatch):
     captured = {}
     real_to_depth = roms.to_depth
 
-    def spy(sub, meta, targets):
+    def spy(sub, meta, targets, **kwargs):
         captured["chunks"] = sub["temp"].chunks
-        return real_to_depth(sub, meta, targets)
+        return real_to_depth(sub, meta, targets, **kwargs)
 
     monkeypatch.setattr(roms, "to_depth", spy)
 
@@ -144,9 +144,9 @@ def test_the_byte_ceiling_falls_back_to_lazy(monkeypatch):
     captured = {}
     real_to_depth = roms.to_depth
 
-    def spy(sub, meta, targets):
+    def spy(sub, meta, targets, **kwargs):
         captured["chunks"] = sub["temp"].chunks
-        return real_to_depth(sub, meta, targets)
+        return real_to_depth(sub, meta, targets, **kwargs)
 
     monkeypatch.setattr(roms, "to_depth", spy)
 
@@ -174,9 +174,9 @@ def test_a_point_lane_is_materialized_before_the_nearest_lookup(monkeypatch):
     captured = {}
     real_nearest = roms.nearest_depth_levels
 
-    def spy(sub, meta, targets):
+    def spy(sub, meta, targets, **kwargs):
         captured["chunks"] = sub["temp"].chunks
-        return real_nearest(sub, meta, targets)
+        return real_nearest(sub, meta, targets, **kwargs)
 
     monkeypatch.setattr(roms, "nearest_depth_levels", spy)
 

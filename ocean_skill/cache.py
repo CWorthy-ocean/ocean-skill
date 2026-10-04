@@ -103,6 +103,20 @@ __all__ = [
 #: values under the wrong units, and the unit conversion that reads them would
 #: shift a temperature variance by 273.15.
 #:
+#: **8** — a lane's *meaning* changed under an otherwise identical key, in two
+#: ways. Depth matching now follows a declared/inferred/default **depth convention**
+#: (:mod:`ocean_skill.depth_convention`): a surface-referenced observation (a CTD
+#: cast, a pressure record -- the default for a profile) is matched *below the moving
+#: free surface* rather than at a fixed height, a nearest-level pick is made *per
+#: time step* instead of once at a reference time, a target in the top or bottom
+#: half-cell is edge-filled with that cell's value instead of NaN, and the free
+#: surface is kept through time aggregates, detiding and transects so the frame the
+#: depth is read in is the one the field was reduced under. And a source's naive
+#: timestamps can now be declared local (:mod:`ocean_skill.time_zone`) rather than
+#: always read as UTC. Wherever the key does not itself move (a ``select`` naming no
+#: ``depth_origin``, a source declaring nothing new) a pre-change entry still holds
+#: the old answer under it, and a stale hit would silently keep it.
+#:
 #: A related fix that did *not* bump this: :func:`ocean_skill.sources.read`'s
 #: singleton-horizontal squeeze (giving an ADCP-shaped station a recoverable
 #: scalar lon/lat) changed what a *fresh* read produces without changing what
@@ -113,7 +127,7 @@ __all__ = [
 #: cache hit for exactly this shape on the way out (see
 #: ``_is_stale_positionless_station`` there) and discards only an entry that
 #: actually lacks a position, recomputing and overwriting just that one.
-_FORMAT_VERSION = 7
+_FORMAT_VERSION = 8
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline

@@ -135,11 +135,18 @@ def test_surface_and_depth_zero_are_distinct(gom_bgc):
     assert np.isfinite(da_surface.values).all()
 
     # The synthetic grid is 50 m deep everywhere with a top cell centre well below
-    # 0 m, so an explicit request for the literal surface interpolates to nothing.
+    # 0 m. A literal 0 is still a depth like any other -- but it lies in the top
+    # half-cell, inside the water, so it takes that cell's value (edge-fill) rather than
+    # coming back NaN: finite, no "entirely NaN" warning, and numerically the surface
+    # field. The two are different *requests* all the same (asserted above): "surface"
+    # is the model's own top level with no depth matched at all, 0 a depth matched in
+    # the lane's frame.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": 0})
-    assert any("entirely NaN" in str(w.message) for w in caught)
+        da_zero, _ = _prepare(ds, meta, OXYGEN_PER_MASS, {"depth": 0})
+    assert not any("entirely NaN" in str(w.message) for w in caught)
+    assert np.isfinite(da_zero.values).all()
+    np.testing.assert_allclose(da_zero.values, da_surface.values)
 
 
 def test_nothing_is_reduced_unless_a_reduction_is_named(gom_bgc):
@@ -313,14 +320,21 @@ def test_a_stale_positionless_station_entry_is_discarded_and_repaired(monkeypatc
 
     # Pre-seed the cache with exactly the stale shape: the same array, position
     # dropped -- what an old, pre-squeeze read produced -- under the very key
-    # prepare_source computes for this call. `_depth_method` included because
-    # prepare_source's own key always carries it now (see its docstring
-    # paragraph) -- omitting it here would make this a cache *miss*, not the
-    # hit this test means to reproduce.
+    # prepare_source computes for this call. `_depth_method` and `_depth_convention`
+    # included because prepare_source's own key always carries them now (see its
+    # docstring paragraph) -- omitting either here would make this a cache *miss*,
+    # not the hit this test means to reproduce. The convention is the lane's own
+    # resolved one, computed the way prepare_source does rather than spelled out.
+    from ocean_skill import depth_convention
+
     key = cache.key_for_prepared(
         source="adcp_mooring",
         variable="eastward_sea_water_velocity",
-        select={"_aggregate": None, "_depth_method": "nearest"},
+        select={
+            "_aggregate": None,
+            "_depth_method": "nearest",
+            "_depth_convention": depth_convention.resolve(meta).key(),
+        },
     )
     stale = fresh.reset_coords(["LATITUDE", "LONGITUDE"], drop=True)
     cache.save_field(key, stale, actual_depth=None)
@@ -555,6 +569,7 @@ def test_a_point_bbox_folds_a_marker_into_the_lane_key(monkeypatch):
     assert len(saved_keys) == 2
     assert len(set(saved_keys)) == 2  # a point crop and a region crop never collide
 
+    from ocean_skill import depth_convention
     from ocean_skill.align import POINT_WINDOW_CELLS
     from ocean_skill.cache import key_for_prepared
 
@@ -565,10 +580,13 @@ def test_a_point_bbox_folds_a_marker_into_the_lane_key(monkeypatch):
             "_aggregate": None,
             "_bbox": [102.0, 12.0, 102.0, 12.0],
             "_point_window": POINT_WINDOW_CELLS,
-            # prepare_source's own key always carries this now (see its
-            # docstring paragraph) -- omitting it here would make this key
-            # simply not match either saved one, for an unrelated reason.
+            # prepare_source's own key always carries these now (see its
+            # docstring paragraph) -- omitting either here would make this key
+            # simply not match either saved one, for an unrelated reason. The
+            # convention is this (metadata-less, non-ROMS) lane's own resolved
+            # one, computed as prepare_source does.
             "_depth_method": "nearest",
+            "_depth_convention": depth_convention.resolve({}).key(),
         },
     )
     assert point_key in saved_keys

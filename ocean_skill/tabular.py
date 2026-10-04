@@ -27,14 +27,16 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
-from ocean_skill import _stacklevel, vocabulary
+from ocean_skill import _stacklevel, depth_convention, time_zone, vocabulary
 
 __all__ = [
     "COORD_COLUMNS",
+    "apply_table_options",
+    "canonicalize_time_options",
     "coord_axis_of",
     "coord_column",
     "decode_time_column",
@@ -42,6 +44,7 @@ __all__ = [
     "is_coordinate_column",
     "is_frame",
     "is_qc_column",
+    "joined_time_column",
     "numeric_in_range",
     "split_units",
     "to_dataset",
@@ -116,11 +119,6 @@ _ALTITUDE = "altitude"
 #: Entry-metadata keys that state a depth when the data does not.
 _DEPTH_ATTRS = ("nominal_depth_m", "depth", "geospatial_vertical_min")
 
-#: Metres per decibar, near enough for a label: the exact factor varies with latitude
-#: and water column (gsw.z_from_p), and gsw is not a dependency here. Flagged on the
-#: result as ``depth_approximate`` rather than presented as a measurement.
-_M_PER_DBAR = 1.0
-
 #: How far a "fixed" instrument may range before it is really a profiler (metres).
 FIXED_DEPTH_TOLERANCE = 2.0
 
@@ -182,7 +180,11 @@ def split_units(column) -> tuple[str, str | None]:
 _AXIS_BOUNDS: dict[str, tuple[float, float]] = {
     "X": (-360.0, 360.0),  # longitude, either sign convention
     "Y": (-90.0, 90.0),  # latitude
-    "Z": (-100.0, 11000.0),  # depth/pressure: a little above sea level to Challenger Deep
+    # Depth/pressure, *either sign convention*: Challenger Deep either way up. A source
+    # that stores depth as a height (negative down) used to lose everything deeper than
+    # 100 m to a one-sided bound; a genuine sentinel is still caught by _FILL_SENTINELS
+    # and _FILL_MAGNITUDE below.
+    "Z": (-11000.0, 11000.0),
 }
 
 #: Round-number "not reported" markers seen in ocean CSV/NetCDF exports, and their
@@ -209,7 +211,8 @@ def numeric_in_range(series, axis: str):
     marker, or larger than :data:`_FILL_MAGNITUDE`, is a "not reported" placeholder
     rather than a real reading and is dropped the same way NaN already is. Used
     everywhere an axis's min/max/spread is computed, so a stray ``9999`` cannot
-    masquerade as this mooring's northernmost latitude or its deepest reading.
+    masquerade as this mooring's northernmost latitude or its deepest reading. The
+    bound for ``"Z"`` is symmetric, so depths stored negative (heights) survive too.
     """
     import pandas as pd
 
@@ -231,8 +234,14 @@ def numeric_in_range(series, axis: str):
 _CF_SINCE = re.compile(r"[_\s]+since[_\s]+", re.IGNORECASE)
 
 
-def decode_time_column(series, column):
-    """Decode a time column to UTC ``datetime64``, honoring CF units in its own name.
+def _subject_of(meta) -> str:
+    """Name a source for a warning: its dataset ID, else its title, else a stand-in."""
+    meta = meta or {}
+    return meta.get("datasetID") or meta.get("title") or "this source"
+
+
+def decode_time_column(series, column, meta=None, *, subject=None):
+    """Decode a time column to UTC ``datetime64``: CF units, and a declared zone.
 
     A time column's name sometimes states its encoding explicitly, e.g.
     ``"Time[days_since_1950-01-01T00:00:00Z]"``. :func:`pandas.to_datetime` does not
@@ -241,11 +250,29 @@ def decode_time_column(series, column):
     1970-01-01, which is silent rather than an error. Detected here from
     :func:`split_units` and decoded with xarray's calendar-aware CF decoder
     (:func:`xarray.coding.times.decode_cf_datetime`) instead. A column with no such
-    units (already timestamps, or a plain date string) falls back to
-    :func:`pandas.to_datetime`, exactly as before.
+    units (already timestamps, or a plain date string) is parsed by
+    :func:`ocean_skill.time_zone.to_utc`.
+
+    ``meta`` is the entry's metadata, read for its declared source time zone
+    (``time_zone`` / ``utc_offset_h``; see :mod:`ocean_skill.time_zone`). A *naive*
+    timestamp -- one with no offset of its own, which is every plain ``"2024-07-01
+    12:00"`` -- is read as local time in that zone and converted to UTC; with nothing
+    declared it is taken as UTC, as it always was. A timestamp that carries its own
+    offset is never shifted. The CF branch follows the same rule: numbers counted from a
+    reference that names a zone (``...since 1950-01-01T00:00:00Z``) are already
+    unambiguous, and a reference with no zone is read as the declared zone's local time.
+
+    The result is always a tz-aware UTC Series on ``series``'s own index. A column that
+    is *already* tz-aware (``sources.read`` has converted the entry's time column on the
+    way in, and :func:`to_dataset` decodes it again) is only converted to UTC: it states
+    what it is, so the declared zone must not apply to it a second time.
     """
     import pandas as pd
 
+    tz = time_zone.tzinfo_of(meta)  # (validates the declaration: raises on a bad one)
+    if isinstance(getattr(series, "dtype", None), pd.DatetimeTZDtype):
+        return series.dt.tz_convert("UTC")
+    subject = subject or _subject_of(meta)
     index = getattr(series, "index", None)
     _, units = split_units(str(column))
     if units and _CF_SINCE.search(units):
@@ -257,12 +284,181 @@ def decode_time_column(series, column):
             decoded = xr.coding.times.decode_cf_datetime(vals, normalized)
             # A Series (not the DatetimeIndex pd.to_datetime returns for an array),
             # keyed on the original index -- callers do frame-aligned `.dt`/`.notna()`
-            # on the result, exactly as they would on the pd.to_datetime fallback.
-            return pd.to_datetime(pd.Series(decoded, index=index), utc=True)
+            # on the result, exactly as they would on the generic fallback.
+            decoded = pd.Series(decoded, index=index)
+            if tz is None or time_zone.has_explicit_zone(normalized):
+                return pd.to_datetime(decoded, utc=True)
+            return time_zone.to_utc(decoded, meta, subject=subject)
         except Exception:
             pass  # not actually CF-decodable (e.g. "since" inside a longer word) --
             # fall through to generic parsing below
-    return pd.to_datetime(series, errors="coerce", utc=True)
+    return time_zone.to_utc(series, meta, subject=subject)
+
+
+# -- table read options ----------------------------------------------------------------
+
+#: The frame ``attrs`` key :func:`apply_table_options` records the name of the column it
+#: joined the entry's ``time_columns`` into, so a later step finds that column by name
+#: instead of guessing which of two ``time``-ish columns it is -- and so a frame that
+#: has already been through it is recognised and left alone.
+_JOINED_TIME_ATTR = "time_joined_column"
+
+#: What the joined column is called, and what it is called instead when the table
+#: already has a (different) ``time`` column that must not be overwritten.
+_JOINED_TIME = "time"
+_JOINED_TIME_FALLBACK = "time_joined"
+
+
+def canonicalize_time_options(
+    time_columns: Any = None, time_format: Any = None
+) -> dict[str, Any]:
+    """Validate a source's ``time_columns`` / ``time_format``; return them canonically.
+
+    ``time_columns`` names two or more columns of the table that together state the
+    time -- ``["Date", "Time"]`` for a logger that writes ``2024-07-01`` and ``12:00``
+    in separate columns -- and ``time_format`` is the :func:`strptime
+    <datetime.datetime.strptime>` format of the *joined* text (the components joined by
+    a single space), for the day a format cannot be guessed (``"%d/%m/%Y %H:%M"``).
+    Returns ``{}`` when neither is declared, else ``{"time_columns": [...]}`` plus
+    ``"time_format"`` when given. A ``time_format`` has nothing to apply to without
+    ``time_columns``, so giving it alone is an error rather than a silent no-op.
+
+    Every problem is a ``ValueError`` whose message starts ``"time_columns: "`` or
+    ``"time_format: "`` and says what is allowed.
+    """
+    if time_columns is None and time_format is None:
+        return {}
+    if time_columns is None:
+        raise ValueError(
+            "time_format: time_format only applies together with time_columns (the "
+            "format of the joined date/time text), e.g. time_columns=['Date', 'Time'], "
+            "time_format='%d/%m/%Y %H:%M'"
+        )
+    if isinstance(time_columns, str) or not isinstance(time_columns, (list, tuple)):
+        # ValueError, not TypeError: every declaration here fails the same way
+        raise ValueError(  # noqa: TRY004
+            "time_columns: give a list of two or more column names that together state "
+            f"the time, e.g. ['Date', 'Time'], got {time_columns!r}"
+        )
+    columns = [c for c in time_columns if isinstance(c, str) and c.strip()]
+    if len(columns) != len(time_columns) or len(columns) < 2:
+        raise ValueError(
+            "time_columns: give a list of two or more column names that together state "
+            f"the time, e.g. ['Date', 'Time'], got {list(time_columns)!r} (a single "
+            "time column needs no joining: name it with axes={'T': ...} instead)"
+        )
+    out: dict[str, Any] = {"time_columns": list(columns)}
+    if time_format is not None:
+        if not isinstance(time_format, str) or not time_format.strip():
+            raise ValueError(
+                "time_format: give a strptime format string for the joined date/time "
+                f"text, e.g. '%d/%m/%Y %H:%M', got {time_format!r}"
+            )
+        out["time_format"] = time_format
+    return out
+
+
+def apply_table_options(df, meta, *, subject: str = "this source"):
+    """Return ``df`` with the entry's table read options applied.
+
+    Today the one option is ``time_columns``: a table whose time is split over several
+    columns (``Date`` and ``Time`` is the common pair). They are joined with one space
+    after being stripped of surrounding whitespace, parsed -- with
+    ``meta["time_format"]`` when the entry gives one, else as pandas reads it -- into
+    one **naive** time column, and replaced by it. The joined column is named ``time``
+    (or ``time_joined`` when the table already has a different ``time`` column), goes
+    first, and the component columns are dropped, so they never become data variables.
+    A row with an empty or missing component has no time (NaT). Naive on purpose: which
+    zone those clock readings are in is the entry's ``time_zone``/``utc_offset_h``, and
+    applying it is :func:`decode_time_column`'s one job, wherever the column is decoded.
+
+    The column's name is recorded in ``df.attrs`` (:func:`joined_time_column` reads it
+    back), which is also how a frame that has already been through here is recognised
+    and returned as it is: ``sources.read`` applies the option, and :func:`to_dataset`
+    asks again for a table handed to it directly. ``df.attrs`` is otherwise preserved.
+    ``df`` is returned unchanged -- the same object -- when the entry declares no
+    ``time_columns``.
+
+    Raises ``ValueError`` for a column the table does not have (listing the ones it
+    does) and for a joined text that no row parses (naming the first value and
+    suggesting ``time_format=``): both mean the declaration does not describe this
+    table.
+    """
+    import pandas as pd
+
+    meta = meta or {}
+    declared = canonicalize_time_options(
+        meta.get("time_columns"), meta.get("time_format")
+    )
+    columns = declared.get("time_columns")
+    if not columns:
+        return df
+    marked = df.attrs.get(_JOINED_TIME_ATTR)
+    if marked is not None and marked in df.columns:
+        return df  # already joined: the components are gone, so there is nothing to do
+    present = {str(c): c for c in df.columns}
+    missing = [c for c in columns if c not in present]
+    if missing:
+        raise ValueError(
+            f"{subject}: time_columns names column(s) {missing} that the table does "
+            f"not have. Its columns are {[str(c) for c in df.columns]}"
+        )
+
+    text = [df[present[c]].astype(str).str.strip() for c in columns]
+    blank = pd.Series(False, index=df.index)
+    for c, part in zip(columns, text, strict=True):
+        blank |= df[present[c]].isna() | part.eq("")
+    joined = text[0]
+    for part in text[1:]:
+        joined = joined + " " + part
+    joined = joined.where(~blank)  # a row missing a piece has no time, not half of one
+    time_format = declared.get("time_format")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # pandas' "could not infer format" notice
+        parsed = pd.to_datetime(joined, format=time_format, errors="coerce")
+    if len(df) and parsed.isna().all():
+        first = next((v for v in joined if isinstance(v, str)), None)
+        what = (
+            f"the first joined value is {first!r}"
+            if first is not None
+            else "every row is missing at least one of them"
+        )
+        raise ValueError(
+            f"{subject}: time_columns {columns} joined into text that no row parses as "
+            f"a time ({what}). Give time_format= the strptime format of the joined "
+            "text (the columns joined by one space), e.g. '%d/%m/%Y %H:%M'."
+        )
+
+    out = df.drop(columns=[present[c] for c in columns])
+    name = _JOINED_TIME if _JOINED_TIME not in out.columns else _JOINED_TIME_FALLBACK
+    # .array, not the Series: a Series would be aligned on the index, which fails on the
+    # duplicate labels a concatenated table can carry; the values are already in order.
+    out.insert(0, name, parsed.array)
+    out.attrs = {**df.attrs, _JOINED_TIME_ATTR: name}
+    return out
+
+
+def joined_time_column(df, meta) -> str | None:
+    """Return the column :func:`apply_table_options` joined ``time_columns`` into.
+
+    ``None`` when the entry declares no ``time_columns``, or the table has not been
+    through :func:`apply_table_options` yet (its component columns are still there).
+    Read from the name recorded in ``df.attrs``, and failing that from the naming rule
+    itself -- ``time_joined`` if there is one, else ``time`` -- so a frame whose attrs
+    were lost on the way (a concatenation, say) is still found.
+    """
+    components = (meta or {}).get("time_columns")
+    if not components:
+        return None
+    named = df.attrs.get(_JOINED_TIME_ATTR)
+    if named is not None and named in df.columns:
+        return str(named)
+    if any(c in df.columns for c in components):
+        return None
+    for candidate in (_JOINED_TIME_FALLBACK, _JOINED_TIME):
+        if candidate in df.columns:
+            return candidate
+    return None
 
 
 def coord_column(df, axis: str, *, exclude: frozenset = frozenset()) -> str | None:
@@ -366,12 +562,16 @@ def _axis_column(df, meta: dict[str, Any], axis: str) -> str | None:
 
     The entry's ``axes`` map is the contract and is tried first — guessing would fail on
     exactly the spellings in play (``"time (UTC)"``, ``"latitude (degrees_north)"``).
+    For ``T``, an entry that joins split date/time columns (``time_columns``) names no
+    column of its own: the joined one is the axis (see :func:`apply_table_options`).
     :func:`coord_column`'s regex match is the fallback for a frame from a reader that
     declared no axes.
     """
     named = (meta.get("axes") or {}).get(axis)
     if named is not None and named in df.columns:
         return str(named)
+    if axis == "T" and (joined := joined_time_column(df, meta)) is not None:
+        return joined
     return coord_column(df, axis)
 
 
@@ -414,40 +614,114 @@ def _scalar_position(df, column: str | None, axis: str) -> float | None:
     return float(np.median(finite))
 
 
-def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
-    """Return ``(depth, source, approximate)`` for a tabular source's instrument depth.
+class _StationDepth(NamedTuple):
+    """What :func:`_find_depth` found: the depth, and what describes it.
 
-    Every dataset states depth differently — a column, a pressure reading to convert, an
-    attribute on the entry, or nothing at all — so this is a ranked search that always
-    reports *which* rung it landed on, rather than a rule pretending they are alike:
-
-    1. a depth **column** with finite values (``depth``, ``depth_reading``, ``z``, and
-       their case-insensitive/``[units]`` variants);
-    2. **pressure** (``sea_water_pressure``, ``pressure``, ``pres``), converted at
-       1 dbar ~ 1 m and flagged ``approximate``;
-    3. an **attribute** on the catalog entry (``nominal_depth_m``, ``depth``,
-       ``geospatial_vertical_min``);
-    4. **nothing** — assume the surface, and say so.
-
-    The ranking is by how directly the source measured it, which is what the OOI Station
-    Papa moorings need: ``depth_reading`` is all-NaN there, ``z`` is a flat 0.0
-    placeholder, and only pressure knows the instrument is at ~8 m (its entry title
-    claims 30). Two rungs that both have a value and disagree are reported, since the
-    higher one silently winning is how a mid-water instrument comes to look like a
-    surface one.
-
-    ``depth`` is an array when the column varies (a profiler) and a float when it does
-    not; ``None`` means the surface was assumed.
+    ``depth`` is metres, positive down, below ``convention``'s origin: a float when the
+    reading is constant, an array when it varies, ``None`` when the surface was assumed.
+    ``column`` is the table column it was read from (``None`` for the metadata and
+    assumed-surface rungs).
     """
-    candidates: dict[str, np.ndarray] = {}
-    placeholders: list[str] = []
+
+    depth: Any
+    source: str
+    approximate: bool
+    convention: depth_convention.ResolvedConvention
+    column: str | None
+
+
+def _vertical_convention(
+    meta: dict[str, Any], units: dict[str, str], column: str | None
+) -> depth_convention.ResolvedConvention:
+    """Resolve the depth convention a table's vertical ``column`` is stated in.
+
+    The entry's declared (and probed) ``depth_convention`` first, then what the column's
+    own name and units give away -- ``Pressure (dbar)`` is pressure, so measured below
+    the free surface and in decibars -- then the defaults (see
+    :func:`ocean_skill.depth_convention.resolve`). The units come from the column's
+    ``(units)``/``[units]`` suffix or, for a column that has been renamed bare, the
+    entry's ``units`` metadata (:func:`_units_map`).
+    """
+    hint: dict[str, str] = {}
+    if column is not None:
+        base, _ = split_units(column)
+        unit = units.get(str(column)) or units.get(base)
+        hint = depth_convention.infer_from_coordinate(
+            base, {"units": unit} if unit else None
+        )
+    return depth_convention.resolve(meta, hint=hint)
+
+
+def _normalize_depth(values, convention: depth_convention.ResolvedConvention):
+    """Return a vertical column's values as metres, positive down.
+
+    Called with what :func:`numeric_in_range` left, so fill values are already NaN. The
+    sign is the convention's ``positive`` where somebody stated it, else the values' own
+    (a column of zeros and negatives is heights, not a depth of nothing), and the units
+    are decibars where the convention says so (1 dbar ~ 1 m, flagged
+    ``depth_approximate`` wherever it is applied: the exact factor varies with latitude
+    and water column, and gsw is not a dependency here).
+    """
+    return depth_convention.positive_down_values(values, None, convention=convention)
+
+
+def _depth_attrs(
+    convention: depth_convention.ResolvedConvention, *, approximate: bool
+) -> dict[str, Any]:
+    """Return the attributes a normalised depth coordinate carries (besides its units).
+
+    ``depth_normalized`` tells every later reader the values are already metres positive
+    down, so a second pass (:func:`ocean_skill.depth_convention.positive_down_values`)
+    leaves them alone instead of flipping or converting them again. ``depth_origin`` and
+    (for a fixed origin) ``depth_datum_z_m`` say what zero is, which is what the model
+    side needs to pick the matching level; ``depth_approximate`` marks values converted
+    from decibars.
+    """
+    attrs: dict[str, Any] = {"depth_origin": convention.origin}
+    if convention.origin == "fixed":
+        attrs["depth_datum_z_m"] = convention.datum_z_m
+    attrs[depth_convention.NORMALIZED_ATTR] = 1
+    if approximate:
+        attrs["depth_approximate"] = 1
+    return attrs
+
+
+def _stamp_time(coord, meta) -> None:
+    """Record on a UTC time coordinate that it is UTC, and what zone the source kept.
+
+    ``time_zone`` stays ``"UTC"`` -- the values are -- and ``source_time_zone`` (only
+    when the entry declared one) says what the source's own clock was, so a reader of a
+    ``12:00`` that now says ``20:00`` can see why.
+    """
+    coord.attrs["time_zone"] = "UTC"
+    if (label := time_zone.time_zone_label(meta)) is not None:
+        coord.attrs["source_time_zone"] = label
+
+
+def _find_depth(df, meta: dict[str, Any], *, subject: str) -> _StationDepth:
+    """Run the ranked depth search behind :func:`depth_of`, keeping its context."""
+    units = _units_map(df, meta)
+
+    # The rungs, in ranking order, as (rung, label, column). An entry's own axes["Z"] is
+    # the first: it names the vertical coordinate outright, where the alias search below
+    # can only guess, and the guess is exactly what goes wrong when a table has both a
+    # depth and a "sensor_depth" column.
+    declared = (meta.get("axes") or {}).get("Z")
+    declared = str(declared) if declared in df.columns else None
+    ranked: list[tuple[str, str, str]] = []
+    if declared is not None:
+        ranked.append((f"axes:{declared}", declared, declared))
     for name, aliases in _DEPTH_COLUMN_ALIASES.items():
         column = next(
             (c for c in df.columns if split_units(c)[0].strip().casefold() in aliases),
             None,
         )
-        if column is None:
-            continue
+        if column is not None and str(column) != declared:
+            ranked.append((name, name, str(column)))
+
+    candidates: dict[str, tuple[Any, depth_convention.ResolvedConvention, str]] = {}
+    placeholders: list[str] = []
+    for rung, label, column in ranked:
         values = numeric_in_range(df[column], "Z").to_numpy()
         finite = values[np.isfinite(values)]
         if finite.size == 0:
@@ -457,30 +731,29 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
         # down. Ranking it first because it is "the more direct column" is how a
         # mid-water instrument comes to be compared as a surface one, so it does not
         # count as a value -- but it is reported below, since a wrongly-declared zero
-        # is worth knowing about whichever rung ends up winning.
+        # is worth knowing about whichever rung ends up winning. That holds for a
+        # declared axes["Z"] too: a catalog's axes are as often what the probe found
+        # (this very column, on exactly these tables) as what somebody wrote.
         if float(np.max(np.abs(finite))) == 0.0:
-            placeholders.append(name)
+            placeholders.append(label)
             continue
-        candidates[name] = values
+        convention = _vertical_convention(meta, units, column)
+        candidates[rung] = (_normalize_depth(values, convention), convention, column)
 
-    reading = next((n for n in _DEPTH_COLUMNS[:-1] if n in candidates), None)
-    pressure = "sea_water_pressure" if "sea_water_pressure" in candidates else None
-
-    chosen, source, approximate = None, None, False
-    if reading is not None:
-        chosen, source = candidates[reading], reading
-    elif pressure is not None:
-        chosen, source, approximate = (
-            candidates[pressure] * _M_PER_DBAR,
-            "sea_water_pressure",
-            True,
-        )
+    # `ranked` is already in ranking order, so the first reading with a value wins; the
+    # pressure rung (always last: a conversion, not a reading) is only the fallback.
+    pressure_rung = _DEPTH_COLUMNS[-1]
+    reading = next(
+        (r for r, _, _ in ranked if r != pressure_rung and r in candidates), None
+    )
+    pressure = pressure_rung if pressure_rung in candidates else None
+    chosen_rung = reading if reading is not None else pressure
 
     # Two rungs that both have a value and disagree: report both rather than letting
     # the ranking decide silently.
     if reading is not None and pressure is not None:
-        a = float(np.nanmedian(candidates[reading]))
-        b = float(np.nanmedian(candidates[pressure])) * _M_PER_DBAR
+        a = float(np.nanmedian(candidates[reading][0]))
+        b = float(np.nanmedian(candidates[pressure][0]))
         if abs(a - b) > DEPTH_DISAGREEMENT_TOLERANCE:
             warnings.warn(
                 f"{subject}: {reading} says {a:g} m but sea_water_pressure says "
@@ -488,32 +761,91 @@ def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
                 "yourself if that is the wrong one.",
                 stacklevel=_stacklevel.find(),
             )
-    if placeholders and source is not None:
-        depth_says = float(np.nanmedian(chosen))
+    if placeholders and chosen_rung is not None:
+        depth_says = float(np.nanmedian(candidates[chosen_rung][0]))
         warnings.warn(
             f"{subject}: {'/'.join(placeholders)} is 0 for the whole record, which is "
-            f"a placeholder rather than a measurement — {source} puts this instrument "
-            f"at {depth_says:g} m. Using {source}.",
+            f"a placeholder rather than a measurement — {chosen_rung} puts this "
+            f"instrument at {depth_says:g} m. Using {chosen_rung}.",
             stacklevel=_stacklevel.find(),
         )
 
-    if chosen is None:
+    if chosen_rung is None:
+        convention = _vertical_convention(meta, units, None)
         for key in _DEPTH_ATTRS:
             value = meta.get(key)
-            if value is not None:
-                return float(value), f"metadata:{key}", False
+            if value is None:
+                continue
+            # nominal_depth_m / depth are depths by name, in metres: only their sign is
+            # ever in doubt (the heuristic reads an all-negative one as a height, as the
+            # abs() this replaces did), and the entry's depth_convention -- which
+            # describes the *source's* vertical values -- is not applied to them.
+            # geospatial_vertical_min is a raw value off that same axis, so it is.
+            raw = np.asarray([float(value)])
+            from_axis = key == "geospatial_vertical_min"
+            depth = depth_convention.positive_down_values(
+                raw, None, convention=convention if from_axis else None
+            )
+            return _StationDepth(
+                float(depth[0]),
+                f"metadata:{key}",
+                from_axis and convention.units == "dbar",
+                convention,
+                None,
+            )
         warnings.warn(
             f"{subject}: no depth found — no depth/z/pressure column with values, and "
             f"no {'/'.join(_DEPTH_ATTRS)} in the catalog entry. Assuming the surface. "
             "Give the entry a nominal_depth_m if it is not.",
             stacklevel=_stacklevel.find(),
         )
-        return None, "assumed-surface", False
+        return _StationDepth(None, "assumed-surface", False, convention, None)
 
+    chosen, convention, column = candidates[chosen_rung]
+    approximate = convention.units == "dbar"
     finite = chosen[np.isfinite(chosen)]
     if float(np.ptp(finite)) > FIXED_DEPTH_TOLERANCE:
-        return chosen, source, approximate
-    return float(np.median(finite)), source, approximate
+        return _StationDepth(chosen, chosen_rung, approximate, convention, column)
+    return _StationDepth(
+        float(np.median(finite)), chosen_rung, approximate, convention, column
+    )
+
+
+def depth_of(df, meta: dict[str, Any], *, subject: str = "this source"):
+    """Return ``(depth, source, approximate)`` for a tabular source's instrument depth.
+
+    Every dataset states depth differently — a column, a pressure reading to convert, an
+    attribute on the entry, or nothing at all — so this is a ranked search that always
+    reports *which* rung it landed on, rather than a rule pretending they are alike:
+
+    1. the **declared** vertical column, ``meta["axes"]["Z"]`` (``source`` reads
+       ``"axes:<column>"``), when the table has it: the entry says which column is the
+       depth, so no alias or bottom-depth column can displace it;
+    2. a depth **column** with finite values (``depth``, ``depth_reading``, ``z``, and
+       their case-insensitive/``[units]`` variants);
+    3. **pressure** (``sea_water_pressure``, ``pressure``, ``pres``), converted at
+       1 dbar ~ 1 m and flagged ``approximate``;
+    4. an **attribute** on the catalog entry (``nominal_depth_m``, ``depth``,
+       ``geospatial_vertical_min``);
+    5. **nothing** — assume the surface, and say so.
+
+    The ranking is by how directly the source measured it, which is what the OOI Station
+    Papa moorings need: ``depth_reading`` is all-NaN there, ``z`` is a flat 0.0
+    placeholder, and only pressure knows the instrument is at ~8 m (its entry title
+    claims 30). Two rungs that both have a value and disagree are reported, since the
+    higher one silently winning is how a mid-water instrument comes to look like a
+    surface one. A column that is exactly zero for the whole record is a placeholder at
+    every column rung, a declared one included.
+
+    ``depth`` is **metres, positive down**, whatever the source stored: the entry's
+    ``depth_convention`` (see :mod:`ocean_skill.depth_convention`) -- declared, probed,
+    or read off the column's own name and units -- says which way the values count and
+    whether they are decibars, and a column that states neither but is all negative is
+    read as heights. It is an array when the column varies (a profiler) and a float when
+    it does not; ``None`` means the surface was assumed.
+    """
+    found = _find_depth(df, meta, subject=subject)
+    return found.depth, found.source, found.approximate
 
 
 def _convert_data_column(
@@ -656,13 +988,29 @@ def to_dataset(df, meta: dict[str, Any]):
     codes was mapped to); the data variable it is paired with gets
     ``ancillary_variables`` pointing back at it, plus ``qc_policy`` recording the
     policy actually applied at read time.
+
+    What the entry declares about how the table is *read* changes the values here. A
+    split time (``time_columns``) is joined first (:func:`apply_table_options`).
+    ``time`` comes out as UTC: a naive timestamp is read as local time in the entry's
+    ``time_zone``/``utc_offset_h`` (see :mod:`ocean_skill.time_zone`), and the
+    coordinate's ``source_time_zone`` attribute says which. ``depth`` comes out as
+    **metres, positive down** whatever the source stored (heights, decibars), under the
+    entry's ``depth_convention`` (see :mod:`ocean_skill.depth_convention`), and carries
+    ``depth_origin`` (``surface`` or ``fixed``), ``depth_datum_z_m`` (fixed only),
+    ``depth_normalized`` (the values are already converted, so
+    :func:`ocean_skill.depth_convention.positive_down_values` leaves them alone) and,
+    for values converted from decibars, ``depth_approximate``.
     """
     import json
 
     import pandas as pd
     import xarray as xr
 
-    subject = meta.get("datasetID") or meta.get("title") or "this source"
+    subject = _subject_of(meta)
+    # A table whose time is split over columns is joined here when it has not been
+    # already (sources.read does it on the way in; this covers a table handed over
+    # directly), so every build below finds one time column.
+    df = apply_table_options(df, meta, subject=subject)
     feature_type = str(meta.get("featureType") or "").strip().casefold()
     if feature_type == "profile":
         # A CTD-style cast is indexed on depth, not time -- a different build entirely.
@@ -685,7 +1033,7 @@ def to_dataset(df, meta: dict[str, Any]):
     # tz-aware lane would re-read the whole remote record on every run. Resampling one
     # also yields datetime.datetime labels, which no later join matches. UTC is
     # recorded in attrs rather than thrown away.
-    time = decode_time_column(df[time_col], time_col)
+    time = decode_time_column(df[time_col], time_col, meta, subject=subject)
     frame = df.loc[time.notna()].copy()
     frame[time_col] = time[time.notna()].dt.tz_convert("UTC").dt.tz_localize(None)
     frame = frame.sort_values(time_col)
@@ -718,7 +1066,9 @@ def to_dataset(df, meta: dict[str, Any]):
             stacklevel=_stacklevel.find(),
         )
 
-    depth, depth_source, approximate = depth_of(frame, meta, subject=subject)
+    station = _find_depth(frame, meta, subject=subject)
+    depth, depth_source = station.depth, station.source
+    approximate = station.approximate
 
     # The entry's resolved qc contract (see ocean_skill.qc), if any -- flag columns
     # named in it are never treated as coordinates below (bypassing
@@ -741,8 +1091,8 @@ def to_dataset(df, meta: dict[str, Any]):
     data: dict[str, Any] = {}
     attrs: dict[str, Any] = {}
     for column in frame.columns:
-        if column in (time_col, lon_col, lat_col):
-            continue
+        if column in (time_col, lon_col, lat_col, station.column):
+            continue  # (a declared depth column is never a variable, by any name)
         is_flag = str(column) in flag_pairs
         if is_coordinate_column(column) and not is_flag:
             # Coordinate columns (time/lon/lat/depth/pressure/altitude, by name or
@@ -785,7 +1135,7 @@ def to_dataset(df, meta: dict[str, Any]):
         data[base] = variable
 
     ds = xr.Dataset(data, coords={"time": frame[time_col].to_numpy()})
-    ds["time"].attrs["time_zone"] = "UTC"
+    _stamp_time(ds["time"], meta)
     if lon is not None:
         ds = ds.assign_coords(lon=lon, lat=lat)
         ds["lon"].attrs.update(units="degrees_east", standard_name="longitude")
@@ -794,7 +1144,10 @@ def to_dataset(df, meta: dict[str, Any]):
         value = depth if np.isscalar(depth) else ("time", np.asarray(depth))
         ds = ds.assign_coords(depth=value)
         ds["depth"].attrs.update(
-            units="m", positive="down", long_name="instrument depth"
+            units="m",
+            positive="down",
+            long_name="instrument depth",
+            **_depth_attrs(station.convention, approximate=station.approximate),
         )
         if not np.isscalar(depth):
             # Describe the spread rather than diagnose its cause: a range can mean a
@@ -843,7 +1196,13 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
             '`axes={"Z": "depth (m)"}`, or name the column "depth".'
         )
 
+    convention = _vertical_convention(meta, _units_map(df, meta), depth_col)
     depth = numeric_in_range(df[depth_col], "Z")
+    # Normalised before the sort and the duplicate check, so both run on metres positive
+    # down whatever the source stored: a cast kept as heights (-1 ... -50) comes out in
+    # the order a depth axis is read, and two heights that differ only by sign are not
+    # mistaken for each other.
+    depth = pd.Series(_normalize_depth(depth.to_numpy(), convention), index=depth.index)
     frame = df.loc[depth.notna()].copy()
     frame[depth_col] = depth[depth.notna()]
     frame = frame.sort_values(depth_col)
@@ -871,7 +1230,7 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
 
     time = None
     if time_col is not None:
-        decoded = decode_time_column(frame[time_col], time_col)
+        decoded = decode_time_column(frame[time_col], time_col, meta, subject=subject)
         decoded = decoded.dropna()
         if not decoded.empty:
             if decoded.nunique() > 1:
@@ -910,9 +1269,11 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
         data[base] = variable
 
     ds = xr.Dataset(data, coords={"depth": frame[depth_col].to_numpy()})
-    _, depth_unit = split_units(depth_col)
     ds["depth"].attrs.update(
-        units=depth_unit or "m", positive="down", long_name="depth"
+        units="m",
+        positive="down",
+        long_name="depth",
+        **_depth_attrs(convention, approximate=convention.units == "dbar"),
     )
     if lon is not None:
         ds = ds.assign_coords(lon=lon, lat=lat)
@@ -920,7 +1281,7 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
         ds["lat"].attrs.update(units="degrees_north", standard_name="latitude")
     if time is not None:
         ds = ds.assign_coords(time=time)
-        ds["time"].attrs["time_zone"] = "UTC"
+        _stamp_time(ds["time"], meta)
     ds.attrs.update(attrs)
     for key in ("featureType", "title", "institution", "datasetID"):
         if value := meta.get(key):
@@ -1007,8 +1368,10 @@ def _timeseriesprofile_dataset(df, meta: dict[str, Any], *, subject: str):
             '`axes={"Z": "depth (m)"}`, or name the column "depth".'
         )
 
-    time = decode_time_column(df[time_col], time_col)
+    time = decode_time_column(df[time_col], time_col, meta, subject=subject)
+    convention = _vertical_convention(meta, _units_map(df, meta), depth_col)
     depth = numeric_in_range(df[depth_col], "Z")
+    depth = pd.Series(_normalize_depth(depth.to_numpy(), convention), index=depth.index)
     keep = time.notna() & depth.notna()
     frame = df.loc[keep].copy()
     frame[time_col] = time[keep].dt.tz_convert("UTC").dt.tz_localize(None)
@@ -1077,8 +1440,13 @@ def _timeseriesprofile_dataset(df, meta: dict[str, Any], *, subject: str):
         variable_attrs[base] = col_attrs
 
     ds = long.set_index(["time", "depth"]).to_xarray()
-    ds["time"].attrs["time_zone"] = "UTC"
-    ds["depth"].attrs.update(units="m", positive="down", long_name="depth")
+    _stamp_time(ds["time"], meta)
+    ds["depth"].attrs.update(
+        units="m",
+        positive="down",
+        long_name="depth",
+        **_depth_attrs(convention, approximate=convention.units == "dbar"),
+    )
     for base, col_attrs in variable_attrs.items():
         ds[base].attrs.update(col_attrs)
     if lon is not None:
