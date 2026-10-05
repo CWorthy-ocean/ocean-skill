@@ -2376,7 +2376,8 @@ name the panels, or with `osk.FieldSet([...])`:
 osk.plot({"Eq": eq, "180-160": b180, "160-120": b160})
 ```
 
-- **Panels keep their own x axis** (km along a transect, degrees for a slab).
+- **Panels keep their own x axis** (km, longitude or latitude as each path suggests;
+  degrees for a slab). `section_x=` applies to every panel alike.
 - **Panel titles** are `label — path note`, and the shared variable and depth go in
   the suptitle.
 - **Colour scale:** one shared scale and colorbar when every member has the same
@@ -2474,8 +2475,22 @@ comparisons instead.
 * **y is depth, positive down, inverted** — 0 m draws at the top, the seafloor at
   the bottom — matching every other depth label in this package (`facet_labels`'
   own `abs()`).
-* **x is along-path distance in kilometres** (great-circle, from the sliced grid's
-  own lon/lat), labelled `distance along transect (km)`.
+* **x is chosen per path (`section_x="auto"`).** A path that runs mostly east-west
+  (an equatorial line) is drawn against its longitude, labelled `longitude (°E)`;
+  one that runs mostly north-south, against its latitude, `latitude (°N)`; anything
+  else — a diagonal, a bend, a path that doubles back — against the distance along
+  the path in kilometres (great-circle, from the sliced grid's own lon/lat),
+  `distance along transect (km)`.
+  * "Mostly" means one direction's span, in kilometres, is at least twice the other's
+    *and* the coordinate only ever rises or only ever falls along the path.
+  * It is read from the positions you asked for, not the grid cells they snapped to,
+    so a line at `lat=0` is not thrown off by a grid that jitters a cell either way.
+  * Longitude is unwrapped across the antimeridian: 170°E to 170°W reads 170 to 190.
+  * `section_x="distance"` forces kilometres whatever the path does;
+    `section_x="lon"` / `"lat"` force that coordinate and raise if it doubles back.
+  * A box-averaged slab always draws its surviving axis in degrees under `"auto"`;
+    `section_x="distance"` gives it kilometres instead. `section_x` works on every
+    section figure, static or interactive, including comparison rows and stacks.
 * **Below-bathymetry (or off-domain) cells** carry no data and draw as the same
   grey a map's land does — the seafloor's shape is visible without singling those
   cells out.
@@ -2755,8 +2770,9 @@ More than one `section_row` comparison in a `ComparisonSet.plot()` — or in
 osk.plot({"Eq": eq, "180-160": b180, "160-120": b160}, shared_limits=True)
 ```
 
-- **Rows keep their own x axis.** A transect row runs in km along the path, a
-  lon-averaged slab row in degrees of latitude, so x is never shared across rows.
+- **Rows keep their own x axis.** A diagonal transect row runs in km along the path,
+  an equatorial one in degrees of longitude, a lon-averaged slab row in degrees of
+  latitude (`section_x=` forces one choice), so x is never shared across rows.
   Depth is positive-down and inverted on every panel.
 - **Row labels** come from each comparison's label, or the dict keys, drawn rotated
   at the left edge (`row_label_kwargs`).

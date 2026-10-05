@@ -151,6 +151,27 @@ def _is_stale_positionless_station(da, meta: dict[str, Any]) -> bool:
     return point_of(da) is None
 
 
+def _is_stale_pathless_section(obj) -> bool:
+    """Whether a cached section lane (or aligned section) lacks its path coordinates.
+
+    A section built before :func:`ocean_skill.transect.sample_along` kept the
+    requested path (``path_lon``/``path_lat``) measured its along-path distance
+    between *snapped* cells and collapsed a run of requests to the run's first
+    point, which on a coarse source sampled along a cell boundary flips between
+    rows and inflates the section several-fold. Like
+    :func:`_is_stale_positionless_station`, read on every cache hit rather than
+    baked into the key (and without bumping ``cache._FORMAT_VERSION``, which would
+    orphan every unrelated entry): anything with an ``along`` dimension but no
+    ``path_lon`` is such an entry, and is discarded and recomputed. Every section
+    made since carries the coordinate, a slab or a grid-aligned slice included
+    (:func:`ocean_skill.transect._attach_along_coord`), so a fresh result never
+    trips this.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    return ALONG_DIM in obj.dims and "path_lon" not in obj.coords
+
+
 def _is_climatology(source: str) -> bool:
     """Whether a source's catalog entry marks it a climatology.
 
@@ -3263,6 +3284,19 @@ def prepare_source(
                     "horizontal squeeze); recomputing and overwriting it.",
                     stacklevel=_stacklevel.find(),
                 )
+            elif da_hit is not None and _is_stale_pathless_section(da_hit):
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    f"ignoring a cached {source!r} section lane with no "
+                    "path_lon/path_lat -- a stale entry from before sections "
+                    "kept the requested path (its along-path distance was "
+                    "measured between snapped cells); recomputing and "
+                    "overwriting it.",
+                    stacklevel=_stacklevel.find(),
+                )
             else:
                 if da_hit is not None and require_reduced:
                     da_hit = _require_reduced(
@@ -4012,40 +4046,59 @@ class Comparison:
     ) -> tuple[dict[str, Any], tuple[float, float, float, float]]:
         """The reference's transect select and bbox, from the test lane's own path.
 
-        Reads ``lon(along)``/``lat(along)`` straight off the already-prepared
+        Reads ``path_lon(along)``/``path_lat(along)`` off the already-prepared
         test lane — whatever grid-aligned slice, waypoint path, line, or points
-        list the user asked for, this is *where it actually landed* — and
+        list the user asked for, this is the path it was *asked to follow*, one
+        position per column (falling back to ``lon(along)``/``lat(along)``, the
+        cells it snapped to, for a lane that carries no path coordinates) — and
         re-spells it as the resolved ``points`` form
         (:func:`ocean_skill.transect.as_transect` already treats that as
         idempotent, since it is what :func:`ocean_skill.transect.sample_along`
-        itself produces). The reference is then sampled at exactly those
-        points, not the user's original request repeated independently, which
-        is the whole point of the route: two lanes sampled at the same lon/lat
-        share an along-path axis to align on; two lanes each finding their own
-        nearest cells to the same request generally do not.
+        itself produces). The reference is then sampled along those points rather
+        than the user's original request repeated independently, so the two lanes
+        see the same path and the same number of kilometres of it.
+
+        The positions the lanes are *paired* on are not decided here:
+        :func:`ocean_skill.align._bin_into_frame` matches the two lanes' columns
+        by position, nearest to nearest, whichever one's cells are coarser. What
+        sampling the reference on the requested path (rather than at the test
+        lane's snapped cells) buys is that the reference does not inherit the test
+        lane's sub-cell jitter: a fine model's cells wobble a few km either side of
+        a straight line, and where that line is the boundary between a coarse
+        reference's rows (the equator through a 1-degree grid centred at +/-0.5)
+        every wobble flips the reference to the other row.
 
         Points are rounded to 4 decimal places, matching the ``_bbox``
         cache-key precedent in :func:`prepare_source`, so float noise carried
         through the test lane's own vertical transform does not fragment the
         reference's lane cache entry. The bbox returned alongside is built
-        from the unrounded positions.
+        from the unrounded positions -- the union of the path and the snapped
+        cells, so the reference crop (which :func:`ocean_skill.align.
+        subset_to_bbox` pads further) covers both.
         """
         from ocean_skill.align import _lat_name, _lon_name
 
         lon_name, lat_name = _lon_name(t), _lat_name(t)
-        lons = np.asarray(t[lon_name], dtype="float64")
-        lats = np.asarray(t[lat_name], dtype="float64")
+        cell_lons = np.asarray(t[lon_name], dtype="float64")
+        cell_lats = np.asarray(t[lat_name], dtype="float64")
+        if "path_lon" in t.coords and "path_lat" in t.coords:
+            lons = np.asarray(t["path_lon"], dtype="float64")
+            lats = np.asarray(t["path_lat"], dtype="float64")
+        else:
+            lons, lats = cell_lons, cell_lats
         points = [
             [round(float(lo), 4), round(float(la), 4)] for lo, la in zip(lons, lats)
         ]
         extra_select = {
             "transect": {"points": points, "method": troute.get("method", "nearest")}
         }
+        all_lons = np.concatenate([lons, cell_lons])
+        all_lats = np.concatenate([lats, cell_lats])
         bbox = (
-            float(lons.min()),
-            float(lats.min()),
-            float(lons.max()),
-            float(lats.max()),
+            float(all_lons.min()),
+            float(all_lats.min()),
+            float(all_lons.max()),
+            float(all_lats.max()),
         )
         return extra_select, bbox
 
@@ -5031,6 +5084,18 @@ class Comparison:
         use_cache = self._use_cache()
         if use_cache and not refresh:
             hit = _cache.load(self._cache_key)
+            if hit is not None and _is_stale_pathless_section(hit):
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    "ignoring a cached section comparison with no path_lon/"
+                    "path_lat -- a stale entry from before sections kept the "
+                    "requested path; recomputing and overwriting it.",
+                    stacklevel=_stacklevel.find(),
+                )
+                hit = None
             if hit is not None:
                 self._aligned = hit
                 # actual_depth rides along in attrs precisely so a cached result

@@ -939,8 +939,8 @@ def test_stacked_section_row_takes_each_rows_x_label_from_its_own_geometry(monke
     real = section_module.prepare_section_row
     calls = {"n": 0}
 
-    def fake(aligned):
-        values, geometry = real(aligned)
+    def fake(aligned, x="auto"):
+        values, geometry = real(aligned, x)
         calls["n"] += 1
         if calls["n"] == 2:
             geometry = dataclasses.replace(geometry, x_label="latitude (°N)")
@@ -1275,8 +1275,8 @@ def test_stacked_section_takes_each_panels_x_label_from_its_own_geometry(monkeyp
     real = section_module.prepare_section
     calls = {"n": 0}
 
-    def fake(da):
-        values, geometry = real(da)
+    def fake(da, x="auto"):
+        values, geometry = real(da, x)
         calls["n"] += 1
         if calls["n"] == 2:
             geometry = dataclasses.replace(geometry, x_label="latitude (°N)")

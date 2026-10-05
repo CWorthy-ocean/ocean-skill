@@ -733,8 +733,17 @@ def grid_slice(
     return _attach_along_coord(sliced, lon_name, lat_name, path_method="grid")
 
 
-def _attach_along_coord(sliced, lon_name: str, lat_name: str, *, path_method: str):
-    """Attach the cumulative along-path distance coordinate (km) and its units.
+def _attach_along_coord(
+    sliced,
+    lon_name: str,
+    lat_name: str,
+    *,
+    path_method: str,
+    distance=None,
+    path_lon=None,
+    path_lat=None,
+):
+    """Attach the along-path distance coordinate (km), its units, and the path coords.
 
     The one place that decides what "along" means, shared by :func:`grid_slice`
     and :func:`sample_along` so a grid-aligned slice and an interpolated/sampled
@@ -743,18 +752,53 @@ def _attach_along_coord(sliced, lon_name: str, lat_name: str, *, path_method: st
     prepare_section` to read. ``sliced`` must already have its along-path
     dimension named :data:`ocean_skill.align.ALONG_DIM`, with 1-D
     ``lon_name``/``lat_name`` coordinates riding on it.
+
+    ``distance`` (km, one value per column) is the along-path coordinate when the
+    caller already knows it -- :func:`sample_along` measures it over the
+    *requested* points, so a nearest-neighbour sample's snapping jitter (the
+    chosen cells wobbling a few km either side of a straight line) cannot add
+    kilometres that the path never had. Left ``None``, it is the cumulative
+    great-circle distance between consecutive ``lon_name``/``lat_name``
+    positions, which is exact when those positions *are* the path (a grid-aligned
+    slice, a slab).
+
+    Two further 1-D coordinates, ``path_lon``/``path_lat``, carry *where the path
+    was asked to go*, as opposed to ``lon_name``/``lat_name``, where the data
+    actually came from (a snapped cell's own position). ``path_lon``/``path_lat``
+    are the caller's when given, and otherwise a copy of ``lon_name``/``lat_name``
+    -- the two coincide whenever nothing was snapped -- so every section carries
+    the same set of coordinates, whichever way it was made.
     """
     from ocean_skill.align import ALONG_DIM, _haversine_km
 
     lon_vals = np.asarray(sliced[lon_name], dtype="float64")
     lat_vals = np.asarray(sliced[lat_name], dtype="float64")
-    distance = np.zeros(lon_vals.size)
-    if lon_vals.size > 1:
-        seg_km = _haversine_km(
-            lon_vals[:-1], lat_vals[:-1], lon_vals[1:], lat_vals[1:]
-        )
-        distance[1:] = np.cumsum(seg_km)
-    sliced = sliced.assign_coords({ALONG_DIM: (ALONG_DIM, distance)})
+    if distance is None:
+        distance = np.zeros(lon_vals.size)
+        if lon_vals.size > 1:
+            seg_km = _haversine_km(
+                lon_vals[:-1], lat_vals[:-1], lon_vals[1:], lat_vals[1:]
+            )
+            distance[1:] = np.cumsum(seg_km)
+    else:
+        distance = np.asarray(distance, dtype="float64")
+    path_lon = lon_vals if path_lon is None else np.asarray(path_lon, dtype="float64")
+    path_lat = lat_vals if path_lat is None else np.asarray(path_lat, dtype="float64")
+    sliced = sliced.assign_coords(
+        {
+            ALONG_DIM: (ALONG_DIM, distance),
+            "path_lon": (
+                ALONG_DIM,
+                path_lon,
+                {"units": "degrees_east", "long_name": "requested path longitude"},
+            ),
+            "path_lat": (
+                ALONG_DIM,
+                path_lat,
+                {"units": "degrees_north", "long_name": "requested path latitude"},
+            ),
+        }
+    )
     sliced[ALONG_DIM].attrs.update(
         units="km", long_name="distance along transect", path_method=path_method
     )
@@ -844,10 +888,25 @@ def sample_along(
     covering less of the path than bilinear (or vice versa) for no reason a
     caller could see.
 
-    Consecutive requested points that snap to the same cell are then collapsed,
-    so the along-path coordinate is always strictly increasing -- see
-    :func:`_attach_along_coord`, which both methods finish through, giving the
-    same output shape :func:`grid_slice` does.
+    For ``method="nearest"``, a run of consecutive requested points that snap to
+    the same cell is collapsed to one column, so the along-path coordinate is
+    always strictly increasing. The column sits at the *middle* of its run (the
+    mean along-path distance, and the mean requested position), not at the run's
+    first point: a coarse source's cell then straddles the stretch of path it
+    actually answers for, rather than being pinned to wherever the path first
+    entered it. ``method="bilinear"`` has no snapping to collapse -- every
+    requested point is its own column (only exactly repeated points merge).
+
+    The along-path distance is measured over the *requested* points, not the
+    snapped cells (see :func:`_attach_along_coord`'s ``distance=``), and the
+    requested positions ride along as the ``path_lon``/``path_lat`` coordinates
+    beside the snapped ``lon``/``lat``. Without that, a coarse source sampled on
+    a line that runs along a cell boundary (the equator through a 1-degree grid
+    whose rows sit at +/-0.5) flips between the two neighbouring rows from one
+    point to the next, and each flip would add its full ~111 km to the along
+    coordinate -- a section 3x its true length. Both methods finish through
+    :func:`_attach_along_coord`, giving the same output shape :func:`grid_slice`
+    does.
     """
     import warnings
 
@@ -918,6 +977,15 @@ def sample_along(
         iys = np.array([np.abs(lat_vals - la).argmin() for la in req_lats])
         snapped_lon, snapped_lat = lon_vals[ixs], lat_vals[iys]
 
+    # Cumulative distance along the *requested* path, over the whole sequence
+    # (so a stretch dropped for lying outside the domain still counts for the
+    # distance it spans), indexed down to the kept columns below.
+    cum_km = np.zeros(req_lons.size)
+    if req_lons.size > 1:
+        cum_km[1:] = np.cumsum(
+            _haversine_km(req_lons[:-1], req_lats[:-1], req_lons[1:], req_lats[1:])
+        )
+
     offsets = _haversine_km(snapped_lon, snapped_lat, req_lons, req_lats)
     inside = offsets <= max(cell_km, 1e-9)
     n_dropped = int((~inside).sum())
@@ -934,22 +1002,46 @@ def sample_along(
         )
     iys, ixs = iys[inside], ixs[inside]
     req_lons, req_lats = req_lons[inside], req_lats[inside]
+    cum_km = cum_km[inside]
+    cum_km = cum_km - cum_km[0]  # the first kept point is km 0
 
     # Consecutive requests landing on the same cell would otherwise leave the
     # along coordinate flat (or, after a nearest isel, duplicated) rather than
-    # strictly increasing.
-    dup = np.zeros(iys.size, dtype=bool)
-    if iys.size > 1:
-        dup[1:] = (np.diff(iys) == 0) & (np.diff(ixs) == 0)
-    keep = ~dup
-    iys, ixs = iys[keep], ixs[keep]
-    req_lons, req_lats = req_lons[keep], req_lats[keep]
-    if iys.size < 2:
+    # strictly increasing. Each such run becomes one column, placed at the middle
+    # of the run. A bilinear sample has no cell to share, so only a request
+    # repeated exactly collapses.
+    new_run = np.ones(iys.size, dtype=bool)
+    if method == "nearest":
+        new_run[1:] = (np.diff(iys) != 0) | (np.diff(ixs) != 0)
+    else:
+        new_run[1:] = (np.diff(req_lons) != 0) | (np.diff(req_lats) != 0)
+    starts = np.flatnonzero(new_run)
+    if starts.size < 2:
         raise ValueError(
             f"{subject}: the transect path collapses to a single grid cell -- "
             "widen it, or use a top-level select={'lon': ..., 'lat': ...} for "
             "one place."
         )
+    run_id = np.cumsum(new_run) - 1
+    counts = np.bincount(run_id)
+    multi = counts > 1
+
+    def _run_mean(values):
+        mean = np.bincount(run_id, weights=values) / counts
+        return np.where(multi, mean, values[starts])
+
+    run_km = _run_mean(cum_km)
+    run_lats = _run_mean(req_lats)
+    # Longitudes are averaged unwrapped, so a run straddling the seam (179.9,
+    # -179.9) lands at 180 rather than 0, then put back into the convention.
+    run_lons = _run_mean(np.unwrap(req_lons, period=360.0))
+    run_lons = np.where(
+        multi,
+        [_wrap_lon(float(v), convention) for v in run_lons],
+        req_lons[starts],
+    )
+    iys, ixs = iys[starts], ixs[starts]
+    req_lons, req_lats = req_lons[starts], req_lats[starts]
 
     if method == "nearest":
         if curvilinear:
@@ -991,7 +1083,15 @@ def sample_along(
                 stacklevel=_stacklevel.find(),
             )
 
-    return _attach_along_coord(sampled, lon_name, lat_name, path_method=method)
+    return _attach_along_coord(
+        sampled,
+        lon_name,
+        lat_name,
+        path_method=method,
+        distance=run_km,
+        path_lon=run_lons,
+        path_lat=run_lats,
+    )
 
 
 def _bilinear_dataset(cropped, lon_name: str, lat_name: str, lons, lats):

@@ -556,7 +556,8 @@ def test_a_lat_slab_is_labelled_by_longitude(patched_woa):
     assert geometry.path_note == "mean over 10°S–5°N"
 
 
-def test_a_transect_section_still_reads_distance_in_km(patched_woa):
+def test_an_equatorial_transect_section_reads_longitude(patched_woa):
+    """A lat=0 transect runs east-west, so ``"auto"`` labels it by longitude."""
     from ocean_skill.plot.section import prepare_section
 
     f = osk.field(
@@ -565,7 +566,16 @@ def test_a_transect_section_still_reads_distance_in_km(patched_woa):
         select={"transect": {"lat": 0, "lon": {"min": 160, "max": 220}}},
         cache=False,
     )
-    _, geometry = prepare_section(f.data)
+    field, geometry = prepare_section(f.data)
+    assert geometry.x_label == "longitude (°E)"
+    assert geometry.x_axis == "lon"
+    assert field["distance"].attrs["units"] == "degrees_east"
+    x = np.unique(field["distance"].values)
+    assert x.min() == pytest.approx(160, abs=2)
+    assert x.max() == pytest.approx(220, abs=2)
+
+    # forcing distance gives the old kilometres reading back
+    _, geometry = prepare_section(f.data, x="distance")
     assert geometry.x_label == "distance along transect (km)"
     assert geometry.x_axis == "distance"
 
