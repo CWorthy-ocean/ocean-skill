@@ -3729,10 +3729,11 @@ def field_facet(
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     location_items: Sequence[dict[str, Any]] | None = None,
-    legend: bool = True,
+    legend: bool | str = True,
     legend_kwargs: dict[str, Any] | None = None,
     marker_size: float = 80.0,
     colors: str | Sequence[str] | Mapping[str, str] | None = None,
+    annot_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -3806,6 +3807,10 @@ def field_facet(
     palette, or a ``{legend label: colour}`` dict -- see
     :func:`~ocean_skill.plot.locations.legend_groups`); with no ``location_items`` it
     has nothing to colour and is ignored, as ``marker_size`` and ``legend`` are.
+    ``legend="annotate"`` writes each labelled selection's name beside its shape on
+    **every** panel (part of the map, not a key) and keeps the framed key, on the
+    first panel, only for the unlabelled groups -- none, no key; ``annot_kwargs``
+    (``Axes.annotate`` keywords) restyles the names.
     """
     import matplotlib.pyplot as plt
 
@@ -3997,9 +4002,11 @@ def field_facet(
                 location_items,
                 marker_size=marker_size,
                 colors=colors,
-                legend=legend and i == 0,
+                legend=legend,
+                key_here=i == 0,
                 legend_kwargs=legend_kwargs,
                 legend_fontsize=scale["legend"],
+                annot_kwargs=annot_kwargs,
             )
         used.append(ax)
         ims.append(im)
@@ -8085,10 +8092,12 @@ def _overlay_locations(
     items,
     *,
     marker_size: float,
-    legend: bool,
+    legend: bool | str,
     legend_kwargs: dict[str, Any] | None,
     legend_fontsize: float,
     colors=None,
+    key_here: bool = True,
+    annot_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Draw ``locations``-family items over a field map already on ``ax``.
 
@@ -8097,23 +8106,86 @@ def _overlay_locations(
     field would otherwise zoom the map out to hold it -- the reason
     :func:`_draw_map` adds its domain ring with ``add_artist`` too. Items are context
     for the field, not something the view should frame itself around.
+
+    ``legend`` is ``True`` (framed key), ``False`` or ``"annotate"`` (each labelled
+    selection's name written beside its shape; the key shrinks to the unlabelled
+    groups and is dropped when there are none). The names are part of the map, so
+    they go on every panel that draws the items; the framed key only where
+    ``key_here`` (a facet's first panel). ``annot_kwargs`` restyles the names.
     """
     import cartopy.crs as ccrs
 
+    from ocean_skill.plot.locations import resolve_location_legend
+
+    legend = resolve_location_legend(legend)
     xlim, ylim = ax.get_xlim(), ax.get_ylim()
     handles = _draw_location_items(
-        ax, items, proj=ccrs.PlateCarree(), marker_size=marker_size, colors=colors
+        ax,
+        items,
+        proj=ccrs.PlateCarree(),
+        marker_size=marker_size,
+        colors=colors,
+        annotate=legend == "annotate",
+        annot_fontsize=legend_fontsize,
+        annot_kwargs=annot_kwargs,
     )
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
-    if legend:
+    if legend and key_here:
         _draw_location_legend(
             ax, handles, fontsize=legend_fontsize, legend_kwargs=legend_kwargs
         )
 
 
+def _draw_location_labels(
+    ax, anchors, *, fontsize: float, annot_kwargs: dict[str, Any] | None = None
+) -> None:
+    """Write each :func:`~ocean_skill.plot.locations.annotation_anchors` name on ``ax``.
+
+    Each is an ``ax.annotate`` at its data position (plain PlateCarree, as the shapes,
+    so a 180-centred axes needs nothing special) with a fixed 4-point offset away from
+    the shape (``dx``/``dy``), in the group's colour, bold, with a white halo so it
+    reads over deep water and pale shelf alike. ``annot_kwargs`` is merged over that.
+    ``annotation_clip`` keeps a label off the page when its anchor is out of view.
+    """
+    import cartopy.crs as ccrs
+    import matplotlib.patheffects as pe
+
+    xy_crs = ccrs.PlateCarree()._as_mpl_transform(ax)
+    for a in anchors:
+        style = _merged(
+            {
+                "color": a["color"],
+                "fontsize": fontsize,
+                "fontweight": "bold",
+                "path_effects": [pe.withStroke(linewidth=2.5, foreground="white")],
+                "zorder": 6,
+                "annotation_clip": True,
+                "ha": a["ha"],
+                "va": a["va"],
+            },
+            annot_kwargs,
+        )
+        ax.annotate(
+            a["text"],
+            xy=(a["lon"], a["lat"]),
+            xycoords=xy_crs,
+            xytext=(a["dx"] * 4, a["dy"] * 4),
+            textcoords="offset points",
+            **style,
+        )
+
+
 def _draw_location_items(
-    ax, items, *, proj, marker_size: float = 80.0, colors=None
+    ax,
+    items,
+    *,
+    proj,
+    marker_size: float = 80.0,
+    colors=None,
+    annotate: bool = False,
+    annot_fontsize: float = 8.0,
+    annot_kwargs: dict[str, Any] | None = None,
 ) -> list:
     """Draw ``locations``-family items into ``ax`` and return the legend handles.
 
@@ -8121,7 +8193,11 @@ def _draw_location_items(
     slices -- grouped, labelled and coloured by :func:`~ocean_skill.plot.locations.
     legend_groups` (``featureType`` via :func:`~ocean_skill.plot.locations.style_for`,
     except that each labelled selection is its own group, in its own colour; ``colors``
-    overrides those colours, shape and legend handle alike). Shared
+    overrides those colours, shape and legend handle alike). With ``annotate`` each
+    labelled selection group is named beside its shape instead
+    (:func:`~ocean_skill.plot.locations.annotation_anchors`, drawn last by
+    :func:`_draw_location_labels`) and gets no legend handle, so the returned handles
+    are only the groups that have no name to write. Shared
     by :func:`locations` (its own figure) and :func:`field_facet` (drawn on top of a
     field map), so a location looks the same on either.
 
@@ -8137,11 +8213,17 @@ def _draw_location_items(
     """
     from matplotlib.lines import Line2D
 
-    from ocean_skill.plot.locations import legend_groups
+    from ocean_skill.plot.locations import annotation_anchors, legend_groups
     from ocean_skill.plot.summary import _MARKERS
 
+    items = list(items)
+    anchors: list[dict[str, Any]] = []
+    if annotate:
+        anchors, unlabelled = annotation_anchors(items, colors)
+        keyed = {label for label, _style, _members in unlabelled}
     handles = []
     for label, style, group_items in legend_groups(items, colors):
+        keyed_here = not annotate or label in keyed
         color = style["color"]
         linestyle = style["linestyle"]
         points = [i for i in group_items if i["kind"] == "point"]
@@ -8186,6 +8268,8 @@ def _draw_location_items(
                     ls="-" if solid else linestyle,
                     zorder=5 if solid else 4,
                 )
+        if not keyed_here:
+            continue
         if points:
             handles.append(
                 Line2D(
@@ -8215,6 +8299,10 @@ def _draw_location_items(
                     label=label,
                 )
             )
+    if anchors:
+        _draw_location_labels(
+            ax, anchors, fontsize=annot_fontsize, annot_kwargs=annot_kwargs
+        )
     return handles
 
 
@@ -8251,7 +8339,7 @@ def locations(
     *,
     title: str | None = None,
     extent: tuple[float, float, float, float] | None = None,
-    legend: bool = True,
+    legend: bool | str = True,
     marker_size: float = 80.0,
     colors: str | Sequence[str] | Mapping[str, str] | None = None,
     tiles: str | bool | None = None,
@@ -8264,6 +8352,7 @@ def locations(
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     legend_kwargs: dict[str, Any] | None = None,
+    annot_kwargs: dict[str, Any] | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
 ):
@@ -8286,6 +8375,14 @@ def locations(
     :func:`~ocean_skill.plot.locations.legend_groups`). Shapes and legend handles take
     the same colour; ``legend_kwargs={"labelcolor": "linecolor"}`` also colours the
     legend text to match.
+
+    ``legend`` is ``True`` (the framed key), ``False`` or ``"annotate"``: each
+    *labelled selection* (a ``label=`` on a Field/Comparison) is named in place instead
+    -- beside a point, over a box's top edge, at a transect's far end -- in its own
+    colour with a white halo, and the framed key keeps only the groups with no name to
+    write (catalog featureTypes, the unlabelled selections, ``domain``), vanishing
+    when there are none. ``annot_kwargs`` (``Axes.annotate`` keywords, e.g.
+    ``{"color": "k", "fontsize": 9}``) restyles those names.
 
     ``extent`` is ``(lon_min, lat_min, lon_max, lat_max)`` — the same bbox shape
     ``find(bbox=...)`` takes — and defaults to a frame around every item (set by
@@ -8344,8 +8441,18 @@ def locations(
         land=land,
     )
 
+    from ocean_skill.plot.locations import resolve_location_legend
+
+    legend = resolve_location_legend(legend)
     handles = _draw_location_items(
-        ax, items, proj=proj, marker_size=marker_size, colors=colors
+        ax,
+        items,
+        proj=proj,
+        marker_size=marker_size,
+        colors=colors,
+        annotate=legend == "annotate",
+        annot_fontsize=scale["legend"],
+        annot_kwargs=annot_kwargs,
     )
 
     if legend:
