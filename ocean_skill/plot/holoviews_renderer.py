@@ -1357,7 +1357,7 @@ def _field_facet(
     vmax: float | None = None,
     titles=None,
     location_items=None,
-    legend: bool = True,
+    legend: bool | str = True,
     marker_size: float = 9.0,
     colors=None,
     **_,
@@ -1421,7 +1421,10 @@ def _field_facet(
 
     ``location_items`` draws :mod:`ocean_skill.plot.locations`-family items over every
     panel (see :func:`_location_elements`); ``legend`` keys them on the first panel
-    only, and they are context rather than data -- a station outside the field does not
+    only (``legend="annotate"`` instead writes each labelled selection's name beside its
+    shape on *every* panel, keying only the unlabelled groups, and only if any
+    remain; see :func:`_location_elements`), and they are context rather than data --
+    a station outside the field does not
     widen the map. ``colors`` recolours the legend groups they draw (see
     :func:`~ocean_skill.plot.locations.legend_groups`) and is ignored without
     ``location_items``, as ``marker_size`` and ``legend`` are.
@@ -1475,6 +1478,13 @@ def _field_facet(
     log = is_log(standard_name, statistic)
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
     loc_xform = _location_xform(field, tiles, geo=geo)
+    loc_font_size = None
+    if location_items:
+        loc_font_size = _panel_geometry(
+            field.isel({d: 0 for d in (facet_dim, row_dim) if d}),
+            font_scale=font_scale,
+            canvas_factor=factor,
+        )[2]["legend"]
     # one panel's worth of cells, not the whole faceted field, which would overcount by
     # the number of panels and rasterize a grid whose individual maps are small
     one_panel = field.isel({d: 0 for d in (facet_dim, row_dim) if d})
@@ -1556,16 +1566,18 @@ def _field_facet(
         )
         panel = mesh if outline is None else mesh * outline
         if location_items:
-            keyed = legend and (row, col) == (0, 0)
+            keyed = (row, col) == (0, 0)
             for element in _location_elements(
                 location_items,
                 xform=loc_xform,
                 marker_size=marker_size,
                 colors=colors,
-                legend=keyed,
+                legend=legend,
+                font_size=loc_font_size,
+                key=keyed,
             ):
                 panel = panel * element
-            if keyed:
+            if keyed and _location_legend_entries(location_items, colors, legend):
                 panel = panel.opts(legend_position="right")
         return panel
 
@@ -6398,8 +6410,54 @@ def _location_xform(field, tiles, *, geo: bool = True):
     return _identity_xform
 
 
+def _location_legend_entries(items, colors, legend) -> bool:
+    """Whether ``legend`` leaves at least one entry to key for ``items``."""
+    from ocean_skill.plot.locations import (
+        annotation_anchors,
+        legend_groups,
+        resolve_location_legend,
+    )
+
+    legend = resolve_location_legend(legend)
+    if not legend:
+        return False
+    if legend == "annotate":
+        return bool(annotation_anchors(items, colors)[1])
+    return bool(legend_groups(items, colors))
+
+
+#: Pixel gap between a ``legend="annotate"`` label and the shape it names.
+_ANNOTATE_OFFSET_PX = 5
+
+
+def _label_offset_hook(dx: int, dy: int, px: float = _ANNOTATE_OFFSET_PX):
+    """Bokeh finalize hook: nudge a ``hv.Labels`` text ``px`` pixels toward ``dx, dy``.
+
+    ``hv.Labels``' own ``xoffset``/``yoffset`` options are in *data* units, which would
+    move a label by a different screen distance at every zoom (and, under a tile
+    basemap, in Web Mercator metres). The bokeh ``LabelSet`` glyph's ``x_offset`` /
+    ``y_offset`` are screen pixels (y up is positive in bokeh's offset, matching
+    ``dy``), so the hook sets those instead.
+    """
+
+    def hook(plot, element):
+        glyph = plot.handles.get("glyph")
+        if glyph is not None:
+            glyph.x_offset = dx * px
+            glyph.y_offset = dy * px
+
+    return hook
+
+
 def _location_elements(
-    items, *, xform, marker_size: float, legend: bool, colors=None
+    items,
+    *,
+    xform,
+    marker_size: float,
+    legend: bool | str,
+    colors=None,
+    font_size: str | None = None,
+    key: bool = True,
 ) -> list:
     """Build the holoviews elements for ``locations``-family items, in draw order.
 
@@ -6427,14 +6485,40 @@ def _location_elements(
 
     ``colors`` is :func:`~ocean_skill.plot.locations.legend_groups`'s override; each
     group's colour reaches its glyphs and so its legend entry alike.
+
+    ``legend="annotate"`` writes each labelled selection group's label next to its
+    shape instead of keying it (see
+    :func:`~ocean_skill.plot.locations.annotation_anchors`): that group's glyphs are
+    drawn without a legend label, and one ``hv.Labels`` per anchor follows the glyphs,
+    positioned through ``xform`` like the plain geometry (the 180-centred frame and
+    Web Mercator included). The text is bold in the group's colour, ``font_size`` (the
+    panel's legend size), offset 5 screen pixels from the anchor by
+    :func:`_label_offset_hook`, and has no halo -- bokeh text has no stroke to draw
+    one with. Unlabelled groups keep their legend entries as usual. ``key=False`` drops
+    every legend entry but keeps the annotation text: a facet keys the legend on its
+    first panel only, yet each panel's shapes need their names.
     """
     import geoviews as gv
     import pandas as pd
     from bokeh.models import HoverTool
 
-    from ocean_skill.plot.locations import HOVER_FIELDS, legend_groups
+    from ocean_skill.plot.locations import (
+        HOVER_FIELDS,
+        annotation_anchors,
+        legend_groups,
+        resolve_location_legend,
+    )
 
     hv = _extension()
+    legend = resolve_location_legend(legend)
+    annotate = legend == "annotate"
+    anchors: list[dict] = []
+    annotated: set[str] = set()
+    if annotate:
+        anchors, _unlabelled = annotation_anchors(items, colors)
+        annotated = {a["text"] for a in anchors}
+        legend = True  # the unlabelled groups keep their entries
+    legend = legend and key
 
     def hover_tool():
         # A fresh HoverTool per element — a bokeh model belongs to one renderer.
@@ -6445,6 +6529,12 @@ def _location_elements(
     elements: list = []
 
     for label, style, group_items in legend_groups(items, colors):
+        # an annotated group is named by its text label, not a legend entry
+        show = bool(legend) and not (
+            annotate
+            and label in annotated
+            and group_items[0].get("featureType") == "selection"
+        )
         extent_items = [i for i in group_items if i["kind"] == "extent"]
         point_items = [i for i in group_items if i["kind"] == "point"]
         path_items = [i for i in group_items if i["kind"] in ("line", "ring")]
@@ -6473,7 +6563,7 @@ def _location_elements(
                     line_color=style["color"],
                     line_width=1.5,
                     tools=[hover_tool()],
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
@@ -6498,7 +6588,7 @@ def _location_elements(
                     tools=[hover_tool()],
                     line_color="white",
                     line_width=1,
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
@@ -6518,10 +6608,30 @@ def _location_elements(
                     color=style["color"],
                     line_dash="solid" if any_solid else "dashed",
                     line_width=1.8 if any_solid else 1.0,
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
+    for anchor in anchors:
+        xs, ys = xform([anchor["lon"]], [anchor["lat"]])
+        opts = {
+            "text_color": anchor["color"],
+            "text_font_style": "bold",
+            "text_align": anchor["ha"],
+            "text_baseline": "middle" if anchor["va"] == "center" else "bottom",
+            "apply_ranges": False,
+            "show_legend": False,
+            "hooks": [_label_offset_hook(anchor["dx"], anchor["dy"])],
+        }
+        if font_size:
+            opts["text_font_size"] = font_size
+        elements.append(
+            hv.Labels(
+                {"x": [float(xs[0])], "y": [float(ys[0])], "text": [anchor["text"]]},
+                kdims=["x", "y"],
+                vdims=["text"],
+            ).opts(**opts)
+        )
     return elements
 
 
@@ -6531,7 +6641,7 @@ def _locations(
     title: str | None = None,
     extent: tuple[float, float, float, float] | None = None,
     tiles: str | bool | None = "EsriOceanBase",
-    legend: bool = True,
+    legend: bool | str = True,
     marker_size: float = 9.0,
     colors=None,
     size=None,
@@ -6563,6 +6673,10 @@ def _locations(
 
     ``land=False`` drops that offline coastline outline too, for a bare basemap; it
     has no effect with ``tiles`` on, the tile layer already showing land.
+
+    ``legend`` is ``True`` (the key), ``False``, or ``"annotate"``: each labelled
+    selection's name is written beside its shape and only the unlabelled groups are
+    keyed, if any (see :func:`_location_elements`).
 
     ``colors`` overrides the legend groups' colours -- a string for every selection
     group, a list as the selection palette, or a ``{legend label: colour}`` dict; see
@@ -6608,6 +6722,7 @@ def _locations(
         marker_size=marker_size,
         colors=colors,
         legend=legend,
+        font_size=fontsize["legend"],
     ):
         overlay = overlay * element
 
@@ -6617,7 +6732,7 @@ def _locations(
         "fontsize": fontsize,
         "title": title or "",
     }
-    if legend:
+    if _location_legend_entries(items, colors, legend):
         opts["legend_position"] = "right"
     if tiles:
         xs, ys = to_mercator([lon0, lon1], [lat0, lat1])

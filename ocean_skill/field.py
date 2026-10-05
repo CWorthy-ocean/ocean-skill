@@ -1417,7 +1417,10 @@ class Field:
             (``legend``, ``legend_kwargs``, ``marker_size``) and recoloured with
             ``colors`` (a colour for every labelled selection, a list of colours
             for them in legend order, or a ``{legend label: colour}`` dict -- see
-            :func:`~ocean_skill.plot.locations.legend_groups`). A ``Field`` whose
+            :func:`~ocean_skill.plot.locations.legend_groups`). ``legend="annotate"``
+            writes each labelled selection's name beside its shape instead of in
+            the key (styled by ``annot_kwargs``; see
+            :func:`~ocean_skill.plot.locations.annotation_anchors`). A ``Field`` whose
             ``select`` cuts a transect draws that transect's path, so the section
             you analyse and the line on the map cannot disagree. The model's own
             outline is not repeated here -- the map draws that through ``domain``.

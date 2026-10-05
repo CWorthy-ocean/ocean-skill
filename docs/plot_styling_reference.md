@@ -47,7 +47,7 @@ want everything bigger or smaller.
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
 | [`legend_kwargs`](#legend_kwargs) | a `series` panel's key, or the `locations` map's | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
-| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait`), or an `XY` annotation's text | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait`), an `XY` annotation's text, or a [`legend="annotate"`](#labelling-in-place-legendannotate) location label | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -603,6 +603,8 @@ is `h` on a ROMS source and draws in `cmo.deep`.
 | Parameter | Default | Effect |
 |---|---|---|
 | `legend` | `True` | the featureType key (plus one entry per labelled `Field`/`Comparison`, each in its own colour), drawn once (on the first panel of a facet) |
+| `legend="annotate"` | — | write each labelled `Field`/`Comparison`'s name beside its shape instead ([below](#labelling-in-place-legendannotate)) |
+| `annot_kwargs` | — | `Axes.text` properties for those in-place labels (static renderer only) |
 | `legend_kwargs` | — | `Axes.legend` properties (static renderer only, as ever) |
 | `marker_size` | `80` static / `9` interactive | marker size (points² / pixels) |
 | `colors` | automatic | recolour the legend groups — a string, a list or a `{legend label: colour}` dict ([below](#recolouring-the-groups-colors)); both renderers |
@@ -624,6 +626,39 @@ Things worth knowing:
   `legend` and `marker_size` are.
 
 **Default:** `None` (nothing drawn)
+
+#### Labelling in place (`legend="annotate"`)
+
+A key is a poor fit when the locations are many and alike: six water-mass sites
+drawn in one colour become six identical legend lines, and the framed key covers
+ocean. `legend="annotate"` writes each labelled `Field`/`Comparison`'s name next to
+what it draws instead, the way a paper figure labels its stations:
+
+```python
+PACIFIC = {"NWP": {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}},
+           "SG":  {"lon": {"min": 184.59, "max": 185.73}, "lat": {"min": 47.76, "max": 48.59}}}
+sites = [osk.field(reference, variable, label=abbr, select=box) for abbr, box in PACIFIC.items()]
+
+osk.field(reference, "h").plot(locations=[eq, b180, b160, *sites],
+                               colors={"Eq": "k", "180-160": "r", "160-120": "r",
+                                       **{abbr: "purple" for abbr in PACIFIC}},
+                               legend="annotate", title="Pacific topography")
+```
+
+- **Where each label goes:** east of a point marker, centred above a box's top edge,
+  and just above a transect or slice line's last point. Offsets are in points/pixels,
+  so they don't change with the map's scale; labels never widen the map.
+- **Style:** the group's own colour, bold, with a thin white halo so a label reads
+  over deep water and shelf alike. `annot_kwargs` overrides any of it (e.g.
+  `annot_kwargs={"color": "k", "fontsize": 9}`), static renderer only. The interactive
+  renderer draws the same labels in the same places, without the halo (bokeh text
+  has no outline).
+- **Only labelled selections are written on the map.** Catalog stations, the
+  unlabelled `"selection"` entry and the domain outline have no name worth writing,
+  so they keep a framed key, drawn only if any are present.
+- **Short labels read best.** Use abbreviations (`label="NWP"`) and spell them out in
+  the caption.
+- **Every panel of a facet** carries the labels, as it carries the shapes.
 
 #### Recolouring the groups (`colors`)
 
