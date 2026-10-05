@@ -39,9 +39,12 @@ __all__ = [
     "DEFAULT_CONTOUR_LEVELS",
     "DEFAULT_FILL_BANDS",
     "SECTION_MARKS",
+    "SECTION_X",
+    "X_DOMINANCE",
     "ContourLevel",
     "SectionGeometry",
     "check_section_options",
+    "check_section_x",
     "contour_label",
     "contour_levels",
     "contour_paths",
@@ -65,16 +68,19 @@ class SectionGeometry:
     one shape of coordinate for a renderer to read either way, no special case for
     which kind of vertical axis it is drawing.
 
-    For a path section ``x_name`` holds the distance along it (km) and ``x_label``
-    says so. For a slab -- a box averaged along one horizontal axis, whose along
-    coordinate carries ``axis_coord`` (see
-    :func:`ocean_skill.comparison._slab_to_section`) -- ``x_name`` still names the
-    coordinate to draw against, but it now holds the *surviving* coordinate's
-    degrees, and ``x_label`` reads "latitude (°N)" / "longitude (°E)". A renderer
-    needs no branch for it: it draws ``x_name`` against ``y_name`` and labels the
-    axes with ``x_label``/``y_label`` either way. ``x_axis`` records which it is
-    (``"distance"``, ``"lat"`` or ``"lon"``) for a caller that does care, such as
-    one deciding whether two sections can share an x axis.
+    By default a path section's ``x_name`` holds the distance along it (km) and
+    ``x_label`` says so -- but :func:`prepare_section` reads where the path runs, and
+    one that is mostly east-west or north-south is drawn against its own longitude or
+    latitude instead, exactly as a slab is. A slab -- a box averaged along one
+    horizontal axis, whose along coordinate carries ``axis_coord`` (see
+    :func:`ocean_skill.comparison._slab_to_section`) -- always has its *surviving*
+    coordinate on ``x_name``, in degrees. Either way ``x_name`` still names the
+    coordinate to draw against and ``x_label`` reads "latitude (°N)" /
+    "longitude (°E)" / "distance along transect (km)". A renderer needs no branch for
+    it: it draws ``x_name`` against ``y_name`` and labels the axes with
+    ``x_label``/``y_label`` regardless. ``x_axis`` records which it is (``"distance"``,
+    ``"lat"`` or ``"lon"``) for a caller that does care, such as one deciding whether
+    two sections can share an x axis.
     """
 
     x_name: str
@@ -128,10 +134,12 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     along_attrs = da[ALONG_DIM].attrs if ALONG_DIM in da.coords else {}
     if along_attrs.get("band_axis") and along_attrs.get("band") is not None:
         return _band_note(along_attrs["band_axis"], along_attrs["band"])
-    if lon_name is None or lat_name is None:
+    # The requested path (path_lon/path_lat) names the transect the caller asked
+    # for -- "along 0.0°N" for an equator line -- where the snapped lon/lat would
+    # name whichever row a coarse source happened to land on (0.5°S).
+    lon, lat = _path_positions(da, lon_name, lat_name)
+    if lon is None or lat is None:
         return ""
-    lon = np.asarray(da[lon_name], dtype="float64")
-    lat = np.asarray(da[lat_name], dtype="float64")
     if lon.size == 0:
         return ""
 
@@ -150,7 +158,103 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     return f"{_fmt(lon[0], lat[0])} → {_fmt(lon[-1], lat[-1])}"
 
 
-def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
+#: What a section's x axis may run along: ``"auto"`` picks per path (see
+#: :func:`_auto_x_axis`), the others force it. ``"distance"`` is kilometres along the
+#: path, ``"lon"``/``"lat"`` the path's own longitude or latitude in degrees.
+SECTION_X = ("auto", "distance", "lon", "lat")
+
+#: How much longer a path's span must be in one direction than the other for ``"auto"``
+#: to label the section by that coordinate. Both spans are in kilometres, so a path
+#: that wanders 120° of longitude and 2° of latitude along the equator reads as
+#: longitude, one that runs 45° across the grid does not, and a path in between
+#: (neither direction at least twice the other) falls back to distance rather than
+#: dressing a diagonal up as an east-west line. May be tuned.
+X_DOMINANCE = 2.0
+
+#: Kilometres per degree: of longitude at the equator (scaled by cos(latitude)), and of
+#: latitude (averaged over the globe -- good to a fraction of a percent, which is all a
+#: dominance test needs).
+_KM_PER_DEG_LON = 111.32
+_KM_PER_DEG_LAT = 110.57
+
+
+def check_section_x(x) -> None:
+    """Refuse an ``x`` / ``section_x`` that is not one of :data:`SECTION_X`."""
+    if not isinstance(x, str) or x not in SECTION_X:
+        raise ValueError(
+            f"section_x={x!r} is not a section x axis; expected one of {SECTION_X}. "
+            '"auto" picks longitude or latitude when the path runs mostly east-west or '
+            'north-south, else distance along the path; "distance" always uses '
+            'kilometres along the path; "lon"/"lat" force that coordinate.'
+        )
+
+
+def _path_positions(da, lon_name: str | None, lat_name: str | None):
+    """Return ``(lon, lat)`` 1-D float arrays along the path, ``None`` where absent.
+
+    The *requested* path positions (``path_lon``/``path_lat`` on the along dimension,
+    see :func:`ocean_skill.transect.path_of`) win over the snapped ``lon``/``lat``:
+    snapping a path to a model's grid jitters the coordinate that was meant to stay
+    fixed (an equatorial line's latitude zigzagging by a cell), which would read as a
+    path that doubles back. A coordinate that is not one-dimensional along the path
+    -- a slab's averaged-out axis, say -- is reported as absent.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    def _read(*names):
+        for name in names:
+            if name is None or name not in da.coords:
+                continue
+            coord = da[name]
+            if coord.dims == (ALONG_DIM,):
+                return np.asarray(coord, dtype="float64")
+        return None
+
+    return _read("path_lon", lon_name), _read("path_lat", lat_name)
+
+
+def _strictly_monotonic(values: np.ndarray | None) -> bool:
+    """Whether ``values`` has two or more finite entries that only ever rise or fall."""
+    if values is None or values.size < 2 or not np.all(np.isfinite(values)):
+        return False
+    steps = np.diff(values)
+    return bool(np.all(steps > 0) or np.all(steps < 0))
+
+
+def _auto_x_axis(lon: np.ndarray | None, lat: np.ndarray | None) -> str:
+    """Pick ``"lon"``, ``"lat"`` or ``"distance"`` for a path's x axis.
+
+    ``lon`` is the path's longitude already unwrapped across the antimeridian. A
+    coordinate is chosen when it runs strictly one way along the path *and* its span
+    in kilometres is at least :data:`X_DOMINANCE` times the other direction's -- so
+    degrees of longitude along a line that is mostly east-west, never along one that
+    doubles back (the same longitude would label two places) or runs diagonally. Any
+    shortfall -- too few points, NaNs, a missing coordinate -- is ``"distance"``.
+    """
+    if not (_strictly_monotonic(lon) or _strictly_monotonic(lat)):
+        return "distance"
+    finite_lat = lat[np.isfinite(lat)] if lat is not None else np.empty(0)
+    mean_lat = float(finite_lat.mean()) if finite_lat.size else 0.0
+    lon_km = (
+        abs(float(lon[-1] - lon[0])) * _KM_PER_DEG_LON * np.cos(np.radians(mean_lat))
+        if lon is not None and lon.size >= 2
+        else 0.0
+    )
+    lat_km = (
+        abs(float(lat[-1] - lat[0])) * _KM_PER_DEG_LAT
+        if lat is not None and lat.size >= 2
+        else 0.0
+    )
+    if _strictly_monotonic(lon) and lon_km >= X_DOMINANCE * lat_km:
+        return "lon"
+    if _strictly_monotonic(lat) and lat_km >= X_DOMINANCE * lon_km:
+        return "lat"
+    return "distance"
+
+
+def prepare_section(
+    da: xr.DataArray, x: str = "auto"
+) -> tuple[xr.DataArray, SectionGeometry]:
     """Return ``(field, geometry)``: ``da`` with ``depth``/``distance`` coordinates.
 
     ``da`` must be exactly two-dimensional: :data:`ocean_skill.align.ALONG_DIM` and
@@ -170,10 +274,28 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     one is not once the vertical axis is native s-levels. A renderer draws
     ``x=geometry.x_name, y=geometry.y_name`` against the returned field and never
     needs to know which kind of vertical axis it got.
+
+    ``x`` says what runs along the x axis (:data:`SECTION_X`), and the coordinate
+    named ``distance`` holds it -- kilometres, or degrees when a longitude or latitude
+    is drawn instead:
+
+    * ``"auto"`` (default): a slab (a box averaged along one horizontal axis, whose
+      along coordinate carries ``axis_coord``) draws its surviving coordinate. A path
+      draws longitude when it runs mostly east-west, latitude when mostly
+      north-south, and distance along the path otherwise (:func:`_auto_x_axis`), read
+      off the *requested* path positions (``path_lon``/``path_lat``) when the field
+      has them and its snapped ``lon``/``lat`` when not. Longitude is unwrapped across
+      the antimeridian, so a path from 170°E to 170°W reads 170 to 190 rather than
+      jumping.
+    * ``"distance"``: kilometres along the path, a slab included.
+    * ``"lon"`` / ``"lat"``: force that coordinate; raises if it does not run strictly
+      one way along the path (a path that doubles back would label two places
+      alike).
     """
     from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
     from ocean_skill.cf import find_coord
 
+    check_section_x(x)
     if ALONG_DIM not in da.dims:
         raise ValueError(
             f"prepare_section expects a field with an {ALONG_DIM!r} dimension "
@@ -251,15 +373,41 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     # no business going NaN there in the first place.
 
     lon_name, lat_name = _lon_name(da), _lat_name(da)
-    # A slab (see ocean_skill.comparison._slab_to_section) names the coordinate its
-    # x axis should be -- the one that survived the averaging -- and draws it in
-    # degrees; a path section's x is the distance along it, in km. Same coordinate
-    # name either way ("distance"), so a renderer needs no branch for which it got.
-    x_axis = da[ALONG_DIM].attrs.get("axis_coord")
-    if x_axis in ("lat", "lon") and (lat_name if x_axis == "lat" else lon_name):
-        source = da[lat_name if x_axis == "lat" else lon_name]
+    # What the x axis shows. A slab (see ocean_skill.comparison._slab_to_section)
+    # names the coordinate its x axis should be -- the one that survived the averaging
+    # -- and draws it in degrees; a path section's x is chosen from where the path
+    # runs (_auto_x_axis) or forced by the caller. Same coordinate name either way
+    # ("distance"), so a renderer needs no branch for which it got.
+    slab_axis = da[ALONG_DIM].attrs.get("axis_coord")
+    slab_name = {"lat": lat_name, "lon": lon_name}.get(slab_axis)
+    degrees = None
+    if x in ("auto", slab_axis) and slab_name:
+        x_axis = slab_axis
+        degrees = np.asarray(da[slab_name], dtype="float64")
+    elif x == "distance":
+        x_axis = "distance"
+    else:
+        lon, lat = _path_positions(da, lon_name, lat_name)
+        if lon is not None and np.all(np.isfinite(lon)):
+            lon = np.unwrap(lon, period=360.0)
+        x_axis = _auto_x_axis(lon, lat) if x == "auto" else x
+        if x_axis in ("lon", "lat"):
+            degrees = lon if x_axis == "lon" else lat
+            if x != "auto" and not _strictly_monotonic(degrees):
+                name = "longitude" if x_axis == "lon" else "latitude"
+                why = (
+                    "absent from this field"
+                    if degrees is None
+                    else "not monotonic (it doubles back, repeats or has gaps)"
+                )
+                raise ValueError(
+                    f'section_x="{x_axis}" needs the path\'s {name} to run strictly '
+                    f"one way along it, but it is {why}. Use section_x=\"distance\" "
+                    "to draw kilometres along the path instead."
+                )
+    if x_axis in ("lat", "lon"):
         distance = xr.DataArray(
-            np.asarray(source, dtype="float64"),
+            degrees,
             dims=ALONG_DIM,
             coords={ALONG_DIM: da[ALONG_DIM]},
             name="distance",
@@ -267,11 +415,18 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
         distance.attrs["units"] = "degrees_north" if x_axis == "lat" else "degrees_east"
         x_label = "latitude (°N)" if x_axis == "lat" else "longitude (°E)"
     else:
-        x_axis = "distance"
-        distance = da[ALONG_DIM].rename("distance")
+        # rebuilt rather than renamed: a renamed coordinate shares its attrs with the
+        # caller's own along coordinate, which the bookkeeping below (units, x_axis)
+        # must not leak into
+        distance = xr.DataArray(
+            np.asarray(da[ALONG_DIM]),
+            dims=ALONG_DIM,
+            coords={ALONG_DIM: da[ALONG_DIM]},
+            name="distance",
+            attrs=dict(da[ALONG_DIM].attrs),
+        )
         distance.attrs["units"] = da[ALONG_DIM].attrs.get("units", "km")
         x_label = "distance along transect (km)"
-
     depth2d, distance2d, values2d = xr.broadcast(depth, distance, da)
     order = tuple(values2d.dims)
     depth2d = depth2d.transpose(*order)
@@ -291,7 +446,7 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
 
 
 def prepare_section_row(
-    aligned: dict[str, xr.DataArray] | xr.Dataset,
+    aligned: dict[str, xr.DataArray] | xr.Dataset, x: str = "auto"
 ) -> tuple[dict[str, xr.DataArray], SectionGeometry]:
     """Return ``(values, geometry)`` for a test | reference | difference row.
 
@@ -315,7 +470,12 @@ def prepare_section_row(
     geometries are identical; only the test lane's is returned, matching
     :func:`ocean_skill.plot.matplotlib_renderer._field_row`'s single-geometry
     contract for a row of panels.
+
+    ``x`` is :func:`prepare_section`'s. It is resolved on the test lane and the answer
+    handed to the other two as a forced choice, so the three panels can never disagree
+    about what runs along their shared x axis.
     """
+    check_section_x(x)
     if "z" not in aligned["test"].dims:
         raise ValueError(
             "prepare_section_row expects a fixed-depth 'z' dimension on every "
@@ -328,9 +488,10 @@ def prepare_section_row(
     values: dict[str, xr.DataArray] = {}
     geometry: SectionGeometry | None = None
     for lane in ("test", "reference", "difference"):
-        values[lane], lane_geometry = prepare_section(aligned[lane])
+        values[lane], lane_geometry = prepare_section(aligned[lane], x)
         if lane == "test":
             geometry = lane_geometry
+            x = lane_geometry.x_axis
     assert geometry is not None
     return values, geometry
 
@@ -418,7 +579,9 @@ def _mismatch_text(
     return text
 
 
-def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
+def prepare_overlay(
+    overlay: xr.DataArray, panel: xr.DataArray, x: str = "auto"
+) -> xr.DataArray:
     """Return ``overlay`` prepared on the same section grid as ``panel``, or raise.
 
     An overlay is the second variable of a section figure -- the isotherms drawn over
@@ -427,7 +590,11 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
     levels. This runs :func:`prepare_section` on it (so it gets the same axis
     conventions as the panel, a native-s overlay's depth flipped to positive-down
     included), puts it in the panel's dimension order, and checks the two meshes
-    agree.
+    agree. ``x`` is the panel's own (the ``section_x`` it was prepared with), so a
+    forced ``"distance"`` or ``"lon"`` applies to the lines as it did to the fill; under
+    ``"auto"`` the two choose alike for two variables cut from one path, and an overlay
+    that is a different kind of section from its panel (a latitude slab against a
+    transect) is reported as the mesh mismatch it is.
 
     It never regrids. Two variables of one source, cut with one ``select`` and
     ``aggregate``, always share a mesh, so a mismatch means the two were built
@@ -446,6 +613,8 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
     panel
         The fill's already-prepared values: :func:`prepare_section`'s own return,
         carrying 2-D ``distance`` and ``depth`` coordinates.
+    x
+        What the panel's x axis was prepared with (:data:`SECTION_X`).
 
     Returns
     -------
@@ -470,7 +639,7 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
             f"(an {ALONG_DIM!r} dimension and 2-D 'distance' and 'depth' coordinates) "
             f"-- got dims {sorted(panel.dims)} and coordinates {sorted(panel.coords)}."
         )
-    prepared, _ = prepare_section(overlay)
+    prepared, _ = prepare_section(overlay, x)
     vertical_o = next(d for d in prepared.dims if d != ALONG_DIM)
     vertical_p = next(d for d in panel.dims if d != ALONG_DIM)
     advice = (
@@ -918,6 +1087,7 @@ def check_section_options(
     contour_levels=None,
     contour_kwargs=None,
     fill_levels=None,
+    section_x="auto",
 ) -> None:
     """Refuse a section option with nothing to act on -- one wording, both renderers.
 
@@ -925,8 +1095,10 @@ def check_section_options(
     either one without an overlay on any panel would be silently ignored; so would
     ``fill_levels=`` -- the bands of a filled-contour fill -- on a ``pcolormesh``
     panel. Both are refused by name instead, as is a ``mark`` a section cannot draw
-    (``None`` is the default, cells).
+    (``None`` is the default, cells), and a ``section_x`` that names no x axis
+    (:data:`SECTION_X`).
     """
+    check_section_x(section_x)
     if mark is not None and mark not in SECTION_MARKS:
         raise ValueError(
             f"mark={mark!r} is not a section mark; expected one of {SECTION_MARKS}. "

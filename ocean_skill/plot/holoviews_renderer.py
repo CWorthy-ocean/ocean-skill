@@ -694,7 +694,13 @@ def _contour_style(contour_kwargs) -> _ContourStyle:
 
 
 def _section_options(
-    *, has_contours: bool, mark, contour_levels, contour_kwargs, fill_levels
+    *,
+    has_contours: bool,
+    mark,
+    contour_levels,
+    contour_kwargs,
+    fill_levels,
+    section_x="auto",
 ) -> tuple[str, _ContourStyle | None]:
     """Check a section family's mark and contour/band options; return ``(mark, style)``.
 
@@ -713,6 +719,7 @@ def _section_options(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     if fill_levels is not None:
         fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
@@ -1604,6 +1611,7 @@ def _section(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -1635,6 +1643,10 @@ def _section(
     styled by ``contour_kwargs`` (``colors``, ``linewidths``, ``linestyles``, ``fmt``,
     ``labels=False``; any other key is static-only and warns). An overlay on a
     different mesh is refused, never regridded.
+
+    ``section_x`` (``"auto"``, ``"distance"``, ``"lon"``, ``"lat"``) is handed to
+    :func:`~ocean_skill.plot.section.prepare_section` and decides what runs along the
+    x axis -- see the static renderer's ``section``.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
@@ -1648,10 +1660,11 @@ def _section(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     _extension()
     factor = _canvas_factor(size, zoom)
-    field, geometry = prepare_section(item["field"])
+    field, geometry = prepare_section(item["field"], section_x)
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
@@ -1671,7 +1684,7 @@ def _section(
 
     lines = ()
     if raw is not None:
-        overlay = prepare_overlay(raw, field)
+        overlay = prepare_overlay(raw, field, section_x)
         name, line_units = _contour_caption(item)
         lines = _line_layers(
             overlay,
@@ -1729,6 +1742,7 @@ def _cross(
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
+    section_x: str = "auto",
     **_,
 ):
     """Two interactive vertical sections through one point, one per grid direction.
@@ -1756,6 +1770,8 @@ def _cross(
     ``vmin``/``vmax`` pin an exact colour range, passed through to both panels'
     own :func:`_section` call -- overriding ``robust`` wherever either end is given
     and, unlike the plain data-derived default, genuinely shared between them.
+
+    ``section_x`` is :func:`_section`'s, applied to each panel on its own.
     """
     hv = _extension()
 
@@ -1780,7 +1796,10 @@ def _cross(
     auto_titles = [
         suptitle_text(
             item.get("standard_name"),
-            (item.get("depth"), prepare_section(item["field"])[1].path_note),
+            (
+                item.get("depth"),
+                prepare_section(item["field"], section_x)[1].path_note,
+            ),
             label=item.get("label"),
         )
         for item in items
@@ -1800,6 +1819,7 @@ def _cross(
             colorbar_label_clipped=colorbar_label_clipped,
             vmin=vmin,
             vmax=vmax,
+            section_x=section_x,
         )
         for item, panel_title in zip(items, resolved_titles, strict=True)
     ]
@@ -1832,6 +1852,7 @@ def _section_grid(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """Several interactive vertical sections -- one panel per item -- in one layout.
@@ -1862,7 +1883,8 @@ def _section_grid(
     ``titles=`` overrides each panel's title by hand (one per item, or one per grid
     cell faceted); see the static renderer's ``section_grid``.
 
-    ``mark``/``fill_levels`` are :func:`_section`'s. Items carrying a ``contour``
+    ``mark``/``fill_levels``/``section_x`` are :func:`_section`'s (each panel picks its
+    own x axis under ``"auto"``). Items carrying a ``contour``
     overlay draw its lines over their own panel; the lines' levels are decided **once**
     for the whole grid, from every overlay at once, so every panel shows the same
     isotherms.
@@ -1885,13 +1907,14 @@ def _section_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
-    prepared = [prepare_section(item["field"]) for item in items]
+    prepared = [prepare_section(item["field"], section_x) for item in items]
     prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
     # the lines' levels and style, read once for the grid and handed to every panel
     levels = None
     overlays = [
-        prepare_overlay(item["contour"], prepared_of[id(item)][0])
+        prepare_overlay(item["contour"], prepared_of[id(item)][0], section_x)
         for item in items
         if item.get("contour") is not None
     ]
@@ -1952,6 +1975,7 @@ def _section_grid(
                 fill_levels=fill_levels,
                 contour_levels=levels if item.get("contour") is not None else None,
                 contour_kwargs=style if item.get("contour") is not None else None,
+                section_x=section_x,
             )
         )
     out = hv.Layout(plots).cols(grid_ncols).opts(hv.opts.Layout(shared_axes=False))
@@ -2609,6 +2633,7 @@ def _section_row(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -2652,6 +2677,8 @@ def _section_row(
     test overlay's lines go over the test panel and the reference's over the reference
     panel, at one set of levels decided from both, and the difference panel gets none --
     a difference of two fields has no isotherm of its own.
+    ``section_x`` is :func:`_section`'s; the three panels share the x axis chosen from
+    the test lane's path.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2666,14 +2693,15 @@ def _section_row(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     hv = _extension()
     factor = _canvas_factor(size, zoom)
-    values, geometry = prepare_section_row(item["aligned"])
+    values, geometry = prepare_section_row(item["aligned"], section_x)
     # the overlays go onto the panels' own meshes, ahead of the x alias renaming them
     overlays = (
         {
-            lane: prepare_overlay(raw[lane], values[lane])
+            lane: prepare_overlay(raw[lane], values[lane], section_x)
             for lane in ("test", "reference")
         }
         if raw is not None
@@ -2811,6 +2839,7 @@ def _section_row_grid(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """One interactive ``section_row`` per comparison, stacked.
@@ -2843,7 +2872,8 @@ def _section_row_grid(
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list, ``3 * n`` entries; ``None`` keeps a panel's own title.
 
-    ``mark``/``fill_levels`` are :func:`_section_row`'s. The lines' levels are decided
+    ``mark``/``fill_levels``/``section_x`` are :func:`_section_row`'s (``section_x``
+    resolved per row from that row's own path). The lines' levels are decided
     **once** for the whole grid, pooled over every row's test and reference overlay, so
     every row shows the same isotherms.
     """
@@ -2861,12 +2891,13 @@ def _section_row_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     hv = _extension()
-    prepared = [prepare_section_row(it["aligned"]) for it in items]
+    prepared = [prepare_section_row(it["aligned"], section_x) for it in items]
     levels = None
     overlays = [
-        prepare_overlay(it["contour"][lane], values[lane])
+        prepare_overlay(it["contour"][lane], values[lane], section_x)
         for it, (values, _geometry) in zip(items, prepared, strict=True)
         if it.get("contour") is not None
         for lane in ("test", "reference")
@@ -2968,6 +2999,7 @@ def _section_row_grid(
             fill_levels=fill_levels,
             contour_levels=levels if it.get("contour") is not None else None,
             contour_kwargs=style if it.get("contour") is not None else None,
+            section_x=section_x,
         )
         for i, it in enumerate(items)
     ]

@@ -4132,6 +4132,7 @@ def _check_section_contours(
     contour_levels: Any,
     contour_kwargs: Any,
     fill_levels: Any,
+    section_x: Any = "auto",
 ) -> None:
     """Refuse a contour or band option with nothing to act on, before any figure exists.
 
@@ -4149,6 +4150,7 @@ def _check_section_contours(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     if contour_kwargs is not None and not isinstance(contour_kwargs, Mapping):
         raise TypeError(
@@ -4165,7 +4167,7 @@ def _check_section_contours(
         fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
 
 
-def _prepare_overlay(raw, values):
+def _prepare_overlay(raw, values, section_x="auto"):
     """Put one item's raw overlay on the mesh of its panel(s), or ``None`` without one.
 
     A section item's overlay is one DataArray over its one panel. A ``section_row``
@@ -4180,13 +4182,15 @@ def _prepare_overlay(raw, values):
         return None
     if isinstance(raw, Mapping):
         return {
-            lane: prepare_overlay(raw[lane], values[lane])
+            lane: prepare_overlay(raw[lane], values[lane], section_x)
             for lane in ("test", "reference")
         }
-    return prepare_overlay(raw, values)
+    return prepare_overlay(raw, values, section_x)
 
 
-def _section_overlays(raws, panels, spec) -> tuple[list[Any], tuple[float, ...]]:
+def _section_overlays(
+    raws, panels, spec, section_x="auto"
+) -> tuple[list[Any], tuple[float, ...]]:
     """Prepare every panel's overlay, and pick the one set of levels the figure draws.
 
     ``raws`` and ``panels`` are the figure's items' raw overlays (``None`` where an item
@@ -4199,7 +4203,9 @@ def _section_overlays(raws, panels, spec) -> tuple[list[Any], tuple[float, ...]]
     """
     from ocean_skill.plot import section as _section_layout
 
-    overlays = [_prepare_overlay(raw, v) for raw, v in zip(raws, panels, strict=True)]
+    overlays = [
+        _prepare_overlay(raw, v, section_x) for raw, v in zip(raws, panels, strict=True)
+    ]
     arrays = [
         array
         for overlay in overlays
@@ -4397,6 +4403,7 @@ def section(
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
+    section_x: str = "auto",
 ):
     """Draw one vertical section: depth against along-path distance.
 
@@ -4405,9 +4412,9 @@ def section(
     and along-path distance rather than longitude and latitude. See
     :func:`ocean_skill.plot.section.prepare_section` for the axis conventions this
     draws against -- positive-down depth with the y-axis inverted, so 0 m sits at
-    the top and the deepest cell at the bottom; the along-path axis in kilometres
-    (or in degrees, for a fixed-longitude/latitude line, whose along coordinate
-    still varies in the *other* direction).
+    the top and the deepest cell at the bottom; the along-path axis in kilometres,
+    or in degrees of longitude/latitude when the path runs mostly east-west or
+    north-south (``section_x``, below).
 
     ``mark="pcolormesh"`` (default) or ``"contourf"``, the same two this package's
     map families accept. Cells below the modelled seafloor -- or wherever the path
@@ -4436,6 +4443,13 @@ def section(
     int about that many, a list exactly those edges -- every colour-bar tick sits on a
     band edge. It is refused with ``mark="pcolormesh"``, which draws cells.
 
+    ``section_x`` says what runs along the x axis: ``"auto"`` (the default) labels a
+    path by longitude when it runs mostly east-west (an equatorial line), by latitude
+    when mostly north-south, and by distance along the path in km otherwise; a
+    ``"lon"`` / ``"lat"`` / ``"distance"`` forces that one (``"lon"``/``"lat"`` raise
+    if the path doubles back in it). See :func:`ocean_skill.plot.section
+    .prepare_section`.
+
     ``contour`` is the raw section of a second variable to draw as black, labelled
     lines over the fill (``contours=`` on ``Field.plot()`` hands it over; see
     :mod:`ocean_skill._overlay`). It has to sit on the fill's own mesh
@@ -4457,10 +4471,13 @@ def section(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     _warn_if_interactive_only(rasterize, hover)
-    values, geometry = prepare_section(field)
-    (overlay,), levels = _section_overlays([contour], [values], contour_levels)
+    values, geometry = prepare_section(field, section_x)
+    (overlay,), levels = _section_overlays(
+        [contour], [values], contour_levels, section_x
+    )
     if title is None:
         title = suptitle_text(standard_name, (depth, geometry.path_note), label=label)
 
@@ -4697,6 +4714,7 @@ def section_grid(
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
+    section_x: str = "auto",
 ):
     """Stack several vertical sections -- one panel per item -- in a single figure.
 
@@ -4736,7 +4754,8 @@ def section_grid(
     panel has no map to outline and no reference to score against. Everything else --
     sizing (``size``/``zoom``/``figsize``), ``font_scale``, ``fit_text``,
     ``align_colorbars``, the ``*_kwargs`` dicts, ``mark`` -- means what it does in
-    :func:`section`. ``rasterize``/``hover`` are accepted only so ``renderer="both"``
+    :func:`section`, ``section_x`` included (each panel picks its own x axis under
+    ``"auto"``). ``rasterize``/``hover`` are accepted only so ``renderer="both"``
     can pass one option set to each renderer (see :func:`_warn_if_interactive_only`).
 
     ``titles=`` overrides each panel's own title by hand: one string per item in
@@ -4765,14 +4784,16 @@ def section_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
 
-    prepared = [prepare_section(item["field"]) for item in items]
+    prepared = [prepare_section(item["field"], section_x) for item in items]
     prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
     overlays, levels = _section_overlays(
         [item.get("contour") for item in items],
         [values for values, _ in prepared],
         contour_levels,
+        section_x,
     )
     overlay_of = {id(item): o for item, o in zip(items, overlays, strict=True)}
     grid_nrows, grid_ncols, cell_items, drawn, panel_titles, auto_suptitle = (
@@ -4948,6 +4969,7 @@ def cross(
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
+    section_x: str = "auto",
 ):
     """Draw two vertical sections through one point, one along each grid direction.
 
@@ -4985,6 +5007,10 @@ def cross(
     ``None`` at a position keeps that panel's own (``label`` + ``path_note``)
     title; the wrong count raises a copy-pasteable ``ValueError`` listing the
     current titles.
+
+    ``section_x`` is :func:`section`'s, applied to each panel on its own: under
+    ``"auto"`` a cross usually reads longitude on its east-west panel and latitude on
+    its north-south one.
     """
     import matplotlib.pyplot as plt
 
@@ -5003,7 +5029,7 @@ def cross(
         )
     _warn_if_interactive_only(rasterize, hover)
 
-    prepared = [prepare_section(item["field"]) for item in items]
+    prepared = [prepare_section(item["field"], section_x) for item in items]
     standard_name = items[0].get("standard_name")
     units = items[0].get("units")
     depth = items[0].get("depth")
@@ -6508,6 +6534,7 @@ def section_row(
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
+    section_x: str = "auto",
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -6541,6 +6568,9 @@ def section_row(
     titles, ``None`` keeping a panel's own) — means exactly what it does in
     :func:`field_row`.
 
+    ``section_x`` is :func:`section`'s: the three panels share one x axis, chosen
+    from the test lane's path.
+
     ``fill_levels`` sets the bands of a ``mark="contourf"`` fill on all three panels,
     the difference panel included (see :func:`section`). ``contour`` is the overlay's
     aligned ``{"test": ..., "reference": ...}`` pair -- the same variable's sections for
@@ -6560,10 +6590,13 @@ def section_row(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     _warn_if_interactive_only(rasterize, hover)
-    values, geometry = prepare_section_row(aligned)
-    (overlay,), levels = _section_overlays([contour], [values], contour_levels)
+    values, geometry = prepare_section_row(aligned, section_x)
+    (overlay,), levels = _section_overlays(
+        [contour], [values], contour_levels, section_x
+    )
     if title is None:
         title = suptitle_text(standard_name, (depth, time, geometry.path_note))
 
@@ -6692,6 +6725,7 @@ def section_row_grid(
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
+    section_x: str = "auto",
 ):
     """Stack one ``test | reference | difference`` section row per comparison.
 
@@ -6750,6 +6784,9 @@ def section_row_grid(
     ``rasterize``/``hover`` are accepted only so ``renderer="both"`` can pass one
     option set to each renderer -- neither changes anything here.
 
+    ``section_x`` is :func:`section`'s, resolved per row from that row's own path, so
+    rows on different paths can end up with different x axes.
+
     ``fill_levels`` sets the bands of a ``mark="contourf"`` fill on every panel of every
     row, difference panels included (see :func:`section`). A row item's ``contour``
     (the overlay's aligned ``{"test", "reference"}`` pair, see :func:`section_row`)
@@ -6770,13 +6807,17 @@ def section_row_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
 
-    prepared = [(item, *prepare_section_row(item["aligned"])) for item in items]
+    prepared = [
+        (item, *prepare_section_row(item["aligned"], section_x)) for item in items
+    ]
     overlays, levels = _section_overlays(
         [item.get("contour") for item in items],
         [values for _, values, _ in prepared],
         contour_levels,
+        section_x,
     )
 
     auto_title, paths_differ = section_row_grid_title(
