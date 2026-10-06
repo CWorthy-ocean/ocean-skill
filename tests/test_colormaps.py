@@ -178,3 +178,26 @@ def test_oxygen_keeps_a_map_of_its_own():
     assert seq.name == "gray"
     others = {s: cmaps_for(s)[0].name for s in _BGC_SPECIES if s != "oxygen"}
     assert "gray" not in others.values(), others
+
+
+# --- tidal harmonics and baroclinic pressure flux -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("sea_surface_height_tidal_amplitude", "amp"),
+        ("tidal_amplitude", "amp"),
+        ("sea_surface_height_tidal_phase", "phase"),
+        ("tidal_phase", "phase"),
+        ("x_baroclinic_pressure_flux", "balance"),
+        ("y_baroclinic_pressure_flux", "balance"),
+        ("eastward_baroclinic_pressure_flux", "balance"),
+        ("northward_baroclinic_pressure_flux", "balance"),
+        # SSH keeps its own map, and the tidal names did not disturb it
+        ("sea_surface_height_above_geoid", "balance"),
+        ("ssh", "balance"),
+    ],
+)
+def test_tidal_and_pressure_flux_colormaps(name, expected):
+    assert cmaps_for(name)[0].name == expected

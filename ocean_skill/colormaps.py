@@ -75,6 +75,7 @@ __all__ = [
 #:   - pH cmo.speed_r vs the velocity family's cmo.speed
 #:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
 #:     _METRIC_CMAPS below) -- a separate table by design, not a leak
+#:   - iron / SSH tidal amplitude: both cmo.amp (different families, rarely adjacent)
 #: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
 #: entry, out of scope for this table's BGC-species guarantee: alkalinity (explicit
 #: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
@@ -87,6 +88,14 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # full standard_name: xcmocean's own "vel" pattern matches the substring "vel" in
     # "sea_le-vel-", which would otherwise give sea-level anomaly a velocity map.
     "sea_surface_height_above_sea_level": "cmo.balance",
+    # Tidal harmonics of SSH (osk-custom names): amplitude is a magnitude, phase is
+    # cyclic. The full names are no substring of the SSH keys above, so neither can
+    # claim the other. The harmonic real/imaginary parts are left to the fallthrough.
+    "sea_surface_height_tidal_amplitude": "cmo.amp",
+    "sea_surface_height_tidal_phase": "cmo.phase",
+    # x/y/eastward/northward baroclinic pressure flux: signed (energy flows either
+    # way), so the SSH precedent, a diverging-look map.
+    "baroclinic_pressure_flux": "cmo.balance",
     "nitrate": "cmo.deep",
     "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",

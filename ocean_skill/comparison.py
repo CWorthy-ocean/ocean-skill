@@ -1370,9 +1370,18 @@ def _calculate_method(spec: Any) -> str | None:
     rows in the same figure). Folded into every label exactly once, in
     :func:`_variable_label`/:func:`_short_variable_label`, regardless of whether the
     spec carries its own standard_name or falls back to the calculator's plain name.
+    A fanned keyword's value (:data:`ocean_skill.operators.CALCULATOR_FANS` -- the
+    ``constituent`` of a tidal amplitude) is folded in alongside for the same reason:
+    K1 and M2 rows would otherwise read identically.
     """
+    from ocean_skill.operators import CALCULATOR_FANS
+
     target = spec["test"] if is_pair_spec(spec) else spec
-    return target.get("method") if isinstance(target, dict) and "calculate" in target else None
+    if not (isinstance(target, dict) and "calculate" in target):
+        return None
+    fanned = CALCULATOR_FANS.get(target["calculate"], ())
+    parts = [target.get("method"), *(target.get(k) for k in fanned)]
+    return ", ".join(str(p) for p in parts if p is not None) or None
 
 
 def _variable_label_base(spec: Any) -> str:
@@ -2210,6 +2219,17 @@ def _prepare(
     # matters here, even spelled as a plain string (see _expand_derived).
     expanded_variable = _expand_derived(variable)
     calculated = isinstance(expanded_variable, dict) and "calculate" in expanded_variable
+    # A calculator sees the whole Dataset, so a time window must narrow that Dataset
+    # *before* it runs -- left to the horizontal select below, a harmonic analysis
+    # would fit the entire record and the window would only trim a result that no
+    # longer has a time axis. Only the time keys move: a box crop stays below,
+    # because a calculator may need neighbouring cells (u/v averaged onto rho).
+    if calculated:
+        from ocean_skill.sources import _TIME_KEYS as _ALL_TIME_KEYS
+
+        window = {k: select.pop(k) for k in list(select) if k in _ALL_TIME_KEYS}
+        if window:
+            obj = operators.select(obj, window, subject=source)
 
     da = operators.resolve_variable(obj, variable)
     if da is None:
@@ -3466,6 +3486,10 @@ def prepare_source(
     from ocean_skill.align import _is_point_bbox
 
     point_window_applied = pre_crop and bbox is not None and _is_point_bbox(bbox)
+    if hasattr(obj, "assign_attrs"):
+        # Who this is, for a calculator that caches its own expensive intermediate
+        # (see operators.calculator_source) -- the cache is keyed by identity.
+        obj = obj.assign_attrs(ocean_skill_source=source)
     da, depth = _prepare(
         obj,
         meta,
@@ -9608,7 +9632,13 @@ def compare(
     # this fans out to. A pair-spec resolves each side the same way -- see
     # Comparison.__init__, which does the identical per-side resolution when the
     # spec reaches it directly rather than through this fan-out.
-    variables = [_resolve_compare_variable(v) for v in variables]
+    from ocean_skill.operators import expand_calculator_fans
+
+    variables = [
+        _resolve_compare_variable(one)
+        for v in variables
+        for one in expand_calculator_fans(v)
+    ]
 
     # A source name that resolves nowhere can never contribute a comparison, no
     # matter how `variables`/`depths`/`times` fan out -- unlike a real source

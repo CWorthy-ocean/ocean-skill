@@ -150,8 +150,16 @@ CALCULATORS: dict[str, Any] = {}
 #: returns for everything else.
 CALCULATOR_INPUTS: dict[str, Any] = {}
 
+#: Spec keys a calculator accepts as a *list*, each value meaning one more field --
+#: ``{"calculate": "tidal_amplitude", "constituent": ["K1", "M2"]}`` is two maps, not
+#: one. :func:`expand_calculator_fans` turns such a spec into one spec per value
+#: before anything is prepared; the calculator itself only ever sees a single value.
+#: Declared per calculator rather than guessed, since a list-valued keyword can just
+#: as well be one argument.
+CALCULATOR_FANS: dict[str, tuple[str, ...]] = {}
 
-def register_calculator(name: str, *, inputs: Any = None):
+
+def register_calculator(name: str, *, inputs: Any = None, fans: tuple[str, ...] = ()):
     """Register a derived diagnostic -- a real formula, not an operator dispatch.
 
     Unlike :data:`COMBINERS`/:data:`REDUCERS`, a calculator needs the whole dataset
@@ -179,9 +187,42 @@ def register_calculator(name: str, *, inputs: Any = None):
         CALCULATORS[name] = fn
         if inputs is not None:
             CALCULATOR_INPUTS[name] = inputs
+        if fans:
+            CALCULATOR_FANS[name] = tuple(fans)
         return fn
 
     return decorate
+
+
+def expand_calculator_fans(spec: Any) -> list[Any]:
+    """Return ``spec`` as a list, one calculate-spec per value of a fanned keyword.
+
+    Only keys the calculator declared through ``register_calculator(fans=...)`` are
+    expanded, in order; anything else -- a name, a combination, a pair-spec, a
+    calculate-spec without a list -- comes back as ``[spec]`` unchanged.
+    """
+    if not (isinstance(spec, dict) and "calculate" in spec):
+        return [spec]
+    for key in CALCULATOR_FANS.get(spec["calculate"], ()):
+        values = spec.get(key)
+        if isinstance(values, (list, tuple)):
+            return [
+                one
+                for value in values
+                for one in expand_calculator_fans({**spec, key: value})
+            ]
+    return [spec]
+
+
+def calculator_source(ds) -> str | None:
+    """Return the catalog name of the source a calculator is running on, if known.
+
+    :func:`ocean_skill.comparison.prepare_source` tags the Dataset before the
+    calculator sees it, so a calculator with an expensive intermediate can cache it
+    by identity (see :func:`ocean_skill.cache.key_for_calculated`). ``None`` for a
+    bare Dataset handed to :func:`resolve_variable` directly -- don't cache then.
+    """
+    return getattr(ds, "attrs", {}).get("ocean_skill_source")
 
 
 def register_derived(name: str, spec: dict[str, Any]) -> None:
