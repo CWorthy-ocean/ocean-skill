@@ -19,6 +19,9 @@ these as a list, each step acting on the axis the previous one left:
 twelve monthly means (the seasonal cycle's variance), and
 ``{"time": [{"resample": "1YS", "reduce": "mean"}, "std"]}`` the standard deviation
 of the annual means (interannual variability). See :func:`aggregate`.
+A ``resample`` keeps only the bins that hold data, so a sparse series (a station
+visited a few times a year, binned daily) yields one point per visit, not a mostly-NaN
+daily axis.
 
 ``groupby`` and ``resample`` are the two ways to keep an axis standing rather than
 collapse it, and they are not the same axis: ``groupby`` bins by *label*, giving a
@@ -2184,6 +2187,9 @@ def _reduce_dim(
 ):
     """Apply one reduction (optionally after a groupby or resample) along ``dim``.
 
+    A ``resample`` keeps only the bins that held samples: empty bins between sparse
+    observations are dropped rather than returned as NaN.
+
     The keyword-only arguments are for :func:`_reduce_chain`, which calls this once
     per step: ``axis`` is the name the result's ``cell_methods`` is written against
     (the chain's original dimension; ``dim`` itself is ``month`` by the second step),
@@ -2231,6 +2237,7 @@ def _reduce_dim(
     # a grouped reduction is along the grouping axis anyway, which vertical cell
     # weights never describe.
     weights = _weights_for(da, target) if name == "mean" else None
+    bin_counts = None
     if group is not None:
         if group == "season":
             # A season groupby is a climatology like any other -- it groups along
@@ -2265,6 +2272,9 @@ def _reduce_dim(
         # starts rather than every original step.
         if target in da.coords:
             _warn_short_bins(da[target], freq, target)
+            # Captured before `da` becomes the resampler: counts below drop the bins
+            # that held no samples.
+            bin_counts = _bin_counts(da[target], freq)
         da = da.resample({target: freq})
         weights = None
     reducible = da
@@ -2298,6 +2308,18 @@ def _reduce_dim(
         if "units" in attrs:
             spread_arr.attrs["units"] = _units_after(attrs["units"], spread)
         out = out.assign_coords({SPREAD_COORD: spread_arr})
+
+    if bin_counts is not None:
+        # Resample fills every bin between the first and last sample, so a sparse
+        # series (a station visited 15 times over seven months, binned daily) comes
+        # back mostly NaN -- and a line plot breaks at NaN, drawing nothing. Keep only
+        # the bins that held samples, by *count* (not data: a bin of all-NaN samples
+        # stays). Same rule as `_time_bins` in comparison.py, which skips `n <= 0`
+        # bins for `compare(times=...)`. Applied after the spread coord is attached so
+        # it is masked along with the value.
+        if bin_counts.sizes[target] != out.sizes[target]:
+            raise AssertionError("resample bin counts misaligned with reduced bins")
+        out = out.isel({target: (bin_counts > 0).values})
 
     if group is not None:
         # A groupby renames the dim to the grouping label (``month``, ``year``,

@@ -7151,6 +7151,44 @@ def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]
     return comparisons, labels
 
 
+#: Smallest share of an averaged group's timestamps that must hold data from at
+#: least two members before :func:`_average_aligned` stops warning that the "average"
+#: is mostly one member's own value (stations visited minutes apart share no
+#: timestamp, so the pooled line just zigzags between them).
+MIN_AVERAGE_TIME_OVERLAP = 0.5
+
+
+def _warn_sparse_time_overlap(stacked: Any) -> None:
+    """Warn when few of ``stacked``'s timestamps are shared by two or more members."""
+    import warnings
+
+    from ocean_skill import _stacklevel, operators
+
+    if "reference" not in stacked.data_vars or stacked.sizes["_average"] < 2:
+        return
+    ref = stacked["reference"]
+    tdim = operators.resolve_dim(ref, "T")
+    if tdim is None or tdim == "_average" or tdim not in ref.dims:
+        return
+    present = ref.notnull()
+    other = [d for d in present.dims if d not in (tdim, "_average")]
+    if other:
+        present = present.any(other)
+    members = present.sum("_average")
+    n_any = int((members >= 1).sum())
+    n_shared = int((members >= 2).sum())
+    if n_any == 0 or n_shared / n_any >= MIN_AVERAGE_TIME_OVERLAP:
+        return
+    warnings.warn(
+        f"average(): {n_any - n_shared} of {n_any} timestamps hold data from only "
+        f"one of the {stacked.sizes['_average']} members, so the \"average\" there "
+        "is just that member's own value and the line will zigzag between them. "
+        "Bin time first so the members share timestamps, e.g. "
+        'aggregate={"time": {"resample": "1D", "reduce": "mean"}}.',
+        stacklevel=_stacklevel.find(),
+    )
+
+
 def _average_aligned(comps: list[Comparison]) -> Any:
     """Average a group of comparisons' aligned pairs into one composite dataset.
 
@@ -7166,7 +7204,11 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     group's members to share one exactly — a station sampled on different dates
     than its groupmate still contributes wherever it has data, via
     ``skipna=True``. A future xarray release changes ``concat``'s default join, so
-    it is passed explicitly here rather than relied upon.
+    it is passed explicitly here rather than relied upon. When fewer than
+    :data:`MIN_AVERAGE_TIME_OVERLAP` of the resulting timestamps hold data from two
+    or more members (stations visited minutes apart share none), the "average" is
+    really one member's value at each step, so a warning suggests binning time first.
+    Members without a time axis are never checked.
     """
     import numpy as np
     import xarray as xr
@@ -7179,6 +7221,7 @@ def _average_aligned(comps: list[Comparison]) -> Any:
         join="outer",
         combine_attrs="drop_conflicts",
     )
+    _warn_sparse_time_overlap(stacked)
     avg = stacked.mean("_average", skipna=True, keep_attrs=True)
     if {"test", "reference"} <= set(avg.data_vars):
         attrs = avg["difference"].attrs if "difference" in avg else {}
@@ -7960,7 +8003,11 @@ class ComparisonSet:
         ``difference`` is recomputed afterward (see :func:`_average_aligned`).
         Mismatched time/depth axes across a group's members are unioned
         (``join="outer"``) and reduced with ``skipna=True``, so members need not
-        share exactly the same sample times.
+        share exactly the same sample times. If under half of the pooled timestamps
+        hold data from two or more members (e.g. CTD stations visited minutes
+        apart), a warning notes that the average there is a single member's value
+        and suggests binning time first with ``aggregate={"time": {"resample":
+        "1D", "reduce": "mean"}}``.
 
         ``by`` accepts any dimension a pooled label can be built from —
         ``"variable"`` (default), ``"depth"``, ``"time"``, ``"test"``,
