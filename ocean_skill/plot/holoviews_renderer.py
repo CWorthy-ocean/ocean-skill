@@ -22,12 +22,13 @@ delegates.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from numbers import Real
 from typing import Any
 
+import matplotlib.colors as _mcolors
 import numpy as np
 
 from ocean_skill.align import natural_convention
@@ -48,14 +49,19 @@ from ocean_skill.plot.matplotlib_renderer import (
 )
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.section import (
+    CAST_COLOR,
     CONTOUR_COLOR,
     CONTOUR_WIDTH,
+    SEAFLOOR_COLOR,
+    cast_marks,
     check_section_options,
     contour_label,
     contour_paths,
+    depth_limit,
     difference_fill_levels,
     fill_edges,
     prepare_overlay,
+    seafloor_line,
 )
 from ocean_skill.plot.section import contour_levels as _contour_levels_for
 from ocean_skill.plot.typography import (
@@ -1029,8 +1035,319 @@ def _banded_fill(
     )
 
 
+# --- vertical sections built from casts: cast lines, names and the seafloor ----------
+#
+# A comparison section stacked from CTD casts (``select={"transect": {"from":
+# "reference"}}``) can show where its data came from: a dashed line down each cast, its
+# name along the top of the panel, and the seafloor shaded under the data. What goes
+# where is :func:`ocean_skill.plot.section.cast_marks` / ``seafloor_line`` /
+# ``depth_limit`` -- shared with the static renderer, so the two draw the same marks at
+# the same places -- and this block only draws them: the seafloor as an ``hv.Area`` (and
+# an ``hv.Curve`` for its outline), the casts as ``hv.Segments`` and ``hv.Labels``.
+
+#: The ``cast_kwargs`` keys this renderer draws -- the static renderer's ``ax.vlines``
+#: spellings (``colors``/``linestyles``/``linewidths``) and the singular form of each --
+#: plus the two that style the names instead (``labels=False``, ``rotation``).
+_CAST_KWARGS = (
+    "colors",
+    "color",
+    "linestyles",
+    "linestyle",
+    "linewidths",
+    "linewidth",
+    "labels",
+    "rotation",
+)
+
+#: The ``seafloor_kwargs`` keys this renderer draws: the outline's ``edgecolor`` and
+#: ``linewidth``, and the fill's ``color`` (``facecolor``) and ``alpha``. Any other key
+#: is a matplotlib ``fill_between`` argument (``hatch`` ...) bokeh has no equivalent of.
+_SEAFLOOR_KWARGS = ("color", "facecolor", "alpha", "edgecolor", "linewidth")
+
+#: Depth, in pixels, of the gap between a cast's name and the panel's top edge.
+_CAST_LABEL_GAP_PX = 3
+
+
+@dataclass(frozen=True)
+class _CastStyle:
+    """How cast lines and their names are drawn: ``cast_kwargs`` in bokeh's terms."""
+
+    color: str = _mcolors.to_hex(CAST_COLOR)
+    #: in CSS pixels (the shared width is matplotlib points; see :class:`_ContourStyle`)
+    width: float = 0.8 * PT_PER_CSS_PX
+    dash: str = "dashed"
+    labels: bool = True
+    #: the names' rotation in degrees, counter-clockwise
+    angle: float = 0.0
+
+
+@dataclass(frozen=True)
+class _SeafloorStyle:
+    """How the seafloor is drawn: ``seafloor_kwargs`` as bokeh spells them."""
+
+    fill_color: str = _mcolors.to_hex(SEAFLOOR_COLOR)
+    fill_alpha: float = 1.0
+    #: the outline's colour, or ``None`` for no outline (``edgecolor="none"``)
+    edge_color: str | None = "#000000"
+    edge_width: float = 0.8 * PT_PER_CSS_PX
+
+
+def _warn_static_only(name: str, keys) -> None:
+    if keys:
+        warnings.warn(
+            f"{name} {sorted(set(keys))} only affect the static (matplotlib) renderer "
+            "and have no effect here -- pass renderer='matplotlib' for them to apply.",
+            stacklevel=4,
+        )
+
+
+def _cast_style(cast_kwargs) -> _CastStyle:
+    """Read ``cast_kwargs`` into a :class:`_CastStyle`, warning about the rest.
+
+    Honours ``colors`` (or ``color``), ``linewidths`` (``linewidth``) and ``linestyles``
+    (``linestyle``) -- one colour, one width, one of the named line styles -- plus
+    ``labels=False`` (no names) and ``rotation`` (degrees). A key bokeh cannot use, or
+    one of these with a value only matplotlib can, is named in one warning rather than
+    silently dropped. An already-built style passes through, so a grid reads its
+    keywords once.
+    """
+    import matplotlib.colors as mcolors
+
+    if cast_kwargs is None:
+        return _CastStyle()
+    if isinstance(cast_kwargs, _CastStyle):
+        return cast_kwargs
+    if not isinstance(cast_kwargs, Mapping):
+        raise TypeError(
+            "cast_kwargs= takes a dict of cast-line options "
+            f"({', '.join(_CAST_KWARGS)}), got {type(cast_kwargs).__name__}."
+        )
+    static_only = [str(k) for k in cast_kwargs if k not in _CAST_KWARGS]
+    fields: dict[str, Any] = {}
+    for key in ("colors", "color"):
+        if key in cast_kwargs:
+            try:
+                fields["color"] = mcolors.to_hex(_only(cast_kwargs[key]))
+            except (ValueError, TypeError):
+                static_only.append(key)
+    for key in ("linewidths", "linewidth"):
+        if key in cast_kwargs:
+            width = _only(cast_kwargs[key])
+            if isinstance(width, Real) and not isinstance(width, bool) and width > 0:
+                fields["width"] = float(width) * PT_PER_CSS_PX
+            else:
+                static_only.append(key)
+    for key in ("linestyles", "linestyle"):
+        if key in cast_kwargs:
+            try:
+                fields["dash"] = _LINE_DASH[_only(cast_kwargs[key])]
+            except (KeyError, TypeError):
+                static_only.append(key)
+    if "labels" in cast_kwargs:
+        fields["labels"] = bool(cast_kwargs["labels"])
+    if "rotation" in cast_kwargs:
+        rotation = cast_kwargs["rotation"]
+        if isinstance(rotation, Real) and not isinstance(rotation, bool):
+            fields["angle"] = float(rotation)
+        else:
+            static_only.append("rotation")
+    _warn_static_only("cast_kwargs", static_only)
+    return _CastStyle(**fields)
+
+
+def _seafloor_style(seafloor_kwargs) -> _SeafloorStyle:
+    """Read ``seafloor_kwargs`` into a :class:`_SeafloorStyle`, warning about the rest.
+
+    ``color`` (``facecolor``) and ``alpha`` style the fill; ``edgecolor`` (a colour, or
+    ``"none"`` for no outline) and ``linewidth`` (``0`` for none) style the outline --
+    the static renderer's own split. Anything else, or a value bokeh cannot use, is
+    named in one warning. An already-built style passes through.
+    """
+    import matplotlib.colors as mcolors
+
+    if seafloor_kwargs is None:
+        return _SeafloorStyle()
+    if isinstance(seafloor_kwargs, _SeafloorStyle):
+        return seafloor_kwargs
+    if not isinstance(seafloor_kwargs, Mapping):
+        raise TypeError(
+            "seafloor_kwargs= takes a dict of seafloor options "
+            f"({', '.join(_SEAFLOOR_KWARGS)}), got {type(seafloor_kwargs).__name__}."
+        )
+    static_only = [str(k) for k in seafloor_kwargs if k not in _SEAFLOOR_KWARGS]
+    fields: dict[str, Any] = {}
+    for key in ("color", "facecolor"):
+        if key in seafloor_kwargs:
+            try:
+                fields["fill_color"] = mcolors.to_hex(seafloor_kwargs[key])
+            except (ValueError, TypeError):
+                static_only.append(key)
+    if "alpha" in seafloor_kwargs:
+        alpha = seafloor_kwargs["alpha"]
+        if isinstance(alpha, Real) and not isinstance(alpha, bool):
+            fields["fill_alpha"] = float(alpha)
+        else:
+            static_only.append("alpha")
+    if "edgecolor" in seafloor_kwargs:
+        edge = seafloor_kwargs["edgecolor"]
+        if edge is None or (isinstance(edge, str) and edge == "none"):
+            fields["edge_color"] = None
+        else:
+            try:
+                fields["edge_color"] = mcolors.to_hex(edge)
+            except (ValueError, TypeError):
+                static_only.append("edgecolor")
+    if "linewidth" in seafloor_kwargs:
+        width = seafloor_kwargs["linewidth"]
+        if isinstance(width, Real) and not isinstance(width, bool) and width >= 0:
+            fields["edge_width"] = float(width) * PT_PER_CSS_PX
+        else:
+            static_only.append("linewidth")
+    _warn_static_only("seafloor_kwargs", static_only)
+    return _SeafloorStyle(**fields)
+
+
+@dataclass(frozen=True)
+class _CastLayers:
+    """What a cast-built section row adds to each panel, in the order it is layered.
+
+    ``floor`` goes *under* the data (a missing cell is transparent, so the shading shows
+    through it, and an observation deeper than the model's smoothed bottom stays visible
+    on top); ``outline`` goes over the data but under any contour lines; ``casts`` --
+    the dashed lines and then their names -- go on top of all of it. ``ylim`` is the
+    ``(top, bottom)`` the depth axis is set to with a seafloor (``None``: the data's
+    own).
+
+    ``floor`` is a function of the panel's frame options returning the seafloor's fill
+    (or ``None``): the fill leads its panel's overlay, so it carries that panel's frame
+    -- its title above all -- and holoviews keeps an element's options by identity, so
+    one fill shared by the row's three panels would give all three the last one's title.
+    """
+
+    floor: Callable[[dict], Any] | None = None
+    outline: tuple = ()
+    casts: tuple = ()
+    ylim: tuple[float, float] | None = None
+
+
+def _cast_layers(
+    values,
+    geometry,
+    *,
+    x: str,
+    cast_labels,
+    seafloor,
+    seafloor_style: _SeafloorStyle,
+    cast_style: _CastStyle,
+    label_size: str,
+) -> _CastLayers:
+    """Return a row's cast lines, names and seafloor as holoviews elements.
+
+    ``values`` is :func:`~ocean_skill.plot.section.prepare_section_row`'s lanes *before*
+    any x renaming, ``geometry`` its geometry; ``x`` is the x dimension the panels
+    actually carry (``geometry.x_name``, or the grid's alias for it) so the new elements
+    share the mesh's dimension names -- bokeh links axes by name. Computed once per row
+    and handed to all three panels, as the static renderer draws the same marks on each.
+
+    Every element takes ``apply_ranges=False``: they are context for the data, not
+    something the view should widen to hold. The depth axis is set explicitly instead --
+    from the surface down to :func:`~ocean_skill.plot.section.depth_limit` -- when there
+    is a seafloor, and left to the data when there is not.
+    """
+    import holoviews as hv
+
+    y = geometry.y_name
+    floor = None
+    outline: list = []
+    casts: list = []
+    ylim = None
+    line = None
+    if seafloor is not None:
+        line = seafloor_line(seafloor, geometry)
+    if line is not None and len(line[0]):
+        bottom = depth_limit(list(values.values()), line[1])
+        ylim = (0.0, bottom)
+        sx, sdepth = line
+
+        def floor(frame):
+            return hv.Area(
+                (sx, sdepth, np.full_like(sdepth, bottom)),
+                kdims=[x],
+                vdims=[y, f"{y}_floor"],
+            ).opts(
+                fill_color=seafloor_style.fill_color,
+                fill_alpha=seafloor_style.fill_alpha,
+                line_alpha=0,
+                show_legend=False,
+                tools=[],
+                apply_ranges=False,
+                **frame,
+            )
+
+        if seafloor_style.edge_color is not None and seafloor_style.edge_width > 0:
+            outline.append(
+                hv.Curve((sx, sdepth), kdims=[x], vdims=[y]).opts(
+                    color=seafloor_style.edge_color,
+                    line_width=seafloor_style.edge_width,
+                    show_legend=False,
+                    tools=[],
+                    apply_ranges=False,
+                )
+            )
+    if cast_labels is not None:
+        marks = cast_marks(values["reference"], geometry, cast_labels)
+        placed = [m for m in marks if np.isfinite(m.x)]
+        reached = [m for m in placed if np.isfinite(m.bottom)]
+        if reached:
+            casts.append(
+                hv.Segments(
+                    [(m.x, 0.0, m.x, m.bottom) for m in reached],
+                    kdims=[x, y, f"{x}_end", f"{y}_end"],
+                ).opts(
+                    color=cast_style.color,
+                    line_width=cast_style.width,
+                    line_dash=cast_style.dash,
+                    show_legend=False,
+                    tools=[],
+                    apply_ranges=False,
+                )
+            )
+        if cast_style.labels and placed:
+            # the names sit just inside the top edge: at the surface when the axis is
+            # set to start there, else at the shallowest depth any panel has
+            top = 0.0
+            if ylim is None:
+                top = min(
+                    float(np.nanmin(np.asarray(da[y], dtype="float64")))
+                    for da in values.values()
+                )
+            casts.append(
+                hv.Labels(
+                    [(m.x, top, m.label) for m in placed],
+                    kdims=[x, y],
+                    vdims=["text"],
+                ).opts(
+                    text_color=cast_style.color,
+                    text_font_size=label_size,
+                    text_align="center",
+                    text_baseline="top",
+                    angle=cast_style.angle,
+                    show_legend=False,
+                    apply_ranges=False,
+                    hooks=[_label_offset_hook(0, -1, px=_CAST_LABEL_GAP_PX)],
+                )
+            )
+    return _CastLayers(floor, tuple(outline), tuple(casts), ylim)
+
+
 def _section_panel(
-    field, *, mark: str = "pcolormesh", fill_levels=None, lines=(), **mesh_opts
+    field,
+    *,
+    mark: str = "pcolormesh",
+    fill_levels=None,
+    lines=(),
+    casts: _CastLayers | None = None,
+    **mesh_opts,
 ):
     """Return one section panel: its fill, with any contour lines over it.
 
@@ -1039,6 +1356,12 @@ def _section_panel(
     elements :func:`_line_layers` built -- are laid over the fill, lines and then their
     labels, above everything else; a panel with none is exactly what it was before
     there were overlays.
+
+    ``casts`` (:class:`_CastLayers`), if given, adds a cast-built section's seafloor
+    beneath the fill (carrying the panel's own frame options, as a banded fill does, so
+    the whole overlay sits in the one frame), its outline over the fill and under the
+    contour ``lines``, and the cast lines and names over everything. The mesh stays the
+    only element with a hover, so a panel still reads an exact value per cell.
     """
     mesh = _quadmesh(field, **mesh_opts)
     panel = mesh
@@ -1057,8 +1380,21 @@ def _section_panel(
             hover=mesh_opts.get("hover", True),
             label_clipped=mesh_opts.get("label_clipped", False),
         )
+    if casts is not None:
+        frame = {
+            k: v for k, v in mesh.opts.get("plot").kwargs.items() if k in _PANEL_OPTS
+        }
+        if casts.floor is not None:
+            panel = casts.floor(frame) * panel
+        for layer in casts.outline:
+            panel = panel * layer
     for layer in lines:
         panel = panel * layer
+    if casts is not None:
+        for layer in casts.casts:
+            panel = panel * layer
+        if casts.ylim is not None:
+            panel = panel.opts(ylim=casts.ylim)
     return panel
 
 
@@ -2703,6 +3039,10 @@ def _section_row(
     contour_levels=None,
     contour_kwargs=None,
     section_x: str = "auto",
+    cast_labels=None,
+    seafloor=None,
+    seafloor_kwargs=None,
+    cast_kwargs=None,
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -2748,6 +3088,20 @@ def _section_row(
     a difference of two fields has no isotherm of its own.
     ``section_x`` is :func:`_section`'s; the three panels share the x axis chosen from
     the test lane's path.
+
+    **Cast-built sections.** An item stacked from CTD casts carries ``cast_labels`` (one
+    name per along-path column) and ``seafloor`` (the bottom depth along the path); the
+    keywords of the same names override the item's. Each is drawn on all three panels
+    from one set of marks computed once for the row (:func:`_cast_layers`): a dashed
+    line from the surface to each cast's deepest observation with its name just inside
+    the top edge, and the seafloor as a filled area *under* the data (a missing cell is
+    transparent, so it shows through) with a thin outline over it but under any contour
+    lines. With a seafloor the depth axis runs from the surface to the deeper of the
+    seafloor and the deepest observation. The mesh stays the only element with a hover.
+    ``cast_kwargs`` (``colors``, ``linestyles``, ``linewidths``; ``labels=False`` for no
+    names, ``rotation`` in degrees) and ``seafloor_kwargs`` (``color``/``alpha`` for the
+    fill, ``edgecolor``/``linewidth`` for the outline) are the static renderer's own
+    keys; others only affect it, and warn. With neither key the panels are unchanged.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2767,6 +3121,29 @@ def _section_row(
     hv = _extension()
     factor = _canvas_factor(size, zoom)
     values, geometry = prepare_section_row(item["aligned"], section_x)
+    if cast_labels is None:
+        cast_labels = item.get("cast_labels")
+    if seafloor is None:
+        seafloor = item.get("seafloor")
+    # the cast marks and seafloor are placed on the row's own coordinates, so they are
+    # built here, ahead of the x alias renaming them (the elements take the alias)
+    cast_layers = None
+    if cast_labels is not None or seafloor is not None:
+        cast_layers = _cast_layers(
+            values,
+            geometry,
+            x=x_alias or geometry.x_name,
+            cast_labels=cast_labels,
+            seafloor=seafloor,
+            seafloor_style=_seafloor_style(seafloor_kwargs),
+            cast_style=_cast_style(cast_kwargs),
+            label_size=_contour_label_size(
+                values["test"],
+                font_scale=font_scale,
+                width_px=PANEL_WIDTH_PX,
+                canvas_factor=factor,
+            ),
+        )
     # the overlays go onto the panels' own meshes, ahead of the x alias renaming them
     overlays = (
         {
@@ -2861,12 +3238,14 @@ def _section_row(
     panels = [
         _section_panel(
             t, mark=mark, fill_levels=fill_levels, lines=lines["test"],
+            casts=cast_layers,
             title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _section_panel(
             r, mark=mark, fill_levels=fill_levels, lines=lines["reference"],
+            casts=cast_layers,
             title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
@@ -2875,6 +3254,7 @@ def _section_row(
             d,
             mark=mark,
             fill_levels=difference_fill_levels(fill_levels),
+            casts=cast_layers,
             title=diff_title,
             cmap=div,
             clim=div_clim,
@@ -2911,6 +3291,8 @@ def _section_row_grid(
     contour_levels=None,
     contour_kwargs=None,
     section_x: str = "auto",
+    seafloor_kwargs=None,
+    cast_kwargs=None,
     **_,
 ):
     """One interactive ``section_row`` per comparison, stacked.
@@ -2947,6 +3329,11 @@ def _section_row_grid(
     resolved per row from that row's own path). The lines' levels are decided
     **once** for the whole grid, pooled over every row's test and reference overlay, so
     every row shows the same isotherms.
+
+    A row stacked from casts draws its own ``cast_labels`` and ``seafloor`` (read per
+    item, as ``contour`` is: one row may be cast-built and the next not), styled by the
+    one ``seafloor_kwargs``/``cast_kwargs`` -- read once here, so a bad value warns
+    once, not once per row. See :func:`_section_row`.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2964,6 +3351,8 @@ def _section_row_grid(
         section_x=section_x,
     )
     hv = _extension()
+    seafloor_style = _seafloor_style(seafloor_kwargs)
+    cast_style = _cast_style(cast_kwargs)
     prepared = [prepare_section_row(it["aligned"], section_x) for it in items]
     levels = None
     overlays = [
@@ -3077,6 +3466,10 @@ def _section_row_grid(
             contour_levels=levels if it.get("contour") is not None else None,
             contour_kwargs=style if it.get("contour") is not None else None,
             section_x=section_x,
+            cast_labels=it.get("cast_labels"),
+            seafloor=it.get("seafloor"),
+            seafloor_kwargs=seafloor_style,
+            cast_kwargs=cast_style,
         )
         for i, it in enumerate(items)
     ]
