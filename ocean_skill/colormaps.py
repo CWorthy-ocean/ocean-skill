@@ -61,7 +61,7 @@ __all__ = [
 #: paint them alike (this table's whole reason to exist: ammonium and iron used to
 #: both fall through to xcmocean's "dye" default and collide). Everything else
 #: (physics) follows xcmocean's own family conventions -- temperature/thermal,
-#: salinity/haline, velocity/speed, density/dense, depth/deep, ice/ice -- and *may*
+#: salinity/haline, speed/speed, density/dense, depth/deep, ice/ice -- and *may*
 #: share a hue with a BGC species, since the two are a different family and unlikely
 #: to sit in the same figure. cmocean has 15 sequential maps and ~40 vocabulary
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
@@ -75,7 +75,7 @@ __all__ = [
 #:     entry below)
 #:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
 #:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
-#:   - pH cmo.speed_r vs the velocity family's cmo.speed
+#:   - pH cmo.speed_r vs the speed family's cmo.speed
 #:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
 #:     _METRIC_CMAPS below) -- a separate table by design, not a leak
 #: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
@@ -96,19 +96,24 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # "sea_le-vel-", which would otherwise give sea-level anomaly a velocity map.
     # (SLA, unlike ADT above, is a signed anomaly about zero. The rule for every such
     # variable: *if zero matters it is in* :data:`_CENTERED`, and :func:`cmaps_for`
-    # then gives it the diverging balance map with limits equal about the centre,
-    # whatever this table says -- the balance entries in this table only keep
-    # xcmocean's own ``da.cmo.seq`` accessor in agreement. :data:`_CENTERED` decides.)
+    # then draws it with limits equal about the centre. :data:`_CENTERED` decides
+    # *whether* a variable is centred; this table decides *which* diverging map --
+    # balance unless the entry names another -- so every centred variable's entry here
+    # must be a diverging map.)
     "sea_surface_height_above_sea_level": "cmo.balance",
     # Signed velocity components (the geostrophic ugos/vgos names are vocabulary aliases
-    # of the first two): direction is the point, zero is "no flow", so balance, centred.
-    # The explicit full names also stop xcmocean's own substring "vel" pattern giving
-    # them cmo.speed when read through ``da.cmo.seq``.
-    "eastward_sea_water_velocity": "cmo.balance",
-    "northward_sea_water_velocity": "cmo.balance",
-    "sea_water_x_velocity": "cmo.balance",
-    "sea_water_y_velocity": "cmo.balance",
-    "upward_sea_water_velocity": "cmo.balance",
+    # of the first two): direction is the point, zero is "no flow", so diverging and
+    # centred -- cmo.delta, the velocity family's own diverging map, which also keeps
+    # a current section from reading like an SLA or CO2-flux one (balance). A velocity
+    # *magnitude* is a different quantity, sequential from zero: see sea_water_speed
+    # and wind_speed (cmo.speed). The explicit full names also stop xcmocean's own
+    # substring "vel" pattern giving the components cmo.speed through ``da.cmo.seq``.
+    "eastward_sea_water_velocity": "cmo.delta",
+    "northward_sea_water_velocity": "cmo.delta",
+    "sea_water_x_velocity": "cmo.delta",
+    "sea_water_y_velocity": "cmo.delta",
+    "upward_sea_water_velocity": "cmo.delta",
+    "sea_water_speed": "cmo.speed",
     "nitrate": "cmo.deep",
     "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",
@@ -134,13 +139,13 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "sea_water_ph_reported_on_total_scale": "cmo.speed_r",
     # kd490: shares turbidity's map -- both are water-clarity/optical measures.
     "diffuse_attenuation": "cmo.turbid",
-    # Signed wind components: zero-meaningful, so in :data:`_CENTERED` and balance here
-    # (see the note on SSH/SLA above). Spelled out by full name rather than the old bare
-    # "wind" key, which as a substring also matched wind_speed -- a true speed, which
-    # keeps its own explicit cmo.speed entry below. No other standard_name contains
-    # "wind".
-    "eastward_wind": "cmo.balance",
-    "northward_wind": "cmo.balance",
+    # Signed wind components: velocity components like the ocean ones above, so in
+    # :data:`_CENTERED` and cmo.delta here (see the note on SSH/SLA above). Spelled out
+    # by full name rather than the old bare "wind" key, which as a substring also
+    # matched wind_speed -- a true speed, which keeps its own explicit cmo.speed entry
+    # below. No other standard_name contains "wind".
+    "eastward_wind": "cmo.delta",
+    "northward_wind": "cmo.delta",
     "wind_speed": "cmo.speed",
     "sea_ice": "cmo.ice",
     # Every mixed-layer-thickness name: the generic ``ocean_mixed_layer_thickness``
@@ -188,8 +193,9 @@ _ANCHORED_CMAPS: dict[str, tuple[str, str]] = {
 }
 
 #: The one source of truth for "zero is meaningful": a variable listed here is a signed
-#: quantity (anomaly, flux, velocity component) whose sequential panel uses the
-#: diverging cmo.balance map (:func:`cmaps_for`) over limits equal about the centre
+#: quantity (anomaly, flux, velocity component) whose sequential panel uses a
+#: diverging map (:func:`cmaps_for`: its :data:`_SEQUENTIAL_CMAPS` entry, else
+#: cmo.balance) over limits equal about the centre
 #: (:func:`variable_limits`), so white is always "none". Its *spread* (std, variance)
 #: is a non-negative magnitude and is not centred. The colour scale is made symmetric
 #: about this value, so the diverging map's white sits at "no anomaly" whatever the data's own extremes are (percentile-or-min/max limits
@@ -270,8 +276,11 @@ def cmaps_for(standard_name: str | None, statistic: str | None = None):
     directly rather than kept as a second, separate lookup here. Falls back to
     xcmocean's own default (``viridis``/``balance``) if nothing matches.
 
-    A centred variable (:data:`_CENTERED`: zero is meaningful) gets the diverging
-    ``cmo.balance`` as its sequential map -- :data:`_CENTERED` decides, not the table.
+    A centred variable (:data:`_CENTERED`: zero is meaningful) gets a diverging map as
+    its sequential map: its own :data:`_SEQUENTIAL_CMAPS` entry (``cmo.delta`` for a
+    velocity component), else ``cmo.balance``. :data:`_CENTERED` decides *whether*,
+    the table only *which* -- no substring match can make a centred variable
+    sequential.
 
     ``statistic`` is the field's ``attrs["statistic"]``. A spread (variance, std,
     range -- :func:`ocean_skill.units.is_spread`) is a non-negative magnitude whatever
@@ -291,7 +300,7 @@ def cmaps_for(standard_name: str | None, statistic: str | None = None):
     if is_spread(statistic):
         override = _cmocean("cmo.amp")
     elif center_for(standard_name) is not None:
-        override = _cmocean("cmo.balance")
+        override = _resolve_cmap(_SEQUENTIAL_CMAPS.get(name, "cmo.balance"))
     else:
         override = None
     for vartype, pattern in REGEX.items():

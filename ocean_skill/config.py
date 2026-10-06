@@ -88,6 +88,11 @@ class PageConfig(BaseModel):
     chain runs against real step names (see :data:`~ocean_skill.workflows.pages
     .STEP_REGISTRY`) rather than a hardcoded list here, so the two can never drift
     apart. ``field:``-only for now.
+
+    ``contours`` overlays contour lines on a ``field:``/``compare:`` page's figure --
+    ``true`` for the plotted object's own, or a mapping of overrides for a second
+    object (see :func:`ocean_skill.workflows.pages.expand`, which checks its value
+    once placeholders are filled; only the page kind is checked here).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,6 +107,7 @@ class PageConfig(BaseModel):
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
+    contours: Any = None
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> PageConfig:
@@ -179,6 +185,17 @@ class PageConfig(BaseModel):
                     f"page {self.title!r}: then: {name!r} is not a known step "
                     f"-- choose one of {sorted(STEP_REGISTRY)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _contours_is_field_or_compare_only(self) -> PageConfig:
+        if self.contours is None:
+            return self
+        if self.kind not in ("field", "compare"):
+            raise ValueError(
+                f"page {self.title!r}: contours: is only supported on field: and "
+                f"compare: pages (this page is {self.kind}:)"
+            )
         return self
 
 

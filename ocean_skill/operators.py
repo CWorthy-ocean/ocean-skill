@@ -321,6 +321,12 @@ _CF_AXES: dict[str, str] = {
 }
 
 
+#: The horizontal shorthand box and slab specs are written in -> the ``find_coord``
+#: kind, consulted by :func:`resolve_dim` only after a literal dimension or coordinate
+#: of that name has been ruled out.
+_SHORT_AXES: dict[str, str] = {"lon": "longitude", "lat": "latitude"}
+
+
 def resolve_dim(obj, name: str) -> str | None:
     """Return the dimension of ``obj`` that ``name`` refers to, or ``None``.
 
@@ -339,7 +345,17 @@ def resolve_dim(obj, name: str) -> str | None:
         return name
     kind = _CF_AXES.get(name)
     if kind is None:
-        return name if name in getattr(obj, "coords", ()) else None
+        if name in getattr(obj, "coords", ()):
+            return name
+        # The ``lon``/``lat`` shorthand a box or slab spec is written in names the
+        # axis, not a variable: on a product that calls it ``longitude`` (GLORYS, say)
+        # ``{"lon": "mean"}`` must still reduce it, or a slab keeps every longitude
+        # and the comparison refuses the leftover axis. Only reached when ``lon`` is
+        # neither a dimension nor a coordinate here, so a source that does carry one
+        # by that name resolves exactly as before.
+        kind = _SHORT_AXES.get(name)
+        if kind is None:
+            return None
     from ocean_skill.cf import find_coord
     from ocean_skill.vocabulary import COORD_FALLBACKS
 

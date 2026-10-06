@@ -52,8 +52,11 @@ _BGC_SPECIES = (
         ("nitrate", "deep"),
         ("phosphate", "rain"),
         ("sea_level_anomaly", "balance"),
-        ("eastward_wind", "balance"),
-        ("northward_wind", "balance"),
+        ("eastward_wind", "delta"),
+        ("northward_wind", "delta"),
+        ("east_velocity", "delta"),
+        ("sea_water_speed", "speed"),
+        ("wind_speed", "speed"),
         ("sea_ice", "ice"),
         ("sigma_theta", "dense"),
         # the density anomaly itself, spelled as the resolved CF name (the short
@@ -268,6 +271,9 @@ def test_a_centred_mean_panel_through_metric_colors_is_symmetric():
     assert colors.vmin == -colors.vmax
 
 
+#: cmocean's diverging maps -- what a centred variable's sequential panel may use.
+DIVERGING = {"balance", "delta", "curl", "diff", "tarn"}
+
 VELOCITY_COMPONENTS = [
     "eastward_sea_water_velocity",
     "northward_sea_water_velocity",
@@ -293,7 +299,7 @@ def test_the_sequential_map_is_diverging_iff_the_variable_is_centred():
     keys = yaml.safe_load(path.read_text())
     assert keys
     for key in keys:
-        diverging = cmaps_for(key)[0].name == "balance"
+        diverging = cmaps_for(key)[0].name in DIVERGING
         centred = resolve_name(key) in _CENTERED
         assert diverging == centred, key
         assert (center_for(key) is not None) == centred, key
@@ -302,10 +308,10 @@ def test_the_sequential_map_is_diverging_iff_the_variable_is_centred():
 
 
 @pytest.mark.parametrize("name", VELOCITY_COMPONENTS)
-def test_signed_components_are_balance_symmetric_and_their_std_is_amp(name):
+def test_signed_components_are_delta_symmetric_and_their_std_is_amp(name):
     from ocean_skill.colormaps import norm_for
 
-    assert cmaps_for(name)[0].name == "balance"
+    assert cmaps_for(name)[0].name == "delta"
     norm = norm_for(name, -0.3, 1.1)
     assert norm.vmin == -norm.vmax and norm.vmax >= 1.1
     assert cmaps_for(name, statistic="std")[0].name == "amp"
@@ -316,3 +322,13 @@ def test_signed_components_are_balance_symmetric_and_their_std_is_amp(name):
 def test_true_speeds_stay_cmo_speed():
     assert cmaps_for("wind_speed")[0].name == "speed"
     assert cmaps_for("sea_water_speed")[0].name == "speed"
+
+
+def test_every_centred_variable_names_a_diverging_map():
+    """``_CENTERED`` says *whether*, ``_SEQUENTIAL_CMAPS`` *which*: never a sequential one."""
+    from ocean_skill.colormaps import _CENTERED, _SEQUENTIAL_CMAPS
+
+    for name in _CENTERED:
+        cmap = _SEQUENTIAL_CMAPS.get(name, "cmo.balance")
+        assert cmap.removeprefix("cmo.") in DIVERGING, name
+        assert cmaps_for(name)[0].name == cmap.removeprefix("cmo."), name

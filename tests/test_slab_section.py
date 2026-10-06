@@ -27,6 +27,7 @@ from ocean_skill.align import ALONG_DIM
 from ocean_skill.operators import aggregate, slab_axis, slab_in_spec
 from tests.test_section_comparison import (  # noqa: F401  (patched_sources is a fixture)
     HC,
+    N_S,
     _climatology,
     _roms_run,
     patched_sources,
@@ -637,3 +638,236 @@ def test_a_slab_section_draws_on_both_renderers(patched_woa, tmp_path):
     f.plot(renderer="matplotlib", save=str(tmp_path / "slab.png"))
     assert (tmp_path / "slab.png").exists()
     f.plot(renderer="holoviews")
+
+
+# -- a lon-less, single-longitude reference (a pre-averaged section) ------------------
+
+EAST = "eastward_sea_water_velocity"
+REF_BOX = {"lon": {"min": 180, "max": 200}, "lat": {"min": -4, "max": 4}}
+REF_DEPTHS = [50.0, 100.0, 200.0]
+SLAB_AGG = {"test": {"time": "mean", "lon": "mean"}, "reference": {"lon": "mean"}}
+
+
+def _east_test_lane(*, units="m s-1", scale=0.01) -> xr.Dataset:
+    """A gridded (time, depth, lat, lon) eastward velocity, 0-360, with time to average.
+
+    ``value = scale * (depth + lat + 0.25 * time_index)``: constant in lon, so the lon
+    mean is the value itself, and the time mean adds ``0.25 * mean(time_index)``.
+    """
+    time = np.arange(3)
+    depth = np.array(REF_DEPTHS)
+    lat = np.arange(-4.0, 5.0, 2.0)
+    lon = np.arange(170.0, 211.0, 10.0)
+    tt, dd, la, _ = np.meshgrid(time, depth, lat, lon, indexing="ij")
+    return xr.DataArray(
+        scale * (dd + la + 0.25 * tt),
+        dims=("time", "depth", "lat", "lon"),
+        coords={
+            "time": np.datetime64("2000-01-01") + time.astype("timedelta64[D]"),
+            "depth": ("depth", depth, {"positive": "down", "units": "m"}),
+            "lat": lat,
+            "lon": lon,
+        },
+        name=EAST,
+        attrs={"units": units, "standard_name": EAST},
+    ).to_dataset()
+
+
+def _lonless_reference(
+    *, lon=190.0, units="m s-1", scale=0.01, lat=None, depth=None, depth_name="depth"
+) -> xr.Dataset:
+    """A bare (depth, lat) section, no time and no lon, then given its one longitude.
+
+    The same ``expand_dims`` the catalog's reader chain does for a Cravatte et al. file.
+    ``value = scale * (depth + lat + 0.5)`` is checked against its own column.
+    ``depth_name`` spells the vertical axis some other way, as a product's own file may.
+    """
+    depth = np.array(REF_DEPTHS if depth is None else depth, dtype="float64")
+    lat = np.arange(-4.0, 5.0, 2.0) if lat is None else np.asarray(lat, "float64")
+    da = xr.DataArray(
+        scale * (depth[:, None] + lat[None, :] + 0.5),
+        dims=(depth_name, "lat"),
+        coords={
+            depth_name: (depth_name, depth, {"positive": "down", "units": "m"}),
+            "lat": lat,
+        },
+        name=EAST,
+        attrs={"units": units, "standard_name": EAST},
+    )
+    return da.to_dataset().expand_dims(lon=[lon])
+
+
+def _lonless_comparison(monkeypatch, reference, *, test=None, **overrides):
+    sources = {
+        "test_grid": _east_test_lane() if test is None else test,
+        "ref_section": reference,
+    }
+    monkeypatch.setattr(osk, "read", lambda n, **kw: sources[n])
+    monkeypatch.setattr(catalog, "resolve", lambda n: SimpleNamespace(metadata={}))
+    kwargs = dict(
+        test="test_grid",
+        reference="ref_section",
+        variable=EAST,
+        select={**REF_BOX, "depth": REF_DEPTHS},
+        aggregate=SLAB_AGG,
+        cache=False,
+    )
+    kwargs.update(overrides)
+    return osk.Comparison(**kwargs)
+
+
+def test_a_lonless_single_longitude_reference_is_a_slab_comparison(monkeypatch):
+    """A pre-averaged (depth, lat) section carrying one longitude joins a lon-mean slab.
+
+    The reference has no time and its lon is a length-1 axis, so ``{"lon": "mean"}`` on
+    it is the identity; the band the section records is the box, not the one longitude.
+    """
+    c = _lonless_comparison(monkeypatch, _lonless_reference())
+    aligned = c.align()
+
+    assert c.family == "section_row"
+    assert set(aligned["reference"].dims) == {"z", ALONG_DIM}
+    assert aligned[ALONG_DIM].attrs["axis_coord"] == "lat"
+    assert aligned[ALONG_DIM].attrs["band_axis"] == "lon"
+    assert aligned[ALONG_DIM].attrs["band"] == [180.0, 200.0]
+    np.testing.assert_allclose(aligned["lat"], np.arange(-4.0, 5.0, 2.0))
+    np.testing.assert_allclose(aligned["z"], [-50.0, -100.0, -200.0])
+
+    # the reference's own column, untouched: scale * (depth + lat + 0.5)
+    expected = 0.01 * (
+        np.array(REF_DEPTHS)[:, None] + np.arange(-4.0, 5.0, 2.0)[None, :] + 0.5
+    )
+    np.testing.assert_allclose(aligned["reference"].values, expected)
+    # and the test lane is its time- and lon-mean: scale * (depth + lat + 0.25)
+    np.testing.assert_allclose(aligned["test"].values, expected - 0.01 * 0.25)
+
+
+def test_a_box_that_excludes_the_references_one_longitude_is_refused(monkeypatch):
+    """The test lane has cells in lon 200-240; the reference's single 190 is outside.
+
+    The refusal names the lane that came up empty (the reference) and the box, rather
+    than producing an empty or all-NaN section.
+    """
+    from ocean_skill.align import EmptySelection
+
+    c = _lonless_comparison(
+        monkeypatch,
+        _lonless_reference(lon=190.0),
+        select={
+            "lon": {"min": 200, "max": 240},
+            "lat": REF_BOX["lat"],
+            "depth": REF_DEPTHS,
+        },
+    )
+    with pytest.raises(EmptySelection, match=r"ref_section"):
+        c.align()
+
+
+def test_a_catalogued_cm_per_s_reference_is_converted_against_an_m_per_s_test(
+    isolated_catalogs, tmp_path
+):
+    """The catalog's ``units`` map is what lets a ``unit: cm/s`` file compare at all.
+
+    The Cravatte-style reference only spells its units ``unit``, so without the map the
+    pair would be differenced unchecked; with it, the lanes are brought to a common unit
+    (the test lane's m s-1 goes onto the reference's cm/s), so the aligned values and
+    the difference are in cm/s.
+    """
+    from ocean_skill.build import build_catalog
+    from tests.test_build_helpers import _build_cravatte
+
+    _build_cravatte(isolated_catalogs, tmp_path)
+    test_path = tmp_path / "test_grid.nc"
+    _east_test_lane(scale=0.01).to_netcdf(test_path, format="NETCDF3_CLASSIC")
+    build_catalog(
+        {"test_grid": str(test_path)},
+        isolated_catalogs / "test_grid.yaml",
+        name_map=None,
+        reader_kwargs={"engine": "scipy"},
+    )
+    c = osk.Comparison(
+        test="test_grid",
+        reference="cravatte",
+        variable=EAST,
+        select={**REF_BOX, "depth": REF_DEPTHS},
+        aggregate=SLAB_AGG,
+        cache=False,
+    )
+    aligned = c.align()
+    assert c.family == "section_row"
+    assert aligned["reference"].attrs["units"] == "cm/s"
+    # the reference's own numbers, as the file has them: depth + lat + 0.5 (cm/s)
+    expected = np.array(REF_DEPTHS)[:, None] + np.arange(-4.0, 5.0, 2.0)[None, :] + 0.5
+    np.testing.assert_allclose(aligned["reference"].values, expected)
+    # the test lane is 0.01 * (depth + lat + 0.25) m/s = depth + lat + 0.25 cm/s
+    np.testing.assert_allclose(aligned["test"].values, expected - 0.25, atol=1e-9)
+    np.testing.assert_allclose(aligned["difference"].values, -0.25, atol=1e-9)
+
+
+def test_a_reference_with_its_own_vertical_axis_name_is_a_slab_section(monkeypatch):
+    """``DEPTH`` is found as the vertical by axis detection, then put on ``depth``."""
+    c = _lonless_comparison(monkeypatch, _lonless_reference(depth_name="DEPTH"))
+    aligned = c.align()
+    assert c.family == "section_row"
+    np.testing.assert_allclose(aligned["z"], [-50.0, -100.0, -200.0])
+    assert set(aligned["reference"].dims) == {"z", ALONG_DIM}
+
+
+def _roms_run_with_velocity(*, angle: float, v: float) -> xr.Dataset:
+    """:func:`_roms_run` plus the raw staggered velocity and a grid ``angle``.
+
+    The post-``standardize`` state a catalogued ROMS source reads back in: the
+    grid-relative components on their own ``xi_u``/``eta_v`` dims, ``angle`` a
+    coordinate, and no ``eastward_sea_water_velocity`` yet -- that is derived on
+    demand once a request names it. Both components are spatially uniform, so the
+    rotated east velocity is a closed form: ``u cos(angle) - v sin(angle)``.
+    """
+    ds = _roms_run()
+    ny, nx = ds["h"].shape
+    u = np.full((N_S, ny, nx - 1), 0.0)
+    vv = np.full((N_S, ny - 1, nx), v)
+    return ds.assign(
+        sea_water_x_velocity=(("s_rho", "eta_rho", "xi_u"), u),
+        sea_water_y_velocity=(("s_rho", "eta_v", "xi_rho"), vv),
+    ).assign_coords(angle=(("eta_rho", "xi_rho"), np.full((ny, nx), angle)))
+
+
+def test_a_roms_east_velocity_slab_is_derived_on_demand_and_compared(monkeypatch):
+    """The model lane derives east from u/v/angle inside the slab path.
+
+    The grid's x axis points true north (``angle = pi/2``) and ``v = -0.2``, so east is
+    ``-v = +0.2`` m/s at every cell and depth; with the fixed-depth interpolation and
+    the lat binning in between, that has to come through unchanged. The reference is a
+    pre-averaged single-longitude section at the box's own longitude.
+    """
+    test = _roms_run_with_velocity(angle=np.pi / 2, v=-0.2)
+    assert EAST not in test  # nothing pre-derived: the slab path has to do it
+    ref = _lonless_reference(
+        lon=-94.0, lat=[24.0, 25.0, 26.0, 27.0, 28.0], depth=[50.0, 200.0]
+    )
+    meta = {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}
+    sources = {"roms_test": (test, meta), "ref_section": (ref, {})}
+    monkeypatch.setattr(osk, "read", lambda n, **kw: sources[n][0])
+    monkeypatch.setattr(
+        catalog, "resolve", lambda n: SimpleNamespace(metadata=sources[n][1])
+    )
+    c = osk.Comparison(
+        test="roms_test",
+        reference="ref_section",
+        variable=EAST,
+        select={**ROMS_BOX, "depth": [50.0, 200.0]},
+        aggregate=MEAN_LON,
+        cache=False,
+    )
+    aligned = c.align()
+    assert c.family == "section_row"
+    assert aligned[ALONG_DIM].attrs["axis_coord"] == "lat"
+    assert aligned[ALONG_DIM].attrs["band"] == [-95.5, -92.5]
+    got = aligned["test"].values
+    assert np.isfinite(got).any()  # the shallowest columns are below the 50 m level
+    np.testing.assert_allclose(got[np.isfinite(got)], 0.2, atol=1e-9)
+    # the reference's own numbers: 0.01 * (depth + lat + 0.5)
+    np.testing.assert_allclose(
+        aligned["reference"].sel(z=-50.0).values,
+        0.01 * (50.0 + aligned["lat"].values + 0.5),
+    )
