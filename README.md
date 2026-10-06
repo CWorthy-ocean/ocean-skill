@@ -1146,6 +1146,71 @@ URL here — the `engine="scipy"` is what actually reads the classic file.
 `osk.find(variable="mld_by_sigma_theta")` now finds it, and `"mld_by_sigma_theta"` is the
 name the pair-spec above reads it by.
 
+### Tidal forcing as a reference
+
+A run's own [roms-tools](https://roms-tools.readthedocs.io) tidal forcing file (TPXO9
+interpolated onto the ROMS grid) is a ready reference for the run's tidal amplitudes:
+`ssh_Re`/`ssh_Im` (m) on `(ntides, eta_rho, xi_rho)`, with the constituent names in the
+`ntides` coordinate. It carries no `lon_rho`/`lat_rho` and is not ROMS *output*, so the
+chain merges the longitude and latitude in from the run's grid file (an intake reader
+passed as a keyword argument is read first) and names them `lon`/`lat`:
+
+```python
+from intake.readers import datatypes, readers
+from ocean_skill import build
+
+def nc(path):
+    return readers.XArrayDatasetReader(datatypes.HDF5(url=path), chunks={})
+
+frc = (
+    nc("iceland_tides_frc.nc")
+    .merge(other=nc("iceland_grd.nc")[["lon_rho", "lat_rho"]])
+    .set_coords(["lon_rho", "lat_rho"])
+    .rename({"lon_rho": "lon", "lat_rho": "lat"})
+)
+build.build_catalog(
+    {
+        "iceland_tides_frc": {
+            "reader": frc,
+            "standard_names": {
+                "ssh_Re": "sea_surface_height_tidal_harmonic_real_part",
+                "ssh_Im": "sea_surface_height_tidal_harmonic_imaginary_part",
+            },
+        },
+    },
+    "catalogs/tidal_forcing.yaml",
+    title="Tidal forcing references",
+    name_map=None,                  # not ROMS output: skip the ROMS name fallback
+)
+```
+
+```python
+osk.compare(test="his", reference="iceland_tides_frc",
+            variables=[{"calculate": "tidal_amplitude", "constituent": ["K1", "M2"]}]).plot()
+```
+
+On the model side the same spec runs a harmonic analysis of the hourly SSH with
+[pyFES](https://github.com/CNES/aviso-fes) (`conda install -c conda-forge pyfes`), cell
+by cell; a list of constituents is one row each, from one analysis (cached). Use
+`"tidal_phase"` for the Greenwich phase lag.
+
+The forcing amplitudes include the nodal factor at the forcing's start date, so they
+match a run started then; over another period they differ from a harmonic fit to the
+run's own output by the nodal modulation.
+
+The raw TPXO9 atlas (`h_tpxo9.v1.nc`-style files: `hRe`/`hIm` on `(nc, nx, ny)`, byte
+labels `con`, 2-D `lon_z`/`lat_z`, longitudes 0 to 360) needs no grid file, only the
+same promotion and renames; it stays on its own native grid:
+
+```python
+tpxo = (
+    nc("h_tpxo9.v1.nc")
+    .set_coords(["con", "lon_z", "lat_z"])
+    .swap_dims({"nc": "con"})
+    .rename({"lon_z": "lon", "lat_z": "lat"})
+)  # then catalog it with the same standard_names, keyed "hRe" / "hIm"
+```
+
 ## Layout
 
 ```

@@ -79,6 +79,7 @@ __all__ = [
 #:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
 #:     _METRIC_CMAPS below) -- a separate table by design, not a leak
 #:   - ammonium cmo.gray_r likewise also colours the "n" (sample count) metric panel
+#:   - iron / SSH tidal amplitude: both cmo.amp (different families, rarely adjacent)
 #: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
 #: entry, out of scope for this table's BGC-species guarantee: alkalinity (explicit
 #: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
@@ -115,6 +116,14 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "sea_water_y_velocity": "cmo.delta",
     "upward_sea_water_velocity": "cmo.delta",
     "sea_water_speed": "cmo.speed",
+    # Tidal harmonics of SSH (osk-custom names): amplitude is a magnitude, phase is
+    # cyclic. The full names are no substring of the SSH keys above, so neither can
+    # claim the other. The harmonic real/imaginary parts are left to the fallthrough.
+    "sea_surface_height_tidal_amplitude": "cmo.amp",
+    "sea_surface_height_tidal_phase": "cmo.phase",
+    # x/y/eastward/northward baroclinic pressure flux: signed (energy flows either
+    # way), so centred (:data:`_CENTERED`) and diverging.
+    "baroclinic_pressure_flux": "cmo.balance",
     "nitrate": "cmo.deep",
     "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",
@@ -216,6 +225,11 @@ _CENTERED: dict[str, float] = {
     "upward_sea_water_velocity": 0.0,
     "eastward_wind": 0.0,
     "northward_wind": 0.0,
+    # signed baroclinic pressure flux (energy flows either way); zero is "no flux"
+    "x_baroclinic_pressure_flux": 0.0,
+    "y_baroclinic_pressure_flux": 0.0,
+    "eastward_baroclinic_pressure_flux": 0.0,
+    "northward_baroclinic_pressure_flux": 0.0,
 }
 
 _registered = False

@@ -313,3 +313,57 @@ def test_a_live_register_keeps_the_third_party_dict(
     assert "my_conc" in vocabulary._REGISTERED
     assert "MC" in vocabulary._REGISTERED
     assert all(options.count(c) == 1 for c in options)  # nothing registered twice
+
+
+# -- tidal harmonics / baroclinic pressure flux (osk-custom names) -------------------
+
+_TIDAL_AND_FLUX = {
+    "tidal_amplitude": "sea_surface_height_tidal_amplitude",
+    "tidal_phase": "sea_surface_height_tidal_phase",
+    "x_baroclinic_pressure_flux": "x_baroclinic_pressure_flux",
+    "y_baroclinic_pressure_flux": "y_baroclinic_pressure_flux",
+    "eastward_baroclinic_pressure_flux": "eastward_baroclinic_pressure_flux",
+    "northward_baroclinic_pressure_flux": "northward_baroclinic_pressure_flux",
+}
+
+
+@pytest.mark.parametrize("key,name", list(_TIDAL_AND_FLUX.items()))
+def test_tidal_and_flux_keys_resolve_to_their_names(key, name):
+    assert vocabulary.resolve_name(key) == name
+    assert vocabulary.resolve_name(name) == name
+
+
+def test_tidal_names_and_ssh_do_not_collide_either_way():
+    """`ssh` must not claim a tidal name, and no tidal key may claim plain SSH."""
+    tidal = {k: re.compile(CRITERIA[k]["name"]) for k in _TIDAL_AND_FLUX}
+    ssh = re.compile(CRITERIA["ssh"]["name"])
+    for name in _TIDAL_AND_FLUX.values():
+        assert not ssh.match(name), name
+    for plain in ("ssh", "sea_surface_height_above_geoid"):
+        assert ssh.match(plain)
+        assert not [k for k, rx in tidal.items() if rx.match(plain)], plain
+    # and the fluxes/amplitude/phase are mutually exclusive
+    for name in _TIDAL_AND_FLUX.values():
+        assert [k for k, rx in tidal.items() if rx.match(name)] in (
+            [k] for k, v in _TIDAL_AND_FLUX.items() if v == name
+        )
+
+
+@pytest.mark.parametrize(
+    "key,label,units",
+    [
+        ("tidal_amplitude", "tidal amplitude", "m"),
+        ("tidal_phase", "tidal phase", "degree"),
+        ("x_baroclinic_pressure_flux", "x baroclinic pressure flux", "m4 s-3"),
+        (
+            "eastward_baroclinic_pressure_flux",
+            "eastward baroclinic pressure flux",
+            "W m-1",
+        ),
+    ],
+)
+def test_tidal_and_flux_labels_and_units(key, label, units):
+    from ocean_skill.vars import lookup, short_name
+
+    assert short_name(key) == label
+    assert lookup(key).units == units

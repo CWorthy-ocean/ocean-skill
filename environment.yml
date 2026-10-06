@@ -36,6 +36,7 @@ dependencies:
                       # calculator body, not core
   - oceans           # PL33 tidal low-pass filter (oceans.filters.pl33tn), scoped to
                       # ocean_skill.detide -- imported inside the module body, not core
+  - pyfes            # tidal harmonic analysis (ocean_skill.tides), imported lazily, not core
   # --- metrics ---
   - xskillscore
   # --- scattered-point interpolation (ocean_skill.plot.map_metrics) ---

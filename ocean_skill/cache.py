@@ -241,14 +241,24 @@ configure_fsspec_cache()
 #: Downloaded source files are *not* a fourth kind, even though by default they sit
 #: right beside these three, in ``<base>/cache/obs`` (see :func:`obs_dir`). They are
 #: kept out of this tuple on purpose; :func:`clear` explains why.
-KINDS = ("prepared", "aligned", "weights")
+#:
+#: ``calculated`` holds a calculator's own expensive intermediate -- every constituent
+#: of a tidal harmonic analysis, say -- so several fields drawn from one result (K1,
+#: then M2) pay for it once. Keyed by identity, like ``prepared``
+#: (:func:`key_for_calculated`).
+KINDS = ("prepared", "aligned", "weights", "calculated")
 
 #: File extension each :data:`KINDS` entry is stored under -- the two Dataset kinds as
 #: zarr stores (a directory), regridder weights as the plain netCDF file
 #: ``regridder.to_netcdf`` writes. :func:`entries` and :func:`clear` need this to find
 #: and remove the right thing; a weights entry is not a Dataset and never goes through
 #: :func:`load`/:func:`save`.
-_EXTENSIONS = {"prepared": "zarr", "aligned": "zarr", "weights": "nc"}
+_EXTENSIONS = {
+    "prepared": "zarr",
+    "aligned": "zarr",
+    "weights": "nc",
+    "calculated": "zarr",
+}
 
 
 def path(kind: str = "aligned") -> Path:
@@ -322,6 +332,20 @@ def key_for_prepared(*, source: str, variable: Any, select: dict[str, Any]) -> s
             "variable": variable,
             "select": select,
         },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def key_for_calculated(*, source: str, name: str, params: dict[str, Any]) -> str:
+    """Return the cache key for one calculator intermediate (see :data:`KINDS`).
+
+    ``params`` is whatever decides the result besides the source: the calculator's
+    own options and the time coverage it actually saw, so a narrower window misses.
+    """
+    payload = json.dumps(
+        {"v": _FORMAT_VERSION, "source": source, "name": name, "params": params},
         sort_keys=True,
         default=str,
     )

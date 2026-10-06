@@ -1073,9 +1073,21 @@ class Field:
         return meta
 
     def _bare_vertical(self) -> bool:
-        """Whether nothing -- select or aggregate -- named a vertical request."""
-        from ocean_skill.comparison import _names_vertical, _vertical_only
+        """Whether nothing -- select or aggregate -- named a vertical request.
 
+        Never true for a calculated variable: a calculator owns the vertical axis
+        itself (see :func:`ocean_skill.comparison._prepare`), so there is no surface
+        to default to -- and surfacing would re-prepare it under a second cache key,
+        running an expensive calculator twice.
+        """
+        from ocean_skill.comparison import (
+            _is_calculated,
+            _names_vertical,
+            _vertical_only,
+        )
+
+        if _is_calculated(self.variable):
+            return False
         return not _names_vertical(self.select) and not _vertical_only(
             self.aggregate
         )
@@ -2669,6 +2681,17 @@ def field(
             qc=qc,
             detide=detide,
         )
+    from ocean_skill.operators import expand_calculator_fans
+
+    # {"calculate": ..., "constituent": ["K1", "M2"]} is several fields, exactly as
+    # a list of specs is -- see ocean_skill.operators.CALCULATOR_FANS.
+    specs = [
+        one
+        for v in (variable if isinstance(variable, (list, tuple)) else [variable])
+        for one in expand_calculator_fans(v)
+    ]
+    if len(specs) > 1 or isinstance(variable, (list, tuple)):
+        variable = specs
     source_is_list = isinstance(source, (list, tuple))
     variable_is_list = isinstance(variable, (list, tuple))
     if source_is_list and not source:

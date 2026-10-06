@@ -332,3 +332,26 @@ def test_every_centred_variable_names_a_diverging_map():
         cmap = _SEQUENTIAL_CMAPS.get(name, "cmo.balance")
         assert cmap.removeprefix("cmo.") in DIVERGING, name
         assert cmaps_for(name)[0].name == cmap.removeprefix("cmo."), name
+
+
+# --- tidal harmonics and baroclinic pressure flux -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("sea_surface_height_tidal_amplitude", "amp"),
+        ("tidal_amplitude", "amp"),
+        ("sea_surface_height_tidal_phase", "phase"),
+        ("tidal_phase", "phase"),
+        ("x_baroclinic_pressure_flux", "balance"),
+        ("y_baroclinic_pressure_flux", "balance"),
+        ("eastward_baroclinic_pressure_flux", "balance"),
+        ("northward_baroclinic_pressure_flux", "balance"),
+        # SSH keeps its own map, and the tidal names did not disturb it
+        ("sea_surface_height_above_geoid", "plasma"),
+        ("ssh", "plasma"),
+    ],
+)
+def test_tidal_and_pressure_flux_colormaps(name, expected):
+    assert cmaps_for(name)[0].name == expected
