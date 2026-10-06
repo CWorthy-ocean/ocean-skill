@@ -29,7 +29,11 @@ from ocean_skill.comparison import (
     _section_extras,
 )
 from ocean_skill.field import field
-from ocean_skill.plot.section import seafloor_line
+from ocean_skill.plot.section import (
+    fill_between_casts,
+    prepare_section,
+    seafloor_line,
+)
 from tests import test_section_comparison as _sc
 from tests.test_section_comparison import (
     _CAST_LONLATS,
@@ -562,3 +566,179 @@ def test_comparison_set_forwards_the_options(roms_casts, captured):
     (item,) = captured["spec"].items
     assert "cast_labels" not in item
     assert "seafloor" in item
+
+
+# -- cast_fill= ----------------------------------------------------------------------
+
+
+def test_cast_fill_default_on_for_a_cast_built_section(roms_casts, captured):
+    c, _ = roms_casts
+    c.plot()
+    assert _item(captured)["cast_fill"] is True
+    c.plot(cast_fill=False)
+    assert "cast_fill" not in _item(captured)
+
+
+def test_cast_fill_off_and_refused_on_a_gridded_section(patched_sources, captured):
+    patched_sources(
+        {
+            "model": (_fine_roms_run(), ROMS_META),
+            "woa_ref": (_climatology(), {}),
+        }
+    )
+    c = osk.Comparison(
+        test="model",
+        reference="woa_ref",
+        variable=VAR,
+        select={
+            "transect": {"waypoints": [[-95.0, 24.0], [-93.0, 28.0]]},
+            "depth": [50.0, 200.0],
+        },
+        cache=False,
+    )
+    c.plot()
+    assert "cast_fill" not in _item(captured)
+    with pytest.raises(ValueError, match="no gaps between casts"):
+        c.plot(cast_fill=True)
+
+
+def test_cast_fill_refused_on_a_non_section_and_typechecked():
+    stub = SimpleNamespace(family="field_row")
+    assert _section_extras(stub, None, None, False) == {}
+    with pytest.raises(ValueError, match="draws as 'field_row'"):
+        _section_extras(stub, None, None, True)
+    with pytest.raises(TypeError, match="cast_fill= must be None or a bool"):
+        _section_extras(stub, None, None, "yes")
+
+
+def test_comparison_set_forwards_cast_fill(roms_casts, captured):
+    c, _ = roms_casts
+    osk.ComparisonSet([c]).plot()
+    (item,) = captured["spec"].items
+    assert item["cast_fill"] is True
+    osk.ComparisonSet([c]).plot(cast_fill=False)
+    (item,) = captured["spec"].items
+    assert "cast_fill" not in item
+
+
+# -- fill_between_casts --------------------------------------------------------------
+
+
+def _three_casts(x="distance"):
+    """Shallow | deep | shallow casts at 0, 10 and 30 km, depths 0..50 m."""
+    nan = np.nan
+    values = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+            [nan, 2.0, nan],
+            [nan, 2.0, nan],
+            [nan, nan, nan],
+        ]
+    )
+    da = xr.DataArray(
+        values,
+        dims=("z", ALONG_DIM),
+        coords={
+            "z": -np.arange(0.0, 60.0, 10.0),
+            ALONG_DIM: [0.0, 10.0, 30.0],
+            "path_lon": (ALONG_DIM, [-150.0, -150.1, -150.3]),
+            "path_lat": (ALONG_DIM, [59.0, 59.0, 59.0]),
+        },
+        name="temp",
+        attrs={"units": "degC"},
+    )
+    return prepare_section(da, x)
+
+
+def _column_at(out, geometry, x):
+    xs = np.asarray(out[geometry.x_name].transpose("z", ALONG_DIM))[0]
+    return np.asarray(out.transpose("z", ALONG_DIM))[:, int(np.argmin(np.abs(xs - x)))]
+
+
+def test_fill_between_casts_blends_where_both_reach():
+    prepared, geometry = _three_casts()
+    out = fill_between_casts(prepared, geometry, samples=100)
+    assert out.sizes[ALONG_DIM] > 50
+    # a quarter of the way from cast 1 (value 1) to cast 2 (value 2), top three levels
+    np.testing.assert_allclose(_column_at(out, geometry, 2.5)[:3], 1.25, atol=0.03)
+
+
+def test_fill_between_casts_carries_a_deep_cast_halfway_and_no_further():
+    prepared, geometry = _three_casts()
+    out = fill_between_casts(prepared, geometry, samples=100)
+    # the deep middle cast reaches 40 m; its neighbours stop at 20 m
+    for x in (5.5, 9.0, 10.0, 12.0, 19.5):
+        np.testing.assert_allclose(_column_at(out, geometry, x)[3:5], 2.0)
+    for x in (0.0, 4.5, 20.5, 30.0):
+        assert np.isnan(_column_at(out, geometry, x)[3:5]).all()
+    # nobody reaches 50 m
+    assert np.isnan(np.asarray(out.transpose("z", ALONG_DIM))[5]).all()
+
+
+def test_fill_between_casts_keeps_the_casts_and_the_mesh_shape():
+    prepared, geometry = _three_casts()
+    out = fill_between_casts(prepared, geometry)
+    assert out.dims == prepared.dims
+    assert out.name == "temp" and out.attrs["units"] == "degC"
+    xs = np.asarray(out[geometry.x_name].transpose("z", ALONG_DIM))
+    depth = np.asarray(out[geometry.y_name].transpose("z", ALONG_DIM))
+    assert xs.shape == depth.shape == out.transpose("z", ALONG_DIM).shape
+    assert np.all(np.diff(xs[0]) > 0)
+    # each cast's own column is in the output, unchanged
+    for i, x in enumerate((0.0, 10.0, 30.0)):
+        j = int(np.flatnonzero(xs[0] == x)[0])
+        np.testing.assert_array_equal(
+            np.asarray(out.transpose("z", ALONG_DIM))[:, j],
+            np.asarray(prepared.transpose("z", ALONG_DIM))[:, i],
+        )
+
+
+def test_fill_between_casts_follows_a_decreasing_longitude_axis():
+    prepared, geometry = _three_casts("lon")
+    assert geometry.x_axis == "lon"
+    out = fill_between_casts(prepared, geometry, samples=100)
+    xs = np.asarray(out[geometry.x_name].transpose("z", ALONG_DIM))[0]
+    assert xs[0] == -150.0 and xs[-1] == pytest.approx(-150.3)
+    assert np.all(np.diff(xs) < 0)
+    # the deep cast at -150.1 carries halfway to each neighbour
+    np.testing.assert_allclose(_column_at(out, geometry, -150.07)[3:5], 2.0)
+    assert np.isnan(_column_at(out, geometry, -150.03)[3:5]).all()
+
+
+def test_fill_between_casts_leaves_a_single_cast_alone():
+    prepared, geometry = _three_casts()
+    one = prepared.isel({ALONG_DIM: [1]})
+    assert fill_between_casts(one, geometry) is one
+
+
+def test_fill_between_casts_never_blends_outside_the_two_casts():
+    # 0.3 * (1 - t) + 0.3 * t is not always exactly 0.3 in floating point; a value an
+    # ulp above the colour scale's top would fall outside contourf's last band
+    da = xr.DataArray(
+        np.full((2, 3), 0.3),
+        dims=("z", ALONG_DIM),
+        coords={"z": [0.0, -10.0], ALONG_DIM: [0.0, 7.0, 31.0]},
+    )
+    prepared, geometry = prepare_section(da, "distance")
+    out = fill_between_casts(prepared, geometry, samples=997)
+    assert np.all(np.asarray(out) == 0.3)
+
+
+def test_fill_between_casts_stops_at_the_seafloor_but_keeps_the_casts():
+    prepared, geometry = _three_casts()
+    # a sill rising to 15 m at 5 km, between the shallow first cast and the deep one;
+    # the middle cast itself (at 10 km) sits where the model floor is only 25 m
+    line = (np.array([0.0, 5.0, 10.0, 30.0]), np.array([30.0, 15.0, 25.0, 30.0]))
+    out = fill_between_casts(prepared, geometry, seafloor=line, samples=200)
+    # over the sill: only the 0 and 10 m levels are above the rock
+    col = _column_at(out, geometry, 5.0)
+    assert np.isfinite(col[:2]).all() and np.isnan(col[2:]).all()
+    # the deep cast's own column is kept as measured, below the model floor too
+    np.testing.assert_allclose(_column_at(out, geometry, 10.0)[:5], 2.0)
+    # but its value is not carried into the rock beside it
+    assert np.isnan(_column_at(out, geometry, 12.0)[3:5]).all()
+    # without a seafloor, the same cells are filled
+    plain = fill_between_casts(prepared, geometry, samples=200)
+    np.testing.assert_allclose(_column_at(plain, geometry, 12.0)[3:5], 2.0)

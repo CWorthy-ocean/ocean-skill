@@ -2471,11 +2471,11 @@ osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], n
   honours a single colour, a scalar width and the named line styles, and warns for
   the rest. Interactively, hovering a line shows its value, such as `temperature 15 °C`.
 
-### Sections built from casts: cast markers and the seafloor (`casts=`, `bathymetry=`)
+### Sections built from casts: cast markers, the seafloor and the fill between casts (`casts=`, `bathymetry=`, `cast_fill=`)
 
 A comparison section stacked from discrete casts
-(`select={"transect": {"from": "reference"}}`) shows where its data came from. Both
-of these are on by default, in the static and interactive renderers alike:
+(`select={"transect": {"from": "reference"}}`) shows where its data came from. All
+three of these are on by default, in the static and interactive renderers alike:
 
 ```python
 along = osk.compare(
@@ -2511,6 +2511,24 @@ along.plot(mark="contourf", contours=along)
   - `seafloor_kwargs=` styles it: `color` and `alpha` style the fill, and `edgecolor`
     and `linewidth` style the outline.
   - `Comparison.seafloor()` returns the sampled line itself.
+  - With a seafloor drawn, a cell with no data is white -- open water the casts did
+    not reach -- rather than the usual light grey, so the data, the empty water and
+    the rock read as three different things.
+- **The fill between casts (`cast_fill=`).**
+  - A section built from casts has one column per cast and nothing between them, so
+    on its own a filled contour only colours between two casts down to the
+    *shallower* one's bottom, and a deep cast between two shallow ones all but
+    disappears.
+  - For drawing, the gap between each pair of casts is filled the way hydrographic
+    sections usually are. At a depth both casts reach, the colour blends between
+    them. At a depth only one reaches, that cast's value carries halfway to its
+    neighbour and stops. So the bottom of the data steps down to each cast's own
+    deepest value, and nothing is drawn below where a cast measured. With a seafloor
+    drawn, the fill between casts also stops at the rock, so a cast's colour is never
+    carried over a sill; each cast's own column is kept as measured.
+  - Contour lines are drawn on the same filled grid.
+  - It changes the picture only; the metrics are computed from the casts
+    themselves. `cast_fill=False` draws just the casts' own columns.
 
 ## The `cross` family (two sections through one point)
 

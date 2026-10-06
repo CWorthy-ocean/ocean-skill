@@ -24,7 +24,9 @@ A section stacked from discrete casts (``select={"transect": {"from": "reference
 marks where each cast was and draws the seafloor under it, and those placements live
 here too: :func:`cast_marks` (a line per cast, down to its deepest observation),
 :func:`seafloor_line` (the bathymetry along the path, on the panel's own x axis) and
-:func:`depth_limit` (how deep the y axis reaches once the seafloor is drawn).
+:func:`depth_limit` (how deep the y axis reaches once the seafloor is drawn). Its
+handful of columns is resampled for drawing by :func:`fill_between_casts`, so the
+fill reaches each cast's own bottom rather than the shallower neighbour's.
 """
 
 from __future__ import annotations
@@ -41,6 +43,9 @@ from ocean_skill.plot._colorbar import _clean, tick_step
 
 __all__ = [
     "CAST_COLOR",
+    "CAST_FILL_SAMPLES",
+    "CAST_LABEL_COLOR",
+    "CAST_WIDTH",
     "CONTOUR_COLOR",
     "CONTOUR_WIDTH",
     "DEFAULT_CONTOUR_LEVELS",
@@ -48,6 +53,7 @@ __all__ = [
     "SEAFLOOR_COLOR",
     "SECTION_MARKS",
     "SECTION_X",
+    "WATER_COLOR",
     "X_DOMINANCE",
     "CastMark",
     "ContourLevel",
@@ -60,6 +66,7 @@ __all__ = [
     "contour_paths",
     "depth_limit",
     "difference_fill_levels",
+    "fill_between_casts",
     "fill_edges",
     "prepare_overlay",
     "prepare_section",
@@ -1146,13 +1153,31 @@ def difference_fill_levels(fill_levels):
 
 # --- casts and seafloor: where a cast-built section's data came from ------------------
 
-#: The default colour of a cast's marker line -- dark enough to read over any fill,
-#: and not black, so it is not mistaken for a contour line.
-CAST_COLOR = "0.2"
+#: The default colour of a cast's marker line -- a light grey that reads over any fill
+#: without competing with the black contour lines drawn on top of it.
+CAST_COLOR = "0.55"
 
-#: The default fill of the seafloor under a section -- darker than the ``0.85`` grey a
-#: missing cell draws as, so "no data here" and "rock here" read differently.
-SEAFLOOR_COLOR = "0.45"
+#: The default width (points) of a cast's marker line: thinner than a contour line.
+CAST_WIDTH = 0.6
+
+#: The colour of a cast's name along a panel's top edge: black, like the axis's own
+#: tick labels (which the static renderer draws them as), not the light line colour.
+CAST_LABEL_COLOR = "black"
+
+#: The default fill of the seafloor under a section: a mid grey, set off from the
+#: data above it by a thin black outline.
+SEAFLOOR_COLOR = "0.65"
+
+#: What a cell with no data draws as on a panel with a seafloor under it. Without a
+#: seafloor the section family's ``0.85`` grey does the job a map's land does; with
+#: one, the rock is already drawn, so what is left above it is open water the casts
+#: did not reach -- white, so the data, the empty water and the rock read as three
+#: different things rather than two shades of grey.
+WATER_COLOR = "white"
+
+#: About how many columns :func:`fill_between_casts` resamples a section onto, shared
+#: out among the gaps between casts in proportion to their width.
+CAST_FILL_SAMPLES = 400
 
 
 @dataclass(frozen=True)
@@ -1263,3 +1288,146 @@ def depth_limit(values: Sequence[xr.DataArray], seafloor_depth: np.ndarray) -> f
     if not deepest:
         raise ValueError("depth_limit needs a seafloor or at least one finite value.")
     return max(deepest)
+
+
+def fill_between_casts(
+    field: xr.DataArray,
+    geometry: SectionGeometry,
+    *,
+    seafloor: tuple[np.ndarray, np.ndarray] | None = None,
+    samples: int = CAST_FILL_SAMPLES,
+) -> xr.DataArray:
+    """Return a cast-built section resampled onto a fine x grid, for drawing only.
+
+    A section stacked from casts has one column per cast and nothing between them, so
+    a filled contour of it can only colour the stretch between two neighbouring casts
+    down to the shallower one's bottom -- a deep cast between two shallow ones all but
+    vanishes. This fills each gap between casts ``i`` and ``i + 1`` the way a
+    hydrographic section is usually drawn:
+
+    * at a depth where both casts have a value, it blends linearly between them;
+    * at a depth only one of them reaches, that cast's own value carries halfway
+      across the gap, and stops there -- a block, exactly the width a
+      ``pcolormesh`` cell of that cast would have;
+    * at a depth neither reaches, nothing.
+
+    So the data's lower edge steps down at each halfway point to each cast's own
+    deepest value, and every coloured cell either is a cast's value or lies between
+    two of them at one depth: nothing is extrapolated, and nothing is drawn below
+    where a cast actually measured. The halfway step is two samples a hair either
+    side of the midpoint, so a filled contour's masked cell there is too thin to see.
+
+    ``seafloor`` -- :func:`seafloor_line`'s ``(x, depth)`` on the same x axis, or
+    ``None`` -- stops the fill at the rock: a cell between casts deeper than the
+    seafloor under it is left empty, so a cast's value carried across a gap never
+    paints over a sill. The casts' own columns are kept as measured, even below the
+    seafloor (a cast deeper than a smoothed model bottom is real data, and its line
+    still reaches its deepest value).
+
+    ``field`` is :func:`prepare_section`'s return -- a fixed-depth comparison lane or
+    an overlay on its mesh -- with the casts as its along-path columns, in order. The
+    result has the same dimensions, name and attrs, and the same 2-D
+    ``geometry.x_name``/``geometry.y_name`` coordinates, on about ``samples`` columns
+    shared out among the gaps by width (at least four each); the along coordinate is
+    interpolated with x. Other coordinates are dropped. A section with fewer than two
+    columns, or with no finite x to place them by, is returned unchanged.
+
+    Raises
+    ------
+    ValueError
+        For a native s-level section, whose depths differ from column to column -- a
+        cast-built section is always on fixed depths.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    if geometry.native_s:
+        raise ValueError(
+            "fill_between_casts needs a fixed-depth section; a native s-level one has "
+            "different depths in every column."
+        )
+    vertical = next(d for d in field.dims if d != ALONG_DIM)
+    order = (vertical, ALONG_DIM)
+    f = field.transpose(*order)
+    values = np.asarray(f, dtype="float64")
+    xs = np.asarray(f[geometry.x_name], dtype="float64")[0]
+    depth = np.asarray(f[geometry.y_name], dtype="float64")[:, 0]
+    along = np.asarray(f[ALONG_DIM], dtype="float64")
+    n = values.shape[1]
+    if n < 2 or not np.all(np.isfinite(xs)):
+        return field
+    widths = np.abs(np.diff(xs))
+    total = float(widths.sum())
+    if total == 0.0:
+        return field
+
+    eps = 1e-6  # of a gap's width: the two sides of its halfway step
+    columns, x_out, along_out, is_cast = [], [], [], []
+    for i, width in enumerate(widths):
+        k = max(4, round(samples * float(width) / total))
+        t = np.linspace(0.0, 1.0, k + 1)[:-1]  # t = 1 is the next gap's t = 0
+        t = np.sort(np.concatenate([t[np.abs(t - 0.5) > eps], [0.5 - eps, 0.5 + eps]]))
+        left, right = values[:, i, None], values[:, i + 1, None]
+        has_left, has_right = np.isfinite(left), np.isfinite(right)
+        with np.errstate(invalid="ignore"):
+            # clipped to its two ends: l*(1-t) + r*t can land an ulp outside them
+            # (0.3 and 0.3 blending to 0.30000000000000004), and a value an ulp past
+            # the colour scale's end falls outside contourf's last band, undrawn
+            blend = np.clip(
+                left * (1.0 - t) + right * t,
+                np.fmin(left, right),
+                np.fmax(left, right),
+            )
+        columns.append(
+            np.where(
+                has_left & has_right,
+                blend,
+                np.where(
+                    has_left & (t <= 0.5),
+                    left,
+                    np.where(has_right & (t > 0.5), right, np.nan),
+                ),
+            )
+        )
+        x_out.append(xs[i] + t * (xs[i + 1] - xs[i]))
+        along_out.append(along[i] + t * (along[i + 1] - along[i]))
+        is_cast.append(t == 0.0)
+    columns.append(values[:, -1:])
+    x_out.append(xs[-1:])
+    along_out.append(along[-1:])
+    is_cast.append(np.array([True]))
+    dense = np.concatenate(columns, axis=1)
+    x_dense = np.concatenate(x_out)
+    m = x_dense.size
+    if seafloor is not None and np.size(seafloor[0]):
+        sx, sdepth = (np.asarray(a, dtype="float64") for a in seafloor)
+        order_x = np.argsort(sx)
+        # the seafloor's depth under each column; past its ends, its end depths
+        floor = np.interp(x_dense, sx[order_x], sdepth[order_x])
+        below = (depth[:, None] > floor[None, :]) & ~np.concatenate(is_cast)[None, :]
+        dense = np.where(below, np.nan, dense)
+
+    out = xr.DataArray(
+        dense,
+        dims=order,
+        coords={
+            vertical: f[vertical],
+            ALONG_DIM: (
+                ALONG_DIM,
+                np.concatenate(along_out),
+                dict(f[ALONG_DIM].attrs),
+            ),
+            geometry.y_name: (
+                order,
+                np.repeat(depth[:, None], m, axis=1),
+                dict(f[geometry.y_name].attrs),
+            ),
+            geometry.x_name: (
+                order,
+                np.repeat(x_dense[None, :], depth.size, axis=0),
+                dict(f[geometry.x_name].attrs),
+            ),
+        },
+        name=field.name,
+        attrs=dict(field.attrs),
+    )
+    return out.transpose(*field.dims)
