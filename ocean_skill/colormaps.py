@@ -66,7 +66,7 @@ __all__ = [
 #: to sit in the same figure. cmocean has 15 sequential maps and ~40 vocabulary
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
 #: deliberate choice, listed here rather than left as an accident to rediscover:
-#:   - ammonium / sigma_theta: both cmo.dense
+#:   - oxygen cmo.dense_r vs sigma_theta cmo.dense (opposite directions)
 #:   - nitrate / mld / pressure / bathymetry: all cmo.deep -- "mld" meaning all five
 #:     mixed-layer thickness names, the generic one and the four CF
 #:     ``..._defined_by_<criterion>`` ones. That includes the sigma_theta-defined
@@ -78,6 +78,7 @@ __all__ = [
 #:   - pH cmo.speed_r vs the speed family's cmo.speed
 #:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
 #:     _METRIC_CMAPS below) -- a separate table by design, not a leak
+#:   - ammonium cmo.gray_r likewise also colours the "n" (sample count) metric panel
 #: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
 #: entry, out of scope for this table's BGC-species guarantee: alkalinity (explicit
 #: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
@@ -117,13 +118,16 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "nitrate": "cmo.deep",
     "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",
-    "ammonium": "cmo.dense",
+    # Light is low, dark is high, like the other nutrient maps -- gray_r, not gray;
+    # only oxygen (below) needs its low end dark.
+    "ammonium": "cmo.gray_r",
     "iron": "cmo.amp",
-    # Dark is low, light is high -- cmo.gray, not its reverse. The reverse (gray_r)
-    # drew low oxygen as white, which on a white page reads as "nothing there" for the
-    # one quantity whose low end (hypoxia) is the thing to see. The substring key also
-    # covers oxygen_saturation, the other "oxygen" standard_name.
-    "oxygen": "cmo.gray",
+    # Dark is low, light is high -- cmo.dense *reversed*. Unreversed, dense (like the
+    # old gray_r before it) drew low oxygen as near-white, which on a white page reads
+    # as "nothing there" for the one quantity whose low end (hypoxia) is the thing to
+    # see. The substring key also covers oxygen_saturation, the other "oxygen"
+    # standard_name.
+    "oxygen": "cmo.dense_r",
     # "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water": "cmo.oxy",
     "dissolved_inorganic_carbon": "cmo.ice_r",
     "sea_water_alkalinity_expressed_as_mole_equivalent": "cmo.matter",
