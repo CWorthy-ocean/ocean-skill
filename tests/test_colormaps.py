@@ -45,8 +45,8 @@ _BGC_SPECIES = (
         ("Fluor_CTD", "algae"),
         ("PAR", "solar"),
         ("PAR_CTD", "solar"),
-        ("ammonium", "dense"),
-        ("NH4", "dense"),
+        ("ammonium", "gray_r"),
+        ("NH4", "gray_r"),
         ("iron", "amp"),
         ("Fe", "amp"),
         ("nitrate", "deep"),
@@ -175,9 +175,9 @@ def test_oxygen_is_dark_at_the_low_end_and_light_at_the_high_end(name):
 def test_oxygen_keeps_a_map_of_its_own():
     """Flipping the direction must not collide it with another BGC species' map."""
     seq, _ = cmaps_for("oxygen")
-    assert seq.name == "gray"
+    assert seq.name == "dense_r"
     others = {s: cmaps_for(s)[0].name for s in _BGC_SPECIES if s != "oxygen"}
-    assert "gray" not in others.values(), others
+    assert "dense_r" not in others.values(), others
 
 
 # --- ADT, spreads, centring, matplotlib names ----------------------------------------
