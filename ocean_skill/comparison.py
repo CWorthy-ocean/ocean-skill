@@ -3721,11 +3721,14 @@ def _normalize_seafloor(da: Any, *, what: str = "the seafloor") -> Any:
     )
 
 
-def _section_extras(comparison: Any, casts: Any, bathymetry: Any) -> dict[str, Any]:
-    """Return the ``cast_labels``/``seafloor`` item keys a section row is plotted with.
+def _section_extras(
+    comparison: Any, casts: Any, bathymetry: Any, cast_fill: bool | None = None
+) -> dict[str, Any]:
+    """Return the ``cast_labels``/``seafloor``/``cast_fill`` item keys of a section row.
 
-    Resolves :meth:`Comparison.plot`'s ``casts=`` and ``bathymetry=`` against one
-    comparison (:meth:`ComparisonSet.plot` calls this per row). Both default to
+    Resolves :meth:`Comparison.plot`'s ``casts=``, ``bathymetry=`` and ``cast_fill=``
+    against one comparison (:meth:`ComparisonSet.plot` calls this per row). All three
+    default to
     *on* for a section built from casts (``select={"transect": {"from":
     "reference"}}``) -- a handful of CTD stations is exactly where the casts
     themselves, and the bottom they were lowered to, say the most -- and to off
@@ -3737,27 +3740,40 @@ def _section_extras(comparison: Any, casts: Any, bathymetry: Any) -> dict[str, A
     ------
     ValueError
         For an explicit request the comparison cannot honour: ``casts=True``, a
-        label list/dict, or ``bathymetry=True``/a ``Field``/a ``DataArray`` on a
-        comparison that is not a (suitable) section, or labels that do not fit the
-        casts.
+        label list/dict, ``cast_fill=True``, or ``bathymetry=True``/a ``Field``/a
+        ``DataArray`` on a comparison that is not a (suitable) section, or labels
+        that do not fit the casts.
     """
     from ocean_skill.align import ALONG_DIM
 
     casts_asked = casts is not None and casts is not False
     bathy_asked = bathymetry is not None and bathymetry is not False
+    if cast_fill not in (None, True, False):
+        raise TypeError(
+            f"cast_fill= must be None or a bool, got {type(cast_fill).__name__}."
+        )
     is_section = comparison.family == "section_row"
     built_from_casts = is_section and bool(comparison._section_casts)
     # a slab says so on its along coordinate (comparison._slab_to_section)
     is_slab = is_section and "axis_coord" in comparison.aligned[ALONG_DIM].attrs
     if not is_section:
-        if casts_asked or bathy_asked:
+        if casts_asked or bathy_asked or cast_fill:
             raise ValueError(
-                "casts=/bathymetry= mark a vertical section, but this comparison "
-                f"draws as {comparison.family!r}."
+                "casts=/bathymetry=/cast_fill= apply to a vertical section, but this "
+                f"comparison draws as {comparison.family!r}."
             )
         return {}
 
     extras: dict[str, Any] = {}
+
+    if cast_fill or (cast_fill is None and built_from_casts):
+        if not built_from_casts:
+            raise ValueError(
+                "cast_fill= fills between the casts a section was built from "
+                "(select={'transect': {'from': 'reference'}}); this section was "
+                "cut from a gridded source, so it has no gaps between casts to fill."
+            )
+        extras["cast_fill"] = True
 
     if casts_asked or (casts is None and built_from_casts):
         if not built_from_casts:
@@ -6568,6 +6584,7 @@ class Comparison:
         contours: Any = None,
         casts: Any = None,
         bathymetry: Any = None,
+        cast_fill: bool | None = None,
         **kwargs: Any,
     ):
         """Render as a ``test | reference | difference`` row, or as metric maps.
@@ -6605,6 +6622,15 @@ class Comparison:
             source has no bathymetry; a :class:`~ocean_skill.field.Field` (or
             ``DataArray``) of seafloor depth along the same path is drawn instead
             of the model's own.
+        cast_fill
+            Sections built from casts only. Fills the gaps between casts for
+            drawing (:func:`ocean_skill.plot.section.fill_between_casts`): blended
+            between two casts at a depth both reach, and carried halfway to the
+            next cast at a depth only one reaches, so each cast's colour reaches its
+            own deepest value rather than stopping at its shallower neighbour's.
+            ``None`` (default) fills a section built from casts; ``False`` draws the
+            casts' columns as they are; ``True`` insists on it (an error for any
+            other section). Drawing only -- the metrics are the casts' own.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -6659,7 +6685,7 @@ class Comparison:
 
             (overlay,) = contour_members(contours, 1, kind="comparison")
             item.update(comparison_contour(overlay, plotted=self))
-        item.update(_section_extras(self, casts, bathymetry))
+        item.update(_section_extras(self, casts, bathymetry, cast_fill))
         spec = PlotSpec(family=plot_family, items=[item], options=kwargs)
         return render(spec, renderer=renderer)
 
@@ -7462,6 +7488,7 @@ class ComparisonSet:
         contours: Any = None,
         casts: Any = None,
         bathymetry: Any = None,
+        cast_fill: bool | None = None,
         **kwargs: Any,
     ):
         """Render all comparisons as stacked rows in one figure.
@@ -7482,6 +7509,9 @@ class ComparisonSet:
         bathymetry
             Sections only. The seafloor under every row -- see
             :meth:`Comparison.plot`.
+        cast_fill
+            Sections built from casts only. Fills between every row's casts for
+            drawing -- see :meth:`Comparison.plot`.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -7519,7 +7549,7 @@ class ComparisonSet:
             ]
         # {} for anything but a section row, so other families never see the keys
         items = [
-            {**item, **_section_extras(c, casts, bathymetry)}
+            {**item, **_section_extras(c, casts, bathymetry, cast_fill)}
             for item, c in zip(items, self.comparisons, strict=True)
         ]
         first = self.comparisons[0]

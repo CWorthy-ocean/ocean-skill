@@ -50,15 +50,19 @@ from ocean_skill.plot.matplotlib_renderer import (
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.section import (
     CAST_COLOR,
+    CAST_LABEL_COLOR,
+    CAST_WIDTH,
     CONTOUR_COLOR,
     CONTOUR_WIDTH,
     SEAFLOOR_COLOR,
+    WATER_COLOR,
     cast_marks,
     check_section_options,
     contour_label,
     contour_paths,
     depth_limit,
     difference_fill_levels,
+    fill_between_casts,
     fill_edges,
     prepare_overlay,
     seafloor_line,
@@ -1074,7 +1078,7 @@ class _CastStyle:
 
     color: str = _mcolors.to_hex(CAST_COLOR)
     #: in CSS pixels (the shared width is matplotlib points; see :class:`_ContourStyle`)
-    width: float = 0.8 * PT_PER_CSS_PX
+    width: float = CAST_WIDTH * PT_PER_CSS_PX
     dash: str = "dashed"
     labels: bool = True
     #: the names' rotation in degrees, counter-clockwise
@@ -1327,7 +1331,7 @@ def _cast_layers(
                     kdims=[x, y],
                     vdims=["text"],
                 ).opts(
-                    text_color=cast_style.color,
+                    text_color=_mcolors.to_hex(CAST_LABEL_COLOR),
                     text_font_size=label_size,
                     text_align="center",
                     text_baseline="top",
@@ -3041,6 +3045,7 @@ def _section_row(
     section_x: str = "auto",
     cast_labels=None,
     seafloor=None,
+    cast_fill: bool = False,
     seafloor_kwargs=None,
     cast_kwargs=None,
     **_,
@@ -3098,6 +3103,15 @@ def _section_row(
     transparent, so it shows through) with a thin outline over it but under any contour
     lines. With a seafloor the depth axis runs from the surface to the deeper of the
     seafloor and the deepest observation. The mesh stays the only element with a hover.
+    A panel with a seafloor draws a cell with no data as white water
+    (:data:`~ocean_skill.plot.section.WATER_COLOR`) rather than the grey of a section
+    without one. ``cast_fill=True`` (the item's ``cast_fill``, which the keyword
+    overrides) resamples the casts' few columns -- the data and any contour overlay --
+    onto a fine x grid for drawing (:func:`~ocean_skill.plot.section.
+    fill_between_casts`), so a deep cast between shallow ones keeps its colour out to
+    halfway to its neighbours; the cast marks, the colour limits and the contour levels
+    are all still read from the casts' own columns, and the mesh's hover then reads the
+    blended values.
     ``cast_kwargs`` (``colors``, ``linestyles``, ``linewidths``; ``labels=False`` for no
     names, ``rotation`` in degrees) and ``seafloor_kwargs`` (``color``/``alpha`` for the
     fill, ``edgecolor``/``linewidth`` for the outline) are the static renderer's own
@@ -3125,6 +3139,7 @@ def _section_row(
         cast_labels = item.get("cast_labels")
     if seafloor is None:
         seafloor = item.get("seafloor")
+    cast_fill = cast_fill or bool(item.get("cast_fill", False))
     # the cast marks and seafloor are placed on the row's own coordinates, so they are
     # built here, ahead of the x alias renaming them (the elements take the alias)
     cast_layers = None
@@ -3153,6 +3168,23 @@ def _section_row(
         if raw is not None
         else {}
     )
+    # decided on the casts' own columns, like the colour limits below: the resampling
+    # below is for drawing, and moves neither
+    levels = (
+        _figure_levels(contour_levels, list(overlays.values())) if overlays else None
+    )
+    limit_values = values
+    if cast_fill:
+        # stopped at the seafloor, so a cast carried across a gap never paints a sill
+        line = seafloor_line(seafloor, geometry) if seafloor is not None else None
+        values = {
+            lane: fill_between_casts(da, geometry, seafloor=line)
+            for lane, da in values.items()
+        }
+        overlays = {
+            lane: fill_between_casts(da, geometry, seafloor=line)
+            for lane, da in overlays.items()
+        }
     x_name = geometry.x_name
     if x_alias is not None:
         # a fresh coordinate carrying the label (never an in-place attrs edit, which
@@ -3167,6 +3199,7 @@ def _section_row(
         }
         x_name = x_alias
     t, r, d = values["test"], values["reference"], values["difference"]
+    lt, lr, ld = (limit_values[lane] for lane in ("test", "reference", "difference"))
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
@@ -3178,18 +3211,18 @@ def _section_row(
     log = is_log(standard_name, statistic)
     if seq_clim is None:
         vmin, vmax = _variable_limits(
-            standard_name, statistic, t, r, log=log, robust=robust
+            standard_name, statistic, lt, lr, log=log, robust=robust
         )
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
     if div_clim is None:
-        dmax = difference_limit(d)
+        dmax = difference_limit(ld)
         div_clim = (-dmax, dmax)
     # the one scale both bars answer for: the row's own data unless a grid's shared
     # scale says more
     if seq_range is None:
-        seq_range = _data_range(t, r, log=log)
+        seq_range = _data_range(lt, lr, log=log)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -3208,7 +3241,14 @@ def _section_row(
         y=geometry.y_name,
         aspect=SECTION_ASPECT,
         invert_y=True,
-        bgcolor="#d9d9d9",
+        # a missing cell shows the panel's background: the grey of "no data" -- unless
+        # the seafloor is drawn, which already says where the rock is, and what is
+        # left above it is water
+        bgcolor=(
+            _mcolors.to_hex(WATER_COLOR)
+            if cast_layers is not None and cast_layers.floor is not None
+            else "#d9d9d9"
+        ),
         axis_labels=(geometry.x_label, geometry.y_label),
         font_scale=font_scale,
         canvas_factor=factor,
@@ -3217,7 +3257,6 @@ def _section_row(
     )
     lines = {"test": (), "reference": ()}
     if overlays:
-        levels = _figure_levels(contour_levels, list(overlays.values()))
         name, line_units = _contour_caption(item)
         label_size = _contour_label_size(
             t, font_scale=font_scale, width_px=PANEL_WIDTH_PX, canvas_factor=factor
@@ -3330,10 +3369,10 @@ def _section_row_grid(
     **once** for the whole grid, pooled over every row's test and reference overlay, so
     every row shows the same isotherms.
 
-    A row stacked from casts draws its own ``cast_labels`` and ``seafloor`` (read per
-    item, as ``contour`` is: one row may be cast-built and the next not), styled by the
-    one ``seafloor_kwargs``/``cast_kwargs`` -- read once here, so a bad value warns
-    once, not once per row. See :func:`_section_row`.
+    A row stacked from casts draws its own ``cast_labels``, ``seafloor`` and
+    ``cast_fill`` (read per item, as ``contour`` is: one row may be cast-built and the
+    next not), styled by the one ``seafloor_kwargs``/``cast_kwargs`` -- read once here,
+    so a bad value warns once, not once per row. See :func:`_section_row`.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -3468,6 +3507,7 @@ def _section_row_grid(
             section_x=section_x,
             cast_labels=it.get("cast_labels"),
             seafloor=it.get("seafloor"),
+            cast_fill=it.get("cast_fill", False),
             seafloor_kwargs=seafloor_style,
             cast_kwargs=cast_style,
         )

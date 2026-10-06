@@ -4263,6 +4263,34 @@ def _section_cast_geometry(values, geometry, cast_labels, seafloor):
     return marks, line, ylim_bottom
 
 
+def _fill_between_casts(values, overlay, geometry, line=None):
+    """Return ``(values, overlay)`` resampled across the gaps between a row's casts.
+
+    Every lane of ``values`` and of ``overlay`` (``None`` or a ``{"test", "reference"}``
+    pair) goes through :func:`ocean_skill.plot.section.fill_between_casts`, so the fill
+    and its contour lines stay on one mesh and a deep cast between two shallow ones is
+    coloured out to halfway across the gaps either side of it. Called after
+    :func:`_section_overlays` and :func:`_section_cast_geometry`, both of which want the
+    original one-column-per-cast mesh (the overlay is checked against it, and the cast
+    marks sit on its columns); the colour limits are then taken from the resampled
+    values, which never leave the original range. ``line`` is the row's seafloor
+    (:func:`ocean_skill.plot.section.seafloor_line`), or ``None``: the fill between
+    casts stops at it, rather than painting over a sill.
+    """
+    from ocean_skill.plot.section import fill_between_casts
+
+    values = {
+        lane: fill_between_casts(da, geometry, seafloor=line)
+        for lane, da in values.items()
+    }
+    if overlay is not None:
+        overlay = {
+            lane: fill_between_casts(da, geometry, seafloor=line)
+            for lane, da in overlay.items()
+        }
+    return values, overlay
+
+
 def _cast_label_overhead(overhead, marks, cast_kwargs=None):
     """Return ``overhead`` plus the height of the cast names along the panels' tops."""
     em, fixed = overhead
@@ -4500,19 +4528,22 @@ def _draw_casts(
     ticks at the casts' own x, which the shared mesh already places -- at the tick
     label size, a touch smaller, since there can be a dozen across one panel.
 
+    The lines are a thin, light grey (:data:`~ocean_skill.plot.section.CAST_COLOR`,
+    :data:`~ocean_skill.plot.section.CAST_WIDTH`) so they sit back from the contours.
+
     ``cast_kwargs`` restyles the lines (``colors``, ``linestyles``, ``linewidths``, any
     other ``ax.vlines`` keyword) apart from two keys that style the names instead:
     ``labels=False`` leaves them off, and ``rotation`` turns them (degrees; 0 by
     default).
     """
-    from ocean_skill.plot.section import CAST_COLOR
+    from ocean_skill.plot.section import CAST_COLOR, CAST_WIDTH
 
     style = dict(cast_kwargs or {})
     labelled = style.pop("labels", True)
     rotation = style.pop("rotation", 0)
     style.setdefault("colors", CAST_COLOR)
     style.setdefault("linestyles", "--")
-    style.setdefault("linewidths", 0.8)
+    style.setdefault("linewidths", CAST_WIDTH)
     style.setdefault("zorder", _CAST_ZORDER)
     reached = [m for m in casts if np.isfinite(m.x) and np.isfinite(m.bottom)]
     if reached:
@@ -4581,9 +4612,14 @@ def _draw_section(
     smoothed bottom is not cut off). ``casts`` -- :func:`ocean_skill.plot.section
     .cast_marks`'s list, or ``None`` -- draws a dashed line down each cast to its
     deepest value and names it along the top edge (see :func:`_draw_casts`). With none
-    of the four given the panel is drawn exactly as it always was.
+    of the four given the panel is drawn exactly as it always was. A panel with a
+    seafloor has its no-data cells white (:data:`~ocean_skill.plot.section.WATER_COLOR`,
+    open water the casts did not reach) rather than the ``0.85`` grey, which would read
+    as a second kind of rock next to the shaded seafloor.
     """
-    ax.set_facecolor("0.85")
+    from ocean_skill.plot.section import WATER_COLOR
+
+    ax.set_facecolor("0.85" if seafloor is None else WATER_COLOR)
     draw = ax.contourf if mark == "contourf" else ax.pcolormesh
     kw = _contour_kw(norm, fill_levels) if mark == "contourf" else {}
     im = draw(
@@ -6788,6 +6824,7 @@ def section_row(
     seafloor: xr.DataArray | None = None,
     seafloor_kwargs: dict[str, Any] | None = None,
     cast_kwargs: dict[str, Any] | None = None,
+    cast_fill: bool = False,
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -6846,7 +6883,12 @@ def section_row(
     ``linewidths``, ...; ``labels=False`` drops the names, ``rotation`` turns them) and
     ``seafloor_kwargs`` the bottom (``edgecolor``/``linewidth`` the outline, every other
     key the shading's ``ax.fill_between``); either is refused on a row without what it
-    styles.
+    styles. ``cast_fill=True`` resamples the section's one-column-per-cast mesh onto a
+    fine one for drawing (:func:`ocean_skill.plot.section.fill_between_casts`): each gap
+    is blended where both neighbouring casts have a value and carries each cast's own
+    value halfway across it where only that one does, so a deep cast between shallow
+    ones is coloured to its own bottom instead of vanishing. The cast lines stay on the
+    casts' own columns. A panel with a seafloor draws open water white, not grey.
     """
     import matplotlib.pyplot as plt
 
@@ -6875,6 +6917,8 @@ def section_row(
     marks, line, ylim_bottom = _section_cast_geometry(
         values, geometry, cast_labels, seafloor
     )
+    if cast_fill:
+        values, overlay = _fill_between_casts(values, overlay, geometry, line)
     if title is None:
         title = suptitle_text(standard_name, (depth, time, geometry.path_note))
 
@@ -7084,9 +7128,10 @@ def section_row_grid(
     row shows the same isotherms; ``contour_levels``/``contour_kwargs`` mean what they
     do in :func:`section`.
 
-    A row item built from CTD casts may carry ``cast_labels`` and ``seafloor`` (see
-    :func:`section_row`); each row draws its own, and a row without them is drawn as
-    ever. ``seafloor_kwargs``/``cast_kwargs`` style them on every row that has them.
+    A row item built from CTD casts may carry ``cast_labels``, ``seafloor`` and
+    ``cast_fill`` (see :func:`section_row`); each row draws its own, and a row without
+    them is drawn as ever. ``seafloor_kwargs``/``cast_kwargs`` style them on every row
+    that has them.
     """
     import matplotlib.pyplot as plt
 
@@ -7125,6 +7170,13 @@ def section_row_grid(
         )
         for item, values, geometry in prepared
     ]
+    # after the overlays and cast marks, which want the original cast mesh
+    for i, (item, values, geometry) in enumerate(prepared):
+        if item.get("cast_fill", False):
+            values, overlays[i] = _fill_between_casts(
+                values, overlays[i], geometry, cast_geometry[i][1]
+            )
+            prepared[i] = (item, values, geometry)
 
     auto_title, paths_differ = section_row_grid_title(
         items, [geometry for _, _, geometry in prepared]
@@ -9066,6 +9118,7 @@ def _render(spec, **kwargs: Any):
             contour=item.get("contour"),
             cast_labels=item.get("cast_labels"),
             seafloor=item.get("seafloor"),
+            cast_fill=item.get("cast_fill", False),
             **opts,
         )
     if family == "cross":
