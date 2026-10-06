@@ -781,13 +781,14 @@ depth-ordered line, and anything else — every cell, level and snapshot of a mo
 is a cloud of dots.
 
 ```python
-box = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+box = {"lon": {"min": 156.16, "max": 157.23}, "lat": {"min": 19.32, "max": 20.32}}
 TS_VARS = ["temperature", "salinity"]
 
 roms = osk.field("all_the_rest", TS_VARS, select=box)                  # dots
 woa = osk.field(["woa23_temperature_annual", "woa23_salinity_annual"], TS_VARS,
-                select={"lon": 155.79, "lat": 21.05})                   # nearest cell: line
-glorys = osk.field("glorys_climatology_timeseries", TS_VARS, select=box,
+                select={"lon": 156.70, "lat": 19.82})                   # nearest cell: line
+run = {"min": "2010-07-31", "max": "2010-10-31"}                    # the run's own dates
+glorys = osk.field("glorys_my_daily_timeseries", TS_VARS, select={**box, "time": run},
                    aggregate={"time": "mean", "lon": "mean", "lat": "mean"})  # line
 
 osk.TS({"ROMS": roms, "WOA23": woa, "GLORYS12": glorys}).plot(
@@ -809,13 +810,13 @@ on a 1° grid can sit between cell centres and select nothing; `at_center=` samp
 listed members at the nearest cell to each box centre instead:
 
 ```python
-PACIFIC = {   # lon (0-360) and lat ranges, after Damien et al., Fig. 7
-    "North West Pacific":        ((155.24, 156.33), (20.51, 21.60)),
-    "Subpolar Gyre":             ((184.59, 185.73), (47.76, 48.59)),
-    "California Current System": ((233.59, 234.83), (39.37, 40.38)),
-    "South West Pacific":        ((184.58, 185.38), (-16.75, -15.91)),
-    "South Pacific Gyre":        ((238.98, 240.00), (-22.37, -21.37)),
-    "Peru Current":              ((273.34, 274.47), (-11.73, -10.57)),
+PACIFIC = {   # lon (0-360) and lat ranges of Damien et al. Fig. 7's boxes, on their grid
+    "North West Pacific":        ((156.16, 157.23), (19.32, 20.32)),
+    "Subpolar Gyre":             ((185.86, 186.96), (44.56, 45.34)),
+    "California Current System": ((233.87, 235.07), (36.39, 37.35)),
+    "South West Pacific":        ((185.18, 185.99), (-15.45, -14.67)),
+    "South Pacific Gyre":        ((240.99, 242.00), (-21.26, -20.31)),
+    "Peru Current":              ((275.31, 276.41), (-11.48, -10.40)),
 }
 regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
                   "lat": {"min": lat[0], "max": lat[1]}}
@@ -824,7 +825,8 @@ regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
 ts = osk.TS({"ROMS": osk.field("all_the_rest", TS_VARS),
              "WOA23": osk.field(["woa23_temperature_annual", "woa23_salinity_annual"],
                                 TS_VARS),
-             "GLORYS12": osk.field("glorys_climatology_timeseries", TS_VARS,
+             "GLORYS12": osk.field("glorys_my_daily_timeseries", TS_VARS,
+                                   select={"time": run},
                                    aggregate={"time": "mean", "lon": "mean",
                                               "lat": "mean"})},
             regions=regions, at_center=["WOA23"])
