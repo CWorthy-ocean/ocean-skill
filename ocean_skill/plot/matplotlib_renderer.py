@@ -19,7 +19,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -56,6 +56,9 @@ from ocean_skill.plot.typography import (
 # aliased: field_grid already has a row_height *parameter*, which is the caller's
 # override of exactly this
 from ocean_skill.plot.typography import row_height as _typographic_row_height
+
+if TYPE_CHECKING:
+    import xarray as xr
 
 __all__ = [
     "cross",
@@ -1098,6 +1101,11 @@ def _draw_section_row(
     overlays: Mapping[str, Any] | None = None,
     levels: Sequence[float] = (),
     contour_kwargs: Mapping[str, Any] | None = None,
+    seafloor: tuple[np.ndarray, np.ndarray] | None = None,
+    casts: Sequence[Any] | None = None,
+    ylim_bottom: float | None = None,
+    seafloor_kwargs: Mapping[str, Any] | None = None,
+    cast_kwargs: Mapping[str, Any] | None = None,
 ):
     """Draw one test|reference|difference section row into three existing axes.
 
@@ -1135,8 +1143,15 @@ def _draw_section_row(
     drawn at ``levels`` over those two panels only: a difference of two fields has no
     isotherm of its own to draw. The caller labels them (:func:`_label_overlays`) once
     the figure is laid out.
+
+    ``seafloor``/``casts``/``ylim_bottom`` are :func:`_section_cast_geometry`'s, worked
+    out once for the row by the caller and drawn on all three panels alike, the
+    difference panel included, so the three keep one y axis and one set of cast names;
+    ``seafloor_kwargs``/``cast_kwargs`` style them (see :func:`_draw_seafloor`,
+    :func:`_draw_casts`).
     """
     import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
 
     from ocean_skill.plot.section import difference_fill_levels
 
@@ -1157,6 +1172,16 @@ def _draw_section_row(
     if div_norm is None:
         dmax = difference_limit(d)
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
+
+    # A secondary axis's tick labels are not something matplotlib clears a title for, so
+    # lift the titles above the cast names by their height (a title_kwargs pad wins).
+    title_pad: dict[str, float] = {}
+    name_em = _cast_label_height_em(casts, cast_kwargs)
+    if name_em:
+        title_pad["pad"] = (
+            plt.rcParams["axes.titlepad"]
+            + (name_em - 0.3) * _CAST_LABEL_SIZE * scale["tick_label"]
+        )
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
     panels = [
@@ -1187,10 +1212,15 @@ def _draw_section_row(
             overlay=(overlays or {}).get(lane),
             levels=levels,
             contour_kwargs=contour_kwargs,
+            seafloor=seafloor,
+            casts=casts,
+            ylim_bottom=ylim_bottom,
+            seafloor_kwargs=seafloor_kwargs,
+            cast_kwargs=cast_kwargs,
         )
         if shared_axis_labels and j != 0:
             ax.tick_params(axis="y", labelleft=False)
-        ax.set_title(lab, **title_kwargs)
+        ax.set_title(lab, **{**title_pad, **title_kwargs})
         ax.title._osk_size_pinned = title_pinned
         ims.append(im)
 
@@ -4174,6 +4204,71 @@ def _check_section_contours(
         fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
 
 
+def _check_section_casts(
+    has_casts: bool,
+    has_seafloor: bool,
+    *,
+    seafloor_kwargs: Any,
+    cast_kwargs: Any,
+) -> None:
+    """Refuse a cast or seafloor style with nothing to style, before any figure exists.
+
+    The counterpart of :func:`_check_section_contours`' ``contour_kwargs`` refusal:
+    ``cast_kwargs=`` styles the lines and names a cast-built section draws, and
+    ``seafloor_kwargs=`` its shaded bottom, so either on a row that has none would be
+    silently ignored. Each also has to be a mapping.
+    """
+    for name, given, present, what in (
+        ("seafloor_kwargs", seafloor_kwargs, has_seafloor, "a seafloor line"),
+        ("cast_kwargs", cast_kwargs, has_casts, "cast labels"),
+    ):
+        if given is None:
+            continue
+        if not isinstance(given, Mapping):
+            raise TypeError(
+                f"{name}= takes a dict of matplotlib keywords -- got "
+                f"{type(given).__name__}."
+            )
+        if not present:
+            raise ValueError(
+                f"{name}= styles what a section built from casts draws, but this "
+                f"section has no {what} -- build it from casts "
+                '(select={"transect": {"from": "reference"}}) first.'
+            )
+
+
+def _section_cast_geometry(values, geometry, cast_labels, seafloor):
+    """Work out one row's cast marks, seafloor line and y limit, before any drawing.
+
+    Returns ``(marks, line, ylim_bottom)`` -- ``marks`` and ``line`` ``None`` for what
+    was not given, ``ylim_bottom`` ``None`` without a seafloor, in which case the y axis
+    keeps its own extent. Done once per row on the prepared fields
+    (:func:`ocean_skill.plot.section.cast_marks`, :func:`~ocean_skill.plot.section
+    .seafloor_line`, :func:`~ocean_skill.plot.section.depth_limit`) so a label count
+    that does not match the casts fails before a figure is open.
+    """
+    from ocean_skill.plot.section import cast_marks, depth_limit, seafloor_line
+
+    marks = (
+        cast_marks(values["reference"], geometry, cast_labels)
+        if cast_labels is not None
+        else None
+    )
+    line = seafloor_line(seafloor, geometry) if seafloor is not None else None
+    ylim_bottom = None
+    if line is not None and len(line[1]):
+        ylim_bottom = depth_limit(
+            [values[lane] for lane in ("test", "reference", "difference")], line[1]
+        )
+    return marks, line, ylim_bottom
+
+
+def _cast_label_overhead(overhead, marks, cast_kwargs=None):
+    """Return ``overhead`` plus the height of the cast names along the panels' tops."""
+    em, fixed = overhead
+    return (em + _cast_label_height_em(marks, cast_kwargs), fixed)
+
+
 def _prepare_overlay(raw, values, section_x="auto"):
     """Put one item's raw overlay on the mesh of its panel(s), or ``None`` without one.
 
@@ -4315,6 +4410,128 @@ def _label_overlays(fig) -> None:
         ax._osk_overlay = None
 
 
+#: Where the seafloor and the cast lines sit. The data fill is at matplotlib's default
+#: of 1, so the rock shading goes *under* it (a cell with no value is transparent, so
+#: the rock shows through below the data -- and an observation deeper than the model's
+#: smoothed bottom stays visible on top of it), and the outline and the cast lines go
+#: over it but under the contour overlay's lines (:data:`_OVERLAY_ZORDER`).
+_SEAFLOOR_FILL_ZORDER = 0.5
+_SEAFLOOR_LINE_ZORDER = 1.5
+_CAST_ZORDER = 1.6
+
+#: How tall (in ems of the tick label size) the cast names are, plus the tick and gap
+#: under them, for horizontal names. A rotated name is taller by about its length.
+CAST_LABEL_OVERHEAD_EM = 1.3
+
+#: The cast names' size against the ordinary tick labels' -- there can be a dozen of
+#: them across one panel, so a touch smaller.
+_CAST_LABEL_SIZE = 0.85
+
+
+def _cast_label_height_em(marks, cast_kwargs: Mapping[str, Any] | None) -> float:
+    """Return how tall the cast names are along a panel's top, in tick-label ems.
+
+    A horizontal name is one line (:data:`CAST_LABEL_OVERHEAD_EM`, which also covers the
+    tick and its gap); a turned one is as tall as its longest name is long, roughly,
+    projected onto the vertical. Not exact -- font widths vary -- but enough to keep a
+    panel's title clear of the names, which matplotlib does not do for a secondary axis.
+    """
+    if not marks or (cast_kwargs or {}).get("labels") is False:
+        return 0.0
+    angle = np.deg2rad((cast_kwargs or {}).get("rotation", 0))
+    longest = max(len(m.label) for m in marks)
+    return 0.3 + abs(np.cos(angle)) + 0.55 * longest * abs(np.sin(angle))
+
+
+def _draw_seafloor(
+    ax,
+    seafloor: tuple[np.ndarray, np.ndarray],
+    ylim_bottom: float | None,
+    seafloor_kwargs: Mapping[str, Any] | None,
+) -> None:
+    """Shade the rock under a section panel and draw its top as a line.
+
+    ``seafloor`` is ``(x, depth)`` (:func:`ocean_skill.plot.section.seafloor_line`),
+    depth in metres positive-down; the shading runs from that line down to
+    ``ylim_bottom`` (the deepest point of the seafloor if not given).
+
+    ``seafloor_kwargs`` restyles it. ``edgecolor`` and ``linewidth`` style the outline
+    (``"k"`` and 0.8 by default; ``edgecolor="none"`` draws no outline), and every other
+    key goes to the shading's ``ax.fill_between`` -- ``color`` (a mid grey,
+    :data:`~ocean_skill.plot.section.SEAFLOOR_COLOR`, by default), ``alpha``, ``hatch``,
+    and so on.
+    """
+    from ocean_skill.plot.section import SEAFLOOR_COLOR
+
+    x, depth = seafloor
+    if not len(x):
+        return
+    style = dict(seafloor_kwargs or {})
+    edgecolor = style.pop("edgecolor", "k")
+    linewidth = style.pop("linewidth", 0.8)
+    style.setdefault("color", SEAFLOOR_COLOR)
+    style.setdefault("linewidth", 0)
+    style.setdefault("zorder", _SEAFLOOR_FILL_ZORDER)
+    floor = float(np.max(depth)) if ylim_bottom is None else ylim_bottom
+    ax.fill_between(x, depth, floor, **style)
+    if edgecolor is not None and edgecolor != "none" and linewidth:
+        ax.plot(
+            x,
+            depth,
+            color=edgecolor,
+            linewidth=linewidth,
+            zorder=_SEAFLOOR_LINE_ZORDER,
+        )
+
+
+def _draw_casts(
+    ax,
+    casts: Sequence[Any],
+    cast_kwargs: Mapping[str, Any] | None,
+    *,
+    fontsize: float,
+) -> None:
+    """Mark each cast of a cast-built section: a dashed line down it, its name on top.
+
+    ``casts`` is :func:`ocean_skill.plot.section.cast_marks`'s list. The line runs from
+    the surface to the cast's deepest value (a cast with none draws no line, but is
+    still named), so the casts' real reach shows against a seafloor that is
+    interpolated between them. The names sit on a secondary axis along the top edge --
+    ticks at the casts' own x, which the shared mesh already places -- at the tick
+    label size, a touch smaller, since there can be a dozen across one panel.
+
+    ``cast_kwargs`` restyles the lines (``colors``, ``linestyles``, ``linewidths``, any
+    other ``ax.vlines`` keyword) apart from two keys that style the names instead:
+    ``labels=False`` leaves them off, and ``rotation`` turns them (degrees; 0 by
+    default).
+    """
+    from ocean_skill.plot.section import CAST_COLOR
+
+    style = dict(cast_kwargs or {})
+    labelled = style.pop("labels", True)
+    rotation = style.pop("rotation", 0)
+    style.setdefault("colors", CAST_COLOR)
+    style.setdefault("linestyles", "--")
+    style.setdefault("linewidths", 0.8)
+    style.setdefault("zorder", _CAST_ZORDER)
+    reached = [m for m in casts if np.isfinite(m.x) and np.isfinite(m.bottom)]
+    if reached:
+        ax.vlines([m.x for m in reached], 0.0, [m.bottom for m in reached], **style)
+    placed = [m for m in casts if np.isfinite(m.x)]
+    if labelled and placed:
+        top = ax.secondary_xaxis("top")
+        top.set_xticks([m.x for m in placed], labels=[m.label for m in placed])
+        top.tick_params(
+            axis="x",
+            labelsize=_CAST_LABEL_SIZE * fontsize,
+            length=2,
+            pad=1.5,
+            labelrotation=rotation,
+        )
+        # the panel's own frame is already drawn; a second line on top would double it
+        top.spines["top"].set_visible(False)
+
+
 def _draw_section(
     ax,
     values,
@@ -4329,6 +4546,11 @@ def _draw_section(
     overlay=None,
     levels: Sequence[float] = (),
     contour_kwargs: Mapping[str, Any] | None = None,
+    seafloor: tuple[np.ndarray, np.ndarray] | None = None,
+    casts: Sequence[Any] | None = None,
+    ylim_bottom: float | None = None,
+    seafloor_kwargs: Mapping[str, Any] | None = None,
+    cast_kwargs: Mapping[str, Any] | None = None,
 ):
     """Draw one vertical-section panel into ``ax`` and return its mappable.
 
@@ -4351,6 +4573,15 @@ def _draw_section(
     ``None`` -- is drawn over the fill as contour lines at ``levels``, styled by
     ``contour_kwargs`` (see :func:`_draw_overlay`); the returned mappable is always the
     fill's, whatever is drawn over it. Its labels wait for :func:`_label_overlays`.
+
+    ``seafloor`` -- :func:`ocean_skill.plot.section.seafloor_line`'s ``(x, depth)``, or
+    ``None`` -- shades the rock under the section and outlines it (see
+    :func:`_draw_seafloor`); ``ylim_bottom`` is how deep the y axis then reaches
+    (:func:`ocean_skill.plot.section.depth_limit`, so a cast deeper than the model's
+    smoothed bottom is not cut off). ``casts`` -- :func:`ocean_skill.plot.section
+    .cast_marks`'s list, or ``None`` -- draws a dashed line down each cast to its
+    deepest value and names it along the top edge (see :func:`_draw_casts`). With none
+    of the four given the panel is drawn exactly as it always was.
     """
     ax.set_facecolor("0.85")
     draw = ax.contourf if mark == "contourf" else ax.pcolormesh
@@ -4363,9 +4594,20 @@ def _draw_section(
         norm=norm,
         **kw,
     )
-    # inverted before the lines go on, and only once: invert_yaxis flips whatever the
-    # axis is now, so a second call would put the seafloor back at the top
-    ax.invert_yaxis()
+    if ylim_bottom is None:
+        # inverted before the lines go on, and only once: invert_yaxis flips whatever
+        # the axis is now, so a second call would put the seafloor back at the top
+        ax.invert_yaxis()
+    xlim = ax.get_xlim()
+    if seafloor is not None:
+        _draw_seafloor(ax, seafloor, ylim_bottom, seafloor_kwargs)
+    if ylim_bottom is not None:
+        # (bottom, 0) is already the inverted axis -- 0 m at the top -- so this stands
+        # in for invert_yaxis() rather than following it, which would flip it back
+        ax.set_ylim(ylim_bottom, 0.0)
+    if casts:
+        _draw_casts(ax, casts, cast_kwargs, fontsize=scale["tick_label"])
+    ax.set_xlim(xlim)  # the seafloor may run past the data; the data sets the extent
     if overlay is not None and len(levels):
         _draw_overlay(
             ax,
@@ -6542,6 +6784,10 @@ def section_row(
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
     section_x: str = "auto",
+    cast_labels: Sequence[str] | None = None,
+    seafloor: xr.DataArray | None = None,
+    seafloor_kwargs: dict[str, Any] | None = None,
+    cast_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one ``test | reference | difference`` row of vertical sections.
 
@@ -6585,6 +6831,22 @@ def section_row(
     test and reference panels respectively; the difference panel never gets any. Their
     levels are decided once over both, so the two panels show the same isotherms, and
     ``contour_levels``/``contour_kwargs`` mean what they do in :func:`section`.
+
+    A section built from CTD casts (``select={"transect": {"from": "reference"}}``) can
+    say where its data came from. ``cast_labels`` -- one name per along-path column, in
+    column order -- draws a dashed line down each cast, to the deepest depth the
+    reference has a value at, and names it along the top of every panel (a count that
+    differs from the number of columns raises ``ValueError``). ``seafloor`` -- a
+    one-dimensional DataArray along ``along`` of bottom depth in metres positive-down,
+    its along coordinate in km from the path's start and ``path_lon``/``path_lat``
+    coordinates -- shades the rock under the section and outlines its top, and deepens
+    the y axis to the deeper of the seafloor and any panel's deepest value, so an
+    observation below the model's smoothed bottom is not cut off. Without it the y axis
+    is as it always was. ``cast_kwargs`` restyles the lines (``colors``, ``linestyles``,
+    ``linewidths``, ...; ``labels=False`` drops the names, ``rotation`` turns them) and
+    ``seafloor_kwargs`` the bottom (``edgecolor``/``linewidth`` the outline, every other
+    key the shading's ``ax.fill_between``); either is refused on a row without what it
+    styles.
     """
     import matplotlib.pyplot as plt
 
@@ -6599,10 +6861,19 @@ def section_row(
         fill_levels=fill_levels,
         section_x=section_x,
     )
+    _check_section_casts(
+        cast_labels is not None,
+        seafloor is not None,
+        seafloor_kwargs=seafloor_kwargs,
+        cast_kwargs=cast_kwargs,
+    )
     _warn_if_interactive_only(rasterize, hover)
     values, geometry = prepare_section_row(aligned, section_x)
     (overlay,), levels = _section_overlays(
         [contour], [values], contour_levels, section_x
+    )
+    marks, line, ylim_bottom = _section_cast_geometry(
+        values, geometry, cast_labels, seafloor
     )
     if title is None:
         title = suptitle_text(standard_name, (depth, time, geometry.path_note))
@@ -6619,7 +6890,11 @@ def section_row(
         canvas=canvas,
         font_scale=font_scale,
         horizontal_colorbar=horizontal,
-        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+        overhead=_cast_label_overhead(
+            ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+            marks,
+            cast_kwargs,
+        ),
     )
     scale = _scale_for(figsize, nrows=1, font_scale=font_scale)
     defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
@@ -6646,6 +6921,11 @@ def section_row(
         overlays=overlay,
         levels=levels,
         contour_kwargs=contour_kwargs,
+        seafloor=line,
+        casts=marks,
+        ylim_bottom=ylim_bottom,
+        seafloor_kwargs=seafloor_kwargs,
+        cast_kwargs=cast_kwargs,
     )
     _draw_colorbar(
         fig,
@@ -6733,6 +7013,8 @@ def section_row_grid(
     contour_levels: bool | int | Sequence[float] | None = None,
     contour_kwargs: dict[str, Any] | None = None,
     section_x: str = "auto",
+    seafloor_kwargs: dict[str, Any] | None = None,
+    cast_kwargs: dict[str, Any] | None = None,
 ):
     """Stack one ``test | reference | difference`` section row per comparison.
 
@@ -6801,6 +7083,10 @@ def section_row_grid(
     are decided once for the whole figure, over every row's overlays pooled, so each
     row shows the same isotherms; ``contour_levels``/``contour_kwargs`` mean what they
     do in :func:`section`.
+
+    A row item built from CTD casts may carry ``cast_labels`` and ``seafloor`` (see
+    :func:`section_row`); each row draws its own, and a row without them is drawn as
+    ever. ``seafloor_kwargs``/``cast_kwargs`` style them on every row that has them.
     """
     import matplotlib.pyplot as plt
 
@@ -6816,6 +7102,12 @@ def section_row_grid(
         fill_levels=fill_levels,
         section_x=section_x,
     )
+    _check_section_casts(
+        any(item.get("cast_labels") is not None for item in items),
+        any(item.get("seafloor") is not None for item in items),
+        seafloor_kwargs=seafloor_kwargs,
+        cast_kwargs=cast_kwargs,
+    )
 
     prepared = [
         (item, *prepare_section_row(item["aligned"], section_x)) for item in items
@@ -6826,6 +7118,13 @@ def section_row_grid(
         contour_levels,
         section_x,
     )
+    # per row, before any figure: a label count that mismatches its casts fails here
+    cast_geometry = [
+        _section_cast_geometry(
+            values, geometry, item.get("cast_labels"), item.get("seafloor")
+        )
+        for item, values, geometry in prepared
+    ]
 
     auto_title, paths_differ = section_row_grid_title(
         items, [geometry for _, _, geometry in prepared]
@@ -6855,7 +7154,11 @@ def section_row_grid(
         canvas=canvas,
         font_scale=font_scale,
         horizontal_colorbar=horizontal,
-        overhead=ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+        overhead=_cast_label_overhead(
+            ROW_OVERHEAD_HORIZONTAL_CBAR if horizontal else ROW_OVERHEAD,
+            [m for marks, _, _ in cast_geometry if marks for m in marks],
+            cast_kwargs,
+        ),
     )
     scale = _scale_for(figsize, nrows=n, font_scale=font_scale)
     defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
@@ -6918,6 +7221,11 @@ def section_row_grid(
             overlays=overlays[i],
             levels=levels,
             contour_kwargs=contour_kwargs,
+            casts=cast_geometry[i][0],
+            seafloor=cast_geometry[i][1],
+            ylim_bottom=cast_geometry[i][2],
+            seafloor_kwargs=seafloor_kwargs,
+            cast_kwargs=cast_kwargs,
         )
         _draw_colorbar(
             fig,
@@ -8756,6 +9064,8 @@ def _render(spec, **kwargs: Any):
             time=item.get("time"),
             metrics=item.get("metrics"),
             contour=item.get("contour"),
+            cast_labels=item.get("cast_labels"),
+            seafloor=item.get("seafloor"),
             **opts,
         )
     if family == "cross":

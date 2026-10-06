@@ -121,6 +121,8 @@ grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
 ``section_row``/``field_grid``), the section options ``contours`` (a second
 variable's object drawn as contour lines over the fill), ``contour_levels``,
 ``contour_kwargs`` and ``fill_levels`` (band count/edges for ``mark="contourf"``),
+``casts``/``cast_kwargs`` and ``bathymetry``/``seafloor_kwargs`` (a section built
+from casts: a labelled line per cast, and the test model's seafloor underneath),
 and ``section_x`` (what runs along a section's x axis: ``"auto"`` picks longitude,
 latitude or kilometres of distance from where the path runs, or force ``"distance"``,
 ``"lon"`` or ``"lat"``), and the

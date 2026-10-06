@@ -2471,6 +2471,47 @@ osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], n
   honours a single colour, a scalar width and the named line styles, and warns for
   the rest. Interactively, hovering a line shows its value, such as `temperature 15 °C`.
 
+### Sections built from casts: cast markers and the seafloor (`casts=`, `bathymetry=`)
+
+A comparison section stacked from discrete casts
+(`select={"transect": {"from": "reference"}}`) shows where its data came from. Both
+of these are on by default, in the static and interactive renderers alike:
+
+```python
+along = osk.compare(
+    reference=[f"ctd_station_HV{n}" for n in [1, 3, 5, 7, 9, 10, 12]],
+    test="his", variables=["salinity"],
+    select={"transect": {"from": "reference"}, "depth": list(range(0, 36, 2))},
+    aggregate={"time": "mean"},
+)
+along.plot(mark="contourf", contours=along)
+```
+
+- **Cast markers (`casts=`).**
+  - Each cast gets a thin dashed line from the surface down to its deepest
+    observation. Its name is written along the top of every panel.
+  - The names are the reference names with their shared prefix removed, so
+    `ctd_station_HV1` reads `HV1`.
+  - `casts=False` turns the markers off.
+  - A list sets every label, in cast order. A dict such as
+    `{"ctd_station_HV1": "mouth"}` renames only some of them.
+  - `cast_kwargs=` styles the lines (`color`, `linestyle`, `linewidth`).
+- **The seafloor (`bathymetry=`).**
+  - The test model's bathymetry (`h`) is sampled finely along the path between the
+    casts, not only at them. It is drawn as a filled seafloor with a black outline.
+  - The y axis reaches down to the seafloor.
+  - The fill sits under the data, so an observation deeper than the model's smoothed
+    bottom stays visible. The outline is drawn over the data.
+  - With the default, a test source that has no bathymetry variable is skipped
+    quietly.
+  - `bathymetry=True` asks for it on any transect comparison, and raises if the
+    source has none.
+  - Pass a 1-D `Field` along the same path, such as a survey DEM, to draw that
+    instead. `bathymetry=False` turns it off.
+  - `seafloor_kwargs=` styles it: `color` and `alpha` style the fill, and `edgecolor`
+    and `linewidth` style the outline.
+  - `Comparison.seafloor()` returns the sampled line itself.
+
 ## The `cross` family (two sections through one point)
 
 `select={"transect": {"cross": ...}}` is sugar for the common case of *two*

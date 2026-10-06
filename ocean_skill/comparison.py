@@ -11,6 +11,9 @@ test × variable × depth cross-product and collects the results into a
 
 from __future__ import annotations
 
+import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -3553,6 +3556,233 @@ def prepare_source(
 DEFAULT_MIN_PAIRS = 5
 
 
+class BathymetryNotFound(LookupError):
+    """The test source carries no bathymetry variable to draw a seafloor from.
+
+    A distinct type so :func:`_section_extras` can skip the seafloor quietly when it
+    was only a default (``bathymetry=None``) while still letting an explicit
+    ``bathymetry=True`` -- or a direct :meth:`Comparison.seafloor` call -- say why.
+    """
+
+
+#: What names a seafloor depth: the same pattern
+#: :data:`ocean_skill.colormaps._ANCHORED_CMAPS` colours as bathymetry (ROMS' own
+#: ``h``, a plain ``bathymetry``, CF ``sea_floor_depth[_below_*]``), so the two agree
+#: on what counts.
+_BATHYMETRY_NAME = re.compile(r"^(h|bathymetry|sea_floor_depth(_below_\w+)?)$")
+
+
+def _cast_labels(names: Sequence[str]) -> list[str]:
+    """Return short per-cast labels: ``names`` less their shared leading text.
+
+    Stations of one campaign share a long prefix (``ctd_station_HV1``,
+    ``ctd_station_HV3``) that would swamp a label drawn on a narrow section. The
+    longest common prefix is stripped, backed off to just after its last separator
+    (``_``, ``-``, space, ``.``) so a name is never cut mid-token -- ``HV1`` and
+    ``HV10`` stay ``HV1`` and ``HV10``, not ``1`` and ``10`` from a prefix that ran
+    into the first digit. If stripping would leave any label empty (one name is a
+    prefix of another, or the names are all identical), the full names are kept.
+    """
+    names = [str(n) for n in names]
+    if len(names) < 2:
+        return names
+    prefix = os.path.commonprefix(names)
+    cut = max((prefix.rfind(sep) for sep in "_- ."), default=-1) + 1
+    labels = [n[cut:] for n in names]
+    return names if not all(labels) else labels
+
+
+def _bathymetry_variable(source: str) -> str:
+    """Name the seafloor-depth variable of ``source``'s dataset.
+
+    Reads the source through :func:`ocean_skill.sources.read` -- memoized and lazy,
+    so this costs a variable listing, not a data read. A variable named like
+    bathymetry (:data:`_BATHYMETRY_NAME`) wins over one that merely declares a
+    ``sea_floor_depth*`` standard name.
+
+    Raises
+    ------
+    BathymetryNotFound
+        When the source has no such variable (or is not gridded at all).
+    """
+    import xarray as xr
+
+    import ocean_skill as osk
+
+    obj = osk.read(source)
+    if isinstance(obj, xr.Dataset):
+        names = list(obj.data_vars)
+        for name in names:
+            if _BATHYMETRY_NAME.fullmatch(str(name).lower()):
+                return str(name)
+        for name in names:
+            if str(obj[name].attrs.get("standard_name", "")).startswith(
+                "sea_floor_depth"
+            ):
+                return str(name)
+    raise BathymetryNotFound(
+        f"{source!r} has no bathymetry variable (looked for h, bathymetry or "
+        "sea_floor_depth*) to draw a seafloor from -- pass bathymetry=<Field> "
+        "with the seafloor along the same path, or bathymetry=False to leave it "
+        "off."
+    )
+
+
+def _normalize_seafloor(da: Any, *, what: str = "the seafloor") -> Any:
+    """Return ``da`` as :func:`~ocean_skill.plot.section.seafloor_line` reads.
+
+    One dimension, :data:`~ocean_skill.align.ALONG_DIM`; values the bottom depth in
+    metres positive-down; an ``along`` coordinate in km starting at 0; and
+    ``path_lon``/``path_lat`` riding on it (falling back to ``lon``/``lat``, which
+    a :func:`ocean_skill.transect.sample_along` result carries too). A length-one
+    leftover dimension (a singleton time on a "static" ``h``) is squeezed. The sign
+    is flipped for an elevation-style variable -- ``positive: "up"``, or every
+    finite value at or below zero -- so GEBCO-like and ROMS-like bathymetry both
+    land positive-down. Only these coordinates are kept: anything else on a
+    sampled source (a snapped ``lon``/``lat``) is not part of the contract.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import ALONG_DIM
+
+    if not isinstance(da, xr.DataArray):
+        raise TypeError(
+            f"{what} must be an xarray.DataArray or a Field, got {type(da).__name__}."
+        )
+    squeeze = [d for d in da.dims if d != ALONG_DIM and da.sizes[d] == 1]
+    da = da.squeeze(squeeze, drop=True)
+    if da.dims != (ALONG_DIM,):
+        raise ValueError(
+            f"{what} must be one-dimensional along {ALONG_DIM!r} (the section's own "
+            f"path), got dims {da.dims}."
+        )
+    if ALONG_DIM not in da.coords:
+        raise ValueError(
+            f"{what} needs an {ALONG_DIM!r} coordinate (kilometres along the path, "
+            "first cast = 0) to be placed on the section."
+        )
+    values = np.asarray(da, dtype="float64")
+    finite = values[np.isfinite(values)]
+    if da.attrs.get("positive") == "up" or (finite.size and finite.max() <= 0):
+        values = -values
+    along = np.asarray(da[ALONG_DIM], dtype="float64")
+    if along.size and np.isfinite(along[0]):
+        along = along - along[0]
+    coords: dict[str, Any] = {ALONG_DIM: (ALONG_DIM, along, {"units": "km"})}
+    for out_name, fallback in (("path_lon", "lon"), ("path_lat", "lat")):
+        for src in (out_name, fallback):
+            if src in da.coords and da[src].dims == (ALONG_DIM,):
+                coords[out_name] = (
+                    ALONG_DIM,
+                    np.asarray(da[src], dtype="float64"),
+                    dict(da[src].attrs),
+                )
+                break
+    return xr.DataArray(
+        values,
+        dims=(ALONG_DIM,),
+        coords=coords,
+        name="seafloor_depth",
+        attrs={
+            "units": da.attrs.get("units", "m"),
+            "long_name": "seafloor depth",
+            "positive": "down",
+        },
+    )
+
+
+def _section_extras(comparison: Any, casts: Any, bathymetry: Any) -> dict[str, Any]:
+    """Return the ``cast_labels``/``seafloor`` item keys a section row is plotted with.
+
+    Resolves :meth:`Comparison.plot`'s ``casts=`` and ``bathymetry=`` against one
+    comparison (:meth:`ComparisonSet.plot` calls this per row). Both default to
+    *on* for a section built from casts (``select={"transect": {"from":
+    "reference"}}``) -- a handful of CTD stations is exactly where the casts
+    themselves, and the bottom they were lowered to, say the most -- and to off
+    everywhere else. A key is only present when its feature is on, so a renderer
+    only ever sees what it draws; nothing at all is returned for a non-section
+    family, whose renderers take neither.
+
+    Raises
+    ------
+    ValueError
+        For an explicit request the comparison cannot honour: ``casts=True``, a
+        label list/dict, or ``bathymetry=True``/a ``Field``/a ``DataArray`` on a
+        comparison that is not a (suitable) section, or labels that do not fit the
+        casts.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    casts_asked = casts is not None and casts is not False
+    bathy_asked = bathymetry is not None and bathymetry is not False
+    is_section = comparison.family == "section_row"
+    built_from_casts = is_section and bool(comparison._section_casts)
+    # a slab says so on its along coordinate (comparison._slab_to_section)
+    is_slab = is_section and "axis_coord" in comparison.aligned[ALONG_DIM].attrs
+    if not is_section:
+        if casts_asked or bathy_asked:
+            raise ValueError(
+                "casts=/bathymetry= mark a vertical section, but this comparison "
+                f"draws as {comparison.family!r}."
+            )
+        return {}
+
+    extras: dict[str, Any] = {}
+
+    if casts_asked or (casts is None and built_from_casts):
+        if not built_from_casts:
+            raise ValueError(
+                "casts= marks the casts a section was built from "
+                "(select={'transect': {'from': 'reference'}}); this section was "
+                "cut from a gridded source, so there are no casts to mark."
+            )
+        names = list(comparison._section_casts)
+        labels = _cast_labels(names)
+        if isinstance(casts, dict):
+            unknown = [k for k in casts if k not in names]
+            if unknown:
+                raise ValueError(
+                    f"casts= names {unknown!r}, which are not among this section's "
+                    f"casts {names!r}."
+                )
+            labels = [
+                str(casts.get(n, lab)) for n, lab in zip(names, labels, strict=True)
+            ]
+        elif isinstance(casts, list | tuple):
+            if len(casts) != len(names):
+                raise ValueError(
+                    f"casts= gives {len(casts)} label(s) for {len(names)} cast(s) "
+                    f"({names!r}) -- one label per cast, in order."
+                )
+            labels = [str(lab) for lab in casts]
+        elif casts is not None and casts is not True:
+            raise TypeError(
+                "casts= must be None, a bool, a list of labels, or a "
+                f"{{cast: label}} dict, got {type(casts).__name__}."
+            )
+        extras["cast_labels"] = labels
+
+    if bathy_asked:
+        if is_slab:
+            raise ValueError(
+                "bathymetry= draws the seafloor along a transect path; a slab "
+                "(a box averaged along one axis) has no single path to sample."
+            )
+        if bathymetry is True:
+            extras["seafloor"] = comparison.seafloor()
+        else:
+            from ocean_skill.field import Field
+
+            data = bathymetry.data if isinstance(bathymetry, Field) else bathymetry
+            extras["seafloor"] = _normalize_seafloor(data, what="bathymetry=")
+    elif bathymetry is None and built_from_casts and not is_slab:
+        try:
+            extras["seafloor"] = comparison.seafloor()
+        except BathymetryNotFound:
+            pass  # a default, not a request: a source with no h just has no bottom
+    return extras
+
+
 class Comparison:
     """One reference↔test comparison for a single variable at a single depth.
 
@@ -6302,7 +6532,13 @@ class Comparison:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        contours: Any = None,
+        casts: Any = None,
+        bathymetry: Any = None,
+        **kwargs: Any,
     ):
         """Render as a ``test | reference | difference`` row, or as metric maps.
 
@@ -6320,6 +6556,25 @@ class Comparison:
             difference panel gets none). ``contour_levels=`` picks the lines
             (``True`` for about six round values, an int for about that many, or a
             list) and ``contour_kwargs=`` styles them.
+        casts
+            Sections only. Marks each cast of a section built from casts
+            (``select={"transect": {"from": "reference"}}``) with a labelled line.
+            ``None`` (default) marks them for such a section and not otherwise;
+            ``False`` turns it off; ``True`` insists on it (an error for a section
+            cut from a gridded source, or for anything that is not a section); a
+            list gives one label per cast, in order; a ``{cast_name: label}`` dict
+            relabels some and leaves the rest. The default label is the cast's
+            source name less the text every cast shares (``HV1`` for
+            ``ctd_station_HV1``).
+        bathymetry
+            Sections only. Draws the test model's seafloor along the section's
+            path, densely (:meth:`seafloor`), as a filled bottom. ``None``
+            (default) draws it for a section built from casts, quietly skipping it
+            when the test source has no bathymetry variable; ``False`` turns it
+            off; ``True`` draws it for any transect section and says so if the
+            source has no bathymetry; a :class:`~ocean_skill.field.Field` (or
+            ``DataArray``) of seafloor depth along the same path is drawn instead
+            of the model's own.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -6374,8 +6629,97 @@ class Comparison:
 
             (overlay,) = contour_members(contours, 1, kind="comparison")
             item.update(comparison_contour(overlay, plotted=self))
+        item.update(_section_extras(self, casts, bathymetry))
         spec = PlotSpec(family=plot_family, items=[item], options=kwargs)
         return render(spec, renderer=renderer)
+
+    def seafloor(self, spacing_km: float | None = None):
+        """Return the test model's seafloor depth along this section's path.
+
+        Parameters
+        ----------
+        spacing_km
+            ``float | None`` -- how finely to sample the model's bathymetry along
+            the path, in km. ``None`` (default) uses the model's own cell size.
+
+        Returns
+        -------
+        xarray.DataArray
+            One-dimensional along :data:`~ocean_skill.align.ALONG_DIM`: bottom depth
+            in metres, positive-down, with the along coordinate in km from the first
+            waypoint (the first cast, for a section built from casts) and
+            ``path_lon``/``path_lat`` coordinates for where each sample sits --
+            what :func:`ocean_skill.plot.section.seafloor_line` draws and what
+            ``bathymetry=`` on :meth:`plot` takes.
+
+        A section's own columns sit only where it was sampled -- at a handful of
+        CTD stations, say -- so the seafloor drawn between them has to come from
+        the model's bathymetry sampled densely along the same path, not from those
+        few columns. The path is this section's own waypoints (the casts, or the
+        sampled transect), joined by straight lon/lat segments exactly as
+        ``select={"transect": {"waypoints": ...}}`` joins them, so the km
+        coordinate agrees with the section's own to within a sampling step.
+
+        The bathymetry variable is whatever the test source calls its seafloor
+        depth (``h``, ``bathymetry`` or ``sea_floor_depth*``), read through
+        :func:`ocean_skill.field.field` so the usual cache applies.
+
+        Raises
+        ------
+        ValueError
+            If this comparison is not a transect section, or is a slab (a box
+            averaged along one axis, which has no single path to sample).
+        BathymetryNotFound
+            If the test source has no bathymetry variable -- a ``LookupError``
+            whose message suggests passing ``bathymetry=<Field>`` to :meth:`plot`.
+        """
+        from ocean_skill.align import ALONG_DIM
+        from ocean_skill.field import field
+
+        if not self.is_section:
+            raise ValueError(
+                "seafloor() draws the bottom along a section's path, but this "
+                f"comparison is {self.family!r}, not a section."
+            )
+        if "axis_coord" in self.aligned[ALONG_DIM].attrs:
+            raise ValueError(
+                "seafloor() needs a transect path to sample along; a slab (a box "
+                "averaged along one axis) has none."
+            )
+        test = self.aligned["test"]
+        lons = np.asarray(
+            test["path_lon"] if "path_lon" in test.coords else test["lon"],
+            dtype="float64",
+        )
+        lats = np.asarray(
+            test["path_lat"] if "path_lat" in test.coords else test["lat"],
+            dtype="float64",
+        )
+        keep = np.isfinite(lons) & np.isfinite(lats)
+        waypoints = [
+            [float(lo), float(la)]
+            for lo, la in zip(lons[keep], lats[keep], strict=True)
+        ]
+        route = self._transect_route()
+        method = route.get("method", "nearest") if route else "nearest"
+        name = _bathymetry_variable(self.test_name)
+        bathy = field(
+            self.test_name,
+            name,
+            select={
+                "transect": {
+                    "waypoints": waypoints,
+                    "spacing_km": spacing_km,
+                    "method": method,
+                }
+            },
+            cache=self.cache,
+        ).data
+        # bathymetry is time-invariant; a catalog that nonetheless carries a time
+        # axis on it just repeats the same field.
+        for dim in [d for d in bathy.dims if d != ALONG_DIM and "time" in d]:
+            bathy = bathy.isel({dim: 0}, drop=True)
+        return _normalize_seafloor(bathy, what=f"{self.test_name!r} bathymetry")
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this comparison's data sits: the selection over the model domain.
@@ -7082,7 +7426,13 @@ class ComparisonSet:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        contours: Any = None,
+        casts: Any = None,
+        bathymetry: Any = None,
+        **kwargs: Any,
     ):
         """Render all comparisons as stacked rows in one figure.
 
@@ -7095,6 +7445,12 @@ class ComparisonSet:
             Sections only. A :class:`ComparisonSet` (or a list of comparisons) of
             the same length, paired with this set's rows by position, drawn as
             contour lines over each row's test and reference panels -- see
+            :meth:`Comparison.plot`.
+        casts
+            Sections only. Cast marks for every row -- see :meth:`Comparison.plot`
+            (a list or dict of labels applies to each row's casts).
+        bathymetry
+            Sections only. The seafloor under every row -- see
             :meth:`Comparison.plot`.
         **kwargs
             Plot options forwarded to the renderer: option families such as
@@ -7131,6 +7487,11 @@ class ComparisonSet:
                     items, overlays, self.comparisons, strict=True
                 )
             ]
+        # {} for anything but a section row, so other families never see the keys
+        items = [
+            {**item, **_section_extras(c, casts, bathymetry)}
+            for item, c in zip(items, self.comparisons, strict=True)
+        ]
         first = self.comparisons[0]
         families = {c.family for c in self.comparisons}
         if len(families) > 1:

@@ -19,6 +19,12 @@ would eventually disagree about where a line or a band edge sits:
   contour primitive of its own (bokeh);
 * :func:`fill_edges` places the filled bands' edges so every colour-bar tick sits on
   one.
+
+A section stacked from discrete casts (``select={"transect": {"from": "reference"}}``)
+marks where each cast was and draws the seafloor under it, and those placements live
+here too: :func:`cast_marks` (a line per cast, down to its deepest observation),
+:func:`seafloor_line` (the bathymetry along the path, on the panel's own x axis) and
+:func:`depth_limit` (how deep the y axis reaches once the seafloor is drawn).
 """
 
 from __future__ import annotations
@@ -34,25 +40,31 @@ import xarray as xr
 from ocean_skill.plot._colorbar import _clean, tick_step
 
 __all__ = [
+    "CAST_COLOR",
     "CONTOUR_COLOR",
     "CONTOUR_WIDTH",
     "DEFAULT_CONTOUR_LEVELS",
     "DEFAULT_FILL_BANDS",
+    "SEAFLOOR_COLOR",
     "SECTION_MARKS",
     "SECTION_X",
     "X_DOMINANCE",
+    "CastMark",
     "ContourLevel",
     "SectionGeometry",
+    "cast_marks",
     "check_section_options",
     "check_section_x",
     "contour_label",
     "contour_levels",
     "contour_paths",
+    "depth_limit",
     "difference_fill_levels",
     "fill_edges",
     "prepare_overlay",
     "prepare_section",
     "prepare_section_row",
+    "seafloor_line",
 ]
 
 
@@ -1130,3 +1142,124 @@ def difference_fill_levels(fill_levels):
     if fill_levels is None or isinstance(fill_levels, bool | int | np.integer):
         return fill_levels
     return None
+
+
+# --- casts and seafloor: where a cast-built section's data came from ------------------
+
+#: The default colour of a cast's marker line -- dark enough to read over any fill,
+#: and not black, so it is not mistaken for a contour line.
+CAST_COLOR = "0.2"
+
+#: The default fill of the seafloor under a section -- darker than the ``0.85`` grey a
+#: missing cell draws as, so "no data here" and "rock here" read differently.
+SEAFLOOR_COLOR = "0.45"
+
+
+@dataclass(frozen=True)
+class CastMark:
+    """One cast's place on a section panel: its ``x``, how deep it reached, its name.
+
+    ``bottom`` is the deepest depth (m, positive-down) at which the cast has a finite
+    value, or NaN for a cast with none -- a renderer still labels it but draws no line.
+    """
+
+    x: float
+    bottom: float
+    label: str
+
+
+def cast_marks(
+    reference: xr.DataArray, geometry: SectionGeometry, labels: Sequence[str]
+) -> list[CastMark]:
+    """Return one :class:`CastMark` per column of a cast-built section.
+
+    ``reference`` is the reference lane as :func:`prepare_section` returned it (with
+    its 2-D ``geometry.x_name``/``geometry.y_name`` coordinates). A section stacked
+    from casts has exactly one along-path column per cast, in the casts' own order
+    (see :meth:`ocean_skill.comparison.Comparison._prepare_section_from_casts`), so
+    ``labels[i]`` names column ``i`` -- the two must have the same length.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    labels = list(labels)
+    n = reference.sizes[ALONG_DIM]
+    if len(labels) != n:
+        raise ValueError(
+            f"{len(labels)} cast label(s) for a section with {n} cast column(s) -- "
+            "a cast-built section has one column per cast, so give one label each."
+        )
+    vertical = next(d for d in reference.dims if d != ALONG_DIM)
+    order = (ALONG_DIM, vertical)
+    values = np.asarray(reference.transpose(*order), dtype="float64")
+    xs = np.asarray(reference[geometry.x_name].transpose(*order), dtype="float64")
+    depths = np.asarray(reference[geometry.y_name].transpose(*order), dtype="float64")
+    marks = []
+    for i, label in enumerate(labels):
+        finite = np.isfinite(values[i]) & np.isfinite(depths[i])
+        bottom = float(np.max(depths[i][finite])) if finite.any() else float("nan")
+        x_row = xs[i][np.isfinite(xs[i])]
+        marks.append(
+            CastMark(
+                x=float(x_row[0]) if x_row.size else float("nan"),
+                bottom=bottom,
+                label=str(label),
+            )
+        )
+    return marks
+
+
+def seafloor_line(
+    seafloor: xr.DataArray, geometry: SectionGeometry
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(x, depth)``: the seafloor drawn on a section panel's own x axis.
+
+    ``seafloor`` is one-dimensional along :data:`~ocean_skill.align.ALONG_DIM`, its
+    values the bottom depth in metres positive-down, with the along coordinate in
+    kilometres from the path's start and ``path_lon``/``path_lat`` coordinates for
+    where each sample sits (see :meth:`ocean_skill.comparison.Comparison.seafloor`).
+    ``geometry.x_axis`` picks which of those becomes ``x``: kilometres as given, or
+    the longitude (unwrapped across the antimeridian, as :func:`prepare_section`
+    unwraps the section's own) or latitude along the path. Points with no finite
+    position or depth are dropped.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    if seafloor.dims != (ALONG_DIM,):
+        raise ValueError(
+            f"a seafloor line must be one-dimensional along {ALONG_DIM!r} -- got "
+            f"dims {seafloor.dims}."
+        )
+    depth = np.asarray(seafloor, dtype="float64")
+    if geometry.x_axis == "distance":
+        x = np.asarray(seafloor[ALONG_DIM], dtype="float64")
+    else:
+        name = "path_lon" if geometry.x_axis == "lon" else "path_lat"
+        if name not in seafloor.coords:
+            raise ValueError(
+                f"the section's x axis is {geometry.x_axis!r}, but the seafloor has "
+                f"no {name!r} coordinate to place it by."
+            )
+        x = np.asarray(seafloor[name], dtype="float64")
+        if geometry.x_axis == "lon" and np.all(np.isfinite(x)):
+            x = np.unwrap(x, period=360.0)
+    keep = np.isfinite(x) & np.isfinite(depth)
+    return x[keep], depth[keep]
+
+
+def depth_limit(values: Sequence[xr.DataArray], seafloor_depth: np.ndarray) -> float:
+    """Return how deep (m, positive-down) a section's y axis reaches over a seafloor.
+
+    The deeper of the seafloor's deepest point and the deepest depth at which any
+    panel in ``values`` (prepared fields, as :func:`prepare_section` returned them)
+    has a finite value -- so the whole bottom shows, and an observation deeper than
+    the model's smoothed bathymetry is never cut off.
+    """
+    deepest = [float(np.nanmax(seafloor_depth))] if np.size(seafloor_depth) else []
+    for da in values:
+        depths = np.asarray(da["depth"], dtype="float64")
+        finite = np.isfinite(np.asarray(da, dtype="float64")) & np.isfinite(depths)
+        if finite.any():
+            deepest.append(float(np.max(depths[finite])))
+    if not deepest:
+        raise ValueError("depth_limit needs a seafloor or at least one finite value.")
+    return max(deepest)
