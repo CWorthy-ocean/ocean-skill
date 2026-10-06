@@ -27,6 +27,9 @@
 #       NCEI the first time they are read, so that run needs network access.
 #   (c) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH. Without it the run warns
 #       and leaves the PDF lossless.
+#   (d) The zonal-current pages read the Cravatte et al. (2017) shipboard-ADCP
+#       sections. Build their catalog once into a catalog_search_paths directory with
+#       the README's Cravatte recipe (cravatte_zonal_currents.yaml).
 #
 # The page count grows with the run: one mixed layer depth page and two WOA pages per
 # calendar month. For a long run, bound them with `month: {run: {last: N}}` in the
@@ -284,3 +287,40 @@ pages:
           ESSW: [34.95, 10.0]
           AAIW: [34.7, 5.5]
           PDW: [34.75, 1.0]
+
+  # -- zonal currents ---------------------------------------------------------------
+  - title: "Zonal currents"
+    section: >-
+      Zonal velocity averaged over two longitude boxes (after Damien et al., Fig. 10),
+      against the 1999-2016 mean shipboard-ADCP sections of Cravatte et al. (2017,
+      doi:10.6096/12). The obs are already a mean over each band (179E-160W and
+      160W-120W) and start at 30-60 m. Black lines are u = 0.
+
+  - title: "Zonal velocity — 180-160W"
+    compare:
+      reference: [cravatte_u_179e_160w]   # test = defaults.test
+      variables: [east_velocity]
+      select:
+        lon: {min: 180, max: 200}
+        lat: {min: -20, max: 20}
+        depth: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200,
+                225, 250, 275, 300, 350, 400, 450, 500]
+      # only the model is averaged over the box; the obs are already a band mean
+      aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}
+    contours: true                        # contour the plotted u itself...
+    plot:
+      contour_levels: [0]                 # ...at u = 0 only
+
+  - title: "Zonal velocity — 160-120W"
+    compare:
+      reference: [cravatte_u_160w_120w]
+      variables: [east_velocity]
+      select:
+        lon: {min: 200, max: 240}
+        lat: {min: -20, max: 20}
+        depth: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200,
+                225, 250, 275, 300, 350, 400, 450, 500]
+      aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}
+    contours: true
+    plot:
+      contour_levels: [0]

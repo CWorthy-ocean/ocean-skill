@@ -451,6 +451,8 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                     )
                     for s in p.steps
                 )
+                if p.contours:
+                    chain += " + contours"
                 print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){chain}")
             return SuiteResult(pages=expanded)
 
