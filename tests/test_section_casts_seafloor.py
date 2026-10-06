@@ -290,6 +290,20 @@ def test_seafloor_is_positive_down_along_the_cast_path(roms_casts):
     assert sea.attrs["units"] == "m"
 
 
+def test_seafloor_finds_h_kept_as_a_coordinate(patched_sources, captured):
+    # the ROMS reader attaches ``h`` (and mask_rho) as coordinates, not data
+    # variables; the default bathymetry= must still find it, not skip it silently
+    run = _fine_roms_run()
+    run = run.set_coords([v for v in ("h", "mask_rho") if v in run.data_vars])
+    assert "h" not in run.data_vars
+    c, _ = _cast_comparison(patched_sources, test=run)
+    sea = c.seafloor()
+    assert sea.sizes[ALONG_DIM] > 30
+    assert float(sea.min()) >= 30.0 - 1e-9
+    c.plot()
+    assert "seafloor" in _item(captured)
+
+
 def test_seafloor_along_starts_at_zero_and_carries_path_coords(roms_casts):
     c, _ = roms_casts
     sea = c.seafloor()

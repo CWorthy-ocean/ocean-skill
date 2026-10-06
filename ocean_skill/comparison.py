@@ -3620,7 +3620,9 @@ def _bathymetry_variable(source: str) -> str:
     """Name the seafloor-depth variable of ``source``'s dataset.
 
     Reads the source through :func:`ocean_skill.sources.read` -- memoized and lazy,
-    so this costs a variable listing, not a data read. A variable named like
+    so this costs a variable listing, not a data read. Two-dimensional coordinates
+    count as well as data variables, since the ROMS reader keeps ``h`` among the
+    coordinates. A variable named like
     bathymetry (:data:`_BATHYMETRY_NAME`) wins over one that merely declares a
     ``sea_floor_depth*`` standard name.
 
@@ -3635,7 +3637,11 @@ def _bathymetry_variable(source: str) -> str:
 
     obj = osk.read(source)
     if isinstance(obj, xr.Dataset):
-        names = list(obj.data_vars)
+        # the ROMS reader attaches ``h`` as a coordinate (grid fields are not
+        # comparable data), so look there too -- data variables first
+        names = list(obj.data_vars) + [
+            c for c in obj.coords if c not in obj.data_vars and obj[c].ndim >= 2
+        ]
         for name in names:
             if _BATHYMETRY_NAME.fullmatch(str(name).lower()):
                 return str(name)
