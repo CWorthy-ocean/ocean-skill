@@ -222,9 +222,10 @@ pages:
     section: >-
       T-S diagrams in six ~100 km boxes (after Damien et al., Fig. 7). Dots are every
       model cell, level and restart snapshot in the box; WOA23 annual is taken at the
-      cell nearest the box centre; GLORYS12 monthly climatology is averaged over the
-      box and the year; grey lines are potential density (sigma-0). WOA temperature is
-      in situ, the others potential.
+      cell nearest the box centre; GLORYS12 reanalysis is averaged over the box and the
+      run's own dates (the paper's blue line was instead the model's 1 January 1999
+      initial condition); grey lines are potential density (sigma-0). WOA temperature
+      is in situ, the others potential.
 
   - title: "T-S diagrams — six Pacific regions"
     TS:                                  # XY: is the same plus x: and y:
@@ -232,15 +233,19 @@ pages:
         ROMS: {}                         # source = defaults.test, variables = [y, x], whole-run window
         WOA23: {source: [woa23_temperature_annual, woa23_salinity_annual]}
         GLORYS12:
-          source: glorys_climatology_timeseries
+          source: glorys_my_daily_timeseries
+          window: run                    # the run's own dates, so GLORYS covers what the dots do
           aggregate: {time: mean, lon: mean, lat: mean}
-      regions:                           # panel order; longitudes 0-360
-        North West Pacific: {lon: {min: 155.24, max: 156.33}, lat: {min: 20.51, max: 21.60}}
-        Subpolar Gyre: {lon: {min: 184.59, max: 185.73}, lat: {min: 47.76, max: 48.59}}
-        California Current System: {lon: {min: 233.59, max: 234.83}, lat: {min: 39.37, max: 40.38}}
-        South West Pacific: {lon: {min: 184.58, max: 185.38}, lat: {min: -16.75, max: -15.91}}
-        South Pacific Gyre: {lon: {min: 238.98, max: 240.00}, lat: {min: -22.37, max: -21.37}}
-        Peru Current: {lon: {min: 273.34, max: 274.47}, lat: {min: -11.73, max: -10.57}}
+      # Panel order; longitudes 0-360. Each box is the lon/lat extent of the paper's 9x9
+      # index box on *its* grid (pacmed12_grd.nc), not the same indices on this one --
+      # the grids differ, and the same indices land 2-3 degrees further poleward here.
+      regions:
+        North West Pacific: {lon: {min: 156.16, max: 157.23}, lat: {min: 19.32, max: 20.32}}
+        Subpolar Gyre: {lon: {min: 185.86, max: 186.96}, lat: {min: 44.56, max: 45.34}}
+        California Current System: {lon: {min: 233.87, max: 235.07}, lat: {min: 36.39, max: 37.35}}
+        South West Pacific: {lon: {min: 185.18, max: 185.99}, lat: {min: -15.45, max: -14.67}}
+        South Pacific Gyre: {lon: {min: 240.99, max: 242.00}, lat: {min: -21.26, max: -20.31}}
+        Peru Current: {lon: {min: 275.31, max: 276.41}, lat: {min: -11.48, max: -10.40}}
       at_center: [WOA23]                 # WOA's 1-degree grid has no cell centre in two of the boxes
     plot:
       ncols: 3

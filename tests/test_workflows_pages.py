@@ -1246,10 +1246,11 @@ def test_build_refuses_a_section_page():
 # A property-property plot: ``members:`` maps a label to one ``field()`` call, and
 # ``expand`` resolves each into a kwargs dict. Only the member that reads
 # ``defaults.test`` is pinned to the run (and cached by the field-page rule); every
-# other member is passed through as written. ``regions:`` is validated by
-# ``ocean_skill.xy.normalize_regions`` (worker C's module) -- tests that only need
-# *some* regions use ``lenient_regions``, which swaps that for a recorder, so they do
-# not depend on its validation rules; the two that exercise those rules for real say so.
+# other member is passed through as written, unless it says ``window: run``.
+# ``regions:`` is validated by ``ocean_skill.xy.normalize_regions`` (worker C's
+# module) -- tests that only need *some* regions use ``lenient_regions``, which swaps
+# that for a recorder, so they do not depend on its validation rules; the two that
+# exercise those rules for real say so.
 
 _NWP = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
 _SG = {"lon": {"min": 184.59, "max": 185.73}, "lat": {"min": 47.76, "max": 48.59}}
@@ -1370,6 +1371,58 @@ def test_a_reference_member_keeps_its_own_time_selection_verbatim():
     (page,) = P.expand(_xy_suite(page={"members": {"ROMS": {}, "WOA23": ref}}))
     # "latest" means the run's last step, which is the test member's business only
     assert page.kwargs["members"]["WOA23"]["select"] == {"time": "latest"}
+
+
+def test_window_run_gives_a_reference_member_the_runs_literal_span():
+    members = {"ROMS": {}, "GLORYS": {"source": "glorys", "window": "run"}}
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    glorys = page.kwargs["members"]["GLORYS"]
+    assert glorys["select"] == {
+        "time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()}
+    }
+    assert "window" not in glorys  # a suite key, never a field() kwarg
+    assert glorys["cache"] is True  # the literal window is part of the cache key
+
+
+def test_window_run_keeps_the_members_other_select_keys():
+    glorys = {"source": "glorys", "window": "run", "select": {"depth": 10}}
+    (page,) = P.expand(_xy_suite(page={"members": {"G": glorys}}))
+    assert page.kwargs["members"]["G"]["select"] == {
+        "depth": 10,
+        "time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()},
+    }
+
+
+def test_window_run_on_the_test_member_is_a_no_op():
+    (plain,) = P.expand(_xy_suite(page={"members": {"ROMS": {}}}))
+    (run,) = P.expand(_xy_suite(page={"members": {"ROMS": {"window": "run"}}}))
+    assert run.kwargs["members"]["ROMS"] == plain.kwargs["members"]["ROMS"]
+
+
+def test_window_run_with_a_time_select_is_refused():
+    glorys = {"source": "glorys", "window": "run", "select": {"time": "latest"}}
+    with pytest.raises(ValueError, match=r"member 'G'.*window: run.*one or the other"):
+        P.expand(_xy_suite(page={"members": {"ROMS": {}, "G": glorys}}))
+
+
+def test_window_run_without_defaults_test_is_refused():
+    suite = _suite(
+        [
+            {
+                "title": "xy",
+                "TS": {"members": {"G": {"source": "glorys", "window": "run"}}},
+            }
+        ]
+    )
+    with pytest.raises(ValueError, match=r"member 'G'.*needs defaults.test"):
+        P.expand(suite)
+
+
+@pytest.mark.parametrize("bad", ["whole", "latest", True, {"min": "2010"}])
+def test_window_accepts_only_run(bad):
+    members = {"ROMS": {}, "G": {"source": "glorys", "window": bad}}
+    with pytest.raises(ValueError, match=r"page 'xy': TS: member 'G': window:"):
+        P.expand(_xy_suite(page={"members": members}))
 
 
 def test_only_the_test_source_member_is_pinned_even_with_another_name():

@@ -223,6 +223,13 @@ the whole page is one figure, one PNG, whatever the number of regions.
   literal `{"min", "max"}` window, and `time: latest` becomes the last step. Every other
   member is passed through exactly as written, with no run window, because a climatology
   or a different run has a time axis of its own -- its time is yours to select.
+- **`window: run` gives a non-test member the run's window.** A reanalysis compared
+  against the run has to cover the run's dates, which change from run to run, so they
+  cannot be written into the YAML: `GLORYS12: {source: glorys_my_daily_timeseries,
+  window: run}` gets the same literal `{"min", "max"}` `select.time` the test member
+  does. It needs `defaults.test`, is refused if the member also names a `time:` in its
+  `select:` (give one or the other), and is a no-op on the test member itself. The only
+  value is `run`.
 - **`regions:`** maps a region name to a horizontal box, `{lon: {min, max}, lat: {min,
   max}}` (or a single point). The name is the panel title. Each region *replaces* its
   members' horizontal `select:`, so write `ROMS: {}`, not the box, and the same members

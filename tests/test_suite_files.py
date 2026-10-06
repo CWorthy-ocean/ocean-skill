@@ -293,7 +293,7 @@ def test_pacmed_review_glodap_pages_get_one_depth_each_and_the_run_window(pacmed
         assert page.kwargs["select"]["test"]["time"] == RUN_WINDOW
 
 
-def test_pacmed_review_ts_page_pins_roms_to_the_run_and_leaves_the_references_alone(
+def test_pacmed_review_ts_page_pins_roms_and_glorys_to_the_run(
     pacmed,
 ):
     suite, expanded = pacmed
@@ -308,11 +308,15 @@ def test_pacmed_review_ts_page_pins_roms_to_the_run_and_leaves_the_references_al
     assert roms["select"] == {"time": RUN_WINDOW}
     assert roms["cache"] is True
 
-    # climatologies: no run window, no select at all, and they cache with the suite
+    # WOA23 is a climatology: no run window, no select at all. GLORYS12 reanalysis
+    # takes the run's window (window: run) so it covers the dots' dates. Both cache
+    # with the suite.
     woa, glorys = members["WOA23"], members["GLORYS12"]
     assert woa["source"] == ["woa23_temperature_annual", "woa23_salinity_annual"]
-    assert "select" not in woa and "select" not in glorys
-    assert glorys["source"] == "glorys_climatology_timeseries"
+    assert "select" not in woa
+    assert glorys["source"] == "glorys_my_daily_timeseries"
+    assert glorys["select"] == {"time": RUN_WINDOW}
+    assert "window" not in glorys
     assert glorys["aggregate"] == {"time": "mean", "lon": "mean", "lat": "mean"}
     assert woa["cache"] is True and glorys["cache"] is True
     assert page.cache is True
@@ -331,10 +335,10 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
         assert 0 <= box["lon"]["min"] < box["lon"]["max"] <= 360
         assert -90 <= box["lat"]["min"] < box["lat"]["max"] <= 90
     assert regions["North West Pacific"] == {
-        "lon": {"min": 155.24, "max": 156.33},
-        "lat": {"min": 20.51, "max": 21.60},
+        "lon": {"min": 156.16, "max": 157.23},
+        "lat": {"min": 19.32, "max": 20.32},
     }
-    assert regions["South West Pacific"]["lat"] == {"min": -16.75, "max": -15.91}
+    assert regions["South West Pacific"]["lat"] == {"min": -15.45, "max": -14.67}
 
     # WOA23's 1-degree grid has no cell centre in two of the boxes
     assert page.kwargs["at_center"] == ["WOA23"]

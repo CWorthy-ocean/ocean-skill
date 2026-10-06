@@ -673,7 +673,9 @@ def _pin_test_lane(
 # ``members`` maps a label (the legend entry) to one ``field()`` call's kwargs, with
 # ``source`` defaulting to ``defaults.test`` and ``variables`` to ``[y, x]``. Only the
 # page's own shape is checked here; whether the members really hold x and y, and
-# whether each region box lands on data, is XY's to say once it reads anything.
+# whether each region box lands on data, is XY's to say once it reads anything. A
+# member may also carry ``window: run`` (a suite key, popped before ``field()`` sees
+# the spec) to take the test run's span as its own ``select.time``.
 
 #: The salinity-temperature preset ``TS:`` stands for.
 _TS_X, _TS_Y = "salinity", "temperature"
@@ -948,7 +950,10 @@ def _expand_xy_page(
     reads ``defaults.test`` is pinned to the run exactly like a ``field:`` page
     (:func:`_pin_test_lane`) and caches by the same rule; every other member is left
     as written, with no run window -- its time axis is not the run's -- and caches with
-    the suite. ``regions`` and ``at_center`` are checked here (so a typo fails at
+    the suite, unless it says ``window: run``: then it gets the test run's whole span
+    as a literal ``select.time`` (a reanalysis that must cover the run's dates, which
+    change per run; refused if it names a ``time`` of its own, and a no-op on the test
+    member). ``regions`` and ``at_center`` are checked here (so a typo fails at
     ``--list``) but stored as written: XY expands the boxes itself.
     """
     kind = page.kind
@@ -963,6 +968,12 @@ def _expand_xy_page(
     members: dict[str, dict[str, Any]] = {}
     for label, spec in args.members.items():
         m = dict(spec or {})
+        window = m.pop("window", None)
+        if window is not None and window != "run":
+            raise ValueError(
+                f"page {title!r}: {kind}: member {label!r}: window: {window!r} is "
+                "not supported -- the only value is 'run' (the test run's span)"
+            )
         for key in _XY_RESERVED_MEMBER_KEYS:
             if key in m:
                 why = (
@@ -991,6 +1002,21 @@ def _expand_xy_page(
             _, _, cacheable = _pin_test_lane(m, get_index(source))
             m["cache"] = suite_cache and cacheable
         else:
+            if window == "run":
+                if test_source is None:
+                    raise ValueError(
+                        f"page {title!r}: {kind}: member {label!r}: window: run "
+                        "needs defaults.test (the run whose span it takes)"
+                    )
+                if "time" in (m.get("select") or {}):
+                    raise ValueError(
+                        f"page {title!r}: {kind}: member {label!r}: window: run "
+                        "and select.time both set the time window -- give one or "
+                        "the other"
+                    )
+                # A literal window, so the cache key stays right when the run grows.
+                index = get_index(test_source)
+                _inject_field_window(m, index[0].isoformat(), index[-1].isoformat())
             m["cache"] = suite_cache
         members[label] = m
 
