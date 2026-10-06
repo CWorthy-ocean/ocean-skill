@@ -2730,3 +2730,140 @@ def test_add_source_featuretype_override_is_canonicalized_and_declared(tmp_path)
     md = cat["hvalfjordur"].metadata
     assert md["featureType"] == "timeSeriesProfile"
     assert md["featureType_source"] == "declared"
+
+
+# ----------------------------- a caller's ``units`` map stamps a gridded source's attrs
+
+EAST = "eastward_sea_water_velocity"
+CRAVATTE_LON = 189.5
+
+
+def _cravatte_like(path, *, unit_attr="unit"):
+    """Write a tiny file shaped like a Cravatte et al. (2017) mean ADCP section.
+
+    The file is already a longitude-band mean, so it is a bare (DEPTH, LATI) grid with
+    no lon and no time -- and its velocity variables spell their units ``unit: "cm/s"``,
+    not ``units``, which nothing in the read path looks at. ``value = depth + lat``
+    (cm/s) makes every cell tell which one it is. ``U_SADCPD`` is the variable the
+    catalog entry gives a standard name; ``U_SADCP`` is left unnamed.
+    """
+    depth = np.array([50.0, 100.0, 200.0])
+    lat = np.arange(-4.0, 5.0, 2.0)
+    values = depth[:, None] + lat[None, :]
+    attrs = {"long_name": "Zonal velocity from all SADCP data", unit_attr: "cm/s"}
+    xr.Dataset(
+        {
+            "U_SADCP": (("DEPTH", "LATI"), values, attrs),
+            "U_SADCPD": (("DEPTH", "LATI"), values + 0.5, attrs),
+        },
+        coords={
+            "DEPTH": (
+                "DEPTH",
+                depth,
+                {
+                    "units": "meters",
+                    "axis": "Z",
+                    "positive": "down",
+                    "standard_name": "depth",
+                },
+            ),
+            "LATI": (
+                "LATI",
+                lat,
+                {"units": "degrees_north", "axis": "Y", "standard_name": "latitude"},
+            ),
+        },
+    ).to_netcdf(path, format="NETCDF3_CLASSIC")
+    return str(path)
+
+
+def _cravatte_reader(path):
+    """The README recipe's reader chain: give the lon-mean file its one longitude."""
+    from intake.readers import datatypes, readers
+
+    return readers.XArrayDatasetReader(
+        datatypes.NetCDF3(url=path), engine="scipy", chunks={}
+    ).expand_dims(lon=[CRAVATTE_LON])
+
+
+def _build_cravatte(isolated_catalogs, tmp_path, **entry):
+    """Catalogue the Cravatte-like file the README way, as ``cravatte``.
+
+    ``featureType: "grid"`` is declared because the probe cannot tell this one from a
+    track: lon is a length-1 axis, so positions vary along lat alone, which reads as a
+    ``trajectoryProfile`` -- and ``sources.read`` squeezes a non-grid's size-1 lon down
+    to a scalar, taking away the axis the slab's ``{"lon": "mean"}`` needs.
+    """
+    out = build_catalog(
+        {
+            "cravatte": {
+                "reader": _cravatte_reader(_cravatte_like(tmp_path / "cravatte.cdf")),
+                "standard_names": {"U_SADCPD": EAST},
+                "units": {"U_SADCP": "cm/s", "U_SADCPD": "cm/s"},
+                "featureType": "grid",
+                "climatology": True,
+                "doi": "10.6096/12",
+                **entry,
+            }
+        },
+        isolated_catalogs / "cravatte.yaml",
+        name_map=None,
+    )
+    return out
+
+
+def test_a_units_map_is_saved_with_the_entry_unchanged(isolated_catalogs, tmp_path):
+    """``units`` rides through the build like ``climatology`` and ``doi`` do."""
+    out = _build_cravatte(isolated_catalogs, tmp_path)
+    md = _entry_metadata(out, "cravatte")
+    assert md["units"] == {"U_SADCP": "cm/s", "U_SADCPD": "cm/s"}
+    assert md["climatology"] is True
+    assert md["doi"] == "10.6096/12"
+
+
+def test_a_units_map_gives_a_gridded_variable_its_units_on_read(
+    isolated_catalogs, tmp_path
+):
+    """A ``unit`` attribute is invisible to the read path; the catalog's map fixes it.
+
+    Keyed by the *original* name and applied before the standard_names rename, so
+    ``U_SADCPD`` is both renamed and given its units, and ``U_SADCP`` (which the entry
+    does not rename) is stamped too. The reader chain's one longitude comes through as
+    a coordinate.
+    """
+    from ocean_skill import sources
+
+    _build_cravatte(isolated_catalogs, tmp_path)
+    ds = sources.read("cravatte")
+
+    assert EAST in ds and "U_SADCPD" not in ds
+    assert ds[EAST].attrs["units"] == "cm/s"
+    assert ds["U_SADCP"].attrs["units"] == "cm/s"
+    np.testing.assert_allclose(ds["lon"], [CRAVATTE_LON])
+    assert ds[EAST].attrs["unit"] == "cm/s"  # the file's own attribute is left alone
+
+
+def test_a_units_map_overrides_a_wrong_units_attribute_and_skips_absent_names(
+    isolated_catalogs, tmp_path
+):
+    """The catalog is the authority over the file, and an unknown name is ignored."""
+    from ocean_skill import sources
+
+    path = tmp_path / "cravatte.cdf"
+    ds = xr.open_dataset(_cravatte_like(path, unit_attr="units")).load()
+    ds["U_SADCP"].attrs["units"] = "m/s"  # wrong: the data are cm/s
+    ds.close()
+    ds.to_netcdf(tmp_path / "wrong.cdf", format="NETCDF3_CLASSIC")
+    build_catalog(
+        {
+            "wrong": {
+                "reader": _cravatte_reader(str(tmp_path / "wrong.cdf")),
+                "units": {"U_SADCP": "cm/s", "not_a_variable": "K"},
+            }
+        },
+        isolated_catalogs / "wrong.yaml",
+        name_map=None,
+    )
+    out = sources.read("wrong")
+    assert out["U_SADCP"].attrs["units"] == "cm/s"
+    assert "not_a_variable" not in out

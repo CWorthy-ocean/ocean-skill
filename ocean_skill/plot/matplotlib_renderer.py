@@ -1014,7 +1014,7 @@ def _draw_row(
 
     t, r, d = aligned[test_name], aligned[reference_name], aligned["difference"]
     tl, rl = labels
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
@@ -1148,7 +1148,7 @@ def _draw_section_row(
 
     t, r, d = values["test"], values["reference"], values["difference"]
     tl, rl = labels
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
@@ -3909,8 +3909,8 @@ def field_facet(
     merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
     merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
 
-    cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(field)
+    cmap, _ = cmaps_for(standard_name, statistic=statistic)
 
     def _norm_of(sub):
         lo, hi = _limits(
@@ -4509,8 +4509,8 @@ def section(
     defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
-    cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(field)
+    cmap, _ = cmaps_for(standard_name, statistic=statistic)
     lo, hi = _limits(
         values,
         log=is_log(standard_name, statistic),
@@ -4853,7 +4853,7 @@ def section_grid(
         standard_name = members[0].get("standard_name")
         statistic = statistic_of(members[0])
         fields = [prepared_of[id(m)][0] for m in members]
-        cmap, _ = cmaps_for(standard_name)
+        cmap, _ = cmaps_for(standard_name, statistic=statistic)
         lo, hi = _limits(
             *fields,
             log=is_log(standard_name, statistic),
@@ -5071,8 +5071,8 @@ def cross(
     title_kwargs = _merged(defaults["title_kwargs"], title_kwargs)
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
-    cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(items[0])
+    cmap, _ = cmaps_for(standard_name, statistic=statistic)
     lo, hi = _limits(
         *(values for values, _ in prepared),
         log=is_log(standard_name, statistic),
@@ -5272,8 +5272,8 @@ def time_depth(
     defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
     suptitle_kwargs = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
 
-    cmap, _ = cmaps_for(standard_name)
     statistic = statistic_of(field)
+    cmap, _ = cmaps_for(standard_name, statistic=statistic)
     lo, hi = _limits(
         values,
         log=is_log(standard_name, statistic),
@@ -5601,7 +5601,7 @@ def time_depth_grid(
             group_indices = [drawn_indices[g] for g in group]
             standard_name = cell_items[group_indices[0]].get("standard_name")
             statistic = statistic_of(cell_items[group_indices[0]])
-            cmap, _ = cmaps_for(standard_name)
+            cmap, _ = cmaps_for(standard_name, statistic=statistic)
             lo, hi = _limits(
                 *(prepared[i][0] for i in group_indices),
                 log=is_log(standard_name, statistic),
@@ -5644,7 +5644,7 @@ def time_depth_grid(
         if grid_index in panel_scale:
             cmap, norm = panel_scale[grid_index]
         else:
-            cmap, _ = cmaps_for(item.get("standard_name"))
+            cmap, _ = cmaps_for(item.get("standard_name"), statistic=statistic_of(item))
             lo, hi = _limits(
                 values,
                 log=is_log(item.get("standard_name"), statistic_of(item)),
@@ -5801,7 +5801,7 @@ def _draw_time_depth_row(
 
     t, r, d = values["test"], values["reference"], values["difference"]
     tl, rl = labels
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
         vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
         seq_norm = _with_range(
@@ -6412,8 +6412,8 @@ def field_map_grid(
         for group in limit_groups:
             group_indices = [drawn_indices[g] for g in group]
             standard_name = cell_items[group_indices[0]].get("standard_name")
-            cmap, _ = cmaps_for(standard_name)
             statistic = statistic_of(cell_items[group_indices[0]])
+            cmap, _ = cmaps_for(standard_name, statistic=statistic)
             vmin, vmax = _limits(
                 *(cell_items[i]["field"] for i in group_indices),
                 log=is_log(standard_name, statistic),
@@ -6434,8 +6434,8 @@ def field_map_grid(
         if index in panel_scale:
             cmap, norm = panel_scale[index]
         else:
-            cmap, _ = cmaps_for(standard_name)
             statistic = statistic_of(item)
+            cmap, _ = cmaps_for(standard_name, statistic=statistic)
             vmin, vmax = _limits(
                 field, log=is_log(standard_name, statistic), robust=robust
             )
@@ -8009,7 +8009,7 @@ def facet_movie(
         ),
         *(field.isel({facet_dim: i}) for i in indices),
     )
-    cmap, _ = cmaps_for(standard_name)
+    cmap, _ = cmaps_for(standard_name, statistic=statistic)
 
     fig, ax = plt.subplots(
         figsize=figsize,

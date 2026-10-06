@@ -1630,3 +1630,31 @@ def test_interp_still_lands_exactly_even_when_every_target_is_covered():
     out = subset_to_time_targets(test, targets, method="interp")
     assert out.sizes["time"] == 2
     assert list(pd.to_datetime(out.time.values)) == list(targets)
+
+
+def test_lon_lat_shorthand_reduces_a_longitude_named_grid():
+    """``{"lon": "mean"}`` reduces a ``longitude`` dim (GLORYS's spelling), not skips it.
+
+    A slab spec is written in the ``lon``/``lat`` shorthand; before the fallback a
+    product without a ``lon`` dim or coordinate left it standing, so the slab kept
+    every longitude and the comparison refused the leftover axis.
+    """
+    from ocean_skill.operators import resolve_dim
+
+    lon = xr.DataArray(
+        np.arange(180.0, 184.0), dims="longitude",
+        attrs={"units": "degrees_east", "standard_name": "longitude"},
+    )
+    lat = xr.DataArray(
+        np.arange(-1.0, 2.0), dims="latitude",
+        attrs={"units": "degrees_north", "standard_name": "latitude"},
+    )
+    da = xr.DataArray(
+        np.ones((3, 4)), dims=("latitude", "longitude"),
+        coords={"longitude": lon, "latitude": lat},
+    )
+    assert resolve_dim(da, "lon") == "longitude"
+    assert resolve_dim(da, "lat") == "latitude"
+    assert aggregate(da, {"lon": "mean"}).dims == ("latitude",)
+    # a source that does carry a `lon` dimension resolves exactly as before
+    assert resolve_dim(da.rename(longitude="lon"), "lon") == "lon"

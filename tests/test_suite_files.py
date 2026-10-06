@@ -147,6 +147,9 @@ EXPECTED_PACMED = (
         ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (100 m)"),
         ("section", "Water masses"),
         ("TS", "T-S diagrams — six Pacific regions"),
+        ("section", "Zonal currents"),
+        ("compare", "Zonal velocity — 180-160W"),
+        ("compare", "Zonal velocity — 160-120W"),
     ]
 )
 
@@ -180,8 +183,8 @@ def test_pacmed_review_settings(pacmed):
 
 def test_pacmed_review_expands_to_the_exact_page_sequence(pacmed):
     _, expanded = pacmed
-    assert len(expanded) == 49
-    assert sum(p.kind == "section" for p in expanded) == 9
+    assert len(expanded) == 52
+    assert sum(p.kind == "section" for p in expanded) == 10
     assert [(p.kind, p.title) for p in expanded] == EXPECTED_PACMED
 
 
@@ -356,3 +359,27 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
             assert 32 < s_pos < 37 and -2 < t_pos < 30  # (S, T) in plausible ranges
     assert "Northern\nsurface\nwaters" in annotations["Subpolar Gyre"]
     assert annotations["Peru Current"]["ESSW"] == [34.95, 10.0]
+
+
+@pytest.mark.parametrize(
+    "title,reference,lon",
+    [
+        ("Zonal velocity — 180-160W", "cravatte_u_179e_160w", {"min": 180, "max": 200}),
+        ("Zonal velocity — 160-120W", "cravatte_u_160w_120w", {"min": 200, "max": 240}),
+    ],
+)
+def test_pacmed_zonal_current_pages_are_lon_mean_slabs_with_zero_contours(
+    pacmed, title, reference, lon
+):
+    """Fig. 10: only the model is box-averaged (the obs are a band mean already)."""
+    _, expanded = pacmed
+    page = _by_title(expanded, title)
+    assert page.kwargs["reference"] == [reference]
+    assert page.kwargs["variables"] == ["east_velocity"]
+    assert page.kwargs["select"]["lon"] == lon
+    assert page.kwargs["aggregate"] == {
+        "test": {"time": "mean", "lon": "mean"},
+        "reference": {"lon": "mean"},
+    }
+    assert page.contours is True
+    assert page.plot["contour_levels"] == [0]

@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 
 from ocean_skill.align import natural_convention
-from ocean_skill.colormaps import cmaps_for
+from ocean_skill.colormaps import cmaps_for, variable_limits
 from ocean_skill.plot import _weighting
 from ocean_skill.plot._colorbar import difference_limit
 from ocean_skill.plot._statistic import statistic_of, units_text
@@ -834,6 +834,32 @@ def _layers(edges: np.ndarray, *, log: bool) -> np.ndarray:
     return 0.5 * (edges[:-1] + edges[1:])
 
 
+def _variable_limits(
+    standard_name,
+    statistic,
+    *arrays,
+    log: bool,
+    robust=False,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> tuple[float, float]:
+    """Sequential ``clim`` for ``arrays``: the static renderer's limits, exactly.
+
+    The data-derived, snapped limits (:func:`~ocean_skill.plot.matplotlib_renderer.
+    _limits`) put through :func:`ocean_skill.colormaps.variable_limits` -- the same
+    two steps the static renderer takes via ``norm_for`` -- so a declared range pin, a
+    spread's zero floor and a signed anomaly's symmetric-about-centre scale hold here
+    too, rather than being a static-only policy. ``vmin``/``vmax`` are the caller's own
+    limits, which win. Callers floor a log scale above zero themselves, as before.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _limits
+
+    lo, hi = _limits(*arrays, log=log, robust=robust, vmin=vmin, vmax=vmax)
+    return variable_limits(
+        standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+    )
+
+
 def _band_palette(cmap, edges, clim, *, log: bool) -> tuple[list[str], str, str]:
     """Return ``(palette, under, over)``: the colours of a banded fill.
 
@@ -1122,7 +1148,6 @@ def _field_row(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
@@ -1132,9 +1157,11 @@ def _field_row(
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
-    vmin, vmax = _limits(t, r, log=log, robust=robust)
+    vmin, vmax = _variable_limits(
+        standard_name, statistic, t, r, log=log, robust=robust
+    )
     if log:
         vmin = max(vmin, 1e-6)
     dmax = difference_limit(d)
@@ -1434,7 +1461,6 @@ def _field_facet(
     from ocean_skill.plot.matplotlib_renderer import (
         _TIME_NOT_GIVEN,
         _aspect_of,
-        _limits,
         facet_labels,
         field_suptitle,
     )
@@ -1474,7 +1500,7 @@ def _field_facet(
         if title is None
         else title
     )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
     loc_xform = _location_xform(field, tiles, geo=geo)
@@ -1491,7 +1517,9 @@ def _field_facet(
     raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
-        lo, hi = _limits(sub, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _variable_limits(
+            standard_name, statistic, sub, log=log, robust=robust, vmin=vmin, vmax=vmax
+        )
         return (max(lo, 1e-6) if log else lo, hi)
 
     # One scale per row when the rows are levels, matching the static renderer: depths
@@ -1661,7 +1689,7 @@ def _section(
     x axis -- see the static renderer's ``section``.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.section import prepare_section
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -1685,10 +1713,18 @@ def _section(
             standard_name, (item.get("depth"), geometry.path_note),
             label=item.get("label"),
         )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if clim is None:
-        lo, hi = _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _variable_limits(
+            standard_name,
+            statistic,
+            field,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         if log:
             lo = max(lo, 1e-6)
         clim = (lo, hi)
@@ -1905,7 +1941,6 @@ def _section_grid(
 
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         section_grid_layout,
         section_limit_groups,
     )
@@ -1955,7 +1990,15 @@ def _section_grid(
             first = members[0][1]
             log = is_log(first.get("standard_name"), statistic_of(first))
             fields = [prepared_of[id(item)][0] for _, item in members]
-            lo, hi = _limits(*fields, log=log, robust=robust, vmin=vmin, vmax=vmax)
+            lo, hi = _variable_limits(
+                first.get("standard_name"),
+                statistic_of(first),
+                *fields,
+                log=log,
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
+            )
             if log:
                 lo = max(lo, 1e-6)
             reach = _data_range(*fields, log=log)
@@ -2047,7 +2090,7 @@ def _time_depth(
     clipped end when *any* panel in the group runs past it (see :func:`_quadmesh`).
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -2065,12 +2108,20 @@ def _time_depth(
             (geometry.place_note, geometry.period_note),
             label=item.get("label"),
         )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     lo, hi = (
         clim
         if clim is not None
-        else _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        else _variable_limits(
+            standard_name,
+            statistic,
+            field,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
     )
     if log:
         lo = max(lo, 1e-6)
@@ -2241,7 +2292,6 @@ def _time_depth_grid(
         resolve_limit_groups,
     )
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         field_title,
         time_depth_grid_titles,
     )
@@ -2317,7 +2367,7 @@ def _time_depth_grid(
             first = cell_items[group_indices[0]]
             # the group's scale is the first member's, as its reach below already is
             log = is_log(first.get("standard_name"), statistic_of(first))
-            span = _limits(
+            span = _variable_limits(first.get("standard_name"), statistic_of(first), 
                 *(prepared[i][0] for i in group_indices),
                 log=log,
                 robust=robust,
@@ -2492,7 +2542,6 @@ def _field_map_grid(
     )
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
-        _limits,
         field_title,
         grid_suptitle,
     )
@@ -2558,7 +2607,13 @@ def _field_map_grid(
             first = cell_items[group_indices[0]]
             # the group's scale is the first member's, as its reach below already is
             log = is_log(first.get("standard_name"), statistic_of(first))
-            span = _limits(*fields, log=log, robust=robust)
+            span = _variable_limits(
+                first.get("standard_name"),
+                statistic_of(first),
+                *fields,
+                log=log,
+                robust=robust,
+            )
             # the shared bar answers for the whole group, as the static norm does
             reach = _data_range(*fields, log=log)
             for i in group_indices:
@@ -2579,9 +2634,11 @@ def _field_map_grid(
         field = item["field"]
         standard_name = item.get("standard_name")
         statistic = statistic_of(item)
-        seq, _div = cmaps_for(standard_name)
+        seq, _div = cmaps_for(standard_name, statistic=statistic)
         log = is_log(standard_name, statistic)
-        lo, hi = clims.get(i) or _limits(field, log=log, robust=robust)
+        lo, hi = clims.get(i) or _variable_limits(
+            standard_name, statistic, field, log=log, robust=robust
+        )
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
@@ -2694,7 +2751,7 @@ def _section_row(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.section import prepare_section_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -2740,10 +2797,12 @@ def _section_row(
         title = suptitle_text(
             standard_name, (item.get("depth"), item.get("time"), geometry.path_note)
         )
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            standard_name, statistic, t, r, log=log, robust=robust
+        )
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
@@ -2892,7 +2951,6 @@ def _section_row_grid(
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         section_row_grid_title,
     )
     from ocean_skill.plot.section import prepare_section_row
@@ -2977,7 +3035,14 @@ def _section_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
-        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            items[0].get("standard_name"),
+            statistic_of(items[0]),
+            *all_t,
+            *all_r,
+            log=log,
+            robust=robust,
+        )
         if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
@@ -3082,7 +3147,7 @@ def _time_depth_row(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -3105,10 +3170,12 @@ def _time_depth_row(
                 geometry.period_note,
             ),
         )
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            standard_name, statistic, t, r, log=log, robust=robust
+        )
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
@@ -3257,7 +3324,6 @@ def _time_depth_row_grid(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
     title = _default_grid_title(items, title)
@@ -3296,7 +3362,14 @@ def _time_depth_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
-        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            items[0].get("standard_name"),
+            statistic_of(items[0]),
+            *all_t,
+            *all_r,
+            log=log,
+            robust=robust,
+        )
         if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
@@ -4325,7 +4398,6 @@ def _facet_movie(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         _one_facet_axis,
         _select_frames,
         frame_labels,
@@ -4347,7 +4419,7 @@ def _facet_movie(
 
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     frames_da = _preload_frames(field.isel({facet_dim: indices}))
     if shared_limits:
@@ -4357,7 +4429,9 @@ def _facet_movie(
         scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
     else:
         scope = frames_da.isel({facet_dim: 0})
-    vmin, vmax = _limits(scope, log=log, robust=robust, vmin=vmin, vmax=vmax)
+    vmin, vmax = _variable_limits(
+        standard_name, statistic, scope, log=log, robust=robust, vmin=vmin, vmax=vmax
+    )
     if log:
         vmin = max(vmin, 1e-6)
     # the bar is built once for the slider, so its ends are marked for every frame
@@ -4468,7 +4542,7 @@ def _field_movie(
     write a video.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, _select_frames
+    from ocean_skill.plot.matplotlib_renderer import _select_frames
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
@@ -4481,7 +4555,7 @@ def _field_movie(
     statistic = statistic_of(first)
     units = units_text(first.get("units"), statistic)
     standard_name = first.get("standard_name")
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
 
     # One clim for the whole movie, from every frame or just the first. Computed here
@@ -4504,7 +4578,7 @@ def _field_movie(
     )
     outline = _domain_overlay(domain, first["aligned"]["test"], geo=geo, tiles=tiles)
     scope = items if shared_limits else items[:1]
-    vmin, vmax = _limits(
+    vmin, vmax = _variable_limits(standard_name, statistic, 
         *[f["aligned"]["test"] for f in scope],
         *[f["aligned"]["reference"] for f in scope],
         log=log,

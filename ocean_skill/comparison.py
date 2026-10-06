@@ -2048,6 +2048,24 @@ def _slab_to_section(da, axis: str, band: tuple[float, float]):
     if not any(d == zdim or _is_vertical_dim(da, d) for d in others):
         return da
 
+    # An observational product that names its vertical axis its own way (Cravatte et
+    # al.'s ADCP sections say ``DEPTH``) is found by cf-xarray's axis detection above,
+    # but the section machinery downstream -- the "keep" list a comparison leaves
+    # standing, ``_observational_vertical_to_z`` -- speaks the conventional names only
+    # (:data:`~ocean_skill.align.SECTION_VERTICAL_DIMS`), so it is brought onto
+    # ``depth`` here. A native ``s_rho``/``s_w`` is left for its own refusal, and so is
+    # a name that would collide with a ``depth`` already on the object.
+    from ocean_skill.align import SECTION_VERTICAL_DIMS
+
+    if (
+        zdim is not None
+        and zdim in da.dims
+        and zdim not in SECTION_VERTICAL_DIMS
+        and zdim not in ("s_rho", "s_w")
+        and "depth" not in da.coords
+    ):
+        da = da.rename({zdim: "depth"})
+
     values = np.asarray(da[hdim].values, dtype="float64")
     if values.size > 1 and values[0] > values[-1]:
         da = da.isel({hdim: slice(None, None, -1)})
