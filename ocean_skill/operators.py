@@ -1791,13 +1791,17 @@ def _weights_for(da, dim: str):
     proper thickness-weighted average without ``aggregate`` needing to know anything
     about vertical coordinates. Weights travel with the data; the reduction just
     uses them when they are there.
+
+    Land cells, where the land-masked free surface leaves the interfaces NaN, count as
+    zero weight so an all-land column reduces to NaN rather than raising —
+    :meth:`xarray.DataArray.weighted` refuses NaN weights outright.
     """
     from ocean_skill.roms import WEIGHT_COORD
 
     weights = da.coords.get(WEIGHT_COORD)
     if weights is None or dim not in weights.dims:
         return None
-    return weights
+    return weights.fillna(0.0)
 
 
 def _dim_kwarg(fn) -> str:
