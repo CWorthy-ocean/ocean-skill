@@ -1227,13 +1227,18 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
     time_col = _axis_column(frame, meta, "T")
     lon = _scalar_position(frame, lon_col, "X")
     lat = _scalar_position(frame, lat_col, "Y")
+    # One cast of a transect (ocean_skill.casts) states its own position -- the ship
+    # drifted while it was on station -- and its samples span minutes by construction.
+    cast = meta.get("cast") if isinstance(meta.get("cast"), dict) else {}
+    if np.isfinite(cast.get("lon", np.nan)) and np.isfinite(cast.get("lat", np.nan)):
+        lon, lat = float(cast["lon"]), float(cast["lat"])
 
     time = None
     if time_col is not None:
         decoded = decode_time_column(frame[time_col], time_col, meta, subject=subject)
         decoded = decoded.dropna()
         if not decoded.empty:
-            if decoded.nunique() > 1:
+            if decoded.nunique() > 1 and not cast:
                 # A profile is one instant by definition -- see PROFILE_FEATURE_TYPES
                 # in ocean_skill.comparison. Depths sampled seconds apart during a cast
                 # commonly carry distinct timestamps; using the earliest is a label,

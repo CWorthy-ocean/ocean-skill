@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ocean_skill import _stacklevel
+from ocean_skill import _stacklevel, casts
 from ocean_skill._display import Description, Text
 
 __all__ = [
@@ -86,11 +86,16 @@ class SourceRef:
     #: :func:`resolve`). Merging the index touches every entry; almost none of
     #: them are what the caller is actually asking about.
     shadowed_path: Path | None = None
+    #: The id of the cast, when this ref is one cast of a ``trajectoryProfile`` entry
+    #: (:mod:`ocean_skill.casts`): ``name``/``path`` stay the entry's, ``metadata`` is
+    #: the cast's own.
+    cast: str | None = None
 
     @property
     def qualified(self) -> str:
-        """Fully-qualified ``catalog:source`` name."""
-        return f"{self.catalog}:{self.name}"
+        """Fully-qualified ``catalog:source`` name (plus ``[cast]`` for a cast)."""
+        suffix = f"[{self.cast}]" if self.cast is not None else ""
+        return f"{self.catalog}:{self.name}{suffix}"
 
 
 #: Shared catalog directories registered at runtime via :func:`add_search_path`.
@@ -330,8 +335,17 @@ def resolve(name: str) -> SourceRef:
     the merged index (the higher-precedence entry wins) and warns only if *this*
     name is the one that collided — an unrelated bare lookup elsewhere in the same
     call never triggers it. Raises :class:`KeyError` if unknown / ambiguous.
+
+    ``"<entry>[<cast id>]"`` resolves one cast of a ``trajectoryProfile`` entry, as a
+    ``profile`` ref at its own time and position (:mod:`ocean_skill.casts`).
     """
-    return _resolve_in(discover(), name)
+    try:
+        return _resolve_in(discover(), name)
+    except KeyError:
+        base, cast = casts.split_name(name)
+        if cast is None:
+            raise
+    return casts.resolve_cast(resolve(base), base, cast)
 
 
 #: Entry-metadata keys :func:`fingerprint` leaves out: the ones that do not change

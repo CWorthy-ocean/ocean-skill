@@ -15,7 +15,7 @@ import json
 from collections import OrderedDict
 from typing import Any
 
-from ocean_skill import time_zone
+from ocean_skill import casts, time_zone
 from ocean_skill.catalog import SourceRef, resolve
 
 __all__ = ["erddap_constraints", "read"]
@@ -54,11 +54,13 @@ def _read_cache_key(ref: SourceRef, qc: Any, kwargs: dict[str, Any]) -> tuple | 
 
     try:
         st = os.stat(ref.path)
-    except OSError:
+    except (AttributeError, OSError, TypeError):  # (a stub ref has no path to stat)
         return None
     qc_key = json.dumps(qc, sort_keys=True, default=str)
     kwargs_key = json.dumps(kwargs, sort_keys=True, default=str)
-    return (str(ref.path), ref.name, st.st_mtime_ns, st.st_size, qc_key, kwargs_key)
+    cast = getattr(ref, "cast", None)  # one cast of a transect is its own result
+    key = (str(ref.path), ref.name, cast, st.st_mtime_ns, st.st_size)
+    return (*key, qc_key, kwargs_key)
 
 
 def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
@@ -119,11 +121,19 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
     return obj
 
 
-read.cache_clear = _READ_CACHE.clear  # type: ignore[attr-defined]
+def _cache_clear() -> None:
+    """Empty the open memo, and the cast tables (:func:`casts.table`) built from it."""
+    _READ_CACHE.clear()
+    casts._TABLES.clear()
+
+
+read.cache_clear = _cache_clear  # type: ignore[attr-defined]
 
 
 def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[str, Any]):
     """The actual open + standardize, uncached -- see :func:`read`'s own memo."""
+    if getattr(ref, "cast", None) is not None:  # one cast of a transect, not an entry
+        return casts.read_cast(ref, qc=qc, **kwargs)
     import intake
 
     cat = intake.from_yaml_file(str(ref.path))
@@ -267,7 +277,8 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
 
         decoded = _decode_times(obj, obj[tname])
         if decoded is not None:
-            obj = obj.assign_coords({tname: decoded})
+            # on its own dims: a bare array makes a transect's time a new dimension
+            obj = obj.assign_coords({tname: (obj[tname].dims, decoded)})
     if not is_frame:
         obj = _in_utc(obj, meta, tname, subject=subject)
         obj = _with_month_coordinate(obj, meta)

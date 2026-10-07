@@ -2776,7 +2776,7 @@ class _DeclarationError(ValueError):
 def _canonical_declarations(name: str, metadata: dict[str, Any]) -> dict[str, Any]:
     """Return ``metadata`` with its read-semantics declarations validated, canonical.
 
-    Four declarations change how a source is *read* rather than describing it, and each
+    Five declarations change how a source is *read* rather than describing it, and each
     has a vocabulary a catalog author can get wrong -- so each is checked once, here, at
     build time, and stored in its canonical form instead of being trusted at every read:
 
@@ -2791,12 +2791,14 @@ def _canonical_declarations(name: str, metadata: dict[str, Any]) -> dict[str, An
       declared lives here; the probe's own finding is merged in by :func:`_attach`.
     * ``axes`` -- must be a mapping of axis to column name; merged per axis, not
       replaced, by :func:`_attach`.
+    * ``casts`` -- how a ``trajectoryProfile`` is cut into casts
+      (:func:`ocean_skill.casts.canonicalize`).
 
     Any problem is a :class:`_DeclarationError` (a ``ValueError``) naming the entry and
     quoting the helper's own message, which says what is allowed. ``None`` and blank
     values are not declarations. ``metadata`` itself is never modified.
     """
-    from ocean_skill import tabular
+    from ocean_skill import casts, tabular
 
     out = dict(metadata)
     try:
@@ -2815,6 +2817,10 @@ def _canonical_declarations(name: str, metadata: dict[str, Any]) -> dict[str, An
             canonical = depth_convention.canonicalize(out.pop("depth_convention"))
             if canonical is not None:
                 out["depth_convention"] = canonical
+        if "casts" in out:
+            canonical = casts.canonicalize(out.pop("casts"))
+            if canonical is not None:
+                out["casts"] = canonical
         axes = out.get("axes")
         if axes is not None and not isinstance(axes, Mapping):
             raise ValueError(
@@ -3111,7 +3117,7 @@ def add_source(
         names, units suffix included: ``"TEMP (degree_Celsius)"``, not ``"TEMP"``).
         See :func:`_merge_standard_names` for the full rules.
 
-        Four more keys say how the source is **read** rather than what it is. Each is
+        Five more keys say how the source is **read** rather than what it is. Each is
         validated here -- a bad value raises ``ValueError``, it is never a warning --
         and saved in canonical form. They belong to the *entry*, not the catalog: one
         catalog may mix conventions, source by source.
@@ -3166,6 +3172,12 @@ def add_source(
             is the instrument depth wherever the table has other depth-like columns::
 
                 add_source(cat, "pier_sonde", url, axes={"Z": "sensor_depth"})
+
+        ``casts``
+            How a ``trajectoryProfile`` is cut into casts, each a source of its own
+            (``"<entry>[<cast id>]"``, see :mod:`ocean_skill.casts`): ``id`` (the column
+            or variable naming them), else ``gap`` and ``distance_m`` (where to split),
+            and ``position`` (``"median"``, ``"first"`` or ``"mean"``).
     """
     if reader is None:
         if url is None:
@@ -3255,7 +3267,7 @@ def add_sources(
     combined with each other, only each with the probe.
 
     The keys that say how a source is *read* -- ``time_zone``/``utc_offset_h``,
-    ``depth_convention``, ``time_columns``/``time_format``, ``axes`` (see
+    ``depth_convention``, ``time_columns``/``time_format``, ``axes``, ``casts`` (see
     :func:`add_source`) -- work the same way, which is what lets one catalog mix
     conventions entry by entry: a shared value is the default and a source's own dict
     overrides it. A bad value raises ``ValueError``: a shared one before anything is
