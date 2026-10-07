@@ -66,10 +66,17 @@ def test_timeseriesprofile_with_depth_collapsed_implies_over_time(monkeypatch):
 
 
 def test_timeseriesprofile_with_no_depth_select_implies_over_time(monkeypatch):
-    """No depth key at all defaults to SURFACE -- a scalar, so still collapsed."""
+    """No depth key at all stands on the station's own levels -- depth is not collapsed.
+
+    A station has no surface to default to: a direct Comparison fills in its own levels
+    at align() (the same default compare() writes), and so decides ``over`` as if they
+    were already there -- both axes kept, at construction, not only after the align.
+    """
+    from ocean_skill.align import TIME_DEPTH_OVER
+
     _feature(monkeypatch, "timeSeriesProfile")
     c = _comparison()
-    assert c.over == "time"
+    assert c.over == TIME_DEPTH_OVER
 
 
 def test_timeseriesprofile_with_time_collapsed_implies_over_Z(monkeypatch):

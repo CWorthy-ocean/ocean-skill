@@ -189,6 +189,62 @@ def test_info_reports_state_and_location(aligned):
         cache.enable()
 
 
+# -- informational printing ----------------------------------------------------
+
+
+@pytest.fixture
+def verbose_restored():
+    saved = cache._verbose
+    yield
+    cache._verbose = saved
+
+
+def test_report_use_prints_one_line_naming_the_comparison(capsys, verbose_restored):
+    cache.report_use("run_new vs whots", cache.USED_PAIRS)
+    out = capsys.readouterr().out
+    assert out == (
+        "ocean-skill: cache: run_new vs whots -- derived from saved model-data "
+        "matches (model not read)\n"
+    )
+
+
+def test_the_phrases_the_comparison_passes_are_stable():
+    assert cache.USED_ALIGNED == "reused the saved comparison"
+    assert cache.USED_LANE == "reused the saved model lane"
+    assert cache.SAVED_PAIRS == "saved model-data matches for reuse"
+
+
+def test_verbose_off_silences_report_use_and_the_banner(
+    capsys, aligned, verbose_restored
+):
+    cache.verbose(False)
+    cache.report_use("x", cache.USED_ALIGNED)
+    cache._announced = False
+    cache.save("k", aligned)
+    cache.load("k")
+    assert capsys.readouterr().out == ""
+    assert cache._announced is False  # still owed once verbose comes back
+    cache.verbose()
+    cache.report_use("x", cache.USED_ALIGNED)
+    assert "reused the saved comparison" in capsys.readouterr().out
+
+
+def test_report_use_is_silent_when_caching_is_off(capsys, verbose_restored):
+    cache.disable()
+    try:
+        cache.report_use("x", cache.USED_ALIGNED)
+    finally:
+        cache.enable()
+    assert capsys.readouterr().out == ""
+
+
+def test_verbose_is_reachable_from_the_package():
+    import ocean_skill as osk
+
+    assert osk.cache.verbose is cache.verbose
+    assert osk.cache.report_use is cache.report_use
+
+
 # -- integration with Comparison ----------------------------------------------
 
 
