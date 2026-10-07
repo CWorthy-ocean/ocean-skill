@@ -1272,8 +1272,11 @@ cast's own time and place**. A cast's depths follow its own `depth_convention` �
 surface-referenced cast the model target is z = ζ(t_cast) − d — and
 `time_method="interp"` interpolates between the model's steps onto the cast's instant
 (the default takes the nearest step). Nothing is averaged across the line, and the
-metrics pool every (cast, level) pair. The levels are the casts' own, merged (binned CTD
-data shares them), NaN where a cast has no sample. Casts that share almost none — raw,
+metrics pool every (cast, level) pair. Each variable's levels are the ones its casts
+sampled it at, merged (binned CTD data shares them), NaN in both lanes where a cast has
+no sample of it — salinity missing at one cast's top level leaves that one cell blank,
+and a cast with none at all is left out of that variable's transect with a warning.
+Casts that share almost none — raw,
 unbinned data, with more than twice as many merged levels as the longest cast has — are
 refused until the levels are named, `select={"depth": [10, 50, 100, 200]}` (or
 `depths=`), which reads each cast at its nearest sample, as for a profile. A transect of

@@ -1,11 +1,12 @@
 """A CTD transect compared against a model whose tide is known by hand.
 
 ``line`` is one CSV transect (``trajectoryProfile``; ``line_noid`` the same rows without
-the station column, cut on the time gap; ``line_bare`` the same, declaring nothing) of
-three casts, with the surface-referenced depths a CTD has. An entry is compared as one
-section, a list of its cast names cast by cast. The model is the tidal ROMS fixture
-(``tests/_tidal_roms``): hourly steps from 2024-07-01 00:00, ``zeta = [3, 0, -3,
-0]`` m, ``height`` exactly ``z_rho``, and ``temp = 10 + hour + 0.5 * xi + 0.1 *
+the station column, cut on the time gap; ``line_bare`` the same, declaring nothing;
+``line_gaps`` the same rows with ``obs`` missing at S1's 1 m and ``temp_obs`` at S3's
+2 m and 4 m) of three casts, with the surface-referenced depths a CTD has. An entry is
+compared as one section, a list of its cast names cast by cast. The model is the tidal
+ROMS fixture (``tests/_tidal_roms``): hourly steps from 2024-07-01 00:00, ``zeta = [3,
+0, -3, 0]`` m, ``height`` exactly ``z_rho``, and ``temp = 10 + hour + 0.5 * xi + 0.1 *
 z_rho`` so a wrong time or a wrong cell changes every number::
 
     cast  time   lon (a sample every 10 s)           depths   zeta(time)
@@ -92,6 +93,15 @@ def _raw_rows(obs):
     return raw
 
 
+def _gap_rows(obs):
+    """Return ``obs`` with ``obs`` NaN at S1's 1 m, ``temp_obs`` at S3's 2 m and 4 m."""
+    gaps = obs.copy()
+    gaps.loc[(gaps["station"] == "S1") & (gaps["depth (m)"] == 1), "obs (m)"] = np.nan
+    s3 = (gaps["station"] == "S3") & gaps["depth (m)"].isin([2, 4])
+    gaps.loc[s3, "temp_obs (degC)"] = np.nan
+    return gaps
+
+
 def _nc(path):
     """Write the transect as a multidimensional CF trajectoryProfile (profile x z)."""
     obs = _rows()
@@ -163,6 +173,7 @@ def world(tmp_path, monkeypatch, isolated_catalogs):
         "line_bare": (obs.drop(columns="station"), {}),
         "line_one": (obs[obs["station"] == "S1"], {"casts": {"id": "station"}}),
         "line_raw": (_raw_rows(obs), {"casts": {"id": "station"}}),
+        "line_gaps": (_gap_rows(obs), {"casts": {"id": "station"}}),
     }
     for sid in CASTS:  # a profile has one position: the cast's, 200.02 for S3
         rows = obs[obs["station"] == sid].drop(columns="station")
@@ -173,11 +184,15 @@ def world(tmp_path, monkeypatch, isolated_catalogs):
 
 
 def _compare(reference, spec=HEIGHT, **kw):
-    """Return ``osk.compare`` of the model against ``reference``, interpolating."""
+    """Return ``osk.compare`` of the model against ``reference``, interpolating.
+
+    ``spec`` is one variable, or a list of them.
+    """
     kw = {"time_method": "interp", "depth_method": "interp", "cache": False, **kw}
+    variables = spec if isinstance(spec, list) else [spec]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return osk.compare(test="his", reference=reference, variables=[spec], **kw)
+        return osk.compare(test="his", reference=reference, variables=variables, **kw)
 
 
 def _lane(c, lane="test"):
@@ -315,6 +330,93 @@ def test_a_transect_entry_is_one_section_on_its_casts_own_levels(world):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # "metrics are weakly constrained"
         assert section.metrics()["n"] == 11  # every (cast, level) pair, 5 + 1 + 5
+
+
+def test_a_missing_value_is_nan_in_both_lanes_of_its_variables_section_only(world):
+    # one variable's gaps are no other's: each section is on its own variable's levels
+    sections = _compare("line_gaps", [HEIGHT, TEMP], skip_missing=False)
+    levels = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    gaps = ({"S1": [1.0]}, {"S3": [2.0, 4.0]})  # of obs, of temp_obs
+    for section, spec, gap in zip(sections, (HEIGHT, TEMP), gaps, strict=True):
+        assert section.is_section and section.reference_name == "line_gaps (3 casts)"
+        a = section.aligned.transpose(ALONG_DIM, "z")
+        np.testing.assert_allclose(-a["z"], levels)
+        n = 0
+        for k, sid in enumerate(CASTS):
+            have = np.isin(levels, CASTS[sid][2]) & ~np.isin(levels, gap.get(sid, []))
+            n += have.sum()
+            for lane in ("test", "reference"):
+                column = a[lane].values[k]
+                assert np.isfinite(column[have]).all() and np.isnan(column[~have]).all()
+            (child,) = _compare(f"line_gaps[{sid}]", spec)
+            for lane in LANES:
+                np.testing.assert_allclose(
+                    a[lane].values[k][have], _lane(child, lane), atol=1e-6
+                )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # "metrics are weakly constrained"
+            assert section.metrics()["n"] == n  # 4 + 1 + 5, then 5 + 1 + 3
+
+
+def test_a_casts_levels_for_a_variable_are_those_it_has_a_value_at(world):
+    levels, cache = comparison._profile_reference_depths, {}
+    assert levels("line_gaps[S1]", cache) == [1.0, 2.0, 3.0, 4.0, 5.0]  # the axis's
+    assert levels("line_gaps[S1]", cache, "obs") == [2.0, 3.0, 4.0, 5.0]
+    assert levels("line_gaps[S3]", cache, "temp_obs") == [1.0, 3.0, 5.0]
+    assert levels("line_gaps[S3]", cache, "salinity") == []  # not a variable of it
+    assert set(cache) == {
+        "line_gaps[S1]",
+        ("line_gaps[S1]", repr("obs")),
+        ("line_gaps[S3]", repr("temp_obs")),
+        ("line_gaps[S3]", repr("salinity")),
+    }
+
+
+def test_a_variables_levels_are_read_with_the_lanes_qc(world, monkeypatch):
+    seen, real = [], sources.read
+    monkeypatch.setattr(
+        sources, "read", lambda name, **kw: seen.append((name, kw)) or real(name, **kw)
+    )
+    for variable, qc in [("obs", "off"), ("obs", None), (None, "off")]:
+        comparison._profile_reference_depths("line_gaps[S1]", {}, variable, qc=qc)
+    read_with = [kw for name, kw in seen if name == "line_gaps[S1]"]
+    assert read_with == [{"qc": "off"}, {}, {}]
+
+
+def test_a_cast_with_no_sample_of_a_variable_is_left_out_of_its_section(world):
+    rows = _rows()
+    rows.loc[rows["station"] == "S2", "temp_obs (degC)"] = np.nan  # S2 logged no temp
+    _write(world, "no_temp", line_no_temp=(rows, {"casts": {"id": "station"}}))
+    levels = comparison._profile_reference_depths("line_no_temp[S2]", {}, "temp_obs")
+    assert levels == []
+    with pytest.warns(UserWarning, match=r"'line_no_temp\[S2\]' \(no \w+ sample\)"):
+        height, temp = osk.compare(
+            test="his",
+            reference="line_no_temp",
+            variables=[HEIGHT, TEMP],
+            time_method="interp",
+            depth_method="interp",
+            cache=False,
+        )
+    # the name counts the cast, as for one the model has no data for
+    assert height.reference_name == temp.reference_name == "line_no_temp (3 casts)"
+    _assert_same(height, _compare("line")[0])  # obs is whole: the plain transect
+    a = temp.aligned.transpose(ALONG_DIM, "z")
+    assert a.sizes[ALONG_DIM] == 2
+    np.testing.assert_allclose(a["lon"] % 360, [200.0, 200.02], atol=1e-9)
+    for k, sid in enumerate(["S1", "S3"]):
+        (child,) = _compare(f"line_no_temp[{sid}]", TEMP)
+        for lane in LANES:
+            np.testing.assert_allclose(a[lane].values[k], _lane(child, lane), atol=1e-6)
+
+
+def test_fewer_than_two_casts_with_a_sample_are_compared_cast_by_cast(world, capsys):
+    rows = _rows()
+    rows.loc[rows["station"] != "S3", "temp_obs (degC)"] = np.nan
+    _write(world, "one_temp", line_one_temp=(rows, {"casts": {"id": "station"}}))
+    (c,) = _compare("line_one_temp", TEMP)  # S1 and S2 have nothing to compare
+    assert not c.is_section and c.reference_name == "line_one_temp[S3]"
+    assert "only 1 of its 3 casts have a" in capsys.readouterr().out
 
 
 def test_named_levels_are_the_sections_levels(world):

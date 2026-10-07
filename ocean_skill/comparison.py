@@ -4582,10 +4582,11 @@ class Comparison:
         ``select={"transect": {"from": "reference"}}`` section -- built by
         :func:`compare`'s own fan-out; rarely passed directly.
     section_own_levels
-        With ``section_casts``: ``select``'s depth list is the union of the casts'
-        own levels (a transect entry's default), not one the caller named -- each
-        cast is then compared on exactly its own levels and left NaN on the others
-        of the union, never snapped onto them.
+        With ``section_casts``: ``select``'s depth list is the union of the levels
+        each cast sampled the variable at (a transect entry's default), not one the
+        caller named -- each cast is then compared on exactly its own levels and
+        left NaN (in both lanes) on the others of the union, never snapped onto
+        them; a cast with no sample of the variable is left out.
 
     Ordinarily both sources are reduced to a single map and the comparison is that pair
     plus their difference. Naming an axis in ``over`` instead keeps that axis: the lanes
@@ -4638,8 +4639,8 @@ class Comparison:
         # fails open (None, or "let the real prepare decide") on a name that
         # does not resolve, which this joined display name never does.
         self._section_casts = list(section_casts) if section_casts else None
-        # The section's depth list is the casts' own levels, merged, rather than a
-        # list the caller named (see _prepare_section_from_casts).
+        # The section's depth list is the levels each cast sampled the variable at,
+        # merged, rather than a list the caller named (see _prepare_section_from_casts).
         self._section_own_levels = bool(section_own_levels and section_casts)
         # What each cast's own comparison is built from (see
         # _prepare_section_from_casts): the arguments this class normalizes below,
@@ -6729,11 +6730,13 @@ class Comparison:
         masked cell, a record that misses it) is left out with one warning, and
         fewer than two left is an error.
 
-        With :attr:`_section_own_levels` the section's depth list is the union of the
-        casts' own levels instead: each child is built as :func:`compare` builds a cast
-        alone (``depth`` = that cast's own levels, not named by the caller) and its two
-        lanes are then put on the union, NaN on the levels the cast has no sample at --
-        a cast is never snapped onto a level it did not measure.
+        With :attr:`_section_own_levels` the section's depth list is instead, per
+        variable, the levels each cast sampled that variable at, merged: each child is
+        built as :func:`compare` builds a cast alone (``depth`` = those levels, not
+        named by the caller) and its two lanes are then put on the union, NaN in both
+        where the cast has no sample of the variable -- a cast is never snapped onto a
+        level it did not measure. A cast with no sample of the variable at all is left
+        out, like one the model has no valid data for.
 
         The children's aligned columns are then stacked along a new
         :data:`~ocean_skill.align.ALONG_DIM` dimension, in the caller's own list
@@ -6767,18 +6770,28 @@ class Comparison:
         method = self._transect_route()["method"] if "method" in spec else self.method
         own = self._section_own_levels
         union = np.asarray(self.select["depth"], float) if own else None
-        levels_of: dict[str, list[float]] = {}  # each cast's own levels (own only)
+        # each cast's levels for this variable (own only), keyed by cast and variable
+        levels_of: dict[Any, list[float]] = {}
         kept, left_out, r_depth = [], [], None
         for cast in self._section_casts:
             kwargs = dict(self._section_child_kwargs)
             if own:
-                # What compare() would give this cast alone: its own levels, not
-                # named by the caller.
+                # What compare() would give this cast alone: the levels it sampled
+                # this variable at, not named by the caller. The child's reference
+                # lane drops the levels its variable is NaN at, so these are exactly
+                # the levels it keeps (_on_union_levels checks as much).
+                levels = _profile_reference_depths(
+                    cast,
+                    levels_of,
+                    variable_for(kwargs["variable"], "reference"),
+                    qc=qc_for(kwargs["qc"], "reference"),
+                )
+                if not levels:
+                    short = _short_variable_label(kwargs["variable"])
+                    left_out.append(f"{cast!r} (no {short} sample)")
+                    continue
                 kwargs["select"] = _fanned_select(
-                    kwargs["select"],
-                    "depth",
-                    _profile_reference_depths(cast, levels_of),
-                    False,
+                    kwargs["select"], "depth", levels, False
                 )
             child = Comparison(
                 reference=cast,
@@ -6806,7 +6819,7 @@ class Comparison:
                 raise
             if own:
                 # one obs depth does not describe a section of casts
-                aligned = _on_union_levels(aligned, levels_of[cast], union, cast)
+                aligned = _on_union_levels(aligned, levels, union, cast)
             else:
                 r_depth = r_depth if kept else child._actual_depth
             kept.append((cast, aligned))
@@ -9288,7 +9301,13 @@ def _is_profile_reference(
     )
 
 
-def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> list[float]:
+def _profile_reference_depths(
+    source: str,
+    cache: dict[Any, list[float]],
+    variable: Any = None,
+    *,
+    qc: Any = None,
+) -> list[float]:
     """The reference profile's own vertical levels, read once and memoized.
 
     Coordinate-only and cheap: a ``profile`` is a single water column, so this opens
@@ -9304,9 +9323,22 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     (:func:`ocean_skill.depth_convention.positive_down_values`), so a height or a
     pressure comes back as metres, positive down -- the scale the model is asked for
     and the observation's own picks are made on.
+
+    With ``variable`` (a reference-side spec, already through :func:`variable_for`) the
+    levels are only those the cast sampled that variable at: where the field has a value
+    (at any index of its other dimensions, if it has some). A lane drops the levels its
+    variable is NaN at (:func:`_prepare`), so a section places each cast on exactly
+    those (:meth:`Comparison._prepare_section_from_casts`) -- and a missing value in
+    one variable is ordinary in a CTD file. ``qc`` is that lane's policy
+    (:func:`qc_for`), passed to the read as the lane passes it, so a flagged value is as
+    missing here as there. ``[]`` when the source has no such variable, or no value of
+    it at any level; the axis itself still raises as it does without one. Memoized
+    under ``(source, repr(variable))``: ``qc`` is neither in that key nor used without
+    a ``variable``, so a cache serves one call's policy.
     """
-    if source in cache:
-        return cache[source]
+    key = source if variable is None else (source, repr(variable))
+    if key in cache:
+        return cache[key]
     import warnings
 
     import numpy as np
@@ -9319,13 +9351,14 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
         meta = resolve(source).metadata
     except KeyError:
         meta = {}
+    read_kwargs = {"qc": qc} if variable is not None and qc is not None else {}
     # Coordinate-only: warnings that belong to *reading* this source (a cast's
     # duplicate depths, a time-varying profile) are the align() lane's to emit when it
     # reads the data for real -- firing them here too, just to learn the axis, would
     # double them. A genuine problem (no vertical axis) raises below, unsuppressed.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        obj = read(source)
+        obj = read(source, **read_kwargs)
         if tabular.is_frame(obj):
             obj = tabular.to_dataset(obj, meta)
     # The catalog's own declared Z axis wins when there is one (a builder records it
@@ -9347,14 +9380,30 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     values = depth_convention_module.positive_down_values(
         obj[zname].values, obj[zname].attrs, convention=convention
     )
-    values = values[np.isfinite(values)]
-    if values.size == 0:
+    keep = np.isfinite(values)
+    if not keep.any():
         raise ValueError(
             f"{source!r}'s vertical axis ({zname!r}) has no finite levels to compare "
             "on -- pass depths=[...] explicitly."
         )
-    depths = [float(v) for v in np.unique(values)]
-    cache[source] = depths
+    if variable is not None:
+        # The same lookup _prepare makes, and its dropna(zname, how="all") is what is
+        # mirrored: a level stays where the field has any value, across the rest of
+        # its dimensions. Quiet for the reason the read is.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            field = operators.resolve_variable(obj, variable)
+        if field is None:
+            keep[:] = False
+        else:
+            sampled = field.notnull()
+            if zname in sampled.dims:
+                others = [d for d in sampled.dims if d != zname]
+                keep &= (sampled.any(others) if others else sampled).values
+            else:  # no vertical dimension to drop levels along: all of them, or none
+                keep &= bool(sampled.any())
+    depths = [float(v) for v in np.unique(values[keep])]
+    cache[key] = depths
     return depths
 
 
@@ -9660,13 +9709,16 @@ def _on_union_levels(aligned, own: list[float], union: np.ndarray, cast: str):
     """Return a cast's aligned lanes on ``union``, NaN where it has no sample.
 
     ``aligned`` is the child comparison of one cast (:meth:`Comparison.
-    _prepare_section_from_casts`), made at that cast's ``own`` levels -- sorted, unique,
-    metres positive down, as :func:`_profile_reference_depths` gives them. The lanes
+    _prepare_section_from_casts`), made at that cast's ``own`` levels -- the levels it
+    sampled the variable at: sorted, unique, metres positive down, as
+    :func:`_profile_reference_depths` gives them for the variable. The lanes
     arrive in that order, on whatever the child's vertical coordinate carries (the
     cast's raw values, a scalar for one level), so the levels are set by *position*
     and stamped as the normalized metres they are; each then lands on its ``union``
     entry (the same level within 1e-6 m) and every other entry is left NaN. Nothing is
-    snapped: the lanes keep only what the cast measured.
+    snapped: the lanes keep only what the cast measured. A lane whose level count is
+    not ``len(own)`` raises: a guard only, as ``own`` already leaves out the levels a
+    lane drops for a missing value.
     """
     import xarray as xr
 
@@ -10935,11 +10987,13 @@ def compare(
     and position) is compared as **one transect**: its casts, in time order
     (:func:`ocean_skill.casts.names`), are the columns of one section, each the model at
     that cast's own time and place, plotted as a section with the metrics pooled over
-    all (cast, level) pairs. The levels are the casts' own, merged
-    (``depths=[...]``/``select={"depth": [...]}``, at least 2 fixed depths, name them
-    instead); each cast is compared on exactly its own and left NaN on the others, and
-    casts that look unbinned (raw samples at their own depths) are refused, naming the
-    levels or the cast-by-cast route. A list of cast names
+    all (cast, level) pairs. The levels are, per variable, those each cast sampled it
+    at, merged (``depths=[...]``/``select={"depth": [...]}``, at least 2 fixed depths,
+    name them instead); each cast is compared on exactly its own and left NaN, in both
+    lanes, on the others -- a cast with no sample of a variable at all is left out of
+    that variable's section, with a warning -- and casts that look unbinned (raw
+    samples at their own depths) are refused, naming the levels or the cast-by-cast
+    route. A list of cast names
     (``reference=osk.cast_names(entry)``) gives one comparison per cast, each a
     ``profile`` as above, and so does an entry with one cast, a vertical ``over=``,
     ``times=``, isopycnals, a pair-spec ``select``, a vertical ``aggregate=`` or levels
@@ -11092,8 +11146,9 @@ def compare(
     # section of all the references), isopycnals, a pair-spec select, a time fan,
     # a vertical aggregate (a section keeps its vertical axis), or levels the caller
     # named that are not a list of at least 2 fixed depths (a scalar, a band). Named
-    # levels that are such a list are the section's own; none named means each
-    # cast's own levels, merged (see the section loop below).
+    # levels that are such a list are the section's own; none named means, per
+    # variable, the levels each cast sampled it at, merged (see the section loop
+    # below).
     named_levels = (
         (list(depths) if isinstance(depths, list | tuple) else depths)
         if depths_was_explicit
@@ -11529,8 +11584,9 @@ def compare(
         The casts together are the section's reference lane -- one Comparison per
         test, named ``display_name`` (never a catalog name), printed and skipped as
         ``shown`` -- and ``sel`` its select (the ``{"from": "reference"}`` transect
-        and the levels). ``own_levels``: the levels are the casts' own, merged,
-        rather than a list the caller named (:attr:`Comparison._section_own_levels`).
+        and the levels). ``own_levels``: the levels are, per variable, those each cast
+        sampled it at, merged, rather than a list the caller named
+        (:attr:`Comparison._section_own_levels`).
         """
         short = _short_variable_label(var)
         prefix = f"{short} " if len(variables) > 1 else ""
@@ -11658,11 +11714,12 @@ def compare(
         # A CTD transect entry (see _expand_transects) is ONE section per test,
         # built from the casts of it that offer this variable -- the same
         # Comparison an explicit select={"transect": {"from": "reference"}} makes.
-        # Its levels are the caller's own list when they named one, else the casts'
-        # own levels, merged, each cast then compared on exactly its own. A
-        # calculated diagnostic has no vertical axis to stack, and fewer than 2
-        # casts (or fewer than 2 shared levels) no section: those compare cast by
-        # cast, below, as the profiles they are.
+        # Its levels are the caller's own list when they named one, else, per
+        # variable, the levels each cast sampled that variable at, merged, each cast
+        # then compared on exactly its own (NaN in both lanes where it has no
+        # sample of it). A calculated diagnostic has no vertical axis to stack, and
+        # fewer than 2 casts (with a sample of the variable, or sharing 2 levels) no
+        # section: those compare cast by cast, below, as the profiles they are.
         sectioned: list[str] = []
         for entry, entry_casts in transects.items():
             members = [c for c in entry_casts if c in matching]
@@ -11675,9 +11732,17 @@ def compare(
                 continue
             own = named_levels is None
             if own:
+                # Per variable. No cache-key bump: where these differ from the axis's
+                # levels the section used to raise, so none was ever stored.
                 try:
                     per_cast = [
-                        _profile_reference_depths(c, _ref_depths_cache) for c in members
+                        _profile_reference_depths(
+                            c,
+                            _ref_depths_cache,
+                            variable_for(var, "reference"),
+                            qc=qc_for(qc, "reference"),
+                        )
+                        for c in members
                     ]
                 except Exception as exc:
                     if not skip_missing:
@@ -11687,8 +11752,19 @@ def compare(
                         "compared cast by cast"
                     )
                     continue
-                levels = _union_levels(per_cast)
-                longest = max(len(v) for v in per_cast)
+                # A cast with no sample of this variable stays a member (the name
+                # counts it, as it does a cast left out for want of model data) and
+                # is left out of the section with a warning; it adds no level.
+                sampled = [v for v in per_cast if v]
+                if len(sampled) < 2:
+                    print(
+                        f"  {entry!r}: only {len(sampled)} of its {len(members)} casts "
+                        f"have a {variable_for(var, 'reference')!r} sample; "
+                        "compared cast by cast"
+                    )
+                    continue
+                levels = _union_levels(sampled)
+                longest = max(len(v) for v in sampled)
                 if len(levels) > 2 * longest:
                     raise ValueError(
                         f"{entry!r}: its {len(members)} casts have {len(levels)} "
