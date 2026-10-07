@@ -653,6 +653,69 @@ def _boxes_overlap(box_a, box_b) -> bool:
     return _circular_overlap(lon_min_a, lon_max_a, lon_min_b, lon_max_b)
 
 
+#: Allowance, in degrees, added to each side of a *gridded* source's declared extent on
+#: an axis where that extent has zero width. The extent is the span of the build probe's
+#: cell-*centre* coordinates, so a model file holding one cell (or one row/column of
+#: them, for the other axis) declares a point -- which says nothing about the size of
+#: the cell around it, and a station well inside that cell, a few metres off its
+#: centre, would be "provably disjoint" from it and never compared. The pre-compare
+#: skip this feeds (:func:`ocean_skill.comparison._provably_disjoint_axes`) is only a
+#: read-free optimisation, so it errs generous: letting a pair through that turns out
+#: not to meet costs one read, skipping one that did meet costs the comparison. About 5
+#: km is deliberately modest -- not a model of the cell (unknowable without a read),
+#: only enough that an off-centre station inside a regional-model cell is not refused.
+#: Never applied to observation points (stations, casts, moorings) or to a gridded
+#: source's real, non-zero-width extent: for those the declared box is exact, and a
+#: station just outside a regional model must still be skipped.
+POINT_EXTENT_TOLERANCE_DEG = 0.05
+
+
+def _is_gridded(meta: dict[str, Any]) -> bool:
+    """Whether an entry describes a model/regular grid rather than an observation.
+
+    ``featureType: grid`` (:func:`ocean_skill.build.guess_feature_type`'s answer for
+    anything with two horizontal dimensions, and what a gridded climatology declares),
+    or a ``model`` key -- a ROMS entry carries ``model: roms``, and a hand-written
+    catalog need not also set ``featureType`` on it.
+    """
+    if str(meta.get("featureType") or "").lower() == "grid":
+        return True
+    return bool(meta.get("model"))
+
+
+def _declared_box(name: str) -> tuple[float, float, float, float] | None:
+    """Return ``name``'s declared lon/lat box as :func:`overlap` should see it.
+
+    A ``(lon_min, lat_min, lon_max, lat_max)`` tuple, or ``None`` when nothing is
+    declared: :func:`ocean_skill.comparison._domain_of` (longitude convention
+    normalised) plus one allowance -- a *gridded* source's zero-width axis is widened
+    by :data:`POINT_EXTENT_TOLERANCE_DEG` on each side (see that constant for why).
+    Axis by axis, so one row of cells (a real longitude extent, a single latitude)
+    keeps its exact longitude range. Returns a new tuple; the entry's own metadata
+    is never touched.
+    """
+    from ocean_skill.comparison import _domain_of
+
+    box = _domain_of(name)
+    if box is None:
+        return None
+    lon_min, lat_min, lon_max, lat_max = box
+    if lon_min != lon_max and lat_min != lat_max:
+        return box  # a real extent on both axes: nothing to widen, nothing to look up
+    try:
+        meta = resolve(name).metadata
+    except KeyError:
+        return box
+    if not _is_gridded(meta):
+        return box
+    pad = POINT_EXTENT_TOLERANCE_DEG
+    if lon_min == lon_max:
+        lon_min, lon_max = lon_min - pad, lon_max + pad
+    if lat_min == lat_max:
+        lat_min, lat_max = lat_min - pad, lat_max + pad
+    return lon_min, lat_min, lon_max, lat_max
+
+
 @dataclass(frozen=True)
 class Overlap:
     """Whether two sources' catalog-declared extents overlap in space and time.
@@ -697,10 +760,17 @@ def overlap(a: str, b: str) -> Overlap:
     Longitude is compared on the circle, convention-agnostic (0-360 vs
     +/-180, and a domain straddling the antimeridian) -- see
     :func:`_circular_overlap`.
-    """
-    from ocean_skill.comparison import _domain_of, _time_coverage_of
 
-    box_a, box_b = _domain_of(a), _domain_of(b)
+    A gridded source (``featureType: grid``, or a ``model`` entry such as ROMS)
+    whose declared extent has zero width on an axis -- a model file holding one
+    cell -- is widened by :data:`POINT_EXTENT_TOLERANCE_DEG` on that axis first: the
+    extent is built from cell *centres*, so it says nothing about the cell's size and
+    a station inside the cell would otherwise read as disjoint. Observation points
+    are never widened (see :func:`_declared_box`).
+    """
+    from ocean_skill.comparison import _time_coverage_of
+
+    box_a, box_b = _declared_box(a), _declared_box(b)
     space = None if box_a is None or box_b is None else _boxes_overlap(box_a, box_b)
 
     window_a, window_b = _time_coverage_of(a), _time_coverage_of(b)
