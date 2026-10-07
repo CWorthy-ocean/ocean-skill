@@ -5031,6 +5031,14 @@ class Comparison:
             if windows
             else None
         )
+        if self._interpolates_onto_profile():
+            # Interpolating onto a cast's instant needs the model steps on *both
+            # sides* of it, and a contiguous crop to the cast's own (day-padded)
+            # coverage can keep only one -- or none -- of them for a low-frequency
+            # model, the very case interpolation is for. The discrete target
+            # (see _reference_time_targets_uncached) already prunes the lane to just
+            # those bracketing steps, so the window has nothing left to save.
+            window = None
         if len(sources) > 1:
             # An ordered collection of discrete casts (a from_reference section,
             # the only way _reference_sources() ever returns more than one name)
@@ -5045,6 +5053,42 @@ class Comparison:
             lat = 0.5 * (bbox[1] + bbox[3])
             bbox = (lon, lat, lon, lat)
         return bbox, window
+
+    def _interpolates_onto_profile(self) -> bool:
+        """Report whether ``time_method`` interpolates onto one ``profile``'s instant.
+
+        A ``profile`` is a single instant, which the test lane is otherwise matched to
+        by the model step nearest it (:func:`ocean_skill.align._sample_test_at_instant`)
+        -- a match ``"interp"``/``"linear"`` has nothing to act on. Offering the cast's
+        own time as a discrete target (:meth:`_reference_time_targets_uncached`) hands
+        it to the machinery a mooring's times already travel through
+        (:func:`ocean_skill.align.subset_to_time_targets`), which interpolates the
+        whole lane -- free surface and depth frame included. A pair-spec select stays
+        unrouted, as it does everywhere this reads the reference's own times, and so
+        does a collection of casts (a section), which has no single instant.
+        """
+        sources = self._reference_sources()
+        return (
+            self.time_method in ("interp", "linear")
+            and not is_pair_spec(self.select)
+            and len(sources) == 1
+            and _feature_type(sources[0]) == "profile"
+        )
+
+    def _outside_the_record(self, start: Any, stop: Any):
+        """Return the ``NoValidData`` for a target the model's record misses."""
+        import pandas as pd
+
+        from ocean_skill.align import NoValidData
+
+        return NoValidData(
+            f"time_method={self.time_method!r} interpolates {self.test_name!r} onto "
+            f"{self.reference_name!r}'s own instant, which falls outside the model's "
+            f"record ({pd.Timestamp(start)} to {pd.Timestamp(stop)}) -- there is no "
+            "step on both sides to interpolate between, and quietly taking the "
+            "nearest one instead would be a different comparison. Leave time_method "
+            "at its default to match the nearest step, or drop this cast."
+        )
 
     def _reference_time_targets(self) -> np.ndarray | None:
         """Memoized :meth:`_reference_time_targets_uncached`.
@@ -5070,7 +5114,9 @@ class Comparison:
         fixed-position or repeat-visit reference -- :data:`POINT_FEATURE_TYPES`
         plus ``timeSeriesProfile``, the same population
         :meth:`_reference_narrowing` collapses to a point, minus ``profile``
-        (already a single instant, with nothing to prune between) and
+        (already a single instant, with nothing to prune between -- except under
+        ``time_method="interp"``, where that instant is itself the target to
+        interpolate onto: see :meth:`_interpolates_onto_profile`) and
         ``trajectory``/``trajectoryProfile`` (a moving position pairs on space
         *and* time together, which a time-only prune here could get wrong). A
         pair-spec select stays unrouted for the same reason
@@ -5130,7 +5176,11 @@ class Comparison:
         test_agg = aggregate_for(self.aggregate, "test")
         collapses_time = _collapses_time(test_agg)
         folds_time = _time_is_climatology(test_agg)
-        if not over_is_time and not collapses_time and not folds_time:
+        # A single profile has no time axis to keep, collapse or fold -- but under
+        # time_method="interp" its one instant is itself the target to interpolate
+        # the model onto (see _interpolates_onto_profile).
+        interp_profile = self._interpolates_onto_profile()
+        if not (over_is_time or collapses_time or folds_time or interp_profile):
             return None
         if is_pair_spec(self.select):
             return None
@@ -5145,7 +5195,7 @@ class Comparison:
         # windows can span the whole campaign, with the model's every step in
         # between read for nothing, so the featureType gate below only applies
         # to the single-source case.
-        if len(sources) == 1:
+        if len(sources) == 1 and not interp_profile:
             feature = _feature_type(sources[0])
             if feature not in POINT_FEATURE_TYPES and feature != "timeSeriesProfile":
                 return None
@@ -5183,6 +5233,18 @@ class Comparison:
         if not all_values:
             return None
         values = np.unique(np.concatenate(all_values))
+        if interp_profile and not collapses_time:
+            # Interpolation never extrapolates, so a cast outside the model's own
+            # catalog-declared record has nothing to land on -- refused here, read-
+            # free, before the lane is read at all (align() checks the lane itself
+            # too, for a source that declares no record). The record is declared to
+            # the day, padded a day each side (see _time_coverage_of), so a cast just
+            # outside it still reaches that second check.
+            test_cov = _time_coverage_of(self.test_name)
+            if test_cov is not None:
+                lo, hi = (np.datetime64(x) for x in test_cov)
+                if not ((values >= lo) & (values <= hi)).any():
+                    raise self._outside_the_record(*test_cov)
         # When a time aggregate collapses the axis (a profile-family {"time":
         # "mean"} station comparison, most often -- and, since the check above
         # never gates a casts collection on featureType, the from_reference
@@ -6309,6 +6371,24 @@ class Comparison:
             time_targets_method=tt_method,
             point_window_cells=test_cells,
         )
+        if (
+            t is not None
+            and time_targets is not None
+            and self._interpolates_onto_profile()
+        ):
+            # subset_to_time_targets drops a target the lane's own span does not
+            # bracket (with a warning) and, when that is every one of them, hands the
+            # lane back untouched -- which the nearest-step match below would then
+            # quietly snap to, however far. Interpolation was asked for and cannot
+            # happen: refuse the pair instead of answering a different question.
+            from ocean_skill.operators import resolve_dim
+
+            _tdim = resolve_dim(t, "T")
+            if _tdim is not None and _tdim in t.dims:
+                stamps = np.asarray(t[_tdim].values).astype("datetime64[ns]")
+                wanted = np.asarray(time_targets).astype("datetime64[ns]")
+                if stamps.shape != wanted.shape or not (stamps == wanted).all():
+                    raise self._outside_the_record(stamps.min(), stamps.max())
         self._warn_on_pair_spec_mismatch(t, r)
         # Each lane's resolved name, computed once: the plain-request definition check
         # reads them here, and they are stored on the aligned pair below so a later
@@ -10026,10 +10106,11 @@ def compare(
         One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
         ``"exact"`` -- how the two lanes are matched along a kept time axis.
         Doubles as the sample-matching knob against a fixed-position or
-        repeat-visit reference (a mooring, a revisited station), where
-        ``"nearest"`` (the default there) keeps only the closest model step
-        to each of the reference's own times and ``"interp"``/``"linear"``
-        interpolates onto them instead.
+        repeat-visit reference (a mooring, a revisited station) or a
+        ``profile``, where ``"nearest"`` (the default there) keeps only the
+        closest model step to each of the reference's own times (to the
+        cast's, for a profile) and ``"interp"``/``"linear"`` interpolates
+        onto them instead.
     depth_method
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"`` -- how
         the model is matched onto target depths: the nearest real level
@@ -10319,6 +10400,12 @@ def compare(
     the ``"auto"`` way: ``"interp"``/``"linear"`` is never passed on to
     :func:`ocean_skill.align.match_axis`, which still reads ``mean``/``nearest``/
     ``exact``/``auto`` for every other comparison (a gridded reference, a profile).
+    A ``profile`` reference takes ``"interp"`` too, with its one instant as the
+    target: the model is interpolated onto the cast's own time (free surface and
+    depth frame with it) instead of being matched to the nearest step, which is what
+    the default still does. Interpolation never extrapolates, so a cast outside the
+    model's record is skipped (``NoValidData``) rather than snapped to its nearest
+    step.
 
     ``depth_method`` is the vertical twin of ``time_method``, and applies whenever a
     depth-resolved lane is asked for -- an ADCP mooring or CTD profile
