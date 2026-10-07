@@ -20,6 +20,7 @@ truncated to the others' windows silently starves that reference of data.
 
 from __future__ import annotations
 
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
@@ -133,7 +134,12 @@ def _spy_crops(monkeypatch):
 
         monkeypatch.setattr(align, name, wrapper)
 
-    for name in ("subset_to_bbox", "subset_to_time", "subset_to_time_targets"):
+    for name in (
+        "subset_to_bbox",
+        "subset_to_time",
+        "preselect_time_targets",
+        "subset_to_time_targets",
+    ):
         spy(name)
     return seen
 
@@ -160,10 +166,14 @@ def test_prepare_source_cuts_time_before_space(monkeypatch):
     seen = _spy_crops(monkeypatch)
     da, _ = _prepare()
     assert da is not None
+    # time first (the window, then a pure-indexing pick of the steps the targets
+    # use), then space, and only then the targets' own work -- interpolation -- on the
+    # few cells that are left
     assert [name for name, _ in seen] == [
         "subset_to_time",
-        "subset_to_time_targets",
+        "preselect_time_targets",
         "subset_to_bbox",
+        "subset_to_time_targets",
     ]
 
 
@@ -360,3 +370,267 @@ def test_time_targets_before_the_spatial_crop_give_the_same_values(monkeypatch, 
         return float(field.isel(eta_rho=iy, xi_rho=ix).squeeze())
 
     assert at_point(da) == pytest.approx(at_point(expected_field), abs=1e-12)
+
+
+# -- the targets: indexing before the spatial crop, interpolation after it ------
+
+
+def _no_preselection(monkeypatch):
+    """Make the pre-selection a no-op: the bbox-then-targets order this replaces."""
+    monkeypatch.setattr(
+        "ocean_skill.align.preselect_time_targets",
+        lambda obj, targets, method="nearest": (obj, targets),
+    )
+
+
+def test_interpolation_runs_on_the_bracket_steps_and_the_windows_cells(monkeypatch):
+    """What reaches the targets' own work: a few steps of a few cells."""
+    ds = _model()
+    _stub(monkeypatch, ds)
+    handed = []
+    import ocean_skill.align as align
+
+    real = align.subset_to_time_targets
+
+    def spy(obj, targets, method="nearest"):
+        handed.append((dict(obj.sizes), obj["temp"].chunks is not None))
+        return real(obj, targets, method=method)
+
+    monkeypatch.setattr(align, "subset_to_time_targets", spy)
+    # three half-hour instants: brackets are steps 1-2, 5-6 and 100-101
+    targets = np.array([T0 + np.timedelta64(m, "m") for m in (90, 330, 6030)])
+    _prepare(
+        time_window=None,
+        time_targets=targets,
+        time_targets_method="interp",
+        point_window_cells=1,
+    )
+    ((sizes, lazy),) = handed
+    assert lazy
+    assert sizes["time"] == 6
+    assert (sizes["eta_rho"], sizes["xi_rho"]) == (
+        3,
+        3,
+    )  # the point window, not 10 x 12
+
+
+def test_contiguous_bracket_steps_are_taken_as_one_slice(monkeypatch):
+    ds = _model()
+    _stub(monkeypatch, ds)
+    isel_keys = []
+    real = xr.Dataset.isel
+
+    def spy(self, indexers=None, *args, **kwargs):
+        isel_keys.append(indexers if indexers is not None else kwargs)
+        return real(self, indexers, *args, **kwargs)
+
+    monkeypatch.setattr(xr.Dataset, "isel", spy)
+    targets = np.array([T0 + np.timedelta64(m, "m") for m in (90, 150, 210)])
+    _prepare(time_window=None, time_targets=targets, time_targets_method="interp")
+    on_time = [k["time"] for k in isel_keys if "time" in k]
+    # steps 1..4 are consecutive: one slice, no index array
+    assert isinstance(on_time[0], slice)
+    assert on_time[0] == slice(1, 5)
+
+
+@pytest.mark.parametrize("method", ["nearest", "interp"])
+def test_the_preselection_changes_no_value(monkeypatch, method):
+    ds = _model()
+    _stub(monkeypatch, ds)
+    # between steps, on a step, close to the first and to the last, and (for interp)
+    # one past the end of the record, which has nothing to interpolate between
+    targets = np.array(
+        [T0 + np.timedelta64(m, "m") for m in (5, 90, 600, 14395, 14500)]
+    )
+    kw = dict(time_window=None, time_targets=targets, time_targets_method=method)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with_it, _ = _prepare(**kw)
+        _no_preselection(monkeypatch)
+        without_it, _ = _prepare(**kw)
+    assert with_it["time"].size == without_it["time"].size > 1
+    xr.testing.assert_allclose(with_it, without_it, atol=0, rtol=0)
+
+
+def test_a_target_past_the_record_is_reported_once_with_the_records_own_span(
+    monkeypatch,
+):
+    _stub(monkeypatch, _model())
+    targets = np.array([T0 + np.timedelta64(m, "m") for m in (90, 14500)])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _prepare(time_window=None, time_targets=targets, time_targets_method="interp")
+    outside = [str(w.message) for w in caught if "fall outside" in str(w.message)]
+    assert len(outside) == 1
+    # the whole record's span (not the two bracket steps that happen to be left)
+    assert "2024-01-01T00:00" in outside[0]
+    assert "2024-01-10T23:00" in outside[0]
+
+
+def _messy(n=12):
+    """Return a dataset whose time axis is out of order and repeats a stamp."""
+    stamps = T0 + np.array([3, 1, 2, 2, 0, 5, 4, 7, 6, 9, 8, 11]) * np.timedelta64(
+        1, "h"
+    )
+    return xr.Dataset(
+        {"v": (("time", "x"), np.arange(n * 2.0).reshape(n, 2))},
+        coords={"time": stamps, "x": [0, 1]},
+    )
+
+
+@pytest.mark.parametrize("method", ["nearest", "interp"])
+@pytest.mark.parametrize("messy", [False, True])
+def test_the_preselection_leaves_the_targets_what_they_would_have_got(method, messy):
+    """The two share one decision about which steps a target uses."""
+    from ocean_skill.align import preselect_time_targets, subset_to_time_targets
+
+    if messy:
+        ds = _messy()
+    else:
+        ds = _model().isel(time=slice(0, 12))[["temp"]]
+    targets = np.array([T0 + np.timedelta64(m, "m") for m in (20, 135, 400, 5000)])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        direct = subset_to_time_targets(ds, targets, method=method)
+        narrowed, left = preselect_time_targets(ds, targets, method=method)
+        via = subset_to_time_targets(narrowed, left, method=method)
+    name = next(v for v in ("temp", "v") if v in ds.data_vars)
+    xr.testing.assert_allclose(via[name], direct[name], atol=0, rtol=0)
+    assert narrowed.sizes["time"] <= ds.sizes["time"]
+
+
+def test_the_preselection_changes_nothing_when_there_is_nothing_to_cut():
+    from ocean_skill.align import preselect_time_targets
+
+    ds = _model().isel(time=slice(0, 3))
+    every = np.array([T0 + np.timedelta64(m, "m") for m in (0, 60, 120)])
+    same, left = preselect_time_targets(ds, every, method="nearest")
+    assert same is ds
+    assert left is every
+    for empty in (None, np.array([], dtype="datetime64[ns]")):
+        same, _ = preselect_time_targets(ds, empty, method="interp")
+        assert same is ds
+    single = ds.isel(time=slice(0, 1))
+    same, _ = preselect_time_targets(single, every, method="interp")
+    assert same is single
+
+
+# -- the same on real comparisons: a mooring and a cast on the tidal fixture ----
+
+
+def _comparison_values(monkeypatch, make, noop):
+    if noop:
+        _no_preselection(monkeypatch)
+    c = make()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return np.asarray(c.aligned["test"]).reshape(-1)
+
+
+def _tidal_install(monkeypatch, name, data, meta):
+    from tests._tidal_roms import tidal_roms
+
+    ds, roms_meta = tidal_roms()
+    ds = ds.assign_coords(time=ds["time"].values.astype("datetime64[ns]"))
+    sources = {"his": (ds, roms_meta), name: (data, meta)}
+    monkeypatch.setattr(osk, "read", lambda n, **kw: sources[n][0])
+    monkeypatch.setattr("ocean_skill.sources.read", lambda n, **kw: sources[n][0])
+    monkeypatch.setattr(
+        catalog, "resolve", lambda n: SimpleNamespace(metadata=sources[n][1])
+    )
+    point = (200.01, 50.01, 200.01, 50.01)  # the middle cell of the fixture's grid
+    monkeypatch.setattr(
+        "ocean_skill.comparison._domain_of", lambda n: None if n == "his" else point
+    )
+    monkeypatch.setattr(
+        "ocean_skill.comparison._outline_of", lambda n, convention=None: None
+    )
+
+
+SPEC = {"test": "height", "reference": "obs", "standard_name": "sea_water_temperature"}
+
+
+def _mooring_comparison(monkeypatch, time_method):
+    import pandas as pd
+
+    from ocean_skill.comparison import Comparison
+
+    frame = pd.DataFrame(
+        {
+            "time": pd.date_range("2024-07-01 00:30", periods=3, freq="h"),
+            "lon": 200.01,
+            "lat": 50.01,
+            "obs (m)": 0.0,
+        }
+    )
+    meta = {
+        "featureType": "timeSeries",
+        "nominal_depth_m": 3.0,
+        "depth_convention": {"origin": "surface"},
+    }
+    _tidal_install(monkeypatch, "pier", frame, meta)
+    return lambda: Comparison(
+        reference="pier",
+        test="his",
+        variable=SPEC,
+        select={"depth": 3.0},
+        over="time",
+        depth_method="interp",
+        time_method=time_method,
+        cache=False,
+    )
+
+
+def _cast_comparison(monkeypatch, time_method):
+    import pandas as pd
+
+    from ocean_skill.comparison import Comparison
+
+    cast = pd.DataFrame(
+        {
+            "time": pd.Timestamp("2024-07-01 00:30"),
+            "lon": 200.01,
+            "lat": 50.01,
+            "depth (m)": [3.0, 5.0],
+            "obs (m)": [0.0, 0.0],
+        }
+    )
+    _tidal_install(monkeypatch, "cast", cast, {"featureType": "profile"})
+    return lambda: Comparison(
+        reference="cast",
+        test="his",
+        variable=SPEC,
+        select={"depth": [3.0, 5.0]},
+        over="Z",
+        depth_method="interp",
+        time_method=time_method,
+        cache=False,
+    )
+
+
+@pytest.mark.parametrize("time_method", ["auto", "interp"])
+@pytest.mark.parametrize("build", [_mooring_comparison, _cast_comparison])
+def test_a_comparison_gets_the_same_values_either_way(monkeypatch, build, time_method):
+    import ocean_skill.align as align
+
+    make = build(monkeypatch, time_method)
+    picked = []
+    real = align.preselect_time_targets
+
+    def counting(obj, targets, method="nearest"):
+        picked.append(method)
+        return real(obj, targets, method=method)
+
+    monkeypatch.setattr(align, "preselect_time_targets", counting)
+    with_it = _comparison_values(monkeypatch, make, noop=False)
+    if time_method == "interp" or build is _mooring_comparison:
+        assert picked, "the pre-selection never ran: the comparison proves nothing"
+    without_it = _comparison_values(monkeypatch, make, noop=True)
+    np.testing.assert_array_equal(with_it, without_it)
+    if time_method == "interp":
+        # interpolated onto the observation's own instants: zeta is 1.5, -1.5, -1.5
+        expected = {
+            _mooring_comparison: [-1.5, -4.5, -4.5],
+            _cast_comparison: [-1.5, -3.5],
+        }[build]
+        np.testing.assert_allclose(with_it, expected)

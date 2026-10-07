@@ -4097,14 +4097,28 @@ def prepare_source(
         from ocean_skill.align import subset_to_time
 
         obj = subset_to_time(obj, time_window)
+    # The targets are applied in two halves, one either side of the spatial crop. The
+    # steps they use are picked out by indexing alone first -- time is the long axis,
+    # and picking is a slice -- so the spatial crop has only those to slice; the
+    # targets' own work (for "interp", the interpolation) comes after it, on the few
+    # cells that are left. Interpolating before the crop would interpolate whole-domain
+    # fields, which xarray's dask `interp` does by concatenating the time chunks per
+    # output block. See align.preselect_time_targets.
+    pending_targets = time_targets
     if pre_crop_time and time_targets is not None:
-        from ocean_skill.align import subset_to_time_targets
+        from ocean_skill.align import preselect_time_targets
 
-        obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
+        obj, pending_targets = preselect_time_targets(
+            obj, time_targets, method=time_targets_method
+        )
     if pre_crop and bbox is not None:
         from ocean_skill.align import subset_to_bbox
 
         obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
+    if pre_crop_time and time_targets is not None:
+        from ocean_skill.align import subset_to_time_targets
+
+        obj = subset_to_time_targets(obj, pending_targets, method=time_targets_method)
     if roms_velocity_point:
         # Re-derive now, after every space/time crop above -- the raw staggered
         # components this re-derives from are already narrowed to (a small halo
