@@ -82,8 +82,12 @@ __all__ = [
 ]
 
 #: Fallback variable → CF standard_name map for ROMS/MARBL output, which mostly lacks
-#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win, and
-#: after this map ``_probe`` also tries :func:`ocean_skill.vocabulary.resolve_name` --
+#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win --
+#: except, for ROMS output, the grid variables (``h``, ``mask_rho``, ... -- never
+#: mapped, see :data:`ocean_skill.roms.GRID_VARIABLE_NAMES`) and ``zeta``, which is
+#: always the entry below whatever the file says, since the loader finds the grid and
+#: the free surface by those names. After this map ``_probe`` also tries
+#: :func:`ocean_skill.vocabulary.resolve_name` --
 #: this map exists for names the shared vocabulary deliberately doesn't carry (``zeta``,
 #: ``u``, ``v``, ``hbls``, ``FG_CO2`` are too short/generic to be global aliases); most
 #: of the tracer names below (``NO3``, ``PO4``, ...) are already in the vocabulary too,
@@ -2044,6 +2048,12 @@ def _probe(
     apart from anything the caller declares so a rebuild never overwrites a person's
     word. ROMS output is skipped for that: its ``s_rho`` is a stretched coordinate, not
     an observation's depth.
+
+    ROMS output is also the one place a file's own ``standard_name`` does *not* win
+    (see :data:`ocean_skill.roms.GRID_VARIABLE_NAMES`): its grid variables are never
+    recorded, and ``zeta`` is always recorded as ``sea_surface_height_above_geoid``,
+    because :mod:`ocean_skill.roms` finds them by those names and a rename away from
+    them takes the depth coordinate and the land mask with it.
     """
     if hasattr(ds, "columns"):
         return _probe_dataframe(ds, qc=qc, declared=declared, subject=subject)
@@ -2114,7 +2124,16 @@ def _probe(
 
     # --- variable -> standard_name (declared attrs win, then name_map, then the
     # shared vocabulary for anything neither of those two covers) ---
+    from ocean_skill.roms import FREE_SURFACE_NAMES, GRID_VARIABLE_NAMES
     from ocean_skill.vocabulary import is_known, resolve_name
+
+    # Decided up front because ROMS output breaks the "declared attrs win" rule below:
+    # the loader reads its grid (``h``, ``mask_rho``, ``angle``, ...) and free surface
+    # by the model's own names, so a file's ``standard_name`` on one of them (``h``:
+    # ``sea_floor_depth``, ``zeta``: ``sea_surface_elevation_anomaly``) must not become
+    # a rename that hides it from the loader -- see ocean_skill.roms.standardize.
+    roms_md = _roms_metadata(ds)  # {} unless this is ROMS output
+    is_roms = bool(roms_md)
 
     std: dict[str, str] = {}
     auxiliary: dict[str, str] = {}
@@ -2122,11 +2141,15 @@ def _probe(
     claimed: set[str] = set()
     for var in ds.data_vars:
         varname = str(var)
+        if is_roms and varname in GRID_VARIABLE_NAMES:
+            continue  # kept under its own name, never mapped
         sn = (
             ds[var].attrs.get("standard_name")
             or (name_map.get(varname) if name_map else None)
             or (resolve_name(varname) if is_known(varname) else None)
         )
+        if is_roms and varname == "zeta":
+            sn = FREE_SURFACE_NAMES[-1]  # whatever the file or the table calls it
         if not sn:
             continue
         _base, _, modifier = str(sn).partition(" ")
@@ -2152,7 +2175,7 @@ def _probe(
     md["featureType"] = ftype
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))
-    md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
+    md.update(roms_md)  # model-specific block when this is ROMS output
     if md.get("model") != "roms" and coords["vertical"] is not None:
         vertical = coords["vertical"]
         found = depth_convention.infer_from_coordinate(vertical.name, vertical.attrs)

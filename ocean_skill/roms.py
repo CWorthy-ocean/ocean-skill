@@ -37,8 +37,10 @@ import xarray as xr
 
 __all__ = [
     "AREA_COORD",
+    "FREE_SURFACE_NAMES",
     "GEOGRAPHIC_VELOCITY_NAMES",
     "GRID_RELATIVE_VELOCITY_NAMES",
+    "GRID_VARIABLE_NAMES",
     "WEIGHT_COORD",
     "add_depth_coord",
     "add_interface_coord",
@@ -92,6 +94,65 @@ def derived_geographic_velocities(present) -> list[str]:
     if set(GRID_RELATIVE_VELOCITY_NAMES) <= set(present):
         return list(GEOGRAPHIC_VELOCITY_NAMES)
     return []
+
+
+#: The ROMS grid and s-coordinate variables the loader looks up by their *own* names:
+#: ``h`` (depth coordinate, water-column bounds), ``mask_rho`` (land mask), ``angle``
+#: (velocity rotation), ``pm``/``pn`` (cell area), ``Cs_r``/``sigma_r``/``hc``/
+#: ``Vtransform`` (the s-coordinate -> ``z_rho`` transform, ``Cs_w``/``sigma_w`` for
+#: ``z_w``), ``lon_rho``/``lat_rho`` (positions), and the staggered/auxiliary members
+#: of the same families. A file may well give one of them a ``standard_name`` of its
+#: own (``h``: ``sea_floor_depth``, ``mask_rho``: ``land_binary_mask``), and the build
+#: probe records attributes ahead of its fallback table -- but a renamed ``h`` is no
+#: longer found, so no depth coordinate, no land mask. Hence this one list, read by both
+#: sides: :func:`ocean_skill.build._probe` never records these names in a source's
+#: ``standard_names``, and :func:`standardize` never renames them, which also protects
+#: catalogs written before the probe knew better.
+GRID_VARIABLE_NAMES = (
+    # horizontal grid: positions, land masks, metrics, rotation, Coriolis
+    "lon_rho",
+    "lat_rho",
+    "lon_u",
+    "lat_u",
+    "lon_v",
+    "lat_v",
+    "lon_psi",
+    "lat_psi",
+    "mask_rho",
+    "mask_u",
+    "mask_v",
+    "mask_psi",
+    "wetdry_mask_rho",
+    "wetdry_mask_u",
+    "wetdry_mask_v",
+    "wetdry_mask_psi",
+    "h",
+    "angle",
+    "pm",
+    "pn",
+    "f",
+    # vertical s-coordinate: the values, the stretching and the transform's parameters
+    "s_rho",
+    "s_w",
+    "sigma_r",
+    "sigma_w",
+    "Cs_r",
+    "Cs_w",
+    "hc",
+    "Vtransform",
+    "Vstretching",
+    "theta_s",
+    "theta_b",
+    "Tcline",
+)
+
+#: The names a ROMS source's free surface goes by: ``zeta`` as the model writes it, and
+#: the standard name the catalog's ``standard_names`` renames it to (build.py's
+#: ``ROMS_STANDARD_NAMES``). The only two :func:`_zeta_of` looks for, so the only two
+#: :func:`standardize` will leave the free surface under -- anything else a catalog (or
+#: a file's own ``standard_name``) calls it, it is not found and the depth coordinate
+#: silently rides a flat ``zeta = 0``. The last is the standard name the probe records.
+FREE_SURFACE_NAMES = ("zeta", "sea_surface_height_above_geoid")
 
 #: Coordinate name carrying per-cell horizontal area, so a spatial mean can honour
 #: it — mirrors :data:`WEIGHT_COORD`'s "weights ride on the data" pattern:
@@ -381,6 +442,38 @@ def _normalize_classic_layout(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def _standard_name_renames(ds: xr.Dataset, meta: dict[str, Any]) -> dict[str, str]:
+    """Return the ``{variable: standard_name}`` renames :func:`standardize` applies.
+
+    The catalog entry's ``standard_names`` map, restricted to what ``ds`` carries and
+    less what the loader could not do without. Two rules, both there for catalogs
+    written before :func:`ocean_skill.build._probe` stopped recording the offending
+    entries (a store whose own ``standard_name`` attributes beat the probe's fallback
+    table put them there):
+
+    * a name in :data:`GRID_VARIABLE_NAMES` is never renamed. The depth coordinate, the
+      land mask and the velocity rotation look ``h``/``mask_rho``/``angle``/... up by
+      those names, and a renamed one raised ``KeyError: "No variable named 'h'"`` or --
+      for the mask -- silently left land unmasked;
+    * ``zeta`` is renamed only to a name :func:`_zeta_of` finds
+      (:data:`FREE_SURFACE_NAMES`). Any other target (``sea_surface_elevation_anomaly``,
+      ...) is replaced by ``sea_surface_height_above_geoid`` -- still the CF name a
+      catalog would give a free surface, but one the depth coordinate can see, where a
+      stranger would fall back to a flat ``zeta = 0`` with no error.
+
+    Every other mapping is applied as written.
+    """
+    rename: dict[str, str] = {}
+    for name, target in (meta.get("standard_names") or {}).items():
+        if name not in ds.variables or name in GRID_VARIABLE_NAMES:
+            continue
+        if name == "zeta" and target not in FREE_SURFACE_NAMES:
+            target = FREE_SURFACE_NAMES[-1]
+        if target != name:
+            rename[name] = target
+    return rename
+
+
 def standardize(
     ds: xr.Dataset, meta: dict[str, Any], *, derive_velocity: bool = False
 ) -> xr.Dataset:
@@ -392,7 +485,11 @@ def standardize(
         Raw ROMS output opened per the catalog entry (rho-point fields).
     meta
         The catalog entry ``metadata`` (``grid``, ``vertical``, ``standard_names``,
-        ``reference_date``/``time_*``).
+        ``reference_date``/``time_*``). ``standard_names`` renames variables to their
+        CF names, except the grid/vertical variables (:data:`GRID_VARIABLE_NAMES`),
+        which keep their own, and ``zeta``, which only ever lands on a name the depth
+        coordinate can find (:data:`FREE_SURFACE_NAMES`) -- see
+        :func:`_standard_name_renames`.
     derive_velocity
         Whether to derive true geographic east/north velocity from the staggered
         grid-relative components (see :func:`_add_geographic_velocity`) here, up
@@ -436,11 +533,9 @@ def standardize(
             }
         )
 
-    # rename model variable names -> CF standard_names
-    rename = {
-        k: v for k, v in (meta.get("standard_names") or {}).items() if k in ds.variables
-    }
-    ds = ds.rename(rename)
+    # rename model variable names -> CF standard_names (see _standard_name_renames:
+    # never the grid/vertical variables, and ``zeta`` only to a name _zeta_of knows)
+    ds = ds.rename(_standard_name_renames(ds, meta))
 
     # derive TRUE geographic east/north velocity from the staggered grid-relative
     # components + the grid angle, before the mask loop below so the new rho-dim
@@ -522,10 +617,9 @@ def _zeta_of(ds: xr.Dataset) -> xr.DataArray:
     coordinates, the matching frame and the water-column bounds all share, so none of
     them can quietly use a different surface from the others.
     """
-    if "zeta" in ds.variables:
-        return ds["zeta"]
-    if "sea_surface_height_above_geoid" in ds.variables:
-        return ds["sea_surface_height_above_geoid"]
+    for name in FREE_SURFACE_NAMES:
+        if name in ds.variables:
+            return ds[name]
     return xr.zeros_like(ds["h"])  # no free-surface field: use zeta = 0
 
 
