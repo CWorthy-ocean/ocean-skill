@@ -198,8 +198,25 @@ def counted_pipeline(aligned):
     calls = {"n": 0}
     test, reference = aligned["test"], aligned["reference"]
 
+    # Mirrors comparison._prepare's signature keyword for keyword: prepare_source
+    # passes every one of them on each call, so a stub that drops any (it once lacked
+    # literal_depths) raises TypeError before the cache is even consulted. None of
+    # them matters here -- the stub answers from ``meta`` alone.
     def fake_prepare(
-        obj, meta, variable, select, aggregate=None, *, source=None, detide=None
+        obj,
+        meta,
+        variable,
+        select,
+        aggregate=None,
+        *,
+        source=None,
+        detide=None,
+        literal_depths=False,
+        point_window=False,
+        depth_method="nearest",
+        over=None,
+        depth_convention=None,
+        obs_convention=None,
     ):
         calls["n"] += 1
         return (test, None) if meta.get("model") == "roms" else (reference, 100.0)
