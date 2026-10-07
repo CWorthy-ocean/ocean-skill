@@ -15,7 +15,7 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -1218,6 +1218,14 @@ def _shared_slab(source: str, qc: Any):
     caller falls straight back to :func:`ocean_skill.sources.read`.
     """
     return _SHARED_SLABS.get(_shared_slab_key(source, qc))
+
+
+#: How many prepared-lane cache hits :func:`prepare_source` has served this process.
+#: Read before and after a lane is prepared (:meth:`Comparison._prepare_lane`) rather
+#: than returned or passed as a callback, so :func:`prepare_source`'s signature -- which
+#: tests and callers stub -- is untouched. A comparison that reused a saved lane says so
+#: in one line (:meth:`Comparison._report_cache_use`).
+_LANE_HITS = 0
 
 
 def _variables_needed(obj, variables: Sequence[Any]) -> set[str] | None:
@@ -3194,8 +3202,8 @@ def _prepare(
                         f"{source!r}: an explicit depth list past the observed "
                         "range only applies to a discrete depth list "
                         '(depths=[...] or select={"depth": [...]}) -- a '
-                        '{"min", "max"} band still takes the levels inside it, '
-                        "clamped to the nearest one when none fall inside.",
+                        '{"min", "max"} band still takes the levels inside it '
+                        "(and is an error when none fall inside).",
                         stacklevel=_stacklevel.find(),
                     )
                 # Observational products report at standard levels, so a band is just
@@ -3205,7 +3213,24 @@ def _prepare(
                 inside = np.where((levels >= depth["min"]) & (levels <= depth["max"]))[
                     0
                 ]
-                if inside.size == 0:  # band falls between levels; take the nearest
+                if inside.size == 0:
+                    point_like = str(meta.get("featureType") or "")
+                    if point_like in _SINGLE_POSITION_FEATURE_TYPES:
+                        # A cast, a repeat-visit station or a one-instrument mooring
+                        # has *no* data in a layer none of its levels falls in: taking
+                        # the nearest level would silently pool an out-of-range depth
+                        # into the layer's average. (Compare/Comparison refuse this
+                        # earlier, in _depth_request_problem; this is the safety net
+                        # for anything that reaches the lane directly.)
+                        problem = _no_data_in_layer(
+                            [(float(depth["min"]), float(depth["max"]))],
+                            np.unique(levels[np.isfinite(levels)]),
+                        )
+                        raise ValueError(
+                            f"{source!r} {problem.reason}. {problem.advice}".strip()
+                        )
+                    # A gridded product's standard levels are all it has, so a band
+                    # between them takes the nearest one.
                     inside = [int(np.abs(levels - depth["min"]).argmin())]
                 attrs = dict(da.attrs)
                 da = da.isel({zname: list(inside)})
@@ -3979,6 +4004,8 @@ def prepare_source(
                     da_hit = _require_reduced(
                         da_hit, require_reduced, source, keep=require_reduced_keep
                     )
+                global _LANE_HITS
+                _LANE_HITS += 1
                 return da_hit, depth_hit
 
     # An ERDDAP table is fetched whole in one request, so the time narrowing below has
@@ -4489,6 +4516,24 @@ def _section_extras(
     return extras
 
 
+class _DerivationPlan(NamedTuple):
+    """What :meth:`Comparison._derivation_plan` decided.
+
+    ``basic`` is the basic comparison the request derives from, or ``None`` when it
+    cannot (or need not) be; ``reason`` says why either way; ``args`` are the
+    ``select``/``aggregate``/``feature_type`` :func:`ocean_skill.pairs.derive` is called
+    with, and ``obs_levels`` the levels (m, positive down) the saved pairs sit at --
+    empty for a station at the surface, whose pairs have no level to name. ``attrs``
+    are attributes the derived pair gains (a layer's ``actual_depth``/``depth_band``).
+    """
+
+    basic: Any
+    reason: str
+    args: dict[str, Any]
+    obs_levels: list[float]
+    attrs: dict[str, Any] | None = None
+
+
 class Comparison:
     """One reference↔test comparison for a single variable at a single depth.
 
@@ -4624,6 +4669,9 @@ class Comparison:
         # fails open (None, or "let the real prepare decide") on a name that
         # does not resolve, which this joined display name never does.
         self._section_casts = list(section_casts) if section_casts else None
+        # Read by _point_depth_applies, which the over= inference just below asks (see
+        # _default_depth_is_own_levels); _sibling flips it to True on the twin it makes.
+        self._is_pairs_base = False
         self.reference_name = reference
         self.test_name = test
         # A plain name resolves through the vocabulary (short name, canonical
@@ -4691,18 +4739,14 @@ class Comparison:
         # asked for one lon/lat is exactly as reduced as a mooring is by nature). The
         # reason is kept so the family this ends up choosing can be traced to what
         # chose it.
+        # Remembered, because it is only an *inferred* axis that is read through the
+        # default depth (_resolve_default_depth) standing in for what has not been
+        # filled in yet -- a repeat-visit station's own levels keep its depth axis,
+        # which is part of what its featureType implies -- so the axis is the same
+        # before and after the first align() (see _infer_over's assume_default_depth).
+        self._over_implied = over is None
         if over is None:
-            over, self.over_reason = _implied_over(
-                reference,
-                select_for(self.select, "reference"),
-                aggregate_for(self.aggregate, "reference"),
-            )
-            if over is None and self._point_select_implies_time():
-                over = "time"
-                self.over_reason = "the select narrows the reference to one position"
-            elif over is None and self._spatial_mean_implies_time():
-                over = "time"
-                self.over_reason = "the aggregate collapses space to one box mean"
+            over, self.over_reason = self._infer_over(assume_default_depth=True)
         else:
             self.over_reason = "over= as asked"
         self.over = over
@@ -4759,6 +4803,17 @@ class Comparison:
         # Memoized the same way, for the same reason (a catalog lookup, and ``None`` --
         # "the reference resolved no frame" -- is itself a result worth keeping).
         self._depth_frame_cache = _UNSET
+        # Point-like references answer a variant (a time slice, a depth band, a monthly
+        # mean...) from one saved *basic* comparison rather than re-reading the model
+        # -- see _derivation_plan. _is_pairs_base marks the basic comparison itself,
+        # which must never try to derive from itself; _quiet keeps it from printing its
+        # own cache line, so the user's comparison says one thing (see
+        # _report_cache_use).
+        self._depth_default_done = False
+        self._quiet = False
+        self._derivation_cache = _UNSET
+        self._cache_note: str | None = None
+        self._lane_hit = False
         self._validate_section_request()
 
     def _validate_section_request(self) -> None:
@@ -4897,6 +4952,48 @@ class Comparison:
                     "-- the two lanes' native verticals share no axis, so there is "
                     "no default to guess: select={..., 'depth': [50, 200, ...]}."
                 )
+
+    def _default_depth_is_own_levels(self) -> bool:
+        """Whether :meth:`_resolve_default_depth` will write the reference's own levels.
+
+        Read-free: only the catalog's featureType and the request's own shape are asked,
+        never the levels themselves -- a cast or a repeat-visit station asked for no
+        depth at all stands on its own levels (a list: depth not collapsed), which is
+        all the axis decision needs to know. A mooring's default is one scalar depth (or
+        the surface), which collapses depth exactly as the unfilled default does, so it
+        needs no stand-in.
+        """
+        if _feature_type(self.reference_name) not in PROFILE_FEATURE_TYPES:
+            return False
+        if not self._point_depth_applies() or is_pair_spec(self.select):
+            return False
+        return not any(k in self.select for k in _ANY_VERTICAL_KEYS)
+
+    def _infer_over(self, assume_default_depth: bool = False) -> tuple[str | None, str]:
+        """Return ``(over, why)`` for a comparison that was not told its axis.
+
+        The reference's featureType decides (:func:`_implied_over`); failing that, a
+        select that pins the reference to one position, or an aggregate that reduces it
+        to one box mean, implies time.
+
+        ``assume_default_depth`` reads a request that names no depth as the default
+        :meth:`_resolve_default_depth` is about to write (see
+        :meth:`_default_depth_is_own_levels`), so the axis is decided once, at
+        construction, and does not move when the first :meth:`align` fills it in.
+        """
+        ref_select = select_for(self.select, "reference")
+        if assume_default_depth and self._default_depth_is_own_levels():
+            ref_select = {**ref_select, "depth": [0.0]}  # a stand-in for the levels
+        over, why = _implied_over(
+            self.reference_name,
+            ref_select,
+            aggregate_for(self.aggregate, "reference"),
+        )
+        if over is None and self._point_select_implies_time():
+            return "time", "the select narrows the reference to one position"
+        if over is None and self._spatial_mean_implies_time():
+            return "time", "the aggregate collapses space to one box mean"
+        return over, why
 
     def _point_select_implies_time(self) -> bool:
         """Whether the select alone narrows the reference to a place worth a line.
@@ -5597,6 +5694,13 @@ class Comparison:
         # itself just changed, so a pair cached before this option existed must
         # never be mistaken for one built under the new default.
         extra["_depth_method"] = self.depth_method
+        # A variant answered from the saved basic comparison is arithmetic on pairs, not
+        # the lanes' own reduction (a band is a plain mean of the obs levels, a time
+        # aggregate is taken over pairs), so its numbers differ from what the lane
+        # pipeline would give for the same select/aggregate -- the two must never share
+        # an entry. Decided read-free of the model (see _derivation_plan).
+        if self._derivation_plan()[0] is not None:
+            extra["_derived"] = "pairs"
         # What the reference's catalog entry says about its depths and its clock is
         # invisible to everything above: declaring it surface-referenced (or its naive
         # stamps local) changes every value of the aligned pair under an identical
@@ -5734,6 +5838,506 @@ class Comparison:
             ),
         )
 
+    # -- what a point reference can be asked for ---------------------------------
+    def _point_depth_applies(self) -> bool:
+        """Whether this comparison's depth request is a point reference's to answer.
+
+        True for a plain (non-pair-spec) request against a cast, a repeat-visit station
+        or a mooring, asking for a depth at all: not a calculated diagnostic (no depth),
+        a transect/slab/section (its own vertical), or an isopycnal request.
+        """
+        if self._is_pairs_base or self._section_casts:
+            return False
+        if _feature_type(self.reference_name) not in _SINGLE_POSITION_FEATURE_TYPES:
+            return False
+        if _is_calculated(self.variable) or is_pair_spec(self.variable):
+            return False
+        ref_select = select_for(self.select, "reference")
+        if "transect" in ref_select or any(k in ref_select for k in _ISOPYCNAL_KEYS):
+            return False
+        from ocean_skill.operators import slab_axis
+
+        return slab_axis(ref_select, aggregate_for(self.aggregate, "reference")) is None
+
+    def _resolve_default_depth(self) -> None:
+        """Give a point reference asked for no depth the depth :func:`compare` would.
+
+        The model's surface is the default for a map, a gridded reference and a surface
+        buoy, but not for a cast, a repeat-visit station or a mooring at depth, which
+        have no surface measurement. :func:`compare` fills those in before it builds the
+        comparison -- a mooring's own depth, a cast's own levels
+        (:func:`_profile_depth_plan`) -- and so does this, once, for a
+        :class:`Comparison` built directly with no vertical key, so the two routes ask
+        the same question (and share a cache entry). A reference with nothing to fill in
+        (a surface buoy) is left on the surface default (written down as such); a
+        mooring that declares no depth, and a repeat-visit station whose axis the
+        caller named (``over=``), are left for :meth:`_check_depth_request` to refuse.
+        """
+        if self._depth_default_done:
+            return
+        self._depth_default_done = True
+        if not self._point_depth_applies() or is_pair_spec(self.select):
+            return
+        if any(k in self.select for k in _ANY_VERTICAL_KEYS):
+            return
+        reference_agg = aggregate_for(self.aggregate, "reference")
+        try:
+            values, _, _ = _profile_depth_plan(
+                self.reference_name,
+                self.select,
+                None if self._over_implied else self.over,
+                False,
+                "depth",
+                (SURFACE,),
+                None,
+                {},
+                ref_time_collapsed=_time_collapsed(self.select, reference_agg),
+                ref_time_climatology=_time_is_climatology(reference_agg),
+                aggregate=reference_agg,
+                detide=self.detide,
+            )
+        except Exception:
+            return  # nothing to fill in; _check_depth_request says what is wrong
+        if not values:
+            return
+        depth = values[0]
+        if _asks_for_surface(depth):
+            # the surface is a surface buoy's own default: written down, as compare()
+            # does, so the two routes (and the variants derived from it) share one entry
+            if not _reference_at_surface(self.reference_name):
+                return
+            depth = SURFACE
+        self.select = {**self.select, "depth": depth}
+        self._derivation_cache = _UNSET
+        # over= is not recomputed: it was decided at construction from the shape of
+        # this very default (_infer_over's assume_default_depth), read-free.
+
+    def _check_depth_request(self) -> None:
+        """Refuse a depth a point reference has no data at, before anything is read.
+
+        A cast, a repeat-visit station and a mooring at depth have no surface
+        measurement, so ``"surface"`` (alone, inside a list, or the unset default that
+        :meth:`_resolve_default_depth` could not replace) raises a ``ValueError``
+        naming the shallowest level it does have. So does a mooring that declares no
+        depth (nothing says it is at the surface: declare it, or name a depth). A depth
+        band that holds a mooring's one instrument depth is its data in that layer; one
+        that does not has none and raises too, as does a band none of a cast's or
+        station's levels falls in. See :func:`_depth_request_problem`.
+        """
+        if not self._point_depth_applies():
+            return
+        ref_select = select_for(self.select, "reference")
+        depth = next((ref_select[k] for k in _VERTICAL_KEYS if k in ref_select), None)
+        problem = _depth_request_problem(self.reference_name, depth)
+        if problem is not None:
+            raise ValueError(
+                f"{self.reference_name!r} {problem.reason}. {problem.advice}".strip()
+            )
+
+    # -- variants answered from saved pairs ---------------------------------------
+    def _sibling(self, select: dict[str, Any], **overrides: Any) -> Comparison:
+        """Return a comparison like this one with its own ``select``, no variant knobs.
+
+        The basic comparison (see :meth:`_derivation_plan`) is
+        this request with the *variant* parts taken off -- no aggregate, no detide, no
+        demeaning, ``over`` left to the featureType -- and everything that decides which
+        model-data pairs exist (variable, method, qc, matching knobs, depth frame) kept.
+        Marked as a base so it never tries to derive from itself, and quiet so
+        the user's own comparison is the one that speaks (:meth:`_report_cache_use`).
+        """
+        kwargs: dict[str, Any] = {
+            "reference": self.reference_name,
+            "test": self.test_name,
+            "variable": self.variable,
+            "select": select,
+            "aggregate": None,
+            "method": self.method,
+            "over": None,
+            "time_method": self.time_method,
+            "depth_method": self.depth_method,
+            "depth_origin": self.depth_origin,
+            "tolerance": self.tolerance,
+            "bin_anchor": self.bin_anchor,
+            "min_coverage": self.min_coverage,
+            "min_pairs": self.min_pairs,
+            "metrics": self.metric_names,
+            "label": self.label,
+            "cache": self.cache,
+            "qc": self.qc,
+            "subtract_mean": False,
+            "detide": False,
+            "literal_depths": False,
+        }
+        kwargs.update(overrides)
+        twin = Comparison(**kwargs)
+        twin._is_pairs_base = True
+        twin._quiet = True
+        return twin
+
+    def _derivation_plan(self) -> _DerivationPlan:
+        """Whether this request can be answered from saved pairs, and from which.
+
+        Memoized: it is asked by :attr:`_cache_key` (a derived result must never share
+        an entry with the lane pipeline's, whose numbers differ) and by :meth:`align`.
+        Reads the *reference* (a cast's own levels) but never the model, and fails open
+        -- any trouble means ``basic=None`` and the ordinary lane pipeline runs.
+        """
+        if self._derivation_cache is _UNSET:
+            try:
+                self._derivation_cache = self._plan_derivation()
+            except Exception as exc:
+                self._derivation_cache = _DerivationPlan(
+                    None, f"could not be planned ({type(exc).__name__}: {exc})", {}, []
+                )
+        return self._derivation_cache
+
+    def _plan_derivation(self) -> _DerivationPlan:
+        """Build this request's :class:`_DerivationPlan`; see :meth:`_derivation_plan`.
+
+        A cast or a mooring is compared at the observations' own times and levels, and
+        that pairing is the expensive part (the model read and sampled at every obs
+        point). Every variant a caller then asks -- a time slice, depth levels or bands,
+        a monthly mean, detiding -- is arithmetic on those pairs
+        (:mod:`ocean_skill.pairs`), so the **basic comparison** (this request with its
+        time narrowing, aggregate, detide and demeaning taken off, depth at the obs's
+        own levels) is computed and cached once and each variant derived from it.
+
+        ``basic`` is ``None`` (with a reason) for everything the saved pairs cannot
+        answer: a reference that is not point-like (gridded, trajectory,
+        trajectoryProfile), a section/transect/slab, a pair-spec or calculated variable,
+        a pair-spec select/aggregate, an isopycnal request, an explicit ``over=`` the
+        featureType would not have chosen, detide on a single cast, and anything
+        :func:`ocean_skill.pairs.derivable` refuses (a depth the obs never sampled, an
+        unrecognized key...). It is also ``None`` -- reason "is the basic comparison" --
+        when the request *is* the basic one: it then runs the ordinary pipeline, its
+        result is exactly what that always gave, and it is the entry the base is built
+        from.
+
+        What is stripped before :func:`~ocean_skill.pairs.derivable` sees the select:
+        every key that is neither time nor vertical (a point lon/lat, a depth-origin
+        declaration). The basic comparison keeps them, so they are reproduced, not
+        varied. A ``season`` select is time-narrowing it cannot derive, and stays in.
+
+        A ``timeSeries``/``station``/``point`` base has one level and no depth axis, so
+        what its depth request may be depends on where its instrument is:
+
+        * a plain depth (the instrument's own, in metres) is the basic comparison's
+          depth;
+        * ``"surface"`` (or no depth at all) is answered only for a station that is
+          itself *at* the surface (:func:`_reference_at_surface`), whose basic
+          comparison *is* the surface comparison -- the model's native top cell against
+          the buoy. Any other station never gets here: :meth:`_check_depth_request`
+          refused the request first;
+        * a depth **band** (a layer, with or without a vertical mean) is answered when
+          the instrument lies inside it: the one level is all the station has in the
+          layer, so the result is the basic pairs with ``actual_depth`` the instrument's
+          depth and ``depth_band`` the layer asked for. An instrument outside the band
+          (or one that declares no depth) has nothing in it and is refused by
+          :meth:`_check_depth_request`. A cast's or visit station's layers are
+          :func:`ocean_skill.pairs.derivable`'s: a layer none of its levels falls in
+          is not answerable either (refused by :meth:`_check_depth_request` the same
+          way) -- unless it is one of several layers, where it is left NaN;
+        * a list, or a vertical aggregate of a plain depth, fall back to the lanes.
+        """
+        from ocean_skill import operators, pairs
+        from ocean_skill.sources import _TIME_KEYS as _ALL_TIME_KEYS
+
+        def no(why: str) -> _DerivationPlan:
+            return _DerivationPlan(None, why, {}, [])
+
+        if self._is_pairs_base:
+            return no("this is the saved basic comparison itself")
+        feature = _feature_type(self.reference_name)
+        if feature not in _SINGLE_POSITION_FEATURE_TYPES:
+            return no(
+                f"the reference ({feature or 'gridded'}) is not a cast or a station"
+            )
+        if self._section_casts:
+            return no("a section stacked from casts is not one set of pairs")
+        if (
+            is_pair_spec(self.variable)
+            or is_pair_spec(self.select)
+            or is_pair_spec(self.aggregate)
+        ):
+            return no("a per-lane (test/reference) request is not one set of pairs")
+        if _is_calculated(self.variable):
+            return no("a calculated diagnostic is computed on the model's whole column")
+        if self._transect_route() is not None or self._slab_route() is not None:
+            return no("a transect or slab is not a station's pairs")
+        select = dict(self.select)
+        aggregate = dict(self.aggregate or {})
+        if any(k in select for k in _ISOPYCNAL_KEYS):
+            return no("an isopycnal request reads the model's density surfaces")
+        if feature == "profile" and any(self.detide.values()):
+            return no("a single cast has no time series to detide")
+        implied, _ = _implied_over(self.reference_name, select, aggregate)
+        if self.over != implied:
+            return no(f"over={self.over!r} was named, not the featureType's own choice")
+
+        time_like = _ALL_TIME_KEYS | {"season"}
+        passed = {
+            k: v
+            for k, v in select.items()
+            if k in time_like or k in _VERTICAL_KEYS
+        }
+        # What the basic comparison keeps: the horizontal/point keys and declarations,
+        # i.e. everything neither narrowing time nor naming a depth.
+        basic_select = {
+            k: v
+            for k, v in select.items()
+            if k not in time_like and k not in _VERTICAL_KEYS
+        }
+        extra_attrs: dict[str, Any] = {}
+        if feature in PROFILE_FEATURE_TYPES:
+            levels = _profile_reference_depths(self.reference_name, {})
+            basic_select["depth"] = list(levels)
+            obs_levels: list[float] = list(levels)
+            literal = False
+        else:
+            literal = self.literal_depths
+            named = [k for k in _VERTICAL_KEYS if k in select]
+            if len(named) > 1:
+                return no("the select names the vertical axis more than once")
+            depth = select[named[0]] if named else None
+            at_surface = _reference_at_surface(self.reference_name)
+            band = _single_band(depth)
+            if band is not None:
+                # A layer of a one-instrument station: its one level is all the data it
+                # has in the layer, so the layer's pairs are the basic pairs.
+                z = _instrument_depth(self.reference_name)
+                if z is None:
+                    return no(
+                        "the station's instrument depth is not declared "
+                        "(geospatial_vertical_min/max), so a layer cannot be "
+                        "answered from its one level"
+                    )
+                if not band[0] <= z <= band[1]:
+                    return no(
+                        f"the station's instrument at {z:g} m is outside the "
+                        f"{band[0]:g}-{band[1]:g} m layer"
+                    )
+                if any(
+                    not operators._is_plain_mean(aggregate[k])
+                    for k in _VERTICAL_KEYS
+                    if k in aggregate
+                ):
+                    return no(
+                        "only a plain mean over the layer can be taken of a "
+                        "station's one level"
+                    )
+                # a mean over the layer of one level is that level: nothing to reduce
+                aggregate = {
+                    k: v for k, v in aggregate.items() if k not in _VERTICAL_KEYS
+                }
+                passed = {k: v for k, v in passed.items() if k not in _VERTICAL_KEYS}
+                basic_select["depth"] = SURFACE if at_surface else z
+                obs_levels = [] if at_surface else [z]
+                extra_attrs = {"actual_depth": z, "depth_band": [band[0], band[1]]}
+            elif depth is None or (
+                not isinstance(depth, list | tuple) and is_surface_request(depth)
+            ):
+                # (a list is a depth axis of its own, a different comparison)
+                if not at_surface:
+                    return no(
+                        "the station is not at the surface, so the model's top "
+                        "cell is not what it measures"
+                    )
+                if any(k in aggregate for k in _VERTICAL_KEYS):
+                    return no("a station's pairs have no depth axis to average over")
+                basic_select.update({k: select[k] for k in named})
+                obs_levels = []
+            elif isinstance(depth, int | float | np.number) and not isinstance(
+                depth, bool
+            ):
+                if any(k in aggregate for k in _VERTICAL_KEYS):
+                    return no("a station's pairs have no depth axis to average over")
+                basic_select.update({k: select[k] for k in named})
+                obs_levels = [float(depth)]
+            else:
+                return no(
+                    "a station's pairs are at its one level, so only a plain depth "
+                    "(in metres), the surface of a surface station, or a layer "
+                    "holding the instrument can be derived, not a list"
+                )
+        ok, why = pairs.derivable(
+            passed,
+            aggregate,
+            feature_type=feature,
+            obs_levels=obs_levels,
+            detide=self.detide,
+        )
+        if not ok:
+            return no(why)
+        basic = self._sibling(basic_select, literal_depths=literal)
+        if (
+            self.select == basic.select
+            and not any(aggregate.values())
+            and not any(self.detide.values())
+            and self.literal_depths == basic.literal_depths
+            and self.over == basic.over
+        ):
+            return no("this request is the basic comparison")
+        return _DerivationPlan(
+            basic,
+            why,
+            {"select": passed, "aggregate": aggregate, "feature_type": feature},
+            obs_levels,
+            extra_attrs,
+        )
+
+    def _pairs_base(self, use_cache: bool, refresh: bool):
+        """Return ``(base, built)``: the saved matched pairs of this *basic* comparison.
+
+        The base *is* the basic comparison's ordinary aligned pair -- the model read and
+        sampled at the observations' own times and levels -- under its ordinary cache
+        entry, so a user who asked for exactly the basic comparison and a variant that
+        derives from it share one entry. ``built`` says whether the model was read for
+        it (``False`` when the saved pair answered).
+        """
+        from ocean_skill import cache as _cache
+
+        base = self.align(refresh=refresh)
+        built = not (use_cache and self._cache_note == _cache.USED_ALIGNED)
+        return base, built
+
+    def _align_from_pairs(self, plan: _DerivationPlan, use_cache: bool, refresh: bool):
+        """Answer this request from the saved pairs of its basic comparison.
+
+        The base is loaded (``cache.USED_PAIRS``: the model is not read) or built
+        (``SAVED_PAIRS``: the one-time cost, after which every variant is free). The
+        derived pair is cached under this request's own key like any aligned result, so
+        an exact repeat is a plain hit.
+        """
+        from ocean_skill import pairs
+
+        base, built = plan.basic._pairs_base(use_cache, refresh)
+        # A station's base has no depth axis to read its level off (one instrument, one
+        # level), so the level the basic comparison was made at is passed alongside.
+        aligned = pairs.derive(
+            base,
+            detide=self.detide,
+            obs_levels=plan.obs_levels,
+            subject=repr(self.reference_name),
+            **plan.args,
+        )
+        if plan.args["feature_type"] in PROFILE_FEATURE_TYPES:
+            aligned = self._tidy_derived_profile(aligned, plan)
+        if plan.attrs:
+            aligned.attrs.update(plan.attrs)
+        aligned.attrs["derived_from"] = "pairs"
+        aligned.attrs["derived_reason"] = plan.reason
+        self._aligned = aligned
+        self._actual_depth = aligned.attrs.get("actual_depth")
+        self._warn_on_definition_mismatch(
+            _aligned_standard_name(aligned, "test"),
+            _aligned_standard_name(aligned, "reference"),
+        )
+        from ocean_skill import cache as _cache
+
+        self._cache_note = _cache.SAVED_PAIRS if built else _cache.USED_PAIRS
+        if use_cache:
+            _cache.save(self._cache_key, aligned)
+        self._subtract_scalar_means()
+        return self._aligned
+
+    def _tidy_derived_profile(self, aligned, plan: _DerivationPlan):
+        """Give a derived cast/visit the two behaviours the lane pipeline's reading has.
+
+        Both are the lane reading's own, restated on the derived pair so the two routes
+        agree: once time has narrowed to one cast, a level the cast never sampled is an
+        all-NaN hole of the rectangular pivot and is dropped (the cast is compared on
+        exactly its own depths -- not when the depths were named literally, where the
+        NaN levels are the point); and one fixed level of a ragged station sampled on
+        under half its visits warns, since that usually means the wrong level for how
+        the station was visited.
+        """
+        import warnings
+
+        from ocean_skill import _stacklevel, operators
+
+        reference = aligned["reference"]
+        zdim = operators.resolve_dim(reference, "Z")
+        tdim = operators.resolve_dim(reference, "T")
+        has_time = tdim is not None and tdim in reference.dims
+        # Layers are not levels the cast never sampled: an empty one among several is
+        # NaN by request (pairs.derive warned), and stays on the axis it was asked for.
+        bands = _bands_of(
+            next(
+                (
+                    plan.args["select"][k]
+                    for k in _VERTICAL_KEYS
+                    if k in plan.args["select"]
+                ),
+                None,
+            )
+        )
+        if (
+            zdim is not None
+            and zdim in reference.dims
+            and not has_time
+            and not self.literal_depths
+            and bands is None
+        ):
+            sampled = reference.notnull().any([d for d in reference.dims if d != zdim])
+            if not bool(sampled.all()):
+                aligned = aligned.isel({zdim: np.flatnonzero(np.asarray(sampled))})
+        depth = next(
+            (
+                plan.args["select"][k]
+                for k in _VERTICAL_KEYS
+                if k in plan.args["select"]
+            ),
+            None,
+        )
+        if (
+            plan.args["feature_type"] == "timeSeriesProfile"
+            and isinstance(depth, int | float | np.number)
+            and not isinstance(depth, bool)
+            and has_time
+            and reference.sizes[tdim] > 0
+            and "actual_depth" in aligned.attrs
+        ):
+            finite_frac = float(np.isfinite(reference).mean())
+            if finite_frac < 0.5:
+                warnings.warn(
+                    f"{self.reference_name!r}: {aligned.attrs['actual_depth']:g} m "
+                    f"(nearest to {float(depth):g} m) has data on only "
+                    f"{finite_frac:.0%} of this station's visits -- a "
+                    "ragged timeSeriesProfile station samples different "
+                    "depths on different visits, so one fixed level can "
+                    "be sparse. Pass depths=[...] for a level this "
+                    'station actually visits often, select={"depth": '
+                    '{"min": ..., "max": ...}} for a band, or select='
+                    '{"time": <one visit>} to compare a single cast '
+                    "over its own depths instead.",
+                    stacklevel=_stacklevel.find(),
+                )
+        return aligned
+
+    def _report_cache_use(self) -> None:
+        """Say, once, which saved layer answered this comparison (nothing if none did).
+
+        The highest layer wins: a saved aligned pair, else saved matched pairs (a
+        derived variant, or the one-time save of a new base), else a saved model lane.
+        A comparison computed entirely fresh prints nothing; so do the internal members
+        of a base (:attr:`_quiet`), whose parent speaks for them.
+        """
+        from ocean_skill import cache as _cache
+
+        if self._quiet or not self._use_cache():
+            return
+        what = self._cache_note or (_cache.USED_LANE if self._lane_hit else None)
+        if what is None:
+            return
+        variable = (
+            self.variable
+            if isinstance(self.variable, str)
+            else _short_variable_label(self.variable)
+        )
+        _cache.report_use(
+            f"{self.test_name} vs {self.reference_name} ({variable})", what
+        )
+
     def _use_cache(self) -> bool:
         """Whether this comparison caches: its own setting, else the global one."""
         from ocean_skill import cache as _cache
@@ -5853,7 +6457,8 @@ class Comparison:
             and slab_axis(select, aggregate_for(self.aggregate, role)) is None
         ):
             select = {**select, "depth": SURFACE}
-        return prepare_source(
+        hits_before = _LANE_HITS
+        result = prepare_source(
             source,
             variable_for(self.variable, role),
             select,
@@ -5888,6 +6493,9 @@ class Comparison:
             # reads its own.
             depth_convention=self._reference_depth_frame() if role == "test" else None,
         )
+        if _LANE_HITS > hits_before:
+            self._lane_hit = True
+        return result
 
     def _warn_on_pair_spec_mismatch(
         self, test_da, reference_da, *, trust_name_fallback: bool = True
@@ -6191,7 +6799,25 @@ class Comparison:
         (:meth:`_warn_on_pair_spec_mismatch`), and a plain broad request such as
         ``"mld"`` that landed on two different definitions of it
         (:meth:`_warn_on_definition_mismatch`).
+
+        A comparison against a cast or a mooring is answered from one saved *basic*
+        comparison where it can be (:meth:`_derivation_plan`): a time slice, depth
+        levels or bands, a monthly mean, detiding or the surface are arithmetic on the
+        model-data pairs, so the model is read once for all of them. The result's
+        ``derived_from`` attribute says ``"pairs"`` or ``"lanes"`` and
+        ``derived_reason`` why; one line names the saved layer that answered
+        (:func:`ocean_skill.cache.verbose` silences it).
         """
+        self._resolve_default_depth()
+        self._check_depth_request()
+        self._cache_note = None
+        self._lane_hit = False
+        aligned = self._align_pipeline(refresh=refresh)
+        self._report_cache_use()
+        return aligned
+
+    def _align_pipeline(self, *, refresh: bool = False):
+        """Run :meth:`align`: a cache hit, a derivation from pairs, or the lanes."""
         from ocean_skill import align as _align
         from ocean_skill import cache as _cache
 
@@ -6235,8 +6861,18 @@ class Comparison:
                 # note): a demeaning request derives its own view here, off the shared
                 # entry, without recomputing the regrid. A no-op when nothing is
                 # demeaned, so a plain comparison hitting the cache is unaffected.
+                self._cache_note = _cache.USED_ALIGNED
                 self._subtract_scalar_means()
                 return self._aligned
+
+        # A variant of a cast or mooring comparison is arithmetic on the saved basic
+        # comparison's pairs and never reads the model (see _derivation_plan). Before
+        # the vertical-score guard below on purpose: a depth band averaged over Z
+        # against a single cast would be refused there, and is exactly what the saved
+        # pairs answer.
+        plan = self._derivation_plan()
+        if plan.basic is not None:
+            return self._align_from_pairs(plan, use_cache, refresh)
 
         # A vertical score (over="Z"/"vertical") needs a depth axis left standing to
         # score down; a select that collapses depth to one level -- a scalar, or the
@@ -6648,6 +7284,8 @@ class Comparison:
         ).load()
         if r_depth is not None:
             self._aligned.attrs["actual_depth"] = r_depth
+        self._aligned.attrs["derived_from"] = "lanes"
+        self._aligned.attrs["derived_reason"] = self._derivation_plan().reason
         # The lanes' resolved names ride along in the attrs for the same reason
         # actual_depth does -- so a cached result restores the state a freshly
         # computed one has. Nothing else keeps them: a ROMS lane carries no
@@ -9264,32 +9902,27 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     return depths
 
 
-def _station_depth_from_metadata(source: str) -> float | None:
-    """The depth a fixed-position reference's own catalog metadata implies, if any.
+def _declared_vertical_extent(source: str) -> tuple[float, float] | None:
+    """Return the ``(shallowest, deepest)`` depth (m) a fixed station declares.
 
-    Read-free, the ``timeSeries``/``point``/``station`` counterpart of
-    :func:`_profile_reference_depths`: a mooring's catalog entry can carry its own
-    ``geospatial_vertical_min``/``_max`` (see :func:`ocean_skill.build._extent`,
-    or a builder that reads it straight off an entry's attributes), which is the
-    one depth a fixed instrument sits at -- unlike a profile, which stands its
-    *whole* column rather than naming a single depth, or a
-    ``timeSeriesProfile``/``trajectoryProfile``, which carries more than one
-    candidate vertical reading (see :func:`_is_profile_reference`'s own scope
-    note). Scoped to :data:`_FIXED_STATION_FEATURE_TYPES` for exactly that reason.
+    Read-free: a depth the catalog entry names outright (``nominal_depth_m``, then
+    ``depth``, as the reader takes them), else its
+    ``geospatial_vertical_min``/``_max`` (see
+    :func:`ocean_skill.build._extent`, or a builder that reads it straight off an
+    entry's attributes), scoped to :data:`_FIXED_STATION_FEATURE_TYPES` -- a profile
+    stands its *whole* column rather than naming a depth, and a
+    ``timeSeriesProfile``/``trajectoryProfile`` carries more than one candidate
+    vertical reading (see :func:`_is_profile_reference`'s own scope note).
 
-    ``None`` -- meaning "nothing to derive, leave the default (or the caller's own
-    ``depths=``/``select=``) alone" -- when the featureType is not one of that
-    set, no vertical extent is declared, it is not finite, or it comes out negative.
-    The extents are raw values, as the source stored them (see
-    :func:`ocean_skill.build._extent`), and are read through its depth convention
+    ``None`` when the featureType is not one of that set, no extent is declared, it is
+    not finite, or it comes out negative. The extents are raw values, as the source
+    stored them, and are read through its depth convention
     (:func:`ocean_skill.depth_convention.resolve`): a source that *declares or infers*
     ``positive: up`` has its (negative) heights negated, and a pressure in dbar is
     converted (approximately, 1 dbar ~ 1 m). Without such a statement the values are
     taken as positive-down metres, as every other consumer of these keys does
     (:data:`ocean_skill.tabular._DEPTH_ATTRS`), and a negative one is more likely a
-    units mixup than a real depth. The midpoint of ``_min``/``_max`` is returned --
-    equal to either bound when a builder only ever wrote one exact depth
-    (``_min == _max``).
+    units mixup than a real depth.
     """
     if _feature_type(source) not in _FIXED_STATION_FEATURE_TYPES:
         return None
@@ -9299,6 +9932,29 @@ def _station_depth_from_metadata(source: str) -> float | None:
         meta = resolve(source).metadata
     except KeyError:
         return None
+    # A depth named outright (nominal_depth_m, depth) is declared too, and wins, in the
+    # same order the reader takes them (ocean_skill.tabular._DEPTH_ATTRS) -- so the
+    # model is matched at the depth the observations are read at, and an entry that
+    # follows the reader's own advice ("give the entry a nominal_depth_m") counts.
+    # Depths by name, in metres: only their sign is ever in doubt, settled as the reader
+    # settles it, and the entry's depth_convention (which describes the source's own
+    # vertical values) is not applied to them.
+    import math
+
+    for key in ("nominal_depth_m", "depth"):
+        value = meta.get(key)
+        if value is None:
+            continue
+        try:
+            named = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(named):
+            continue
+        named = float(
+            depth_convention_module.positive_down_values(np.asarray([named]), None)[0]
+        )
+        return (named, named)
     lo = meta.get("geospatial_vertical_min")
     if lo is None:
         return None
@@ -9307,8 +9963,6 @@ def _station_depth_from_metadata(source: str) -> float | None:
         lo, hi = float(lo), float(hi)
     except (TypeError, ValueError):
         return None
-    import math
-
     if not (math.isfinite(lo) and math.isfinite(hi)):
         return None
     try:
@@ -9331,7 +9985,295 @@ def _station_depth_from_metadata(source: str) -> float | None:
         )
     if lo < 0 or hi < 0:
         return None
-    return (lo + hi) / 2.0
+    return (min(lo, hi), max(lo, hi))
+
+
+def _station_depth_from_metadata(source: str) -> float | None:
+    """Return the depth a fixed station's own catalog metadata implies, if any.
+
+    Read-free, the ``timeSeries``/``point``/``station`` counterpart of
+    :func:`_profile_reference_depths`: the midpoint of the entry's declared vertical
+    extent (:func:`_declared_vertical_extent`) -- equal to either bound when a builder
+    only ever wrote one exact depth (``_min == _max``) -- which is the one depth a
+    fixed instrument sits at, unlike a profile (its *whole* column).
+
+    ``None`` -- meaning "nothing to derive, leave the default (or the caller's own
+    ``depths=``/``select=``) alone" -- when no usable extent is declared.
+    """
+    extent = _declared_vertical_extent(source)
+    return None if extent is None else (extent[0] + extent[1]) / 2.0
+
+
+#: How close to the top (m, positive down) a point reference's declared vertical extent
+#: must lie for it to count as measuring *at the surface*
+#: (:func:`_reference_at_surface`): a surface buoy's thermistor at 0.5 m is "the
+#: surface", a mooring's at 10 m is not.
+SURFACE_DEPTH_TOLERANCE_M = 1.0
+
+
+def _reference_at_surface(source: str) -> bool:
+    """Whether a fixed-station reference measures *at* the surface, read-free.
+
+    ``"surface"`` is a keyword for the model, for gridded datasets, and for point
+    datasets that are themselves at the surface (a surface buoy, a drifter); it means
+    nothing for a cast, a repeat-visit station, or a mooring whose instrument hangs at
+    depth. Only the catalog entry is read, in either of two ways:
+
+    * it says so explicitly, with the existing depth-convention declaration
+      ``depth_convention: {support: surface}`` -- "this observation is of the model's
+      own top cell" (:mod:`ocean_skill.depth_convention`) -- or
+    * its declared vertical extent (:func:`_declared_vertical_extent`, read through the
+      entry's depth convention) lies within :data:`SURFACE_DEPTH_TOLERANCE_M` of the
+      top, i.e. its deepest declared level is at most that deep.
+
+    ``False`` for anything that is not a ``timeSeries``/``point``/``station`` reference
+    (a gridded dataset is not asked: it has every level) and for an entry that declares
+    neither -- an undeclared depth is *unknown*, not "at depth", so it neither
+    qualifies here nor is refused a surface request (:func:`_depth_request_problem`).
+    """
+    if _feature_type(source) not in _FIXED_STATION_FEATURE_TYPES:
+        return False
+    from ocean_skill.catalog import resolve
+
+    try:
+        meta = resolve(source).metadata
+    except KeyError:
+        meta = {}
+    try:
+        if depth_convention_module.resolve(meta).support == "surface":
+            return True
+    except ValueError:
+        pass  # a broken declaration is the lane's to report
+    extent = _declared_vertical_extent(source)
+    return extent is not None and extent[1] <= SURFACE_DEPTH_TOLERANCE_M
+
+
+def _instrument_depth(source: str) -> float | None:
+    """Return the one depth (m, positive down) a fixed station's instrument sits at.
+
+    ``0.0`` for a reference at the surface (:func:`_reference_at_surface`); else the
+    midpoint of its declared extent -- the very depth :func:`compare` fills in for it
+    (:func:`_station_depth_from_metadata`) and so the level its *basic* comparison is
+    made at. ``None`` when nothing is declared, or when the declared extent is wider
+    than a fixed instrument ranges (:data:`ocean_skill.tabular.FIXED_DEPTH_TOLERANCE`:
+    that is really a profiler, with no single level to speak for).
+    """
+    if _reference_at_surface(source):
+        return 0.0
+    extent = _declared_vertical_extent(source)
+    if extent is None:
+        return None
+    from ocean_skill.tabular import FIXED_DEPTH_TOLERANCE
+
+    if extent[1] - extent[0] > FIXED_DEPTH_TOLERANCE:
+        return None
+    return (extent[0] + extent[1]) / 2.0
+
+
+def _asks_for_surface(depth: Any) -> bool:
+    """Whether a depth request names the surface: ``"surface"``, unset, or in a list."""
+    if isinstance(depth, list | tuple):
+        return any(isinstance(d, str) and is_surface_request(d) for d in depth)
+    return is_surface_request(depth)
+
+
+def _single_band(depth: Any) -> tuple[float, float] | None:
+    """Return ``(min, max)`` when ``depth`` is exactly one ``{"min", "max"}`` band."""
+    if isinstance(depth, list | tuple) and len(depth) == 1:
+        depth = depth[0]
+    if not is_depth_band(depth):
+        return None
+    try:
+        return float(depth["min"]), float(depth["max"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _bands_of(depth: Any) -> list[tuple[float, float]] | None:
+    """Return every ``(min, max)`` when ``depth`` is a band or a list of only bands."""
+    items = list(depth) if isinstance(depth, list | tuple) else [depth]
+    if not items or not all(is_depth_band(d) for d in items):
+        return None
+    try:
+        return [(float(d["min"]), float(d["max"])) for d in items]
+    except (TypeError, ValueError):
+        return None
+
+
+def _layer_label(bands: list[tuple[float, float]]) -> str:
+    """Name layers for a message: "the 0–10 m layer", "the 0–2, 5–9 m layers"."""
+    spans = ", ".join(f"{lo:g}–{hi:g}" for lo, hi in bands)
+    return f"the {spans} m layer{'s' if len(bands) > 1 else ''}"
+
+
+def _empty_layers(
+    bands: list[tuple[float, float]], levels: Any
+) -> list[tuple[float, float]]:
+    """Return the bands that none of ``levels`` (m, positive down) falls inside."""
+    z = np.asarray(levels, dtype=float)
+    return [b for b in bands if not np.any((z >= b[0]) & (z <= b[1]))]
+
+
+class _DepthProblem(NamedTuple):
+    """Why a point reference cannot answer a depth request, and what to ask instead.
+
+    ``reason`` is a clause that follows the reference's name ("has no surface
+    measurement -- its shallowest level is 2 m"); ``advice`` is the sentence that says
+    what to pass instead (empty when there is none).
+    """
+
+    reason: str
+    advice: str
+
+
+def _no_data_in_layer(
+    bands: list[tuple[float, float]], levels: Any
+) -> _DepthProblem:
+    """Say that a cast's or station's levels hold nothing in ``bands``, and name some.
+
+    The nearest few levels are named so the caller can see where the data *is*: all of
+    them when there are three or fewer, else the three closest to the layer(s).
+    """
+    z = sorted({float(v) for v in np.asarray(levels, dtype=float).reshape(-1)})
+    if not z:
+        return _DepthProblem(f"has no data in {_layer_label(bands)}", "")
+    nearest = sorted(
+        sorted(z, key=lambda v: min(min(abs(v - lo), abs(v - hi)) for lo, hi in bands))[
+            :3
+        ]
+    )
+    which = "levels are" if len(nearest) == len(z) else "nearest levels are"
+    return _DepthProblem(
+        f"has no data in {_layer_label(bands)} -- its {which} "
+        f"{', '.join(f'{v:g}' for v in nearest)} m",
+        "Pass a layer that holds one of them.",
+    )
+
+
+#: What to say to a mooring that declares no depth (see :func:`_undeclared_mooring`):
+#: the two ways to declare one, or the way around it.
+_DECLARE_DEPTH_ADVICE = (
+    "Declare its instrument depth in the catalog entry (nominal_depth_m, "
+    "geospatial_vertical_min/max, or depth_convention: {support: surface} for a "
+    "surface instrument), or pass an explicit depth such as depths=[10]."
+)
+
+
+def _undeclared_mooring(source: str) -> bool:
+    """Whether a ``timeSeries``/``point``/``station`` reference declares no depth.
+
+    No ``geospatial_vertical_min``/``_max`` (usable: finite, not negative once read
+    through its depth convention) and no ``depth_convention: {support: surface}``: the
+    catalog does not say where the instrument is, so nothing can tell a surface reading
+    from one at depth. A *wide* declared extent (a profiler) is declared, not this.
+    """
+    return (
+        _feature_type(source) in _FIXED_STATION_FEATURE_TYPES
+        and not _reference_at_surface(source)
+        and _declared_vertical_extent(source) is None
+    )
+
+
+def _depth_request_problem(
+    source: str, depth: Any, cache: dict[str, list[float]] | None = None
+) -> _DepthProblem | None:
+    """Say why a point reference cannot answer ``depth``, or ``None`` when it can.
+
+    Read-free for a mooring (catalog metadata only); a cast's or a repeat-visit
+    station's own levels are read only to *name* its shallowest one in the message.
+
+    Two refusals, both about asking a one-instrument or sparse reference for data it
+    does not have:
+
+    * **"surface"** -- the word, unset, or inside a list -- of a ``profile`` or
+      ``timeSeriesProfile`` (a cast has levels, not a surface), of a mooring whose one
+      instrument is at depth (:func:`_reference_at_surface` is ``False`` and its depth
+      is declared), or of a mooring that declares no depth at all
+      (:func:`_undeclared_mooring`: nothing says it is *at* the surface, so it is
+      refused until the catalog does -- an explicit numeric depth still works).
+    * **a depth band** (``{"min", "max"}``) with no data in it: of a mooring whose
+      instrument depth (:func:`_instrument_depth`) lies outside it (or is undeclared,
+      so it cannot be placed in or out of the layer); of a cast or repeat-visit
+      station none of whose levels falls inside (the *station's* levels, whichever
+      visits sampled them). Several bands (one cast's layer profile) are refused only
+      when *every* one is empty -- an empty one among others is left NaN by
+      :func:`ocean_skill.pairs.derive`. A gridded product is not asked: its standard
+      levels are all it has, so a band between them takes the nearest.
+
+    ``depth`` is the *reference side's* vertical request; anything else (a gridded or
+    trajectory reference, a number) is not this function's to judge.
+    """
+    feature = _feature_type(source)
+    if feature not in _SINGLE_POSITION_FEATURE_TYPES:
+        return None
+    if _asks_for_surface(depth):
+        if feature in PROFILE_FEATURE_TYPES:
+            try:
+                levels = _profile_reference_depths(
+                    source, {} if cache is None else cache
+                )
+            except Exception:
+                levels = []
+            if not levels:
+                return _DepthProblem(
+                    "has no surface measurement -- it is a "
+                    f"{'cast' if feature == 'profile' else 'repeat-visit station'}, "
+                    "not a surface dataset",
+                    "Pass depths=[...] for levels it has, or a range like "
+                    "{'min': 0, 'max': 50}.",
+                )
+            top = min(levels)
+            return _DepthProblem(
+                f"has no surface measurement -- its shallowest level is {top:g} m",
+                _depth_advice(top),
+            )
+        z = _instrument_depth(source)
+        if z is not None and z > 0.0:
+            return _DepthProblem(
+                f"has no surface measurement -- its instrument is at {z:g} m",
+                _depth_advice(z),
+            )
+        if _undeclared_mooring(source):
+            return _DepthProblem(
+                "declares no instrument depth, so it is not known to measure the "
+                "surface",
+                _DECLARE_DEPTH_ADVICE,
+            )
+        return None
+    band = _single_band(depth)
+    if band is not None and feature in _FIXED_STATION_FEATURE_TYPES:
+        z = _instrument_depth(source)
+        if z is not None and not (band[0] <= z <= band[1]):
+            return _DepthProblem(
+                f"has no data in the {band[0]:g}–{band[1]:g} m layer -- its "
+                f"instrument at {z:g} m is outside it",
+                "",
+            )
+        if _undeclared_mooring(source):
+            return _DepthProblem(
+                "declares no instrument depth, so it cannot be placed in or out of "
+                f"the {band[0]:g}–{band[1]:g} m layer",
+                _DECLARE_DEPTH_ADVICE,
+            )
+    bands = _bands_of(depth)
+    if bands is not None and feature in PROFILE_FEATURE_TYPES:
+        try:
+            levels = _profile_reference_depths(source, {} if cache is None else cache)
+        except Exception:
+            return None  # an unreadable axis is the lane's to report
+        if len(_empty_layers(bands, levels)) == len(bands):
+            return _no_data_in_layer(bands, levels)
+    return None
+
+
+def _depth_advice(top: float) -> str:
+    """Return the sentence naming what to ask for instead of a missing surface."""
+    import math
+
+    return (
+        f"Pass depths=[{top:g}] or a range like "
+        f"{{'min': 0, 'max': {math.ceil(top) + 3}}}."
+    )
 
 
 def _profile_depth_plan(
@@ -9346,6 +10288,8 @@ def _profile_depth_plan(
     *,
     ref_time_collapsed: bool = False,
     ref_time_climatology: bool = False,
+    aggregate: dict[str, Any] | None = None,
+    detide: Any = None,
 ) -> tuple[tuple[Any, ...], bool, bool]:
     """Per-reference ``(values, many_values, literal)`` for compare()'s depth fan.
 
@@ -9373,7 +10317,9 @@ def _profile_depth_plan(
       1-tuple holding that list);
     * a **fixed-station** reference (a mooring, say) names its own depth the same
       way, but as one scalar rather than a column -- comparing it against the
-      model's default surface would silently score the wrong level. Only when the
+      model's default surface would silently score the wrong level (a station that is
+      itself *at* the surface, :func:`_reference_at_surface`, is the exception: the
+      surface is its depth, so the default stays). Only when the
       caller named no ``depths=`` and no vertical ``select=`` of their own, exactly
       like the profile case; a warning says which depth was chosen and why, since
       unlike a profile's *whole* column, this quietly overrides a real default
@@ -9435,6 +10381,32 @@ def _profile_depth_plan(
         # the ordinary per-depth fan below (fan_values) treats it exactly as a
         # non-profile reference already would; only scalar/"surface" levels (or the
         # reference's own, just below) stay standing as one profile.
+        #
+        # The exception to the exception: layer means of ONE cast. Bands with a vertical
+        # mean (depths=[band, band], aggregate={"Z": "mean"}) against a single `profile`
+        # are one profile of layers -- a point per band, scored down depth -- not a fan
+        # of unrelated scalars, so they stay together as one comparison whose select
+        # lists the bands. Only offered when the saved pairs can answer it
+        # (Comparison._derivation_plan derives it); anything they cannot keeps today's
+        # per-band fan.
+        if (
+            explicit_bands
+            and _feature_type(ref) == "profile"
+            and isinstance(explicit_depths, list | tuple)
+            and all(is_depth_band(d) for d in explicit_depths)
+            and any(k in (aggregate or {}) for k in _VERTICAL_KEYS)
+        ):
+            from ocean_skill import pairs
+
+            ok, _ = pairs.derivable(
+                {"depth": list(explicit_depths)},
+                aggregate or {},
+                feature_type="profile",
+                obs_levels=_profile_reference_depths(ref, cache),
+                detide=_normalize_detide(detide),
+            )
+            if ok:
+                return (list(explicit_depths),), False, True
         if explicit_depths is not None and not explicit_bands:
             levels = (
                 list(explicit_depths)
@@ -9446,7 +10418,12 @@ def _profile_depth_plan(
             levels = _profile_reference_depths(ref, cache)
             return (levels,), False, False
     if is_depth_fan and explicit_depths is None and not has_vertical_select:
-        depth = _station_depth_from_metadata(ref)
+        # A reference that measures *at* the surface (a surface buoy) keeps the model's
+        # own surface as its default -- the comparison it is for -- rather than the
+        # ~0.5 m midpoint of its declared extent (see _reference_at_surface).
+        depth = (
+            None if _reference_at_surface(ref) else _station_depth_from_metadata(ref)
+        )
         if depth is not None:
             import warnings
 
@@ -10259,6 +11236,16 @@ def compare(
         reference's own levels instead of fanning this: the whole ragged
         union of every visit's own depths for the first, one visit's own
         depths for the other two.
+
+        ``"surface"`` is for the model, gridded references, and point
+        references that are themselves at the surface (a surface buoy, a
+        drifter): a cast, a repeat-visit station or a mooring at depth has no
+        surface measurement. Asked for one, that reference is left out of the
+        call with a warning naming its shallowest level (an error if nothing
+        is left), and a mooring defaults to its own depth, not the surface.
+        A ``{"min", "max"}`` band is a mooring's one level when its
+        instrument lies inside it, and a mooring outside it is likewise left
+        out.
     times
         ``None`` (default, no time fan), a dict deriving bins from the
         test's own time axis (``{"resample": ..., "reduce": ...}``,
@@ -11225,6 +12212,9 @@ def compare(
     # axis): `(pair, exception)`, kept for the one summary warning after the loops
     # and for re-raising the first when nothing at all formed. See _skip below.
     unexpected: list[tuple[str, Exception]] = []
+    # References left out because they have no data at the depth asked for (a surface
+    # of a cast, a layer a mooring does not reach); see _depth_request_problem.
+    left_out: list[str] = []
 
     def _skip(
         label: str,
@@ -11426,6 +12416,8 @@ def compare(
                     _ref_depths_cache,
                     ref_time_collapsed=_ref_time_collapsed,
                     ref_time_climatology=_ref_time_climatology,
+                    aggregate=aggregate_for(aggregate, "reference"),
+                    detide=detide,
                 )
             except Exception as exc:
                 # Reading a profile reference's own levels can fail (no vertical axis
@@ -11437,6 +12429,34 @@ def compare(
                 pair_num += len(viable_tests)
                 _skip(repr(ref), repr(ref), exc, expected=(ValueError,))
                 continue
+            # A cast, a repeat-visit station or a mooring at depth has no surface
+            # measurement, and a mooring has data only at its one depth: asked for what
+            # it lacks, this reference is left out of the call rather than aborting the
+            # others in it (a WOA climatology alongside a CTD cast, a layer pooled over
+            # several moorings). Nothing left at all is an error, below.
+            if not calculated:
+                kept_values = []
+                for v in these_values:
+                    problem = _depth_request_problem(ref, v, _ref_depths_cache)
+                    if problem is None:
+                        kept_values.append(v)
+                        continue
+                    left_out.append(
+                        f"{ref!r} {problem.reason}. {problem.advice}".strip()
+                    )
+                    warnings.warn(
+                        f"left out {ref!r} ({label_fn(v)}): it {problem.reason}. "
+                        f"{problem.advice}".strip(),
+                        stacklevel=_stacklevel.find(),
+                    )
+                if len(kept_values) < len(these_values):
+                    n_skipped += (len(these_values) - len(kept_values)) * len(
+                        viable_tests
+                    )
+                    these_values = tuple(kept_values)
+                    if not these_values:
+                        pair_num += len(viable_tests)
+                        continue
             for tst in viable_tests:
                 pair_num += 1
                 prefix = f"{_short_variable_label(var)} " if many_vars else ""
@@ -11525,6 +12545,10 @@ def compare(
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
+    if left_out and not out:
+        # Every reference lacked the depth asked for: an empty set would look like "no
+        # data" rather than "the question cannot be answered here".
+        raise ValueError(left_out[0])
     # Every pair is aligned by now: the slab has done its job, and left behind it would
     # answer a later prepare_source of the same source with this call's window and
     # variables, whatever that caller asked for.

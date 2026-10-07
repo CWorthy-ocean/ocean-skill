@@ -202,7 +202,14 @@ def test_compare_does_not_skip_a_one_cell_model_against_a_nearby_station(capsys)
 
     declared = {
         "cell": _point(-150.0, 60.0, featureType="grid", model="roms"),
-        "station": _point(-150.0 + 1e-4, 60.0 + 1e-4, featureType="timeSeries"),
+        # a surface station: a mooring is refused "surface" until its entry says so
+        "station": _point(
+            -150.0 + 1e-4,
+            60.0 + 1e-4,
+            featureType="timeSeries",
+            geospatial_vertical_min=0.0,
+            geospatial_vertical_max=0.0,
+        ),
     }
     with _fan_recorded(declared) as formed:
         comparison.compare(reference="station", test="cell", variables=[TEMPERATURE])

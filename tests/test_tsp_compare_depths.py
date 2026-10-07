@@ -88,21 +88,41 @@ def test_bare_compare_keeps_both_axes_standing(stubbed_tsp_fan):
 
 
 def test_explicit_depths_still_suppress_both_axes_standing(stubbed_tsp_fan):
-    """A caller who explicitly passes depths=("surface",) -- the old bare default,
-    spelled out -- must still get today's collapsed behavior: both_standing is
-    keyed on `depths_was_explicit is False`, so naming a depth explicitly (even
-    the surface sentinel) opts out of the new "keep both axes" routing.
+    """A caller who explicitly passes a depth -- depths=(10,) -- must still get the
+    collapsed mooring-at-a-depth reading: both_standing is keyed on
+    `depths_was_explicit is False`, so naming a depth explicitly opts out of the
+    "keep both axes" routing. (This used to be spelled depths=("surface",), the old
+    bare default; a repeat-visit station has no surface measurement now, so that
+    spelling is refused -- see test_explicit_surface_depths_are_refused.)
     """
     comparison.compare(
         reference="hvalfjordur",
         test="his",
         variables=[TEMPERATURE],
-        depths=("surface",),
+        depths=(10,),
     )
     assert len(stubbed_tsp_fan) == 1
     over, select = stubbed_tsp_fan[0]
     assert over == "time"
-    assert select == {"depth": "surface"}
+    assert select == {"depth": 10}
+
+
+def test_explicit_surface_depths_are_refused(stubbed_tsp_fan):
+    """A timeSeriesProfile station has levels, not a surface: depths=("surface",)
+    names the shallowest level it does have and what to pass instead, and nothing is
+    formed. (With other references in the call it is left out with a warning
+    instead -- see tests/test_surface_and_layers.py.)
+    """
+    with pytest.raises(ValueError, match="no surface measurement") as err:
+        comparison.compare(
+            reference="hvalfjordur",
+            test="his",
+            variables=[TEMPERATURE],
+            depths=("surface",),
+        )
+    assert "shallowest level is 1 m" in str(err.value)
+    assert "depths=[1]" in str(err.value)
+    assert stubbed_tsp_fan == []
 
 
 def test_scalar_depth_select_alone_still_keeps_time(stubbed_tsp_fan):

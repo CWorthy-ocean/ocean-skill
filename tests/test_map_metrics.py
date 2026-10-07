@@ -735,6 +735,12 @@ def mooring_set(monkeypatch):
         "_feature_type",
         lambda source: "grid" if source.endswith("_model") else "timeSeries",
     )
+    # surface buoys: a mooring is refused "surface" until its entry declares a depth
+    monkeypatch.setattr(
+        comparison_module,
+        "_declared_vertical_extent",
+        lambda source: None if source.endswith("_model") else (0.0, 0.0),
+    )
 
     comparisons = []
     for name, *_rest in _STATIONS:

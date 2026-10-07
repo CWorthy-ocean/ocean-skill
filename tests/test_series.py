@@ -495,6 +495,13 @@ def station_lanes(monkeypatch):
         "_feature_type",
         lambda source: "timeSeries" if source == "papa" else "grid",
     )
+    # A mooring is compared at the surface only when its catalog says it is there
+    # (comparison._undeclared_mooring); this one is a surface buoy.
+    monkeypatch.setattr(
+        comparison,
+        "_declared_vertical_extent",
+        lambda source: (0.0, 0.0) if source == "papa" else None,
+    )
     return lanes
 
 
@@ -1562,6 +1569,8 @@ def test_a_stale_metadata_position_is_corrected_by_the_post_read_verification(
                 "geospatial_lon_max": -131.0,
                 "geospatial_lat_min": 41.0,
                 "geospatial_lat_max": 41.0,
+                "geospatial_vertical_min": 0.0,
+                "geospatial_vertical_max": 0.0,
             }
         },
     )
@@ -1593,6 +1602,8 @@ def test_an_explicit_point_select_beats_the_metadata_position(monkeypatch):
                 "geospatial_lon_max": -141.0,
                 "geospatial_lat_min": 54.0,
                 "geospatial_lat_max": 54.0,
+                "geospatial_vertical_min": 0.0,
+                "geospatial_vertical_max": 0.0,
             }
         },
     )

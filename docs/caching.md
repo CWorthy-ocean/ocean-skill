@@ -180,6 +180,95 @@ cropped to the model's own extent before it is read (which is what keeps a globa
 from being held whole). One consequence: that lane is not shared with a different model the
 way an uncropped one is.
 
+## Casts, moorings and stations: variants come from saved matches
+
+A comparison against a point-like reference — a CTD cast (`profile`), a mooring or station
+(`timeSeries`), or repeat casts at one station (`timeSeriesProfile`) — reads the model only
+once. The first comparison against that reference saves the **basic** comparison: the model
+matched to the observations at their own times and depths, with nothing averaged. Every
+later variant is worked out from those saved matches without touching the model:
+
+```python
+osk.compare(reference="ctd_0412", test="his", variables=["temp"])
+# reads the model at the cast's depths and time; saves the matches
+
+osk.compare(reference="ctd_0412", test="his", variables=["temp"],
+            depths=[{"min": 0, "max": 10}, {"min": 50, "max": 100}],
+            aggregate={"Z": "mean"})
+# 0-10 m and 50-100 m layer means, worked out from the saved matches: no model read
+```
+
+| Variant | Worked out from the saved matches as |
+|---|---|
+| A time window or instants | the matches inside it |
+| A list of depths the observations have | the matches at those depths |
+| `"surface"` | only for a dataset that is itself at the surface (see below): the model's top cell against it |
+| Depth layers + `{"Z": "mean"}` | the plain mean of the matches inside each layer, on both sides alike; against a single cast the layers form a short profile |
+| A depth layer against a one-instrument mooring | that mooring's matches when its instrument is inside the layer; left out, with a warning, when it is not |
+| Time reductions, `resample`, climatologies | applied to both sides of the matches, then the difference recomputed |
+| `detide` | the PL33 filter run on both sides of the matched series (needs roughly hourly, regular sampling; otherwise it warns and leaves the series as is) |
+| `subtract_mean`, `qc` | as before; a different `qc` rebuilds the matches, but the model lane underneath is still a cache hit |
+
+**"Surface" is for data that has one.** The model has a top cell and a gridded product has a top
+level, but a cast's shallowest reading may be 2 m or 8 m, and a mooring's instrument sits wherever
+it was deployed. So against a cast, a repeat-visit station or a mooring at depth, `"surface"` is
+an error that names the depths the data does have. Ask for one of those, or a range, instead. A
+dataset counts as at the surface when its catalog entry says so (`depth_convention: {support:
+surface}`), or when its declared depth is within 1 m of the top: a surface buoy, say. A mooring's
+depth is declared by `nominal_depth_m` (or `depth`), else `geospatial_vertical_min/max`. A
+mooring that declares none is refused "surface" and depth ranges until it does, because it
+can't be placed at the surface or in a layer. In a `compare()` over several references, one
+that can't answer is skipped with a warning rather than failing the call.
+
+**A layer with no observations in it is empty.** For casts, stations and moorings, a depth
+range containing none of the data's depths is an error naming the depths it does have. In a
+`compare()` over several references it is skipped with a warning instead. With several ranges
+against one cast, an empty one comes back as NaN with a warning. Gridded products, which report
+at standard levels, still take the nearest level for a range falling between two of them.
+
+**Pooling a depth range across moorings.** Ask every mooring for the same layer, then average
+them. Each one comes from its own saved matches, and moorings whose instrument is outside the
+layer are left out:
+
+```python
+layer = osk.compare(reference=["m_10m", "m_30m", "m_80m"], test="his", variables=["temp"],
+                    depths=[{"min": 0, "max": 50}], aggregate={"Z": "mean"})
+# warns: m_80m left out (its instrument at 80 m is outside 0-50 m)
+layer.average(by="variable")   # the 10 m and 30 m moorings pooled into one series
+```
+
+Some requests can't be answered from matches, and still go through the model as before:
+- a depth the observations didn't sample;
+- density and mixed-layer-depth calculators;
+- the tidal harmonic calculators;
+- gridded references, area means and trajectories.
+
+A different `time_method` or `depth_method` matches the model differently, so it saves a
+new set of matches. A result records which way it was made in its attrs: `derived_from` is
+`"pairs"` or `"lanes"`, and `derived_reason` says why.
+
+**Two consequences to know:**
+- **Averages are taken over the matches.** A layer mean of the model is the mean of the model
+  at the observation's depths — the same sampling as the observation side — rather than a
+  thickness-weighted mean over the model's own levels. Likewise a monthly mean is a mean of
+  matched values.
+- **The first comparison against a mooring reads its whole record**, even when it asks for
+  one month, so that later windows can be served from it.
+
+### Seeing when the cache was used
+
+Each comparison that used a saved result prints one line saying which:
+
+```
+ocean-skill: cache: his vs ctd_0412 (sea_water_temperature) -- reused the saved comparison
+ocean-skill: cache: his vs ctd_0412 (sea_water_temperature) -- derived from saved model-data matches (model not read)
+ocean-skill: cache: his vs mooring_A (sea_water_temperature) -- saved model-data matches for reuse
+ocean-skill: cache: his vs woa23_temp (sea_water_temperature) -- reused the saved model lane
+```
+
+A comparison computed entirely fresh prints nothing. `osk.cache.verbose(False)` silences
+these lines and the banner.
+
 ## Controls
 
 | What | How |
@@ -188,6 +277,7 @@ way an uncropped one is.
 | Where downloaded sources land | `osk.cache.obs_dir()` — never touched by `clear()` (`clear("obs")` raises); delete by hand to reclaim space |
 | State, entry counts, size | `osk.cache.info()` |
 | Turn off for this session | `osk.cache.disable()` |
+| Silence the "cache: … reused …" lines | `osk.cache.verbose(False)` |
 | Turn back on | `osk.cache.enable()` |
 | Move it elsewhere | `osk.cache.enable("/path/to/dir")`, or set `$OCEAN_SKILL_DIR` |
 | Pin a suite's cache | `cache_dir:` in the suite YAML (`docs/suites.md`) |
