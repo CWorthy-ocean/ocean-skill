@@ -154,6 +154,17 @@ GRID_VARIABLE_NAMES = (
 #: silently rides a flat ``zeta = 0``. The last is the standard name the probe records.
 FREE_SURFACE_NAMES = ("zeta", "sea_surface_height_above_geoid")
 
+#: The members of :data:`GRID_VARIABLE_NAMES` ROMS writes *along the record dimension*
+#: because they are fields, not geometry (a wetting-and-drying run's per-step wet/dry
+#: flags). Kept under their own names like the rest, but never reduced to a single
+#: record by :func:`_static_grid_fields`: every record of them is data.
+_RECORD_GRID_NAMES = (
+    "wetdry_mask_rho",
+    "wetdry_mask_u",
+    "wetdry_mask_v",
+    "wetdry_mask_psi",
+)
+
 #: Coordinate name carrying per-cell horizontal area, so a spatial mean can honour
 #: it — mirrors :data:`WEIGHT_COORD`'s "weights ride on the data" pattern:
 #: :func:`ocean_skill.operators.aggregate` needs no special case for a box mean,
@@ -417,6 +428,60 @@ def add_geographic_velocity_windowed(ds: xr.Dataset, meta: dict[str, Any]) -> xr
     return ds
 
 
+def _record_dims(
+    ds: xr.Dataset, meta: Mapping[str, Any] | None = None
+) -> tuple[str, ...]:
+    """Return the dimension(s) of ``ds`` its time records run along (``()`` if none).
+
+    Classic Rutgers output makes ``ocean_time`` the dimension itself, UCLA output puts
+    the ``ocean_time`` variable on a dimension called ``time``: ``meta``'s
+    ``time_coord``/``time_dim`` (defaulting to those two names), whichever ``ds`` has.
+    """
+    meta = meta or {}
+    names = (meta.get("time_dim", "time"), meta.get("time_coord", "ocean_time"))
+    return tuple(dict.fromkeys(d for d in names if d in ds.dims))
+
+
+def _static_grid_fields(ds: xr.Dataset, meta: Mapping[str, Any]) -> xr.Dataset:
+    """Return ``ds`` with its record-stacked static grid fields cut to one record.
+
+    A ROMS grid is the same at every time step, so a grid field with a record
+    dimension (``h`` as ``(ocean_time, eta_rho, xi_rho)``, ``hc`` as ``(ocean_time,)``,
+    a classic file's ``s_rho`` as ``(ocean_time, s_rho)``) is an artifact of how the
+    store was put together: files that each carry their grid, stacked with every
+    variable treated as data. That is what :func:`ocean_skill.build.make_kerchunk` did
+    before it kept statics static, and what a kerchunk ``MultiZarrToZarr`` does to any
+    variable it is not told is identical. Left as is, the stacked ``lon_rho`` makes
+    ``lon``/``lat`` three-dimensional, ``hc`` stops being a number and a stacked
+    ``s_rho`` is no longer a vertical coordinate at all.
+
+    Only the fields ROMS holds static are reduced (:data:`GRID_VARIABLE_NAMES` less
+    :data:`_RECORD_GRID_NAMES`), each at its first record -- whatever the stack holds,
+    every record of a static field is the same one. A coordinate stays a coordinate, a
+    data variable a data variable, and the reduction is lazy. A no-op for a dataset
+    whose grid is already static, which is the usual case.
+    """
+    record_dims = _record_dims(ds, meta)
+    if not record_dims:
+        return ds
+    for name in GRID_VARIABLE_NAMES:
+        var = ds.variables.get(name)
+        if var is None or name in _RECORD_GRID_NAMES:
+            continue
+        along = {d: 0 for d in record_dims if d in var.dims}
+        if not along:
+            continue
+        # ``Variable.isel``: no coordinates to drag in (or to conflict with), and the
+        # attrs come with it. Dropped and re-added, since a variable cannot be swapped
+        # in place for one of other dimensions -- as the kind it was, so a coordinate
+        # (``lon_rho``, a classic ``s_rho``) stays one.
+        first = var.isel(along)
+        was_coord = name in ds.coords
+        ds = ds.drop_vars(name)
+        ds = ds.assign_coords({name: first}) if was_coord else ds.assign({name: first})
+    return ds
+
+
 def _normalize_classic_layout(ds: xr.Dataset) -> xr.Dataset:
     """Give a classic-Rutgers s-coordinate the UCLA layout (``sigma_*`` + bare dim).
 
@@ -506,7 +571,11 @@ def standardize(
         with no graph built at all). Pass ``True`` only for a caller -- direct or
         test-only -- that wants the older, simpler all-in-one shape.
     """
-    # first, so a self-contained grid (grid is ds, below) sees ``sigma_r`` too
+    # first of all: a store that stacked its grid along the record dimension (see
+    # _static_grid_fields) must be read as the static grid it is, before anything below
+    # looks at ``s_rho``/``hc``/``lon_rho``. ``grid = ds`` below is then the static one.
+    ds = _static_grid_fields(ds, meta)
+    # next, so a self-contained grid (grid is ds, below) sees ``sigma_r`` too
     ds = _normalize_classic_layout(ds)
     # the grid may be a separate file, or already merged into the output
     # (self_contained_grid, e.g. a combined ROMS file)
