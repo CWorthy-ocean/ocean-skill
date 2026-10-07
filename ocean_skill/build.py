@@ -56,11 +56,11 @@ import functools
 import importlib
 import struct
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ocean_skill import _stacklevel
+from ocean_skill import _stacklevel, depth_convention, time_zone
 from ocean_skill.cf import find_coord
 
 __all__ = [
@@ -2014,7 +2014,12 @@ def _domain_outline(lon, lat) -> list[list[float]] | None:
 
 
 def _probe(
-    ds, name_map: dict[str, str] | None, *, qc: dict[str, Any] | None = None
+    ds,
+    name_map: dict[str, str] | None,
+    *,
+    qc: dict[str, Any] | None = None,
+    declared: dict[str, Any] | None = None,
+    subject: str | None = None,
 ) -> dict[str, Any]:
     """Derive extents, axis mapping, variable mapping and featureType from a dataset.
 
@@ -2027,9 +2032,21 @@ def _probe(
     branch — see :func:`_probe_dataframe` — a gridded Dataset's QC flags are CF
     ``flag_values``/``flag_meanings`` attributes already, out of scope here (see
     the plan's "out of scope" list: ADCP/NetCDF flag handling is noted, not wired).
+
+    ``declared`` is the metadata the caller handed :func:`add_source` (the probe never
+    overrides it; see :func:`_attach`), consulted for what changes *how the data is
+    read*: a declared ``time_zone`` / ``utc_offset_h`` puts the time coverage in UTC
+    rather than in the source's own clock, and for a table the declared ``axes`` columns
+    and ``time_columns`` decide which columns the extents come from. ``subject`` names
+    the source in the warnings that raises. The vertical coordinate's own name and CF
+    attributes are also read for what they say about the depth convention (``positive``,
+    pressure in decibars) and recorded under ``depth_convention["inferred"]``, kept
+    apart from anything the caller declares so a rebuild never overwrites a person's
+    word. ROMS output is skipped for that: its ``s_rho`` is a stretched coordinate, not
+    an observation's depth.
     """
     if hasattr(ds, "columns"):
-        return _probe_dataframe(ds, qc=qc)
+        return _probe_dataframe(ds, qc=qc, declared=declared, subject=subject)
     import numpy as np
 
     md: dict[str, Any] = {}
@@ -2075,6 +2092,12 @@ def _probe(
     if coords["time"] is not None:
         t = _decode_times(ds, coords["time"])
         if t is not None and t.size:
+            if t.dtype.kind == "M" and time_zone.tzinfo_of(declared) is not None:
+                # The file's clock readings are local time in the declared zone, and
+                # coverage is stated in UTC (as it is read): shift before taking dates.
+                t = time_zone.localize_naive_datetime64(
+                    t, declared, subject=subject or "this source"
+                )
             md["time_coverage_start"] = str(
                 np.datetime_as_string(np.nanmin(t), unit="D")
             )
@@ -2130,6 +2153,12 @@ def _probe(
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))
     md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
+    if md.get("model") != "roms" and coords["vertical"] is not None:
+        vertical = coords["vertical"]
+        found = depth_convention.infer_from_coordinate(vertical.name, vertical.attrs)
+        if found:
+            reason = f"vertical coordinate {vertical.name!r}"
+            md["depth_convention"] = {"inferred": {**found, "reason": reason}}
     if md.get("model") == "roms":
         # A classic ROMS file carries s_rho as a *valued* coordinate, so the generic
         # probe above takes it for "vertical" and records its sigma values
@@ -2162,7 +2191,13 @@ def _probe(
     return md
 
 
-def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
+def _probe_dataframe(
+    df,
+    *,
+    qc: dict[str, Any] | None = None,
+    declared: dict[str, Any] | None = None,
+    subject: str | None = None,
+) -> dict[str, Any]:
     """Return the tabular counterpart of :func:`_probe` above.
 
     Same contract (axes, extents, standard_names, variables, featureType), derived
@@ -2195,34 +2230,77 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
     no flags at all (a mooring's 9999 sentinel poisoning both the geospatial extent
     *and*, unmasked, the trajectory-vs-timeSeries featureType guess below, via a
     lon/lat value that only ever differs because of the fill).
+
+    ``declared`` is the metadata the caller handed :func:`add_source` (see
+    :func:`_probe`), and it changes what is read, not just what is recorded. A declared
+    ``axes`` column wins over the name-based pick for its axis -- a table with both a
+    ``depth`` and a ``sensor_depth`` column gets its vertical extent from the one the
+    caller named -- and ``time_columns`` makes the joined column the time axis (the
+    table is joined here if the caller has not done so, see
+    :func:`ocean_skill.tabular.apply_table_options`). A declared ``time_zone`` /
+    ``utc_offset_h`` puts the coverage dates in UTC instead of the source's own clock.
+    The Z column's own name and units are read for a depth convention (``Pressure
+    (dbar)`` is a pressure: decibars, measured below the free surface), recorded as
+    ``md["depth_convention"] = {"inferred": {...}}`` -- the probe's finding, kept apart
+    from any declaration (see :func:`ocean_skill.depth_convention.merge_probed`).
+    ``geospatial_vertical_min``/``_max`` stay the column's raw values: whoever reads
+    them converts through the convention.
     """
     import numpy as np
 
     from ocean_skill import qc as _qc
     from ocean_skill.tabular import (
         FIXED_POSITION_TOLERANCE,
+        apply_table_options,
         coord_column,
         decode_time_column,
         is_coordinate_column,
         is_qc_column,
+        joined_time_column,
         numeric_in_range,
         split_units,
     )
 
     md: dict[str, Any] = {}
+    declared = declared or {}
+    subject = subject or declared.get("datasetID") or declared.get("title")
+    subject = subject or "this source"
+    df = apply_table_options(df, declared, subject=subject)  # no-op once joined
 
     contract = _qc.resolve_contract(qc, df)
     flag_cols: frozenset[str] = (
         frozenset(contract.get("flags") or {}) if contract is not None else frozenset()
     )
+
+    # Which column each axis is read from: the one the caller declared, else (for time)
+    # the joined time_columns column, else the one the column names give away. Picked
+    # once, up front, so a declared column the table lacks is warned about once.
+    declared_axes = declared.get("axes") or {}
+
+    def _pick(axis: str) -> str | None:
+        named = declared_axes.get(axis)
+        if named is not None:
+            if named in df.columns:
+                return str(named)
+            warnings.warn(
+                f"{subject}: axes[{axis!r}] names column {named!r}, which the table "
+                f"does not have (its columns: {[str(c) for c in df.columns]}); reading "
+                f"the {axis} axis from the column names instead.",
+                stacklevel=_stacklevel.find(),
+            )
+        if axis == "T" and (joined := joined_time_column(df, declared)) is not None:
+            return joined
+        return coord_column(df, axis, exclude=flag_cols)
+
+    picks = {axis: _pick(axis) for axis in ("X", "Y", "T", "Z")}
+
     fill_values = (contract or {}).get("fill_values")
     work = df
     if fill_values:
-        time_hint = coord_column(df, "T", exclude=flag_cols)
-        work = _qc.mask_fill_values(df, fill_values, time_col=time_hint)
+        work = _qc.mask_fill_values(df, fill_values, time_col=picks["T"])
 
     axes: dict[str, str] = {}
-    if lon_col := coord_column(df, "X", exclude=flag_cols):
+    if lon_col := picks["X"]:
         # numeric_in_range drops out-of-range fill values (e.g. a "not reported" row
         # written as 9999 rather than left blank) the same way it already drops
         # non-numeric/NaN -- otherwise one such row reports 9999 as this source's
@@ -2238,7 +2316,7 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
             md["lon_convention"] = (
                 "0-360" if md["geospatial_lon_max"] > 180 else "-180-180"
             )
-    if lat_col := coord_column(df, "Y", exclude=flag_cols):
+    if lat_col := picks["Y"]:
         la = numeric_in_range(work[lat_col], "Y").dropna()
         if not la.empty:
             axes["Y"] = lat_col
@@ -2246,17 +2324,21 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
                 float(la.min()),
                 float(la.max()),
             )
-    if time_col := coord_column(df, "T", exclude=flag_cols):
+    if time_col := picks["T"]:
         # decode_time_column honors a CF "<n> since <date>" encoding stated in the
         # column's own name (e.g. "Time[days_since_1950-01-01T00:00:00Z]") -- plain
         # pd.to_datetime on the raw numbers instead reads them as nanoseconds since
-        # the Unix epoch, landing every timestamp within a heartbeat of 1970-01-01.
-        t = decode_time_column(work[time_col], time_col).dropna()
+        # the Unix epoch, landing every timestamp within a heartbeat of 1970-01-01. It
+        # also reads naive stamps in the declared time zone, so the coverage dates
+        # below are UTC dates.
+        t = decode_time_column(
+            work[time_col], time_col, declared, subject=subject
+        ).dropna()
         if not t.empty:
             axes["T"] = time_col
             md["time_coverage_start"] = str(t.min().date())
             md["time_coverage_end"] = str(t.max().date())
-    if depth_col := coord_column(df, "Z", exclude=flag_cols):
+    if depth_col := picks["Z"]:
         # Written for the catalog's own sake (search, map hover text -- see
         # plot/locations._format_depth) and as depth_of's rung-3 fallback for a
         # frame whose column depth_of's own (narrower, exact) alias list still
@@ -2269,6 +2351,13 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
                 float(finite.min()),
                 float(finite.max()),
             )
+            # What the column's own name and units say about the convention (a
+            # pressure in dbar is measured below the free surface); nothing a table
+            # column can say about its sign, so `positive` is left to the read.
+            if found := depth_convention.infer_from_coordinate(depth_col):
+                md["depth_convention"] = {
+                    "inferred": {**found, "reason": f"Z column {depth_col!r}"}
+                }
     if axes:
         md["axes"] = axes
 
@@ -2306,8 +2395,10 @@ def _probe_dataframe(df, *, qc: dict[str, Any] | None = None) -> dict[str, Any]:
         # is actually fixed but carries a stray fill-value row (a declared fill, or an
         # out-of-range sentinel numeric_in_range drops) would otherwise look like it
         # "varies", misclassifying a mooring as a trajectory.
-        series = numeric_in_range(work[col], axis) if numeric else decode_time_column(
-            work[col], col
+        series = (
+            numeric_in_range(work[col], axis)
+            if numeric
+            else decode_time_column(work[col], col, declared, subject=subject)
         )
         if axis in ("X", "Y"):
             # A position axis asks "does this station actually move", not "does it
@@ -2560,6 +2651,126 @@ def _drop_absent_standard_names(
     return {**metadata, "standard_names": kept}
 
 
+#: The two alternative ways of declaring what a naive timestamp means.
+_TIME_ZONE_KEYS = frozenset({"time_zone", "utc_offset_h"})
+
+
+class _DeclarationError(ValueError):
+    """A declaration in the metadata a caller passed is invalid.
+
+    A subclass of ``ValueError`` of its own so that :func:`add_sources` can let it
+    through as itself: a bad ``time_zone`` is a mistake in the builder's call, not a
+    source that failed to open, and wrapping it in the "failed adding ..."
+    ``RuntimeError`` every other failure gets would hide what it is.
+    """
+
+
+def _canonical_declarations(name: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return ``metadata`` with its read-semantics declarations validated, canonical.
+
+    Four declarations change how a source is *read* rather than describing it, and each
+    has a vocabulary a catalog author can get wrong -- so each is checked once, here, at
+    build time, and stored in its canonical form instead of being trusted at every read:
+
+    * ``time_zone`` / ``utc_offset_h`` -- what a naive timestamp means
+      (:func:`ocean_skill.time_zone.canonicalize_time_zone`). The two are alternatives;
+      only the canonical one is kept (``"america/anchorage"`` becomes
+      ``"America/Anchorage"``).
+    * ``time_columns`` / ``time_format`` -- a time split over several columns
+      (:func:`ocean_skill.tabular.canonicalize_time_options`).
+    * ``depth_convention`` -- where depth is measured from and which way it counts
+      (:func:`ocean_skill.depth_convention.canonicalize`). Only what the caller
+      declared lives here; the probe's own finding is merged in by :func:`_attach`.
+    * ``axes`` -- must be a mapping of axis to column name; merged per axis, not
+      replaced, by :func:`_attach`.
+
+    Any problem is a :class:`_DeclarationError` (a ``ValueError``) naming the entry and
+    quoting the helper's own message, which says what is allowed. ``None`` and blank
+    values are not declarations. ``metadata`` itself is never modified.
+    """
+    from ocean_skill import tabular
+
+    out = dict(metadata)
+    try:
+        # pop first: the zone keys are replaced by their canonical form (one of them).
+        out.update(
+            time_zone.canonicalize_time_zone(
+                out.pop("time_zone", None), out.pop("utc_offset_h", None)
+            )
+        )
+        out.update(
+            tabular.canonicalize_time_options(
+                out.pop("time_columns", None), out.pop("time_format", None)
+            )
+        )
+        if "depth_convention" in out:
+            canonical = depth_convention.canonicalize(out.pop("depth_convention"))
+            if canonical is not None:
+                out["depth_convention"] = canonical
+        axes = out.get("axes")
+        if axes is not None and not isinstance(axes, Mapping):
+            raise ValueError(
+                "axes: give a mapping of axis to column name, e.g. "
+                f"{{'Z': 'sensor_depth'}}, got {axes!r}"
+            )
+    except ValueError as exc:
+        raise _DeclarationError(f"{name!r}: {exc}") from exc
+    return out
+
+
+def _join_time_columns(name: str, data, metadata: dict[str, Any]):
+    """Return a probed table with the entry's ``time_columns`` joined (see tabular).
+
+    A declaration that does not describe the table (a column it lacks, a joined text no
+    row parses) is the caller's mistake, so it surfaces as a :class:`_DeclarationError`
+    -- unlike a probe failure, which only costs the entry its searchable extents.
+    """
+    if not metadata.get("time_columns"):
+        return data
+    from ocean_skill.tabular import apply_table_options
+
+    try:
+        return apply_table_options(data, metadata, subject=name)
+    except ValueError as exc:
+        raise _DeclarationError(f"{name!r}: {exc}") from exc
+
+
+def _merge_declarations(
+    target: dict[str, Any],
+    name: str,
+    probed: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    """Apply the declarations whose merge with the probe is not "caller wins whole".
+
+    ``target`` is the entry's metadata, to which the probe and the caller's metadata
+    have already been applied key by key (the plain override); this puts right the keys
+    where that is the wrong rule:
+
+    * ``axes`` merge **per axis**. A caller who declares only ``{"Z": "sensor_depth"}``
+      is naming one column, not asking the probe's time, longitude and latitude to be
+      forgotten -- which replacing the whole mapping did.
+    * ``depth_convention`` keeps the caller's fields at the top and the probe's finding
+      under ``inferred`` (:func:`ocean_skill.depth_convention.merge_probed`), so a
+      rebuild re-probes without ever overwriting what a person wrote.
+    * ``time_zone`` and ``utc_offset_h`` are alternatives: the one declared is stored
+      and the other, if the entry carried one from earlier, is removed.
+    """
+    if "axes" in metadata:
+        target["axes"] = {**(probed.get("axes") or {}), **(metadata["axes"] or {})}
+    try:
+        merged = depth_convention.merge_probed(
+            probed.get("depth_convention"), metadata.get("depth_convention")
+        )
+    except ValueError as exc:  # e.g. a declared datum on what the probe found surface
+        raise _DeclarationError(f"{name!r}: {exc}") from exc
+    if merged is not None:
+        target["depth_convention"] = merged
+    for kept, dropped in (("time_zone", "utc_offset_h"), ("utc_offset_h", "time_zone")):
+        if kept in metadata:
+            target.pop(dropped, None)
+
+
 def _attach(
     cat,
     name,
@@ -2626,15 +2837,27 @@ def _attach(
     does not carry, so merging it anyway would only make ``variables`` advertise a
     name ``read()`` never produces. With probing skipped there is no data to check
     against, and the map is taken as given.
+
+    A third group of keys describes how the source is *read*: ``time_zone`` /
+    ``utc_offset_h``, ``time_columns`` / ``time_format``, ``depth_convention`` and
+    ``axes`` (see :func:`add_source`). They are validated before anything is read, in
+    :func:`_canonical_declarations`, and a bad one raises ``ValueError`` -- it is a
+    mistake in the call, so it must not be mistaken for "could not derive metadata" and
+    survive as a warning. ``time_columns`` is applied to the table the probe reads, so
+    the probe sees the joined time column and not its pieces, and the declarations
+    that need the probe's finding are merged in :func:`_merge_declarations`.
     """
+    metadata = _canonical_declarations(name, metadata)
     probed: dict[str, Any] = {}
     if probe:
         # unreadable => unusable; let the caller decide, but retry a transient failure first
         data = _read_with_retries(reader, name)
+        if hasattr(data, "columns"):
+            data = _join_time_columns(name, data, metadata)
         try:
             if resolve_qc is not None:
                 qc = resolve_qc(data)
-            probed = _probe(data, name_map, qc=qc)
+            probed = _probe(data, name_map, qc=qc, declared=metadata, subject=name)
             reader.metadata.update(probed)
         except Exception as exc:
             warnings.warn(
@@ -2644,6 +2867,7 @@ def _attach(
             )
         metadata = _drop_absent_standard_names(name, metadata, data)
     reader.metadata.update(_merge_standard_names(probed, metadata))
+    _merge_declarations(reader.metadata, name, probed, metadata)
     if "featureType" in metadata:
         # A caller-supplied featureType overrides the probe's guess (the update
         # above), but was never run through the same canonicalization the probe's
@@ -2778,6 +3002,62 @@ def add_source(
         reads it, is ignored with a warning (for a table the keys are its column
         names, units suffix included: ``"TEMP (degree_Celsius)"``, not ``"TEMP"``).
         See :func:`_merge_standard_names` for the full rules.
+
+        Four more keys say how the source is **read** rather than what it is. Each is
+        validated here -- a bad value raises ``ValueError``, it is never a warning --
+        and saved in canonical form. They belong to the *entry*, not the catalog: one
+        catalog may mix conventions, source by source.
+
+        ``depth_convention``
+            Where an observed depth is measured from, and which way it counts. Either a
+            shorthand origin or a mapping of ``origin`` (``"surface"``: below the moving
+            free surface, as a CTD cast or a pressure sensor measures it; ``"fixed"``: a
+            position fixed in space), ``positive`` (``"up"``/``"down"``: the sign of the
+            stored values), ``units`` (``"m"``/``"dbar"``), ``datum_z_m`` (``fixed``
+            only: the height of the observation's datum in the model's z, default 0) and
+            ``support`` (``"point"``, or the model's ``"surface"``/``"bottom"`` cell),
+            plus per-variable overrides under ``variables``. What nobody declares falls
+            back to what the probe read off the vertical coordinate (kept apart under
+            ``inferred``, so a rebuild never overwrites a person's word), then to
+            ``surface`` for a profile or a pressure and ``fixed`` for the rest. At read
+            time every depth becomes metres positive down below that origin::
+
+                add_source(
+                    cat, "ctd_casts", url,
+                    depth_convention={"origin": "surface", "positive": "up"},
+                )
+
+        ``time_zone`` / ``utc_offset_h``
+            What a **naive** timestamp -- one with no ``Z`` or offset of its own --
+            means; it is read as UTC if nothing is declared, and a timestamp that
+            carries an offset is never shifted. The two are alternatives (giving both is
+            an error). ``time_zone`` is an IANA name and follows daylight saving;
+            ``utc_offset_h`` is a fixed offset, **local clock minus UTC** (ISO 8601:
+            ``-8`` for Alaska daylight time, ``-9`` for Alaska standard time, ``5.5``
+            for India), for a logger that keeps local standard time all year. UTC is the
+            stamp minus the offset, so ``12:00`` at ``-8`` is ``20:00`` UTC::
+
+                add_source(cat, "mooring_a", url_a, time_zone="America/Anchorage")
+                add_source(cat, "mooring_b", url_b, utc_offset_h=-9)
+
+        ``time_columns`` / ``time_format``
+            A table whose time is split over columns: the named columns (two or more)
+            are joined with a space into one time column, which becomes the time axis.
+            ``time_format`` is the ``strptime`` format of the joined text, for when it
+            cannot be guessed::
+
+                add_source(
+                    cat, "logger", url,
+                    time_columns=["Date", "Time"], time_format="%d/%m/%Y %H:%M",
+                )
+
+        ``axes``
+            Which column is each axis (``"T"``, ``"X"``, ``"Y"``, ``"Z"``), where the
+            names the probe guessed are wrong. Merged **per axis** with the probed ones
+            (the caller wins for the axes it names; the rest stay), and a declared ``Z``
+            is the instrument depth wherever the table has other depth-like columns::
+
+                add_source(cat, "pier_sonde", url, axes={"Z": "sensor_depth"})
     """
     if reader is None:
         if url is None:
@@ -2866,11 +3146,32 @@ def add_sources(
     exactly as any other per-source key replaces its shared value: the two are not
     combined with each other, only each with the probe.
 
+    The keys that say how a source is *read* -- ``time_zone``/``utc_offset_h``,
+    ``depth_convention``, ``time_columns``/``time_format``, ``axes`` (see
+    :func:`add_source`) -- work the same way, which is what lets one catalog mix
+    conventions entry by entry: a shared value is the default and a source's own dict
+    overrides it. A bad value raises ``ValueError``: a shared one before anything is
+    opened, a per-source one for that entry (``skip_errors=True`` skips such an entry
+    with a warning, like any other that fails)::
+
+        add_sources(
+            cat,
+            {
+                "visit_2023": {"url": url_a, "utc_offset_h": -8},
+                "visit_2024": {"url": url_b, "time_zone": "America/Anchorage"},
+                "visit_2025": url_c,  # declares nothing: naive times are UTC
+            },
+        )
+
     Returns ``{name: reader}`` for the entries actually added.
     """
     # An already-built catalog carries readers, so there is nothing to construct --
     # only the shared probe/attach step. This is what makes
     # `build_catalog(ERDDAPCatalogReader(...).read(), out)` work.
+    # A shared declaration that is wrong is wrong for every entry: say so now, before
+    # any (possibly slow) read, rather than once per entry as each one is skipped.
+    _canonical_declarations("the shared options", shared)
+
     from_catalog = _is_catalog(sources)
     if from_catalog:
         names = list(sources) or list(getattr(sources, "entries", {}))
@@ -2883,6 +3184,13 @@ def add_sources(
     added: dict[str, Any] = {}
     for name, spec in items:
         opts = {**shared, **spec} if isinstance(spec, dict) else {**shared}
+        if isinstance(spec, dict) and spec.keys() & _TIME_ZONE_KEYS:
+            # time_zone and utc_offset_h are alternatives, so a source that says
+            # anything about its zone replaces the shared declaration outright: a
+            # per-source utc_offset_h must not meet a shared time_zone (and fail as
+            # "both given"), and an explicit ``time_zone=None`` clears the shared one.
+            for key in _TIME_ZONE_KEYS - spec.keys():
+                opts.pop(key, None)
         url = (
             None
             if from_catalog
@@ -2915,6 +3223,8 @@ def add_sources(
                 added[name] = add_source(cat, name, url, **opts)
         except Exception as exc:
             if not skip_errors:
+                if isinstance(exc, _DeclarationError):
+                    raise  # a mistake in the call, not a source that failed to open
                 raise RuntimeError(f"failed adding {name!r} ({url}): {exc}") from exc
             warnings.warn(f"skipping {name!r} ({url}): {exc}", stacklevel=2)
     return added

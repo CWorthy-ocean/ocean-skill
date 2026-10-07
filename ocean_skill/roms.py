@@ -3,15 +3,33 @@
 The catalog says *how to read* a ROMS file (driver/args → intake); this module turns
 that raw output into a CF-standardized dataset ocean-skill can compare: attach the grid
 (lon/lat/h/mask), decode ``ocean_time``, rename variables to CF standard_names, mask
-land, and reconstruct depth. The s-coordinate → z transform is xgcm-based (Vtransform 1
-or 2, using ``Cs_r``/``sigma_r`` from the grid); it stays lazy (dask) — no unchunk
-needed.
+land, and reconstruct depth. The s-coordinate → z reconstruction (Vtransform 1 or 2,
+using ``Cs_r``/``sigma_r`` from the grid) stays lazy (dask) — no unchunk needed.
 Lateral regridding lives in :mod:`ocean_skill.align` (xesmf), not here.
+
+Matching the model to a *depth* is the other half, and the one place the free surface
+matters. ROMS' ``z_rho`` is a height relative to mean sea level, so it rides up and down
+with ``zeta`` -- but most in-situ depths (a CTD cast, a pressure sensor, a profiler) are
+measured *below the instantaneous surface*, while a pier sonde or a bottom-mounted
+instrument sits at a position fixed in space. Which one a source is decides the right
+target (in a macrotidal estuary, up to a tidal range of difference), so
+:func:`to_depth`, :func:`nearest_depth_levels` and :func:`depth_band` work in a *frame*
+(:func:`frame_coordinate`): ``z - zeta`` for ``origin: surface``, ``z - datum_z_m`` for
+``origin: fixed``. In either, a depth ``d`` is simply the coordinate ``-d``. The caller
+says which origin applies (``convention=``, a plain mapping -- this module never reads
+catalog metadata for it); this module only applies it.
+
+The two vertical matches share one numpy kernel (:func:`_match_columns`) that matches
+**per time step** against the frame of that step, and that treats the top and bottom
+half-cells -- inside the water column but beyond the outermost cell centres --
+explicitly (see :func:`to_depth` for the edge policy) instead of leaving a NaN band
+there.
 """
 
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -24,14 +42,17 @@ __all__ = [
     "WEIGHT_COORD",
     "add_depth_coord",
     "add_interface_coord",
+    "bottom",
     "depth_average",
     "depth_band",
     "derived_geographic_velocities",
+    "frame_coordinate",
     "nearest_depth_levels",
     "standardize",
     "surface",
     "to_depth",
     "to_sigma0",
+    "water_column_bounds",
 ]
 
 #: ROMS' own grid-relative velocity standard_names (build.py's ROMS_STANDARD_NAMES
@@ -491,6 +512,23 @@ def _s_to_z(sigma, Cs, h, zeta, hc: float, vtransform: int):
     return zeta + (zeta + h) * s
 
 
+def _zeta_of(ds: xr.Dataset) -> xr.DataArray:
+    """Return the free-surface height ``zeta`` (metres above mean sea level) of ``ds``.
+
+    ``zeta`` when ``ds`` carries it, else ``sea_surface_height_above_geoid`` (what the
+    catalog's ``standard_names`` rename it to -- a data variable or a coordinate alike),
+    else zeros shaped like ``h``: a flat free surface, so a dataset with no free-surface
+    field still has a (static) depth coordinate and frame. The one lookup the depth
+    coordinates, the matching frame and the water-column bounds all share, so none of
+    them can quietly use a different surface from the others.
+    """
+    if "zeta" in ds.variables:
+        return ds["zeta"]
+    if "sea_surface_height_above_geoid" in ds.variables:
+        return ds["sea_surface_height_above_geoid"]
+    return xr.zeros_like(ds["h"])  # no free-surface field: use zeta = 0
+
+
 def add_depth_coord(
     ds: xr.Dataset, meta: dict[str, Any], *, zero_zeta: bool = False
 ) -> xr.Dataset:
@@ -515,14 +553,7 @@ def add_depth_coord(
     costs nothing a vertical section could show.
     """
     hc, vtransform = _vertical_params(ds, meta)
-    if zero_zeta:
-        zeta = xr.zeros_like(ds["h"])
-    elif "zeta" in ds.variables:
-        zeta = ds["zeta"]
-    elif "sea_surface_height_above_geoid" in ds.variables:
-        zeta = ds["sea_surface_height_above_geoid"]
-    else:  # no free-surface field: use zeta = 0
-        zeta = xr.zeros_like(ds["h"])
+    zeta = xr.zeros_like(ds["h"]) if zero_zeta else _zeta_of(ds)
     z_rho = _s_to_z(ds["sigma_r"], ds["Cs_r"], ds["h"], zeta, hc, vtransform)
     # The preferred order for the full field; `...` carries forward anything not
     # named here (`along`, for a vertical section already sliced to one grid
@@ -545,26 +576,156 @@ def add_interface_coord(
     *centres*, so interpolating to a depth (:func:`to_depth`) must use ``z_rho``.
     Cell *thicknesses* only exist between interfaces, so a depth-band average
     (:func:`depth_average`) must use ``z_w``. Interfaces also start exactly at the
-    free surface, which is why a band average has no NaN problem where interpolation
-    does: the shallowest ``z_rho`` can be 7 m down in deep water, but the shallowest
-    ``z_w`` is always 0.
+    free surface, which is why a band average needs no edge rule where a point-depth
+    match does: the shallowest ``z_rho`` can be 7 m down in deep water (a target above
+    it is in the top half-cell, which :func:`to_depth` fills with that cell's value),
+    but the shallowest ``z_w`` is always the surface itself.
 
     ``zero_zeta`` -- see :func:`add_depth_coord`, the same zeta-free mesh for a
     section built on ``s_w`` instead of ``s_rho``.
     """
     hc, vtransform = _vertical_params(ds, meta)
-    if zero_zeta:
-        zeta = xr.zeros_like(ds["h"])
-    elif "zeta" in ds.variables:
-        zeta = ds["zeta"]
-    elif "sea_surface_height_above_geoid" in ds.variables:
-        zeta = ds["sea_surface_height_above_geoid"]
-    else:
-        zeta = xr.zeros_like(ds["h"])
+    zeta = xr.zeros_like(ds["h"]) if zero_zeta else _zeta_of(ds)
     z_w = _s_to_z(ds["sigma_w"], ds["Cs_w"], ds["h"], zeta, hc, vtransform)
     dims = ("time", "s_w", "eta_rho", "xi_rho")  # see add_depth_coord's note on `...`
     z_w = z_w.transpose(*[d for d in dims if d in z_w.dims], ...)
     return ds.assign_coords(z_w=z_w)
+
+
+#: The two things a depth can be measured from: ``"surface"`` -- below the moving free
+#: surface (a CTD cast, a pressure-derived depth) -- or ``"fixed"`` -- a position fixed
+#: in space relative to a datum (a pier sonde, a bottom-mounted instrument). Spelled out
+#: here rather than imported: this module is handed the answer as a plain mapping (see
+#: :func:`_frame_spec`) and never reads catalog metadata to decide it.
+_ORIGINS = ("surface", "fixed")
+
+
+def _check_origin(origin: str) -> str:
+    """Return ``origin`` if it is one of :data:`_ORIGINS`, else raise a clear error."""
+    if origin not in _ORIGINS:
+        raise ValueError(
+            f"depth origin must be one of {_ORIGINS}, got {origin!r}: 'surface' "
+            "measures depth below the moving free surface, 'fixed' at a position "
+            "fixed in space."
+        )
+    return origin
+
+
+def _check_datum(datum_z_m: float) -> float:
+    """Return ``datum_z_m`` as a float if it is finite, else raise a clear error."""
+    datum = float(datum_z_m or 0.0)
+    if not np.isfinite(datum):
+        raise ValueError(f"datum_z_m must be a finite number, got {datum_z_m!r}.")
+    return datum
+
+
+def _frame_spec(convention: Mapping[str, Any] | None) -> tuple[str, float, str]:
+    """Read ``(origin, datum_z_m, source)`` from a plain ``convention`` mapping.
+
+    Only these three keys are read; anything else the mapping carries (``support``,
+    ``positive``, ...) is the caller's business, not a matter for the vertical match.
+    Missing keys mean the historical meaning: ``origin="fixed"``, ``datum_z_m=0.0`` and
+    ``source="default"`` -- "nobody declared this" (``"declared"``/``"inferred"``/
+    ``"data"`` say someone did, and are what silences the large-tide warning in
+    :func:`to_depth`). ``datum_z_m`` only exists for a fixed origin: a surface origin
+    has no datum to offset from, so it is 0 there whatever was passed.
+    """
+    if convention is None:
+        convention = {}
+    elif not isinstance(convention, Mapping):
+        raise TypeError(
+            "convention must be a mapping with 'origin' / 'datum_z_m' / 'source' keys "
+            f"(or None), got {type(convention).__name__}."
+        )
+    origin = _check_origin(convention.get("origin") or "fixed")
+    datum = 0.0 if origin == "surface" else _check_datum(convention.get("datum_z_m"))
+    return origin, datum, str(convention.get("source") or "default")
+
+
+def frame_coordinate(
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    origin: str = "fixed",
+    *,
+    datum_z_m: float = 0.0,
+    z: str = "z_rho",
+) -> xr.DataArray:
+    """Return the vertical coordinate in the matching *frame*: a depth is ``-d`` in it.
+
+    ``z_rho`` (or, with ``z="z_w"``, the cell interfaces) is a height above mean sea
+    level, and it moves: ``z_rho = zeta + (zeta + h) * s``. A depth quoted *below the
+    free surface* therefore sits at ``z = zeta - d``, and one quoted at a position
+    *fixed in space* at ``z = datum_z_m - d`` (``datum_z_m`` is the height of the
+    observation datum in the model's frame, mean sea level = 0). Subtracting that
+    reference leaves a coordinate in which the target is ``-d`` either way::
+
+        origin="surface":  z - zeta         (= (zeta + h) * s for Vtransform 2)
+        origin="fixed":    z - datum_z_m    (z itself for the default datum 0)
+
+    which is why :func:`to_depth` and :func:`nearest_depth_levels` need only one kernel
+    for both origins. Only ``z`` and ``zeta`` enter, so this holds for Vtransform 1 and
+    2 alike (Vtransform 1: ``z - zeta = z0 * (1 + zeta/h)``, the same stretching of the
+    unperturbed column that ``(zeta + h)/h`` gives Vtransform 2).
+
+    ``z_rho``/``z_w`` is attached first (:func:`add_depth_coord`/
+    :func:`add_interface_coord`) when ``ds`` lacks it. An existing one is used as
+    found, so it must have been built from the same ``zeta`` that ``ds`` carries -- a
+    ``zeta`` that was reduced *after* ``z_rho`` was built would put the frame out of
+    step with it. ``datum_z_m`` is ignored for ``origin="surface"``. Lazy.
+    """
+    origin = _check_origin(origin)
+    if z not in ("z_rho", "z_w"):
+        raise ValueError(
+            f"z must be 'z_rho' (cell centres) or 'z_w' (interfaces), got {z!r}."
+        )
+    if z not in ds.coords:
+        attach = add_depth_coord if z == "z_rho" else add_interface_coord
+        ds = attach(ds, meta)
+    height = ds[z]
+    datum = _check_datum(datum_z_m)
+    if origin == "surface":
+        frame = height - _zeta_of(ds)
+    elif datum:
+        frame = height - datum
+    else:
+        frame = height  # datum 0: the frame *is* z (no arithmetic, no graph layer)
+    # ``ds[z]`` lists itself among its own coordinates; the frame is not ``z`` any more
+    # (a surface frame is shifted by zeta), so the stale copy under that name goes.
+    return frame.drop_vars(z, errors="ignore")
+
+
+def water_column_bounds(
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    origin: str = "fixed",
+    *,
+    datum_z_m: float = 0.0,
+) -> tuple[xr.DataArray, xr.DataArray]:
+    """Return ``(top, bottom)``: the free surface and seafloor in the matching frame.
+
+    The two bounds a target depth has to lie between to be *in the water*, in the same
+    frame as :func:`frame_coordinate` (so directly comparable with its values and with
+    a target's ``-d``)::
+
+        origin="surface":  top = 0,              bottom = -(h + zeta)
+        origin="fixed":    top = zeta - datum,   bottom = -h - datum
+
+    The outermost cell *centres* stop half a cell short of both, so the bounds are what
+    tell "in the top (bottom) half-cell" -- edge-filled with that cell's value -- from
+    "above the free surface" (below the seafloor), which is NaN; see :func:`to_depth`.
+    ``zeta`` is land-masked (see :func:`standardize`), so over land the bounds go NaN
+    like the frame does (a surface origin's ``top = 0`` is made NaN there too). Lazy.
+    """
+    origin = _check_origin(origin)
+    zeta = _zeta_of(ds)
+    h = ds["h"]
+    if origin == "surface":
+        # ``h + zeta`` puts h's dims first; zeta's own order (time first) is the one
+        # ``top`` has and ``z_rho`` follows, so keep the pair consistent.
+        bottom = (-(h + zeta)).transpose(*zeta.dims, ...)
+        return xr.zeros_like(zeta).where(zeta.notnull()), bottom
+    datum = _check_datum(datum_z_m)
+    return zeta - datum, -h - datum
 
 
 #: Coordinate name carrying per-cell weights, so a later reduction can honour them.
@@ -574,8 +735,30 @@ def add_interface_coord(
 WEIGHT_COORD = "dz"
 
 
+def _interface_dim(ds: xr.Dataset, s_dim: str) -> str:
+    """Return the name of the cell-interface dimension (``s_w``) ``z_w`` is built on.
+
+    Read off ``sigma_w``'s own (one) dimension when ``ds`` carries it -- ``z_w`` is
+    built from it, so it is the interface axis by construction. The old rule ("the
+    first dim of ``z_w`` that is not the centre dim") only held while ``z_w`` had no
+    time axis: with a free surface that moves, ``z_w`` is ``(time, s_w, ...)`` and that
+    rule picks ``time``.
+    """
+    if "sigma_w" in ds.variables and ds["sigma_w"].ndim == 1:
+        return str(ds["sigma_w"].dims[0])
+    z_w_dims = ds["z_w"].dims
+    if "s_w" in z_w_dims:
+        return "s_w"
+    return next((d for d in z_w_dims if d not in ds[s_dim].dims), "s_w")
+
+
 def depth_band(
-    ds: xr.Dataset, meta: dict[str, Any], low: float, high: float
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    low: float,
+    high: float,
+    *,
+    convention: Mapping[str, Any] | None = None,
 ) -> xr.Dataset:
     """Return the cells overlapping ``low``-``high`` m, with overlap as weights.
 
@@ -586,14 +769,24 @@ def depth_band(
     aggregate collapses" true for depth exactly as it is for time — and makes
     ``{"Z": "max"}`` or ``{"Z": "std"}`` over a band meaningful rather than
     impossible.
+
+    ``low``/``high`` are depths in the ``convention``'s frame (see
+    :func:`frame_coordinate`): metres below the moving free surface for ``origin:
+    surface`` -- the band then follows the tide, its top edge always the surface -- or
+    below the fixed datum (mean sea level by default) for ``origin: fixed``. With a
+    free surface that varies in time, the interfaces and so the weights vary per time
+    step (``dz`` keeps its time axis) and a cell is kept if the band touches it at *any*
+    step, so a later reduction sees one consistent set of cells. ``convention=None``
+    is the fixed origin at datum 0, ``-z_w`` exactly as before the frame existed.
     """
+    origin, datum_z_m, _ = _frame_spec(convention)
     if "z_w" not in ds.coords:
         ds = add_interface_coord(ds, meta)
     s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
-    w_dim = next((d for d in ds["z_w"].dims if d not in ds[s_dim].dims), "s_w")
+    w_dim = _interface_dim(ds, s_dim)
 
-    # z_w is negative-down; work in positive-down metres to match the request.
-    depth_w = -ds["z_w"]
+    # the frame is negative-down; work in positive-down metres to match the request.
+    depth_w = -frame_coordinate(ds, meta, origin, datum_z_m=datum_z_m, z="z_w")
     shallower = depth_w.isel({w_dim: slice(1, None)}).rename({w_dim: s_dim})
     deeper = depth_w.isel({w_dim: slice(None, -1)}).rename({w_dim: s_dim})
     overlap = (deeper.clip(max=float(high)) - shallower.clip(min=float(low))).clip(
@@ -613,7 +806,12 @@ def depth_band(
 
 
 def depth_average(
-    ds: xr.Dataset, meta: dict[str, Any], low: float, high: float
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    low: float,
+    high: float,
+    *,
+    convention: Mapping[str, Any] | None = None,
 ) -> xr.Dataset:
     """Thickness-weighted average of ``ds`` over the depth band ``low``-``high`` (m).
 
@@ -634,8 +832,11 @@ def depth_average(
     never resolved. It is still the right comparison for satellite chlorophyll,
     because the band is the *same depth everywhere* — unlike :func:`surface`, whose
     effective depth ranges from 0.2 m on the shelf to 17 m offshore on this grid.
+
+    ``convention`` says what the band is measured from (see :func:`depth_band`):
+    below the moving free surface (``origin: surface``) or at depths fixed in space.
     """
-    band = depth_band(ds, meta, low, high)
+    band = depth_band(ds, meta, low, high, convention=convention)
     s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
     weights = band[WEIGHT_COORD]
     total = weights.sum(s_dim)
@@ -658,28 +859,48 @@ def depth_average(
 def surface(ds: xr.Dataset, meta: dict[str, Any] | None = None) -> xr.Dataset:
     """Return the surface field: the topmost s-coordinate level (``s_rho=-1``).
 
-    This is the right operation for surface comparisons — unlike interpolating to a
-    fixed shallow depth, which yields NaN wherever the top model cell-center is deeper
-    than the target (common over deep water). Drops the vertical dimension.
+    This is the right operation for surface comparisons — unlike matching a fixed
+    shallow depth, which asserts a depth the model's top cell (0.2 m thick on a shelf,
+    17 m offshore) may not resolve, and which is NaN wherever the free surface has
+    dropped below that depth (see :func:`to_depth`'s edge policy). The native top cell
+    is the model's own surface layer whatever its thickness and wherever the tide is.
+    Drops the vertical dimension.
     """
     s_dim = (meta or {}).get("vertical", {}).get("s_dim", "s_rho")
     top = ds.isel({s_dim: -1}) if s_dim in ds.dims else ds
     return top.drop_vars([s_dim, "z_rho"], errors="ignore")
 
 
+def bottom(ds: xr.Dataset, meta: dict[str, Any] | None = None) -> xr.Dataset:
+    """Return the bottom field: the lowest s-coordinate level (``s_rho`` index 0).
+
+    The twin of :func:`surface`, for a bottom-mounted instrument -- a seabed ADCP or
+    pressure sensor measures the near-bed water, whatever depth that is -- or any
+    comparison that means "the model's bottom cell" rather than a depth. Like
+    :func:`surface` it takes the native cell (ROMS orders ``s_rho`` bottom -> top)
+    instead of matching a depth, so it is never NaN for want of a cell centre at the
+    target and does not depend on where the free surface is. Drops the vertical
+    dimension.
+    """
+    s_dim = (meta or {}).get("vertical", {}).get("s_dim", "s_rho")
+    low = ds.isel({s_dim: 0}) if s_dim in ds.dims else ds
+    return low.drop_vars([s_dim, "z_rho"], errors="ignore")
+
+
 def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
     """Return ``da`` with its vertical axis in a single dask chunk.
 
-    Interpolating to a depth reads the whole water column at once — xgcm passes the
-    vertical to ``apply_ufunc`` as a *core* dimension — so a source chunked along
-    ``s_rho`` fails outright with "consists of multiple chunks, but is also a core
-    dimension". Whether that happens is a property of how the store was written, which
-    is why it can lie unnoticed until a particular dataset is used.
+    Matching to a depth reads the whole water column at once — the vertical is an
+    ``apply_ufunc`` *core* dimension, as it is for the depth kernel here and for xgcm's
+    transform — so a source chunked along ``s_rho`` fails outright with "consists of
+    multiple chunks, but is also a core dimension". Whether that happens is a property
+    of how the store was written, which is why it can lie unnoticed until a particular
+    dataset is used.
 
-    Rechunking here rather than passing xgcm ``allow_rechunk=True``: the two do the
+    Rechunking here rather than passing ``allow_rechunk=True``: the two do the
     same work, but allow_rechunk lets dask decide, and its warning that this "may
     significantly increase memory usage" is well earned on a full model run. One
-    column is the smallest unit the interpolation can act on, and doing it explicitly
+    column is the smallest unit the match can act on, and doing it explicitly
     leaves the *horizontal* chunking — which is what bounds memory here — untouched.
 
     A numpy-backed array is returned unchanged; ``.chunk()`` on one would make it lazy,
@@ -691,10 +912,11 @@ def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
 
 
 def _z_grid(ds: xr.Dataset, s_dim: str):
-    """Build the xgcm ``Grid`` :func:`to_depth` and :func:`to_sigma0` both transform on.
+    """Build the xgcm ``Grid`` :func:`to_sigma0` transforms on.
 
-    Split out because the two share every step of the vertical transform except the
-    target coordinate itself — one is against ``z_rho``, the other against sigma0.
+    Kept apart from the transform itself so the grid construction (and its xgcm-version
+    fallbacks) lives in one place. :func:`to_depth` used to share it; it now matches
+    depths with its own kernel (:func:`_match_columns`), which needs no grid.
     """
     import xgcm
 
@@ -715,14 +937,15 @@ def _z_grid(ds: xr.Dataset, s_dim: str):
 def _transform_spread(grid, ds: xr.Dataset, s_dim: str, targets, target_data, h_dims):
     """Interpolate a riding ``spread`` coordinate onto the transform's target levels.
 
-    Both :func:`to_depth` and :func:`to_sigma0` rebuild their result with a fixed
-    coordinate whitelist (lon/lat/z or sigma0/cell_area); left alone, that silently
-    drops ``operators.aggregate``'s ``spread`` coordinate (a mean+std envelope) on a
-    model lane, while an observational lane -- which never goes through this transform
-    -- keeps its own. Transformed the same way each data variable is (same grid, same
-    target_data, same linear method), so the band lands on the requested
-    depths/isopycnals instead of disappearing. Returns ``None`` when there is no spread
-    to carry, or its dims do not match this transform (nothing to interpolate against).
+    :func:`to_sigma0` rebuilds its result with a fixed coordinate whitelist
+    (lon/lat/sigma0/cell_area); left alone, that silently drops
+    ``operators.aggregate``'s ``spread`` coordinate (a mean+std envelope) on a model
+    lane, while an observational lane -- which never goes through this transform --
+    keeps its own. Transformed the same way each data variable is (same grid, same
+    target_data, same linear method), so the band lands on the requested isopycnals
+    instead of disappearing. Returns ``None`` when there is no spread to carry, or its
+    dims do not match this transform (nothing to interpolate against). The depth matches
+    do the same for their own kernel: :func:`_match_spread`.
     """
     from ocean_skill.operators import SPREAD_COORD
 
@@ -742,18 +965,187 @@ def _transform_spread(grid, ds: xr.Dataset, s_dim: str, targets, target_data, h_
     return transformed
 
 
-def _nearest_depth_spread(ds, s_dim: str, idx, h_dims):
-    """Snap a riding ``spread`` coordinate onto :func:`nearest_depth_levels`' own index.
+# -- matching to depths: one kernel, per time step, with an explicit edge policy ------
 
-    The nearest counterpart of :func:`_transform_spread`: the same "a mean+std
-    envelope silently vanishes through a fixed coordinate whitelist" problem,
-    solved the same way :func:`nearest_depth_levels` reads every ordinary data
-    variable -- ``isel`` at the already-computed nearest-level ``idx``, not a
-    fresh interpolation. Returns ``None`` under the same conditions
-    :func:`_transform_spread` does: no spread riding at all, or its dims do not
-    match this transform (nothing to select against). Reachability (NaN below/
-    above the reference column's range) is left to the caller, exactly as the
-    ordinary data variables get ``.where(reachable)`` applied after this returns.
+#: What became of one (sample, target) pair -- see :func:`_locate`. 0-2 carry a value
+#: (an interior match, or an edge-fill from the top / bottom half-cell); 3-5 are NaN.
+_INTERIOR, _TOP_CELL, _BOTTOM_CELL, _ABOVE_SURFACE, _BELOW_BOTTOM, _MASKED = range(6)
+
+
+def _gatherer(a: np.ndarray, lead: tuple[int, ...]):
+    """Return ``take(idx)``: ``a[..., idx]`` for one index per column (``idx`` is lead).
+
+    A flat ``take`` at row offsets, several times faster than ``np.take_along_axis``'s
+    multi-dimensional fancy indexing (the gather is what dominates the kernel). ``a``
+    is ``(..., N)`` whose leading axes are each ``lead``'s size or 1 -- they broadcast
+    by offsetting the *rows* against ``lead``, so ``a`` itself is never copied up to
+    the broadcast shape (a static field under a time-varying frame stays its own size).
+    """
+    n = a.shape[-1]
+    flat = np.ascontiguousarray(a).reshape(-1)
+    rows = (np.arange(flat.size // n) * n).reshape(a.shape[:-1])
+    base = np.broadcast_to(rows, lead)
+    return lambda idx: flat.take(base + idx)
+
+
+def _locate(frame, top, bottom, masked, t):
+    """Say where the frame-coordinate target ``t`` falls in every column.
+
+    ``frame`` is ``(..., N)`` and ascending (``s_rho`` runs bottom -> top), ``top`` and
+    ``bottom`` the water column's bounds in the same frame, ``(...)``, and ``masked``
+    which columns are all-NaN (land) -- the same for every target, so the caller finds
+    it once rather than once per target. Returns ``(idx, code)``: ``idx`` is how many
+    cell centres lie at or below ``t`` (0..N), which brackets it between ``idx - 1``
+    and ``idx``; ``code`` is the edge-policy outcome (the ``_INTERIOR`` .. ``_MASKED``
+    constants, see :func:`to_depth`).
+
+    Later assignments win, and that order *is* the priority the policy needs: a masked
+    column is masked whatever else is true; above the surface and below the seafloor
+    are NaN even where ``t`` is also past the outermost *centre*; only a target still
+    inside the water is a half-cell edge-fill. A target exactly on the top (bottom)
+    centre is interior, not an edge.
+    """
+    n = frame.shape[-1]
+    idx = np.asarray((frame <= t).sum(axis=-1))
+    code = np.zeros(idx.shape, dtype=np.int8)
+    code[(idx == n) & (t > frame[..., -1])] = _TOP_CELL
+    code[idx == 0] = _BOTTOM_CELL
+    code[t < bottom] = _BELOW_BOTTOM
+    code[t > top] = _ABOVE_SURFACE
+    code[masked] = _MASKED
+    return idx, code
+
+
+def _match_columns(values, frame, top, bottom, *, targets, mode, dtype):
+    """Match every column of ``values`` to every target, per sample -- the one kernel.
+
+    ``values`` and ``frame`` are ``(..., N)`` (vertical last, bottom -> top, so
+    ``frame`` ascends), ``top`` and ``bottom`` ``(...)``. The leading dimensions only
+    need to *broadcast* against each other: a field with no time axis against a frame
+    that has one, say, or a static frame under a time series. Returns
+    ``(..., len(targets))``.
+
+    Each target is its own pass over the columns: the same work as one big comparison,
+    but the temporaries stay the size of one field instead of ``(..., Z, N)`` -- for a
+    profile of a few hundred depths over a model year, the difference between fitting
+    in memory and not. ``idx`` (:func:`_locate`) brackets the target between two
+    centres; clipping those two to the column is what makes the edges work -- beyond
+    the top centre both are the top cell, beyond the bottom one both are the bottom
+    cell, so the "interpolation" is that cell's own value -- and the code from
+    :func:`_locate` then decides whether such an edge-fill stands or the sample is NaN
+    (above the surface, below the seafloor, over land). ``mode="interp"`` is linear
+    between the bracketing centres; ``"nearest"`` takes the closer of the two (a tie
+    goes to the deeper, as ``argmin`` does).
+    """
+    n = frame.shape[-1]
+    # Everything about *where* a target falls depends on the frame alone, so it is
+    # worked out at the frame's own shape -- a static frame under a long time series is
+    # located once, not once per step -- and only the data gathers run at the full one.
+    where_lead = np.broadcast_shapes(frame.shape[:-1], top.shape, bottom.shape)
+    lead = np.broadcast_shapes(where_lead, values.shape[:-1])
+    take_frame, take_value = _gatherer(frame, where_lead), _gatherer(values, lead)
+    frame = np.broadcast_to(frame, (*where_lead, n))
+    top = np.broadcast_to(top, where_lead)
+    bottom = np.broadcast_to(bottom, where_lead)
+    masked = np.isnan(frame).all(axis=-1)
+
+    out = np.empty((*lead, len(targets)), dtype=dtype)
+    for j, t in enumerate(targets):
+        idx, code = _locate(frame, top, bottom, masked, t)
+        lo = np.clip(idx - 1, 0, n - 1)
+        hi = np.minimum(idx, n - 1)
+        f_lo = take_frame(lo)
+        f_hi = take_frame(hi)
+        if mode == "nearest":
+            pick = np.where(np.abs(f_hi - t) < np.abs(f_lo - t), hi, lo)
+            column = take_value(np.broadcast_to(pick, lead))
+        else:
+            v_lo = take_value(np.broadcast_to(lo, lead))
+            v_hi = take_value(np.broadcast_to(hi, lead))
+            span = f_hi - f_lo
+            with np.errstate(divide="ignore", invalid="ignore"):
+                weight = np.where(span != 0, (t - f_lo) / span, 0.0)
+            # ``weight == 0`` is an exact hit on a centre (or an edge-fill): that
+            # centre's own value, even where its neighbour is NaN (``0 * NaN`` is NaN).
+            column = np.where(weight == 0, v_lo, v_lo + weight * (v_hi - v_lo))
+        out[..., j] = np.where(code >= _ABOVE_SURFACE, np.nan, column)
+    return out
+
+
+def _classify_columns(frame, top, bottom, *, targets):
+    """Return the edge-policy code of every (sample, target): the kernel minus the data.
+
+    The same :func:`_locate` the data path runs, on the frame alone, so what the counts
+    (and the unreachable-target warning) report is exactly what happened to the data --
+    without ever reading any. ``(..., N)`` frame in, ``(..., len(targets))`` int8 out.
+    """
+    lead = np.broadcast_shapes(frame.shape[:-1], top.shape, bottom.shape)
+    frame = np.broadcast_to(frame, (*lead, frame.shape[-1]))
+    top = np.broadcast_to(top, lead)
+    bottom = np.broadcast_to(bottom, lead)
+    masked = np.isnan(frame).all(axis=-1)
+    codes = np.empty((*lead, len(targets)), dtype=np.int8)
+    for j, t in enumerate(targets):
+        codes[..., j] = _locate(frame, top, bottom, masked, t)[1]
+    return codes
+
+
+def _match_dtype(values_dtype, frame_dtype, mode: str):
+    """Return the dtype a match produces: the data's own, or float where it must be.
+
+    A nearest match returns real model values untouched, so a float32 field stays
+    float32 (a NaN needs a float, so anything else becomes float64). An interpolation
+    blends in the frame's precision, so it is at least that.
+    """
+    if not np.issubdtype(values_dtype, np.floating):
+        return np.dtype(np.float64)
+    if mode == "nearest":
+        return np.dtype(values_dtype)
+    return np.result_type(values_dtype, frame_dtype)
+
+
+def _match_variable(da, frame, top, bottom, s_dim: str, targets, mode: str):
+    """Run :func:`_match_columns` over one variable, lazily (dask in -> dask out).
+
+    The vertical is an ``apply_ufunc`` *core* dimension, so it is made one dask chunk
+    first (:func:`_contiguous_column`); the horizontal and time chunking, which is what
+    bounds memory, is left alone. The result has ``z`` last; any dimension the frame
+    has and the variable lacks (a time axis, for a field that does not vary in time) is
+    put first, ahead of the variable's own. Coordinates other than the dimension ones
+    are left off -- the caller attaches the ones it wants.
+    """
+    values = _contiguous_column(da.reset_coords(drop=True), s_dim)
+    dtype = _match_dtype(da.dtype, frame.dtype, mode)
+    out = xr.apply_ufunc(
+        _match_columns,
+        values,
+        frame,
+        top,
+        bottom,
+        input_core_dims=[[s_dim], [s_dim], [], []],
+        output_core_dims=[["z"]],
+        dask="parallelized",
+        output_dtypes=[dtype],
+        dask_gufunc_kwargs={"output_sizes": {"z": len(targets)}},
+        kwargs={"targets": targets, "mode": mode, "dtype": dtype},
+    )
+    extra = [d for d in out.dims if d != "z" and d not in da.dims]
+    own = [d for d in da.dims if d != s_dim]
+    return out.transpose(*extra, *own, "z")
+
+
+def _match_spread(ds, s_dim: str, h_dims, frame, top, bottom, targets, mode: str):
+    """Carry a riding ``spread`` coordinate onto the match's target depths.
+
+    Both depth matches rebuild their result with a fixed coordinate whitelist
+    (lon/lat/z/cell_area); left alone, that silently drops
+    :func:`ocean_skill.operators.aggregate`'s ``spread`` coordinate (a mean+std
+    envelope) on a model lane, while an observational lane -- which never goes through
+    this match -- keeps its own. Matched the way each data variable is (same frame,
+    same kernel, same ``mode``), so the band lands on the requested depths and, for a
+    nearest match, on the very level the data was read from. Returns ``None`` when
+    there is no spread to carry, or its dims do not match this match (nothing to match
+    it against).
     """
     from ocean_skill.operators import SPREAD_COORD
 
@@ -762,60 +1154,218 @@ def _nearest_depth_spread(ds, s_dim: str, idx, h_dims):
     spread = ds[SPREAD_COORD]
     if s_dim not in spread.dims or not (h_dims <= set(spread.dims)):
         return None
-    selected = spread.isel({s_dim: idx}).reset_coords(drop=True)
-    selected.attrs = dict(spread.attrs)
-    return selected
+    matched = _match_variable(spread, frame, top, bottom, s_dim, targets, mode)
+    matched.attrs = dict(spread.attrs)
+    return matched
 
 
-def to_depth(
-    ds: xr.Dataset, meta: dict[str, Any], d: float | list[float]
-) -> xr.Dataset:
-    """Interpolate s-coordinate fields to fixed depth(s) ``d`` (metres, positive down).
+def _at_ref_time(da: xr.DataArray, meta: dict[str, Any], ref_time: Any) -> xr.DataArray:
+    """Return ``da`` at the model time nearest ``ref_time``, loaded (one small instant).
 
-    Uses xgcm's vertical transform against ``z_rho`` (linear; NaN outside the water
-    column — no extrapolation). Keeps the result lazy. ``d`` may be a scalar or a list.
-    For a true surface field use :func:`surface` instead; for a surface of constant
-    potential density rather than constant depth, see :func:`to_sigma0`.
-    Non-``s_rho`` variables drop.
+    Eager on purpose: it is one time step of the frame (a single water column or a
+    point-cropped window), read once, so the match built from it is a plain array
+    rather than a lazy graph every field would be pushed through. The scalar ``time``
+    coordinate it leaves behind would conflict with the real, multi-step ``time`` of
+    the data, so it is dropped.
     """
+    tdim = meta.get("time_dim", "time")
+    if tdim not in da.dims:
+        return da
+    at = da.sel({tdim: ref_time}, method="nearest").load()
+    return at.drop_vars(tdim, errors="ignore")
+
+
+def _frame_codes(frame, top, bottom, s_dim: str, targets) -> xr.DataArray:
+    """Return the edge-policy code of every (sample, target), lazy when dask-backed."""
+    return xr.apply_ufunc(
+        _classify_columns,
+        frame,
+        top,
+        bottom,
+        input_core_dims=[[s_dim], [], []],
+        output_core_dims=[["z"]],
+        dask="parallelized",
+        output_dtypes=[np.int8],
+        dask_gufunc_kwargs={"output_sizes": {"z": len(targets)}},
+        kwargs={"targets": targets},
+    )
+
+
+def _tally_codes(codes: xr.DataArray) -> tuple[list[int], np.ndarray]:
+    """Count each outcome over every (sample, target); say which targets get a value.
+
+    Returns ``(counts, reached)``: ``counts[code]`` for each of the six codes, and a
+    boolean per target -- ``True`` if any sample got a value for it (interior or
+    edge-fill). One ``compute`` for all seven reductions, so a dask-backed frame is
+    evaluated once, chunk by chunk, not held whole in memory.
+    """
+    other = [dim for dim in codes.dims if dim != "z"]
+    got_value = codes <= _BOTTOM_CELL
+    tally = xr.Dataset(
+        {
+            **{f"n{code}": (codes == code).sum() for code in range(6)},
+            "reached": got_value.any(dim=other) if other else got_value,
+        }
+    ).compute()
+    return [int(tally[f"n{code}"]) for code in range(6)], np.asarray(tally["reached"])
+
+
+def _surface_range(ds: xr.Dataset, h_dims) -> float:
+    """Return the largest per-column range of the free surface over time, in metres.
+
+    ``max - min`` of ``zeta`` over every non-horizontal dimension (the time axis), per
+    water column, then the widest column. *Per column*: a full-domain lane's spatial
+    differences in mean sea level are not "the surface moves", and must not count. A
+    ``zeta`` with no time axis (absent, or already reduced) does not move: 0. Eager --
+    ``zeta`` is one field, a fraction of the ``(time, s_rho, ...)`` frame.
+    """
+    zeta = _zeta_of(ds)
+    over = [dim for dim in zeta.dims if dim not in h_dims]
+    if not over:
+        return 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # an all-land column is all-NaN
+        per_column = zeta.max(over, skipna=True) - zeta.min(over, skipna=True)
+        widest = float(per_column.max(skipna=True))
+    return widest if np.isfinite(widest) else 0.0
+
+
+def _warn_depth_match(
+    depths,
+    counts,
+    reached,
+    *,
+    mode: str,
+    origin: str,
+    datum_z_m: float,
+    source: str,
+    tide_range,
+) -> None:
+    """Emit the (up to three) warnings a depth match owes its caller, once each.
+
+    1. *No sample reaches a target at all*: it is entirely NaN -- outside the water at
+       every time step and column (above the free surface, below the seafloor, or only
+       land). One line for the whole call, naming the span, not one per target: a
+       profile's own depths can drive dozens of below-the-bottom targets (a cast
+       reaching past the model's deepest cell is routine) and one line each buries the
+       signal.
+    2. *Fixed origin, and some samples are above the free surface*: how many, and the
+       likeliest cause -- a depth measured below the surface (a CTD, a profiler) being
+       matched as if fixed in space, which the surface drops out from under at low
+       tide.
+    3. *Fixed origin by default, over a surface that moves a lot*: nothing declared how
+       this depth is measured, so it was matched fixed in space, which is wrong by up
+       to the tidal range if it was in fact measured below the surface. Silenced the
+       moment the source declares (or infers) its convention -- a declared fixed origin
+       is a decision, not a default. ``tide_range`` is a callable, evaluated only here
+       (it reads ``zeta``), so a declared lane never pays for it.
+
+    Edge-fills do not warn; the counts on the result carry them. ``stacklevel`` reaches
+    the caller of :func:`to_depth`/:func:`nearest_depth_levels`.
+    """
+    stacklevel = 4  # here -> _match_depths -> to_depth / nearest_depth_levels -> caller
+    verb = "interpolated" if mode == "interp" else "snapped to"
+    nan_depths = [float(dd) for i, dd in enumerate(depths) if not bool(reached[i])]
+    if nan_depths:
+        hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
+        if len(nan_depths) == 1:
+            where = f"target depth {nan_depths[0]:g} m is"
+        else:
+            where = (
+                f"{len(nan_depths)} target depths "
+                f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
+            )
+        warnings.warn(
+            f"{where} entirely NaN: the target lies outside the water column (above "
+            "the free surface, below the seafloor, or over land) at every sample, so "
+            f"nothing can be {verb};{hint}",
+            stacklevel=stacklevel,
+        )
+    if origin != "fixed":
+        return
+    above = counts[_ABOVE_SURFACE]
+    if above:
+        live = sum(counts) - counts[_MASKED]
+        warnings.warn(
+            f"{above} of {live} (sample, target) matches lie above the free surface "
+            "and are NaN: depth was matched at positions fixed in space "
+            f"(z = {datum_z_m:g} - depth), and the surface drops below the target at "
+            "those samples. If the observation measures depth below the instantaneous "
+            "surface (a CTD, a profiler, a pressure sensor), declare "
+            "`depth_convention: {origin: surface}` for it (or pass "
+            '`depth_origin="surface"`) so the target follows the surface.',
+            stacklevel=stacklevel,
+        )
+    if source == "default" and len(depths):
+        threshold = max(0.5, 0.1 * float(np.min(depths)))
+        moves = tide_range()
+        if moves > threshold:
+            warnings.warn(
+                f"the free surface moves {moves:.2g} m over time at some water column "
+                f"(more than {threshold:g} m), but the observation declares no "
+                "`depth_convention`, so its depth is matched at positions fixed in "
+                "space (origin: fixed), not below the moving surface. If it is "
+                "measured below the surface, declare `depth_convention: {origin: "
+                'surface}` (or pass `depth_origin="surface"`); if it really is fixed '
+                "in space, declare `depth_convention: {origin: fixed}` to say so.",
+                stacklevel=stacklevel,
+            )
+
+
+def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Dataset:
+    """Match ``ds`` to depths ``d``: the shared body of the two public depth matches.
+
+    :func:`to_depth` is ``mode="interp"`` and :func:`nearest_depth_levels`
+    ``"nearest"``; everything else -- the frame, the kernel, the coordinates, the
+    counts and the warnings -- is the same, which is what keeps the two
+    interchangeable.
+    """
+    origin, datum_z_m, source = _frame_spec(convention)
     if "z_rho" not in ds.coords:
         ds = add_depth_coord(ds, meta)
     s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
     depths = np.atleast_1d(np.asarray(d, dtype=float))
-    targets = xr.DataArray(-depths, dims="z", coords={"z": -depths})
+    targets = -depths  # in the frame a depth d is the coordinate -d, either origin
 
-    grid = _z_grid(ds, s_dim)
-    z_rho = _contiguous_column(ds["z_rho"], s_dim)
+    frame = frame_coordinate(ds, meta, origin, datum_z_m=datum_z_m)
+    top, bottom = water_column_bounds(ds, meta, origin, datum_z_m=datum_z_m)
+    frame, top, bottom = (a.reset_coords(drop=True) for a in (frame, top, bottom))
+    if ref_time is not None:
+        # The old static lookup: the frame as it was at one reference time, applied to
+        # every step. Because the frame then has no time axis, the very same kernel
+        # picks one level per column and the data follows it through time.
+        frame, top, bottom = (
+            _at_ref_time(a, meta, ref_time) for a in (frame, top, bottom)
+        )
+    frame = _contiguous_column(frame, s_dim)
+
     # Rho-point fields share z_rho's own horizontal dims; staggered u/v (xi_u/eta_v)
-    # need interpolation to rho first (deferred), so are skipped here. Read off
-    # z_rho's own dims rather than the hardcoded ("eta_rho", "xi_rho") pair, so a
-    # variable already sliced to one grid column or transect (see
+    # need interpolation to rho first (deferred), so are skipped here. Read off lon's
+    # own dims rather than the hardcoded ("eta_rho", "xi_rho") pair, so a variable
+    # already sliced to one grid column or transect (see
     # ocean_skill.transect.grid_slice, whose renamed "along" dim replaces one of the
-    # two) still matches -- it shares z_rho's dims exactly, since z_rho went through
-    # the same slice. `time` is deliberately excluded: z_rho can carry it (when zeta
-    # is present) while a time-invariant variable legitimately does not, and that
-    # variable must not be skipped just because it lacks an axis z_rho happens to have.
+    # two) still matches -- it shares lon's dims exactly, since lon went through the
+    # same slice. `time` is deliberately excluded: z_rho can carry it (when zeta is
+    # present) while a time-invariant variable legitimately does not, and that
+    # variable must not be skipped just because it lacks an axis z_rho happens to
+    # have.
     h_dims = set(ds["lon"].dims) if "lon" in ds.coords else {"eta_rho", "xi_rho"}
     out = {}
     for var in ds.data_vars:
         da = ds[var]
         if s_dim in da.dims and h_dims <= set(da.dims):
-            transformed = grid.transform(
-                _contiguous_column(da, s_dim),
-                "Z",
-                targets,
-                target_data=z_rho,
-                method="linear",
-            )
-            # the transform sheds attrs on some xarray versions (see to_sigma0's
-            # identical note); carry the source variable's forward explicitly
-            # rather than depend on apply_ufunc's keep_attrs default.
-            transformed.attrs = {**da.attrs, **transformed.attrs}
-            out[var] = transformed
-    coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
+            matched = _match_variable(da, frame, top, bottom, s_dim, targets, mode)
+            # the match sheds attrs; carry the source variable's forward explicitly
+            matched.attrs = dict(da.attrs)
+            out[var] = matched
+
+    z_attrs = {"positive": "up", "units": "m", "depth_origin": origin}
+    if origin == "fixed" and datum_z_m:
+        z_attrs["depth_datum_z_m"] = datum_z_m
+    coords = {"lon": ds["lon"], "lat": ds["lat"], "z": ("z", targets, z_attrs)}
     if AREA_COORD in ds.coords:
         coords[AREA_COORD] = ds[AREA_COORD]
-    spread = _transform_spread(grid, ds, s_dim, targets, z_rho, h_dims)
+    spread = _match_spread(ds, s_dim, h_dims, frame, top, bottom, targets, mode)
     if spread is not None:
         from ocean_skill.operators import SPREAD_COORD
 
@@ -823,167 +1373,138 @@ def to_depth(
     result = xr.Dataset(out, coords=coords)
     result.attrs.update(ds.attrs)
 
-    # A target shallower than the topmost cell centre (or deeper than the bottom one)
-    # interpolates to nothing and silently yields an all-NaN level — most often when
-    # asking for exactly 0 m. Say so, and point at surface() for the surface case.
-    #
-    # Reachability is a property of the grid alone — whether *any* column, at any
-    # time, brackets the target between its bottom and top cell centres — not of any
-    # particular variable's data, so it is checked once against z_rho directly
-    # rather than once per variable against the (lazy) transformed result. Checking
-    # the latter used to force the whole transform eagerly here, only to compute it
-    # again for real once the caller loads the result — doubling the cost of every
-    # interpolation just to phrase this warning. `z_rho.min`/`.max` reduce a single
-    # small (zeta-sized) coordinate, not the data, so this keeps the promise this
-    # function's docstring already makes: the result stays lazy.
-    #
-    # The trade-off: a variable that is NaN everywhere *within* a reachable depth
-    # (masked out for a reason other than geometry) no longer warns here — only a
-    # target the grid itself cannot reach does. A land column is the only routine
-    # case that used to trigger the old check outside of unreachable geometry, and a
-    # land column's cell centres are themselves NaN, so it still counts as
-    # unreachable below.
-    #
-    # One warning for the whole call, not one per variable: a profile's own depths
-    # can drive dozens of below-the-bottom targets (a CTD cast reaching past the
-    # model's deepest cell centre is routine), and one line each buries the signal.
-    # Collapse the run of NaN depths into a single line naming their span.
-    col_min = z_rho.min(s_dim)
-    col_max = z_rho.max(s_dim)
-    other = [dim for dim in col_min.dims if dim != "z"]
-    reachable = (col_min <= targets) & (targets <= col_max)
-    reachable = reachable.any(dim=other) if other else reachable
-    reachable = np.asarray(reachable)
-    nan_depths = [float(d) for i, d in enumerate(depths) if not bool(reachable[i])]
-    if nan_depths:
-        hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
-        if len(nan_depths) == 1:
-            where = f"target depth {nan_depths[0]:g} m is"
-        else:
-            where = (
-                f"{len(nan_depths)} target depths "
-                f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
-            )
-        warnings.warn(
-            f"{where} entirely NaN: the target lies outside the model's "
-            f"cell-centre range, so nothing can be interpolated;{hint}",
-            stacklevel=2,
-        )
+    # What the edge policy did, counted from the frame and the water-column bounds
+    # alone -- the same cost as asking "is any column deep enough?" (the frame is a
+    # function of the small zeta field), and never a pass over the data, so loading
+    # the result later does not change them. Reachability is a property of the
+    # geometry, not of any one variable's data: a variable that is NaN everywhere
+    # within a reachable depth (masked out for a reason other than geometry) does not
+    # warn here.
+    counts, reached = _tally_codes(_frame_codes(frame, top, bottom, s_dim, targets))
+    stamp = {
+        "depth_edge_top": counts[_TOP_CELL],
+        "depth_edge_bottom": counts[_BOTTOM_CELL],
+        "depth_above_surface": counts[_ABOVE_SURFACE],
+        "depth_below_bottom": counts[_BELOW_BOTTOM],
+        "depth_origin": origin,
+    }
+    result.attrs.update(stamp)
+    for name in result.data_vars:
+        result[name].attrs.update(stamp)
+
+    _warn_depth_match(
+        depths,
+        counts,
+        reached,
+        mode=mode,
+        origin=origin,
+        datum_z_m=datum_z_m,
+        source=source,
+        tide_range=lambda: _surface_range(ds, h_dims),
+    )
     return result
 
 
-def nearest_depth_levels(
-    ds: xr.Dataset, meta: dict[str, Any], d: float | list[float], *, ref_time: Any = None
+def to_depth(
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    d: float | list[float],
+    *,
+    convention: Mapping[str, Any] | None = None,
 ) -> xr.Dataset:
-    """Snap fixed target depth(s) ``d`` to the nearest native model level -- no interpolation.
+    """Interpolate s-coordinate fields to depth(s) ``d`` (metres, positive down).
+
+    Linear between the two ``s_rho`` cell centres that bracket the target, **per time
+    step, in the** ``convention``'s frame (:func:`frame_coordinate`): ``origin: fixed``
+    (the default) reads ``d`` as the height ``z = datum_z_m - d``, a position fixed in
+    space; ``origin: surface`` as ``z = zeta - d``, ``d`` metres below the free surface
+    *as it is at that step*. ``convention`` is a plain mapping -- ``origin``,
+    ``datum_z_m`` and ``source`` are the keys read -- or ``None`` for fixed at datum 0
+    (what a caller that never heard of the frame meant). Keeps the result lazy: a dask
+    input gives dask output. ``d`` may be a scalar or a list. For a true surface field
+    use :func:`surface`; for a surface of constant potential density rather than
+    constant depth, see :func:`to_sigma0`. Non-``s_rho`` variables drop.
+
+    **Edge policy** -- per column, per time step, per target ``t = -d``, with ``f`` the
+    cell-centre frame values (bottom -> top) and ``top``/``bottom`` the water column's
+    bounds (:func:`water_column_bounds`):
+
+    ==============================  ==================================================
+    where ``t`` is                  result
+    ==============================  ==================================================
+    ``f[0] <= t <= f[-1]``          interpolated between the bracketing centres
+    ``f[-1] < t <= top``            the top cell's value (top half-cell)
+    ``bottom <= t < f[0]``          the bottom cell's value (bottom half-cell)
+    ``t > top``                     NaN: above the free surface
+    ``t < bottom``                  NaN: below the seafloor
+    column all-NaN (land, masked)   NaN
+    ==============================  ==================================================
+
+    The half-cells are filled, not left NaN, because the water *is* there: the
+    outermost centres sit half a cell inside the column (7 m down in deep water on a
+    stretched grid), and a target in that half-cell is in the water -- the model's one
+    statement about it is that cell's value, which is also what :func:`surface`
+    returns for the surface. (Before the frame existed this was NaN, which made
+    ``d=0`` and every shallow target in deep water an empty field.) Only a target
+    outside the water itself is NaN.
+
+    The result keeps ``(..., z)`` dims with ``z = -d`` (metres, negative up, as
+    ``z_rho``), ``lon``/``lat`` and any ``cell_area``/``spread`` coordinates. ``z``
+    carries ``positive="up"``, ``units="m"``, ``depth_origin`` (and
+    ``depth_datum_z_m`` for a fixed origin with a non-zero datum). The result and each
+    variable carry integer counts of what the edge policy did, over every (sample,
+    target) pair (a sample is a column at a time step -- the frame's own, so a frame
+    with no time axis counts each column once): ``depth_edge_top`` /
+    ``depth_edge_bottom`` (edge-filled) and ``depth_above_surface`` /
+    ``depth_below_bottom`` (NaN for lying outside the water), plus ``depth_origin``.
+    Counted from the frame and bounds alone, never from the data.
+
+    Warns (once each per call): a target that no sample reaches at all is *entirely
+    NaN*; for a fixed origin, how many samples sit above the free surface (and that a
+    depth measured below the surface should declare ``origin: surface``); and, when
+    nothing declared the origin (``convention`` source ``"default"``), a free surface
+    that moves more than ``max(0.5, 0.1 * min(d))`` m at some column over time -- so a
+    depth quietly matched fixed in space under a big tide does not go unremarked.
+    """
+    return _match_depths(ds, meta, d, mode="interp", convention=convention)
+
+
+def nearest_depth_levels(
+    ds: xr.Dataset,
+    meta: dict[str, Any],
+    d: float | list[float],
+    *,
+    ref_time: Any = None,
+    convention: Mapping[str, Any] | None = None,
+) -> xr.Dataset:
+    """Snap target depth(s) ``d`` to the nearest native model level -- no interpolation.
 
     The nearest-level counterpart of :func:`to_depth`: rather than linearly blending
     two levels together, this looks up the closest ``s_rho`` cell centre (per column)
     and reads its value directly, so what comes back is real model output, never an
-    average of two. Keeps the result lazy exactly as :func:`to_depth` does, except for
-    the tiny lookup itself (below).
+    average of two. Keeps the result lazy exactly as :func:`to_depth` does; ``d`` may
+    be a scalar or a list; the frame (``convention``), the edge policy, the counts, the
+    warnings and the shape and coordinate conventions of the result (a ``z`` axis in
+    metres, stored negative-up to match ``z_rho``) are all :func:`to_depth`'s, so the
+    two are interchangeable to a caller. Non-``s_rho`` variables drop, exactly as there.
 
-    A level's true depth still moves with the free surface, so "nearest" needs a
-    single reference profile to measure against -- built once, from ``ref_time`` (the
-    model's own time nearest it) or, absent that, simply the first step of ``ds``'s own
-    (already time-cropped) record. That lookup is then applied across **every** time
-    step as one static index, deliberately not re-matched per step: recomputing
-    ``z_rho`` (a function of the moving ``zeta``) at every one of a mooring's hourly
-    steps is exactly the per-timestep cost this function exists to avoid, and the
-    reference profile it uses instead is small enough to evaluate eagerly regardless
-    of how lazily the rest of ``ds`` is chunked.
+    The closest level is chosen **at every time step**, against the frame of that
+    step: a level's true depth moves with the free surface, so the level nearest 1 m
+    down at high tide is not the one nearest it at low tide, and a static lookup would
+    hand the same cell to every step (and report a value where the water is no longer
+    deep enough). A tie between two levels goes to the deeper one. The frame is a
+    function of the small ``zeta`` field, so matching it per step costs little next to
+    reading data.
 
-    A target outside the *reference* column's own [shallowest, deepest] cell-centre
-    range comes back NaN, the same no-extrapolation convention :func:`to_depth` uses
-    and for the same reason -- there is nothing there to snap to. ``d`` may be a
-    scalar or a list, exactly as in :func:`to_depth`; the result matches its shape and
-    coordinate conventions (a ``z`` axis in metres, stored negative-down to match
-    ``z_rho``) so the two are interchangeable to a caller. Non-``s_rho`` variables
-    drop, exactly as in :func:`to_depth`.
+    ``ref_time`` restores the old, static behaviour for a caller that wants it: the
+    frame -- and the water-column bounds -- is taken at the model's own time nearest
+    ``ref_time`` and the level chosen there is applied to **every** step (a field that
+    stays on one cell through the record). The edge policy still applies, against that
+    one reference frame.
     """
-    if "z_rho" not in ds.coords:
-        ds = add_depth_coord(ds, meta)
-    s_dim = meta.get("vertical", {}).get("s_dim", "s_rho")
-    depths = np.atleast_1d(np.asarray(d, dtype=float))
-    targets = xr.DataArray(-depths, dims="z", coords={"z": -depths})
-
-    z_rho = _contiguous_column(ds["z_rho"], s_dim)
-    if "time" in z_rho.dims:
-        z_profile = (
-            z_rho.sel(time=ref_time, method="nearest")
-            if ref_time is not None
-            else z_rho.isel(time=0)
-        )
-    else:
-        z_profile = z_rho
-    # Small (one time, one water column or a point-cropped window) and read once --
-    # loaded eagerly so the index built from it below is a plain array, never a lazy
-    # graph the per-time fields would otherwise be forced through to resolve it.
-    # The scalar `time` this leaves behind (a leftover coordinate, not a dimension
-    # any more) would otherwise conflict with the real, multi-step `time` on every
-    # field the index below is applied to -- dropped for exactly that reason.
-    z_profile = z_profile.load()
-    if "time" in z_profile.coords:
-        z_profile = z_profile.drop_vars("time")
-
-    diff = np.abs(z_profile - targets)
-    # fillna guards a masked (land) column: without it, argmin's tie-breaking on a
-    # NaN cell centre is undefined rather than simply "never nearest".
-    idx = diff.fillna(np.inf).argmin(s_dim)
-
-    h_dims = set(ds["lon"].dims) if "lon" in ds.coords else {"eta_rho", "xi_rho"}
-    out = {}
-    for var in ds.data_vars:
-        da = ds[var]
-        if s_dim in da.dims and h_dims <= set(da.dims):
-            selected = da.isel({s_dim: idx})
-            # Plain isel (unlike to_depth's xgcm transform) drags every coordinate
-            # sharing the indexed dim along for the ride -- z_rho chief among them,
-            # now itself indexed onto the picked levels. Dropped so this result
-            # carries exactly the coordinate set to_depth's does (lon/lat/z, no
-            # more), or a mixed ["surface", ...] request downstream (which
-            # concatenates this against roms.surface's own z_rho-free result) sees
-            # a coordinate mismatch between the two pieces.
-            selected = selected.reset_coords(drop=True)
-            selected.attrs = dict(da.attrs)
-            out[var] = selected
-    coords = {"lon": ds["lon"], "lat": ds["lat"], "z": -depths}
-    if AREA_COORD in ds.coords:
-        coords[AREA_COORD] = ds[AREA_COORD]
-    spread = _nearest_depth_spread(ds, s_dim, idx, h_dims)
-
-    # Reachability, exactly as to_depth checks it: a property of the reference
-    # column's geometry alone, not of any one variable's data.
-    col_min = z_profile.min(s_dim)
-    col_max = z_profile.max(s_dim)
-    other = [dim for dim in col_min.dims if dim != "z"]
-    reachable = (col_min <= targets) & (targets <= col_max)
-    for name in out:
-        out[name] = out[name].where(reachable)
-    if spread is not None:
-        from ocean_skill.operators import SPREAD_COORD
-
-        coords[SPREAD_COORD] = spread.where(reachable)
-    result = xr.Dataset(out, coords=coords)
-    result.attrs.update(ds.attrs)
-    reachable_any = reachable.any(dim=other) if other else reachable
-    reachable_any = np.asarray(reachable_any)
-    nan_depths = [float(dd) for i, dd in enumerate(depths) if not bool(reachable_any[i])]
-    if nan_depths:
-        hint = " use surface() for the surface field" if min(nan_depths) < 5 else ""
-        if len(nan_depths) == 1:
-            where = f"target depth {nan_depths[0]:g} m is"
-        else:
-            where = (
-                f"{len(nan_depths)} target depths "
-                f"({min(nan_depths):g}-{max(nan_depths):g} m) are"
-            )
-        warnings.warn(
-            f"{where} entirely NaN: the target lies outside the reference column's "
-            f"cell-centre range, so nothing can be snapped to;{hint}",
-            stacklevel=2,
-        )
-    return result
+    return _match_depths(
+        ds, meta, d, mode="nearest", convention=convention, ref_time=ref_time
+    )
 
 
 def to_sigma0(
@@ -991,8 +1512,8 @@ def to_sigma0(
 ) -> xr.Dataset:
     """Interpolate s-coordinate fields onto surface(s) of constant potential density.
 
-    An isopycnal slice: the same xgcm vertical transform :func:`to_depth` uses, but
-    against potential density anomaly (sigma0, TEOS-10 via
+    An isopycnal slice: the xgcm vertical transform :func:`to_depth` itself used before
+    it got its own kernel, but against potential density anomaly (sigma0, TEOS-10 via
     :func:`ocean_skill.mld.potential_density`) instead of ``z_rho``. Water masses
     move along density surfaces, not depth surfaces, so this is often the more
     physically meaningful slice through a stratified column. ``s`` may be a scalar
@@ -1024,8 +1545,9 @@ def to_sigma0(
     detect or resolve that, it interpolates whatever profile it is given.
 
     NaN outside the column's own sigma0 range (no extrapolation), with a warning
-    naming the target -- the same shape :func:`to_depth` uses for a target beyond
-    the water column.
+    naming the target -- the same shape :func:`to_depth` uses for a target that no
+    sample reaches. (A density has no half-cell to fall back on: beyond the column's
+    own sigma0 range there is no level to read, so there it stays NaN.)
     """
     from ocean_skill.mld import potential_density
     from ocean_skill.units import find_variable

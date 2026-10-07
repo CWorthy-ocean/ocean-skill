@@ -500,9 +500,12 @@ osk.compare(
 ).plot()                              # test | reference overlaid, difference in the box
 ```
 
-The test lane is linearly interpolated onto the reference's own levels — the
-vertical counterpart of the coarser-wins rule `over="time"` already follows,
-settled once rather than chosen, since a water column has no "composite vs.
+The test lane is put on the reference's own levels, by default taking the model
+level nearest each one at every time step (`depth_method="interp"` interpolates
+instead), with depths read the way the reference's catalog entry says it measures
+them (see "Depth conventions and time zones" below). That is the vertical counterpart
+of the coarser-wins rule `over="time"` already follows, settled once rather than
+chosen, since a water column has no "composite vs.
 instantaneous" question a time axis does. `over=` rarely needs spelling out at
 all: a `profile` reference implies it outright (no time axis to draw instead), and
 a `timeSeriesProfile` reference — which carries both axes — reads whichever one
@@ -1210,6 +1213,41 @@ tpxo = (
     .rename({"lon_z": "lon", "lat_z": "lat"})
 )  # then catalog it with the same standard_names, keyed "hRe" / "hIm"
 ```
+
+### Depth conventions and time zones
+
+A model's depth is a height that rides the tide; an observation's "1 m" is usually 1 m
+*below the moving surface* (a CTD cast, a pressure record) and sometimes a position
+*fixed in space* (a pier sonde, a bottom-mounted ADCP). A catalog entry says which with
+`depth_convention`; the model lane of a comparison follows the **reference's**:
+
+```python
+build.add_source(cat, "ctd_casts", url, featureType="profile",
+                 depth_convention={"origin": "surface"},        # model target z = zeta - d
+                 time_zone="America/Anchorage")                 # naive stamps are local, DST-aware
+build.add_source(cat, "pier_sonde", url,
+                 depth_convention={"origin": "fixed", "datum_z_m": -2.4},  # z = datum - d
+                 utc_offset_h=-9,                               # local standard time all year
+                 time_columns=["Date", "Time"], time_format="%m/%d/%Y %H:%M",
+                 axes={"Z": "sensor_depth"})                    # this column is the depth
+```
+
+`depth_convention` fields: `origin` (`surface` | `fixed`), `positive` (`up` | `down`),
+`units` (`m` | `dbar`, 1 dbar ≈ 1 m), `datum_z_m` (fixed only: the obs datum's height in
+the model's frame, MSL = 0) and `support` (`point`, or the model's `surface`/`bottom`
+cell), with optional per-variable overrides under `variables:`. What you declare wins;
+the build-time probe records what it can tell from the data (CF `positive`, a pressure
+axis) under `inferred:`; undeclared, a `profile`/`trajectoryProfile` or pressure-based
+depth is `surface` and anything else `fixed`. Per lane, `select={"depth_origin":
+"surface"}` overrides it, and `osk.compare(..., depth_origin=...)` does so for both
+lanes. Depths are matched per time step; a target in the top or bottom half-cell takes
+that cell's value, and one above the free surface or below the seafloor is NaN (counted
+in the result's attrs, with a warning).
+
+`utc_offset_h` is local clock minus UTC (ISO 8601): UTC = naive stamp − `utc_offset_h`,
+so AKDT data is `-8`, local standard time kept year-round `-9`. `time_zone` is the
+DST-aware alternative; declare one or the other, per entry. Either applies only to
+naive timestamps — one carrying its own offset (`...Z`) is converted as written.
 
 ## Layout
 

@@ -25,7 +25,7 @@ from typing import Any, Literal
 import numpy as np
 import xarray as xr
 
-from ocean_skill import _stacklevel
+from ocean_skill import _stacklevel, depth_convention
 from ocean_skill.cf import find_coord
 
 __all__ = [
@@ -658,8 +658,9 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     included) moves onto the cast times consistently, not just the requested
     field. A target outside the object's own span (no step on one side) has no
     bracket to interpolate from and is dropped, with a warning -- no
-    extrapolation, the same convention :func:`_match_vertical`/
-    :func:`ocean_skill.roms.to_depth` already use past their own data's range.
+    extrapolation, the same convention :func:`_match_vertical` uses past its test
+    lane's own range (and :func:`ocean_skill.roms.to_depth` outside the water column
+    itself).
     Unlike ``"nearest"``, this never takes the "keep everything, nothing to
     prune" shortcut: even when every target already falls inside the record,
     the object must still land exactly *on* the cast instants, not merely
@@ -725,6 +726,16 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     lo, hi = lo[in_span], hi[in_span]
     pos = np.unique(np.concatenate([lo, hi]))
     cropped = obj.isel({name: pos})
+    if values.dtype.kind == "M" and targets.dtype.kind == "M":
+        # One resolution on both sides first: interp reads a datetime64 axis and its
+        # targets each in their own unit, so a model clock in seconds (what
+        # roms._decode_time builds) against a reference's finer stamps put every target
+        # outside the span -- an all-NaN lane, with no warning.
+        stamps = cropped[name]
+        cropped = cropped.assign_coords(
+            {name: (stamps.dims, stamps.values.astype("datetime64[ns]"), stamps.attrs)}
+        )
+        targets = targets.astype("datetime64[ns]")
     return cropped.interp({name: targets}, method="linear")
 
 
@@ -1650,10 +1661,13 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
     ``method="nearest"`` (the default) snaps each reference level to the test
     lane's closest real level; ``"interp"`` (or ``"linear"``) linearly interpolates
     the test lane onto the reference's own levels instead. A level outside the
-    test's own vertical range comes back NaN either way (no extrapolation), the
-    same convention :func:`ocean_skill.roms.to_depth` uses for exactly the same
-    reason -- ``"nearest"`` enforces this with a tolerance (below) since a plain
+    test's own vertical range comes back NaN either way (no extrapolation) --
+    ``"nearest"`` enforces this with a tolerance (below) since a plain
     nearest-neighbour lookup would otherwise always find *some* level, however far.
+    (The model's own vertical transform is more forgiving at its edges: it fills the
+    top and bottom half-cells with the outermost cell's value, see
+    :func:`ocean_skill.roms.to_depth`. This step has only the levels it was handed,
+    and no water-column bounds to tell a half-cell from open air.)
 
     In the ordinary comparison flow this step is close to a no-op: the model lane
     already arrived on the reference's own levels care of
@@ -1662,9 +1676,13 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
     when the caller names none). It matters in full when a caller hands
     :func:`align` two columns whose levels were never reconciled upstream.
 
-    Sign conventions are reconciled before matching -- ROMS's own ``z``/``z_rho``
-    read negative-down, an observational product's own axis usually already reads
-    positive-down -- and the *reference's* convention is what survives: the shared
+    Sign conventions are reconciled before matching -- each lane's axis is read as
+    metres, positive down, by its own word (its CF ``positive`` attribute, else the
+    sign of its values: ROMS's ``z`` arrives ``positive: up`` and negative, an
+    observational axis is usually positive-down; see
+    :func:`ocean_skill.depth_convention.positive_down_values`, which replaces the
+    ``abs()`` that used to read a height as a depth) -- and the *reference's*
+    convention is what survives: the shared
     axis keeps the reference's own literal values, exactly as :func:`match_axis`
     keeps the reference's own stamps for a time match. Always lands on the
     reference (never the test), unlike time's coarser-wins rule: a station
@@ -1701,13 +1719,17 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
             # A real vertical coordinate riding on `dim` under another name --
             # promote it onto the dimension so the reindex/interp below (which
             # reads test[tdim]/reference[rdim]) sees a dimension coordinate.
-            lanes[role] = lane.assign_coords({dim: (dim, np.asarray(coord.values))})
+            lanes[role] = lane.assign_coords(
+                {dim: (dim, np.asarray(coord.values), dict(coord.attrs))}
+            )
     test, reference = lanes["test"], lanes["reference"]
 
     ref_vals = np.asarray(reference[rdim].values, dtype="float64")
     test_vals = np.asarray(test[tdim].values, dtype="float64")
-    ref_pos = np.abs(ref_vals)
-    test_pos = np.abs(test_vals)
+    # Metres, positive down, by each axis's own word -- not ``abs()``, which reads a
+    # height as a depth.
+    ref_pos = depth_convention.positive_down_values(ref_vals, reference[rdim].attrs)
+    test_pos = depth_convention.positive_down_values(test_vals, test[tdim].attrs)
     order = np.argsort(test_pos)
     test_sorted = test.isel({tdim: order}).assign_coords({tdim: test_pos[order]})
 
@@ -3131,25 +3153,37 @@ def _observational_vertical_to_z(da):
     """Return ``da`` with an observational vertical axis renamed onto ``"z"``.
 
     A gridded observational or reanalysis test lane (WOA, GLORYS) carries its
-    levels as a positive-down ``depth`` (or ``lev``/``depth_surface``) axis, where
-    a ROMS lane run through :func:`ocean_skill.roms.to_depth` arrives with ``"z"``,
-    negative-down. :func:`_align_along_path` speaks the latter, so the former is
-    brought onto it the way the reference's own levels are (see there): renamed,
-    and negated so it reads negative-down. Only an axis named in
-    :data:`SECTION_VERTICAL_DIMS` with non-negative values qualifies; anything
-    else -- a native ``s_rho``/``s_w``, a negative-down axis of another name --
-    comes back untouched for the caller's own refusal to name.
+    levels as a ``depth`` (or ``lev``/``depth_surface``) axis, usually positive-down,
+    where a ROMS lane run through :func:`ocean_skill.roms.to_depth` arrives with
+    ``"z"``, negative-up (``positive: up``). :func:`_align_along_path` speaks the
+    latter, so the former is brought onto it the way the reference's own levels are
+    (see there): renamed and given the sign ``z`` has, by the axis's own word -- its CF
+    ``positive`` attribute, else the sign of its values
+    (:func:`ocean_skill.depth_convention.coordinate_positive`). A positive-down axis is
+    negated; one that already reads positive-up (negative heights, ``positive: up``) is
+    renamed as it is; a pressure in dbar is converted to metres. Only an axis named in
+    :data:`SECTION_VERTICAL_DIMS` qualifies, and one whose sign nothing settles -- mixed
+    signs and no ``positive`` attribute -- is left alone; anything else -- a native
+    ``s_rho``/``s_w``, an axis of another name -- comes back untouched for the
+    caller's own refusal to name.
     """
     for name in SECTION_VERTICAL_DIMS[1:]:
         if name not in da.dims or name not in da.coords:
             continue
         values = np.asarray(da[name].values, dtype="float64")
-        if values.size == 0 or not np.nanmin(values) >= 0:
+        if values.size == 0 or not np.isfinite(values).any():
             continue
         attrs = dict(da[name].attrs)
+        positive = depth_convention.coordinate_positive(attrs, values)
+        undeclared = "positive" not in attrs
+        if positive == "down" and undeclared and not np.nanmin(values) >= 0:
+            continue  # mixed signs and nobody says which way is down: do not guess
+        z = -depth_convention.positive_down_values(values, attrs)
         out = da.rename({name: "z"})
-        out = out.assign_coords(z=-out["z"])
+        out = out.assign_coords(z=("z", z))
         attrs.update(positive="up")
+        if depth_convention.infer_from_coordinate(name, attrs).get("units") == "dbar":
+            attrs["units"] = "m"  # converted above, at 1 dbar ~ 1 m
         out["z"].attrs.update(attrs)
         return out
     return da
@@ -3219,11 +3253,15 @@ def _align_along_path(
             f"has {reference.sizes[ref_vdim]} -- both lanes need the same depth "
             "list, in the same order (select={'depth': [...]})."
         )
-    reference_levels = (
-        [-float(v) for v in np.asarray(reference["z"])]
-        if ref_vdim == "z"
-        else [float(v) for v in np.asarray(reference[ref_vdim])]
-    )
+    # Metres, positive down, by the axis's own word: a ``z`` axis reads negative-up
+    # (``positive: up``), a ``depth``/``lev`` one positive-down, and either may say
+    # otherwise -- whatever the axis is called.
+    reference_levels = [
+        float(v)
+        for v in depth_convention.positive_down_values(
+            np.asarray(reference[ref_vdim]), reference[ref_vdim].attrs
+        )
+    ]
     if ref_vdim != "z":
         reference = reference.rename({ref_vdim: "z"})
     reference = reference.assign_coords(z=test["z"])

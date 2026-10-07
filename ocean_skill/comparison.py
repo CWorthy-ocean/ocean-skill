@@ -19,10 +19,15 @@ from typing import Any
 
 import numpy as np
 
+# Aliased because the depth-matching entry points below take the *resolved* convention
+# as a parameter of the same name (``depth_convention=``), which would shadow it.
+from ocean_skill import depth_convention as depth_convention_module
+from ocean_skill import time_zone as time_zone_module
 from ocean_skill._docs import graft_from, graft_plot_options
 
 __all__ = [
     "COLUMN",
+    "DEPTH_ORIGIN_KEY",
     "SURFACE",
     "Comparison",
     "ComparisonSet",
@@ -60,6 +65,15 @@ _UNSET = object()
 #: :func:`_prepare`, which routes both spellings to an unbounded
 #: :func:`~ocean_skill.roms.depth_band`, keeping every native s-level standing.
 COLUMN = "column"
+
+#: The ``select`` key that says how a lane's depths are referenced: a dict of
+#: ``origin`` (``"surface"``/``"fixed"``), ``datum_z_m`` and ``support`` -- or just the
+#: origin as a string -- overriding what the source's own catalog entry says
+#: (:mod:`ocean_skill.depth_convention`). Per lane like any select entry (a
+#: ``{"test", "reference"}`` pair-spec may give each side its own), and never an
+#: *axis*: :func:`_prepare` pops it before any select is applied, so it can neither
+#: match a dimension nor draw the "matched no axis" warning.
+DEPTH_ORIGIN_KEY = "depth_origin"
 
 
 #: CF featureTypes whose data is a *place*, not a field: one position, a time axis, and
@@ -690,10 +704,12 @@ def is_surface_request(depth: Any) -> bool:
 
     Unset (``None``) and the ``"surface"`` sentinel both mean "the model's own top
     level" (:func:`ocean_skill.roms.surface`). A literal ``0``/``0.0`` is a real depth
-    request instead — interpolated like any other depth via
-    :func:`ocean_skill.roms.to_depth`, which may legitimately come back all-NaN (with a
-    warning) if the topmost cell centre already sits below 0 m. Conflating the two
-    silently hid that distinction; now only the explicit sentinel gets the shortcut.
+    request instead — matched like any other depth via
+    :func:`ocean_skill.roms.to_depth`/``nearest_depth_levels``, in the lane's depth
+    frame. Below the moving surface, depth 0 is the top half-cell and takes the top
+    cell's value (finite, no warning); fixed in space it is NaN wherever the tide has
+    dropped the free surface below it. Conflating the two silently hid that
+    distinction; now only the explicit sentinel gets the shortcut.
     """
     return depth is None or (isinstance(depth, str) and depth.lower() == SURFACE)
 
@@ -1650,33 +1666,298 @@ def _as_named_dataset(da, name: str):
     return da.to_dataset(name=name)
 
 
-def _to_depth_targets(sub, meta, targets, *, depth_method: str = "nearest"):
+def _convention_variable_name(variable: Any) -> str | None:
+    """Return the name a catalog ``depth_convention``'s per-variable entries use.
+
+    A plain name is itself; a combination spec that names its ``standard_name`` gives
+    that; anything else (an unnamed combination, a calculator) has no one name, so
+    only the entry's top level speaks for it.
+    """
+    if isinstance(variable, str):
+        return variable
+    if isinstance(variable, dict) and isinstance(variable.get("standard_name"), str):
+        return variable["standard_name"]
+    return None
+
+
+def _canonical_depth_origin(
+    value: Any, *, inherited: str | None = None
+) -> dict[str, Any]:
+    """Validate a ``depth_origin`` request and return the fields it sets, canonical.
+
+    ``value`` is what ``select={"depth_origin": ...}`` or ``compare(depth_origin=)``
+    carries: an origin string (``"surface"``/``"fixed"``) or a dict of ``origin``/
+    ``datum_z_m``/``support``, spelled as
+    :func:`ocean_skill.depth_convention.canonicalize` accepts them. Only those three
+    fields: how a source *stores* its depths (``positive``, ``units``) is a fact about
+    the source and lives in its catalog entry's ``depth_convention``, so naming one
+    here is refused rather than silently dropped. A ``datum_z_m`` only means something
+    on a fixed origin; ``inherited`` -- the origin the override is applied on top of --
+    supplies it when the request names none of its own. Raises ``ValueError``.
+    """
+    probe = value
+    if isinstance(value, dict) and not value.get("origin") and inherited is not None:
+        probe = {**value, "origin": inherited}
+    try:
+        canonical = depth_convention_module.canonicalize(probe) or {}
+    except ValueError as exc:
+        raise ValueError(f"{DEPTH_ORIGIN_KEY}={value!r}: {exc}") from None
+    extra = sorted(set(canonical) - {"origin", "datum_z_m", "support"})
+    if extra:
+        raise ValueError(
+            f"{DEPTH_ORIGIN_KEY}={value!r}: only origin, datum_z_m and support can be "
+            f"overridden here, not {extra} -- how a source stores its depths (sign, "
+            "units) belongs in its catalog entry's depth_convention."
+        )
+    if probe is not value:
+        canonical.pop("origin", None)  # inherited to validate the datum, not asked for
+    return canonical
+
+
+def _complete_frame(given: dict[str, Any]) -> dict[str, Any]:
+    """Return a depth frame with every key the model side and the cache read set.
+
+    A caller may hand in only what it means (``{"origin": "surface"}``): the rest takes
+    the historical meaning -- datum 0, ``support`` ``"point"``, and a ``source`` of
+    ``"default"`` ("nobody declared this"), the one that lets the large-tide warning
+    speak.
+    """
+    return {
+        "origin": given.get("origin") or "fixed",
+        "datum_z_m": float(given.get("datum_z_m") or 0.0),
+        "support": given.get("support") or "point",
+        "source": given.get("source") or "default",
+    }
+
+
+def _lane_conventions(
+    meta: dict[str, Any],
+    variable: Any,
+    select: dict[str, Any] | None,
+    depth_convention: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Return ``(own, frame)``: how a lane's depths are stored, and matched in.
+
+    ``own`` is the lane's own resolved convention
+    (:func:`ocean_skill.depth_convention.resolve` of its catalog metadata, per-variable
+    entry for ``variable`` included): what its *stored* depths mean (sign, units), which
+    the observational branch of :func:`_prepare` reads its levels through. ``frame`` is
+    the plain mapping :mod:`ocean_skill.roms` matches model depths in (``origin``,
+    ``datum_z_m``, ``support``, ``source``): ``depth_convention`` when one is handed
+    in -- a comparison's test lane follows its *reference's* convention -- else
+    ``own``'s.
+    ``select[DEPTH_ORIGIN_KEY]`` outranks both: its ``origin``/``datum_z_m``/``support``
+    replace the frame's, and naming an origin (or a datum) makes the frame ``declared``,
+    which is what keeps the large-tide warning from second-guessing it. A surface origin
+    has no datum, whatever was inherited. Validated here, so a bad request is a
+    ``ValueError`` before anything is read.
+    """
+    own = depth_convention_module.resolve(meta, _convention_variable_name(variable))
+    given = depth_convention if depth_convention is not None else own.frame()
+    frame = _complete_frame(given)
+    override = (select or {}).get(DEPTH_ORIGIN_KEY)
+    if override is not None:
+        fields = _canonical_depth_origin(override, inherited=frame["origin"])
+        origin = fields.get("origin", frame["origin"])
+        frame["origin"] = origin
+        frame["datum_z_m"] = (
+            0.0
+            if origin == "surface"
+            else float(fields.get("datum_z_m", frame["datum_z_m"]))
+        )
+        frame["support"] = fields.get("support", frame["support"])
+        if "origin" in fields or "datum_z_m" in fields:
+            frame["source"] = "declared"
+    return own, frame
+
+
+def _frame_key(frame: dict[str, Any]) -> dict[str, Any]:
+    """Return the part of a depth frame that changes a *value*, for a key or identity.
+
+    ``source`` (declared/inferred/default) is deliberately left out: it only decides
+    which warnings a match owes its caller, never what it returns.
+    """
+    return {
+        "origin": frame["origin"],
+        "datum_z_m": float(frame["datum_z_m"]),
+        "support": frame["support"],
+    }
+
+
+def _vertical_request(select: dict[str, Any] | None) -> Any:
+    """Return what ``select`` asks for vertically, under whichever depth key it used."""
+    return next((select[k] for k in _VERTICAL_KEYS if k in (select or {})), None)
+
+
+def _needs_depth_frame(depth: Any) -> bool:
+    """Whether a vertical request is matched *in a depth frame* (a number, a band).
+
+    A literal depth, a list holding one, or a ``{"min", "max"}`` band is read in the
+    frame the observation's convention defines; the model's own top level
+    (``"surface"``/unset), the whole native column and an isopycnal are not -- none of
+    them names a depth to be matched against anything.
+    """
+    if depth is None or is_surface_request(depth) or is_column_request(depth):
+        return False
+    if is_depth_band(depth):
+        return True
+    if isinstance(depth, list | tuple):
+        return any(not is_surface_request(d) for d in depth)
+    return True
+
+
+#: The names a ROMS source's free surface goes by: ``zeta`` as the model writes it, and
+#: the standard name the catalog's ``standard_names`` renames it to.
+_FREE_SURFACE_NAMES = ("zeta", "sea_surface_height_above_geoid")
+
+#: The keys of an aggregate step that say *which bins* an axis is reduced into, as
+#: opposed to *how* each bin is reduced -- see :func:`_as_mean_aggregate`.
+_BINNING_KEYS = ("groupby", "resample", "seasons")
+
+
+def _as_mean_aggregate(spec: dict[str, Any] | None) -> dict[str, Any]:
+    """``spec`` with every reduction turned into a mean, the binning left as it was.
+
+    The free surface a depth is matched against has to be reduced over the *same bins*
+    the field was, but not by the same statistic: the standard deviation, a quantile or
+    the maximum of a free surface is not an elevation, and the frame a bin's statistic
+    lives in is the one the bin's mean surface defines. So the axes, their
+    ``groupby``/``resample``/``seasons`` structure and every step of a chain are kept,
+    each ``reduce`` becomes ``"mean"``, and the ``spread`` and reduction keywords
+    (``q``, ...) are dropped.
+    """
+
+    def step(how: Any) -> Any:
+        if isinstance(how, dict):
+            binning = {k: v for k, v in how.items() if k in _BINNING_KEYS}
+            return {**binning, "reduce": "mean"}
+        return "mean"
+
+    return {
+        axis: [step(s) for s in how] if isinstance(how, list | tuple) else step(how)
+        for axis, how in (spec or {}).items()
+    }
+
+
+def _with_free_surface(
+    sub,
+    obj,
+    field,
+    meta: dict[str, Any],
+    horizontal: dict[str, Any],
+    early_agg: dict[str, Any] | None,
+    detide: dict[str, Any] | None,
+    source: str,
+):
+    """Re-attach ``obj``'s free surface to ``sub``, reduced the way ``field`` was.
+
+    A depth is matched against ``z_rho``, and ``z_rho = zeta + (zeta + h) * s`` moves
+    with the free surface: matching below the *instantaneous* surface, per time step, or
+    in the frame of a time-mean field only means anything if ``zeta`` went through the
+    pipeline with the field. So it is low-passed like the field when ``detide`` ran
+    (``detide`` is ``None`` when it did not), cut by the same horizontal ``select`` and
+    reduced by the same non-vertical aggregate -- every reduction a *mean*
+    (:func:`_as_mean_aggregate`) -- and any axis it still has that the field does not
+    (a time-less field in a time-varying file) is averaged away, so ``z_rho`` is never
+    time-varying against a time-less field. The reduction's warnings are the field's
+    own, already given, and are silenced here rather than repeated.
+
+    ``z_rho`` is then recomputed from it, and a stale ``z_w`` dropped so
+    :func:`ocean_skill.roms.depth_band` rebuilds the interfaces from the same surface.
+    ``sub`` comes back unchanged when ``obj`` carries no free surface (every depth
+    routine then falls back to a flat one) or lacks the grid fields to build ``z_rho``.
+    """
+    import warnings
+
+    from ocean_skill import roms
+    from ocean_skill.cf import find_coord
+
+    name = next((n for n in _FREE_SURFACE_NAMES if n in obj.variables), None)
+    if name is None:
+        return sub
+    zeta = obj[name]
+    if detide is not None:
+        from ocean_skill.detide import detide as _run_detide
+
+        time_coord = find_coord(zeta, "time")
+        if time_coord is not None and time_coord.name in zeta.dims:
+            zeta = _run_detide(zeta, T=detide["T"], component="subtidal")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        zeta = _select_horizontal_then_aggregate(
+            zeta, horizontal, _as_mean_aggregate(early_agg), source
+        )
+    leftover = [str(d) for d in zeta.dims if d not in field.dims]
+    if leftover:
+        zeta = zeta.mean(leftover)
+    sub = sub.drop_vars("zeta", errors="ignore").assign(
+        zeta=zeta.reset_coords(drop=True)
+    )
+    sub = sub.drop_vars("z_w", errors="ignore")
+    if all(v in sub.variables for v in ("sigma_r", "Cs_r", "h")):
+        sub = roms.add_depth_coord(sub, meta)
+    return sub
+
+
+def _warn_support_ignored(support: str, depth: Any, source: str) -> None:
+    """Say that a ``support`` was ignored because the request is not a single depth."""
+    import warnings
+
+    from ocean_skill import _stacklevel
+
+    cell = "top" if support == "surface" else "bottom"
+    warnings.warn(
+        f"{source!r}: depth_convention support={support!r} (the model's {cell} cell) "
+        f"only applies to a single-depth request, but this one asks for {depth!r} -- "
+        "ignoring it and matching at the requested depth(s).",
+        stacklevel=_stacklevel.find(),
+    )
+
+
+def _to_depth_targets(
+    sub,
+    meta,
+    targets,
+    *,
+    depth_method: str = "nearest",
+    convention: dict[str, Any] | None = None,
+):
     """Dispatch a fixed-level vertical request to interpolation or the nearest level.
 
     The one place :func:`ocean_skill.roms.to_depth` (``depth_method="interp"``/
     ``"linear"``) and :func:`ocean_skill.roms.nearest_depth_levels`
     (``depth_method="nearest"``, the default) are chosen between, so every caller in
-    this module reads the same rule the same way.
+    this module reads the same rule the same way. ``convention`` is the depth frame
+    both read the targets in -- a plain mapping (``origin``, ``datum_z_m``, ``source``),
+    or ``None`` for the historical fixed-in-space reading.
     """
     from ocean_skill import roms
 
     if depth_method == "nearest":
-        return roms.nearest_depth_levels(sub, meta, targets)
+        return roms.nearest_depth_levels(sub, meta, targets, convention=convention)
     if depth_method in ("interp", "linear"):
-        return roms.to_depth(sub, meta, targets)
+        return roms.to_depth(sub, meta, targets, convention=convention)
     raise ValueError(
         f"unknown depth_method {depth_method!r}; expected 'nearest' (the default) or "
         "'interp' (or 'linear')"
     )
 
 
-def _surface_and_levels(sub, meta, name: str, depths, *, depth_method: str = "nearest") -> Any:
+def _surface_and_levels(
+    sub,
+    meta,
+    name: str,
+    depths,
+    *,
+    depth_method: str = "nearest",
+    convention: dict[str, Any] | None = None,
+) -> Any:
     """Assemble a ``z`` axis mixing the model's own surface with fixed levels.
 
     ``select={"depth": ["surface", 50, 100]}`` asks for levels no single vertical
     operation can produce: ``"surface"`` is the native top cell
-    (:func:`ocean_skill.roms.surface` — interpolating to 0 m is NaN wherever the top
-    cell centre sits deeper), while the numbers are fixed levels via
+    (:func:`ocean_skill.roms.surface` — the native top cell, with no depth matched at
+    all), while the numbers are fixed levels via
     :func:`_to_depth_targets` (``depth_method``). So the two are computed separately
     and concatenated along ``z`` in the order asked for.
 
@@ -1692,7 +1973,9 @@ def _surface_and_levels(sub, meta, name: str, depths, *, depth_method: str = "ne
 
     numeric = [float(d) for d in depths if not is_surface_request(d)]
     levels = (
-        _to_depth_targets(sub, meta, numeric, depth_method=depth_method)[name]
+        _to_depth_targets(
+            sub, meta, numeric, depth_method=depth_method, convention=convention
+        )[name]
         if numeric
         else None
     )
@@ -1963,6 +2246,13 @@ def _reindex_onto_literal_depths(
     are resolved first (``groupby(...).mean(...)``, which also collapses a
     duplicate to its honest mean, the same way an overlapping band's cells are
     averaged above).
+
+    ``levels`` and ``targets`` are both metres, positive down: the caller has already
+    read the obs's levels through its depth convention
+    (:func:`ocean_skill.depth_convention.positive_down_values`), so the coordinate
+    this puts on the result is stamped as exactly that -- ``positive="down"``,
+    ``units="m"`` and the already-normalised marker -- and downstream matching reads
+    it without converting it a second time.
     """
     attrs = dict(da.attrs)
     da = da.assign_coords({zname: (zname, levels)}).groupby(zname).mean(zname)
@@ -1970,6 +2260,9 @@ def _reindex_onto_literal_depths(
     target_arr = np.asarray(targets, dtype="float64")
     da = da.reindex({zname: target_arr}, method="nearest", tolerance=tol)
     da.attrs = attrs
+    da[zname].attrs.update(
+        {"positive": "down", "units": "m", depth_convention_module.NORMALIZED_ATTR: 1}
+    )
     if len(target_arr) == 1:
         da.attrs["actual_depth"] = float(target_arr[0])
     finite_levels = levels[np.isfinite(levels)]
@@ -2108,6 +2401,8 @@ def _prepare(
     point_window: bool = False,
     depth_method: str = "nearest",
     over: Any = None,
+    depth_convention: dict[str, Any] | None = None,
+    obs_convention: Any = None,
 ):
     """Reduce a source to one comparable 2-D field (variable, aggregation, depth).
 
@@ -2158,12 +2453,33 @@ def _prepare(
     ``depth_method`` picks how a fixed target depth (or list of them) is read off
     the model's native levels -- see :func:`_to_depth_targets`, which this passes
     straight through to. ``"nearest"`` (the default) snaps to the closest native
-    level, matched once against a single reference time rather than re-matched
-    every step (:func:`ocean_skill.roms.nearest_depth_levels`); ``"interp"`` (or
-    ``"linear"``) instead linearly interpolates every step onto the target depth
-    (:func:`ocean_skill.roms.to_depth`, this module's behaviour before this option
-    existed). The vertical counterpart of ``Comparison.time_method`` -- see that
+    level, chosen **per time step** against that step's own depth frame -- a level's
+    true depth rides the free surface, so no one level stays the nearest through a
+    tide (:func:`ocean_skill.roms.nearest_depth_levels`, which also says what a
+    target in the top or bottom half-cell gets: that cell's value, not NaN);
+    ``"interp"`` (or ``"linear"``) instead linearly interpolates every step onto the
+    target depth (:func:`ocean_skill.roms.to_depth`, under the same frame and edge
+    policy). The vertical counterpart of ``Comparison.time_method`` -- see that
     attribute's own docstring for the matching choice along time.
+
+    ``depth_convention`` is the depth *frame* a ROMS lane's fixed depths are read in
+    -- a plain mapping of ``origin`` (``"surface"``: metres below the moving free
+    surface; ``"fixed"``: a position fixed in space), ``datum_z_m``, ``support`` and
+    ``source`` (see :func:`_lane_conventions`). A comparison's test lane is handed its
+    *reference's* (the model follows the observation), a bare field its own catalog
+    entry's. It is passed to :func:`ocean_skill.roms.to_depth`/``nearest_depth_levels``
+    /``depth_band``; a ``support`` of ``"surface"``/``"bottom"`` on a single-depth
+    request reads the model's own top/bottom cell instead (``attrs["depth_support"]``
+    says so) and is ignored, with a warning, for a list or a band. The free surface
+    that frame needs is kept through the early reduction, the detide and a transect
+    (:func:`_with_free_surface`) rather than dropped. ``obs_convention`` is the lane's
+    *own* resolved convention (a
+    :class:`~ocean_skill.depth_convention.ResolvedConvention`), which the observational
+    branch reads its stored levels through -- sign, units -- so that every depth it
+    compares, picks and reports is metres, positive down.
+    ``None`` for either resolves it from ``meta`` and ``select``, so a direct caller
+    needs to pass neither; ``select["depth_origin"]`` (:data:`DEPTH_ORIGIN_KEY`) is
+    read for them here and popped, so it is never mistaken for an axis.
 
     ``over`` is the calling :class:`Comparison`'s own axis choice (``None`` for a
     bare :class:`~ocean_skill.field.Field`, which never sets it) -- consulted only
@@ -2190,6 +2506,16 @@ def _prepare(
     if tabular.is_frame(obj):
         obj = tabular.to_dataset(obj, meta)
 
+    # How this lane's depths are stored (``obs_convention``: sign, units) and matched
+    # (``depth_convention``: the frame), resolved *before* the select is touched --
+    # its depth_origin entry is one of the things they are resolved from.
+    if depth_convention is None or obs_convention is None:
+        _own, _frame = _lane_conventions(meta, variable, select, depth_convention)
+        depth_convention = _frame
+        if obs_convention is None:
+            obs_convention = _own
+    depth_convention = _complete_frame(depth_convention)
+
     # A transect is sliced first, on the whole Dataset, before anything else in this
     # function runs -- earlier than the horizontal select just below. Applying it to
     # the whole Dataset rather than to the one resolved variable keeps h/mask_rho/
@@ -2198,6 +2524,8 @@ def _prepare(
     # if `obj` is already sliced, whatever it re-attaches already matches. Popped
     # (not just read) so it never reaches the horizontal select below, which knows
     # nothing about it.
+    # Never an axis: read above, and out of the select before any of it is applied.
+    select.pop(DEPTH_ORIGIN_KEY, None)
     transect_spec = select.pop("transect", None)
     is_section = transect_spec is not None
     if is_section:
@@ -2256,6 +2584,7 @@ def _prepare(
     if da is None:
         return None, None
 
+    detided = False
     if detide is not None:
         from ocean_skill.detide import detide as _run_detide
 
@@ -2269,6 +2598,7 @@ def _prepare(
             )
         else:
             da = _run_detide(da, T=detide["T"], component="subtidal")
+            detided = True
 
     # A plain surface request is a free isel -- unlike to_depth/depth_band/to_sigma0,
     # it needs no grid attached and no water column, just the top s-level -- so it is
@@ -2446,16 +2776,27 @@ def _prepare(
             # A DataArray only carries coordinates sharing its dimensions, so the
             # interface-grid variables (on s_w, which a tracer has no part of) are
             # dropped by to_dataset. They are exactly what depth_average needs.
-            #
-            # Static grid fields only -- deliberately not `zeta`, which still
-            # carries the time dimension this field has already been averaged
-            # over; re-attaching it would make z_rho time-varying against a
-            # time-less field and break the xgcm transform. Both depth
-            # routines fall back to zeta=0, which is the approximation
-            # already in force here and is small against metre-scale cells.
             for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
                 if grid_var in obj.variables and grid_var not in sub.variables:
                     sub = sub.assign({grid_var: obj[grid_var]})
+            # The free surface too, reduced as the field was (see _with_free_surface):
+            # a depth is matched in a frame built from it -- below the instantaneous
+            # surface, per time step, or in the frame of the time-mean field -- and a
+            # flat zeta=0 would put that frame up to a tidal range out of step with the
+            # data. Not for a request that is not a depth match: the model's own top
+            # level, an isopycnal, and a section drawn on its native levels (below).
+            if sigma is None and not surface and not (is_section and depth is None):
+                sub = _with_free_surface(
+                    sub,
+                    obj,
+                    da,
+                    meta,
+                    horizontal,
+                    early_agg,
+                    detide if detided else None,
+                    source,
+                )
+            support_cell = None
             if is_section and depth is None:
                 # A section with no depth request draws the model's own s-levels --
                 # no transform, so no xgcm grid needed and nothing interpolated. But
@@ -2480,6 +2821,12 @@ def _prepare(
                 # scale. See ocean_skill.plot.section.prepare_section, which no
                 # longer has (or needs) a placeholder fill for a NaN it will now
                 # never receive.
+                #
+                # This is the plot mesh and nothing else: no depth is ever matched
+                # against it. Every branch that does match one (below) is handed the
+                # real, reduced free surface by _with_free_surface instead, which this
+                # branch deliberately skips -- a section on its native levels has no
+                # observation depth to be in a frame with.
                 sub = roms.add_depth_coord(sub, meta, zero_zeta=True)
             elif sigma is not None:
                 # An isopycnal slice needs the full water column of temperature and
@@ -2526,7 +2873,11 @@ def _prepare(
                 # target grid over 0-10 m would be mostly NaN offshore.
                 # A *selection*: keeps the cells and their thickness weights, so the
                 # vertical aggregation below decides how to collapse them.
-                sub = roms.depth_band(sub, meta, depth["min"], depth["max"])
+                if depth_convention["support"] != "point":
+                    _warn_support_ignored(depth_convention["support"], depth, source)
+                sub = roms.depth_band(
+                    sub, meta, depth["min"], depth["max"], convention=depth_convention
+                )
             elif column or depth is None:
                 # The whole water column, native levels standing: an unbounded band --
                 # every cell overlaps a 0..inf m range, so nothing is excluded, but the
@@ -2538,13 +2889,29 @@ def _prepare(
                 # lane -- see `surface`'s definition above) and gets the identical
                 # treatment: nothing reduced, nothing assumed, just the coordinates a
                 # profile/section/{"Z": ...} consumer needs attached.
-                sub = roms.depth_band(sub, meta, 0.0, float("inf"))
+                #
+                # Always read from the surface: every cell is wanted whatever the
+                # tide, so what the weights should be is each cell's real thickness,
+                # (h + zeta) * ds. A fixed-frame 0..inf band would instead clip the
+                # part of the top cell above mean sea level whenever zeta > 0.
+                sub = roms.depth_band(
+                    sub, meta, 0.0, float("inf"), convention={"origin": "surface"}
+                )
             elif isinstance(depth, list | tuple) and any(
                 is_surface_request(d) for d in depth
             ):
                 # "surface" beside numbers, e.g. ["surface", 50, 100]: no single
                 # vertical operation produces that, so the levels are assembled.
-                sub = _surface_and_levels(sub, meta, name, depth, depth_method=depth_method)
+                if depth_convention["support"] != "point":
+                    _warn_support_ignored(depth_convention["support"], depth, source)
+                sub = _surface_and_levels(
+                    sub,
+                    meta,
+                    name,
+                    depth,
+                    depth_method=depth_method,
+                    convention=depth_convention,
+                )
             else:
                 # A list gives several levels in one field, which the vertical
                 # aggregation then collapses; a scalar gives one level and no axis.
@@ -2560,9 +2927,29 @@ def _prepare(
                         '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
                         'metres and "surface" (["surface", 50, 100]).'
                     ) from None
-                sub = _materialize_point_column(sub, point_window)
-                sub = _to_depth_targets(sub, meta, targets, depth_method=depth_method)
+                support = depth_convention["support"]
+                if support != "point" and isinstance(targets, float):
+                    # support="surface"/"bottom": the observation is of the model's
+                    # own top/bottom cell (a satellite skin, a seabed sensor), not of
+                    # a depth -- so no depth is matched, and the cell is never NaN
+                    # for want of a level at the target or a tide that moved it.
+                    pick = roms.surface if support == "surface" else roms.bottom
+                    sub = pick(sub, meta)
+                    support_cell = support
+                else:
+                    if support != "point":
+                        _warn_support_ignored(support, depth, source)
+                    sub = _materialize_point_column(sub, point_window)
+                    sub = _to_depth_targets(
+                        sub,
+                        meta,
+                        targets,
+                        depth_method=depth_method,
+                        convention=depth_convention,
+                    )
             da = sub[name]
+            if support_cell is not None:
+                da.attrs["depth_support"] = support_cell
             # Squeeze only a single interpolated level: a scalar depth
             # request collapses the axis by itself (as `.sel` does
             # everywhere), while a list or band leaves several levels for
@@ -2606,10 +2993,18 @@ def _prepare(
             # rather than only "Depth" exactly. Excluded when it resolves back to
             # the axis's own coordinate (zname): that case is already `da[zname]`.
             _depth_var = find_coord(obj, "vertical")
-            levels = (
-                np.asarray(_depth_var)
+            _levels_var = (
+                _depth_var
                 if _depth_var is not None and str(_depth_var.name) != zname
-                else np.asarray(da[zname])
+                else da[zname]
+            )
+            # Metres, positive down, whichever way the source stores them (a height, a
+            # pressure in dbar): every pick, band test and reported depth below -- and
+            # the depths the model was matched at -- are on that one scale. The
+            # standing coordinate itself is left as the source wrote it, attrs and
+            # all, for the downstream matching to read.
+            levels = depth_convention_module.positive_down_values(
+                np.asarray(_levels_var), _levels_var.attrs, convention=obs_convention
             )
             if band:
                 if _deepen:
@@ -2751,7 +3146,13 @@ def _prepare(
     if "actual_depth" not in da.attrs:
         _station_depth = find_coord(da, "vertical")
         if _station_depth is not None and not _station_depth.dims:
-            da.attrs["actual_depth"] = float(_station_depth)
+            da.attrs["actual_depth"] = float(
+                depth_convention_module.positive_down_values(
+                    float(_station_depth),
+                    _station_depth.attrs,
+                    convention=obs_convention,
+                )
+            )
         elif da.attrs.get("depth_m") is not None:
             # A station's depth also rides on the variable's attrs, which is what is
             # left once a reduction has dropped a coordinate along time -- so the
@@ -3065,6 +3466,7 @@ def prepare_source(
     literal_depths: bool = False,
     depth_method: str = "nearest",
     over: Any = None,
+    depth_convention: dict[str, Any] | None = None,
 ):
     """Reduce one source to its prepared field, via the lane cache.
 
@@ -3211,6 +3613,23 @@ def prepare_source(
     Every lane cached before this option existed was necessarily squeezed, so it
     is exactly the byte-identical, unre-keyed default this still produces.
 
+    ``depth_convention`` is the depth frame a ROMS lane matches its fixed depths in
+    (see :func:`_prepare`'s paragraph and :func:`_lane_conventions`): a comparison's
+    test lane is handed its reference's (the model follows the observation), and
+    ``None`` -- a bare :class:`~ocean_skill.field.Field`, or a comparison's reference
+    lane -- means the lane's own, from its catalog entry. ``select["depth_origin"]``
+    (:data:`DEPTH_ORIGIN_KEY`) outranks both. How the depths are referenced changes
+    the field, so it joins the cache key below: ``_depth_frame`` (origin, datum,
+    support) for a ROMS lane whose vertical request is a number, a list holding one or
+    a band -- never for the model's own surface, the whole column or an isopycnal,
+    which name no depth to match -- and ``_depth_convention`` (the lane's own
+    resolved sign/units/origin/datum/support) for every other lane, since an
+    observation's picks and reported depths are read through it. ``_time_zone``
+    joins when the entry declares a time zone (:mod:`ocean_skill.time_zone`): a
+    naive stamp read as local is a different instant from one read as UTC. These
+    entries are present whether or not the source declares anything -- an undeclared
+    one resolves to the defaults, which are themselves a (changed) behaviour.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -3225,6 +3644,9 @@ def prepare_source(
     # anything -- belongs in the cache key. See the qc= paragraph above.
     meta = resolve(source).metadata
     effective_qc = _qc.effective_policy(qc, meta)
+    # Resolved here, from the select as given (before anything pops a key from it): an
+    # invalid catalog declaration or depth_origin raises now, not after a read.
+    own, frame = _lane_conventions(meta, variable, select, depth_convention)
 
     key_select: dict[str, Any] = {**(select or {}), "_aggregate": aggregate}
     if bbox is not None:
@@ -3284,6 +3706,17 @@ def prepare_source(
     # docstring paragraph. A lane cached before this option existed carries no
     # such key at all, so it never collides with either value of this one.
     key_select["_depth_method"] = depth_method
+    # How depths are referenced changes values (a surface frame vs a fixed one, a sign
+    # or units conversion), and nothing in `select` says it when it comes from the
+    # catalog -- see the depth_convention= docstring paragraph above.
+    if meta.get("model") == "roms":
+        if _needs_depth_frame(_vertical_request(select)):
+            key_select["_depth_frame"] = _frame_key(frame)
+    else:
+        key_select["_depth_convention"] = own.key()
+    zone = time_zone_module.time_zone_label(meta)
+    if zone is not None:
+        key_select["_time_zone"] = zone
     if str(meta.get("featureType") or "") == "timeSeriesProfile":
         # Whether _prepare's own singleton-time squeeze fires depends on `over`
         # (see its docstring paragraph) -- and unlike _require_reduced's squeeze,
@@ -3523,6 +3956,8 @@ def prepare_source(
         point_window=point_window_applied,
         depth_method=depth_method,
         over=over,
+        depth_convention=frame,
+        obs_convention=own,
     )
     if da is not None and require_reduced:
         # A fail-fast check only -- before .load(), while it is still free -- see the
@@ -3865,6 +4300,13 @@ class Comparison:
     depth_method
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"``. See
         :func:`compare`'s ``depth_method=``.
+    depth_origin
+        ``None`` (default, each source's own ``depth_convention`` decides), an
+        origin string (``"surface"``/``"fixed"``) or a dict of ``origin``/
+        ``datum_z_m``/``support`` overriding how the observation's depths are
+        referenced. Validated here and written into both lanes' selects
+        (:data:`DEPTH_ORIGIN_KEY`), except a lane that already names its own. See
+        :func:`compare`'s ``depth_origin=``.
     tolerance
         Optional float widening a ``"nearest"`` match. ``None`` (default)
         uses the matcher's own tolerance.
@@ -3928,6 +4370,7 @@ class Comparison:
         over: str | None = None,
         time_method: str = "auto",
         depth_method: str = "nearest",
+        depth_origin: Any = None,
         tolerance: float | None = None,
         bin_anchor: str = "auto",
         min_coverage: float = 0.5,
@@ -3994,6 +4437,18 @@ class Comparison:
         # lane's own prepare() call resolves this through, mirroring variable_for.
         self.select = _normalize_pair(select, "select", normalize_side=as_select)
         self.select = _resolve_latest_lanes(self.select, test)
+        # How the observation's depths are referenced, when the caller says so rather
+        # than the catalog: validated once, here, and written into *both* lanes' selects
+        # -- where it outranks what either lane's catalog entry (or, for the test lane,
+        # the reference's convention) says -- except into a lane that already names its
+        # own. A plain select stays plain (a pair-spec would change how it is routed).
+        self.depth_origin = (
+            None
+            if depth_origin is None
+            else (_canonical_depth_origin(depth_origin) or None)
+        )
+        if self.depth_origin is not None:
+            self.select = _with_depth_origin(self.select, self.depth_origin)
         self.aggregate = _normalize_pair(aggregate, "aggregate")
         if is_pair_spec(self.aggregate):
             for role, side in self.aggregate.items():
@@ -4076,6 +4531,9 @@ class Comparison:
         # align() call it, and it reads the reference to get it. _UNSET marks
         # "not computed yet" without colliding with a genuine None result.
         self._time_targets_cache = _UNSET
+        # Memoized the same way, for the same reason (a catalog lookup, and ``None`` --
+        # "the reference resolved no frame" -- is itself a result worth keeping).
+        self._depth_frame_cache = _UNSET
         self._validate_section_request()
 
     def _validate_section_request(self) -> None:
@@ -4411,6 +4869,54 @@ class Comparison:
         needing its own copy of the same fix (see :meth:`_prepare_lane`).
         """
         return list(self._section_casts) if self._section_casts else [self.reference_name]
+
+    def _reference_depth_frame(self) -> dict[str, Any] | None:
+        """Return the depth frame the *test* lane matches its depths in.
+
+        The model follows the observation: a CTD that measures below the moving surface
+        is compared with the model's depths below *its* moving surface, a pier sonde
+        with the model at a fixed height. So this is the reference's resolved
+        convention (:func:`_lane_conventions` of its catalog metadata -- the first cast,
+        for a section built from casts -- and its own lane select, ``depth_origin``
+        included), handed to the test lane's :func:`prepare_source`. Read-free and
+        memoized, and **fails open** to ``None`` (the test lane then resolves its own)
+        on anything that goes wrong -- an unresolvable name, a stub, a malformed
+        declaration, which the reference lane's own prepare raises for properly.
+        """
+        cached = getattr(self, "_depth_frame_cache", _UNSET)
+        if cached is not _UNSET:
+            return cached
+        try:
+            from ocean_skill.catalog import resolve
+
+            meta = resolve(self._reference_sources()[0]).metadata
+            _, frame = _lane_conventions(
+                meta,
+                variable_for(self.variable, "reference"),
+                select_for(self.select, "reference"),
+            )
+        except Exception:
+            frame = None
+        self._depth_frame_cache = frame
+        return frame
+
+    def _time_zone_labels(self) -> list[str | None] | None:
+        """Return ``[test, reference]`` time zones, or ``None`` if none is declared.
+
+        A source's declared zone changes where its naive timestamps sit in time, so the
+        aligned pair it feeds is a different pair -- see :attr:`_cache_key`. Fails open
+        (``None``) like the other catalog-derived entries there.
+        """
+        try:
+            from ocean_skill.catalog import resolve
+
+            labels = [
+                time_zone_module.time_zone_label(resolve(name).metadata)
+                for name in (self.test_name, self._reference_sources()[0])
+            ]
+        except Exception:
+            return None
+        return labels if any(label is not None for label in labels) else None
 
     def _reference_narrowing(
         self,
@@ -4804,6 +5310,18 @@ class Comparison:
         # itself just changed, so a pair cached before this option existed must
         # never be mistaken for one built under the new default.
         extra["_depth_method"] = self.depth_method
+        # What the reference's catalog entry says about its depths and its clock is
+        # invisible to everything above: declaring it surface-referenced (or its naive
+        # stamps local) changes every value of the aligned pair under an identical
+        # select. The frame is the reference's resolved one, which the test lane is
+        # matched in; both entries fail open (absent) like the other catalog-derived
+        # ones below.
+        frame = self._reference_depth_frame()
+        if frame is not None:
+            extra["_depth_frame"] = _frame_key(frame)
+        zones = self._time_zone_labels()
+        if zones is not None:
+            extra["_time_zones"] = zones
         if self._section_casts is not None:
             # reference_name is a joined display string here (see __init__), so
             # the real identity -- which casts, in which order -- has to be
@@ -5067,6 +5585,10 @@ class Comparison:
             # wrong here the way there is above.
             depth_method=self.depth_method,
             over=self.over,
+            # The model follows the observation: the test lane matches its depths in
+            # the reference's frame (see _reference_depth_frame); the reference lane
+            # reads its own.
+            depth_convention=self._reference_depth_frame() if role == "test" else None,
         )
 
     def _warn_on_pair_spec_mismatch(
@@ -6861,6 +7383,34 @@ class Comparison:
         )
 
 
+def _with_depth_origin(select: Any, depth_origin: dict[str, Any]) -> Any:
+    """``select`` with ``depth_origin`` written into every lane that names none.
+
+    A pair-spec gets it on both sides, a plain select -- shared by both lanes -- stays
+    plain with the one key added (turning it into a pair-spec would change how the
+    comparison routes it). A lane that already carries its own
+    :data:`DEPTH_ORIGIN_KEY` keeps it.
+    """
+
+    def side(sel: dict[str, Any]) -> dict[str, Any]:
+        if DEPTH_ORIGIN_KEY in sel:
+            return sel
+        return {**sel, DEPTH_ORIGIN_KEY: dict(depth_origin)}
+
+    if is_pair_spec(select):
+        return {"test": side(select["test"]), "reference": side(select["reference"])}
+    return side(select)
+
+
+def _identity_depth_frame(c) -> dict[str, Any] | None:
+    """Return ``c``'s reference depth frame, or ``None`` (a stub, a failure)."""
+    try:
+        frame = c._reference_depth_frame()
+        return None if frame is None else _frame_key(frame)
+    except Exception:
+        return None
+
+
 def _canonical(obj: Any) -> str:
     """A dict-key-order-insensitive representation of ``obj``.
 
@@ -6902,6 +7452,11 @@ def _identity(c) -> tuple:
         getattr(c, "depth_method", None),
         getattr(c, "tolerance", None),
         getattr(c, "bin_anchor", None),
+        # How the depths are referenced -- what was asked for, and the frame the
+        # reference's catalog entry resolves to -- changes the pair; two comparisons
+        # that differ only there must pool as two points, not dedup into one.
+        _canonical(getattr(c, "depth_origin", None)),
+        _canonical(_identity_depth_frame(c)),
         # A demeaned comparison and its raw twin must pool as two distinct points,
         # not dedup into one -- _flatten (below) drops anything with a repeated
         # identity, which is exactly wrong for the "raw + demeaned side by side"
@@ -8320,6 +8875,11 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     :func:`numpy.unique`, which also sorts them ascending; neither the reference's own
     nearest-level ``isel`` nor the test's :func:`ocean_skill.roms.to_depth` cares about
     order, so the axis's literal order is not preserved. Returns a plain list of floats.
+
+    The levels are read through the source's depth convention
+    (:func:`ocean_skill.depth_convention.positive_down_values`), so a height or a
+    pressure comes back as metres, positive down -- the scale the model is asked for
+    and the observation's own picks are made on.
     """
     if source in cache:
         return cache[source]
@@ -8356,7 +8916,13 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
             "found to read its own levels from -- pass depths=[...] explicitly, or "
             "check the catalog entry's axes/standard_names."
         )
-    values = np.asarray(obj[zname].values, dtype="float64")
+    try:
+        convention = depth_convention_module.resolve(meta)
+    except ValueError:
+        convention = None  # a broken declaration is the lane's to report
+    values = depth_convention_module.positive_down_values(
+        obj[zname].values, obj[zname].attrs, convention=convention
+    )
     values = values[np.isfinite(values)]
     if values.size == 0:
         raise ValueError(
@@ -8383,12 +8949,17 @@ def _station_depth_from_metadata(source: str) -> float | None:
 
     ``None`` -- meaning "nothing to derive, leave the default (or the caller's own
     ``depths=``/``select=``) alone" -- when the featureType is not one of that
-    set, no vertical extent is declared, it is not finite, or it is negative: every
-    other consumer of these keys (:data:`ocean_skill.tabular._DEPTH_ATTRS`,
-    :func:`ocean_skill.build._extent`) assumes positive-down metres, and a
-    negative value here is more likely a units mixup than a real depth. The
-    midpoint of ``_min``/``_max`` is returned -- equal to either bound when a
-    builder only ever wrote one exact depth (``_min == _max``).
+    set, no vertical extent is declared, it is not finite, or it comes out negative.
+    The extents are raw values, as the source stored them (see
+    :func:`ocean_skill.build._extent`), and are read through its depth convention
+    (:func:`ocean_skill.depth_convention.resolve`): a source that *declares or infers*
+    ``positive: up`` has its (negative) heights negated, and a pressure in dbar is
+    converted (approximately, 1 dbar ~ 1 m). Without such a statement the values are
+    taken as positive-down metres, as every other consumer of these keys does
+    (:data:`ocean_skill.tabular._DEPTH_ATTRS`), and a negative one is more likely a
+    units mixup than a real depth. The midpoint of ``_min``/``_max`` is returned --
+    equal to either bound when a builder only ever wrote one exact depth
+    (``_min == _max``).
     """
     if _feature_type(source) not in _FIXED_STATION_FEATURE_TYPES:
         return None
@@ -8408,7 +8979,27 @@ def _station_depth_from_metadata(source: str) -> float | None:
         return None
     import math
 
-    if not (math.isfinite(lo) and math.isfinite(hi)) or lo < 0 or hi < 0:
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    try:
+        convention = depth_convention_module.resolve(meta)
+    except ValueError:
+        convention = None  # the lane's own prepare reports a broken declaration
+    if convention is not None:
+        # Only what the entry actually said counts: a *default* sign must not turn
+        # "negative means a units mixup" into a quiet flip.
+        positive = (
+            convention.positive
+            if convention.provenance["positive"] != "default"
+            else "down"
+        )
+        lo, hi = (
+            float(v)
+            for v in depth_convention_module.to_positive_down(
+                [lo, hi], positive=positive, units=convention.units
+            )
+        )
+    if lo < 0 or hi < 0:
         return None
     return (lo + hi) / 2.0
 
@@ -9304,6 +9895,7 @@ def compare(
     qc: Any = None,
     subtract_mean: Any = False,
     detide: Any = False,
+    depth_origin: Any = None,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -9373,14 +9965,15 @@ def compare(
     time_method
         One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
         ``"exact"`` -- how the two lanes are matched along a kept time axis.
-        Doubles as the cast-matching knob against a repeat-visit station,
-        where ``"nearest"`` (the default there) keeps only the closest model
-        step to each cast and ``"interp"``/``"linear"`` interpolates onto
-        each cast time instead.
+        Doubles as the sample-matching knob against a fixed-position or
+        repeat-visit reference (a mooring, a revisited station), where
+        ``"nearest"`` (the default there) keeps only the closest model step
+        to each of the reference's own times and ``"interp"``/``"linear"``
+        interpolates onto them instead.
     depth_method
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"`` -- how
-        the model is matched onto target depths: the nearest real level, or
-        linearly interpolated at every step.
+        the model is matched onto target depths: the nearest real level
+        (chosen at every time step), or linearly interpolated at every step.
     tolerance
         Optional float widening a ``"nearest"`` time/position match.
         ``None`` (default) uses each matcher's own built-in tolerance.
@@ -9428,6 +10021,26 @@ def compare(
         default cutoff), or a ``{"T": hours}``/``{"test": ...,
         "reference": ...}`` dict giving an explicit cutoff per lane -- a
         low-pass filter applied to each lane before alignment.
+    depth_origin
+        How the observation's depths are referenced, overriding its catalog
+        entry's ``depth_convention`` (:mod:`ocean_skill.depth_convention`):
+        ``"surface"`` -- measured below the moving free surface, as a CTD cast
+        or a pressure record is -- or ``"fixed"`` -- a position fixed in space,
+        as a pier sonde or a bottom-mounted instrument is -- or a dict of
+        ``origin``, ``datum_z_m`` (the height of the observation's datum in the
+        model's z frame, mean sea level = 0; fixed only) and ``support``
+        (``"point"``, or the model's ``"surface"``/``"bottom"`` cell). Written
+        into both lanes' ``select`` (:data:`DEPTH_ORIGIN_KEY`), except a lane
+        that already names its own -- ``select={"test": {"depth_origin": ...},
+        ...}`` is per lane. Precedence on a lane, highest first:
+        ``select["depth_origin"]``; this argument; the *reference's* resolved
+        convention (the model follows the observation); the lane's own catalog
+        entry; ``"fixed"``. ``None`` (default) takes whatever the catalog says.
+        For a mooring CTD whose catalog entry does not say it is measured below
+        the surface::
+
+            osk.compare(reference="ctd", test="his", variables=["temp"],
+                        depths=[1], depth_origin="surface")
 
     ``reference`` and ``test`` each take a source name or a list; ``variables`` is a
     list of anything :mod:`ocean_skill.vocabulary` recognizes — a short vocabulary key
@@ -9621,32 +10234,56 @@ def compare(
     many pairs a cell needs before it is reported, and ``metrics`` which maps are
     computed (default :data:`ocean_skill.metrics.DEFAULT_MAP_METRICS`).
 
-    Against a repeat-visit station under a time climatology (below), ``time_method``
-    doubles as the knob for how the test lane is matched to the reference's own cast
-    times (see :meth:`Comparison._reference_time_targets`): the default keeps only the
-    model step *nearest* each cast (cheap, exact where the model runs often enough);
-    ``time_method="interp"`` (or ``"linear"``) instead linearly interpolates the model
-    onto each cast time, for a low-frequency model whose nearest step could sit
-    meaningfully far from a cast. Inert everywhere else -- an ordinary ``over="time"``
-    comparison still reads it as ``mean``/``nearest``/``exact``/``auto``, unaffected.
+    Against a fixed-position or repeat-visit reference -- a mooring, a station
+    revisited over months: :data:`POINT_FEATURE_TYPES` plus ``timeSeriesProfile`` --
+    whose own times are kept (``over="time"``) or folded into a climatology or a time
+    aggregate (below), ``time_method`` doubles as the knob for how the *test lane* is
+    matched to the reference's own sample times (see
+    :meth:`Comparison._reference_time_targets`): the default keeps only the model
+    step *nearest* each reference time (cheap, exact where the model runs often
+    enough); ``time_method="interp"`` (or ``"linear"``) instead linearly interpolates
+    the whole test lane -- its free surface, so the depth frame, along with it --
+    onto the reference's own times before the two are compared, for a low-frequency
+    model whose nearest step could sit meaningfully far from a sample. The alignment
+    that follows then sees both lanes already on the same instants and matches them
+    the ``"auto"`` way: ``"interp"``/``"linear"`` is never passed on to
+    :func:`ocean_skill.align.match_axis`, which still reads ``mean``/``nearest``/
+    ``exact``/``auto`` for every other comparison (a gridded reference, a profile).
 
     ``depth_method`` is the vertical twin of ``time_method``, and applies whenever a
     depth-resolved lane is asked for -- an ADCP mooring or CTD profile
     (``over="Z"``, above) most often, but also a plain fixed-depth ``select={"depth":
     [...]}``/``depths=`` request against a ROMS-shaped model with no ``over`` at all.
     ``"nearest"`` (the default) reads the real model level closest to each target
-    depth -- matched **once**, against a single reference time, rather than
-    re-matched at every step (see :func:`ocean_skill.roms.nearest_depth_levels`), so
-    the value reported is genuine model output, never a blend of two levels, and a
-    long point record (a mooring's thousands of hourly steps) costs one lookup, not
-    one per step. ``depth_method="interp"`` (or ``"linear"``) instead linearly
+    depth, chosen **per time step** against that step's own depth frame (see
+    :func:`ocean_skill.roms.nearest_depth_levels`): a level's true depth rides the
+    free surface, so the level nearest 1 m down at high water is not the one nearest
+    it at low water, and the value reported is genuine model output, never a blend of
+    two levels. ``depth_method="interp"`` (or ``"linear"``) instead linearly
     interpolates the model onto each target depth, at every time step
-    (:func:`ocean_skill.roms.to_depth`, this option's behaviour before ``"nearest"``
-    existed). Unlike lon/lat, which was already sampled at the nearest grid cell by
-    default (``method="nearest"`` at a station -- see :func:`ocean_skill.align.
-    _align_at_point`), depth had no such default until this option: the whole
-    comparison is now nearest-by-default in space as it is in the vertical, with
-    interpolation available in both wherever it is asked for explicitly.
+    (:func:`ocean_skill.roms.to_depth`). Either way a target in the top or bottom
+    half-cell -- shallower than the shallowest cell centre, deeper than the deepest --
+    takes that cell's value (edge-fill) rather than NaN; only a target outside the
+    water (above the free surface, below the seafloor) is NaN. Unlike lon/lat, which
+    was already sampled at the nearest grid cell by default (``method="nearest"`` at a
+    station -- see :func:`ocean_skill.align._align_at_point`), depth had no such
+    default until this option: the whole comparison is now nearest-by-default in
+    space as it is in the vertical, with interpolation available in both wherever it
+    is asked for explicitly.
+
+    What a depth is measured *from* matters as much as how it is read off the grid.
+    ROMS's ``z`` is a height above mean sea level and rides the tide, while an
+    observation's "1 m" is usually 1 m *below the instantaneous surface* -- a CTD
+    cast, a pressure record: the default for a ``profile`` and for a pressure-derived
+    depth -- and sometimes a position fixed in space -- a pier sonde, a bottom-mounted
+    ADCP: the default for everything else. The model lane follows the *reference's*
+    convention (declared in its catalog entry's ``depth_convention`` -- origin, sign,
+    units, datum, support -- else inferred from its vertical coordinate, else the
+    default), or ``depth_origin=`` here: below the surface the model target is
+    ``z = zeta - d`` at each time step, fixed in space ``z = datum - d``. A fixed-in-
+    space target the free surface drops below is NaN, with a warning that says how
+    many samples and what to declare; a comparison that is silently defaulting to
+    fixed under a large tide warns once.
 
     ``min_coverage`` (default 0.5) is the map-regrid counterpart of ``min_pairs``: when
     the finer lane (a model, most often) is regridded onto the coarser one's cells (a
@@ -9693,10 +10330,11 @@ def compare(
     one thing this call cannot infer on your behalf.
 
     ``depths`` defaults to ``("surface",)`` — the model's own top level, via
-    :func:`ocean_skill.roms.surface`. A literal ``0`` is a *different*, real request:
-    the field interpolated to exactly 0 m, which for a model whose topmost cell centre
-    sits a few metres down legitimately comes back all-NaN (with a warning) rather than
-    silently reusing the surface field.
+    :func:`ocean_skill.roms.surface`. A literal ``0`` is a *different*, real request: a
+    depth matched in the lane's frame -- at 0 m below the moving surface that is the top
+    half-cell, which takes the top cell's value (numerically the surface field, with no
+    warning), but at 0 m *fixed in space* it is NaN wherever the tide has dropped the
+    free surface below it (with a warning).
 
     A reference whose ``featureType`` is ``profile`` is the exception, and needs no
     ``depths=`` at all: it is a single water column that keeps its depth axis standing
@@ -10329,6 +10967,7 @@ def compare(
                     qc=qc,
                     subtract_mean=subtract_mean,
                     detide=detide,
+                    depth_origin=depth_origin,
                     section_casts=matching,
                 )
                 try:
@@ -10490,6 +11129,7 @@ def compare(
                             qc=qc,
                             subtract_mean=subtract_mean,
                             detide=detide,
+                            depth_origin=depth_origin,
                             literal_depths=literal_depths,
                         )
                         try:

@@ -88,14 +88,23 @@ def test_weights_are_the_overlap_with_the_band(roms_column):
 
 
 def test_the_band_is_finite_everywhere_including_deep_water(roms_column):
-    """Interpolating to 0-10 m would be NaN offshore; the shallowest centre is deep."""
+    """The band has no gap offshore; a point-depth match fills it with one cell.
+
+    The shallowest centre is metres down in deep water, so there is nothing above it to
+    interpolate *between*. A point-depth match used to leave that NaN; it now takes the
+    top cell's value there (the top half-cell edge-fill, see :func:`roms.to_depth`) --
+    finite, but one number for every depth in the half-cell, and counted rather than
+    silent. The band's thickness-weighted mean over the same depths is the real answer
+    to "what is the model there", which is why the band exists.
+    """
     ds, meta = roms_column
     band = roms.depth_average(ds, meta, 0.0, 10.0)["chl"]
     assert np.isfinite(band.values).all()
 
     interpolated = roms.to_depth(ds, meta, [0.0, 2.0, 5.0])["chl"]
     deep = interpolated.isel(eta_rho=1, xi_rho=1)
-    assert np.isnan(deep.values).any(), "expected NaN above the shallowest cell centre"
+    assert np.isfinite(deep.values).all(), "the half-cell above the top centre is filled"
+    assert interpolated.attrs["depth_edge_top"] > 0, "and the fill is counted, not silent"
 
 
 def test_units_and_provenance_survive(roms_column):

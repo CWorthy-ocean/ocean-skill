@@ -15,6 +15,7 @@ import json
 from collections import OrderedDict
 from typing import Any
 
+from ocean_skill import time_zone
 from ocean_skill.catalog import SourceRef, resolve
 
 __all__ = ["erddap_constraints", "read"]
@@ -130,6 +131,7 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
     # An intake v2 entry is called to re-parameterize it; calling it with nothing would
     # also work but reads oddly, so only when there is something to say.
     obj = entry(**kwargs).read() if kwargs else entry.read()
+    subject = meta.get("datasetID") or meta.get("title") or ref.name
 
     if meta.get("model") == "roms" or meta.get("loader") == "ocean_skill.roms":
         from ocean_skill import roms
@@ -138,7 +140,8 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         # derived on demand instead, only once a caller's request actually names
         # it -- see roms.standardize's own docstring and
         # ocean_skill.comparison.prepare_source/_variable_available.
-        return roms.standardize(obj, meta)
+        # `time` is the coordinate standardize leaves, whatever the file called it.
+        return _in_utc(roms.standardize(obj, meta), meta, "time", subject=subject)
 
     # Point sources (e.g. ERDDAP tabledap, via add_erddap_source) come back as a
     # DataFrame rather than a Dataset — same metadata contract, different renaming and
@@ -152,6 +155,14 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         from ocean_skill.qc import apply as _apply_qc
 
         obj = _apply_qc(obj, meta, qc)
+
+        # A table whose time is split over several columns (``time_columns``) gets one
+        # time column here: after qc, whose contract names the original columns, and
+        # before the rename below, which has no business with the pieces.
+        if meta.get("time_columns"):
+            from ocean_skill import tabular
+
+            obj = tabular.apply_table_options(obj, meta, subject=subject)
 
     if not is_frame:
         # The entry's ``units`` map, ``{original_variable_name: unit}``, stamped onto
@@ -237,10 +248,19 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
     # "time (UTC)"). Undecodable units (WOA's "months since ...") return None and are
     # left alone.
     tname = (meta.get("axes") or {}).get("T")
-    if is_frame and tname and tname in obj.columns:
-        import pandas as pd
+    if is_frame and not tname and meta.get("time_columns"):
+        from ocean_skill import tabular
 
-        decoded = pd.to_datetime(obj[tname], utc=True, errors="coerce")
+        tname = tabular.joined_time_column(obj, meta)  # the joined column is the axis
+    if is_frame and tname and tname in obj.columns:
+        from ocean_skill import tabular
+
+        # Naive timestamps are the entry's declared local time (time_zone /
+        # utc_offset_h) and become UTC here, once; with nothing declared they were UTC
+        # all along, and an offset-carrying one is converted as it stands.
+        # decode_time_column also reads a CF "<n> since <date>" stated in the column's
+        # own name, which a bare pandas parse turns into dates in 1970.
+        decoded = tabular.decode_time_column(obj[tname], tname, meta, subject=subject)
         obj = obj.assign(**{tname: decoded})
     elif not is_frame and tname and tname in getattr(obj, "variables", {}):
         from ocean_skill.build import _decode_times
@@ -249,8 +269,48 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         if decoded is not None:
             obj = obj.assign_coords({tname: decoded})
     if not is_frame:
+        obj = _in_utc(obj, meta, tname, subject=subject)
         obj = _with_month_coordinate(obj, meta)
     return obj
+
+
+def _in_utc(obj, meta: dict[str, Any], tname: str | None, *, subject: str):
+    """Return ``obj`` with its time coordinate shifted from the declared zone to UTC.
+
+    An xarray ``datetime64`` is always naive, so it cannot say what zone it is in; an
+    entry that declares ``time_zone`` / ``utc_offset_h`` (see
+    :mod:`ocean_skill.time_zone`) is saying its clock readings are *local*. They are
+    shifted to UTC here, once, as the tabular read does for a column of timestamps, and
+    the coordinate gains ``source_time_zone`` to say what the source kept. ``tname`` is
+    the entry's time axis; failing that, a coordinate called ``time``. Returns ``obj``
+    untouched when nothing is declared (or UTC is), which is every source that does not
+    say -- no values change.
+
+    A declared zone on a time axis that never became ``datetime64`` (undecodable units,
+    cftime dates) cannot be applied; that is warned about rather than silently dropped.
+    """
+    label = time_zone.time_zone_label(meta)  # also validates the declaration
+    if label is None:
+        return obj
+    variables = getattr(obj, "variables", {})
+    name = next((n for n in (tname, "time") if n and n in variables), None)
+    if name is None:
+        return obj
+    time = obj[name]
+    if time.dtype.kind != "M":
+        import warnings
+
+        warnings.warn(
+            f"{subject}: declares time_zone {label}, but its time axis {name!r} is not "
+            f"a datetime64 (dtype {time.dtype}) -- the zone could not be applied and "
+            "the times are as the file states them.",
+            stacklevel=2,
+        )
+        return obj
+    shifted = time_zone.localize_naive_datetime64(time.values, meta, subject=subject)
+    return obj.assign_coords(
+        {name: (time.dims, shifted, {**time.attrs, "source_time_zone": label})}
+    )
 
 
 def _with_month_coordinate(obj, meta: dict[str, Any]):
