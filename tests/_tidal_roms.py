@@ -35,6 +35,9 @@ per time step, for the default tide ``zeta = [3, 0, -3, 0]``:
   ``z = -3`` is exactly the free surface, in the top half-cell, so the top cell's own
   value (``-3 - 0.85``) is taken rather than a NaN.
 
+``temp=True`` adds a third, ``temp`` (degC), that tells the step, the column and the
+level apart: ``10 + hour + 0.5 * xi_index + 0.1 * z_rho`` (``hour`` = the step index).
+
 ``zeta_name`` chooses the free-surface variable's name, ``"zeta"`` (ROMS's own) or
 ``"sea_surface_height_above_geoid"`` (what the catalog's ``standard_names`` rename it
 to). ``land=True`` masks one corner column (``mask_rho = 0``), which
@@ -62,6 +65,7 @@ def tidal_roms(
     chunks=None,
     zeta_name="zeta",
     land=False,
+    temp=False,
 ) -> tuple[xr.Dataset, dict]:
     """Return ``(ds, meta)``: a standardized ROMS dataset on a moving free surface.
 
@@ -105,6 +109,9 @@ def tidal_roms(
             "ocean_time": ("time", np.arange(nt) * 3600.0),
         }
     )
+    if temp:
+        hour, xi = np.arange(nt)[:, None, None, None], np.arange(nx)
+        raw["temp"] = (rho, 10.0 + hour + 0.5 * xi + 0.1 * height, {"units": "degC"})
     meta = {
         "model": "roms",
         "self_contained_grid": True,

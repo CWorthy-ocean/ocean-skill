@@ -396,18 +396,21 @@ def stubbed_trajectoryprofile_fan():
         yield formed
 
 
-def test_bare_trajectoryprofile_warns_and_still_collapses_to_the_surface(
+def test_trajectoryprofile_over_time_warns_and_still_collapses_to_the_surface(
     stubbed_trajectoryprofile_fan,
 ):
-    """A moving platform with more than one candidate vertical reading has no
-    natural default -- unlike profile/timeSeriesProfile, this stays the old
-    surface-collapse-with-over-unresolved shape, but now says so.
+    """Scored over time, a moving platform with more than one candidate vertical
+    reading has no natural default depth -- it collapses to the surface, and says
+    so. (With no over=, a trajectoryProfile is compared cast by cast instead; see
+    tests/test_transect_compare.py.)
     """
     with pytest.warns(UserWarning, match="trajectoryProfile"):
-        comparison.compare(reference="glider", test="his", variables=[TEMPERATURE])
+        comparison.compare(
+            reference="glider", test="his", variables=[TEMPERATURE], over="time"
+        )
     assert len(stubbed_trajectoryprofile_fan) == 1
     over, select = stubbed_trajectoryprofile_fan[0]
-    assert over is None
+    assert over == "time"
     assert select == {"depth": "surface"}
 
 
@@ -417,9 +420,13 @@ def test_explicit_depths_silence_the_trajectoryprofile_warning(
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         comparison.compare(
-            reference="glider", test="his", variables=[TEMPERATURE], depths=[10]
+            reference="glider",
+            test="his",
+            variables=[TEMPERATURE],
+            depths=[10],
+            over="time",
         )
     assert len(stubbed_trajectoryprofile_fan) == 1
     over, select = stubbed_trajectoryprofile_fan[0]
-    assert over is None
+    assert over == "time"
     assert select == {"depth": 10}

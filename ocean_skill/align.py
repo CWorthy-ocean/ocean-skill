@@ -3304,7 +3304,9 @@ def _align_along_path(
     reports its own cells' positions (``lon``/``lat``) beside the request's
     (``path_lon``/``path_lat``; see :func:`ocean_skill.transect.sample_along`).
     The columns are paired by position on ``lon``/``lat``, and the frame lane's
-    ``path_lon``/``path_lat`` are kept for the merged result.
+    ``path_lon``/``path_lat`` are kept for the merged result. Lanes whose columns are
+    already identical (the same ``along``, ``lon`` and ``lat``) are paired as they
+    stand.
     """
     if "z" not in test.dims:
         test = _observational_vertical_to_z(test)
@@ -3364,14 +3366,23 @@ def _align_along_path(
     test_path_method = test[ALONG_DIM].attrs.get("path_method", "")
     reference_path_method = reference[ALONG_DIM].attrs.get("path_method", "")
 
-    target, reason = _section_target(test, reference)
-    if target == "reference":
-        lon_r, lat_r = _lon_name(reference), _lat_name(reference)
+    lon_t, lat_t = _lon_name(test), _lat_name(test)
+    lon_r, lat_r = _lon_name(reference), _lat_name(reference)
+    if all(
+        np.array_equal(test[a].values, reference[b].values)
+        for a, b in ((ALONG_DIM, ALONG_DIM), (lon_t, lon_r), (lat_t, lat_r))
+    ):
+        # Columns already paired one-to-one upstream (a section stacked from casts gives
+        # both lanes the casts' own positions): binning by nearest position would merge
+        # two casts taken at the same place.
+        target, offsets_km = "reference", np.zeros(reference.sizes[ALONG_DIM])
+    elif _section_target(test, reference)[0] == "reference":
+        target = "reference"
         reference, test, offsets_km = _bin_into_frame(
             reference, test, frame_lon=lon_r, frame_lat=lat_r
         )
     else:
-        lon_t, lat_t = _lon_name(test), _lat_name(test)
+        target = "test"
         test, reference, offsets_km = _bin_into_frame(
             test, reference, frame_lon=lon_t, frame_lat=lat_t
         )

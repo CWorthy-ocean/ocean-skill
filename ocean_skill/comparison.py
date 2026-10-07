@@ -345,8 +345,9 @@ def _implied_over(
     if feature in ("trajectory", "trajectoryProfile"):
         return None, (
             f"the reference's featureType is {feature!r} -- a moving platform has "
-            "no single recipe to keep an axis by, so name over= (or depths=/"
-            "select=, for a trajectoryProfile) explicitly"
+            "no single recipe to keep an axis by, so name over= explicitly (or, for a "
+            "trajectoryProfile, let osk.compare() compare its casts one by one, "
+            "each a profile)"
         )
     return None, "the reference is gridded"
 
@@ -4266,10 +4267,17 @@ def _cast_labels(names: Sequence[str]) -> list[str]:
     ``HV10`` stay ``HV1`` and ``HV10``, not ``1`` and ``10`` from a prefix that ran
     into the first digit. If stripping would leave any label empty (one name is a
     prefix of another, or the names are all identical), the full names are kept.
+    The casts of one transect (``ctd_line[03]``, ``ctd_line[04]``, ...) are told
+    apart by their cast ids alone.
     """
+    from ocean_skill import casts
+
     names = [str(n) for n in names]
     if len(names) < 2:
         return names
+    parts = [casts.split_name(n) for n in names]
+    if len({base for base, _ in parts}) == 1 and all(cast_id for _, cast_id in parts):
+        return [cast_id for _, cast_id in parts]
     prefix = os.path.commonprefix(names)
     cut = max((prefix.rfind(sep) for sep in "_- ."), default=-1) + 1
     labels = [n[cut:] for n in names]
@@ -4624,6 +4632,22 @@ class Comparison:
         # fails open (None, or "let the real prepare decide") on a name that
         # does not resolve, which this joined display name never does.
         self._section_casts = list(section_casts) if section_casts else None
+        # What each cast's own comparison is built from (see
+        # _prepare_section_from_casts): the arguments this class normalizes below,
+        # as they were given, so a cast is prepared exactly as compare() would
+        # prepare it alone as a profile reference.
+        self._section_child_kwargs = (
+            {
+                "variable": variable,
+                "select": {k: v for k, v in (select or {}).items() if k != "transect"},
+                "aggregate": aggregate,
+                "depth_origin": depth_origin,
+                "qc": qc,
+                "detide": detide,
+            }
+            if section_casts
+            else None
+        )
         self.reference_name = reference
         self.test_name = test
         # A plain name resolves through the vocabulary (short name, canonical
@@ -5227,9 +5251,8 @@ class Comparison:
         if len(sources) > 1:
             # An ordered collection of discrete casts (a from_reference section,
             # the only way _reference_sources() ever returns more than one name)
-            # has no single catalog position or extent for a bbox to mean -- the
-            # test lane is already cropped to exactly these positions by the
-            # transect's own resolved `points` select (see
+            # has no single catalog position or extent for a bbox to mean -- each
+            # cast's own comparison crops the test lane to its own position (see
             # _prepare_section_from_casts). Only the time half applies here.
             return None, window
         bbox = _domain_of(sources[0])
@@ -5616,6 +5639,12 @@ class Comparison:
             # list (a different section) would silently share a cache entry with
             # the original order.
             extra["_section_casts"] = list(self._section_casts)
+            # Each cast is now compared on its own (the model at that cast's own
+            # time and position); an entry cached by the earlier build -- one read
+            # at every cast's position, averaged over all their times -- is a
+            # different pair and must not be served. The global cache format is
+            # left alone: it would orphan every unrelated entry.
+            extra["_section_build"] = "per_cast"
         # Unlike `min_pairs`, `min_coverage` changes the *aligned* pair itself (which
         # regridded cells survive `align`'s `min_coverage` threshold -- see
         # ocean_skill.align.align), not a downstream metric mask, so it has to be
@@ -6534,9 +6563,9 @@ class Comparison:
         else:
             # select={"transect": {"from": "reference"}}: the reference IS the
             # path -- an ordered collection of discrete casts (self._section_casts,
-            # from compare()'s own reference=[...] fan-out), each reduced like any
-            # other profile reference and stacked along a new `along` dimension in
-            # list order, with the model sampled at exactly those cast positions.
+            # from compare()'s own reference=[...] fan-out), each compared on its
+            # own as a profile (the model at that cast's own time and position) and
+            # the pairs stacked along a new `along` dimension in list order.
             # See _prepare_section_from_casts. None of the point/mooring-narrowing
             # machinery above applies -- there is no single catalog position or
             # extent to read it from -- so this lane skips straight to keep=
@@ -6674,105 +6703,134 @@ class Comparison:
 
         The inverse of the ordinary transect route (:meth:`_resolved_path`, where
         the *test* lane already carries a path and the reference is sampled at
-        wherever it snapped to): here the reference IS the path. Each cast in
-        :attr:`_section_casts` is reduced on its own, in order, exactly like any
-        other profile reference (:meth:`_prepare_lane` with ``role="reference"``
-        -- the shared ``select={"depth": [...]}`` reindexes it onto the section's
-        fixed levels the same way a single profile reference already is, via
-        :attr:`literal_depths`, which the explicit depth list in ``select``
-        already sets regardless of this route). The casts' own ``"transect"``
-        entry (the ``{"from": "reference"}`` sentinel, meaningless to a single
-        profile with no path of its own) is dropped before each one is prepared.
+        wherever it snapped to): here the reference IS the path, and every cast of
+        :attr:`_section_casts` is compared on its own, in order, as the profile it
+        is. Each gets a child :class:`Comparison` built as :func:`compare` builds
+        one for that cast alone -- the section's own select less its ``"transect"``
+        entry (the ``{"from": "reference"}`` sentinel, meaningless to one profile),
+        so ``select={"depth": [...]}`` reindexes the cast onto the section's fixed
+        levels as it does for a single profile -- and aligned like any other pair.
+        The model is thus read at *each cast's own time and position*, never at all
+        of them at once, and a time aggregate averages it over that cast's own
+        times alone. A cast the model has no valid data for (``NoValidData``: a
+        masked cell, a record that misses it) is left out with one warning, and
+        fewer than two left is an error.
 
-        The reduced columns are then stacked along a new
+        The children's aligned columns are then stacked along a new
         :data:`~ocean_skill.align.ALONG_DIM` dimension, in the caller's own list
-        order, and given the same cumulative-distance coordinate
-        :func:`ocean_skill.transect.grid_slice`/:func:`~ocean_skill.transect.
-        sample_along` themselves attach (:func:`ocean_skill.transect.
-        _attach_along_coord`) -- so the result is indistinguishable, downstream,
-        from a section sampled off a gridded reference: :func:`ocean_skill.align.
-        path_of` recognizes it, and :meth:`align` (which called this) hands it to
-        the same ``_align_along_path``/``section_row`` machinery unchanged.
-
-        The model is then sampled at exactly those cast positions
-        (:func:`ocean_skill.transect.apply_transect` via a resolved ``points``
-        ``extra_select``, mirroring :meth:`_resolved_path`), never densified --
-        one column per cast, in the casts' own order, the honest read of "the
-        model at these repeat stations" rather than a smoothed line between them.
+        order, both lanes carrying the casts' own positions, the same
+        cumulative-distance coordinate :func:`ocean_skill.transect.
+        _attach_along_coord` gives any section, and the casts' times as
+        ``cast_time`` -- so :func:`ocean_skill.align.path_of` recognizes the result
+        and :meth:`align` hands it to the ordinary ``_align_along_path``/
+        ``section_row`` machinery, which pairs the lanes column for column. Two
+        casts taken at one place stay two columns.
         """
+        import warnings
+
         import xarray as xr
 
+        from ocean_skill import _stacklevel
         from ocean_skill.align import (
             ALONG_DIM,
-            SECTION_VERTICAL_DIMS,
+            NoValidData,
             _lat_name,
             _lon_name,
+            _observational_vertical_to_z,
         )
+        from ocean_skill.cf import find_coord
+        from ocean_skill.operators import resolve_dim
         from ocean_skill.transect import _attach_along_coord
 
-        columns = []
-        lons: list[float] = []
-        lats: list[float] = []
-        r_depth = None
-        lon_name = lat_name = None
-        for i, cast in enumerate(self._section_casts):
-            col, depth = self._prepare_lane(
-                cast,
-                use_cache,
-                refresh,
-                role="reference",
-                drop_keys=("transect",),
-                keep=SECTION_VERTICAL_DIMS,
+        # The transect's own method= (how the model is sampled at a cast's place)
+        # outranks compare()'s, which a station reads as nearest anyway.
+        spec = self.select.get("transect") or {}
+        method = self._transect_route()["method"] if "method" in spec else self.method
+        kept, left_out, r_depth = [], [], None
+        for cast in self._section_casts:
+            child = Comparison(
+                reference=cast,
+                test=self.test_name,
+                method=method,
+                over=None,
+                time_method=self.time_method,
+                depth_method=self.depth_method,
+                tolerance=self.tolerance,
+                bin_anchor=self.bin_anchor,
+                min_coverage=self.min_coverage,
+                min_pairs=self.min_pairs,
+                cache=use_cache,
+                subtract_mean=False,
+                literal_depths=self.literal_depths,
+                **self._section_child_kwargs,
             )
-            if col is None:
-                raise KeyError(
-                    f"{variable_for(self.variable, 'reference')!r} not available "
-                    f"in {cast!r}"
-                )
-            this_lon, this_lat = _lon_name(col), _lat_name(col)
-            if this_lon is None or this_lat is None:
-                raise ValueError(
-                    f"{cast!r} has no longitude/latitude coordinate, so it "
-                    "cannot take a place along a section."
-                )
-            if i == 0:
-                lon_name, lat_name, r_depth = this_lon, this_lat, depth
-            lons.append(float(np.asarray(col[this_lon]).reshape(-1)[0]))
-            lats.append(float(np.asarray(col[this_lat]).reshape(-1)[0]))
-            columns.append(col.drop_vars([this_lon, this_lat]))
-
-        stacked = xr.concat(
-            columns,
-            dim=ALONG_DIM,
-            coords="minimal",
-            compat="override",
-            combine_attrs="override",
-            join="override",
-        )
-        stacked = stacked.assign_coords(
-            {lon_name: (ALONG_DIM, lons), lat_name: (ALONG_DIM, lats)}
-        )
-        stacked = _attach_along_coord(
-            stacked, lon_name, lat_name, path_method="from_reference"
-        )
-
-        troute = self._transect_route()
-        method = troute.get("method", "nearest") if troute else "nearest"
-        points = [[lo, la] for lo, la in zip(lons, lats, strict=True)]
-        t, _ = self._prepare_lane(
-            self.test_name,
-            use_cache,
-            refresh,
-            role="test",
-            extra_select={"transect": {"points": points, "method": method}},
-            keep=SECTION_VERTICAL_DIMS,
-        )
-        if t is None:
-            raise KeyError(
-                f"{variable_for(self.variable, 'test')!r} not available in "
-                f"{self.test_name!r}"
+            try:
+                aligned = child.align(refresh=refresh)
+            except NoValidData as exc:
+                left_out.append(f"{cast!r} ({exc})")
+                continue
+            except Exception as exc:
+                exc.add_note(f"(while comparing cast {cast!r} for a section)")
+                raise
+            r_depth = r_depth if kept else child._actual_depth
+            kept.append((cast, aligned))
+        if len(kept) < 2:
+            raise NoValidData(
+                "a section needs at least 2 casts with valid data, and "
+                f"{len(kept)} of {len(self._section_casts)} have: {'; '.join(left_out)}"
             )
-        return t, stacked, r_depth
+        if left_out:
+            warnings.warn(
+                f"{len(left_out)} of the {len(self._section_casts)} casts are left out "
+                f"of the section, with no valid data: {'; '.join(left_out)}",
+                stacklevel=_stacklevel.find(),
+            )
+            # the casts the section is now built from, which is what casts= labels
+            self._section_casts = [cast for cast, _ in kept]
+
+        first = kept[0][1]
+        lon_name = _lon_name(first["reference"])
+        lat_name = _lat_name(first["reference"])
+        lons, lats, times = [], [], []
+        for _, aligned in kept:
+            ref = aligned["reference"]
+            lons.append(float(np.asarray(ref[lon_name]).reshape(-1)[0]))
+            lats.append(float(np.asarray(ref[lat_name]).reshape(-1)[0]))
+            when = find_coord(ref, "time")  # the cast's instant; none once averaged
+            scalar = when is not None and when.ndim == 0
+            times.append(when.values if scalar else np.datetime64("NaT", "ns"))
+        times = np.array(times, dtype="datetime64[ns]")
+
+        def stack(role: str):
+            lane = xr.concat(
+                [aligned[role].reset_coords(drop=True) for _, aligned in kept],
+                dim=ALONG_DIM,
+                coords="minimal",
+                compat="override",
+                combine_attrs="override",
+                join="override",
+            ).assign_coords(
+                {
+                    lon_name: (ALONG_DIM, lons),
+                    lat_name: (ALONG_DIM, lats),
+                    "cast_time": (ALONG_DIM, times),
+                }
+            )
+            lane = _attach_along_coord(
+                lane, lon_name, lat_name, path_method="from_reference"
+            )
+            # What the child resolved this lane to: a ROMS lane carries its
+            # standard_name only as the array's name, which align() replaced.
+            lane.name = first.attrs.get(f"{role}_standard_name")
+            return lane
+
+        reference, test = stack("reference"), stack("test")
+        # The child matched the model onto the cast's own levels, so the test lane
+        # wears the cast's vertical name; _align_along_path wants it on z.
+        vdim = resolve_dim(reference, "Z")
+        if vdim not in (None, "depth"):
+            test = test.rename({vdim: "depth"})
+        return _observational_vertical_to_z(test), reference, r_depth
 
     def _subtract_scalar_means(self) -> None:
         """Remove each requested lane's own scalar mean from the just-aligned pair.
@@ -9378,11 +9436,12 @@ def _profile_depth_plan(
       like the profile case; a warning says which depth was chosen and why, since
       unlike a profile's *whole* column, this quietly overrides a real default
       (surface) rather than filling in one that never existed;
-    * a bare **trajectoryProfile** reference (position varies too, so even a
-      genuinely empty select has no single depth -- or single axis -- to default
-      to) warns that this call is about to collapse depth to the surface and leave
-      ``over=`` unresolved, pointing at ``depths=``/``select=``/``over=`` as the
-      way out;
+    * a **trajectoryProfile** reference still standing as one (a transect is
+      ordinarily split into its casts, each a profile, by :func:`_expand_transects`
+      before this runs; only an explicit non-vertical ``over=`` keeps it whole) is
+      a moving platform with no single depth to default to, so this warns that the
+      call is about to collapse depth to the surface, pointing at ``depths=``/
+      ``select=`` as the way out;
     * anything else keeps the ordinary depth fan unchanged.
 
     ``literal`` says whether the depths this call settled on were named by the
@@ -9460,24 +9519,25 @@ def _profile_depth_plan(
             )
             return (depth,), False, False
         if _feature_type(ref) == "trajectoryProfile":
-            # A moving platform with more than one candidate vertical reading (see
-            # _is_profile_reference's own note on it) has no natural default the
-            # way a profile's own column or a fixed station's metadata depth do --
-            # this call is about to fall through to the ordinary fan below, which
-            # for a bare call means the surface sentinel, and over stays unresolved
-            # (see _implied_over's own trajectoryProfile branch). Both are silent
-            # otherwise, so say so once, pointing at the escape hatches.
+            # A transect reaches here whole only under an explicit non-vertical
+            # over= (otherwise _expand_transects has split it into its casts), where
+            # it is a moving platform with more than one candidate vertical reading
+            # (see _is_profile_reference's own note on it): no natural default the
+            # way a profile's own column or a fixed station's metadata depth do.
+            # This call is about to fall through to the ordinary fan below, which
+            # for a bare call means the surface sentinel -- silent otherwise, so say
+            # so once, pointing at the escape hatch.
             import warnings
 
             from ocean_skill import _stacklevel
 
             warnings.warn(
-                f"{ref!r} is a trajectoryProfile -- a moving platform with more "
-                "than one candidate vertical reading, so there is no single depth "
-                "to default to and no single recipe to keep an axis by. This call "
-                "collapses depth to the surface and leaves over= unresolved. Pass "
-                "depths=[...] (or select={'depth': ...}) to name a depth "
-                'explicitly, or over="time"/over="Z" to choose which axis to keep.',
+                f"{ref!r} is a trajectoryProfile, compared as a moving platform "
+                f"because over={over!r} is not vertical (without it, or with "
+                'over="Z", each of its casts is compared as a profile). A moving '
+                "platform has no single depth to default to, so this call collapses "
+                "depth to the surface. Pass depths=[...] (or select={'depth': ...}) "
+                "to name a depth explicitly.",
                 stacklevel=_stacklevel.find(),
             )
     # A profile reference whose vertical select was already explicit (has_vertical_
@@ -9488,6 +9548,36 @@ def _profile_depth_plan(
     # select has no "clamp to the deepest observed level" behavior for literal to
     # change, so marking it there would be meaningless, not just unused).
     return fan_values, len(fan_values) > 1, bool(is_profile_ref and has_vertical_select)
+
+
+def _expand_transects(refs: list[str], over: str | None) -> list[str]:
+    """Replace each CTD transect in ``refs`` by its casts, in time order.
+
+    A ``trajectoryProfile`` entry is one ship visit to a line of stations, each cast
+    at its own time and position, and every cast is a ``profile`` source of its own
+    (:mod:`ocean_skill.casts`) -- so it is compared cast by cast, and everything
+    below sees a plain list of profiles. An explicit ``over=`` that is not vertical
+    keeps the moving-platform reading instead (see :func:`_implied_over`).
+    """
+    from ocean_skill import casts
+    from ocean_skill.operators import _CF_AXES
+
+    if over is not None and _CF_AXES.get(over) != "vertical":
+        return refs
+    out: list[str] = []
+    for ref in refs:
+        if not casts.is_transect(ref):
+            out.append(ref)
+            continue
+        names = casts.names(ref)
+        if not names:
+            raise ValueError(f"{ref!r} is a trajectoryProfile with no casts to compare")
+        print(
+            f"  {ref!r}: trajectoryProfile of {len(names)} "
+            f"cast{'' if len(names) == 1 else 's'} -- compared cast by cast"
+        )
+        out.extend(names)
+    return out
 
 
 def _selected_time(select: dict[str, Any]) -> Any:
@@ -10240,6 +10330,7 @@ def compare(
     reference
         Catalog source name, or a list of names to fan over (one comparison
         per name paired with each ``test``/variable/depth/time combination).
+        A CTD transect (a ``trajectoryProfile`` entry) stands for its casts.
     test
         Catalog source name, or a list of names, matching ``reference``.
     variables
@@ -10713,10 +10804,12 @@ def compare(
     the bins (``.plot()`` draws one row per month); no ``over=`` or ``depths=``
     needed. Left with neither axis narrowed nor a climatology fold (or both), it is
     still the ordinary ``timeSeriesProfile`` ambiguity, needing an explicit
-    ``over=``. A ``trajectoryProfile`` carries more than one candidate axis regardless, so it
-    still needs an explicit ``depths=``/``select={"depth": [...]}``, and a vertical
-    ``over=`` with no depth axis left standing is refused rather than compared
-    against a single collapsed level.
+    ``over=``. A ``trajectoryProfile`` reference -- a CTD transect, one file of casts
+    each at its own time and position -- stands for its casts, in time order
+    (:func:`ocean_skill.casts.names`), each compared as a ``profile`` as above; with
+    ``select={"transect": {"from": "reference"}}`` they are instead the columns of one
+    section. Only an explicit non-vertical ``over=`` keeps the moving-platform reading,
+    which needs an explicit ``depths=``/``select={"depth": [...]}``.
 
     A **fixed-station** reference (``featureType`` ``timeSeries``/``point``/``station``
     -- a mooring, most often) is auto-derived the same way, but to a single depth
@@ -10833,8 +10926,12 @@ def compare(
     # Computed here, ahead of the has_transect block below, so a
     # select={"transect": {"from": "reference"}} request can check its one real
     # precondition -- an ordered *collection* of casts, not a single source --
-    # before anything else runs. Reused unchanged by the fan-out further down.
-    refs = [reference] if isinstance(reference, str) else list(reference)
+    # before anything else runs. A CTD transect (one entry holding many casts) is
+    # already its casts here, so that check, the availability filter and both
+    # fan-outs below only ever see profiles. Reused unchanged by the fan-out.
+    refs = _expand_transects(
+        [reference] if isinstance(reference, str) else list(reference), over
+    )
 
     # depths defaults to the vertical entry already in `select`, if any, so the two
     # spellings agree instead of one clobbering the other. Recorded *before*
@@ -10964,7 +11061,7 @@ def compare(
                 "*collection* of casts to lay a path through -- "
                 f"reference={reference!r} names only one source. Pass "
                 "reference=[cast_1, cast_2, ...], in the order they fall "
-                "along the section."
+                "along the section, or one transect entry holding several casts."
             )
 
     # `fan_key`/`fan_values` generalize `depths` to whichever vertical axis is
@@ -11003,8 +11100,8 @@ def compare(
             "compare() got both times= and "
             "select={'transect': {'from': 'reference'}} -- fanning a section "
             "into one comparison per time bin is a follow-up, not yet built. "
-            "Drop times= (the aggregate's own {'time': 'mean'} already "
-            "collapses the axis)."
+            "Drop times= (each cast is matched at its own time, so a section has "
+            "no time axis left to fan)."
         )
     time_freq: str | None = None
     time_window: Any = None

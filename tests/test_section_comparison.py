@@ -835,7 +835,7 @@ _CAST_META = {"featureType": "timeSeriesProfile"}
 # domain so each one's nearest model cell is a distinct one -- one column per
 # cast, no coarse-grid snapping collisions -- while still exercising the
 # along-path order this whole feature is about honouring.
-_CAST_LONLATS = [(-94.9, 24.2), (-94.0, 26.0), (-93.1, 27.8)]
+_CAST_LONLATS = [(-94.9, 25.0), (-94.0, 26.0), (-93.1, 27.8)]
 
 
 @pytest.fixture
@@ -1001,7 +1001,7 @@ def casts_and_model_with_time(patched_sources):
     # that their mean drift (2.0, 22.0 -> mean 12.0) differs clearly from the
     # full record's own mean drift (0..59 -> mean 14.75).
     cast_times = [base_time + pd.Timedelta(days=4), base_time + pd.Timedelta(days=44)]
-    lonlats = [(-94.9, 24.2), (-93.1, 27.8)]
+    lonlats = [(-94.9, 25.0), (-93.1, 27.8)]
     sources = {
         "roms_test": (model, {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}),
     }
@@ -1014,19 +1014,14 @@ def casts_and_model_with_time(patched_sources):
     return casts, n_time, cast_times
 
 
-def test_from_reference_prunes_the_model_to_cast_nearest_steps(
+def test_from_reference_matches_the_model_at_each_casts_own_time(
     casts_and_model_with_time,
 ):
-    """The section's model column must match the casts' own times, not the
-    full-record mean -- the observable proof the test lane was pruned before
-    the read/vertical-transform/mean, rather than averaged over everything.
-    """
+    """Each column is the model at *its own cast's* time -- not one mean over all."""
     casts, n_time, cast_times = casts_and_model_with_time
-    points = [[-94.9, 24.2], [-93.1, 27.8]]
+    points = [[-94.9, 25.0], [-93.1, 27.8]]
     depths = [50.0, 200.0]
 
-    # Independently, via the plain model-only path (Field, not Comparison):
-    # the full 60-day mean at the same points/depths.
     full_mean = osk.field(
         "roms_test",
         VAR,
@@ -1035,29 +1030,24 @@ def test_from_reference_prunes_the_model_to_cast_nearest_steps(
     ).data
     full_mean_drift = 0.5 * np.mean(np.arange(n_time))
     cast_day_indices = [(t - pd.Timestamp("2024-01-01")).days for t in cast_times]
-    cast_mean_drift = 0.5 * np.mean(cast_day_indices)
-    # The depth/space-dependent part is the same either way (see
-    # _roms_run_with_time's docstring on why the drift commutes exactly out).
-    expected_pruned = full_mean - full_mean_drift + cast_mean_drift
+    vertical = next(d for d in full_mean.dims if d != ALONG_DIM)
+    by_cast = np.asarray(full_mean.transpose(ALONG_DIM, vertical))
+    expected = np.stack(
+        [
+            by_cast[i] - full_mean_drift + 0.5 * day
+            for i, day in enumerate(cast_day_indices)
+        ]
+    )
 
     result = osk.compare(
         reference=casts,
         test="roms_test",
         variables=[VAR],
         select={"transect": {"from": "reference"}, "depth": depths},
-        aggregate={"time": "mean"},
     )
     aligned = result.comparisons[0].aligned
-    np.testing.assert_allclose(
-        np.asarray(aligned["test"]).ravel(),
-        np.asarray(expected_pruned).ravel(),
-        rtol=1e-10,
-    )
-    # And, the failure this guards against made concrete: the pruned result
-    # must NOT equal the naive full-record mean.
-    assert not np.allclose(
-        np.asarray(aligned["test"]).ravel(), np.asarray(full_mean).ravel()
-    )
+    got = np.asarray(aligned["test"].transpose(ALONG_DIM, "z"))
+    np.testing.assert_allclose(got, expected.reshape(got.shape), rtol=1e-10)
 
 
 def test_from_reference_test_lane_prep_receives_time_targets(
@@ -1091,3 +1081,44 @@ def test_from_reference_test_lane_prep_receives_time_targets(
     assert "time_targets" in captured
     assert captured["time_targets"] is not None
     assert len(captured["time_targets"]) == len(casts)
+
+
+def _tsp_cast(lon, lat, days, *, base):
+    time = pd.Timestamp("2024-01-01") + pd.to_timedelta(days, unit="D")
+    depth = np.array([50.0, 200.0])
+    values = np.broadcast_to(base - 0.01 * depth[None, :], (len(days), 2)).copy()
+    return xr.Dataset(
+        {VAR: (("time", "depth"), values, {"units": "degC"})},
+        coords={"time": time, "depth": depth},
+    ).assign_coords(lon=lon, lat=lat)
+
+
+def test_from_reference_repeat_visit_casts_average_over_their_own_visits(patched_sources):
+    n_time = 60
+    model = _roms_run_with_time(n_time)
+    visits = {"cast_1": [4, 44], "cast_2": [10, 20]}
+    lonlats = {"cast_1": (-94.9, 25.0), "cast_2": (-93.1, 27.8)}
+    sources = {"roms_test": (model, {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}})}
+    for name, days in visits.items():
+        sources[name] = (_tsp_cast(*lonlats[name], days, base=16.0), _CAST_META)
+    patched_sources(sources)
+    points = [list(lonlats["cast_1"]), list(lonlats["cast_2"])]
+    depths = [50.0, 200.0]
+    full_mean = osk.field(
+        "roms_test", VAR,
+        select={"transect": {"points": points}, "depth": depths},
+        aggregate={"time": "mean"},
+    ).data
+    vertical = next(d for d in full_mean.dims if d != ALONG_DIM)
+    by_cast = np.asarray(full_mean.transpose(ALONG_DIM, vertical))
+    full_drift = 0.5 * np.mean(np.arange(n_time))
+    expected = np.stack(
+        [by_cast[i] - full_drift + 0.5 * np.mean(visits[c]) for i, c in enumerate(["cast_1", "cast_2"])]
+    )
+    out = osk.compare(
+        reference=["cast_1", "cast_2"], test="roms_test", variables=[VAR],
+        select={"transect": {"from": "reference"}, "depth": depths},
+        aggregate={"time": "mean"},
+    )
+    got = np.asarray(out.comparisons[0].aligned["test"].transpose(ALONG_DIM, "z"))
+    np.testing.assert_allclose(got, expected, rtol=1e-10)

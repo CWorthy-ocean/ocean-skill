@@ -1249,6 +1249,51 @@ so AKDT data is `-8`, local standard time kept year-round `-9`. `time_zone` is t
 DST-aware alternative; declare one or the other, per entry. Either applies only to
 naive timestamps — one carrying its own offset (`...Z`) is converted as written.
 
+### CTD transects
+
+A ship's CTD line is one file holding many casts, each at its own time and place — CF
+`featureType: trajectoryProfile`. Register it as one entry; every cast of it is then a
+source of its own, `"<entry>[<cast id>]"`, that compares exactly like a `profile`
+registered by hand:
+
+```python
+build.add_source(cat, "line_p", url, featureType="trajectoryProfile",
+                 casts={"id": "station"},                   # the column that names the casts
+                 depth_convention={"origin": "surface"})    # a CTD's depths ride the tide
+osk.cast_names("line_p")              # ['line_p[P1]', 'line_p[P2]', ...], in time order
+osk.compare(reference="line_p", test="run_new", variables=[TEMPERATURE],
+            time_method="interp").plot()                    # one profile per cast
+```
+
+`casts` says where one cast ends and the next begins, by the first of these that applies:
+`id`, a column (or netCDF variable) whose value names the cast; a netCDF variable with
+`cf_role: profile_id` (a profile × level file is one cast per profile); otherwise a
+pause between consecutive samples longer than `gap` (default `"15min"`) or a jump longer
+than `distance_m` (default 200), the casts then numbered `1`, `2`, ... A station that
+comes back later is `P1#2`. A glider-style file never pauses long enough to split on, so
+declare its profile id: `casts={"id": "profile_id"}`. (A ragged array — CF
+`sample_dimension` — is not read yet.)
+
+A cast's time is its earliest sample and its position the median of its samples', so a
+ship that drifts during the cast is still one place (`casts={"position": "first"}`, or
+`"mean"`, changes that). Its depths follow its own `depth_convention` — for a
+surface-referenced cast the model target is z = ζ(t_cast) − d — and the model is read at
+**that cast's own time and place**; `time_method="interp"` interpolates between the
+model's steps onto the cast's instant (the default takes the nearest step). Nothing is
+averaged across the line. The casts can also stand side by side as one section, in time
+order, each column the model at its own cast's time and place:
+
+```python
+osk.compare(reference="line_p", test="run_new", variables=[TEMPERATURE],
+            select={"transect": {"from": "reference"}, "depth": [10, 50, 100, 200]},
+            time_method="interp").plot()      # a cast with no sample at a level is NaN there
+```
+
+A list of cast names works wherever the entry does (`reference=osk.cast_names("line_p")[2:]`):
+some of the casts, or a section laid in another order.
+An explicit `over=` that is not vertical (`over="time"`) keeps the old reading instead:
+the entry is one moving platform, sampled along its track, and wants a `depths=`.
+
 ## Layout
 
 ```
