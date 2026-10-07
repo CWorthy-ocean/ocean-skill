@@ -43,14 +43,17 @@ __all__ = [
     "MetricColors",
     "cmaps_for",
     "difference_cmap",
+    "center_for",
     "is_log",
     "metric_colors",
     "norm_for",
+    "variable_limits",
 ]
 
 #: BGC species colors — edit here, nothing else needs to change. Values are cmocean
-#: colormap names (``cmo.<name>``). Reused as both the xcmocean "vartype" key and its
-#: own (escaped, exact) match pattern.
+#: colormap names (``cmo.<name>``) or, for a map cmocean does not have, a matplotlib
+#: one (``plasma``) -- see :func:`_resolve_cmap`. Reused as both the xcmocean "vartype"
+#: key and its own (escaped, exact) match pattern.
 #:
 #: Policy: the twelve BGC species (nitrate, phosphate, silicate, ammonium, iron,
 #: oxygen, DIC, alkalinity, chlorophyll, PAR, turbidity, pH) must each get a
@@ -58,12 +61,12 @@ __all__ = [
 #: paint them alike (this table's whole reason to exist: ammonium and iron used to
 #: both fall through to xcmocean's "dye" default and collide). Everything else
 #: (physics) follows xcmocean's own family conventions -- temperature/thermal,
-#: salinity/haline, velocity/speed, density/dense, depth/deep, ice/ice -- and *may*
+#: salinity/haline, speed/speed, density/dense, depth/deep, ice/ice -- and *may*
 #: share a hue with a BGC species, since the two are a different family and unlikely
 #: to sit in the same figure. cmocean has 15 sequential maps and ~40 vocabulary
 #: variables, so some cross-family sharing is unavoidable; where it happens it's a
 #: deliberate choice, listed here rather than left as an accident to rediscover:
-#:   - ammonium / sigma_theta: both cmo.dense
+#:   - oxygen cmo.dense_r vs sigma_theta cmo.dense (opposite directions)
 #:   - nitrate / mld / pressure / bathymetry: all cmo.deep -- "mld" meaning all five
 #:     mixed-layer thickness names, the generic one and the four CF
 #:     ``..._defined_by_<criterion>`` ones. That includes the sigma_theta-defined
@@ -72,31 +75,68 @@ __all__ = [
 #:     entry below)
 #:   - kd490 / turbidity: both cmo.turbid (same optical-quantity family)
 #:   - sea_ice cmo.ice vs DIC cmo.ice_r (opposite directions, rarely adjacent)
-#:   - pH cmo.speed_r vs the velocity family's cmo.speed
+#:   - pH cmo.speed_r vs the speed family's cmo.speed
 #:   - iron cmo.amp also colours the rmse/mae/crmsd/std metric panels (see
 #:     _METRIC_CMAPS below) -- a separate table by design, not a leak
+#:   - ammonium cmo.gray_r likewise also colours the "n" (sample count) metric panel
+#:   - iron / SSH tidal amplitude: both cmo.amp (different families, rarely adjacent)
 #: Left on xcmocean's "dye" fallthrough (cmo.matter) rather than given a dedicated
 #: entry, out of scope for this table's BGC-species guarantee: alkalinity (explicit
 #: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
 #: a cell-count/pigment family unlikely to sit beside the twelve species above.
 _SEQUENTIAL_CMAPS: dict[str, str] = {
-    # xcmocean's own default for this vartype ("zeta") is a sequential cmo.amp; SSH is
-    # signed, not a magnitude, so we use a diverging-look map for its sequential panel
-    # too -- a deliberate override, not an oversight.
-    "sea_surface_height_above_geoid": "cmo.balance",
+    # Height above the geoid has an arbitrary datum -- like temperature it is an
+    # interval quantity, only differences mean anything -- so neither a white-to-colour
+    # magnitude map (cmo.amp, xcmocean's own default for this vartype: white reads as
+    # "none") nor a diverging one (cmo.balance: its white midpoint would mean
+    # something it does not) fits. A plain perceptually-uniform sequential map does.
+    # plasma rather than viridis because viridis is already xcmocean's fallback for
+    # any variable it cannot match, so it would read as "no opinion" -- plasma is a
+    # deliberate choice, and a matplotlib name, which :func:`_resolve_cmap` allows.
+    "sea_surface_height_above_geoid": "plasma",
     # full standard_name: xcmocean's own "vel" pattern matches the substring "vel" in
     # "sea_le-vel-", which would otherwise give sea-level anomaly a velocity map.
+    # (SLA, unlike ADT above, is a signed anomaly about zero. The rule for every such
+    # variable: *if zero matters it is in* :data:`_CENTERED`, and :func:`cmaps_for`
+    # then draws it with limits equal about the centre. :data:`_CENTERED` decides
+    # *whether* a variable is centred; this table decides *which* diverging map --
+    # balance unless the entry names another -- so every centred variable's entry here
+    # must be a diverging map.)
     "sea_surface_height_above_sea_level": "cmo.balance",
+    # Signed velocity components (the geostrophic ugos/vgos names are vocabulary aliases
+    # of the first two): direction is the point, zero is "no flow", so diverging and
+    # centred -- cmo.delta, the velocity family's own diverging map, which also keeps
+    # a current section from reading like an SLA or CO2-flux one (balance). A velocity
+    # *magnitude* is a different quantity, sequential from zero: see sea_water_speed
+    # and wind_speed (cmo.speed). The explicit full names also stop xcmocean's own
+    # substring "vel" pattern giving the components cmo.speed through ``da.cmo.seq``.
+    "eastward_sea_water_velocity": "cmo.delta",
+    "northward_sea_water_velocity": "cmo.delta",
+    "sea_water_x_velocity": "cmo.delta",
+    "sea_water_y_velocity": "cmo.delta",
+    "upward_sea_water_velocity": "cmo.delta",
+    "sea_water_speed": "cmo.speed",
+    # Tidal harmonics of SSH (osk-custom names): amplitude is a magnitude, phase is
+    # cyclic. The full names are no substring of the SSH keys above, so neither can
+    # claim the other. The harmonic real/imaginary parts are left to the fallthrough.
+    "sea_surface_height_tidal_amplitude": "cmo.amp",
+    "sea_surface_height_tidal_phase": "cmo.phase",
+    # x/y/eastward/northward baroclinic pressure flux: signed (energy flows either
+    # way), so centred (:data:`_CENTERED`) and diverging.
+    "baroclinic_pressure_flux": "cmo.balance",
     "nitrate": "cmo.deep",
     "phosphate": "cmo.rain",
     "silicate": "cmo.tempo",
-    "ammonium": "cmo.dense",
+    # Light is low, dark is high, like the other nutrient maps -- gray_r, not gray;
+    # only oxygen (below) needs its low end dark.
+    "ammonium": "cmo.gray_r",
     "iron": "cmo.amp",
-    # Dark is low, light is high -- cmo.gray, not its reverse. The reverse (gray_r)
-    # drew low oxygen as white, which on a white page reads as "nothing there" for the
-    # one quantity whose low end (hypoxia) is the thing to see. The substring key also
-    # covers oxygen_saturation, the other "oxygen" standard_name.
-    "oxygen": "cmo.gray",
+    # Dark is low, light is high -- cmo.dense *reversed*. Unreversed, dense (like the
+    # old gray_r before it) drew low oxygen as near-white, which on a white page reads
+    # as "nothing there" for the one quantity whose low end (hypoxia) is the thing to
+    # see. The substring key also covers oxygen_saturation, the other "oxygen"
+    # standard_name.
+    "oxygen": "cmo.dense_r",
     # "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water": "cmo.oxy",
     "dissolved_inorganic_carbon": "cmo.ice_r",
     "sea_water_alkalinity_expressed_as_mole_equivalent": "cmo.matter",
@@ -112,10 +152,14 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     "sea_water_ph_reported_on_total_scale": "cmo.speed_r",
     # kd490: shares turbidity's map -- both are water-clarity/optical measures.
     "diffuse_attenuation": "cmo.turbid",
-    # eastward_wind/northward_wind; wind_speed already matches xcmocean's own "vel"
-    # pattern (it contains "speed") to the same cmo.speed, so this just extends the
-    # same family to the two wind components. No other standard_name contains "wind".
-    "wind": "cmo.speed",
+    # Signed wind components: velocity components like the ocean ones above, so in
+    # :data:`_CENTERED` and cmo.delta here (see the note on SSH/SLA above). Spelled out
+    # by full name rather than the old bare "wind" key, which as a substring also
+    # matched wind_speed -- a true speed, which keeps its own explicit cmo.speed entry
+    # below. No other standard_name contains "wind".
+    "eastward_wind": "cmo.delta",
+    "northward_wind": "cmo.delta",
+    "wind_speed": "cmo.speed",
     "sea_ice": "cmo.ice",
     # Every mixed-layer-thickness name: the generic ``ocean_mixed_layer_thickness``
     # and CF's ``..._defined_by_sigma_theta``/``_sigma_t``/``_temperature``/
@@ -161,7 +205,52 @@ _ANCHORED_CMAPS: dict[str, tuple[str, str]] = {
     "bathymetry": (r"^(h|bathymetry|sea_floor_depth(_below_\w+)?)$", "cmo.deep"),
 }
 
+#: The one source of truth for "zero is meaningful": a variable listed here is a signed
+#: quantity (anomaly, flux, velocity component) whose sequential panel uses a
+#: diverging map (:func:`cmaps_for`: its :data:`_SEQUENTIAL_CMAPS` entry, else
+#: cmo.balance) over limits equal about the centre
+#: (:func:`variable_limits`), so white is always "none". Its *spread* (std, variance)
+#: is a non-negative magnitude and is not centred. The colour scale is made symmetric
+#: about this value, so the diverging map's white sits at "no anomaly" whatever the data's own extremes are (percentile-or-min/max limits
+#: of -0.1..0.4 would otherwise put white at +0.15, saying the wrong thing). Keyed by
+#: full standard_name, looked up after :func:`ocean_skill.vocabulary.resolve_name`.
+_CENTERED: dict[str, float] = {
+    "sea_surface_height_above_sea_level": 0.0,
+    "surface_downward_mole_flux_of_carbon_dioxide": 0.0,
+    # signed velocity components; true speeds (wind_speed, ...) are magnitudes, absent
+    "eastward_sea_water_velocity": 0.0,
+    "northward_sea_water_velocity": 0.0,
+    "sea_water_x_velocity": 0.0,
+    "sea_water_y_velocity": 0.0,
+    "upward_sea_water_velocity": 0.0,
+    "eastward_wind": 0.0,
+    "northward_wind": 0.0,
+    # signed baroclinic pressure flux (energy flows either way); zero is "no flux"
+    "x_baroclinic_pressure_flux": 0.0,
+    "y_baroclinic_pressure_flux": 0.0,
+    "eastward_baroclinic_pressure_flux": 0.0,
+    "northward_baroclinic_pressure_flux": 0.0,
+}
+
 _registered = False
+
+
+def _resolve_cmap(name: str):
+    """Resolve a colormap name from a table: ``cmo.<name>`` or a matplotlib name.
+
+    A ``cmo.`` prefix means cmocean (falling back to ``cmo.matter`` for a name it does
+    not have, as before); anything else is looked up in matplotlib's registry, so a
+    table entry can name a map cmocean lacks (``plasma``) without a second mechanism.
+    A bad matplotlib name raises rather than silently becoming matter -- a typo in a
+    table should be loud. cmocean maps are matplotlib Colormaps too, so every consumer
+    (norm-based matplotlib draw, holoviews' ``cmap(float)``/``get_under`` palette
+    sampling) treats the two kinds alike.
+    """
+    if name.startswith("cmo."):
+        return _cmocean(name)
+    import matplotlib
+
+    return matplotlib.colormaps[name]
 
 
 def _register_colormaps() -> None:
@@ -173,21 +262,14 @@ def _register_colormaps() -> None:
     global _registered
     if _registered:
         return
-    import cmocean
     import xcmocean.options as xopts
 
     regexin = {name: re.escape(name) for name in _SEQUENTIAL_CMAPS}
-    seqin = {
-        name: getattr(cmocean.cm, cmap.removeprefix("cmo."), cmocean.cm.matter)
-        for name, cmap in _SEQUENTIAL_CMAPS.items()
-    }
+    seqin = {name: _resolve_cmap(cmap) for name, cmap in _SEQUENTIAL_CMAPS.items()}
     # anchored spellings first: they fullmatch, so they can shadow nothing else
     anchored = {name: pattern for name, (pattern, _) in _ANCHORED_CMAPS.items()}
     regexin = anchored | regexin
-    seqin |= {
-        name: getattr(cmocean.cm, cmap.removeprefix("cmo."), cmocean.cm.matter)
-        for name, (_, cmap) in _ANCHORED_CMAPS.items()
-    }
+    seqin |= {name: _resolve_cmap(cmap) for name, (_, cmap) in _ANCHORED_CMAPS.items()}
     # dict order is insertion order; rebuilding with ours first, then xcmocean's
     # existing table, makes ours the entries checked first without disturbing
     # anything already registered (including by a user's own xcmocean.set_options
@@ -199,7 +281,7 @@ def _register_colormaps() -> None:
     _registered = True
 
 
-def cmaps_for(standard_name: str | None):
+def cmaps_for(standard_name: str | None, statistic: str | None = None):
     """Return ``(sequential, diverging)`` colormaps for a variable's standard_name.
 
     Accepts anything :func:`ocean_skill.vocabulary.resolve_name` recognizes (a short
@@ -211,20 +293,42 @@ def cmaps_for(standard_name: str | None):
     module docstring for why ocean-skill's BGC entries are inserted into them
     directly rather than kept as a second, separate lookup here. Falls back to
     xcmocean's own default (``viridis``/``balance``) if nothing matches.
+
+    A centred variable (:data:`_CENTERED`: zero is meaningful) gets a diverging map as
+    its sequential map: its own :data:`_SEQUENTIAL_CMAPS` entry (``cmo.delta`` for a
+    velocity component), else ``cmo.balance``. :data:`_CENTERED` decides *whether*,
+    the table only *which* -- no substring match can make a centred variable
+    sequential.
+
+    ``statistic`` is the field's ``attrs["statistic"]``. A spread (variance, std,
+    range -- :func:`ocean_skill.units.is_spread`) is a non-negative magnitude whatever
+    it is a spread *of*, so its sequential map is ``cmo.amp`` (the same map
+    ``_METRIC_CMAPS["std_test"]`` gives a std panel) read from zero, rather than the
+    variable's own map; the diverging map is unchanged. ``None`` changes nothing.
     """
     _register_colormaps()
     from xcmocean.options import DIV, REGEX, SEQ
 
+    from ocean_skill.units import is_spread
     from ocean_skill.vocabulary import resolve_name
 
     name = resolve_name(standard_name or "").lower()
+    # Decided here, before the regex table, so no substring match (xcmocean's "vel")
+    # can override it: a zero-meaningful variable is diverging, a spread is amp.
+    if is_spread(statistic):
+        override = _cmocean("cmo.amp")
+    elif center_for(standard_name) is not None:
+        override = _resolve_cmap(_SEQUENTIAL_CMAPS.get(name, "cmo.balance"))
+    else:
+        override = None
     for vartype, pattern in REGEX.items():
         if re.search(pattern, name):
-            return SEQ[vartype], DIV[vartype]
+            return (override if override is not None else SEQ[vartype]), DIV[vartype]
     # No match: xcmocean's own defaultdict fallback (viridis / balance), called
     # directly rather than via SEQ[None]/DIV[None] so a bogus "None" key doesn't get
     # permanently inserted into its shared, module-global tables.
-    return SEQ.default_factory(), DIV.default_factory()
+    seq = override if override is not None else SEQ.default_factory()
+    return seq, DIV.default_factory()
 
 
 def difference_cmap():
@@ -251,6 +355,22 @@ def _pinned(standard_name: str | None, statistic: str | None):
     return standard_name, _RANGES.get(standard_name, (None, None, False))
 
 
+def center_for(standard_name: str | None, statistic: str | None = None) -> float | None:
+    """Return the value a variable's sequential scale is centred on, or ``None``.
+
+    Only signed anomalies (:data:`_CENTERED`: sea-level anomaly, air-sea CO2 flux)
+    have one. A spread of such a variable (its std, say) is a non-negative magnitude,
+    not a signed anomaly, so it has none -- same rule as :func:`_pinned`. Accepts any
+    spelling :func:`ocean_skill.vocabulary.resolve_name` recognizes.
+    """
+    from ocean_skill.units import is_spread
+    from ocean_skill.vocabulary import resolve_name
+
+    if is_spread(statistic):
+        return None
+    return _CENTERED.get(resolve_name(standard_name or ""))
+
+
 def is_log(standard_name: str | None, statistic: str | None = None) -> bool:
     """Return whether :data:`_RANGES` marks ``standard_name`` log-scale.
 
@@ -265,6 +385,66 @@ def is_log(standard_name: str | None, statistic: str | None = None) -> bool:
     :func:`_pinned`. Optional, and ``None`` changes nothing.
     """
     return _pinned(standard_name, statistic)[1][2]
+
+
+def variable_limits(
+    standard_name: str | None,
+    vmin: float,
+    vmax: float,
+    *,
+    user_vmin: float | None = None,
+    user_vmax: float | None = None,
+    statistic: str | None = None,
+) -> tuple[float, float]:
+    """Return the sequential ``(lo, hi)`` colour limits for a variable.
+
+    The one place the limit policy lives, so :func:`norm_for` (matplotlib) and the
+    holoviews renderer's ``clim`` cannot disagree. ``vmin``/``vmax`` are the data-
+    derived (snapped) limits, shared across whatever panels share the scale; this
+    layers on, in order:
+
+    1. the variable's declared :data:`_RANGES` pin (none for a spread, see
+       :func:`_pinned`);
+    2. a **spread** statistic (std, variance, range) reads from 0 -- it is a
+       non-negative magnitude, and ``cmo.amp``'s white end must mean "no spread";
+    3. a **centred** variable (:func:`center_for`) is made symmetric about its centre,
+       half-width ``max(|lo-c|, |hi-c|)`` snapped to a round value the way
+       :func:`metric_colors` snaps a centred metric's, so the diverging map's white sits
+       at "no anomaly". Limits of a centred variable are *always* equal about the
+       centre: a single user end is **mirrored** (``user_vmin=-0.2`` gives
+       ``(-0.2, 0.2)``); both user ends are honoured exactly as given;
+    4. otherwise ``user_vmin``/``user_vmax`` -- a caller's own limits -- always win,
+       each moving only its own end.
+
+    A log variable is returned as pinned/derived; flooring it above zero is the
+    caller's business (LogNorm rejects ``vmin <= 0``).
+    """
+    from ocean_skill.plot._colorbar import round_limits
+    from ocean_skill.units import is_spread
+
+    _, (r_vmin, r_vmax, _log) = _pinned(standard_name, statistic)
+    lo = r_vmin if r_vmin is not None else vmin
+    hi = r_vmax if r_vmax is not None else vmax
+    if is_spread(statistic):
+        lo = 0.0
+    else:
+        center = center_for(standard_name)
+        if center is not None:
+            if user_vmin is not None and user_vmax is not None:
+                return user_vmin, user_vmax  # both given: exactly as asked
+            if user_vmin is not None or user_vmax is not None:
+                # one end given: mirror it, the user's number is not rounded
+                half = abs((user_vmin if user_vmin is not None else user_vmax) - center)
+            else:
+                half = max(abs(lo - center), abs(hi - center))
+                if half > 0:
+                    half = round_limits(-half, half, log=False)[1]
+            if half > 0:  # all-at-centre data keeps its own (degenerate) limits
+                return center - half, center + half
+    return (
+        user_vmin if user_vmin is not None else lo,
+        user_vmax if user_vmax is not None else hi,
+    )
 
 
 def norm_for(
@@ -298,9 +478,15 @@ def norm_for(
     """
     import matplotlib.colors as mcolors
 
-    standard_name, (r_vmin, r_vmax, log) = _pinned(standard_name, statistic)
-    lo = user_vmin if user_vmin is not None else r_vmin if r_vmin is not None else vmin
-    hi = user_vmax if user_vmax is not None else r_vmax if r_vmax is not None else vmax
+    log = is_log(standard_name, statistic)
+    lo, hi = variable_limits(
+        standard_name,
+        vmin,
+        vmax,
+        user_vmin=user_vmin,
+        user_vmax=user_vmax,
+        statistic=statistic,
+    )
     if log:
         lo = max(lo, 1e-6)  # LogNorm rejects vmin <= 0
         return mcolors.LogNorm(vmin=lo, vmax=hi)
@@ -311,7 +497,7 @@ def norm_for(
 
 #: Metric colors — edit here, nothing else needs to change. The counterpart of
 #: :data:`_SEQUENTIAL_CMAPS` for metrics, and read the same way: values are cmocean
-#: colormap names (``cmo.<name>``).
+#: colormap names (``cmo.<name>``), or matplotlib ones, via :func:`_resolve_cmap`.
 #:
 #: A metric absent from this table takes its colormap from the **variable** being scored
 #: instead: ``bias`` uses the variable's own *diverging* map, so a bias panel and the
@@ -515,7 +701,7 @@ def metric_colors(metric: str, values=None, *, standard_name: str | None = None)
         center = 0.0 if (finite.min() < 0 < finite.max()) else None
         vmin = None if center is not None else 0.0
     cmap = (
-        _cmocean(_METRIC_CMAPS[metric])
+        _resolve_cmap(_METRIC_CMAPS[metric])
         if metric in _METRIC_CMAPS
         else (div_cmap if center is not None else seq_cmap)
     )

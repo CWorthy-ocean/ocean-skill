@@ -45,15 +45,18 @@ _BGC_SPECIES = (
         ("Fluor_CTD", "algae"),
         ("PAR", "solar"),
         ("PAR_CTD", "solar"),
-        ("ammonium", "dense"),
-        ("NH4", "dense"),
+        ("ammonium", "gray_r"),
+        ("NH4", "gray_r"),
         ("iron", "amp"),
         ("Fe", "amp"),
         ("nitrate", "deep"),
         ("phosphate", "rain"),
         ("sea_level_anomaly", "balance"),
-        ("eastward_wind", "speed"),
-        ("northward_wind", "speed"),
+        ("eastward_wind", "delta"),
+        ("northward_wind", "delta"),
+        ("east_velocity", "delta"),
+        ("sea_water_speed", "speed"),
+        ("wind_speed", "speed"),
         ("sea_ice", "ice"),
         ("sigma_theta", "dense"),
         # the density anomaly itself, spelled as the resolved CF name (the short
@@ -127,7 +130,7 @@ def test_bathymetry_spellings_get_the_deep_map(name):
         ("phosphate", "rain"),
         ("chlorophyll", "algae"),
         ("temperature", "thermal"),
-        ("sea_surface_height_above_geoid", "balance"),
+        ("sea_surface_height_above_geoid", "plasma"),
     ],
 )
 def test_the_bathymetry_pattern_is_anchored_and_captures_nothing_else(name, expected):
@@ -175,6 +178,180 @@ def test_oxygen_is_dark_at_the_low_end_and_light_at_the_high_end(name):
 def test_oxygen_keeps_a_map_of_its_own():
     """Flipping the direction must not collide it with another BGC species' map."""
     seq, _ = cmaps_for("oxygen")
-    assert seq.name == "gray"
+    assert seq.name == "dense_r"
     others = {s: cmaps_for(s)[0].name for s in _BGC_SPECIES if s != "oxygen"}
-    assert "gray" not in others.values(), others
+    assert "dense_r" not in others.values(), others
+
+
+# --- ADT, spreads, centring, matplotlib names ----------------------------------------
+
+SLA = "sea_surface_height_above_sea_level"
+ADT = "sea_surface_height_above_geoid"
+CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
+
+
+def test_adt_is_plasma_and_sla_stays_balance():
+    """ADT has an arbitrary datum (plasma); SLA is a signed anomaly (balance)."""
+    assert cmaps_for(ADT)[0].name == "plasma"
+    assert cmaps_for(SLA)[0].name == "balance"
+
+
+def test_a_matplotlib_name_in_the_table_resolves_and_does_not_become_matter():
+    """A non-``cmo.`` entry is a matplotlib name, not a silent cmo.matter."""
+    import matplotlib
+
+    from ocean_skill import colormaps
+
+    assert colormaps._resolve_cmap("plasma").name == matplotlib.colormaps["plasma"].name
+    assert colormaps._resolve_cmap("cmo.amp").name == "amp"
+    # the registered xcmocean table holds the matplotlib map itself
+    colormaps._register_colormaps()
+    from xcmocean.options import SEQ
+
+    assert SEQ[ADT].name == "plasma"
+    with pytest.raises(KeyError):  # a typo is loud, not matter
+        colormaps._resolve_cmap("not_a_colormap")
+
+
+@pytest.mark.parametrize("statistic", ["std", "var", "range"])
+def test_a_spread_gets_the_amp_map_from_zero(statistic):
+    from ocean_skill.colormaps import norm_for
+
+    assert cmaps_for("nitrate", statistic=statistic)[0].name == "amp"
+    assert cmaps_for(None, statistic=statistic)[0].name == "amp"  # the fallback too
+    assert cmaps_for("nitrate", statistic="mean")[0].name == "deep"
+    # diverging side unchanged
+    assert cmaps_for(SLA, statistic=statistic)[1].name == cmaps_for(SLA)[1].name
+    norm = norm_for("nitrate", 3.1, 7.4, statistic=statistic)
+    assert (norm.vmin, norm.vmax) == (0.0, 7.4)
+    # a user's vmin still wins over the zero floor
+    assert norm_for("nitrate", 3.1, 7.4, user_vmin=1.0, statistic=statistic).vmin == 1.0
+    # a mean is untouched
+    assert norm_for("nitrate", 3.1, 7.4, statistic="mean").vmin == 3.1
+
+
+def test_center_for_is_zero_for_signed_anomalies_only():
+    from ocean_skill.colormaps import center_for
+
+    assert center_for(SLA) == 0.0
+    assert center_for("sea_level_anomaly") == 0.0  # a short vocabulary spelling
+    assert center_for("surface_downward_mole_flux_of_carbon_dioxide") == 0.0
+    assert center_for(ADT) is None
+    assert center_for("nitrate") is None
+    assert center_for(SLA, statistic="std") is None  # a spread is not an anomaly
+
+
+def test_sla_limits_are_symmetric_about_zero_and_users_win():
+    from ocean_skill.colormaps import norm_for, variable_limits
+
+    assert variable_limits(SLA, -0.1, 0.4) == (-0.4, 0.4)
+    assert variable_limits(SLA, -0.6, 0.2) == (-0.6, 0.6)
+    # the half-width is rounded like a centred metric's, not left at 0.4137
+    assert variable_limits(SLA, -0.1, 0.4137) == (-0.42, 0.42)
+    norm = norm_for(SLA, -0.1, 0.4)
+    assert (norm.vmin, norm.vmax) == (-0.4, 0.4)
+    # one user end is mirrored about the centre; the scale is always equal-sided
+    assert variable_limits(SLA, -0.1, 0.4, user_vmin=-0.2) == (-0.2, 0.2)
+    assert variable_limits(SLA, -0.1, 0.4, user_vmax=0.1) == (-0.1, 0.1)
+    # both ends: honoured as given, even when lopsided
+    assert variable_limits(SLA, -0.1, 0.4, user_vmin=-0.2, user_vmax=0.1) == (-0.2, 0.1)
+    # a non-centred variable passes straight through
+    assert variable_limits(ADT, 0.5, 1.4) == (0.5, 1.4)
+    # a pinned range still applies (chlorophyll's), and a user's beats it
+    assert variable_limits(CHL, 0.02, 3.0) == (0.01, 10.0)
+    assert variable_limits(CHL, 0.02, 3.0, user_vmax=5.0) == (0.01, 5.0)
+
+
+def test_a_centred_mean_panel_through_metric_colors_is_symmetric():
+    import numpy as np
+
+    from ocean_skill.colormaps import metric_colors
+
+    colors = metric_colors("mean_test", np.linspace(-0.1, 0.4, 50), standard_name=SLA)
+    assert colors.vmin == -colors.vmax
+
+
+#: cmocean's diverging maps -- what a centred variable's sequential panel may use.
+DIVERGING = {"balance", "delta", "curl", "diff", "tarn"}
+
+VELOCITY_COMPONENTS = [
+    "eastward_sea_water_velocity",
+    "northward_sea_water_velocity",
+    "sea_water_x_velocity",
+    "sea_water_y_velocity",
+    "upward_sea_water_velocity",
+    "eastward_wind",
+    "northward_wind",
+]
+
+
+def test_the_sequential_map_is_diverging_iff_the_variable_is_centred():
+    """``_CENTERED`` alone decides which variables are zero-meaningful (diverging)."""
+    from pathlib import Path
+
+    import yaml
+
+    import ocean_skill
+    from ocean_skill.colormaps import _CENTERED, center_for
+    from ocean_skill.vocabulary import resolve_name
+
+    path = Path(ocean_skill.__file__).parent / "vocab" / "vocabulary.yaml"
+    keys = yaml.safe_load(path.read_text())
+    assert keys
+    for key in keys:
+        diverging = cmaps_for(key)[0].name in DIVERGING
+        centred = resolve_name(key) in _CENTERED
+        assert diverging == centred, key
+        assert (center_for(key) is not None) == centred, key
+    # every table entry is a real vocabulary variable
+    assert {resolve_name(k) for k in keys} >= set(_CENTERED)
+
+
+@pytest.mark.parametrize("name", VELOCITY_COMPONENTS)
+def test_signed_components_are_delta_symmetric_and_their_std_is_amp(name):
+    from ocean_skill.colormaps import norm_for
+
+    assert cmaps_for(name)[0].name == "delta"
+    norm = norm_for(name, -0.3, 1.1)
+    assert norm.vmin == -norm.vmax and norm.vmax >= 1.1
+    assert cmaps_for(name, statistic="std")[0].name == "amp"
+    spread = norm_for(name, 0.2, 1.1, statistic="std")
+    assert spread.vmin == 0.0
+
+
+def test_true_speeds_stay_cmo_speed():
+    assert cmaps_for("wind_speed")[0].name == "speed"
+    assert cmaps_for("sea_water_speed")[0].name == "speed"
+
+
+def test_every_centred_variable_names_a_diverging_map():
+    """``_CENTERED`` says *whether*, ``_SEQUENTIAL_CMAPS`` *which*: never a sequential one."""
+    from ocean_skill.colormaps import _CENTERED, _SEQUENTIAL_CMAPS
+
+    for name in _CENTERED:
+        cmap = _SEQUENTIAL_CMAPS.get(name, "cmo.balance")
+        assert cmap.removeprefix("cmo.") in DIVERGING, name
+        assert cmaps_for(name)[0].name == cmap.removeprefix("cmo."), name
+
+
+# --- tidal harmonics and baroclinic pressure flux -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("sea_surface_height_tidal_amplitude", "amp"),
+        ("tidal_amplitude", "amp"),
+        ("sea_surface_height_tidal_phase", "phase"),
+        ("tidal_phase", "phase"),
+        ("x_baroclinic_pressure_flux", "balance"),
+        ("y_baroclinic_pressure_flux", "balance"),
+        ("eastward_baroclinic_pressure_flux", "balance"),
+        ("northward_baroclinic_pressure_flux", "balance"),
+        # SSH keeps its own map, and the tidal names did not disturb it
+        ("sea_surface_height_above_geoid", "plasma"),
+        ("ssh", "plasma"),
+    ],
+)
+def test_tidal_and_pressure_flux_colormaps(name, expected):
+    assert cmaps_for(name)[0].name == expected

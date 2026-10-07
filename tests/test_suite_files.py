@@ -147,6 +147,9 @@ EXPECTED_PACMED = (
         ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (100 m)"),
         ("section", "Water masses"),
         ("TS", "T-S diagrams — six Pacific regions"),
+        ("section", "Zonal currents"),
+        ("compare", "Zonal velocity — 180-160W"),
+        ("compare", "Zonal velocity — 160-120W"),
     ]
 )
 
@@ -180,8 +183,8 @@ def test_pacmed_review_settings(pacmed):
 
 def test_pacmed_review_expands_to_the_exact_page_sequence(pacmed):
     _, expanded = pacmed
-    assert len(expanded) == 49
-    assert sum(p.kind == "section" for p in expanded) == 9
+    assert len(expanded) == 52
+    assert sum(p.kind == "section" for p in expanded) == 10
     assert [(p.kind, p.title) for p in expanded] == EXPECTED_PACMED
 
 
@@ -293,7 +296,7 @@ def test_pacmed_review_glodap_pages_get_one_depth_each_and_the_run_window(pacmed
         assert page.kwargs["select"]["test"]["time"] == RUN_WINDOW
 
 
-def test_pacmed_review_ts_page_pins_roms_to_the_run_and_leaves_the_references_alone(
+def test_pacmed_review_ts_page_pins_roms_and_glorys_to_the_run(
     pacmed,
 ):
     suite, expanded = pacmed
@@ -308,11 +311,15 @@ def test_pacmed_review_ts_page_pins_roms_to_the_run_and_leaves_the_references_al
     assert roms["select"] == {"time": RUN_WINDOW}
     assert roms["cache"] is True
 
-    # climatologies: no run window, no select at all, and they cache with the suite
+    # WOA23 is a climatology: no run window, no select at all. GLORYS12 reanalysis
+    # takes the run's window (window: run) so it covers the dots' dates. Both cache
+    # with the suite.
     woa, glorys = members["WOA23"], members["GLORYS12"]
     assert woa["source"] == ["woa23_temperature_annual", "woa23_salinity_annual"]
-    assert "select" not in woa and "select" not in glorys
-    assert glorys["source"] == "glorys_climatology_timeseries"
+    assert "select" not in woa
+    assert glorys["source"] == "glorys_my_daily_timeseries"
+    assert glorys["select"] == {"time": RUN_WINDOW}
+    assert "window" not in glorys
     assert glorys["aggregate"] == {"time": "mean", "lon": "mean", "lat": "mean"}
     assert woa["cache"] is True and glorys["cache"] is True
     assert page.cache is True
@@ -331,10 +338,10 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
         assert 0 <= box["lon"]["min"] < box["lon"]["max"] <= 360
         assert -90 <= box["lat"]["min"] < box["lat"]["max"] <= 90
     assert regions["North West Pacific"] == {
-        "lon": {"min": 155.24, "max": 156.33},
-        "lat": {"min": 20.51, "max": 21.60},
+        "lon": {"min": 156.16, "max": 157.23},
+        "lat": {"min": 19.32, "max": 20.32},
     }
-    assert regions["South West Pacific"]["lat"] == {"min": -16.75, "max": -15.91}
+    assert regions["South West Pacific"]["lat"] == {"min": -15.45, "max": -14.67}
 
     # WOA23's 1-degree grid has no cell centre in two of the boxes
     assert page.kwargs["at_center"] == ["WOA23"]
@@ -352,3 +359,27 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
             assert 32 < s_pos < 37 and -2 < t_pos < 30  # (S, T) in plausible ranges
     assert "Northern\nsurface\nwaters" in annotations["Subpolar Gyre"]
     assert annotations["Peru Current"]["ESSW"] == [34.95, 10.0]
+
+
+@pytest.mark.parametrize(
+    "title,reference,lon",
+    [
+        ("Zonal velocity — 180-160W", "cravatte_u_179e_160w", {"min": 180, "max": 200}),
+        ("Zonal velocity — 160-120W", "cravatte_u_160w_120w", {"min": 200, "max": 240}),
+    ],
+)
+def test_pacmed_zonal_current_pages_are_lon_mean_slabs_with_zero_contours(
+    pacmed, title, reference, lon
+):
+    """Fig. 10: only the model is box-averaged (the obs are a band mean already)."""
+    _, expanded = pacmed
+    page = _by_title(expanded, title)
+    assert page.kwargs["reference"] == [reference]
+    assert page.kwargs["variables"] == ["east_velocity"]
+    assert page.kwargs["select"]["lon"] == lon
+    assert page.kwargs["aggregate"] == {
+        "test": {"time": "mean", "lon": "mean"},
+        "reference": {"lon": "mean"},
+    }
+    assert page.contours is True
+    assert page.plot["contour_levels"] == [0]

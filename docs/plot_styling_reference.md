@@ -47,7 +47,7 @@ want everything bigger or smaller.
 | [`frame_label_kwargs`](#frame_label_kwargs) | a movie's per-frame timestamp (`field_movie` only) | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 | [`line_kwargs`](#line_kwargs) | every line of a `series` panel (`series` only) | [`Axes.plot`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.plot.html) |
 | [`legend_kwargs`](#legend_kwargs) | a `series` panel's key, or the `locations` map's | [`Axes.legend`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.legend.html) |
-| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait`), or an `XY` annotation's text | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
+| [`annot_kwargs`](#the-portrait-family-metrics-scoreboard) | a portrait cell's own value (`portrait`), an `XY` annotation's text, or a [`legend="annotate"`](#labelling-in-place-legendannotate) location label | [`Axes.text`](https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.text.html) |
 
 Most of these ultimately configure a matplotlib `Text` object (title, tick label, axes
 text, colorbar label all are one) — see [Common Text properties](#common-text-properties)
@@ -603,6 +603,8 @@ is `h` on a ROMS source and draws in `cmo.deep`.
 | Parameter | Default | Effect |
 |---|---|---|
 | `legend` | `True` | the featureType key (plus one entry per labelled `Field`/`Comparison`, each in its own colour), drawn once (on the first panel of a facet) |
+| `legend="annotate"` | — | write each labelled `Field`/`Comparison`'s name beside its shape instead ([below](#labelling-in-place-legendannotate)) |
+| `annot_kwargs` | — | `Axes.text` properties for those in-place labels (static renderer only) |
 | `legend_kwargs` | — | `Axes.legend` properties (static renderer only, as ever) |
 | `marker_size` | `80` static / `9` interactive | marker size (points² / pixels) |
 | `colors` | automatic | recolour the legend groups — a string, a list or a `{legend label: colour}` dict ([below](#recolouring-the-groups-colors)); both renderers |
@@ -624,6 +626,39 @@ Things worth knowing:
   `legend` and `marker_size` are.
 
 **Default:** `None` (nothing drawn)
+
+#### Labelling in place (`legend="annotate"`)
+
+A key is a poor fit when the locations are many and alike: six water-mass sites
+drawn in one colour become six identical legend lines, and the framed key covers
+ocean. `legend="annotate"` writes each labelled `Field`/`Comparison`'s name next to
+what it draws instead, the way a paper figure labels its stations:
+
+```python
+PACIFIC = {"NWP": {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}},
+           "SG":  {"lon": {"min": 184.59, "max": 185.73}, "lat": {"min": 47.76, "max": 48.59}}}
+sites = [osk.field(reference, variable, label=abbr, select=box) for abbr, box in PACIFIC.items()]
+
+osk.field(reference, "h").plot(locations=[eq, b180, b160, *sites],
+                               colors={"Eq": "k", "180-160": "r", "160-120": "r",
+                                       **{abbr: "purple" for abbr in PACIFIC}},
+                               legend="annotate", title="Pacific topography")
+```
+
+- **Where each label goes:** east of a point marker, centred above a box's top edge,
+  and just above a transect or slice line's last point. Offsets are in points/pixels,
+  so they don't change with the map's scale; labels never widen the map.
+- **Style:** the group's own colour, bold, with a thin white halo so a label reads
+  over deep water and shelf alike. `annot_kwargs` overrides any of it (e.g.
+  `annot_kwargs={"color": "k", "fontsize": 9}`), static renderer only. The interactive
+  renderer draws the same labels in the same places, without the halo (bokeh text
+  has no outline).
+- **Only labelled selections are written on the map.** Catalog stations, the
+  unlabelled `"selection"` entry and the domain outline have no name worth writing,
+  so they keep a framed key, drawn only if any are present.
+- **Short labels read best.** Use abbreviations (`label="NWP"`) and spell them out in
+  the caption.
+- **Every panel of a facet** carries the labels, as it carries the shapes.
 
 #### Recolouring the groups (`colors`)
 
@@ -2376,7 +2411,8 @@ name the panels, or with `osk.FieldSet([...])`:
 osk.plot({"Eq": eq, "180-160": b180, "160-120": b160})
 ```
 
-- **Panels keep their own x axis** (km along a transect, degrees for a slab).
+- **Panels keep their own x axis** (km, longitude or latitude as each path suggests;
+  degrees for a slab). `section_x=` applies to every panel alike.
 - **Panel titles** are `label — path note`, and the shared variable and depth go in
   the suptitle.
 - **Colour scale:** one shared scale and colorbar when every member has the same
@@ -2435,6 +2471,65 @@ osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], n
   honours a single colour, a scalar width and the named line styles, and warns for
   the rest. Interactively, hovering a line shows its value, such as `temperature 15 °C`.
 
+### Sections built from casts: cast markers, the seafloor and the fill between casts (`casts=`, `bathymetry=`, `cast_fill=`)
+
+A comparison section stacked from discrete casts
+(`select={"transect": {"from": "reference"}}`) shows where its data came from. All
+three of these are on by default, in the static and interactive renderers alike:
+
+```python
+along = osk.compare(
+    reference=[f"ctd_station_HV{n}" for n in [1, 3, 5, 7, 9, 10, 12]],
+    test="his", variables=["salinity"],
+    select={"transect": {"from": "reference"}, "depth": list(range(0, 36, 2))},
+    aggregate={"time": "mean"},
+)
+along.plot(mark="contourf", contours=along)
+```
+
+- **Cast markers (`casts=`).**
+  - Each cast gets a thin dashed line from the surface down to its deepest
+    observation. Its name is written along the top of every panel.
+  - The names are the reference names with their shared prefix removed, so
+    `ctd_station_HV1` reads `HV1`.
+  - `casts=False` turns the markers off.
+  - A list sets every label, in cast order. A dict such as
+    `{"ctd_station_HV1": "mouth"}` renames only some of them.
+  - `cast_kwargs=` styles the lines (`color`, `linestyle`, `linewidth`).
+- **The seafloor (`bathymetry=`).**
+  - The test model's bathymetry (`h`) is sampled finely along the path between the
+    casts, not only at them. It is drawn as a filled seafloor with a black outline.
+  - The y axis reaches down to the seafloor.
+  - The fill sits under the data, so an observation deeper than the model's smoothed
+    bottom stays visible. The outline is drawn over the data.
+  - With the default, a test source that has no bathymetry variable is skipped
+    quietly.
+  - `bathymetry=True` asks for it on any transect comparison, and raises if the
+    source has none.
+  - Pass a 1-D `Field` along the same path, such as a survey DEM, to draw that
+    instead. `bathymetry=False` turns it off.
+  - `seafloor_kwargs=` styles it: `color` and `alpha` style the fill, and `edgecolor`
+    and `linewidth` style the outline.
+  - `Comparison.seafloor()` returns the sampled line itself.
+  - With a seafloor drawn, a cell with no data is white -- open water the casts did
+    not reach -- rather than the usual light grey, so the data, the empty water and
+    the rock read as three different things.
+- **The fill between casts (`cast_fill=`).**
+  - A section built from casts has one column per cast and nothing between them, so
+    on its own a filled contour only colours between two casts down to the
+    *shallower* one's bottom, and a deep cast between two shallow ones all but
+    disappears.
+  - For drawing, the gap between each pair of casts is filled the way hydrographic
+    sections usually are. At a depth both casts reach, the colour blends between
+    them. At a depth only one reaches, that cast's value carries halfway to its
+    neighbour and stops. So the bottom of the data steps down to each cast's own
+    deepest value, and nothing is drawn below where a cast measured. With a seafloor
+    drawn, the fill between casts also stops at the rock, so a cast's colour is never
+    carried over a sill; each cast's own column is kept as measured.
+  - Contour lines are drawn on the same filled grid.
+  - It changes the picture only; the metrics are computed from the casts
+    themselves. `cast_fill=False` draws just the casts' own columns.
+
 ## The `cross` family (two sections through one point)
 
 `select={"transect": {"cross": ...}}` is sugar for the common case of *two*
@@ -2474,8 +2569,22 @@ comparisons instead.
 * **y is depth, positive down, inverted** — 0 m draws at the top, the seafloor at
   the bottom — matching every other depth label in this package (`facet_labels`'
   own `abs()`).
-* **x is along-path distance in kilometres** (great-circle, from the sliced grid's
-  own lon/lat), labelled `distance along transect (km)`.
+* **x is chosen per path (`section_x="auto"`).** A path that runs mostly east-west
+  (an equatorial line) is drawn against its longitude, labelled `longitude (°E)`;
+  one that runs mostly north-south, against its latitude, `latitude (°N)`; anything
+  else — a diagonal, a bend, a path that doubles back — against the distance along
+  the path in kilometres (great-circle, from the sliced grid's own lon/lat),
+  `distance along transect (km)`.
+  * "Mostly" means one direction's span, in kilometres, is at least twice the other's
+    *and* the coordinate only ever rises or only ever falls along the path.
+  * It is read from the positions you asked for, not the grid cells they snapped to,
+    so a line at `lat=0` is not thrown off by a grid that jitters a cell either way.
+  * Longitude is unwrapped across the antimeridian: 170°E to 170°W reads 170 to 190.
+  * `section_x="distance"` forces kilometres whatever the path does;
+    `section_x="lon"` / `"lat"` force that coordinate and raise if it doubles back.
+  * A box-averaged slab always draws its surviving axis in degrees under `"auto"`;
+    `section_x="distance"` gives it kilometres instead. `section_x` works on every
+    section figure, static or interactive, including comparison rows and stacks.
 * **Below-bathymetry (or off-domain) cells** carry no data and draw as the same
   grey a map's land does — the seafloor's shape is visible without singling those
   cells out.
@@ -2755,8 +2864,9 @@ More than one `section_row` comparison in a `ComparisonSet.plot()` — or in
 osk.plot({"Eq": eq, "180-160": b180, "160-120": b160}, shared_limits=True)
 ```
 
-- **Rows keep their own x axis.** A transect row runs in km along the path, a
-  lon-averaged slab row in degrees of latitude, so x is never shared across rows.
+- **Rows keep their own x axis.** A diagonal transect row runs in km along the path,
+  an equatorial one in degrees of longitude, a lon-averaged slab row in degrees of
+  latitude (`section_x=` forces one choice), so x is never shared across rows.
   Depth is positive-down and inverted on every panel.
 - **Row labels** come from each comparison's label, or the dict keys, drawn rotated
   at the left edge (`row_label_kwargs`).

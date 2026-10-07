@@ -19,6 +19,14 @@ would eventually disagree about where a line or a band edge sits:
   contour primitive of its own (bokeh);
 * :func:`fill_edges` places the filled bands' edges so every colour-bar tick sits on
   one.
+
+A section stacked from discrete casts (``select={"transect": {"from": "reference"}}``)
+marks where each cast was and draws the seafloor under it, and those placements live
+here too: :func:`cast_marks` (a line per cast, down to its deepest observation),
+:func:`seafloor_line` (the bathymetry along the path, on the panel's own x axis) and
+:func:`depth_limit` (how deep the y axis reaches once the seafloor is drawn). Its
+handful of columns is resampled for drawing by :func:`fill_between_casts`, so the
+fill reaches each cast's own bottom rather than the shallower neighbour's.
 """
 
 from __future__ import annotations
@@ -34,22 +42,36 @@ import xarray as xr
 from ocean_skill.plot._colorbar import _clean, tick_step
 
 __all__ = [
+    "CAST_COLOR",
+    "CAST_FILL_SAMPLES",
+    "CAST_LABEL_COLOR",
+    "CAST_WIDTH",
     "CONTOUR_COLOR",
     "CONTOUR_WIDTH",
     "DEFAULT_CONTOUR_LEVELS",
     "DEFAULT_FILL_BANDS",
+    "SEAFLOOR_COLOR",
     "SECTION_MARKS",
+    "SECTION_X",
+    "WATER_COLOR",
+    "X_DOMINANCE",
+    "CastMark",
     "ContourLevel",
     "SectionGeometry",
+    "cast_marks",
     "check_section_options",
+    "check_section_x",
     "contour_label",
     "contour_levels",
     "contour_paths",
+    "depth_limit",
     "difference_fill_levels",
+    "fill_between_casts",
     "fill_edges",
     "prepare_overlay",
     "prepare_section",
     "prepare_section_row",
+    "seafloor_line",
 ]
 
 
@@ -65,16 +87,19 @@ class SectionGeometry:
     one shape of coordinate for a renderer to read either way, no special case for
     which kind of vertical axis it is drawing.
 
-    For a path section ``x_name`` holds the distance along it (km) and ``x_label``
-    says so. For a slab -- a box averaged along one horizontal axis, whose along
-    coordinate carries ``axis_coord`` (see
-    :func:`ocean_skill.comparison._slab_to_section`) -- ``x_name`` still names the
-    coordinate to draw against, but it now holds the *surviving* coordinate's
-    degrees, and ``x_label`` reads "latitude (°N)" / "longitude (°E)". A renderer
-    needs no branch for it: it draws ``x_name`` against ``y_name`` and labels the
-    axes with ``x_label``/``y_label`` either way. ``x_axis`` records which it is
-    (``"distance"``, ``"lat"`` or ``"lon"``) for a caller that does care, such as
-    one deciding whether two sections can share an x axis.
+    By default a path section's ``x_name`` holds the distance along it (km) and
+    ``x_label`` says so -- but :func:`prepare_section` reads where the path runs, and
+    one that is mostly east-west or north-south is drawn against its own longitude or
+    latitude instead, exactly as a slab is. A slab -- a box averaged along one
+    horizontal axis, whose along coordinate carries ``axis_coord`` (see
+    :func:`ocean_skill.comparison._slab_to_section`) -- always has its *surviving*
+    coordinate on ``x_name``, in degrees. Either way ``x_name`` still names the
+    coordinate to draw against and ``x_label`` reads "latitude (°N)" /
+    "longitude (°E)" / "distance along transect (km)". A renderer needs no branch for
+    it: it draws ``x_name`` against ``y_name`` and labels the axes with
+    ``x_label``/``y_label`` regardless. ``x_axis`` records which it is (``"distance"``,
+    ``"lat"`` or ``"lon"``) for a caller that does care, such as one deciding whether
+    two sections can share an x axis.
     """
 
     x_name: str
@@ -128,10 +153,12 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     along_attrs = da[ALONG_DIM].attrs if ALONG_DIM in da.coords else {}
     if along_attrs.get("band_axis") and along_attrs.get("band") is not None:
         return _band_note(along_attrs["band_axis"], along_attrs["band"])
-    if lon_name is None or lat_name is None:
+    # The requested path (path_lon/path_lat) names the transect the caller asked
+    # for -- "along 0.0°N" for an equator line -- where the snapped lon/lat would
+    # name whichever row a coarse source happened to land on (0.5°S).
+    lon, lat = _path_positions(da, lon_name, lat_name)
+    if lon is None or lat is None:
         return ""
-    lon = np.asarray(da[lon_name], dtype="float64")
-    lat = np.asarray(da[lat_name], dtype="float64")
     if lon.size == 0:
         return ""
 
@@ -150,7 +177,103 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     return f"{_fmt(lon[0], lat[0])} → {_fmt(lon[-1], lat[-1])}"
 
 
-def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
+#: What a section's x axis may run along: ``"auto"`` picks per path (see
+#: :func:`_auto_x_axis`), the others force it. ``"distance"`` is kilometres along the
+#: path, ``"lon"``/``"lat"`` the path's own longitude or latitude in degrees.
+SECTION_X = ("auto", "distance", "lon", "lat")
+
+#: How much longer a path's span must be in one direction than the other for ``"auto"``
+#: to label the section by that coordinate. Both spans are in kilometres, so a path
+#: that wanders 120° of longitude and 2° of latitude along the equator reads as
+#: longitude, one that runs 45° across the grid does not, and a path in between
+#: (neither direction at least twice the other) falls back to distance rather than
+#: dressing a diagonal up as an east-west line. May be tuned.
+X_DOMINANCE = 2.0
+
+#: Kilometres per degree: of longitude at the equator (scaled by cos(latitude)), and of
+#: latitude (averaged over the globe -- good to a fraction of a percent, which is all a
+#: dominance test needs).
+_KM_PER_DEG_LON = 111.32
+_KM_PER_DEG_LAT = 110.57
+
+
+def check_section_x(x) -> None:
+    """Refuse an ``x`` / ``section_x`` that is not one of :data:`SECTION_X`."""
+    if not isinstance(x, str) or x not in SECTION_X:
+        raise ValueError(
+            f"section_x={x!r} is not a section x axis; expected one of {SECTION_X}. "
+            '"auto" picks longitude or latitude when the path runs mostly east-west or '
+            'north-south, else distance along the path; "distance" always uses '
+            'kilometres along the path; "lon"/"lat" force that coordinate.'
+        )
+
+
+def _path_positions(da, lon_name: str | None, lat_name: str | None):
+    """Return ``(lon, lat)`` 1-D float arrays along the path, ``None`` where absent.
+
+    The *requested* path positions (``path_lon``/``path_lat`` on the along dimension,
+    see :func:`ocean_skill.transect.path_of`) win over the snapped ``lon``/``lat``:
+    snapping a path to a model's grid jitters the coordinate that was meant to stay
+    fixed (an equatorial line's latitude zigzagging by a cell), which would read as a
+    path that doubles back. A coordinate that is not one-dimensional along the path
+    -- a slab's averaged-out axis, say -- is reported as absent.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    def _read(*names):
+        for name in names:
+            if name is None or name not in da.coords:
+                continue
+            coord = da[name]
+            if coord.dims == (ALONG_DIM,):
+                return np.asarray(coord, dtype="float64")
+        return None
+
+    return _read("path_lon", lon_name), _read("path_lat", lat_name)
+
+
+def _strictly_monotonic(values: np.ndarray | None) -> bool:
+    """Whether ``values`` has two or more finite entries that only ever rise or fall."""
+    if values is None or values.size < 2 or not np.all(np.isfinite(values)):
+        return False
+    steps = np.diff(values)
+    return bool(np.all(steps > 0) or np.all(steps < 0))
+
+
+def _auto_x_axis(lon: np.ndarray | None, lat: np.ndarray | None) -> str:
+    """Pick ``"lon"``, ``"lat"`` or ``"distance"`` for a path's x axis.
+
+    ``lon`` is the path's longitude already unwrapped across the antimeridian. A
+    coordinate is chosen when it runs strictly one way along the path *and* its span
+    in kilometres is at least :data:`X_DOMINANCE` times the other direction's -- so
+    degrees of longitude along a line that is mostly east-west, never along one that
+    doubles back (the same longitude would label two places) or runs diagonally. Any
+    shortfall -- too few points, NaNs, a missing coordinate -- is ``"distance"``.
+    """
+    if not (_strictly_monotonic(lon) or _strictly_monotonic(lat)):
+        return "distance"
+    finite_lat = lat[np.isfinite(lat)] if lat is not None else np.empty(0)
+    mean_lat = float(finite_lat.mean()) if finite_lat.size else 0.0
+    lon_km = (
+        abs(float(lon[-1] - lon[0])) * _KM_PER_DEG_LON * np.cos(np.radians(mean_lat))
+        if lon is not None and lon.size >= 2
+        else 0.0
+    )
+    lat_km = (
+        abs(float(lat[-1] - lat[0])) * _KM_PER_DEG_LAT
+        if lat is not None and lat.size >= 2
+        else 0.0
+    )
+    if _strictly_monotonic(lon) and lon_km >= X_DOMINANCE * lat_km:
+        return "lon"
+    if _strictly_monotonic(lat) and lat_km >= X_DOMINANCE * lon_km:
+        return "lat"
+    return "distance"
+
+
+def prepare_section(
+    da: xr.DataArray, x: str = "auto"
+) -> tuple[xr.DataArray, SectionGeometry]:
     """Return ``(field, geometry)``: ``da`` with ``depth``/``distance`` coordinates.
 
     ``da`` must be exactly two-dimensional: :data:`ocean_skill.align.ALONG_DIM` and
@@ -170,10 +293,28 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     one is not once the vertical axis is native s-levels. A renderer draws
     ``x=geometry.x_name, y=geometry.y_name`` against the returned field and never
     needs to know which kind of vertical axis it got.
+
+    ``x`` says what runs along the x axis (:data:`SECTION_X`), and the coordinate
+    named ``distance`` holds it -- kilometres, or degrees when a longitude or latitude
+    is drawn instead:
+
+    * ``"auto"`` (default): a slab (a box averaged along one horizontal axis, whose
+      along coordinate carries ``axis_coord``) draws its surviving coordinate. A path
+      draws longitude when it runs mostly east-west, latitude when mostly
+      north-south, and distance along the path otherwise (:func:`_auto_x_axis`), read
+      off the *requested* path positions (``path_lon``/``path_lat``) when the field
+      has them and its snapped ``lon``/``lat`` when not. Longitude is unwrapped across
+      the antimeridian, so a path from 170°E to 170°W reads 170 to 190 rather than
+      jumping.
+    * ``"distance"``: kilometres along the path, a slab included.
+    * ``"lon"`` / ``"lat"``: force that coordinate; raises if it does not run strictly
+      one way along the path (a path that doubles back would label two places
+      alike).
     """
     from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
     from ocean_skill.cf import find_coord
 
+    check_section_x(x)
     if ALONG_DIM not in da.dims:
         raise ValueError(
             f"prepare_section expects a field with an {ALONG_DIM!r} dimension "
@@ -251,15 +392,41 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
     # no business going NaN there in the first place.
 
     lon_name, lat_name = _lon_name(da), _lat_name(da)
-    # A slab (see ocean_skill.comparison._slab_to_section) names the coordinate its
-    # x axis should be -- the one that survived the averaging -- and draws it in
-    # degrees; a path section's x is the distance along it, in km. Same coordinate
-    # name either way ("distance"), so a renderer needs no branch for which it got.
-    x_axis = da[ALONG_DIM].attrs.get("axis_coord")
-    if x_axis in ("lat", "lon") and (lat_name if x_axis == "lat" else lon_name):
-        source = da[lat_name if x_axis == "lat" else lon_name]
+    # What the x axis shows. A slab (see ocean_skill.comparison._slab_to_section)
+    # names the coordinate its x axis should be -- the one that survived the averaging
+    # -- and draws it in degrees; a path section's x is chosen from where the path
+    # runs (_auto_x_axis) or forced by the caller. Same coordinate name either way
+    # ("distance"), so a renderer needs no branch for which it got.
+    slab_axis = da[ALONG_DIM].attrs.get("axis_coord")
+    slab_name = {"lat": lat_name, "lon": lon_name}.get(slab_axis)
+    degrees = None
+    if x in ("auto", slab_axis) and slab_name:
+        x_axis = slab_axis
+        degrees = np.asarray(da[slab_name], dtype="float64")
+    elif x == "distance":
+        x_axis = "distance"
+    else:
+        lon, lat = _path_positions(da, lon_name, lat_name)
+        if lon is not None and np.all(np.isfinite(lon)):
+            lon = np.unwrap(lon, period=360.0)
+        x_axis = _auto_x_axis(lon, lat) if x == "auto" else x
+        if x_axis in ("lon", "lat"):
+            degrees = lon if x_axis == "lon" else lat
+            if x != "auto" and not _strictly_monotonic(degrees):
+                name = "longitude" if x_axis == "lon" else "latitude"
+                why = (
+                    "absent from this field"
+                    if degrees is None
+                    else "not monotonic (it doubles back, repeats or has gaps)"
+                )
+                raise ValueError(
+                    f'section_x="{x_axis}" needs the path\'s {name} to run strictly '
+                    f"one way along it, but it is {why}. Use section_x=\"distance\" "
+                    "to draw kilometres along the path instead."
+                )
+    if x_axis in ("lat", "lon"):
         distance = xr.DataArray(
-            np.asarray(source, dtype="float64"),
+            degrees,
             dims=ALONG_DIM,
             coords={ALONG_DIM: da[ALONG_DIM]},
             name="distance",
@@ -267,11 +434,18 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
         distance.attrs["units"] = "degrees_north" if x_axis == "lat" else "degrees_east"
         x_label = "latitude (°N)" if x_axis == "lat" else "longitude (°E)"
     else:
-        x_axis = "distance"
-        distance = da[ALONG_DIM].rename("distance")
+        # rebuilt rather than renamed: a renamed coordinate shares its attrs with the
+        # caller's own along coordinate, which the bookkeeping below (units, x_axis)
+        # must not leak into
+        distance = xr.DataArray(
+            np.asarray(da[ALONG_DIM]),
+            dims=ALONG_DIM,
+            coords={ALONG_DIM: da[ALONG_DIM]},
+            name="distance",
+            attrs=dict(da[ALONG_DIM].attrs),
+        )
         distance.attrs["units"] = da[ALONG_DIM].attrs.get("units", "km")
         x_label = "distance along transect (km)"
-
     depth2d, distance2d, values2d = xr.broadcast(depth, distance, da)
     order = tuple(values2d.dims)
     depth2d = depth2d.transpose(*order)
@@ -291,7 +465,7 @@ def prepare_section(da: xr.DataArray) -> tuple[xr.DataArray, SectionGeometry]:
 
 
 def prepare_section_row(
-    aligned: dict[str, xr.DataArray] | xr.Dataset,
+    aligned: dict[str, xr.DataArray] | xr.Dataset, x: str = "auto"
 ) -> tuple[dict[str, xr.DataArray], SectionGeometry]:
     """Return ``(values, geometry)`` for a test | reference | difference row.
 
@@ -315,7 +489,12 @@ def prepare_section_row(
     geometries are identical; only the test lane's is returned, matching
     :func:`ocean_skill.plot.matplotlib_renderer._field_row`'s single-geometry
     contract for a row of panels.
+
+    ``x`` is :func:`prepare_section`'s. It is resolved on the test lane and the answer
+    handed to the other two as a forced choice, so the three panels can never disagree
+    about what runs along their shared x axis.
     """
+    check_section_x(x)
     if "z" not in aligned["test"].dims:
         raise ValueError(
             "prepare_section_row expects a fixed-depth 'z' dimension on every "
@@ -328,9 +507,10 @@ def prepare_section_row(
     values: dict[str, xr.DataArray] = {}
     geometry: SectionGeometry | None = None
     for lane in ("test", "reference", "difference"):
-        values[lane], lane_geometry = prepare_section(aligned[lane])
+        values[lane], lane_geometry = prepare_section(aligned[lane], x)
         if lane == "test":
             geometry = lane_geometry
+            x = lane_geometry.x_axis
     assert geometry is not None
     return values, geometry
 
@@ -418,7 +598,9 @@ def _mismatch_text(
     return text
 
 
-def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
+def prepare_overlay(
+    overlay: xr.DataArray, panel: xr.DataArray, x: str = "auto"
+) -> xr.DataArray:
     """Return ``overlay`` prepared on the same section grid as ``panel``, or raise.
 
     An overlay is the second variable of a section figure -- the isotherms drawn over
@@ -427,7 +609,11 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
     levels. This runs :func:`prepare_section` on it (so it gets the same axis
     conventions as the panel, a native-s overlay's depth flipped to positive-down
     included), puts it in the panel's dimension order, and checks the two meshes
-    agree.
+    agree. ``x`` is the panel's own (the ``section_x`` it was prepared with), so a
+    forced ``"distance"`` or ``"lon"`` applies to the lines as it did to the fill; under
+    ``"auto"`` the two choose alike for two variables cut from one path, and an overlay
+    that is a different kind of section from its panel (a latitude slab against a
+    transect) is reported as the mesh mismatch it is.
 
     It never regrids. Two variables of one source, cut with one ``select`` and
     ``aggregate``, always share a mesh, so a mismatch means the two were built
@@ -446,6 +632,8 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
     panel
         The fill's already-prepared values: :func:`prepare_section`'s own return,
         carrying 2-D ``distance`` and ``depth`` coordinates.
+    x
+        What the panel's x axis was prepared with (:data:`SECTION_X`).
 
     Returns
     -------
@@ -470,7 +658,7 @@ def prepare_overlay(overlay: xr.DataArray, panel: xr.DataArray) -> xr.DataArray:
             f"(an {ALONG_DIM!r} dimension and 2-D 'distance' and 'depth' coordinates) "
             f"-- got dims {sorted(panel.dims)} and coordinates {sorted(panel.coords)}."
         )
-    prepared, _ = prepare_section(overlay)
+    prepared, _ = prepare_section(overlay, x)
     vertical_o = next(d for d in prepared.dims if d != ALONG_DIM)
     vertical_p = next(d for d in panel.dims if d != ALONG_DIM)
     advice = (
@@ -918,6 +1106,7 @@ def check_section_options(
     contour_levels=None,
     contour_kwargs=None,
     fill_levels=None,
+    section_x="auto",
 ) -> None:
     """Refuse a section option with nothing to act on -- one wording, both renderers.
 
@@ -925,8 +1114,10 @@ def check_section_options(
     either one without an overlay on any panel would be silently ignored; so would
     ``fill_levels=`` -- the bands of a filled-contour fill -- on a ``pcolormesh``
     panel. Both are refused by name instead, as is a ``mark`` a section cannot draw
-    (``None`` is the default, cells).
+    (``None`` is the default, cells), and a ``section_x`` that names no x axis
+    (:data:`SECTION_X`).
     """
+    check_section_x(section_x)
     if mark is not None and mark not in SECTION_MARKS:
         raise ValueError(
             f"mark={mark!r} is not a section mark; expected one of {SECTION_MARKS}. "
@@ -958,3 +1149,285 @@ def difference_fill_levels(fill_levels):
     if fill_levels is None or isinstance(fill_levels, bool | int | np.integer):
         return fill_levels
     return None
+
+
+# --- casts and seafloor: where a cast-built section's data came from ------------------
+
+#: The default colour of a cast's marker line -- a light grey that reads over any fill
+#: without competing with the black contour lines drawn on top of it.
+CAST_COLOR = "0.55"
+
+#: The default width (points) of a cast's marker line: thinner than a contour line.
+CAST_WIDTH = 0.6
+
+#: The colour of a cast's name along a panel's top edge: black, like the axis's own
+#: tick labels (which the static renderer draws them as), not the light line colour.
+CAST_LABEL_COLOR = "black"
+
+#: The default fill of the seafloor under a section: a mid grey, set off from the
+#: data above it by a thin black outline.
+SEAFLOOR_COLOR = "0.65"
+
+#: What a cell with no data draws as on a panel with a seafloor under it. Without a
+#: seafloor the section family's ``0.85`` grey does the job a map's land does; with
+#: one, the rock is already drawn, so what is left above it is open water the casts
+#: did not reach -- white, so the data, the empty water and the rock read as three
+#: different things rather than two shades of grey.
+WATER_COLOR = "white"
+
+#: About how many columns :func:`fill_between_casts` resamples a section onto, shared
+#: out among the gaps between casts in proportion to their width.
+CAST_FILL_SAMPLES = 400
+
+
+@dataclass(frozen=True)
+class CastMark:
+    """One cast's place on a section panel: its ``x``, how deep it reached, its name.
+
+    ``bottom`` is the deepest depth (m, positive-down) at which the cast has a finite
+    value, or NaN for a cast with none -- a renderer still labels it but draws no line.
+    """
+
+    x: float
+    bottom: float
+    label: str
+
+
+def cast_marks(
+    reference: xr.DataArray, geometry: SectionGeometry, labels: Sequence[str]
+) -> list[CastMark]:
+    """Return one :class:`CastMark` per column of a cast-built section.
+
+    ``reference`` is the reference lane as :func:`prepare_section` returned it (with
+    its 2-D ``geometry.x_name``/``geometry.y_name`` coordinates). A section stacked
+    from casts has exactly one along-path column per cast, in the casts' own order
+    (see :meth:`ocean_skill.comparison.Comparison._prepare_section_from_casts`), so
+    ``labels[i]`` names column ``i`` -- the two must have the same length.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    labels = list(labels)
+    n = reference.sizes[ALONG_DIM]
+    if len(labels) != n:
+        raise ValueError(
+            f"{len(labels)} cast label(s) for a section with {n} cast column(s) -- "
+            "a cast-built section has one column per cast, so give one label each."
+        )
+    vertical = next(d for d in reference.dims if d != ALONG_DIM)
+    order = (ALONG_DIM, vertical)
+    values = np.asarray(reference.transpose(*order), dtype="float64")
+    xs = np.asarray(reference[geometry.x_name].transpose(*order), dtype="float64")
+    depths = np.asarray(reference[geometry.y_name].transpose(*order), dtype="float64")
+    marks = []
+    for i, label in enumerate(labels):
+        finite = np.isfinite(values[i]) & np.isfinite(depths[i])
+        bottom = float(np.max(depths[i][finite])) if finite.any() else float("nan")
+        x_row = xs[i][np.isfinite(xs[i])]
+        marks.append(
+            CastMark(
+                x=float(x_row[0]) if x_row.size else float("nan"),
+                bottom=bottom,
+                label=str(label),
+            )
+        )
+    return marks
+
+
+def seafloor_line(
+    seafloor: xr.DataArray, geometry: SectionGeometry
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(x, depth)``: the seafloor drawn on a section panel's own x axis.
+
+    ``seafloor`` is one-dimensional along :data:`~ocean_skill.align.ALONG_DIM`, its
+    values the bottom depth in metres positive-down, with the along coordinate in
+    kilometres from the path's start and ``path_lon``/``path_lat`` coordinates for
+    where each sample sits (see :meth:`ocean_skill.comparison.Comparison.seafloor`).
+    ``geometry.x_axis`` picks which of those becomes ``x``: kilometres as given, or
+    the longitude (unwrapped across the antimeridian, as :func:`prepare_section`
+    unwraps the section's own) or latitude along the path. Points with no finite
+    position or depth are dropped.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    if seafloor.dims != (ALONG_DIM,):
+        raise ValueError(
+            f"a seafloor line must be one-dimensional along {ALONG_DIM!r} -- got "
+            f"dims {seafloor.dims}."
+        )
+    depth = np.asarray(seafloor, dtype="float64")
+    if geometry.x_axis == "distance":
+        x = np.asarray(seafloor[ALONG_DIM], dtype="float64")
+    else:
+        name = "path_lon" if geometry.x_axis == "lon" else "path_lat"
+        if name not in seafloor.coords:
+            raise ValueError(
+                f"the section's x axis is {geometry.x_axis!r}, but the seafloor has "
+                f"no {name!r} coordinate to place it by."
+            )
+        x = np.asarray(seafloor[name], dtype="float64")
+        if geometry.x_axis == "lon" and np.all(np.isfinite(x)):
+            x = np.unwrap(x, period=360.0)
+    keep = np.isfinite(x) & np.isfinite(depth)
+    return x[keep], depth[keep]
+
+
+def depth_limit(values: Sequence[xr.DataArray], seafloor_depth: np.ndarray) -> float:
+    """Return how deep (m, positive-down) a section's y axis reaches over a seafloor.
+
+    The deeper of the seafloor's deepest point and the deepest depth at which any
+    panel in ``values`` (prepared fields, as :func:`prepare_section` returned them)
+    has a finite value -- so the whole bottom shows, and an observation deeper than
+    the model's smoothed bathymetry is never cut off.
+    """
+    deepest = [float(np.nanmax(seafloor_depth))] if np.size(seafloor_depth) else []
+    for da in values:
+        depths = np.asarray(da["depth"], dtype="float64")
+        finite = np.isfinite(np.asarray(da, dtype="float64")) & np.isfinite(depths)
+        if finite.any():
+            deepest.append(float(np.max(depths[finite])))
+    if not deepest:
+        raise ValueError("depth_limit needs a seafloor or at least one finite value.")
+    return max(deepest)
+
+
+def fill_between_casts(
+    field: xr.DataArray,
+    geometry: SectionGeometry,
+    *,
+    seafloor: tuple[np.ndarray, np.ndarray] | None = None,
+    samples: int = CAST_FILL_SAMPLES,
+) -> xr.DataArray:
+    """Return a cast-built section resampled onto a fine x grid, for drawing only.
+
+    A section stacked from casts has one column per cast and nothing between them, so
+    a filled contour of it can only colour the stretch between two neighbouring casts
+    down to the shallower one's bottom -- a deep cast between two shallow ones all but
+    vanishes. This fills each gap between casts ``i`` and ``i + 1`` the way a
+    hydrographic section is usually drawn:
+
+    * at a depth where both casts have a value, it blends linearly between them;
+    * at a depth only one of them reaches, that cast's own value carries halfway
+      across the gap, and stops there -- a block, exactly the width a
+      ``pcolormesh`` cell of that cast would have;
+    * at a depth neither reaches, nothing.
+
+    So the data's lower edge steps down at each halfway point to each cast's own
+    deepest value, and every coloured cell either is a cast's value or lies between
+    two of them at one depth: nothing is extrapolated, and nothing is drawn below
+    where a cast actually measured. The halfway step is two samples a hair either
+    side of the midpoint, so a filled contour's masked cell there is too thin to see.
+
+    ``seafloor`` -- :func:`seafloor_line`'s ``(x, depth)`` on the same x axis, or
+    ``None`` -- stops the fill at the rock: a cell between casts deeper than the
+    seafloor under it is left empty, so a cast's value carried across a gap never
+    paints over a sill. The casts' own columns are kept as measured, even below the
+    seafloor (a cast deeper than a smoothed model bottom is real data, and its line
+    still reaches its deepest value).
+
+    ``field`` is :func:`prepare_section`'s return -- a fixed-depth comparison lane or
+    an overlay on its mesh -- with the casts as its along-path columns, in order. The
+    result has the same dimensions, name and attrs, and the same 2-D
+    ``geometry.x_name``/``geometry.y_name`` coordinates, on about ``samples`` columns
+    shared out among the gaps by width (at least four each); the along coordinate is
+    interpolated with x. Other coordinates are dropped. A section with fewer than two
+    columns, or with no finite x to place them by, is returned unchanged.
+
+    Raises
+    ------
+    ValueError
+        For a native s-level section, whose depths differ from column to column -- a
+        cast-built section is always on fixed depths.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    if geometry.native_s:
+        raise ValueError(
+            "fill_between_casts needs a fixed-depth section; a native s-level one has "
+            "different depths in every column."
+        )
+    vertical = next(d for d in field.dims if d != ALONG_DIM)
+    order = (vertical, ALONG_DIM)
+    f = field.transpose(*order)
+    values = np.asarray(f, dtype="float64")
+    xs = np.asarray(f[geometry.x_name], dtype="float64")[0]
+    depth = np.asarray(f[geometry.y_name], dtype="float64")[:, 0]
+    along = np.asarray(f[ALONG_DIM], dtype="float64")
+    n = values.shape[1]
+    if n < 2 or not np.all(np.isfinite(xs)):
+        return field
+    widths = np.abs(np.diff(xs))
+    total = float(widths.sum())
+    if total == 0.0:
+        return field
+
+    eps = 1e-6  # of a gap's width: the two sides of its halfway step
+    columns, x_out, along_out, is_cast = [], [], [], []
+    for i, width in enumerate(widths):
+        k = max(4, round(samples * float(width) / total))
+        t = np.linspace(0.0, 1.0, k + 1)[:-1]  # t = 1 is the next gap's t = 0
+        t = np.sort(np.concatenate([t[np.abs(t - 0.5) > eps], [0.5 - eps, 0.5 + eps]]))
+        left, right = values[:, i, None], values[:, i + 1, None]
+        has_left, has_right = np.isfinite(left), np.isfinite(right)
+        with np.errstate(invalid="ignore"):
+            # clipped to its two ends: l*(1-t) + r*t can land an ulp outside them
+            # (0.3 and 0.3 blending to 0.30000000000000004), and a value an ulp past
+            # the colour scale's end falls outside contourf's last band, undrawn
+            blend = np.clip(
+                left * (1.0 - t) + right * t,
+                np.fmin(left, right),
+                np.fmax(left, right),
+            )
+        columns.append(
+            np.where(
+                has_left & has_right,
+                blend,
+                np.where(
+                    has_left & (t <= 0.5),
+                    left,
+                    np.where(has_right & (t > 0.5), right, np.nan),
+                ),
+            )
+        )
+        x_out.append(xs[i] + t * (xs[i + 1] - xs[i]))
+        along_out.append(along[i] + t * (along[i + 1] - along[i]))
+        is_cast.append(t == 0.0)
+    columns.append(values[:, -1:])
+    x_out.append(xs[-1:])
+    along_out.append(along[-1:])
+    is_cast.append(np.array([True]))
+    dense = np.concatenate(columns, axis=1)
+    x_dense = np.concatenate(x_out)
+    m = x_dense.size
+    if seafloor is not None and np.size(seafloor[0]):
+        sx, sdepth = (np.asarray(a, dtype="float64") for a in seafloor)
+        order_x = np.argsort(sx)
+        # the seafloor's depth under each column; past its ends, its end depths
+        floor = np.interp(x_dense, sx[order_x], sdepth[order_x])
+        below = (depth[:, None] > floor[None, :]) & ~np.concatenate(is_cast)[None, :]
+        dense = np.where(below, np.nan, dense)
+
+    out = xr.DataArray(
+        dense,
+        dims=order,
+        coords={
+            vertical: f[vertical],
+            ALONG_DIM: (
+                ALONG_DIM,
+                np.concatenate(along_out),
+                dict(f[ALONG_DIM].attrs),
+            ),
+            geometry.y_name: (
+                order,
+                np.repeat(depth[:, None], m, axis=1),
+                dict(f[geometry.y_name].attrs),
+            ),
+            geometry.x_name: (
+                order,
+                np.repeat(x_dense[None, :], depth.size, axis=0),
+                dict(f[geometry.x_name].attrs),
+            ),
+        },
+        name=field.name,
+        attrs=dict(field.attrs),
+    )
+    return out.transpose(*field.dims)

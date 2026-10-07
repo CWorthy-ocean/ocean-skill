@@ -121,7 +121,12 @@ grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
 ``section_row``/``field_grid``), the section options ``contours`` (a second
 variable's object drawn as contour lines over the fill), ``contour_levels``,
 ``contour_kwargs`` and ``fill_levels`` (band count/edges for ``mark="contourf"``),
-and the
+``casts``/``cast_kwargs``, ``bathymetry``/``seafloor_kwargs`` and ``cast_fill``
+(a section built from casts: a labelled line per cast, the test model's seafloor
+underneath, and the gaps between casts filled so each reaches its own bottom), and
+``section_x`` (what runs along a section's x axis: ``"auto"`` picks longitude,
+latitude or kilometres of distance from where the path runs, or force ``"distance"``,
+``"lon"`` or ``"lat"``), and the
 ``*_kwargs`` styling dicts (``title_kwargs``, ``colorbar_kwargs``,
 ``gridline_kwargs``, ``legend_kwargs``, ...), each merging onto a built-in
 default and unpacked straight into one matplotlib/cartopy call. See

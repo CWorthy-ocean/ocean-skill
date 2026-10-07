@@ -40,8 +40,10 @@ __all__ = [
     "HOVER_FIELDS",
     "SELECTION_PALETTE",
     "TAB10",
+    "annotation_anchors",
     "build_items",
     "legend_groups",
+    "resolve_location_legend",
     "style_for",
 ]
 
@@ -252,6 +254,128 @@ def legend_groups(
             style["color"] = by_label[key]
         groups.append((key, style, group_items))
     return groups
+
+
+def resolve_location_legend(legend: Any) -> bool | str:
+    """Validate a ``locations`` ``legend=``: ``True``, ``False`` or ``"annotate"``.
+
+    ``True`` is the framed key, ``False`` none, and ``"annotate"`` writes each
+    labelled selection's name beside its shape (see :func:`annotation_anchors`) with a
+    framed key left only for the groups that have no name to write. ``None`` reads as
+    ``False``. Anything else raises a ``ValueError`` naming the allowed values, so a
+    typo fails before a figure is built.
+    """
+    if legend is None:
+        return False
+    if legend is True or legend is False or legend == "annotate":
+        return legend
+    raise ValueError(
+        f"legend={legend!r} is not recognised for locations; use True (a framed "
+        'key), False (none) or "annotate" (write each labelled selection\'s name '
+        "beside its shape)."
+    )
+
+
+def _extent_anchor(item: dict[str, Any]) -> tuple[float, float] | None:
+    """Top-edge centre ``(lon, lat)`` of an extent's ``bboxes``, seam-aware."""
+    boxes = item.get("bboxes") or []
+    if not boxes:
+        return None
+    first_lo = boxes[0][0]
+    spans = []
+    for lo, _la, hi, _ha in boxes:
+        # unwrap pieces west of the first one by a full turn so a seam-split box
+        # (170..180 and -180..-170) is one contiguous span again
+        shift = 360.0 if lo < first_lo else 0.0
+        spans.append((lo + shift, hi + shift))
+    mid = 0.5 * (min(s[0] for s in spans) + max(s[1] for s in spans))
+    lon = _wrap(mid)
+    if lon == -180.0 and mid > 0:
+        lon = 180.0
+    return lon, float(max(b[3] for b in boxes))
+
+
+def _anchor_for(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Where and how one shape's label sits, or ``None`` for a kind not labelled."""
+    kind = item["kind"]
+    if kind == "point":
+        return {
+            "lon": float(item["lon"]),
+            "lat": float(item["lat"]),
+            "ha": "left",
+            "va": "center",
+            "dx": 1,
+            "dy": 0,
+        }
+    if kind == "extent":
+        at = _extent_anchor(item)
+        if at is None:
+            return None
+        return {
+            "lon": at[0],
+            "lat": at[1],
+            "ha": "center",
+            "va": "bottom",
+            "dx": 0,
+            "dy": 1,
+        }
+    if kind == "line":
+        paths = [p for p in item.get("paths") or [] if len(p)]
+        if not paths:
+            return None
+        lon, lat = paths[-1][-1]
+        return {
+            "lon": float(lon),
+            "lat": float(lat),
+            "ha": "right",
+            "va": "bottom",
+            "dx": 0,
+            "dy": 1,
+        }
+    return None
+
+
+def annotation_anchors(
+    items: Iterable[dict[str, Any]],
+    colors: str | Sequence[str] | Mapping[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], list]:
+    """``(anchors, unlabelled_groups)`` for ``legend="annotate"``.
+
+    Built on :func:`legend_groups` (``colors`` as there), so a label's text and colour
+    always match the shape it names. ``anchors`` holds one dict per **labelled
+    selection group** -- ``featureType == "selection"`` with a truthy
+    ``legend_label`` -- in legend order, placed on the group's first placeable
+    item::
+
+        {"text", "lon", "lat", "ha", "va", "dx", "dy", "color"}
+
+    ``lon``/``lat`` are the item's already ±180-wrapped coordinates and ``dx``/``dy``
+    are unit offsets (-1/0/1) each renderer scales into points or pixels, so the gap
+    does not change with map scale. Placement: a **point** just east of the marker
+    (``left``/``center``); an **extent** centred over its top edge (``center``/
+    ``bottom``; a seam-split box takes the true midpoint across ±180); a **line**
+    (selection transect or slice) at the last vertex of its last path, above it
+    (``right``/``bottom``). A ring (or any other kind) is skipped for the group's next
+    item; a group with nothing placeable stays in the key.
+
+    ``unlabelled_groups`` is every other :func:`legend_groups` tuple, unchanged and in
+    order: catalog featureTypes, the shared unlabelled ``"selection"`` group, and
+    ``"domain"`` -- groups with no useful name to write, which keep a framed legend.
+    """
+    anchors: list[dict[str, Any]] = []
+    rest: list = []
+    for label, style, members in legend_groups(items, colors):
+        placed = None
+        if members[0]["featureType"] == "selection" and members[0].get("legend_label"):
+            for item in members:
+                placed = _anchor_for(item)
+                if placed is not None:
+                    break
+        if placed is None:
+            rest.append((label, style, members))
+        else:
+            anchors.append({"text": label, **placed, "color": style["color"]})
+    return anchors, rest
 
 
 def _resolve_group_colors(

@@ -673,7 +673,9 @@ def _pin_test_lane(
 # ``members`` maps a label (the legend entry) to one ``field()`` call's kwargs, with
 # ``source`` defaulting to ``defaults.test`` and ``variables`` to ``[y, x]``. Only the
 # page's own shape is checked here; whether the members really hold x and y, and
-# whether each region box lands on data, is XY's to say once it reads anything.
+# whether each region box lands on data, is XY's to say once it reads anything. A
+# member may also carry ``window: run`` (a suite key, popped before ``field()`` sees
+# the spec) to take the test run's span as its own ``select.time``.
 
 #: The salinity-temperature preset ``TS:`` stands for.
 _TS_X, _TS_Y = "salinity", "temperature"
@@ -778,6 +780,13 @@ class ExpandedPage:
     #: by :func:`expand` (placeholders filled, a fixed-snapshot ``series`` window
     #: turned into a literal) -- part of ``as_dict()`` since none of it needs data.
     steps: list[dict[str, Any]] = _dc_field(default_factory=list)
+    #: A field/compare page's contour overlay (``False`` for every other page, or
+    #: none asked for): ``True`` contours the plotted object itself; a mapping is
+    #: the *fully resolved* kwargs of a second ``field:``/``compare:`` call (the
+    #: page's own kwargs with the page's ``contours:`` overrides merged over them,
+    #: run through the same window injection) that :func:`build` draws the lines
+    #: from. Part of ``as_dict()`` since none of it needs data.
+    contours: bool | dict[str, Any] = False
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
@@ -798,6 +807,7 @@ class ExpandedPage:
             "plot": self.plot,
             "cache": self.cache,
             "steps": self.steps,
+            "contours": self.contours,
         }
 
 
@@ -948,7 +958,10 @@ def _expand_xy_page(
     reads ``defaults.test`` is pinned to the run exactly like a ``field:`` page
     (:func:`_pin_test_lane`) and caches by the same rule; every other member is left
     as written, with no run window -- its time axis is not the run's -- and caches with
-    the suite. ``regions`` and ``at_center`` are checked here (so a typo fails at
+    the suite, unless it says ``window: run``: then it gets the test run's whole span
+    as a literal ``select.time`` (a reanalysis that must cover the run's dates, which
+    change per run; refused if it names a ``time`` of its own, and a no-op on the test
+    member). ``regions`` and ``at_center`` are checked here (so a typo fails at
     ``--list``) but stored as written: XY expands the boxes itself.
     """
     kind = page.kind
@@ -963,6 +976,12 @@ def _expand_xy_page(
     members: dict[str, dict[str, Any]] = {}
     for label, spec in args.members.items():
         m = dict(spec or {})
+        window = m.pop("window", None)
+        if window is not None and window != "run":
+            raise ValueError(
+                f"page {title!r}: {kind}: member {label!r}: window: {window!r} is "
+                "not supported -- the only value is 'run' (the test run's span)"
+            )
         for key in _XY_RESERVED_MEMBER_KEYS:
             if key in m:
                 why = (
@@ -991,6 +1010,21 @@ def _expand_xy_page(
             _, _, cacheable = _pin_test_lane(m, get_index(source))
             m["cache"] = suite_cache and cacheable
         else:
+            if window == "run":
+                if test_source is None:
+                    raise ValueError(
+                        f"page {title!r}: {kind}: member {label!r}: window: run "
+                        "needs defaults.test (the run whose span it takes)"
+                    )
+                if "time" in (m.get("select") or {}):
+                    raise ValueError(
+                        f"page {title!r}: {kind}: member {label!r}: window: run "
+                        "and select.time both set the time window -- give one or "
+                        "the other"
+                    )
+                # A literal window, so the cache key stays right when the run grows.
+                index = get_index(test_source)
+                _inject_field_window(m, index[0].isoformat(), index[-1].isoformat())
             m["cache"] = suite_cache
         members[label] = m
 
@@ -1020,6 +1054,115 @@ def _expand_xy_page(
         "regions": args.regions,
         "at_center": list(args.at_center),
     }
+
+
+def _resolve_field_kwargs(
+    kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
+) -> tuple[dict[str, Any], dict[str, Any], bool, bool, Any]:
+    """Resolve one ``field:`` page's templated kwargs in place.
+
+    Fills the ``source`` default, renames ``variables`` to ``variable``, checks the
+    depth contradiction and pins the time selection to the run (:func:`_pin_test_lane`).
+    Returns ``(kwargs, select, had_explicit_time, cacheable, index)``. A page's
+    ``contours:`` override mapping goes through here too, so the lines cover the
+    same dates as the fill.
+    """
+    kwargs.setdefault("source", test_source)
+    source = kwargs["source"]
+    if source is None:
+        raise ValueError(f"page {title!r}: no source (set defaults.test)")
+    if "variables" in kwargs:
+        kwargs["variable"] = kwargs.pop("variables")
+    _check_field_depth_contradiction(title, kwargs)
+    index = get_index(source)
+    select, had_explicit_time, cacheable = _pin_test_lane(kwargs, index)
+    return kwargs, select, had_explicit_time, cacheable, index
+
+
+def _resolve_compare_kwargs(
+    kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
+) -> tuple[dict[str, Any], bool]:
+    """Resolve one ``compare:`` page's templated kwargs in place.
+
+    Fills the ``test`` default, injects the run window into the test lane and decides
+    whether the result is cacheable (before the suite-wide ``cache:`` switch). Returns
+    ``(kwargs, cacheable)``. A page's ``contours:`` override mapping goes through here
+    too, so the lines cover the same dates as the fill.
+    """
+    kwargs.setdefault("test", test_source)
+    source = kwargs["test"]
+    if source is None:
+        raise ValueError(f"page {title!r}: no test source (set defaults.test)")
+    index = get_index(source)
+    t0, t1 = index[0].isoformat(), index[-1].isoformat()
+    select = kwargs.get("select")
+    is_pair_spec = isinstance(select, dict) and (
+        "test" in select or "reference" in select
+    )
+    detide_margin = _detide_margin(kwargs.get("detide"), lane="test")
+    if select is None or is_pair_spec:
+        was_latest = is_pair_spec and (
+            isinstance(select.get("test"), dict)
+            and select["test"].get("time") == "latest"
+        )
+        pinned = (
+            select is None or was_latest or "time" not in (select.get("test") or {})
+        )
+        _inject_compare_window(kwargs, t0, t1)
+        if was_latest:
+            kwargs["select"]["test"]["time"] = t1
+        test_lane = kwargs["select"]["test"]
+        cacheable = pinned or _is_closed(test_lane, index, margin=detide_margin)
+    else:
+        # A flat, non-paired select applies to both lanes at once --
+        # compare()'s own contract -- so rewriting only the "test"
+        # side here would silently change what the reference reads
+        # too. Never rewritten, only checked.
+        cacheable = _is_closed(select, index, margin=detide_margin)
+    if kwargs.get("times") is not None:
+        # times= fans this one page into several per-bin comparisons,
+        # each replacing whatever time entry select carried with its
+        # own bin value at draw time (comparison._fanned_time_select)
+        # -- what actually gets keyed is not what was just resolved
+        # above, so nothing here can vouch for it.
+        cacheable = False
+    return kwargs, cacheable
+
+
+def _check_contours_spec(spec: Any, *, kind: str, title: str) -> bool | dict[str, Any]:
+    """Validate a page's (templated) ``contours:`` value: a bool or a mapping."""
+    if spec is None:
+        return False
+    if isinstance(spec, (bool, dict)):
+        return spec
+    raise ValueError(
+        f"page {title!r}: contours: must be true (contour the plotted {kind} "
+        f"itself) or a mapping of {kind}: overrides for a second one, got "
+        f"{spec!r}"
+    )
+
+
+def _contour_overrides(
+    spec: dict[str, Any], raw: dict[str, Any], *, kind: str, title: str
+) -> dict[str, Any]:
+    """Shallow-merge a ``contours:`` mapping over the page's own (templated) kwargs.
+
+    ``raw`` is the page's own ``field:``/``compare:`` kwargs before resolution, so the
+    merge happens in the keys the YAML used -- and a ``field:`` page's ``variables`` and
+    ``variable`` spellings are treated as the one key they are, so an override in
+    either spelling replaces the page's own rather than sitting beside it.
+    """
+    if not spec:
+        raise ValueError(
+            f"page {title!r}: contours: {{}} overrides nothing -- use contours: true "
+            f"to contour the plotted {kind} itself"
+        )
+    merged = dict(raw)
+    if kind == "field" and ("variables" in spec or "variable" in spec):
+        merged.pop("variables", None)
+        merged.pop("variable", None)
+    merged.update(spec)
+    return merged
 
 
 def expand(suite: Any) -> list[ExpandedPage]:
@@ -1108,18 +1251,15 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 # and the window injection below both write into ``select`` in
                 # place, and without this a shared placeholder would leak one
                 # page's resolved time into every other page that names it.
-                kwargs = copy.deepcopy(
-                    _template_value(dict(page.field), namespace, title=title)
+                raw = _template_value(dict(page.field), namespace, title=title)
+                kwargs, select, had_explicit_time, cacheable, index = (
+                    _resolve_field_kwargs(
+                        copy.deepcopy(raw),
+                        title=title,
+                        test_source=test_source,
+                        get_index=get_index,
+                    )
                 )
-                kwargs.setdefault("source", test_source)
-                source = kwargs["source"]
-                if source is None:
-                    raise ValueError(f"page {title!r}: no source (set defaults.test)")
-                if "variables" in kwargs:
-                    kwargs["variable"] = kwargs.pop("variables")
-                _check_field_depth_contradiction(title, kwargs)
-                index = get_index(source)
-                select, had_explicit_time, cacheable = _pin_test_lane(kwargs, index)
 
                 steps = [
                     _normalize_step(raw, title=title)
@@ -1145,6 +1285,30 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     extrema=extrema,
                 )
 
+                contours = _check_contours_spec(
+                    _template_value(page.contours, namespace, title=title),
+                    kind="field",
+                    title=title,
+                )
+                if contours and steps:
+                    raise ValueError(
+                        f"page {title!r}: contours: is not supported with a then: "
+                        "chain -- the steps return something other than the field "
+                        "the lines would be drawn from"
+                    )
+                if isinstance(contours, dict):
+                    # Resolved like the page itself (source default, run window,
+                    # latest) so the lines cover the same dates as the fill; the
+                    # page is only cacheable when both reads are.
+                    contours, _, _, contour_cacheable, _ = _resolve_field_kwargs(
+                        copy.deepcopy(
+                            _contour_overrides(contours, raw, kind="field", title=title)
+                        ),
+                        title=title,
+                        test_source=test_source,
+                        get_index=get_index,
+                    )
+                    cacheable = cacheable and contour_cacheable
                 out.append(
                     ExpandedPage(
                         title=title,
@@ -1153,57 +1317,37 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         plot=plot,
                         cache=suite.cache and cacheable,
                         steps=steps,
+                        contours=contours,
                     )
                 )
 
             elif page.kind == "compare":
                 # See the field branch above for why this is deep-copied.
-                kwargs = copy.deepcopy(
-                    _template_value(dict(page.compare), namespace, title=title)
+                raw = _template_value(dict(page.compare), namespace, title=title)
+                kwargs, cacheable = _resolve_compare_kwargs(
+                    copy.deepcopy(raw),
+                    title=title,
+                    test_source=test_source,
+                    get_index=get_index,
                 )
-                kwargs.setdefault("test", test_source)
-                source = kwargs["test"]
-                if source is None:
-                    raise ValueError(
-                        f"page {title!r}: no test source (set defaults.test)"
-                    )
-                index = get_index(source)
-                t0, t1 = index[0].isoformat(), index[-1].isoformat()
-                select = kwargs.get("select")
-                is_pair_spec = isinstance(select, dict) and (
-                    "test" in select or "reference" in select
+                contours = _check_contours_spec(
+                    _template_value(page.contours, namespace, title=title),
+                    kind="compare",
+                    title=title,
                 )
-                detide_margin = _detide_margin(kwargs.get("detide"), lane="test")
-                if select is None or is_pair_spec:
-                    was_latest = is_pair_spec and (
-                        isinstance(select.get("test"), dict)
-                        and select["test"].get("time") == "latest"
+                if isinstance(contours, dict):
+                    # Same treatment as the page (see the field branch above).
+                    contours, contour_cacheable = _resolve_compare_kwargs(
+                        copy.deepcopy(
+                            _contour_overrides(
+                                contours, raw, kind="compare", title=title
+                            )
+                        ),
+                        title=title,
+                        test_source=test_source,
+                        get_index=get_index,
                     )
-                    pinned = (
-                        select is None
-                        or was_latest
-                        or "time" not in (select.get("test") or {})
-                    )
-                    _inject_compare_window(kwargs, t0, t1)
-                    if was_latest:
-                        kwargs["select"]["test"]["time"] = t1
-                    test_lane = kwargs["select"]["test"]
-                    cacheable = pinned or _is_closed(
-                        test_lane, index, margin=detide_margin
-                    )
-                else:
-                    # A flat, non-paired select applies to both lanes at once --
-                    # compare()'s own contract -- so rewriting only the "test"
-                    # side here would silently change what the reference reads
-                    # too. Never rewritten, only checked.
-                    cacheable = _is_closed(select, index, margin=detide_margin)
-                if kwargs.get("times") is not None:
-                    # times= fans this one page into several per-bin comparisons,
-                    # each replacing whatever time entry select carried with its
-                    # own bin value at draw time (comparison._fanned_time_select)
-                    # -- what actually gets keyed is not what was just resolved
-                    # above, so nothing here can vouch for it.
-                    cacheable = False
+                    cacheable = cacheable and contour_cacheable
                 out.append(
                     ExpandedPage(
                         title=title,
@@ -1211,6 +1355,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         kwargs=kwargs,
                         plot=plot,
                         cache=suite.cache and cacheable,
+                        contours=contours,
                     )
                 )
 
@@ -1247,6 +1392,33 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     )
                 )
     return out
+
+
+def _check_contour_families(
+    title: str, families: list[str], plotted: list[str], contour_cs: Any
+) -> None:
+    """Refuse a ``contours:`` comparison set that does not pair with the plotted one.
+
+    Each plotted family bucket is paired with the contour comparisons of the same
+    family, by position (see ``ComparisonSet.plot(contours=...)``), so a family with
+    no counterpart -- or a different count -- would mis-pair rather than overlay.
+    """
+    contour_families = [c.family for c in contour_cs]
+    for fam in families:
+        n_plot, n_contour = plotted.count(fam), contour_families.count(fam)
+        if n_contour == 0:
+            raise ValueError(
+                f"page {title!r}: contours: built no {fam!r} comparison to pair "
+                f"with the plotted one (it made {sorted(set(contour_families))} -- "
+                "check the contour variables, or that none was skipped for missing "
+                "data)"
+            )
+        if n_contour != n_plot:
+            raise ValueError(
+                f"page {title!r}: contours: built {n_contour} {fam!r} comparison(s) "
+                f"for {n_plot} plotted -- the lines are paired with the fill by "
+                "position, so the counts must match"
+            )
 
 
 def _extremum_record(ext: Any) -> dict[str, Any]:
@@ -1312,6 +1484,12 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
 
     import ocean_skill as osk
 
+    if page.contours and "contours" in page.plot:
+        raise ValueError(
+            f"page {page.title!r}: plot: contours: clashes with the page's own "
+            "contours: key -- set one of them"
+        )
+
     if page.kind == "field":
         if "cache" in page.kwargs:
             raise ValueError(
@@ -1319,15 +1497,19 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
                 "caching is controlled by the suite's own cache:/cache_dir: "
                 "settings, not a per-page kwarg"
             )
-        field_kwargs = {
-            k: v for k, v in page.kwargs.items() if k not in ("source", "variable")
-        }
-        obj = osk.field(
-            page.kwargs["source"],
-            page.kwargs["variable"],
-            cache=page.cache,
-            **field_kwargs,
-        )
+
+        def build_field(kwargs: dict[str, Any]):
+            field_kwargs = {
+                k: v for k, v in kwargs.items() if k not in ("source", "variable")
+            }
+            return osk.field(
+                kwargs["source"],
+                kwargs["variable"],
+                cache=page.cache,
+                **field_kwargs,
+            )
+
+        obj = build_field(page.kwargs)
         if page.steps:
             if isinstance(obj, osk.FieldSet):
                 # expand()'s _check_step_chain already refused anything wider
@@ -1345,7 +1527,12 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
                 if isinstance(obj, osk.Extremum):
                     print(repr(obj))
                     page.results.append(_extremum_record(obj))
-        fig = obj.plot(**page.plot)
+        plot_kwargs = dict(page.plot)
+        if page.contours is True:
+            plot_kwargs["contours"] = obj
+        elif page.contours:
+            plot_kwargs["contours"] = build_field(page.contours)
+        fig = obj.plot(**plot_kwargs)
         return [("", fig)]
 
     if page.kind in ("XY", "TS"):
@@ -1372,21 +1559,38 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
         return [("", obj.plot(**page.plot))]
 
     if page.kind == "compare":
-        compare_kwargs = {k: v for k, v in page.kwargs.items() if k not in ("test",)}
-        cs = osk.compare(
-            test=page.kwargs["test"],
-            skip_missing=True,
-            cache=page.cache,
-            **compare_kwargs,
-        )
+
+        def build_compare(kwargs: dict[str, Any]):
+            compare_kwargs = {k: v for k, v in kwargs.items() if k not in ("test",)}
+            return osk.compare(
+                test=kwargs["test"],
+                skip_missing=True,
+                cache=page.cache,
+                **compare_kwargs,
+            )
+
+        cs = build_compare(page.kwargs)
         if len(cs) == 0:
             raise ValueError("every comparison in this page was skipped (skip_missing)")
         page.metrics_records = [c.metrics() for c in cs]
         families = sorted({c.family for c in cs})
+        contour_cs = None
+        if isinstance(page.contours, dict):
+            contour_cs = build_compare(page.contours)
+            _check_contour_families(
+                page.title, families, [c.family for c in cs], contour_cs
+            )
         results = []
         for fam in families:
             bucket = osk.ComparisonSet([c for c in cs if c.family == fam])
-            fig = bucket.plot(**page.plot)
+            plot_kwargs = dict(page.plot)
+            if page.contours is True:
+                plot_kwargs["contours"] = bucket
+            elif contour_cs is not None:
+                plot_kwargs["contours"] = osk.ComparisonSet(
+                    [c for c in contour_cs if c.family == fam]
+                )
+            fig = bucket.plot(**plot_kwargs)
             suffix = "" if len(families) == 1 else f"_{fam}"
             results.append((suffix, fig))
         return results

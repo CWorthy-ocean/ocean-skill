@@ -341,7 +341,9 @@ def test_a_log_field_gets_plain_decimal_labels():
     obj = _facet(field, standard_name=CHLOROPHYLL)
     (mesh,) = _meshes(obj)
     lo, hi = _clim(mesh)
-    assert (lo, hi) == pytest.approx((0.02, 8.0))
+    # chlorophyll's declared 0.01-10 display range, as the static renderer draws it
+    # (variable_limits is shared), not the data's own 0.02-8
+    assert (lo, hi) == pytest.approx((0.01, 10.0))
     ticks = colorbar_ticks(lo, hi, log=True)
     opts = _bar_opts(mesh)
     assert opts["ticker"].ticks == list(ticks.values)
@@ -621,3 +623,29 @@ def test_a_pinned_datetime_bar_keeps_its_date_labels():
     assert isinstance(bar.formatter, DatetimeTickFormatter)
     # no round numbers were put on a bar of dates
     assert len(bar.ticker.ticks) >= 3
+
+
+# --- the variable policy matches the static renderer ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("standard_name", "statistic", "field", "expected"),
+    [
+        ("sea_surface_height_above_sea_level", None, _ramp(-0.1, 0.4), (-0.4, 0.4)),
+        (NITRATE, "std", _ramp(3.1, 7.4), (0.0, 7.4)),
+        ("eastward_sea_water_velocity", None, _ramp(-0.2, 0.9), (-0.9, 0.9)),
+    ],
+)
+def test_holoviews_clim_matches_the_static_norm_for_centred_and_spread(
+    standard_name, statistic, field, expected
+):
+    """One policy, two renderers: a signed anomaly is centred on 0, a spread from 0."""
+    from ocean_skill.colormaps import norm_for
+    from ocean_skill.plot.matplotlib_renderer import _limits
+
+    if statistic is not None:
+        field = field.assign_attrs(statistic=statistic)
+    (mesh,) = _meshes(_facet(field, standard_name))
+    lo, hi = _limits(field, log=False)
+    norm = norm_for(standard_name, lo, hi, statistic=statistic)
+    assert _clim(mesh) == (norm.vmin, norm.vmax) == expected

@@ -3129,13 +3129,23 @@ def _bin_into_frame(frame, moving, *, frame_lon: str, frame_lat: str):
 
     kept = np.asarray(binned[ALONG_DIM].values)
     frame_trimmed = frame.isel({ALONG_DIM: kept})
-    binned = binned.assign_coords(
-        {
-            ALONG_DIM: frame_trimmed[ALONG_DIM].values,
-            frame_lon: (ALONG_DIM, np.asarray(frame_trimmed[frame_lon].values)),
-            frame_lat: (ALONG_DIM, np.asarray(frame_trimmed[frame_lat].values)),
-        }
-    )
+    new_coords = {
+        ALONG_DIM: frame_trimmed[ALONG_DIM].values,
+        frame_lon: (ALONG_DIM, np.asarray(frame_trimmed[frame_lon].values)),
+        frame_lat: (ALONG_DIM, np.asarray(frame_trimmed[frame_lat].values)),
+    }
+    # The requested path (transect.sample_along's path_lon/path_lat) rides on
+    # `along` just as lon/lat do, and is dropped by the groupby for the same
+    # reason; the frame's is reattached the same way, so both lanes then carry
+    # identical copies and merge into one Dataset's coordinates.
+    for name in ("path_lon", "path_lat"):
+        if name in frame_trimmed.coords:
+            new_coords[name] = (
+                ALONG_DIM,
+                np.asarray(frame_trimmed[name].values),
+                dict(frame_trimmed[name].attrs),
+            )
+    binned = binned.assign_coords(new_coords)
     return frame_trimmed, binned, offsets_km
 
 
@@ -3192,15 +3202,17 @@ def _align_along_path(
 
     The section counterpart of the regrid in :func:`align`: both lanes are
     already reduced to columns along one shared transect (test's own path;
-    reference sampled at the test's snapped points — see
+    reference sampled along the test's requested path — see
     :meth:`ocean_skill.comparison.Comparison.align`'s transect route), so there
     is no 2-D grid to regrid onto and nothing here calls xesmf. What is left is
     two housekeeping steps a real grid regrid does not need: putting both lanes'
     depth lists on one shared ``z`` coordinate, and reconciling their along-path
     columns, which differ even when both were asked for the same points — a
     coarser lane's sampler collapses points that land in the same cell and
-    reports its own cells' positions, not the request's (see
-    :func:`ocean_skill.transect.sample_along`).
+    reports its own cells' positions (``lon``/``lat``) beside the request's
+    (``path_lon``/``path_lat``; see :func:`ocean_skill.transect.sample_along`).
+    The columns are paired by position on ``lon``/``lat``, and the frame lane's
+    ``path_lon``/``path_lat`` are kept for the merged result.
     """
     if "z" not in test.dims:
         test = _observational_vertical_to_z(test)

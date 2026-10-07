@@ -784,13 +784,14 @@ depth-ordered line, and anything else — every cell, level and snapshot of a mo
 is a cloud of dots.
 
 ```python
-box = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
+box = {"lon": {"min": 156.16, "max": 157.23}, "lat": {"min": 19.32, "max": 20.32}}
 TS_VARS = ["temperature", "salinity"]
 
 roms = osk.field("all_the_rest", TS_VARS, select=box)                  # dots
 woa = osk.field(["woa23_temperature_annual", "woa23_salinity_annual"], TS_VARS,
-                select={"lon": 155.79, "lat": 21.05})                   # nearest cell: line
-glorys = osk.field("glorys_climatology_timeseries", TS_VARS, select=box,
+                select={"lon": 156.70, "lat": 19.82})                   # nearest cell: line
+run = {"min": "2010-07-31", "max": "2010-10-31"}                    # the run's own dates
+glorys = osk.field("glorys_my_daily_timeseries", TS_VARS, select={**box, "time": run},
                    aggregate={"time": "mean", "lon": "mean", "lat": "mean"})  # line
 
 osk.TS({"ROMS": roms, "WOA23": woa, "GLORYS12": glorys}).plot(
@@ -812,13 +813,13 @@ on a 1° grid can sit between cell centres and select nothing; `at_center=` samp
 listed members at the nearest cell to each box centre instead:
 
 ```python
-PACIFIC = {   # lon (0-360) and lat ranges, after Damien et al., Fig. 7
-    "North West Pacific":        ((155.24, 156.33), (20.51, 21.60)),
-    "Subpolar Gyre":             ((184.59, 185.73), (47.76, 48.59)),
-    "California Current System": ((233.59, 234.83), (39.37, 40.38)),
-    "South West Pacific":        ((184.58, 185.38), (-16.75, -15.91)),
-    "South Pacific Gyre":        ((238.98, 240.00), (-22.37, -21.37)),
-    "Peru Current":              ((273.34, 274.47), (-11.73, -10.57)),
+PACIFIC = {   # lon (0-360) and lat ranges of Damien et al. Fig. 7's boxes, on their grid
+    "North West Pacific":        ((156.16, 157.23), (19.32, 20.32)),
+    "Subpolar Gyre":             ((185.86, 186.96), (44.56, 45.34)),
+    "California Current System": ((233.87, 235.07), (36.39, 37.35)),
+    "South West Pacific":        ((185.18, 185.99), (-15.45, -14.67)),
+    "South Pacific Gyre":        ((240.99, 242.00), (-21.26, -20.31)),
+    "Peru Current":              ((275.31, 276.41), (-11.48, -10.40)),
 }
 regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
                   "lat": {"min": lat[0], "max": lat[1]}}
@@ -827,7 +828,8 @@ regions = {name: {"lon": {"min": lon[0], "max": lon[1]},
 ts = osk.TS({"ROMS": osk.field("all_the_rest", TS_VARS),
              "WOA23": osk.field(["woa23_temperature_annual", "woa23_salinity_annual"],
                                 TS_VARS),
-             "GLORYS12": osk.field("glorys_climatology_timeseries", TS_VARS,
+             "GLORYS12": osk.field("glorys_my_daily_timeseries", TS_VARS,
+                                   select={"time": run},
                                    aggregate={"time": "mean", "lon": "mean",
                                               "lat": "mean"})},
             regions=regions, at_center=["WOA23"])
@@ -1146,6 +1148,71 @@ URL here — the `engine="scipy"` is what actually reads the classic file.
 
 `osk.find(variable="mld_by_sigma_theta")` now finds it, and `"mld_by_sigma_theta"` is the
 name the pair-spec above reads it by.
+
+### Tidal forcing as a reference
+
+A run's own [roms-tools](https://roms-tools.readthedocs.io) tidal forcing file (TPXO9
+interpolated onto the ROMS grid) is a ready reference for the run's tidal amplitudes:
+`ssh_Re`/`ssh_Im` (m) on `(ntides, eta_rho, xi_rho)`, with the constituent names in the
+`ntides` coordinate. It carries no `lon_rho`/`lat_rho` and is not ROMS *output*, so the
+chain merges the longitude and latitude in from the run's grid file (an intake reader
+passed as a keyword argument is read first) and names them `lon`/`lat`:
+
+```python
+from intake.readers import datatypes, readers
+from ocean_skill import build
+
+def nc(path):
+    return readers.XArrayDatasetReader(datatypes.HDF5(url=path), chunks={})
+
+frc = (
+    nc("iceland_tides_frc.nc")
+    .merge(other=nc("iceland_grd.nc")[["lon_rho", "lat_rho"]])
+    .set_coords(["lon_rho", "lat_rho"])
+    .rename({"lon_rho": "lon", "lat_rho": "lat"})
+)
+build.build_catalog(
+    {
+        "iceland_tides_frc": {
+            "reader": frc,
+            "standard_names": {
+                "ssh_Re": "sea_surface_height_tidal_harmonic_real_part",
+                "ssh_Im": "sea_surface_height_tidal_harmonic_imaginary_part",
+            },
+        },
+    },
+    "catalogs/tidal_forcing.yaml",
+    title="Tidal forcing references",
+    name_map=None,                  # not ROMS output: skip the ROMS name fallback
+)
+```
+
+```python
+osk.compare(test="his", reference="iceland_tides_frc",
+            variables=[{"calculate": "tidal_amplitude", "constituent": ["K1", "M2"]}]).plot()
+```
+
+On the model side the same spec runs a harmonic analysis of the hourly SSH with
+[pyFES](https://github.com/CNES/aviso-fes) (`conda install -c conda-forge pyfes`), cell
+by cell; a list of constituents is one row each, from one analysis (cached). Use
+`"tidal_phase"` for the Greenwich phase lag.
+
+The forcing amplitudes include the nodal factor at the forcing's start date, so they
+match a run started then; over another period they differ from a harmonic fit to the
+run's own output by the nodal modulation.
+
+The raw TPXO9 atlas (`h_tpxo9.v1.nc`-style files: `hRe`/`hIm` on `(nc, nx, ny)`, byte
+labels `con`, 2-D `lon_z`/`lat_z`, longitudes 0 to 360) needs no grid file, only the
+same promotion and renames; it stays on its own native grid:
+
+```python
+tpxo = (
+    nc("h_tpxo9.v1.nc")
+    .set_coords(["con", "lon_z", "lat_z"])
+    .swap_dims({"nc": "con"})
+    .rename({"lon_z": "lon", "lat_z": "lat"})
+)  # then catalog it with the same standard_names, keyed "hRe" / "hIm"
+```
 
 ### Depth conventions and time zones
 

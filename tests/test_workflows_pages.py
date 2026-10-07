@@ -1246,10 +1246,11 @@ def test_build_refuses_a_section_page():
 # A property-property plot: ``members:`` maps a label to one ``field()`` call, and
 # ``expand`` resolves each into a kwargs dict. Only the member that reads
 # ``defaults.test`` is pinned to the run (and cached by the field-page rule); every
-# other member is passed through as written. ``regions:`` is validated by
-# ``ocean_skill.xy.normalize_regions`` (worker C's module) -- tests that only need
-# *some* regions use ``lenient_regions``, which swaps that for a recorder, so they do
-# not depend on its validation rules; the two that exercise those rules for real say so.
+# other member is passed through as written, unless it says ``window: run``.
+# ``regions:`` is validated by ``ocean_skill.xy.normalize_regions`` (worker C's
+# module) -- tests that only need *some* regions use ``lenient_regions``, which swaps
+# that for a recorder, so they do not depend on its validation rules; the two that
+# exercise those rules for real say so.
 
 _NWP = {"lon": {"min": 155.24, "max": 156.33}, "lat": {"min": 20.51, "max": 21.60}}
 _SG = {"lon": {"min": 184.59, "max": 185.73}, "lat": {"min": 47.76, "max": 48.59}}
@@ -1370,6 +1371,58 @@ def test_a_reference_member_keeps_its_own_time_selection_verbatim():
     (page,) = P.expand(_xy_suite(page={"members": {"ROMS": {}, "WOA23": ref}}))
     # "latest" means the run's last step, which is the test member's business only
     assert page.kwargs["members"]["WOA23"]["select"] == {"time": "latest"}
+
+
+def test_window_run_gives_a_reference_member_the_runs_literal_span():
+    members = {"ROMS": {}, "GLORYS": {"source": "glorys", "window": "run"}}
+    (page,) = P.expand(_xy_suite(page={"members": members}))
+    glorys = page.kwargs["members"]["GLORYS"]
+    assert glorys["select"] == {
+        "time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()}
+    }
+    assert "window" not in glorys  # a suite key, never a field() kwarg
+    assert glorys["cache"] is True  # the literal window is part of the cache key
+
+
+def test_window_run_keeps_the_members_other_select_keys():
+    glorys = {"source": "glorys", "window": "run", "select": {"depth": 10}}
+    (page,) = P.expand(_xy_suite(page={"members": {"G": glorys}}))
+    assert page.kwargs["members"]["G"]["select"] == {
+        "depth": 10,
+        "time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()},
+    }
+
+
+def test_window_run_on_the_test_member_is_a_no_op():
+    (plain,) = P.expand(_xy_suite(page={"members": {"ROMS": {}}}))
+    (run,) = P.expand(_xy_suite(page={"members": {"ROMS": {"window": "run"}}}))
+    assert run.kwargs["members"]["ROMS"] == plain.kwargs["members"]["ROMS"]
+
+
+def test_window_run_with_a_time_select_is_refused():
+    glorys = {"source": "glorys", "window": "run", "select": {"time": "latest"}}
+    with pytest.raises(ValueError, match=r"member 'G'.*window: run.*one or the other"):
+        P.expand(_xy_suite(page={"members": {"ROMS": {}, "G": glorys}}))
+
+
+def test_window_run_without_defaults_test_is_refused():
+    suite = _suite(
+        [
+            {
+                "title": "xy",
+                "TS": {"members": {"G": {"source": "glorys", "window": "run"}}},
+            }
+        ]
+    )
+    with pytest.raises(ValueError, match=r"member 'G'.*needs defaults.test"):
+        P.expand(suite)
+
+
+@pytest.mark.parametrize("bad", ["whole", "latest", True, {"min": "2010"}])
+def test_window_accepts_only_run(bad):
+    members = {"ROMS": {}, "G": {"source": "glorys", "window": bad}}
+    with pytest.raises(ValueError, match=r"page 'xy': TS: member 'G': window:"):
+        P.expand(_xy_suite(page={"members": members}))
 
 
 def test_only_the_test_source_member_is_pinned_even_with_another_name():
@@ -1723,3 +1776,246 @@ def test_build_passes_x_and_y_to_xy(monkeypatch):
         "regions": None,
         "at_center": [],
     }
+
+
+# -- contours: -- a contour overlay on a field:/compare: page -------------------------
+
+
+_CONTOUR_COMPARE = {
+    "reference": ["cravatte"],
+    "variables": ["east_velocity"],
+    "select": {"test": {"depth": [0, 10]}, "reference": {}},
+}
+
+
+def _contour_page(contours, kind="compare", **extra):
+    body = (
+        _CONTOUR_COMPARE
+        if kind == "compare"
+        else {"variables": ["temperature"], "select": {"depth": "surface"}}
+    )
+    return {"title": "x", kind: dict(body), "contours": contours, **extra}
+
+
+def test_expand_keeps_contours_true_and_defaults_to_false():
+    (page,) = P.expand(_suite([_contour_page(True)], defaults={"test": "stub"}))
+    assert page.contours is True and page.as_dict()["contours"] is True
+    (plain,) = P.expand(
+        _suite(
+            [{"title": "x", "compare": dict(_CONTOUR_COMPARE)}],
+            defaults={"test": "stub"},
+        )
+    )
+    assert plain.contours is False
+
+
+def test_expand_templates_and_resolves_a_compare_contours_mapping():
+    suite = _suite(
+        [
+            _contour_page(
+                {"reference": ["{ref}"], "variables": ["temperature"]},
+                for_each={"ref": ["woa_a", "woa_b"]},
+            )
+        ],
+        defaults={"test": "stub"},
+    )
+    a, b = P.expand(suite)
+    assert a.contours["reference"] == ["woa_a"] and b.contours["reference"] == ["woa_b"]
+    # merged over the page's own kwargs, then given the same run window and test source
+    assert a.contours["variables"] == ["temperature"]
+    assert a.contours["select"]["test"]["depth"] == [0, 10]
+    assert a.contours["select"]["test"]["time"] == {
+        "min": INDEX[0].isoformat(),
+        "max": INDEX[-1].isoformat(),
+    }
+    assert a.contours["test"] == "stub"
+    # the two builds never share a select dict with each other or with the page
+    assert a.contours["select"] is not a.kwargs["select"]
+    json.dumps(a.as_dict())
+
+
+def test_a_contours_override_select_is_windowed_and_decides_the_cache_flag():
+    page = _contour_page({"select": {"test": {"time": "2010-01-12"}, "reference": {}}})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    # the page's own select got the whole-run window (cacheable), the override's
+    # closed instant is cacheable too
+    assert p.cache is True
+    page = _contour_page({"select": {"test": {"time": "2010-03-09"}, "reference": {}}})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    assert p.cache is False  # an instant on the run's last step may be replaced
+
+
+def test_expand_resolves_a_field_contours_mapping_with_variable_spelling():
+    suite = _suite(
+        [_contour_page({"variable": "salinity"}, kind="field")],
+        defaults={"test": "stub"},
+    )
+    (p,) = P.expand(suite)
+    assert p.kwargs["variable"] == ["temperature"]
+    assert p.contours["variable"] == "salinity" and "variables" not in p.contours
+    assert p.contours["source"] == "stub"
+    assert p.contours["select"]["time"] == {
+        "min": INDEX[0].isoformat(),
+        "max": INDEX[-1].isoformat(),
+    }
+
+
+@pytest.mark.parametrize("bad", ["yes", 3, [1], {}])
+def test_a_bad_contours_value_is_refused_naming_the_page(bad):
+    with pytest.raises(ValueError, match=r"page 'x': contours:"):
+        P.expand(_suite([_contour_page(bad)], defaults={"test": "stub"}))
+
+
+@pytest.mark.parametrize("kind", ["summary", "section", "XY", "TS"])
+def test_contours_on_another_page_kind_is_a_schema_error(kind):
+    body = {"summary": {}, "section": "text", "XY": {"members": {"a": None}}}.get(
+        kind, {"members": {"a": None}}
+    )
+    with pytest.raises(Exception, match=rf"contours: is only supported.*{kind}"):
+        _suite([{"title": "x", kind: body, "contours": True}])
+
+
+def test_contours_on_a_field_page_with_then_is_refused():
+    page = _contour_page(True, kind="field", then=["extremum"])
+    page["field"]["select"] = {"depth": "surface", "time": "latest"}
+    with pytest.raises(ValueError, match=r"page 'x': contours: is not supported"):
+        P.expand(_suite([page], defaults={"test": "stub"}))
+
+
+class _FakeComparison:
+    def __init__(self, family, tag):
+        self.family, self.tag = family, tag
+
+    def metrics(self):
+        return {"tag": self.tag}
+
+
+def _fake_osk(monkeypatch, *, test_families, contour_families=()):
+    """Stub osk.compare/ComparisonSet; returns the list of recorded calls."""
+    import ocean_skill as osk
+
+    calls = {"compare": [], "plot": []}
+
+    class FakeSet(list):
+        def plot(self, **opts):
+            calls["plot"].append((self, opts))
+            return "figure"
+
+    def fake_compare(**kwargs):
+        calls["compare"].append(kwargs)
+        fams = test_families if len(calls["compare"]) == 1 else contour_families
+        tag = "test" if len(calls["compare"]) == 1 else "contour"
+        return FakeSet(_FakeComparison(f, tag) for f in fams)
+
+    monkeypatch.setattr(osk, "compare", fake_compare)
+    monkeypatch.setattr(osk, "ComparisonSet", FakeSet)
+    return calls
+
+
+def test_build_compare_contours_true_passes_each_bucket_to_itself(monkeypatch):
+    calls = _fake_osk(monkeypatch, test_families=["section", "map"])
+    page = _contour_page(True, plot={"contour_levels": [0]})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    figs = P.build(p)
+    assert [s for s, _ in figs] == ["_map", "_section"]
+    assert len(calls["compare"]) == 1
+    assert len(calls["plot"]) == 2
+    for bucket, opts in calls["plot"]:
+        assert opts["contours"] is bucket and opts["contour_levels"] == [0]
+
+
+def test_build_compare_contours_mapping_builds_a_second_set_and_pairs_by_family(
+    monkeypatch,
+):
+    calls = _fake_osk(
+        monkeypatch,
+        test_families=["section", "map"],
+        contour_families=["map", "section"],
+    )
+    page = _contour_page(
+        {"reference": ["woa"], "variables": ["temperature"]},
+        plot={"contour_levels": 8},
+    )
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    P.build(p)
+    first, second = calls["compare"]
+    assert first["variables"] == ["east_velocity"] and first["reference"] == [
+        "cravatte"
+    ]
+    assert second["variables"] == ["temperature"] and second["reference"] == ["woa"]
+    # same test source, skip_missing and cache setting as the page itself
+    for kw in (first, second):
+        assert kw["test"] == "stub" and kw["skip_missing"] is True
+        assert kw["cache"] == p.cache
+    assert second["select"]["test"]["depth"] == [0, 10]
+    for bucket, opts in calls["plot"]:
+        (c,) = opts["contours"]
+        assert c.tag == "contour" and c.family == bucket[0].family
+        assert opts["contour_levels"] == 8
+
+
+def test_build_compare_contours_with_a_missing_family_is_refused(monkeypatch):
+    _fake_osk(monkeypatch, test_families=["section"], contour_families=["map"])
+    page = _contour_page({"variables": ["temperature"]})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    with pytest.raises(ValueError, match=r"page 'x': contours: built no 'section'"):
+        P.build(p)
+
+
+def test_build_compare_contours_with_a_count_mismatch_is_refused(monkeypatch):
+    _fake_osk(monkeypatch, test_families=["map"], contour_families=["map", "map"])
+    page = _contour_page({"variables": ["temperature"]})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    with pytest.raises(ValueError, match=r"built 2 'map' comparison\(s\) for 1"):
+        P.build(p)
+
+
+def test_build_refuses_plot_contours_beside_the_page_key(monkeypatch):
+    _fake_osk(monkeypatch, test_families=["map"])
+    page = _contour_page(True, plot={"contours": "x"})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    with pytest.raises(ValueError, match=r"plot: contours: clashes"):
+        P.build(p)
+
+
+def _fake_field(monkeypatch):
+    import ocean_skill as osk
+
+    calls = []
+
+    class FakeObj:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+
+        def plot(self, **opts):
+            self.opts = opts
+            return "figure"
+
+    def fake_field(source, variable, **kw):
+        obj = FakeObj({"source": source, "variable": variable, **kw})
+        calls.append(obj)
+        return obj
+
+    monkeypatch.setattr(osk, "field", fake_field)
+    return calls
+
+
+def test_build_field_contours_true_contours_the_object_itself(monkeypatch):
+    calls = _fake_field(monkeypatch)
+    page = _contour_page(True, kind="field", plot={"contour_levels": [0]})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    P.build(p)
+    (obj,) = calls
+    assert obj.opts["contours"] is obj and obj.opts["contour_levels"] == [0]
+
+
+def test_build_field_contours_mapping_builds_a_second_field(monkeypatch):
+    calls = _fake_field(monkeypatch)
+    page = _contour_page({"variable": "salinity"}, kind="field")
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    P.build(p)
+    main, lines = calls
+    assert main.kwargs["variable"] == ["temperature"]
+    assert lines.kwargs["variable"] == "salinity" and lines.kwargs["source"] == "stub"
+    assert lines.kwargs["cache"] == p.cache
+    assert main.opts["contours"] is lines

@@ -225,6 +225,40 @@ ssh:
   name: '^(?i:ssh|sea_surface_height_above_geoid)$'
   standard_name: '^(?i:sea_surface_height_above_geoid)$'
 
+# Tidal harmonic constants of the sea surface height and the baroclinic
+# pressure flux (energy flux of the internal tide). CF has no name for any of
+# them, so these are osk-custom standard names (as are the real/imaginary
+# parts the forcing files carry, which have no key here: nobody searches
+# for them). Each regex is an exact literal, so none can claim plain `ssh` or
+# the other way round -- tests/test_vocabulary_file.py pins both directions.
+# The x/y fluxes are ROMS' grid-relative, staggered `up`/`vp` (UCLA calc_pflx,
+# m4 s-3 = W m-1 / rho0); build.py's ROMS_STANDARD_NAMES maps them. The
+# eastward/northward ones are the same flux rotated to geographic axes, in W m-1.
+tidal_amplitude:
+  name: '^(?i:tidal_amplitude|sea_surface_height_tidal_amplitude)$'
+  standard_name: '^(?i:sea_surface_height_tidal_amplitude)$'
+
+# Greenwich phase lag, in degrees.
+tidal_phase:
+  name: '^(?i:tidal_phase|sea_surface_height_tidal_phase)$'
+  standard_name: '^(?i:sea_surface_height_tidal_phase)$'
+
+x_baroclinic_pressure_flux:
+  name: '^(?i:x_baroclinic_pressure_flux)$'
+  standard_name: '^(?i:x_baroclinic_pressure_flux)$'
+
+y_baroclinic_pressure_flux:
+  name: '^(?i:y_baroclinic_pressure_flux)$'
+  standard_name: '^(?i:y_baroclinic_pressure_flux)$'
+
+eastward_baroclinic_pressure_flux:
+  name: '^(?i:eastward_baroclinic_pressure_flux)$'
+  standard_name: '^(?i:eastward_baroclinic_pressure_flux)$'
+
+northward_baroclinic_pressure_flux:
+  name: '^(?i:northward_baroclinic_pressure_flux)$'
+  standard_name: '^(?i:northward_baroclinic_pressure_flux)$'
+
 # OOI Papa's own name (ocean_skill/catalogs/ooi_papa.yaml) needs no alias here
 # -- it already spells the CF name in full.
 conductivity:

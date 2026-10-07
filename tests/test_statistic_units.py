@@ -207,7 +207,8 @@ def test_chlorophyll_variance_skips_the_pinned_range_and_log_scale():
     assert type(pinned).__name__ == "LogNorm"
     spread = norm_for(CHL, 1e-5, 3e-4, statistic="var")
     assert type(spread).__name__ == "Normalize"
-    assert (spread.vmin, spread.vmax) == (1e-5, 3e-4)
+    # a spread reads from zero (cmo.amp's white end is "no spread")
+    assert (spread.vmin, spread.vmax) == (0.0, 3e-4)
     # an explicit user limit still wins
     assert norm_for(CHL, 1e-5, 3e-4, user_vmax=1.0, statistic="var").vmax == 1.0
 

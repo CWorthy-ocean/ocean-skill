@@ -96,6 +96,10 @@ ROMS_STANDARD_NAMES: dict[str, str] = {
     "u": "sea_water_x_velocity",
     "v": "sea_water_y_velocity",
     "w": "upward_sea_water_velocity",
+    # UCLA ROMS calc_pflx online diagnostic: baroclinic pressure flux, grid-relative
+    # and staggered like u/v; m4 s-3 = W m-1 / rho0. osk-custom names (CF has none).
+    "up": "x_baroclinic_pressure_flux",
+    "vp": "y_baroclinic_pressure_flux",
     # ROMS' KPP surface boundary-layer depth is CF's "mixed layer thickness defined by
     # mixing scheme": the model's own diagnostic, not a threshold-criterion MLD (those
     # are the ``mld`` calculator's). The vocabulary still relates it to the broad

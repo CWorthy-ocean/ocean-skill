@@ -22,16 +22,17 @@ delegates.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from numbers import Real
 from typing import Any
 
+import matplotlib.colors as _mcolors
 import numpy as np
 
 from ocean_skill.align import natural_convention
-from ocean_skill.colormaps import cmaps_for
+from ocean_skill.colormaps import cmaps_for, variable_limits
 from ocean_skill.plot import _weighting
 from ocean_skill.plot._colorbar import difference_limit
 from ocean_skill.plot._statistic import statistic_of, units_text
@@ -48,14 +49,23 @@ from ocean_skill.plot.matplotlib_renderer import (
 )
 from ocean_skill.plot.registry import register_renderer
 from ocean_skill.plot.section import (
+    CAST_COLOR,
+    CAST_LABEL_COLOR,
+    CAST_WIDTH,
     CONTOUR_COLOR,
     CONTOUR_WIDTH,
+    SEAFLOOR_COLOR,
+    WATER_COLOR,
+    cast_marks,
     check_section_options,
     contour_label,
     contour_paths,
+    depth_limit,
     difference_fill_levels,
+    fill_between_casts,
     fill_edges,
     prepare_overlay,
+    seafloor_line,
 )
 from ocean_skill.plot.section import contour_levels as _contour_levels_for
 from ocean_skill.plot.typography import (
@@ -694,7 +704,13 @@ def _contour_style(contour_kwargs) -> _ContourStyle:
 
 
 def _section_options(
-    *, has_contours: bool, mark, contour_levels, contour_kwargs, fill_levels
+    *,
+    has_contours: bool,
+    mark,
+    contour_levels,
+    contour_kwargs,
+    fill_levels,
+    section_x="auto",
 ) -> tuple[str, _ContourStyle | None]:
     """Check a section family's mark and contour/band options; return ``(mark, style)``.
 
@@ -713,6 +729,7 @@ def _section_options(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     if fill_levels is not None:
         fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
@@ -825,6 +842,32 @@ def _layers(edges: np.ndarray, *, log: bool) -> np.ndarray:
     if log and edges[0] > 0:
         return np.sqrt(edges[:-1]) * np.sqrt(edges[1:])
     return 0.5 * (edges[:-1] + edges[1:])
+
+
+def _variable_limits(
+    standard_name,
+    statistic,
+    *arrays,
+    log: bool,
+    robust=False,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> tuple[float, float]:
+    """Sequential ``clim`` for ``arrays``: the static renderer's limits, exactly.
+
+    The data-derived, snapped limits (:func:`~ocean_skill.plot.matplotlib_renderer.
+    _limits`) put through :func:`ocean_skill.colormaps.variable_limits` -- the same
+    two steps the static renderer takes via ``norm_for`` -- so a declared range pin, a
+    spread's zero floor and a signed anomaly's symmetric-about-centre scale hold here
+    too, rather than being a static-only policy. ``vmin``/``vmax`` are the caller's own
+    limits, which win. Callers floor a log scale above zero themselves, as before.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _limits
+
+    lo, hi = _limits(*arrays, log=log, robust=robust, vmin=vmin, vmax=vmax)
+    return variable_limits(
+        standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+    )
 
 
 def _band_palette(cmap, edges, clim, *, log: bool) -> tuple[list[str], str, str]:
@@ -996,8 +1039,319 @@ def _banded_fill(
     )
 
 
+# --- vertical sections built from casts: cast lines, names and the seafloor ----------
+#
+# A comparison section stacked from CTD casts (``select={"transect": {"from":
+# "reference"}}``) can show where its data came from: a dashed line down each cast, its
+# name along the top of the panel, and the seafloor shaded under the data. What goes
+# where is :func:`ocean_skill.plot.section.cast_marks` / ``seafloor_line`` /
+# ``depth_limit`` -- shared with the static renderer, so the two draw the same marks at
+# the same places -- and this block only draws them: the seafloor as an ``hv.Area`` (and
+# an ``hv.Curve`` for its outline), the casts as ``hv.Segments`` and ``hv.Labels``.
+
+#: The ``cast_kwargs`` keys this renderer draws -- the static renderer's ``ax.vlines``
+#: spellings (``colors``/``linestyles``/``linewidths``) and the singular form of each --
+#: plus the two that style the names instead (``labels=False``, ``rotation``).
+_CAST_KWARGS = (
+    "colors",
+    "color",
+    "linestyles",
+    "linestyle",
+    "linewidths",
+    "linewidth",
+    "labels",
+    "rotation",
+)
+
+#: The ``seafloor_kwargs`` keys this renderer draws: the outline's ``edgecolor`` and
+#: ``linewidth``, and the fill's ``color`` (``facecolor``) and ``alpha``. Any other key
+#: is a matplotlib ``fill_between`` argument (``hatch`` ...) bokeh has no equivalent of.
+_SEAFLOOR_KWARGS = ("color", "facecolor", "alpha", "edgecolor", "linewidth")
+
+#: Depth, in pixels, of the gap between a cast's name and the panel's top edge.
+_CAST_LABEL_GAP_PX = 3
+
+
+@dataclass(frozen=True)
+class _CastStyle:
+    """How cast lines and their names are drawn: ``cast_kwargs`` in bokeh's terms."""
+
+    color: str = _mcolors.to_hex(CAST_COLOR)
+    #: in CSS pixels (the shared width is matplotlib points; see :class:`_ContourStyle`)
+    width: float = CAST_WIDTH * PT_PER_CSS_PX
+    dash: str = "dashed"
+    labels: bool = True
+    #: the names' rotation in degrees, counter-clockwise
+    angle: float = 0.0
+
+
+@dataclass(frozen=True)
+class _SeafloorStyle:
+    """How the seafloor is drawn: ``seafloor_kwargs`` as bokeh spells them."""
+
+    fill_color: str = _mcolors.to_hex(SEAFLOOR_COLOR)
+    fill_alpha: float = 1.0
+    #: the outline's colour, or ``None`` for no outline (``edgecolor="none"``)
+    edge_color: str | None = "#000000"
+    edge_width: float = 0.8 * PT_PER_CSS_PX
+
+
+def _warn_static_only(name: str, keys) -> None:
+    if keys:
+        warnings.warn(
+            f"{name} {sorted(set(keys))} only affect the static (matplotlib) renderer "
+            "and have no effect here -- pass renderer='matplotlib' for them to apply.",
+            stacklevel=4,
+        )
+
+
+def _cast_style(cast_kwargs) -> _CastStyle:
+    """Read ``cast_kwargs`` into a :class:`_CastStyle`, warning about the rest.
+
+    Honours ``colors`` (or ``color``), ``linewidths`` (``linewidth``) and ``linestyles``
+    (``linestyle``) -- one colour, one width, one of the named line styles -- plus
+    ``labels=False`` (no names) and ``rotation`` (degrees). A key bokeh cannot use, or
+    one of these with a value only matplotlib can, is named in one warning rather than
+    silently dropped. An already-built style passes through, so a grid reads its
+    keywords once.
+    """
+    import matplotlib.colors as mcolors
+
+    if cast_kwargs is None:
+        return _CastStyle()
+    if isinstance(cast_kwargs, _CastStyle):
+        return cast_kwargs
+    if not isinstance(cast_kwargs, Mapping):
+        raise TypeError(
+            "cast_kwargs= takes a dict of cast-line options "
+            f"({', '.join(_CAST_KWARGS)}), got {type(cast_kwargs).__name__}."
+        )
+    static_only = [str(k) for k in cast_kwargs if k not in _CAST_KWARGS]
+    fields: dict[str, Any] = {}
+    for key in ("colors", "color"):
+        if key in cast_kwargs:
+            try:
+                fields["color"] = mcolors.to_hex(_only(cast_kwargs[key]))
+            except (ValueError, TypeError):
+                static_only.append(key)
+    for key in ("linewidths", "linewidth"):
+        if key in cast_kwargs:
+            width = _only(cast_kwargs[key])
+            if isinstance(width, Real) and not isinstance(width, bool) and width > 0:
+                fields["width"] = float(width) * PT_PER_CSS_PX
+            else:
+                static_only.append(key)
+    for key in ("linestyles", "linestyle"):
+        if key in cast_kwargs:
+            try:
+                fields["dash"] = _LINE_DASH[_only(cast_kwargs[key])]
+            except (KeyError, TypeError):
+                static_only.append(key)
+    if "labels" in cast_kwargs:
+        fields["labels"] = bool(cast_kwargs["labels"])
+    if "rotation" in cast_kwargs:
+        rotation = cast_kwargs["rotation"]
+        if isinstance(rotation, Real) and not isinstance(rotation, bool):
+            fields["angle"] = float(rotation)
+        else:
+            static_only.append("rotation")
+    _warn_static_only("cast_kwargs", static_only)
+    return _CastStyle(**fields)
+
+
+def _seafloor_style(seafloor_kwargs) -> _SeafloorStyle:
+    """Read ``seafloor_kwargs`` into a :class:`_SeafloorStyle`, warning about the rest.
+
+    ``color`` (``facecolor``) and ``alpha`` style the fill; ``edgecolor`` (a colour, or
+    ``"none"`` for no outline) and ``linewidth`` (``0`` for none) style the outline --
+    the static renderer's own split. Anything else, or a value bokeh cannot use, is
+    named in one warning. An already-built style passes through.
+    """
+    import matplotlib.colors as mcolors
+
+    if seafloor_kwargs is None:
+        return _SeafloorStyle()
+    if isinstance(seafloor_kwargs, _SeafloorStyle):
+        return seafloor_kwargs
+    if not isinstance(seafloor_kwargs, Mapping):
+        raise TypeError(
+            "seafloor_kwargs= takes a dict of seafloor options "
+            f"({', '.join(_SEAFLOOR_KWARGS)}), got {type(seafloor_kwargs).__name__}."
+        )
+    static_only = [str(k) for k in seafloor_kwargs if k not in _SEAFLOOR_KWARGS]
+    fields: dict[str, Any] = {}
+    for key in ("color", "facecolor"):
+        if key in seafloor_kwargs:
+            try:
+                fields["fill_color"] = mcolors.to_hex(seafloor_kwargs[key])
+            except (ValueError, TypeError):
+                static_only.append(key)
+    if "alpha" in seafloor_kwargs:
+        alpha = seafloor_kwargs["alpha"]
+        if isinstance(alpha, Real) and not isinstance(alpha, bool):
+            fields["fill_alpha"] = float(alpha)
+        else:
+            static_only.append("alpha")
+    if "edgecolor" in seafloor_kwargs:
+        edge = seafloor_kwargs["edgecolor"]
+        if edge is None or (isinstance(edge, str) and edge == "none"):
+            fields["edge_color"] = None
+        else:
+            try:
+                fields["edge_color"] = mcolors.to_hex(edge)
+            except (ValueError, TypeError):
+                static_only.append("edgecolor")
+    if "linewidth" in seafloor_kwargs:
+        width = seafloor_kwargs["linewidth"]
+        if isinstance(width, Real) and not isinstance(width, bool) and width >= 0:
+            fields["edge_width"] = float(width) * PT_PER_CSS_PX
+        else:
+            static_only.append("linewidth")
+    _warn_static_only("seafloor_kwargs", static_only)
+    return _SeafloorStyle(**fields)
+
+
+@dataclass(frozen=True)
+class _CastLayers:
+    """What a cast-built section row adds to each panel, in the order it is layered.
+
+    ``floor`` goes *under* the data (a missing cell is transparent, so the shading shows
+    through it, and an observation deeper than the model's smoothed bottom stays visible
+    on top); ``outline`` goes over the data but under any contour lines; ``casts`` --
+    the dashed lines and then their names -- go on top of all of it. ``ylim`` is the
+    ``(top, bottom)`` the depth axis is set to with a seafloor (``None``: the data's
+    own).
+
+    ``floor`` is a function of the panel's frame options returning the seafloor's fill
+    (or ``None``): the fill leads its panel's overlay, so it carries that panel's frame
+    -- its title above all -- and holoviews keeps an element's options by identity, so
+    one fill shared by the row's three panels would give all three the last one's title.
+    """
+
+    floor: Callable[[dict], Any] | None = None
+    outline: tuple = ()
+    casts: tuple = ()
+    ylim: tuple[float, float] | None = None
+
+
+def _cast_layers(
+    values,
+    geometry,
+    *,
+    x: str,
+    cast_labels,
+    seafloor,
+    seafloor_style: _SeafloorStyle,
+    cast_style: _CastStyle,
+    label_size: str,
+) -> _CastLayers:
+    """Return a row's cast lines, names and seafloor as holoviews elements.
+
+    ``values`` is :func:`~ocean_skill.plot.section.prepare_section_row`'s lanes *before*
+    any x renaming, ``geometry`` its geometry; ``x`` is the x dimension the panels
+    actually carry (``geometry.x_name``, or the grid's alias for it) so the new elements
+    share the mesh's dimension names -- bokeh links axes by name. Computed once per row
+    and handed to all three panels, as the static renderer draws the same marks on each.
+
+    Every element takes ``apply_ranges=False``: they are context for the data, not
+    something the view should widen to hold. The depth axis is set explicitly instead --
+    from the surface down to :func:`~ocean_skill.plot.section.depth_limit` -- when there
+    is a seafloor, and left to the data when there is not.
+    """
+    import holoviews as hv
+
+    y = geometry.y_name
+    floor = None
+    outline: list = []
+    casts: list = []
+    ylim = None
+    line = None
+    if seafloor is not None:
+        line = seafloor_line(seafloor, geometry)
+    if line is not None and len(line[0]):
+        bottom = depth_limit(list(values.values()), line[1])
+        ylim = (0.0, bottom)
+        sx, sdepth = line
+
+        def floor(frame):
+            return hv.Area(
+                (sx, sdepth, np.full_like(sdepth, bottom)),
+                kdims=[x],
+                vdims=[y, f"{y}_floor"],
+            ).opts(
+                fill_color=seafloor_style.fill_color,
+                fill_alpha=seafloor_style.fill_alpha,
+                line_alpha=0,
+                show_legend=False,
+                tools=[],
+                apply_ranges=False,
+                **frame,
+            )
+
+        if seafloor_style.edge_color is not None and seafloor_style.edge_width > 0:
+            outline.append(
+                hv.Curve((sx, sdepth), kdims=[x], vdims=[y]).opts(
+                    color=seafloor_style.edge_color,
+                    line_width=seafloor_style.edge_width,
+                    show_legend=False,
+                    tools=[],
+                    apply_ranges=False,
+                )
+            )
+    if cast_labels is not None:
+        marks = cast_marks(values["reference"], geometry, cast_labels)
+        placed = [m for m in marks if np.isfinite(m.x)]
+        reached = [m for m in placed if np.isfinite(m.bottom)]
+        if reached:
+            casts.append(
+                hv.Segments(
+                    [(m.x, 0.0, m.x, m.bottom) for m in reached],
+                    kdims=[x, y, f"{x}_end", f"{y}_end"],
+                ).opts(
+                    color=cast_style.color,
+                    line_width=cast_style.width,
+                    line_dash=cast_style.dash,
+                    show_legend=False,
+                    tools=[],
+                    apply_ranges=False,
+                )
+            )
+        if cast_style.labels and placed:
+            # the names sit just inside the top edge: at the surface when the axis is
+            # set to start there, else at the shallowest depth any panel has
+            top = 0.0
+            if ylim is None:
+                top = min(
+                    float(np.nanmin(np.asarray(da[y], dtype="float64")))
+                    for da in values.values()
+                )
+            casts.append(
+                hv.Labels(
+                    [(m.x, top, m.label) for m in placed],
+                    kdims=[x, y],
+                    vdims=["text"],
+                ).opts(
+                    text_color=_mcolors.to_hex(CAST_LABEL_COLOR),
+                    text_font_size=label_size,
+                    text_align="center",
+                    text_baseline="top",
+                    angle=cast_style.angle,
+                    show_legend=False,
+                    apply_ranges=False,
+                    hooks=[_label_offset_hook(0, -1, px=_CAST_LABEL_GAP_PX)],
+                )
+            )
+    return _CastLayers(floor, tuple(outline), tuple(casts), ylim)
+
+
 def _section_panel(
-    field, *, mark: str = "pcolormesh", fill_levels=None, lines=(), **mesh_opts
+    field,
+    *,
+    mark: str = "pcolormesh",
+    fill_levels=None,
+    lines=(),
+    casts: _CastLayers | None = None,
+    **mesh_opts,
 ):
     """Return one section panel: its fill, with any contour lines over it.
 
@@ -1006,6 +1360,12 @@ def _section_panel(
     elements :func:`_line_layers` built -- are laid over the fill, lines and then their
     labels, above everything else; a panel with none is exactly what it was before
     there were overlays.
+
+    ``casts`` (:class:`_CastLayers`), if given, adds a cast-built section's seafloor
+    beneath the fill (carrying the panel's own frame options, as a banded fill does, so
+    the whole overlay sits in the one frame), its outline over the fill and under the
+    contour ``lines``, and the cast lines and names over everything. The mesh stays the
+    only element with a hover, so a panel still reads an exact value per cell.
     """
     mesh = _quadmesh(field, **mesh_opts)
     panel = mesh
@@ -1024,8 +1384,21 @@ def _section_panel(
             hover=mesh_opts.get("hover", True),
             label_clipped=mesh_opts.get("label_clipped", False),
         )
+    if casts is not None:
+        frame = {
+            k: v for k, v in mesh.opts.get("plot").kwargs.items() if k in _PANEL_OPTS
+        }
+        if casts.floor is not None:
+            panel = casts.floor(frame) * panel
+        for layer in casts.outline:
+            panel = panel * layer
     for layer in lines:
         panel = panel * layer
+    if casts is not None:
+        for layer in casts.casts:
+            panel = panel * layer
+        if casts.ylim is not None:
+            panel = panel.opts(ylim=casts.ylim)
     return panel
 
 
@@ -1115,7 +1488,6 @@ def _field_row(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
@@ -1125,9 +1497,11 @@ def _field_row(
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
-    vmin, vmax = _limits(t, r, log=log, robust=robust)
+    vmin, vmax = _variable_limits(
+        standard_name, statistic, t, r, log=log, robust=robust
+    )
     if log:
         vmin = max(vmin, 1e-6)
     dmax = difference_limit(d)
@@ -1350,7 +1724,7 @@ def _field_facet(
     vmax: float | None = None,
     titles=None,
     location_items=None,
-    legend: bool = True,
+    legend: bool | str = True,
     marker_size: float = 9.0,
     colors=None,
     **_,
@@ -1414,7 +1788,10 @@ def _field_facet(
 
     ``location_items`` draws :mod:`ocean_skill.plot.locations`-family items over every
     panel (see :func:`_location_elements`); ``legend`` keys them on the first panel
-    only, and they are context rather than data -- a station outside the field does not
+    only (``legend="annotate"`` instead writes each labelled selection's name beside its
+    shape on *every* panel, keying only the unlabelled groups, and only if any
+    remain; see :func:`_location_elements`), and they are context rather than data --
+    a station outside the field does not
     widen the map. ``colors`` recolours the legend groups they draw (see
     :func:`~ocean_skill.plot.locations.legend_groups`) and is ignored without
     ``location_items``, as ``marker_size`` and ``legend`` are.
@@ -1424,7 +1801,6 @@ def _field_facet(
     from ocean_skill.plot.matplotlib_renderer import (
         _TIME_NOT_GIVEN,
         _aspect_of,
-        _limits,
         facet_labels,
         field_suptitle,
     )
@@ -1464,17 +1840,26 @@ def _field_facet(
         if title is None
         else title
     )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
     loc_xform = _location_xform(field, tiles, geo=geo)
+    loc_font_size = None
+    if location_items:
+        loc_font_size = _panel_geometry(
+            field.isel({d: 0 for d in (facet_dim, row_dim) if d}),
+            font_scale=font_scale,
+            canvas_factor=factor,
+        )[2]["legend"]
     # one panel's worth of cells, not the whole faceted field, which would overcount by
     # the number of panels and rasterize a grid whose individual maps are small
     one_panel = field.isel({d: 0 for d in (facet_dim, row_dim) if d})
     raster = _should_rasterize(one_panel, rasterize)
 
     def _clim(sub):
-        lo, hi = _limits(sub, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _variable_limits(
+            standard_name, statistic, sub, log=log, robust=robust, vmin=vmin, vmax=vmax
+        )
         return (max(lo, 1e-6) if log else lo, hi)
 
     # One scale per row when the rows are levels, matching the static renderer: depths
@@ -1549,16 +1934,18 @@ def _field_facet(
         )
         panel = mesh if outline is None else mesh * outline
         if location_items:
-            keyed = legend and (row, col) == (0, 0)
+            keyed = (row, col) == (0, 0)
             for element in _location_elements(
                 location_items,
                 xform=loc_xform,
                 marker_size=marker_size,
                 colors=colors,
-                legend=keyed,
+                legend=legend,
+                font_size=loc_font_size,
+                key=keyed,
             ):
                 panel = panel * element
-            if keyed:
+            if keyed and _location_legend_entries(location_items, colors, legend):
                 panel = panel.opts(legend_position="right")
         return panel
 
@@ -1604,6 +1991,7 @@ def _section(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """One interactive vertical section: depth against along-path distance.
@@ -1635,9 +2023,13 @@ def _section(
     styled by ``contour_kwargs`` (``colors``, ``linewidths``, ``linestyles``, ``fmt``,
     ``labels=False``; any other key is static-only and warns). An overlay on a
     different mesh is refused, never regridded.
+
+    ``section_x`` (``"auto"``, ``"distance"``, ``"lon"``, ``"lat"``) is handed to
+    :func:`~ocean_skill.plot.section.prepare_section` and decides what runs along the
+    x axis -- see the static renderer's ``section``.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.section import prepare_section
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -1648,10 +2040,11 @@ def _section(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     _extension()
     factor = _canvas_factor(size, zoom)
-    field, geometry = prepare_section(item["field"])
+    field, geometry = prepare_section(item["field"], section_x)
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
@@ -1660,10 +2053,18 @@ def _section(
             standard_name, (item.get("depth"), geometry.path_note),
             label=item.get("label"),
         )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if clim is None:
-        lo, hi = _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        lo, hi = _variable_limits(
+            standard_name,
+            statistic,
+            field,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         if log:
             lo = max(lo, 1e-6)
         clim = (lo, hi)
@@ -1671,7 +2072,7 @@ def _section(
 
     lines = ()
     if raw is not None:
-        overlay = prepare_overlay(raw, field)
+        overlay = prepare_overlay(raw, field, section_x)
         name, line_units = _contour_caption(item)
         lines = _line_layers(
             overlay,
@@ -1729,6 +2130,7 @@ def _cross(
     vmin: float | None = None,
     vmax: float | None = None,
     titles=None,
+    section_x: str = "auto",
     **_,
 ):
     """Two interactive vertical sections through one point, one per grid direction.
@@ -1756,6 +2158,8 @@ def _cross(
     ``vmin``/``vmax`` pin an exact colour range, passed through to both panels'
     own :func:`_section` call -- overriding ``robust`` wherever either end is given
     and, unlike the plain data-derived default, genuinely shared between them.
+
+    ``section_x`` is :func:`_section`'s, applied to each panel on its own.
     """
     hv = _extension()
 
@@ -1780,7 +2184,10 @@ def _cross(
     auto_titles = [
         suptitle_text(
             item.get("standard_name"),
-            (item.get("depth"), prepare_section(item["field"])[1].path_note),
+            (
+                item.get("depth"),
+                prepare_section(item["field"], section_x)[1].path_note,
+            ),
             label=item.get("label"),
         )
         for item in items
@@ -1800,6 +2207,7 @@ def _cross(
             colorbar_label_clipped=colorbar_label_clipped,
             vmin=vmin,
             vmax=vmax,
+            section_x=section_x,
         )
         for item, panel_title in zip(items, resolved_titles, strict=True)
     ]
@@ -1832,6 +2240,7 @@ def _section_grid(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
     **_,
 ):
     """Several interactive vertical sections -- one panel per item -- in one layout.
@@ -1862,7 +2271,8 @@ def _section_grid(
     ``titles=`` overrides each panel's title by hand (one per item, or one per grid
     cell faceted); see the static renderer's ``section_grid``.
 
-    ``mark``/``fill_levels`` are :func:`_section`'s. Items carrying a ``contour``
+    ``mark``/``fill_levels``/``section_x`` are :func:`_section`'s (each panel picks its
+    own x axis under ``"auto"``). Items carrying a ``contour``
     overlay draw its lines over their own panel; the lines' levels are decided **once**
     for the whole grid, from every overlay at once, so every panel shows the same
     isotherms.
@@ -1871,7 +2281,6 @@ def _section_grid(
 
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         section_grid_layout,
         section_limit_groups,
     )
@@ -1885,13 +2294,14 @@ def _section_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
-    prepared = [prepare_section(item["field"]) for item in items]
+    prepared = [prepare_section(item["field"], section_x) for item in items]
     prepared_of = {id(item): p for item, p in zip(items, prepared, strict=True)}
     # the lines' levels and style, read once for the grid and handed to every panel
     levels = None
     overlays = [
-        prepare_overlay(item["contour"], prepared_of[id(item)][0])
+        prepare_overlay(item["contour"], prepared_of[id(item)][0], section_x)
         for item in items
         if item.get("contour") is not None
     ]
@@ -1920,7 +2330,15 @@ def _section_grid(
             first = members[0][1]
             log = is_log(first.get("standard_name"), statistic_of(first))
             fields = [prepared_of[id(item)][0] for _, item in members]
-            lo, hi = _limits(*fields, log=log, robust=robust, vmin=vmin, vmax=vmax)
+            lo, hi = _variable_limits(
+                first.get("standard_name"),
+                statistic_of(first),
+                *fields,
+                log=log,
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
+            )
             if log:
                 lo = max(lo, 1e-6)
             reach = _data_range(*fields, log=log)
@@ -1952,6 +2370,7 @@ def _section_grid(
                 fill_levels=fill_levels,
                 contour_levels=levels if item.get("contour") is not None else None,
                 contour_kwargs=style if item.get("contour") is not None else None,
+                section_x=section_x,
             )
         )
     out = hv.Layout(plots).cols(grid_ncols).opts(hv.opts.Layout(shared_axes=False))
@@ -2011,7 +2430,7 @@ def _time_depth(
     clipped end when *any* panel in the group runs past it (see :func:`_quadmesh`).
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -2029,12 +2448,20 @@ def _time_depth(
             (geometry.place_note, geometry.period_note),
             label=item.get("label"),
         )
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     lo, hi = (
         clim
         if clim is not None
-        else _limits(field, log=log, robust=robust, vmin=vmin, vmax=vmax)
+        else _variable_limits(
+            standard_name,
+            statistic,
+            field,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
     )
     if log:
         lo = max(lo, 1e-6)
@@ -2205,7 +2632,6 @@ def _time_depth_grid(
         resolve_limit_groups,
     )
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         field_title,
         time_depth_grid_titles,
     )
@@ -2281,7 +2707,7 @@ def _time_depth_grid(
             first = cell_items[group_indices[0]]
             # the group's scale is the first member's, as its reach below already is
             log = is_log(first.get("standard_name"), statistic_of(first))
-            span = _limits(
+            span = _variable_limits(first.get("standard_name"), statistic_of(first), 
                 *(prepared[i][0] for i in group_indices),
                 log=log,
                 robust=robust,
@@ -2456,7 +2882,6 @@ def _field_map_grid(
     )
     from ocean_skill.plot.matplotlib_renderer import (
         _aspect_of,
-        _limits,
         field_title,
         grid_suptitle,
     )
@@ -2522,7 +2947,13 @@ def _field_map_grid(
             first = cell_items[group_indices[0]]
             # the group's scale is the first member's, as its reach below already is
             log = is_log(first.get("standard_name"), statistic_of(first))
-            span = _limits(*fields, log=log, robust=robust)
+            span = _variable_limits(
+                first.get("standard_name"),
+                statistic_of(first),
+                *fields,
+                log=log,
+                robust=robust,
+            )
             # the shared bar answers for the whole group, as the static norm does
             reach = _data_range(*fields, log=log)
             for i in group_indices:
@@ -2543,9 +2974,11 @@ def _field_map_grid(
         field = item["field"]
         standard_name = item.get("standard_name")
         statistic = statistic_of(item)
-        seq, _div = cmaps_for(standard_name)
+        seq, _div = cmaps_for(standard_name, statistic=statistic)
         log = is_log(standard_name, statistic)
-        lo, hi = clims.get(i) or _limits(field, log=log, robust=robust)
+        lo, hi = clims.get(i) or _variable_limits(
+            standard_name, statistic, field, log=log, robust=robust
+        )
         clim = (max(lo, 1e-6) if log else lo, hi)
         raster = _should_rasterize(field, rasterize)
         mesh = _quadmesh(
@@ -2609,6 +3042,12 @@ def _section_row(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
+    cast_labels=None,
+    seafloor=None,
+    cast_fill: bool = False,
+    seafloor_kwargs=None,
+    cast_kwargs=None,
     **_,
 ):
     """Test | reference | difference vertical sections, as three linked interactive maps.
@@ -2652,10 +3091,35 @@ def _section_row(
     test overlay's lines go over the test panel and the reference's over the reference
     panel, at one set of levels decided from both, and the difference panel gets none --
     a difference of two fields has no isotherm of its own.
+    ``section_x`` is :func:`_section`'s; the three panels share the x axis chosen from
+    the test lane's path.
+
+    **Cast-built sections.** An item stacked from CTD casts carries ``cast_labels`` (one
+    name per along-path column) and ``seafloor`` (the bottom depth along the path); the
+    keywords of the same names override the item's. Each is drawn on all three panels
+    from one set of marks computed once for the row (:func:`_cast_layers`): a dashed
+    line from the surface to each cast's deepest observation with its name just inside
+    the top edge, and the seafloor as a filled area *under* the data (a missing cell is
+    transparent, so it shows through) with a thin outline over it but under any contour
+    lines. With a seafloor the depth axis runs from the surface to the deeper of the
+    seafloor and the deepest observation. The mesh stays the only element with a hover.
+    A panel with a seafloor draws a cell with no data as white water
+    (:data:`~ocean_skill.plot.section.WATER_COLOR`) rather than the grey of a section
+    without one. ``cast_fill=True`` (the item's ``cast_fill``, which the keyword
+    overrides) resamples the casts' few columns -- the data and any contour overlay --
+    onto a fine x grid for drawing (:func:`~ocean_skill.plot.section.
+    fill_between_casts`), so a deep cast between shallow ones keeps its colour out to
+    halfway to its neighbours; the cast marks, the colour limits and the contour levels
+    are all still read from the casts' own columns, and the mesh's hover then reads the
+    blended values.
+    ``cast_kwargs`` (``colors``, ``linestyles``, ``linewidths``; ``labels=False`` for no
+    names, ``rotation`` in degrees) and ``seafloor_kwargs`` (``color``/``alpha`` for the
+    fill, ``edgecolor``/``linewidth`` for the outline) are the static renderer's own
+    keys; others only affect it, and warn. With neither key the panels are unchanged.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.section import prepare_section_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -2666,19 +3130,61 @@ def _section_row(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     hv = _extension()
     factor = _canvas_factor(size, zoom)
-    values, geometry = prepare_section_row(item["aligned"])
+    values, geometry = prepare_section_row(item["aligned"], section_x)
+    if cast_labels is None:
+        cast_labels = item.get("cast_labels")
+    if seafloor is None:
+        seafloor = item.get("seafloor")
+    cast_fill = cast_fill or bool(item.get("cast_fill", False))
+    # the cast marks and seafloor are placed on the row's own coordinates, so they are
+    # built here, ahead of the x alias renaming them (the elements take the alias)
+    cast_layers = None
+    if cast_labels is not None or seafloor is not None:
+        cast_layers = _cast_layers(
+            values,
+            geometry,
+            x=x_alias or geometry.x_name,
+            cast_labels=cast_labels,
+            seafloor=seafloor,
+            seafloor_style=_seafloor_style(seafloor_kwargs),
+            cast_style=_cast_style(cast_kwargs),
+            label_size=_contour_label_size(
+                values["test"],
+                font_scale=font_scale,
+                width_px=PANEL_WIDTH_PX,
+                canvas_factor=factor,
+            ),
+        )
     # the overlays go onto the panels' own meshes, ahead of the x alias renaming them
     overlays = (
         {
-            lane: prepare_overlay(raw[lane], values[lane])
+            lane: prepare_overlay(raw[lane], values[lane], section_x)
             for lane in ("test", "reference")
         }
         if raw is not None
         else {}
     )
+    # decided on the casts' own columns, like the colour limits below: the resampling
+    # below is for drawing, and moves neither
+    levels = (
+        _figure_levels(contour_levels, list(overlays.values())) if overlays else None
+    )
+    limit_values = values
+    if cast_fill:
+        # stopped at the seafloor, so a cast carried across a gap never paints a sill
+        line = seafloor_line(seafloor, geometry) if seafloor is not None else None
+        values = {
+            lane: fill_between_casts(da, geometry, seafloor=line)
+            for lane, da in values.items()
+        }
+        overlays = {
+            lane: fill_between_casts(da, geometry, seafloor=line)
+            for lane, da in overlays.items()
+        }
     x_name = geometry.x_name
     if x_alias is not None:
         # a fresh coordinate carrying the label (never an in-place attrs edit, which
@@ -2693,6 +3199,7 @@ def _section_row(
         }
         x_name = x_alias
     t, r, d = values["test"], values["reference"], values["difference"]
+    lt, lr, ld = (limit_values[lane] for lane in ("test", "reference", "difference"))
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
@@ -2700,20 +3207,22 @@ def _section_row(
         title = suptitle_text(
             standard_name, (item.get("depth"), item.get("time"), geometry.path_note)
         )
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            standard_name, statistic, lt, lr, log=log, robust=robust
+        )
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
     if div_clim is None:
-        dmax = difference_limit(d)
+        dmax = difference_limit(ld)
         div_clim = (-dmax, dmax)
     # the one scale both bars answer for: the row's own data unless a grid's shared
     # scale says more
     if seq_range is None:
-        seq_range = _data_range(t, r, log=log)
+        seq_range = _data_range(lt, lr, log=log)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -2732,7 +3241,14 @@ def _section_row(
         y=geometry.y_name,
         aspect=SECTION_ASPECT,
         invert_y=True,
-        bgcolor="#d9d9d9",
+        # a missing cell shows the panel's background: the grey of "no data" -- unless
+        # the seafloor is drawn, which already says where the rock is, and what is
+        # left above it is water
+        bgcolor=(
+            _mcolors.to_hex(WATER_COLOR)
+            if cast_layers is not None and cast_layers.floor is not None
+            else "#d9d9d9"
+        ),
         axis_labels=(geometry.x_label, geometry.y_label),
         font_scale=font_scale,
         canvas_factor=factor,
@@ -2741,7 +3257,6 @@ def _section_row(
     )
     lines = {"test": (), "reference": ()}
     if overlays:
-        levels = _figure_levels(contour_levels, list(overlays.values()))
         name, line_units = _contour_caption(item)
         label_size = _contour_label_size(
             t, font_scale=font_scale, width_px=PANEL_WIDTH_PX, canvas_factor=factor
@@ -2762,12 +3277,14 @@ def _section_row(
     panels = [
         _section_panel(
             t, mark=mark, fill_levels=fill_levels, lines=lines["test"],
+            casts=cast_layers,
             title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _section_panel(
             r, mark=mark, fill_levels=fill_levels, lines=lines["reference"],
+            casts=cast_layers,
             title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
             data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
@@ -2776,6 +3293,7 @@ def _section_row(
             d,
             mark=mark,
             fill_levels=difference_fill_levels(fill_levels),
+            casts=cast_layers,
             title=diff_title,
             cmap=div,
             clim=div_clim,
@@ -2811,6 +3329,9 @@ def _section_row_grid(
     fill_levels=None,
     contour_levels=None,
     contour_kwargs=None,
+    section_x: str = "auto",
+    seafloor_kwargs=None,
+    cast_kwargs=None,
     **_,
 ):
     """One interactive ``section_row`` per comparison, stacked.
@@ -2843,14 +3364,19 @@ def _section_row_grid(
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list, ``3 * n`` entries; ``None`` keeps a panel's own title.
 
-    ``mark``/``fill_levels`` are :func:`_section_row`'s. The lines' levels are decided
+    ``mark``/``fill_levels``/``section_x`` are :func:`_section_row`'s (``section_x``
+    resolved per row from that row's own path). The lines' levels are decided
     **once** for the whole grid, pooled over every row's test and reference overlay, so
     every row shows the same isotherms.
+
+    A row stacked from casts draws its own ``cast_labels``, ``seafloor`` and
+    ``cast_fill`` (read per item, as ``contour`` is: one row may be cast-built and the
+    next not), styled by the one ``seafloor_kwargs``/``cast_kwargs`` -- read once here,
+    so a bad value warns once, not once per row. See :func:`_section_row`.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         section_row_grid_title,
     )
     from ocean_skill.plot.section import prepare_section_row
@@ -2861,12 +3387,15 @@ def _section_row_grid(
         contour_levels=contour_levels,
         contour_kwargs=contour_kwargs,
         fill_levels=fill_levels,
+        section_x=section_x,
     )
     hv = _extension()
-    prepared = [prepare_section_row(it["aligned"]) for it in items]
+    seafloor_style = _seafloor_style(seafloor_kwargs)
+    cast_style = _cast_style(cast_kwargs)
+    prepared = [prepare_section_row(it["aligned"], section_x) for it in items]
     levels = None
     overlays = [
-        prepare_overlay(it["contour"][lane], values[lane])
+        prepare_overlay(it["contour"][lane], values[lane], section_x)
         for it, (values, _geometry) in zip(items, prepared, strict=True)
         if it.get("contour") is not None
         for lane in ("test", "reference")
@@ -2934,7 +3463,14 @@ def _section_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
-        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            items[0].get("standard_name"),
+            statistic_of(items[0]),
+            *all_t,
+            *all_r,
+            log=log,
+            robust=robust,
+        )
         if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
@@ -2968,6 +3504,12 @@ def _section_row_grid(
             fill_levels=fill_levels,
             contour_levels=levels if it.get("contour") is not None else None,
             contour_kwargs=style if it.get("contour") is not None else None,
+            section_x=section_x,
+            cast_labels=it.get("cast_labels"),
+            seafloor=it.get("seafloor"),
+            cast_fill=it.get("cast_fill", False),
+            seafloor_kwargs=seafloor_style,
+            cast_kwargs=cast_style,
         )
         for i, it in enumerate(items)
     ]
@@ -3038,7 +3580,7 @@ def _time_depth_row(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits, suptitle_text
+    from ocean_skill.plot.matplotlib_renderer import suptitle_text
     from ocean_skill.plot.time_depth import default_mark, prepare_time_depth_row
     from ocean_skill.plot.typography import SECTION_ASPECT
 
@@ -3061,10 +3603,12 @@ def _time_depth_row(
                 geometry.period_note,
             ),
         )
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     if seq_clim is None:
-        vmin, vmax = _limits(t, r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            standard_name, statistic, t, r, log=log, robust=robust
+        )
         if log:
             vmin = max(vmin, 1e-6)
         seq_clim = (vmin, vmax)
@@ -3213,7 +3757,6 @@ def _time_depth_row_grid(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
-    from ocean_skill.plot.matplotlib_renderer import _limits
 
     hv = _extension()
     title = _default_grid_title(items, title)
@@ -3252,7 +3795,14 @@ def _time_depth_row_grid(
         all_r = [values["reference"] for values, _ in prepared]
         all_d = [values["difference"] for values, _ in prepared]
         log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
-        vmin, vmax = _limits(*all_t, *all_r, log=log, robust=robust)
+        vmin, vmax = _variable_limits(
+            items[0].get("standard_name"),
+            statistic_of(items[0]),
+            *all_t,
+            *all_r,
+            log=log,
+            robust=robust,
+        )
         if log:
             vmin = max(vmin, 1e-6)
         shared_seq_clim = (vmin, vmax)
@@ -4281,7 +4831,6 @@ def _facet_movie(
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot.matplotlib_renderer import (
-        _limits,
         _one_facet_axis,
         _select_frames,
         frame_labels,
@@ -4303,7 +4852,7 @@ def _facet_movie(
 
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
-    seq, _div = cmaps_for(standard_name)
+    seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
     frames_da = _preload_frames(field.isel({facet_dim: indices}))
     if shared_limits:
@@ -4313,7 +4862,9 @@ def _facet_movie(
         scope = frames_da if len(indices) == int(field.sizes[facet_dim]) else field
     else:
         scope = frames_da.isel({facet_dim: 0})
-    vmin, vmax = _limits(scope, log=log, robust=robust, vmin=vmin, vmax=vmax)
+    vmin, vmax = _variable_limits(
+        standard_name, statistic, scope, log=log, robust=robust, vmin=vmin, vmax=vmax
+    )
     if log:
         vmin = max(vmin, 1e-6)
     # the bar is built once for the slider, so its ends are marked for every frame
@@ -4424,7 +4975,7 @@ def _field_movie(
     write a video.
     """
     from ocean_skill.colormaps import is_log
-    from ocean_skill.plot.matplotlib_renderer import _limits, _select_frames
+    from ocean_skill.plot.matplotlib_renderer import _select_frames
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
@@ -4437,7 +4988,7 @@ def _field_movie(
     statistic = statistic_of(first)
     units = units_text(first.get("units"), statistic)
     standard_name = first.get("standard_name")
-    seq, div = cmaps_for(standard_name)
+    seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
 
     # One clim for the whole movie, from every frame or just the first. Computed here
@@ -4460,7 +5011,7 @@ def _field_movie(
     )
     outline = _domain_overlay(domain, first["aligned"]["test"], geo=geo, tiles=tiles)
     scope = items if shared_limits else items[:1]
-    vmin, vmax = _limits(
+    vmin, vmax = _variable_limits(standard_name, statistic, 
         *[f["aligned"]["test"] for f in scope],
         *[f["aligned"]["reference"] for f in scope],
         log=log,
@@ -6366,8 +6917,54 @@ def _location_xform(field, tiles, *, geo: bool = True):
     return _identity_xform
 
 
+def _location_legend_entries(items, colors, legend) -> bool:
+    """Whether ``legend`` leaves at least one entry to key for ``items``."""
+    from ocean_skill.plot.locations import (
+        annotation_anchors,
+        legend_groups,
+        resolve_location_legend,
+    )
+
+    legend = resolve_location_legend(legend)
+    if not legend:
+        return False
+    if legend == "annotate":
+        return bool(annotation_anchors(items, colors)[1])
+    return bool(legend_groups(items, colors))
+
+
+#: Pixel gap between a ``legend="annotate"`` label and the shape it names.
+_ANNOTATE_OFFSET_PX = 5
+
+
+def _label_offset_hook(dx: int, dy: int, px: float = _ANNOTATE_OFFSET_PX):
+    """Bokeh finalize hook: nudge a ``hv.Labels`` text ``px`` pixels toward ``dx, dy``.
+
+    ``hv.Labels``' own ``xoffset``/``yoffset`` options are in *data* units, which would
+    move a label by a different screen distance at every zoom (and, under a tile
+    basemap, in Web Mercator metres). The bokeh ``LabelSet`` glyph's ``x_offset`` /
+    ``y_offset`` are screen pixels (y up is positive in bokeh's offset, matching
+    ``dy``), so the hook sets those instead.
+    """
+
+    def hook(plot, element):
+        glyph = plot.handles.get("glyph")
+        if glyph is not None:
+            glyph.x_offset = dx * px
+            glyph.y_offset = dy * px
+
+    return hook
+
+
 def _location_elements(
-    items, *, xform, marker_size: float, legend: bool, colors=None
+    items,
+    *,
+    xform,
+    marker_size: float,
+    legend: bool | str,
+    colors=None,
+    font_size: str | None = None,
+    key: bool = True,
 ) -> list:
     """Build the holoviews elements for ``locations``-family items, in draw order.
 
@@ -6395,14 +6992,40 @@ def _location_elements(
 
     ``colors`` is :func:`~ocean_skill.plot.locations.legend_groups`'s override; each
     group's colour reaches its glyphs and so its legend entry alike.
+
+    ``legend="annotate"`` writes each labelled selection group's label next to its
+    shape instead of keying it (see
+    :func:`~ocean_skill.plot.locations.annotation_anchors`): that group's glyphs are
+    drawn without a legend label, and one ``hv.Labels`` per anchor follows the glyphs,
+    positioned through ``xform`` like the plain geometry (the 180-centred frame and
+    Web Mercator included). The text is bold in the group's colour, ``font_size`` (the
+    panel's legend size), offset 5 screen pixels from the anchor by
+    :func:`_label_offset_hook`, and has no halo -- bokeh text has no stroke to draw
+    one with. Unlabelled groups keep their legend entries as usual. ``key=False`` drops
+    every legend entry but keeps the annotation text: a facet keys the legend on its
+    first panel only, yet each panel's shapes need their names.
     """
     import geoviews as gv
     import pandas as pd
     from bokeh.models import HoverTool
 
-    from ocean_skill.plot.locations import HOVER_FIELDS, legend_groups
+    from ocean_skill.plot.locations import (
+        HOVER_FIELDS,
+        annotation_anchors,
+        legend_groups,
+        resolve_location_legend,
+    )
 
     hv = _extension()
+    legend = resolve_location_legend(legend)
+    annotate = legend == "annotate"
+    anchors: list[dict] = []
+    annotated: set[str] = set()
+    if annotate:
+        anchors, _unlabelled = annotation_anchors(items, colors)
+        annotated = {a["text"] for a in anchors}
+        legend = True  # the unlabelled groups keep their entries
+    legend = legend and key
 
     def hover_tool():
         # A fresh HoverTool per element — a bokeh model belongs to one renderer.
@@ -6413,6 +7036,12 @@ def _location_elements(
     elements: list = []
 
     for label, style, group_items in legend_groups(items, colors):
+        # an annotated group is named by its text label, not a legend entry
+        show = bool(legend) and not (
+            annotate
+            and label in annotated
+            and group_items[0].get("featureType") == "selection"
+        )
         extent_items = [i for i in group_items if i["kind"] == "extent"]
         point_items = [i for i in group_items if i["kind"] == "point"]
         path_items = [i for i in group_items if i["kind"] in ("line", "ring")]
@@ -6441,7 +7070,7 @@ def _location_elements(
                     line_color=style["color"],
                     line_width=1.5,
                     tools=[hover_tool()],
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
@@ -6466,7 +7095,7 @@ def _location_elements(
                     tools=[hover_tool()],
                     line_color="white",
                     line_width=1,
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
@@ -6486,10 +7115,30 @@ def _location_elements(
                     color=style["color"],
                     line_dash="solid" if any_solid else "dashed",
                     line_width=1.8 if any_solid else 1.0,
-                    show_legend=legend,
+                    show_legend=show,
                     apply_ranges=False,
                 )
             )
+    for anchor in anchors:
+        xs, ys = xform([anchor["lon"]], [anchor["lat"]])
+        opts = {
+            "text_color": anchor["color"],
+            "text_font_style": "bold",
+            "text_align": anchor["ha"],
+            "text_baseline": "middle" if anchor["va"] == "center" else "bottom",
+            "apply_ranges": False,
+            "show_legend": False,
+            "hooks": [_label_offset_hook(anchor["dx"], anchor["dy"])],
+        }
+        if font_size:
+            opts["text_font_size"] = font_size
+        elements.append(
+            hv.Labels(
+                {"x": [float(xs[0])], "y": [float(ys[0])], "text": [anchor["text"]]},
+                kdims=["x", "y"],
+                vdims=["text"],
+            ).opts(**opts)
+        )
     return elements
 
 
@@ -6499,7 +7148,7 @@ def _locations(
     title: str | None = None,
     extent: tuple[float, float, float, float] | None = None,
     tiles: str | bool | None = "EsriOceanBase",
-    legend: bool = True,
+    legend: bool | str = True,
     marker_size: float = 9.0,
     colors=None,
     size=None,
@@ -6531,6 +7180,10 @@ def _locations(
 
     ``land=False`` drops that offline coastline outline too, for a bare basemap; it
     has no effect with ``tiles`` on, the tile layer already showing land.
+
+    ``legend`` is ``True`` (the key), ``False``, or ``"annotate"``: each labelled
+    selection's name is written beside its shape and only the unlabelled groups are
+    keyed, if any (see :func:`_location_elements`).
 
     ``colors`` overrides the legend groups' colours -- a string for every selection
     group, a list as the selection palette, or a ``{legend label: colour}`` dict; see
@@ -6576,6 +7229,7 @@ def _locations(
         marker_size=marker_size,
         colors=colors,
         legend=legend,
+        font_size=fontsize["legend"],
     ):
         overlay = overlay * element
 
@@ -6585,7 +7239,7 @@ def _locations(
         "fontsize": fontsize,
         "title": title or "",
     }
-    if legend:
+    if _location_legend_entries(items, colors, legend):
         opts["legend_position"] = "right"
     if tiles:
         xs, ys = to_mercator([lon0, lon1], [lat0, lat1])

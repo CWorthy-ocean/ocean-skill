@@ -82,6 +82,7 @@ pages:
     XY: {members: {...}, x: ..., y: ...}   # one variable against another (see below); TS: is XY: with x/y fixed
     for_each: {...}        # optional: fan this one page into several (see below)
     then: [...]            # optional, field: pages only: a method chain (see below)
+    contours: true         # optional, field:/compare: pages: contour lines over the fill (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
                             # (size:/zoom:/figsize: are pinned to the page canvas and warned
                             # about instead while pdf: true -- see Page size, below)
@@ -223,6 +224,13 @@ the whole page is one figure, one PNG, whatever the number of regions.
   literal `{"min", "max"}` window, and `time: latest` becomes the last step. Every other
   member is passed through exactly as written, with no run window, because a climatology
   or a different run has a time axis of its own -- its time is yours to select.
+- **`window: run` gives a non-test member the run's window.** A reanalysis compared
+  against the run has to cover the run's dates, which change from run to run, so they
+  cannot be written into the YAML: `GLORYS12: {source: glorys_my_daily_timeseries,
+  window: run}` gets the same literal `{"min", "max"}` `select.time` the test member
+  does. It needs `defaults.test`, is refused if the member also names a `time:` in its
+  `select:` (give one or the other), and is a no-op on the test member itself. The only
+  value is `run`.
 - **`regions:`** maps a region name to a horizontal box, `{lon: {min, max}, lat: {min,
   max}}` (or a single point). The name is the panel title. Each region *replaces* its
   members' horizontal `select:`, so write `ROMS: {}`, not the box, and the same members
@@ -444,6 +452,50 @@ the minimum or the maximum, its value with units, where it is, and the snapshot 
 was found on. A page's own `plot: {title: "..."}` replaces it. The same value and
 position are also printed (so they land in `run.log`) and recorded per page in
 `manifest.json`'s own `results:` list.
+
+## `contours:` -- contour lines over a `field:`/`compare:` page
+
+`contours:` is the suite-YAML form of `.plot(contours=<object>)` (see "Contour
+overlays" in `plot_styling_reference.md`): lines drawn over the filled figure. It sits
+beside `plot:`, whose own `contour_levels:`/`contour_kwargs:` set the levels and
+styling as usual. Two forms:
+
+```yaml
+# true: contour the plotted object itself (zero-lines on a velocity section)
+- title: "Zonal velocity, 180-160W"
+  compare:
+    reference: [cravatte_u_179e_160w]
+    variables: [east_velocity]
+    select: {lon: {min: 180, max: 200}, lat: {min: -20, max: 20}, depth: [0, 10, 20, 50, 100, 200, 300, 500]}
+    aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}
+  contours: true
+  plot: {contour_levels: [0]}
+
+# a mapping: a second object, built from the page's own kwargs with these keys
+# replaced (a shallow merge) -- isotherms over phosphate
+- title: "Phosphate with isotherms"
+  compare: {reference: [woa23_phosphate_annual], variables: [phosphate], select: {...}, aggregate: {...}}
+  contours: {reference: [woa23_temperature_annual], variables: [temperature]}
+  plot: {contour_levels: 8}
+```
+
+A `field:` page takes the same two forms (`contours: {variable: temperature}`;
+`variables:` is accepted as the same key). Everything else follows `plot(contours=)`:
+over a comparison the test lines go on the test panel and the reference lines on the
+reference panel, pairing is by position, and a grid mismatch is refused.
+
+- The mapping's values are templated (`{placeholder}`, `for_each:`) like the page's
+  own. The second object gets the same `test`/`source` default, the same run window
+  and `time: latest` resolution, and the same `skip_missing`/`cache` settings as the
+  page; the page is cached only when both reads are.
+- On a `compare:` page each plot-family figure is paired with the contour comparisons
+  of the *same family*. A family with no contour counterpart, or a different count,
+  is an error naming the page, not a silent mis-pairing.
+- `contours:` is refused on `summary:`/`section:`/`XY:`/`TS:` pages and on a `field:`
+  page with a `then:` chain (schema/`--list` errors), and when `plot:` also sets
+  `contours:`. A value other than `true`/`false` or a non-empty mapping is an error.
+- `--list` marks such a page with `+ contours`; `manifest.json` records the resolved
+  contour kwargs under the page's own `contours:`.
 
 ## Caching
 

@@ -164,6 +164,21 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
 
             obj = tabular.apply_table_options(obj, meta, subject=subject)
 
+    if not is_frame:
+        # The entry's ``units`` map, ``{original_variable_name: unit}``, stamped onto
+        # each named variable's ``units`` attribute. A product that spells its units
+        # some other way (Cravatte et al.'s ADCP sections carry ``unit: "cm/s"``, which
+        # nothing downstream reads) is declared right once, in the catalog, rather
+        # than patched in every caller. Keyed by the *original* names and applied
+        # before the standard_names rename just below, the same keying the table path
+        # uses (see ocean_skill.tabular._units_map, which reads this same key for a
+        # DataFrame -- the reason a frame is left out here). A name the data does not
+        # carry is skipped. Functional, so the Dataset the reader handed back is never
+        # touched.
+        for name, unit in (meta.get("units") or {}).items():
+            if name in obj.variables:
+                obj = obj.assign({name: obj[name].assign_attrs(units=str(unit))})
+
     # Generic/obs: light CF rename from the entry's standard_names map (cf.standardize
     # will do axis detection + units later). Skip any rename whose target already exists
     # or is claimed twice — the mapping has to stay one-to-one for rename() to work.

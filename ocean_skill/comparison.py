@@ -11,6 +11,9 @@ test × variable × depth cross-product and collects the results into a
 
 from __future__ import annotations
 
+import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +166,27 @@ def _is_stale_positionless_station(da, meta: dict[str, Any]) -> bool:
     from ocean_skill.align import point_of
 
     return point_of(da) is None
+
+
+def _is_stale_pathless_section(obj) -> bool:
+    """Whether a cached section lane (or aligned section) lacks its path coordinates.
+
+    A section built before :func:`ocean_skill.transect.sample_along` kept the
+    requested path (``path_lon``/``path_lat``) measured its along-path distance
+    between *snapped* cells and collapsed a run of requests to the run's first
+    point, which on a coarse source sampled along a cell boundary flips between
+    rows and inflates the section several-fold. Like
+    :func:`_is_stale_positionless_station`, read on every cache hit rather than
+    baked into the key (and without bumping ``cache._FORMAT_VERSION``, which would
+    orphan every unrelated entry): anything with an ``along`` dimension but no
+    ``path_lon`` is such an entry, and is discarded and recomputed. Every section
+    made since carries the coordinate, a slab or a grid-aligned slice included
+    (:func:`ocean_skill.transect._attach_along_coord`), so a fresh result never
+    trips this.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    return ALONG_DIM in obj.dims and "path_lon" not in obj.coords
 
 
 def _is_climatology(source: str) -> bool:
@@ -1365,9 +1389,18 @@ def _calculate_method(spec: Any) -> str | None:
     rows in the same figure). Folded into every label exactly once, in
     :func:`_variable_label`/:func:`_short_variable_label`, regardless of whether the
     spec carries its own standard_name or falls back to the calculator's plain name.
+    A fanned keyword's value (:data:`ocean_skill.operators.CALCULATOR_FANS` -- the
+    ``constituent`` of a tidal amplitude) is folded in alongside for the same reason:
+    K1 and M2 rows would otherwise read identically.
     """
+    from ocean_skill.operators import CALCULATOR_FANS
+
     target = spec["test"] if is_pair_spec(spec) else spec
-    return target.get("method") if isinstance(target, dict) and "calculate" in target else None
+    if not (isinstance(target, dict) and "calculate" in target):
+        return None
+    fanned = CALCULATOR_FANS.get(target["calculate"], ())
+    parts = [target.get("method"), *(target.get(k) for k in fanned)]
+    return ", ".join(str(p) for p in parts if p is not None) or None
 
 
 def _variable_label_base(spec: Any) -> str:
@@ -2311,6 +2344,24 @@ def _slab_to_section(da, axis: str, band: tuple[float, float]):
     if not any(d == zdim or _is_vertical_dim(da, d) for d in others):
         return da
 
+    # An observational product that names its vertical axis its own way (Cravatte et
+    # al.'s ADCP sections say ``DEPTH``) is found by cf-xarray's axis detection above,
+    # but the section machinery downstream -- the "keep" list a comparison leaves
+    # standing, ``_observational_vertical_to_z`` -- speaks the conventional names only
+    # (:data:`~ocean_skill.align.SECTION_VERTICAL_DIMS`), so it is brought onto
+    # ``depth`` here. A native ``s_rho``/``s_w`` is left for its own refusal, and so is
+    # a name that would collide with a ``depth`` already on the object.
+    from ocean_skill.align import SECTION_VERTICAL_DIMS
+
+    if (
+        zdim is not None
+        and zdim in da.dims
+        and zdim not in SECTION_VERTICAL_DIMS
+        and zdim not in ("s_rho", "s_w")
+        and "depth" not in da.coords
+    ):
+        da = da.rename({zdim: "depth"})
+
     values = np.asarray(da[hdim].values, dtype="float64")
     if values.size > 1 and values[0] > values[-1]:
         da = da.isel({hdim: slice(None, None, -1)})
@@ -2517,6 +2568,17 @@ def _prepare(
     # matters here, even spelled as a plain string (see _expand_derived).
     expanded_variable = _expand_derived(variable)
     calculated = isinstance(expanded_variable, dict) and "calculate" in expanded_variable
+    # A calculator sees the whole Dataset, so a time window must narrow that Dataset
+    # *before* it runs -- left to the horizontal select below, a harmonic analysis
+    # would fit the entire record and the window would only trim a result that no
+    # longer has a time axis. Only the time keys move: a box crop stays below,
+    # because a calculator may need neighbouring cells (u/v averaged onto rho).
+    if calculated:
+        from ocean_skill.sources import _TIME_KEYS as _ALL_TIME_KEYS
+
+        window = {k: select.pop(k) for k in list(select) if k in _ALL_TIME_KEYS}
+        if window:
+            obj = operators.select(obj, window, subject=source)
 
     da = operators.resolve_variable(obj, variable)
     if da is None:
@@ -3696,6 +3758,19 @@ def prepare_source(
                     "horizontal squeeze); recomputing and overwriting it.",
                     stacklevel=_stacklevel.find(),
                 )
+            elif da_hit is not None and _is_stale_pathless_section(da_hit):
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    f"ignoring a cached {source!r} section lane with no "
+                    "path_lon/path_lat -- a stale entry from before sections "
+                    "kept the requested path (its along-path distance was "
+                    "measured between snapped cells); recomputing and "
+                    "overwriting it.",
+                    stacklevel=_stacklevel.find(),
+                )
             else:
                 if da_hit is not None and require_reduced:
                     da_hit = _require_reduced(
@@ -3865,6 +3940,10 @@ def prepare_source(
     from ocean_skill.align import _is_point_bbox
 
     point_window_applied = pre_crop and bbox is not None and _is_point_bbox(bbox)
+    if hasattr(obj, "assign_attrs"):
+        # Who this is, for a calculator that caches its own expensive intermediate
+        # (see operators.calculator_source) -- the cache is keyed by identity.
+        obj = obj.assign_attrs(ocean_skill_source=source)
     da, depth = _prepare(
         obj,
         meta,
@@ -3934,6 +4013,255 @@ def prepare_source(
 #: and wants a few dozen, this counts *time steps at one cell* and wants a handful. One
 #: word for two quantities in one call signature is how the wrong one gets passed.
 DEFAULT_MIN_PAIRS = 5
+
+
+class BathymetryNotFound(LookupError):
+    """The test source carries no bathymetry variable to draw a seafloor from.
+
+    A distinct type so :func:`_section_extras` can skip the seafloor quietly when it
+    was only a default (``bathymetry=None``) while still letting an explicit
+    ``bathymetry=True`` -- or a direct :meth:`Comparison.seafloor` call -- say why.
+    """
+
+
+#: What names a seafloor depth: the same pattern
+#: :data:`ocean_skill.colormaps._ANCHORED_CMAPS` colours as bathymetry (ROMS' own
+#: ``h``, a plain ``bathymetry``, CF ``sea_floor_depth[_below_*]``), so the two agree
+#: on what counts.
+_BATHYMETRY_NAME = re.compile(r"^(h|bathymetry|sea_floor_depth(_below_\w+)?)$")
+
+
+def _cast_labels(names: Sequence[str]) -> list[str]:
+    """Return short per-cast labels: ``names`` less their shared leading text.
+
+    Stations of one campaign share a long prefix (``ctd_station_HV1``,
+    ``ctd_station_HV3``) that would swamp a label drawn on a narrow section. The
+    longest common prefix is stripped, backed off to just after its last separator
+    (``_``, ``-``, space, ``.``) so a name is never cut mid-token -- ``HV1`` and
+    ``HV10`` stay ``HV1`` and ``HV10``, not ``1`` and ``10`` from a prefix that ran
+    into the first digit. If stripping would leave any label empty (one name is a
+    prefix of another, or the names are all identical), the full names are kept.
+    """
+    names = [str(n) for n in names]
+    if len(names) < 2:
+        return names
+    prefix = os.path.commonprefix(names)
+    cut = max((prefix.rfind(sep) for sep in "_- ."), default=-1) + 1
+    labels = [n[cut:] for n in names]
+    return names if not all(labels) else labels
+
+
+def _bathymetry_variable(source: str) -> str:
+    """Name the seafloor-depth variable of ``source``'s dataset.
+
+    Reads the source through :func:`ocean_skill.sources.read` -- memoized and lazy,
+    so this costs a variable listing, not a data read. Two-dimensional coordinates
+    count as well as data variables, since the ROMS reader keeps ``h`` among the
+    coordinates. A variable named like
+    bathymetry (:data:`_BATHYMETRY_NAME`) wins over one that merely declares a
+    ``sea_floor_depth*`` standard name.
+
+    Raises
+    ------
+    BathymetryNotFound
+        When the source has no such variable (or is not gridded at all).
+    """
+    import xarray as xr
+
+    import ocean_skill as osk
+
+    obj = osk.read(source)
+    if isinstance(obj, xr.Dataset):
+        # the ROMS reader attaches ``h`` as a coordinate (grid fields are not
+        # comparable data), so look there too -- data variables first
+        names = list(obj.data_vars) + [
+            c for c in obj.coords if c not in obj.data_vars and obj[c].ndim >= 2
+        ]
+        for name in names:
+            if _BATHYMETRY_NAME.fullmatch(str(name).lower()):
+                return str(name)
+        for name in names:
+            if str(obj[name].attrs.get("standard_name", "")).startswith(
+                "sea_floor_depth"
+            ):
+                return str(name)
+    raise BathymetryNotFound(
+        f"{source!r} has no bathymetry variable (looked for h, bathymetry or "
+        "sea_floor_depth*) to draw a seafloor from -- pass bathymetry=<Field> "
+        "with the seafloor along the same path, or bathymetry=False to leave it "
+        "off."
+    )
+
+
+def _normalize_seafloor(da: Any, *, what: str = "the seafloor") -> Any:
+    """Return ``da`` as :func:`~ocean_skill.plot.section.seafloor_line` reads.
+
+    One dimension, :data:`~ocean_skill.align.ALONG_DIM`; values the bottom depth in
+    metres positive-down; an ``along`` coordinate in km starting at 0; and
+    ``path_lon``/``path_lat`` riding on it (falling back to ``lon``/``lat``, which
+    a :func:`ocean_skill.transect.sample_along` result carries too). A length-one
+    leftover dimension (a singleton time on a "static" ``h``) is squeezed. The sign
+    is flipped for an elevation-style variable -- ``positive: "up"``, or every
+    finite value at or below zero -- so GEBCO-like and ROMS-like bathymetry both
+    land positive-down. Only these coordinates are kept: anything else on a
+    sampled source (a snapped ``lon``/``lat``) is not part of the contract.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import ALONG_DIM
+
+    if not isinstance(da, xr.DataArray):
+        raise TypeError(
+            f"{what} must be an xarray.DataArray or a Field, got {type(da).__name__}."
+        )
+    squeeze = [d for d in da.dims if d != ALONG_DIM and da.sizes[d] == 1]
+    da = da.squeeze(squeeze, drop=True)
+    if da.dims != (ALONG_DIM,):
+        raise ValueError(
+            f"{what} must be one-dimensional along {ALONG_DIM!r} (the section's own "
+            f"path), got dims {da.dims}."
+        )
+    if ALONG_DIM not in da.coords:
+        raise ValueError(
+            f"{what} needs an {ALONG_DIM!r} coordinate (kilometres along the path, "
+            "first cast = 0) to be placed on the section."
+        )
+    values = np.asarray(da, dtype="float64")
+    finite = values[np.isfinite(values)]
+    if da.attrs.get("positive") == "up" or (finite.size and finite.max() <= 0):
+        values = -values
+    along = np.asarray(da[ALONG_DIM], dtype="float64")
+    if along.size and np.isfinite(along[0]):
+        along = along - along[0]
+    coords: dict[str, Any] = {ALONG_DIM: (ALONG_DIM, along, {"units": "km"})}
+    for out_name, fallback in (("path_lon", "lon"), ("path_lat", "lat")):
+        for src in (out_name, fallback):
+            if src in da.coords and da[src].dims == (ALONG_DIM,):
+                coords[out_name] = (
+                    ALONG_DIM,
+                    np.asarray(da[src], dtype="float64"),
+                    dict(da[src].attrs),
+                )
+                break
+    return xr.DataArray(
+        values,
+        dims=(ALONG_DIM,),
+        coords=coords,
+        name="seafloor_depth",
+        attrs={
+            "units": da.attrs.get("units", "m"),
+            "long_name": "seafloor depth",
+            "positive": "down",
+        },
+    )
+
+
+def _section_extras(
+    comparison: Any, casts: Any, bathymetry: Any, cast_fill: bool | None = None
+) -> dict[str, Any]:
+    """Return the ``cast_labels``/``seafloor``/``cast_fill`` item keys of a section row.
+
+    Resolves :meth:`Comparison.plot`'s ``casts=``, ``bathymetry=`` and ``cast_fill=``
+    against one comparison (:meth:`ComparisonSet.plot` calls this per row). All three
+    default to
+    *on* for a section built from casts (``select={"transect": {"from":
+    "reference"}}``) -- a handful of CTD stations is exactly where the casts
+    themselves, and the bottom they were lowered to, say the most -- and to off
+    everywhere else. A key is only present when its feature is on, so a renderer
+    only ever sees what it draws; nothing at all is returned for a non-section
+    family, whose renderers take neither.
+
+    Raises
+    ------
+    ValueError
+        For an explicit request the comparison cannot honour: ``casts=True``, a
+        label list/dict, ``cast_fill=True``, or ``bathymetry=True``/a ``Field``/a
+        ``DataArray`` on a comparison that is not a (suitable) section, or labels
+        that do not fit the casts.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    casts_asked = casts is not None and casts is not False
+    bathy_asked = bathymetry is not None and bathymetry is not False
+    if cast_fill not in (None, True, False):
+        raise TypeError(
+            f"cast_fill= must be None or a bool, got {type(cast_fill).__name__}."
+        )
+    is_section = comparison.family == "section_row"
+    built_from_casts = is_section and bool(comparison._section_casts)
+    # a slab says so on its along coordinate (comparison._slab_to_section)
+    is_slab = is_section and "axis_coord" in comparison.aligned[ALONG_DIM].attrs
+    if not is_section:
+        if casts_asked or bathy_asked or cast_fill:
+            raise ValueError(
+                "casts=/bathymetry=/cast_fill= apply to a vertical section, but this "
+                f"comparison draws as {comparison.family!r}."
+            )
+        return {}
+
+    extras: dict[str, Any] = {}
+
+    if cast_fill or (cast_fill is None and built_from_casts):
+        if not built_from_casts:
+            raise ValueError(
+                "cast_fill= fills between the casts a section was built from "
+                "(select={'transect': {'from': 'reference'}}); this section was "
+                "cut from a gridded source, so it has no gaps between casts to fill."
+            )
+        extras["cast_fill"] = True
+
+    if casts_asked or (casts is None and built_from_casts):
+        if not built_from_casts:
+            raise ValueError(
+                "casts= marks the casts a section was built from "
+                "(select={'transect': {'from': 'reference'}}); this section was "
+                "cut from a gridded source, so there are no casts to mark."
+            )
+        names = list(comparison._section_casts)
+        labels = _cast_labels(names)
+        if isinstance(casts, dict):
+            unknown = [k for k in casts if k not in names]
+            if unknown:
+                raise ValueError(
+                    f"casts= names {unknown!r}, which are not among this section's "
+                    f"casts {names!r}."
+                )
+            labels = [
+                str(casts.get(n, lab)) for n, lab in zip(names, labels, strict=True)
+            ]
+        elif isinstance(casts, list | tuple):
+            if len(casts) != len(names):
+                raise ValueError(
+                    f"casts= gives {len(casts)} label(s) for {len(names)} cast(s) "
+                    f"({names!r}) -- one label per cast, in order."
+                )
+            labels = [str(lab) for lab in casts]
+        elif casts is not None and casts is not True:
+            raise TypeError(
+                "casts= must be None, a bool, a list of labels, or a "
+                f"{{cast: label}} dict, got {type(casts).__name__}."
+            )
+        extras["cast_labels"] = labels
+
+    if bathy_asked:
+        if is_slab:
+            raise ValueError(
+                "bathymetry= draws the seafloor along a transect path; a slab "
+                "(a box averaged along one axis) has no single path to sample."
+            )
+        if bathymetry is True:
+            extras["seafloor"] = comparison.seafloor()
+        else:
+            from ocean_skill.field import Field
+
+            data = bathymetry.data if isinstance(bathymetry, Field) else bathymetry
+            extras["seafloor"] = _normalize_seafloor(data, what="bathymetry=")
+    elif bathymetry is None and built_from_casts and not is_slab:
+        try:
+            extras["seafloor"] = comparison.seafloor()
+        except BathymetryNotFound:
+            pass  # a default, not a request: a source with no h just has no bottom
+    return extras
 
 
 class Comparison:
@@ -4470,40 +4798,59 @@ class Comparison:
     ) -> tuple[dict[str, Any], tuple[float, float, float, float]]:
         """The reference's transect select and bbox, from the test lane's own path.
 
-        Reads ``lon(along)``/``lat(along)`` straight off the already-prepared
+        Reads ``path_lon(along)``/``path_lat(along)`` off the already-prepared
         test lane — whatever grid-aligned slice, waypoint path, line, or points
-        list the user asked for, this is *where it actually landed* — and
+        list the user asked for, this is the path it was *asked to follow*, one
+        position per column (falling back to ``lon(along)``/``lat(along)``, the
+        cells it snapped to, for a lane that carries no path coordinates) — and
         re-spells it as the resolved ``points`` form
         (:func:`ocean_skill.transect.as_transect` already treats that as
         idempotent, since it is what :func:`ocean_skill.transect.sample_along`
-        itself produces). The reference is then sampled at exactly those
-        points, not the user's original request repeated independently, which
-        is the whole point of the route: two lanes sampled at the same lon/lat
-        share an along-path axis to align on; two lanes each finding their own
-        nearest cells to the same request generally do not.
+        itself produces). The reference is then sampled along those points rather
+        than the user's original request repeated independently, so the two lanes
+        see the same path and the same number of kilometres of it.
+
+        The positions the lanes are *paired* on are not decided here:
+        :func:`ocean_skill.align._bin_into_frame` matches the two lanes' columns
+        by position, nearest to nearest, whichever one's cells are coarser. What
+        sampling the reference on the requested path (rather than at the test
+        lane's snapped cells) buys is that the reference does not inherit the test
+        lane's sub-cell jitter: a fine model's cells wobble a few km either side of
+        a straight line, and where that line is the boundary between a coarse
+        reference's rows (the equator through a 1-degree grid centred at +/-0.5)
+        every wobble flips the reference to the other row.
 
         Points are rounded to 4 decimal places, matching the ``_bbox``
         cache-key precedent in :func:`prepare_source`, so float noise carried
         through the test lane's own vertical transform does not fragment the
         reference's lane cache entry. The bbox returned alongside is built
-        from the unrounded positions.
+        from the unrounded positions -- the union of the path and the snapped
+        cells, so the reference crop (which :func:`ocean_skill.align.
+        subset_to_bbox` pads further) covers both.
         """
         from ocean_skill.align import _lat_name, _lon_name
 
         lon_name, lat_name = _lon_name(t), _lat_name(t)
-        lons = np.asarray(t[lon_name], dtype="float64")
-        lats = np.asarray(t[lat_name], dtype="float64")
+        cell_lons = np.asarray(t[lon_name], dtype="float64")
+        cell_lats = np.asarray(t[lat_name], dtype="float64")
+        if "path_lon" in t.coords and "path_lat" in t.coords:
+            lons = np.asarray(t["path_lon"], dtype="float64")
+            lats = np.asarray(t["path_lat"], dtype="float64")
+        else:
+            lons, lats = cell_lons, cell_lats
         points = [
             [round(float(lo), 4), round(float(la), 4)] for lo, la in zip(lons, lats)
         ]
         extra_select = {
             "transect": {"points": points, "method": troute.get("method", "nearest")}
         }
+        all_lons = np.concatenate([lons, cell_lons])
+        all_lats = np.concatenate([lats, cell_lats])
         bbox = (
-            float(lons.min()),
-            float(lats.min()),
-            float(lons.max()),
-            float(lats.max()),
+            float(all_lons.min()),
+            float(all_lats.min()),
+            float(all_lons.max()),
+            float(all_lats.max()),
         )
         return extra_select, bbox
 
@@ -5553,6 +5900,18 @@ class Comparison:
         use_cache = self._use_cache()
         if use_cache and not refresh:
             hit = _cache.load(self._cache_key)
+            if hit is not None and _is_stale_pathless_section(hit):
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                warnings.warn(
+                    "ignoring a cached section comparison with no path_lon/"
+                    "path_lat -- a stale entry from before sections kept the "
+                    "requested path; recomputing and overwriting it.",
+                    stacklevel=_stacklevel.find(),
+                )
+                hit = None
             if hit is not None:
                 self._aligned = hit
                 # actual_depth rides along in attrs precisely so a cached result
@@ -6741,7 +7100,14 @@ class Comparison:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        contours: Any = None,
+        casts: Any = None,
+        bathymetry: Any = None,
+        cast_fill: bool | None = None,
+        **kwargs: Any,
     ):
         """Render as a ``test | reference | difference`` row, or as metric maps.
 
@@ -6759,6 +7125,34 @@ class Comparison:
             difference panel gets none). ``contour_levels=`` picks the lines
             (``True`` for about six round values, an int for about that many, or a
             list) and ``contour_kwargs=`` styles them.
+        casts
+            Sections only. Marks each cast of a section built from casts
+            (``select={"transect": {"from": "reference"}}``) with a labelled line.
+            ``None`` (default) marks them for such a section and not otherwise;
+            ``False`` turns it off; ``True`` insists on it (an error for a section
+            cut from a gridded source, or for anything that is not a section); a
+            list gives one label per cast, in order; a ``{cast_name: label}`` dict
+            relabels some and leaves the rest. The default label is the cast's
+            source name less the text every cast shares (``HV1`` for
+            ``ctd_station_HV1``).
+        bathymetry
+            Sections only. Draws the test model's seafloor along the section's
+            path, densely (:meth:`seafloor`), as a filled bottom. ``None``
+            (default) draws it for a section built from casts, quietly skipping it
+            when the test source has no bathymetry variable; ``False`` turns it
+            off; ``True`` draws it for any transect section and says so if the
+            source has no bathymetry; a :class:`~ocean_skill.field.Field` (or
+            ``DataArray``) of seafloor depth along the same path is drawn instead
+            of the model's own.
+        cast_fill
+            Sections built from casts only. Fills the gaps between casts for
+            drawing (:func:`ocean_skill.plot.section.fill_between_casts`): blended
+            between two casts at a depth both reach, and carried halfway to the
+            next cast at a depth only one reaches, so each cast's colour reaches its
+            own deepest value rather than stopping at its shallower neighbour's.
+            ``None`` (default) fills a section built from casts; ``False`` draws the
+            casts' columns as they are; ``True`` insists on it (an error for any
+            other section). Drawing only -- the metrics are the casts' own.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -6813,8 +7207,97 @@ class Comparison:
 
             (overlay,) = contour_members(contours, 1, kind="comparison")
             item.update(comparison_contour(overlay, plotted=self))
+        item.update(_section_extras(self, casts, bathymetry, cast_fill))
         spec = PlotSpec(family=plot_family, items=[item], options=kwargs)
         return render(spec, renderer=renderer)
+
+    def seafloor(self, spacing_km: float | None = None):
+        """Return the test model's seafloor depth along this section's path.
+
+        Parameters
+        ----------
+        spacing_km
+            ``float | None`` -- how finely to sample the model's bathymetry along
+            the path, in km. ``None`` (default) uses the model's own cell size.
+
+        Returns
+        -------
+        xarray.DataArray
+            One-dimensional along :data:`~ocean_skill.align.ALONG_DIM`: bottom depth
+            in metres, positive-down, with the along coordinate in km from the first
+            waypoint (the first cast, for a section built from casts) and
+            ``path_lon``/``path_lat`` coordinates for where each sample sits --
+            what :func:`ocean_skill.plot.section.seafloor_line` draws and what
+            ``bathymetry=`` on :meth:`plot` takes.
+
+        A section's own columns sit only where it was sampled -- at a handful of
+        CTD stations, say -- so the seafloor drawn between them has to come from
+        the model's bathymetry sampled densely along the same path, not from those
+        few columns. The path is this section's own waypoints (the casts, or the
+        sampled transect), joined by straight lon/lat segments exactly as
+        ``select={"transect": {"waypoints": ...}}`` joins them, so the km
+        coordinate agrees with the section's own to within a sampling step.
+
+        The bathymetry variable is whatever the test source calls its seafloor
+        depth (``h``, ``bathymetry`` or ``sea_floor_depth*``), read through
+        :func:`ocean_skill.field.field` so the usual cache applies.
+
+        Raises
+        ------
+        ValueError
+            If this comparison is not a transect section, or is a slab (a box
+            averaged along one axis, which has no single path to sample).
+        BathymetryNotFound
+            If the test source has no bathymetry variable -- a ``LookupError``
+            whose message suggests passing ``bathymetry=<Field>`` to :meth:`plot`.
+        """
+        from ocean_skill.align import ALONG_DIM
+        from ocean_skill.field import field
+
+        if not self.is_section:
+            raise ValueError(
+                "seafloor() draws the bottom along a section's path, but this "
+                f"comparison is {self.family!r}, not a section."
+            )
+        if "axis_coord" in self.aligned[ALONG_DIM].attrs:
+            raise ValueError(
+                "seafloor() needs a transect path to sample along; a slab (a box "
+                "averaged along one axis) has none."
+            )
+        test = self.aligned["test"]
+        lons = np.asarray(
+            test["path_lon"] if "path_lon" in test.coords else test["lon"],
+            dtype="float64",
+        )
+        lats = np.asarray(
+            test["path_lat"] if "path_lat" in test.coords else test["lat"],
+            dtype="float64",
+        )
+        keep = np.isfinite(lons) & np.isfinite(lats)
+        waypoints = [
+            [float(lo), float(la)]
+            for lo, la in zip(lons[keep], lats[keep], strict=True)
+        ]
+        route = self._transect_route()
+        method = route.get("method", "nearest") if route else "nearest"
+        name = _bathymetry_variable(self.test_name)
+        bathy = field(
+            self.test_name,
+            name,
+            select={
+                "transect": {
+                    "waypoints": waypoints,
+                    "spacing_km": spacing_km,
+                    "method": method,
+                }
+            },
+            cache=self.cache,
+        ).data
+        # bathymetry is time-invariant; a catalog that nonetheless carries a time
+        # axis on it just repeats the same field.
+        for dim in [d for d in bathy.dims if d != ALONG_DIM and "time" in d]:
+            bathy = bathy.isel({dim: 0}, drop=True)
+        return _normalize_seafloor(bathy, what=f"{self.test_name!r} bathymetry")
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this comparison's data sits: the selection over the model domain.
@@ -7223,6 +7706,44 @@ def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]
     return comparisons, labels
 
 
+#: Smallest share of an averaged group's timestamps that must hold data from at
+#: least two members before :func:`_average_aligned` stops warning that the "average"
+#: is mostly one member's own value (stations visited minutes apart share no
+#: timestamp, so the pooled line just zigzags between them).
+MIN_AVERAGE_TIME_OVERLAP = 0.5
+
+
+def _warn_sparse_time_overlap(stacked: Any) -> None:
+    """Warn when few of ``stacked``'s timestamps are shared by two or more members."""
+    import warnings
+
+    from ocean_skill import _stacklevel, operators
+
+    if "reference" not in stacked.data_vars or stacked.sizes["_average"] < 2:
+        return
+    ref = stacked["reference"]
+    tdim = operators.resolve_dim(ref, "T")
+    if tdim is None or tdim == "_average" or tdim not in ref.dims:
+        return
+    present = ref.notnull()
+    other = [d for d in present.dims if d not in (tdim, "_average")]
+    if other:
+        present = present.any(other)
+    members = present.sum("_average")
+    n_any = int((members >= 1).sum())
+    n_shared = int((members >= 2).sum())
+    if n_any == 0 or n_shared / n_any >= MIN_AVERAGE_TIME_OVERLAP:
+        return
+    warnings.warn(
+        f"average(): {n_any - n_shared} of {n_any} timestamps hold data from only "
+        f"one of the {stacked.sizes['_average']} members, so the \"average\" there "
+        "is just that member's own value and the line will zigzag between them. "
+        "Bin time first so the members share timestamps, e.g. "
+        'aggregate={"time": {"resample": "1D", "reduce": "mean"}}.',
+        stacklevel=_stacklevel.find(),
+    )
+
+
 def _average_aligned(comps: list[Comparison]) -> Any:
     """Average a group of comparisons' aligned pairs into one composite dataset.
 
@@ -7238,7 +7759,11 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     group's members to share one exactly — a station sampled on different dates
     than its groupmate still contributes wherever it has data, via
     ``skipna=True``. A future xarray release changes ``concat``'s default join, so
-    it is passed explicitly here rather than relied upon.
+    it is passed explicitly here rather than relied upon. When fewer than
+    :data:`MIN_AVERAGE_TIME_OVERLAP` of the resulting timestamps hold data from two
+    or more members (stations visited minutes apart share none), the "average" is
+    really one member's value at each step, so a warning suggests binning time first.
+    Members without a time axis are never checked.
     """
     import numpy as np
     import xarray as xr
@@ -7251,6 +7776,7 @@ def _average_aligned(comps: list[Comparison]) -> Any:
         join="outer",
         combine_attrs="drop_conflicts",
     )
+    _warn_sparse_time_overlap(stacked)
     avg = stacked.mean("_average", skipna=True, keep_attrs=True)
     if {"test", "reference"} <= set(avg.data_vars):
         attrs = avg["difference"].attrs if "difference" in avg else {}
@@ -7554,7 +8080,14 @@ class ComparisonSet:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        contours: Any = None,
+        casts: Any = None,
+        bathymetry: Any = None,
+        cast_fill: bool | None = None,
+        **kwargs: Any,
     ):
         """Render all comparisons as stacked rows in one figure.
 
@@ -7568,6 +8101,15 @@ class ComparisonSet:
             the same length, paired with this set's rows by position, drawn as
             contour lines over each row's test and reference panels -- see
             :meth:`Comparison.plot`.
+        casts
+            Sections only. Cast marks for every row -- see :meth:`Comparison.plot`
+            (a list or dict of labels applies to each row's casts).
+        bathymetry
+            Sections only. The seafloor under every row -- see
+            :meth:`Comparison.plot`.
+        cast_fill
+            Sections built from casts only. Fills between every row's casts for
+            drawing -- see :meth:`Comparison.plot`.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -7603,6 +8145,11 @@ class ComparisonSet:
                     items, overlays, self.comparisons, strict=True
                 )
             ]
+        # {} for anything but a section row, so other families never see the keys
+        items = [
+            {**item, **_section_extras(c, casts, bathymetry, cast_fill)}
+            for item, c in zip(items, self.comparisons, strict=True)
+        ]
         first = self.comparisons[0]
         families = {c.family for c in self.comparisons}
         if len(families) > 1:
@@ -8011,7 +8558,11 @@ class ComparisonSet:
         ``difference`` is recomputed afterward (see :func:`_average_aligned`).
         Mismatched time/depth axes across a group's members are unioned
         (``join="outer"``) and reduced with ``skipna=True``, so members need not
-        share exactly the same sample times.
+        share exactly the same sample times. If under half of the pooled timestamps
+        hold data from two or more members (e.g. CTD stations visited minutes
+        apart), a warning notes that the average there is a single member's value
+        and suggests binning time first with ``aggregate={"time": {"resample":
+        "1D", "reduce": "mean"}}``.
 
         ``by`` accepts any dimension a pooled label can be built from —
         ``"variable"`` (default), ``"depth"``, ``"time"``, ``"test"``,
@@ -10181,7 +10732,13 @@ def compare(
     # this fans out to. A pair-spec resolves each side the same way -- see
     # Comparison.__init__, which does the identical per-side resolution when the
     # spec reaches it directly rather than through this fan-out.
-    variables = [_resolve_compare_variable(v) for v in variables]
+    from ocean_skill.operators import expand_calculator_fans
+
+    variables = [
+        _resolve_compare_variable(one)
+        for v in variables
+        for one in expand_calculator_fans(v)
+    ]
 
     # A source name that resolves nowhere can never contribute a comparison, no
     # matter how `variables`/`depths`/`times` fan out -- unlike a real source

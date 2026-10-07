@@ -83,6 +83,28 @@ REGISTRY: dict[str, VarInfo] = {
         "downwelling_photosynthetic_photon_flux_in_sea_water",
         units="umol m-2 s-1",
     ),
+    # osk-custom names (CF has none for tidal harmonic constants or this flux).
+    "sea_surface_height_tidal_amplitude": VarInfo(
+        "sea_surface_height_tidal_amplitude", units="m"
+    ),
+    "sea_surface_height_tidal_phase": VarInfo(
+        "sea_surface_height_tidal_phase", units="degree"
+    ),
+    "sea_surface_height_tidal_harmonic_real_part": VarInfo(
+        "sea_surface_height_tidal_harmonic_real_part", units="m"
+    ),
+    "sea_surface_height_tidal_harmonic_imaginary_part": VarInfo(
+        "sea_surface_height_tidal_harmonic_imaginary_part", units="m"
+    ),
+    # ROMS' up/vp are W m-1 divided by rho0, hence m4 s-3.
+    "x_baroclinic_pressure_flux": VarInfo("x_baroclinic_pressure_flux", units="m4 s-3"),
+    "y_baroclinic_pressure_flux": VarInfo("y_baroclinic_pressure_flux", units="m4 s-3"),
+    "eastward_baroclinic_pressure_flux": VarInfo(
+        "eastward_baroclinic_pressure_flux", units="W m-1"
+    ),
+    "northward_baroclinic_pressure_flux": VarInfo(
+        "northward_baroclinic_pressure_flux", units="W m-1"
+    ),
 }
 
 
@@ -136,6 +158,13 @@ _LABEL_OVERRIDES = {
     "ocean_mixed_layer_thickness_defined_by_sigma_t": "MLD (σt)",
     "ocean_mixed_layer_thickness_defined_by_temperature": "MLD (temperature)",
     "ocean_mixed_layer_thickness_defined_by_mixing_scheme": "MLD (mixing scheme)",
+    # Stripping would leave "sea surface height tidal amplitude" etc.
+    "sea_surface_height_tidal_amplitude": "tidal amplitude",
+    "sea_surface_height_tidal_phase": "tidal phase",
+    "sea_surface_height_tidal_harmonic_real_part": "tidal harmonic (real)",
+    "sea_surface_height_tidal_harmonic_imaginary_part": "tidal harmonic (imaginary)",
+    "eastward_baroclinic_pressure_flux": "eastward baroclinic pressure flux",
+    "northward_baroclinic_pressure_flux": "northward baroclinic pressure flux",
 }
 
 

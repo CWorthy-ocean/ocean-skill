@@ -19,6 +19,9 @@ these as a list, each step acting on the axis the previous one left:
 twelve monthly means (the seasonal cycle's variance), and
 ``{"time": [{"resample": "1YS", "reduce": "mean"}, "std"]}`` the standard deviation
 of the annual means (interannual variability). See :func:`aggregate`.
+A ``resample`` keeps only the bins that hold data, so a sparse series (a station
+visited a few times a year, binned daily) yields one point per visit, not a mostly-NaN
+daily axis.
 
 ``groupby`` and ``resample`` are the two ways to keep an axis standing rather than
 collapse it, and they are not the same axis: ``groupby`` bins by *label*, giving a
@@ -150,8 +153,16 @@ CALCULATORS: dict[str, Any] = {}
 #: returns for everything else.
 CALCULATOR_INPUTS: dict[str, Any] = {}
 
+#: Spec keys a calculator accepts as a *list*, each value meaning one more field --
+#: ``{"calculate": "tidal_amplitude", "constituent": ["K1", "M2"]}`` is two maps, not
+#: one. :func:`expand_calculator_fans` turns such a spec into one spec per value
+#: before anything is prepared; the calculator itself only ever sees a single value.
+#: Declared per calculator rather than guessed, since a list-valued keyword can just
+#: as well be one argument.
+CALCULATOR_FANS: dict[str, tuple[str, ...]] = {}
 
-def register_calculator(name: str, *, inputs: Any = None):
+
+def register_calculator(name: str, *, inputs: Any = None, fans: tuple[str, ...] = ()):
     """Register a derived diagnostic -- a real formula, not an operator dispatch.
 
     Unlike :data:`COMBINERS`/:data:`REDUCERS`, a calculator needs the whole dataset
@@ -179,9 +190,42 @@ def register_calculator(name: str, *, inputs: Any = None):
         CALCULATORS[name] = fn
         if inputs is not None:
             CALCULATOR_INPUTS[name] = inputs
+        if fans:
+            CALCULATOR_FANS[name] = tuple(fans)
         return fn
 
     return decorate
+
+
+def expand_calculator_fans(spec: Any) -> list[Any]:
+    """Return ``spec`` as a list, one calculate-spec per value of a fanned keyword.
+
+    Only keys the calculator declared through ``register_calculator(fans=...)`` are
+    expanded, in order; anything else -- a name, a combination, a pair-spec, a
+    calculate-spec without a list -- comes back as ``[spec]`` unchanged.
+    """
+    if not (isinstance(spec, dict) and "calculate" in spec):
+        return [spec]
+    for key in CALCULATOR_FANS.get(spec["calculate"], ()):
+        values = spec.get(key)
+        if isinstance(values, (list, tuple)):
+            return [
+                one
+                for value in values
+                for one in expand_calculator_fans({**spec, key: value})
+            ]
+    return [spec]
+
+
+def calculator_source(ds) -> str | None:
+    """Return the catalog name of the source a calculator is running on, if known.
+
+    :func:`ocean_skill.comparison.prepare_source` tags the Dataset before the
+    calculator sees it, so a calculator with an expensive intermediate can cache it
+    by identity (see :func:`ocean_skill.cache.key_for_calculated`). ``None`` for a
+    bare Dataset handed to :func:`resolve_variable` directly -- don't cache then.
+    """
+    return getattr(ds, "attrs", {}).get("ocean_skill_source")
 
 
 def register_derived(name: str, spec: dict[str, Any]) -> None:
@@ -321,6 +365,12 @@ _CF_AXES: dict[str, str] = {
 }
 
 
+#: The horizontal shorthand box and slab specs are written in -> the ``find_coord``
+#: kind, consulted by :func:`resolve_dim` only after a literal dimension or coordinate
+#: of that name has been ruled out.
+_SHORT_AXES: dict[str, str] = {"lon": "longitude", "lat": "latitude"}
+
+
 def resolve_dim(obj, name: str) -> str | None:
     """Return the dimension of ``obj`` that ``name`` refers to, or ``None``.
 
@@ -339,7 +389,17 @@ def resolve_dim(obj, name: str) -> str | None:
         return name
     kind = _CF_AXES.get(name)
     if kind is None:
-        return name if name in getattr(obj, "coords", ()) else None
+        if name in getattr(obj, "coords", ()):
+            return name
+        # The ``lon``/``lat`` shorthand a box or slab spec is written in names the
+        # axis, not a variable: on a product that calls it ``longitude`` (GLORYS, say)
+        # ``{"lon": "mean"}`` must still reduce it, or a slab keeps every longitude
+        # and the comparison refuses the leftover axis. Only reached when ``lon`` is
+        # neither a dimension nor a coordinate here, so a source that does carry one
+        # by that name resolves exactly as before.
+        kind = _SHORT_AXES.get(name)
+        if kind is None:
+            return None
     from ocean_skill.cf import find_coord
     from ocean_skill.vocabulary import COORD_FALLBACKS
 
@@ -2127,6 +2187,9 @@ def _reduce_dim(
 ):
     """Apply one reduction (optionally after a groupby or resample) along ``dim``.
 
+    A ``resample`` keeps only the bins that held samples: empty bins between sparse
+    observations are dropped rather than returned as NaN.
+
     The keyword-only arguments are for :func:`_reduce_chain`, which calls this once
     per step: ``axis`` is the name the result's ``cell_methods`` is written against
     (the chain's original dimension; ``dim`` itself is ``month`` by the second step),
@@ -2174,6 +2237,7 @@ def _reduce_dim(
     # a grouped reduction is along the grouping axis anyway, which vertical cell
     # weights never describe.
     weights = _weights_for(da, target) if name == "mean" else None
+    bin_counts = None
     if group is not None:
         if group == "season":
             # A season groupby is a climatology like any other -- it groups along
@@ -2208,6 +2272,9 @@ def _reduce_dim(
         # starts rather than every original step.
         if target in da.coords:
             _warn_short_bins(da[target], freq, target)
+            # Captured before `da` becomes the resampler: counts below drop the bins
+            # that held no samples.
+            bin_counts = _bin_counts(da[target], freq)
         da = da.resample({target: freq})
         weights = None
     reducible = da
@@ -2241,6 +2308,18 @@ def _reduce_dim(
         if "units" in attrs:
             spread_arr.attrs["units"] = _units_after(attrs["units"], spread)
         out = out.assign_coords({SPREAD_COORD: spread_arr})
+
+    if bin_counts is not None:
+        # Resample fills every bin between the first and last sample, so a sparse
+        # series (a station visited 15 times over seven months, binned daily) comes
+        # back mostly NaN -- and a line plot breaks at NaN, drawing nothing. Keep only
+        # the bins that held samples, by *count* (not data: a bin of all-NaN samples
+        # stays). Same rule as `_time_bins` in comparison.py, which skips `n <= 0`
+        # bins for `compare(times=...)`. Applied after the spread coord is attached so
+        # it is masked along with the value.
+        if bin_counts.sizes[target] != out.sizes[target]:
+            raise AssertionError("resample bin counts misaligned with reduced bins")
+        out = out.isel({target: (bin_counts > 0).values})
 
     if group is not None:
         # A groupby renames the dim to the grouping label (``month``, ``year``,
