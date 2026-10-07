@@ -37,6 +37,7 @@ NEAR = [  # 90 s apart, and 1 km
 ]
 HOURLY = [(f"s{i}", f"2024-07-01 {i:02d}:00", [-150.0], [1]) for i in range(10)]
 ID = {"casts": {"id": "station"}}
+SPLIT = {"casts": {"gap": "15min"}}  # declared, with no id: split on pauses and moves
 
 
 def _frame(spec):
@@ -125,7 +126,7 @@ def test_casts_by_an_id_column_in_time_order_with_a_revisit(tmp_path):
     assert found["time"][1] == pd.Timestamp("2024-07-01 02:00")
     assert found["lon"][1] == pytest.approx(-150.0999)  # B drifts: the median
     # the table is memoized, until the catalog file changes
-    _write(tmp_path, t=(TRANSECT, {}))
+    _write(tmp_path, t=(TRANSECT, SPLIT))
     assert list(casts.table("t")["id"]) == ["1", "2", "3", "4"]
 
 
@@ -140,10 +141,10 @@ def test_a_cast_stands_where_the_position_option_says(tmp_path, how, lon):
 def test_without_an_id_casts_split_where_time_or_distance_jumps(tmp_path):
     _write(
         tmp_path,
-        t=(TRANSECT, {}),
-        many=(HOURLY, {}),
+        t=(TRANSECT, SPLIT),
+        many=(HOURLY, SPLIT),
         slow=(HOURLY, {"casts": {"gap": "3h"}}),
-        near=(NEAR, {}),
+        near=(NEAR, {"casts": {"position": "median"}}),  # any key opts in
         far=(NEAR, {"casts": {"distance_m": 5000}}),
     )
     assert list(casts.table("t")["id"]) == ["1", "2", "3", "4"]
@@ -151,6 +152,31 @@ def test_without_an_id_casts_split_where_time_or_distance_jumps(tmp_path):
     assert list(casts.table("slow")["n"]) == [10]  # an hour apart is within a 3 h gap
     assert list(casts.table("near")["n"]) == [2, 2]
     assert list(casts.table("far")["n"]) == [4]
+
+
+def test_casts_nothing_identifies_are_not_guessed(tmp_path):
+    _write(tmp_path, t=(TRANSECT, {}), nc=(_nc(tmp_path, "flat"), {}))
+    for name in ("t", "nc"):
+        with pytest.raises(casts.NoCasts, match=r"not identified.*casts=\{'id'"):
+            osk.cast_names(name)
+    with pytest.raises(KeyError, match="not identified"):
+        catalog.resolve("t[1]")
+
+
+def test_the_profile_dimension_identifies_the_casts_of_a_netcdf_file(tmp_path):
+    ds = xr.open_dataset(_nc(tmp_path, "multi")).load()
+    del ds["station"].attrs["cf_role"]
+    ds.to_netcdf(tmp_path / "plain.nc")
+    _write(tmp_path, t=(tmp_path / "plain.nc", {}))
+    assert list(casts.table("t")["n"]) == [3, 4, 3, 1]
+
+
+def test_casts_on_another_feature_type_is_ignored_with_a_warning(tmp_path):
+    with pytest.warns(UserWarning, match="casts= is ignored.*a timeSeriesProfile"):
+        _write(tmp_path, m=(TRANSECT, {"featureType": "timeSeriesProfile", **ID}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # nothing to say for a trajectoryProfile
+        _write(tmp_path, t=(TRANSECT, ID))
 
 
 def test_rows_with_no_time_belong_to_no_cast(tmp_path):

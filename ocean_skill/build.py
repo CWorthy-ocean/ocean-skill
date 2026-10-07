@@ -2992,6 +2992,13 @@ def _attach(
         # explicitly. Both are fixed here, once, for every caller.
         reader.metadata["featureType"] = _canonical_feature_type(metadata["featureType"])
         reader.metadata["featureType_source"] = "declared"
+    ftype = reader.metadata.get("featureType")
+    if reader.metadata.get("casts") and ftype and ftype != "trajectoryProfile":
+        warnings.warn(
+            f"{name!r}: casts= is ignored -- it cuts a trajectoryProfile into its "
+            f"casts, and this entry is a {ftype}.",
+            stacklevel=_stacklevel.find(),
+        )
     # A ROMS entry with its grid still a separate file (not merged into the store by
     # make_kerchunk's grid= at build time) never sees lon_rho/lat_rho in the probed
     # `data` above — self_contained_grid was already False by then, so :func:`_probe`
@@ -3177,7 +3184,10 @@ def add_source(
             How a ``trajectoryProfile`` is cut into casts, each a source of its own
             (``"<entry>[<cast id>]"``, see :mod:`ocean_skill.casts`): ``id`` (the column
             or variable naming them), else ``gap`` and ``distance_m`` (where to split),
-            and ``position`` (``"median"``, ``"first"`` or ``"mean"``).
+            and ``position`` (``"median"``, ``"first"`` or ``"mean"``). Declaring it
+            (any key) is what splits a table: without it, or a netCDF ``profile_id``,
+            a ``trajectoryProfile`` is compared as one moving platform. Ignored, with
+            a warning, on any other featureType.
     """
     if reader is None:
         if url is None:

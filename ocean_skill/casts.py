@@ -11,10 +11,15 @@ everything that compares a profile compares a cast the same way.
 Which samples make a cast comes from, in order:
 
 1. the column (table) or variable (netCDF) named by the entry's ``casts: {"id": ...}``;
-2. a netCDF variable carrying CF ``cf_role: profile_id``;
-3. otherwise, splitting the samples (in time order) wherever two consecutive ones are
-   more than ``casts["gap"]`` apart in time (default :data:`DEFAULT_GAP`) or more than
-   ``casts["distance_m"]`` apart in space (default :data:`DEFAULT_DISTANCE_M`).
+2. a netCDF variable carrying CF ``cf_role: profile_id`` (or, in the multidimensional
+   layout, the profile dimension itself);
+3. a ``casts`` declaration with no ``id`` (``{"gap": "15min"}``, say): the samples (in
+   time order) are split wherever two consecutive ones are more than ``casts["gap"]``
+   apart in time (default :data:`DEFAULT_GAP`) or more than ``casts["distance_m"]``
+   apart in space (default :data:`DEFAULT_DISTANCE_M`).
+
+Nothing else is guessed: a ``trajectoryProfile`` with none of these (a glider's table,
+a ship's ADCP) has no identified casts, and asking for them raises :class:`NoCasts`.
 
 With an id, a cast is a run of consecutive samples (in time order) sharing one id
 value; a value that comes back in a later, separate run (a station revisited) names a
@@ -61,6 +66,10 @@ _KINDS = {"T": "time", "X": "longitude", "Y": "latitude", "Z": "vertical"}
 _TABLES: dict[str, tuple[tuple, Any]] = {}
 
 
+class NoCasts(ValueError):
+    """A ``trajectoryProfile`` source whose casts are not identified: see the module."""
+
+
 def split_name(name: str) -> tuple[str, str | None]:
     """Return ``(base, cast id)`` for ``"<base>[<cast id>]"``, else ``(name, None)``."""
     match = _CAST_NAME.match(name) if isinstance(name, str) else None
@@ -75,9 +84,10 @@ def cast_name(base: str, cast_id: str) -> str:
 
 
 def is_transect(source: str) -> bool:
-    """Whether ``source`` is a ``trajectoryProfile`` entry, compared cast by cast.
+    """Whether ``source`` is a ``trajectoryProfile`` entry, which may hold casts.
 
-    Read-free (catalog metadata only). ``False`` for a cast name or an unresolvable
+    Read-free (catalog metadata only), so it does not say whether the casts are
+    identified (:func:`table` does). ``False`` for a cast name or an unresolvable
     source.
     """
     from ocean_skill import catalog
@@ -146,6 +156,7 @@ def table(source: str):
     Columns ``id`` (str), ``name`` (``"<source>[<id>]"``), ``time`` (UTC, naive
     ``Timestamp``), ``lon``, ``lat`` and ``n`` (samples), in time order. Reads the
     source (:func:`ocean_skill.sources.read`); memoized, until the catalog file changes.
+    Raises :class:`NoCasts` when nothing identifies the casts (see the module).
     """
     from ocean_skill import cache, catalog, sources
 
@@ -163,7 +174,11 @@ def table(source: str):
 
 
 def names(source: str) -> list[str]:
-    """Return the source names of ``source``'s casts, in time order."""
+    """Return the source names of ``source``'s casts, in time order.
+
+    Raises :class:`NoCasts` when nothing identifies them: declare ``casts=`` on the
+    entry (:func:`ocean_skill.build.add_source`).
+    """
     return list(table(source)["name"])
 
 
@@ -175,7 +190,10 @@ def resolve_cast(parent, base: str, cast_id: str):
     """
     if not is_transect(base):
         raise KeyError(f"{base!r} has no casts: it is not a trajectoryProfile source.")
-    found = table(base)
+    try:
+        found = table(base)
+    except NoCasts as exc:
+        raise KeyError(str(exc)) from None
     rows = found[found["id"] == cast_id]
     if rows.empty:
         raise KeyError(
@@ -253,7 +271,17 @@ def _text(value: Any) -> str | None:
 def _casts_of(obj, meta: dict[str, Any], subject: str):
     """Return a source's casts: :func:`table`'s columns, plus a ``selector``."""
     opts = canonicalize(meta.get("casts")) or {}
-    return _group(*_samples(obj, meta, opts, subject), opts=opts, subject=subject)
+    samples = _samples(obj, meta, opts, subject)
+    ids, merge = samples[3], samples[6]
+    if ids is None and merge and not opts:  # neither named, nor laid out, nor declared
+        raise NoCasts(
+            f"{subject}: its casts are not identified. Name the column (or variable) "
+            "that tells them apart, casts={'id': ...}, or split on pauses with "
+            "casts={'gap': '15min'} (and on moves of more than casts['distance_m'], "
+            f"default {DEFAULT_DISTANCE_M:g} m) -- a keyword of "
+            "ocean_skill.build.add_source."
+        )
+    return _group(*samples, opts=opts, subject=subject)
 
 
 def _samples(obj, meta: dict[str, Any], opts: dict[str, Any], subject: str):
