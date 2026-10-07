@@ -2128,7 +2128,9 @@ def _probe(
     (see :data:`ocean_skill.roms.GRID_VARIABLE_NAMES`): its grid variables are never
     recorded, and ``zeta`` is always recorded as ``sea_surface_height_above_geoid``,
     because :mod:`ocean_skill.roms` finds them by those names and a rename away from
-    them takes the depth coordinate and the land mask with it.
+    them takes the depth coordinate and the land mask with it. And a ROMS store on
+    ``eta_rho``/``xi_rho`` is ``featureType: grid`` whatever its size (see
+    :func:`guess_feature_type`, which would take a one-cell file for a fixed point).
     """
     if hasattr(ds, "columns"):
         return _probe_dataframe(ds, qc=qc, declared=declared, subject=subject)
@@ -2247,6 +2249,14 @@ def _probe(
         md["duplicate_standard_names"] = duplicates
 
     ftype, source = guess_feature_type(ds)
+    if is_roms and source == "inferred" and {"eta_rho", "xi_rho"} <= set(ds.dims):
+        # ROMS output on its rho dimensions is a model grid whatever its size. The
+        # generic guess counts a horizontal dim only when it is longer than one, so a
+        # one-cell file (a point extraction) came out as a timeSeriesProfile/timeSeries/
+        # profile/point and a one-cell-wide strip as a trajectory -- and everything
+        # downstream is written for a grid. A featureType the file itself declares is
+        # still believed, and the caller's own (add_source's) still wins in _attach.
+        ftype = "grid"
     md["featureType"] = ftype
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))

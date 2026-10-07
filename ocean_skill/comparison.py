@@ -2707,6 +2707,14 @@ def _prepare(
         if not over_is_time:
             da = da.squeeze(_tsp_tdim, drop=False)
 
+    # The observational depth axis, bound only by the ladder's final `else:` (the
+    # branch an observational lane takes) -- and read again below, by the profile
+    # pruning, for *any* lane whose catalog entry says it is a profile. A ROMS lane
+    # never takes that branch, yet a one-cell ROMS file an older catalog labelled
+    # `timeSeriesProfile` (or a calculated variable on a profile lane) reaches the
+    # pruning all the same: no observational axis to prune is a perfectly good answer
+    # there, an UnboundLocalError is not.
+    zname = None
     if calculated:
         # A plain surface request is not a contradiction here: it is the default
         # Comparison._prepare_lane/Field._surfaced() inject for *every* grid lane
