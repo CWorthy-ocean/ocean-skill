@@ -100,6 +100,14 @@ def station_and_daily_model(monkeypatch):
     return lanes
 
 
+class _TimeTargetCalls(list):
+    """The ``subset_to_time_targets`` calls, with the pre-selection's own in ``pre``."""
+
+    def __init__(self):
+        super().__init__()
+        self.pre = []
+
+
 def _time_targets_spy(monkeypatch):
     """Spy on align.subset_to_time_targets, recording each call's own
     (method, input time size, output time size) -- the prune/interpolate step
@@ -107,11 +115,17 @@ def _time_targets_spy(monkeypatch):
     module's own attribute is what matters: prepare_source's own
     ``from ocean_skill.align import subset_to_time_targets`` is a local import,
     re-resolved from that module's namespace at call time.
+
+    The steps the targets use are picked out ahead of the spatial crop, by
+    ``align.preselect_time_targets``, so the object ``subset_to_time_targets`` is handed
+    already holds only those steps: where the record is cut down from its full length
+    is the pre-selection's call, recorded in ``calls.pre`` the same way.
     """
     import ocean_skill.align as align_mod
 
-    calls = []
+    calls = _TimeTargetCalls()
     real = align_mod.subset_to_time_targets
+    real_pre = align_mod.preselect_time_targets
 
     def spy(obj, targets, method="nearest"):
         before = obj.sizes.get("time")
@@ -119,7 +133,14 @@ def _time_targets_spy(monkeypatch):
         calls.append((method, before, out.sizes.get("time")))
         return out
 
+    def spy_pre(obj, targets, method="nearest"):
+        before = obj.sizes.get("time")
+        out, left = real_pre(obj, targets, method=method)
+        calls.pre.append((method, before, out.sizes.get("time")))
+        return out, left
+
     monkeypatch.setattr(align_mod, "subset_to_time_targets", spy)
+    monkeypatch.setattr(align_mod, "preselect_time_targets", spy_pre)
     return calls
 
 
@@ -147,7 +168,10 @@ def test_a_groupby_climatology_prunes_the_model_to_cast_times(
     method, before, after = calls[0]
     assert method == "nearest"
     assert after == len(CAST_TIMES)
-    assert before is None or before > after  # far more than 4 days were read in
+    _, pre_before, pre_after = calls.pre[0]
+    assert pre_after == len(CAST_TIMES)
+    assert pre_before is None or pre_before > pre_after  # far more than 4 days read in
+    assert before == pre_after  # what reached subset_to_time_targets was already cut
     assert aligned.sizes["month"] <= len(CAST_TIMES)
 
 
@@ -203,7 +227,10 @@ def test_time_method_interp_lands_the_model_on_the_cast_instants(
     # Every cast is well inside the daily model's span, so all 4 interpolate;
     # bracketing keeps at most 2 steps per target, never the whole record.
     assert after == len(CAST_TIMES)
-    assert before is None or before > after
+    _, pre_before, pre_after = calls.pre[0]
+    assert pre_after <= 2 * len(CAST_TIMES)
+    assert pre_before is None or pre_before > pre_after
+    assert before == pre_after  # the interpolation ran on the bracket steps alone
 
 
 def test_time_method_auto_still_uses_nearest():

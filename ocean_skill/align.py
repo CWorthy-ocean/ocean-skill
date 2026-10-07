@@ -605,6 +605,15 @@ def subset_to_time(obj, window):
     just because the reference's record runs longer than the test's. A value
     mask answers "which steps fall in ``window``" directly, for any axis shape
     or order, and never raises.
+
+    The mask only decides *which* steps; how they are then selected depends on
+    what it kept. A sorted axis and a ``[lo, hi]`` window always keep one
+    contiguous run, and that run is selected with a ``slice`` -- on a long lazy
+    dataset (a year of hourly history files is hundreds of thousands of
+    one-step chunks) a fancy-index selection is much more expensive to build
+    than a slice, which only has to find the few chunks it keeps, and the
+    result is identical. Any other kept set (a gappy selection on an unsorted
+    axis) is selected by the mask itself, as before.
     """
     name = _time_name(obj)
     if name is None or window is None or name not in obj.dims:
@@ -621,10 +630,113 @@ def subset_to_time(obj, window):
         mask &= values >= lo
     if hi is not None:
         mask &= values <= hi
-    if not mask.any():
+    kept = np.flatnonzero(mask)
+    if kept.size == 0:
         return obj
-    out = obj.isel({name: mask})
+    first, last = int(kept[0]), int(kept[-1])
+    contiguous = last - first + 1 == kept.size  # no gap between first and last kept
+    out = obj.isel({name: slice(first, last + 1) if contiguous else mask})
     return obj if out.sizes.get(name, 0) == 0 else out
+
+
+def _time_target_steps(values, targets, method: str):
+    """Return ``(pos, in_span)``: the steps of ``values`` that ``targets`` use.
+
+    ``values`` is a time axis already strictly ascending and unique (see
+    :func:`_sorted_unique_on`). The one place that decides which steps a discrete time
+    crop needs, shared by :func:`subset_to_time_targets` (which selects them -- and, for
+    ``interp``, interpolates between them) and :func:`preselect_time_targets` (which
+    only selects them, ahead of a spatial crop), so the two cannot disagree about which
+    step a target uses. ``pos`` is sorted and unique. ``method="nearest"`` uses each
+    target's single nearest step, and every target is in span (nearest has no span to
+    miss); ``"interp"``/``"linear"`` use the step *before* and the step *after* each
+    target (``pandas``' own ``ffill``/``bfill`` indexers), and a target with no step on
+    one side is out of span and uses none.
+    """
+    import pandas as pd
+
+    idx = pd.Index(values)
+    targets = np.asarray(targets)
+    if method not in ("interp", "linear"):
+        pos = idx.get_indexer(targets, method="nearest")
+        return np.unique(pos[pos >= 0]), np.ones(targets.shape, dtype=bool)
+    lo = idx.get_indexer(targets, method="ffill")
+    hi = idx.get_indexer(targets, method="bfill")
+    in_span = (lo >= 0) & (hi >= 0)
+    return np.unique(np.concatenate([lo[in_span], hi[in_span]])), in_span
+
+
+def _warn_targets_outside_span(name: str, values, dropped) -> None:
+    """Warn that the ``dropped`` target times have no step on a side of them.
+
+    Said whether some or *all* targets are out of span -- silently falling back to the
+    unpruned object when every target missed would leave the caller no sign that nothing
+    was actually interpolated (the same "say so, don't just fail open quietly" idiom
+    :func:`ocean_skill.roms.to_depth`'s own all-NaN-target warning follows).
+    """
+    warnings.warn(
+        f"{dropped.size} target time(s) fall outside {name!r}'s own span "
+        f"({values[0]} to {values[-1]}) and have no step to interpolate "
+        f"between -- dropped rather than extrapolated: {list(dropped)}.",
+        stacklevel=_stacklevel.find(),
+    )
+
+
+def preselect_time_targets(obj, targets, method: str = "nearest"):
+    """Return ``(obj, targets)``, ``obj`` cut by indexing to the steps it will use.
+
+    The cheap half of :func:`subset_to_time_targets`, for running *before* a spatial
+    crop. That function ends by interpolating (``method="interp"``/``"linear"``), and
+    xarray's dask ``interp`` concatenates the interpolated dimension's chunks for every
+    output block: applied to a lane still at its full horizontal extent it interpolates
+    whole-domain fields, where applied after the spatial crop it interpolates the few
+    cells that are kept. Selecting the steps first -- the ones
+    :func:`_time_target_steps` says the targets use (nearest: each target's nearest
+    step; interp: the two steps around each in-span target) -- costs a slice, or one
+    index array when they are not consecutive, and leaves the spatial crop only those
+    steps to slice. The targets' own work then runs on what is left and gives the values
+    it would have given on the whole axis: every step it looks at is still there, and
+    still the nearest or the bracketing one.
+
+    ``targets`` comes back narrowed to the ones in span, for ``interp``: an out-of-span
+    target is reported here, once, against the whole axis (see
+    :func:`_warn_targets_outside_span`), where the cut object's span would misstate the
+    record. Hand the returned ``targets`` to :func:`subset_to_time_targets` afterwards.
+    ``(obj, targets)`` come back unchanged whenever there is nothing to cut: no time
+    dimension, no targets, a single step, every step in use -- or no target in span,
+    which :func:`subset_to_time_targets` meets with the whole object, as before.
+
+    An axis that is out of order or repeats a stamp is read as :func:`_sorted_unique_on`
+    reads it (ascending, a repeat's *first* occurrence), so the selection is the very
+    one that function would make.
+    """
+    name = _time_name(obj)
+    if name is None or name not in obj.dims:
+        return obj, targets
+    if targets is None or len(targets) == 0 or obj.sizes[name] <= 1:
+        return obj, targets
+    import pandas as pd
+
+    raw = np.asarray(obj[name].values)
+    idx = pd.Index(raw)
+    if idx.is_monotonic_increasing and idx.is_unique:
+        values, first = raw, None
+    else:
+        values, first = np.unique(raw, return_index=True)
+    if values.size <= 1:
+        return obj, targets
+    targets = np.asarray(targets)
+    pos, in_span = _time_target_steps(values, targets, method)
+    if not in_span.all():
+        _warn_targets_outside_span(name, values, targets[~in_span])
+        targets = targets[in_span]
+    if pos.size == 0 or pos.size == values.size:
+        return obj, targets
+    if first is not None:
+        pos = first[pos]  # back to where those steps sit in ``obj`` itself
+    if first is None and pos[-1] - pos[0] + 1 == pos.size:
+        return obj.isel({name: slice(int(pos[0]), int(pos[-1]) + 1)}), targets
+    return obj.isel({name: pos}), targets
 
 
 def subset_to_time_targets(obj, targets, method: str = "nearest"):
@@ -693,38 +805,18 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     values = np.asarray(obj[name].values)
     if values.size <= 1:
         return obj
-    import pandas as pd
-
-    idx = pd.Index(values)
     targets = np.asarray(targets)
+    pos, in_span = _time_target_steps(values, targets, method)
     if method not in ("interp", "linear"):
-        pos = idx.get_indexer(targets, method="nearest")
-        pos = np.unique(pos[pos >= 0])
         if pos.size == 0 or pos.size == values.size:
             return obj
         return obj.isel({name: pos})
 
-    lo = idx.get_indexer(targets, method="ffill")
-    hi = idx.get_indexer(targets, method="bfill")
-    in_span = (lo >= 0) & (hi >= 0)
     if not in_span.all():
-        # Warned whether some or *all* targets are out of span -- silently
-        # falling back to the unpruned object when every target missed would
-        # leave the caller no sign that nothing was actually interpolated
-        # (the same "say so, don't just fail open quietly" idiom
-        # roms.to_depth's own all-NaN-target warning follows).
-        dropped = targets[~in_span]
-        warnings.warn(
-            f"{dropped.size} target time(s) fall outside {name!r}'s own span "
-            f"({values[0]} to {values[-1]}) and have no step to interpolate "
-            f"between -- dropped rather than extrapolated: {list(dropped)}.",
-            stacklevel=_stacklevel.find(),
-        )
+        _warn_targets_outside_span(name, values, targets[~in_span])
     if not in_span.any():
         return obj
     targets = targets[in_span]
-    lo, hi = lo[in_span], hi[in_span]
-    pos = np.unique(np.concatenate([lo, hi]))
     cropped = obj.isel({name: pos})
     if values.dtype.kind == "M" and targets.dtype.kind == "M":
         # One resolution on both sides first: interp reads a datetime64 axis and its

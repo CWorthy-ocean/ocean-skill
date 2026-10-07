@@ -82,8 +82,12 @@ __all__ = [
 ]
 
 #: Fallback variable → CF standard_name map for ROMS/MARBL output, which mostly lacks
-#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win, and
-#: after this map ``_probe`` also tries :func:`ocean_skill.vocabulary.resolve_name` --
+#: ``standard_name`` attributes. Variables carrying their own ``standard_name`` win --
+#: except, for ROMS output, the grid variables (``h``, ``mask_rho``, ... -- never
+#: mapped, see :data:`ocean_skill.roms.GRID_VARIABLE_NAMES`) and ``zeta``, which is
+#: always the entry below whatever the file says, since the loader finds the grid and
+#: the free surface by those names. After this map ``_probe`` also tries
+#: :func:`ocean_skill.vocabulary.resolve_name` --
 #: this map exists for names the shared vocabulary deliberately doesn't carry (``zeta``,
 #: ``u``, ``v``, ``hbls``, ``FG_CO2`` are too short/generic to be global aliases); most
 #: of the tracer names below (``NO3``, ``PO4``, ...) are already in the vocabulary too,
@@ -582,6 +586,25 @@ def detect_concat(file) -> tuple[str, tuple[str, ...]]:
     return result
 
 
+#: How the per-file pieces of a kerchunk are concatenated: only a variable that already
+#: has the concat dimension is stacked along it, everything else is taken from the
+#: first file. ``virtualizarr``'s defaults (``data_vars="all"``, ``coords="different"``)
+#: stack *every* variable present in every file, so a static variable gained the record
+#: dimension: ROMS output that carries its grid came out with ``h`` as ``(ocean_time,
+#: eta_rho, xi_rho)``, ``hc`` as ``(ocean_time,)`` and a classic ``s_rho`` as
+#: ``(ocean_time, s_rho)`` -- a store no longer recognised as ROMS, its grid unusable.
+#: ``compat="override"`` is what lets a static variable pass without its values being
+#: compared, which a still-virtual (unread) array cannot do. Used by both concatenations
+#: here, the files' own and the rebuild after :func:`_dedup_concat_axis` drops records.
+#: A scalar (0-d) variable now stays 0-d too, which is why :func:`_write_reference`
+#: exists.
+_STATIC_STAYS_STATIC = {
+    "data_vars": "minimal",
+    "coords": "minimal",
+    "compat": "override",
+}
+
+
 def _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths):
     """Warn when the concatenated coordinate is not strictly increasing.
 
@@ -797,7 +820,7 @@ def _dedup_concat_axis(
     kept = kept[np.argsort(values[kept], kind="stable")]
 
     pieces = [vds.isel({concat_dim: slice(int(i), int(i) + 1)}) for i in kept]
-    vds = xr.concat(pieces, dim=concat_dim)
+    vds = xr.concat(pieces, dim=concat_dim, **_STATIC_STAYS_STATIC)
 
     if identical_dropped:
         warnings.warn(
@@ -891,7 +914,8 @@ def make_kerchunk(
     grid
         A separate static-coordinate file to merge in, so the store carries lon/lat
         and any grid parameters and needs no companion file. (For ROMS this is the
-        grid file, giving lon/lat/h/mask plus the s-coordinate parameters.)
+        grid file, giving lon/lat/h/mask plus the s-coordinate parameters.) Not needed
+        when the output files carry their own grid: see the Notes below.
     concat_dim, loadable_variables
         Both **detected from the first file** by :func:`detect_concat` when left
         ``None`` — no per-model configuration. Pass them to override, e.g. for a
@@ -972,6 +996,16 @@ def make_kerchunk(
     Global attributes are merged with ``combine_attrs="drop_conflicts"``: attributes the
     output and grid agree on (``theta_s``/``theta_b``/``hc``) are kept, and ones that
     clash (e.g. ``title``) are dropped rather than raising.
+
+    Only a variable that already has ``concat_dim`` is stacked along it. A variable
+    without it -- a ROMS grid every output file carries (``h``, ``mask_rho``,
+    ``lon_rho``, ``Cs_r``, ``hc``, ...), any static coordinate -- is taken from the
+    first file and stays static, so output that carries its own grid builds a
+    self-contained store with no ``grid=``. (Every such variable used to gain the record
+    dimension -- ``h`` as ``(ocean_time, eta_rho, xi_rho)`` -- and the store was then
+    not even recognised as ROMS; :func:`ocean_skill.roms.standardize` still reads one
+    built that way.) The values are not compared: a static variable that differs between
+    files keeps the first file's.
     """
     import xarray as xr
     from obspec_utils.registry import ObjectStoreRegistry
@@ -1036,6 +1070,7 @@ def make_kerchunk(
             concat_dim=concat_dim,
             loadable_variables=list(loadable_variables),
             preprocess=preprocess,
+            **_STATIC_STAYS_STATIC,
         )
         _warn_if_concat_axis_is_disordered(vds, concat_dim, loadable_variables, paths)
         if keep != "all":
@@ -1081,8 +1116,39 @@ def make_kerchunk(
 
         out = Path(out).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
-        vds.vz.to_kerchunk(str(out), format=fmt or _kerchunk_format(out))
+        _write_reference(vds, out, fmt or _kerchunk_format(out))
     return out
+
+
+def _write_reference(vds, out: Path, fmt: str) -> None:
+    """Write ``vds`` as a kerchunk reference at ``out`` (``fmt``: json or parquet).
+
+    ``vds.vz.to_kerchunk`` with one repair, for the 0-d (scalar) variables a store now
+    keeps: virtualizarr files the single chunk of a 0-d array under ``"<name>/"``, where
+    a zarr reader looks for ``"<name>/0"``. Left alone, a JSON reference reads such a
+    variable (a classic ROMS file's ``hc``/``Vtransform``, a grid file's ``xl``/``el``)
+    back as its fill value -- NaN -- and a parquet one cannot be opened at all
+    (``KeyError: 'hc/.zarray'``). The keys are renamed on the reference dict, which is
+    then written the way ``to_kerchunk`` itself writes it (same format defaults); a
+    virtualizarr that files them correctly leaves nothing to rename.
+    """
+    refs = vds.vz.to_kerchunk(format="dict")
+    chunks = refs["refs"]
+    for key in [k for k in chunks if k.endswith("/")]:
+        chunks[key + "0"] = chunks.pop(key)
+    if fmt == "json":
+        import ujson
+
+        with open(out, "w") as fh:
+            ujson.dump(refs, fh)
+    elif fmt == "parquet":
+        from kerchunk.df import refs_to_dataframe
+
+        refs_to_dataframe(
+            refs, url=str(out), record_size=100_000, categorical_threshold=10
+        )
+    else:
+        raise ValueError(f"Unrecognized output format: {fmt}")
 
 
 def _kerchunk_format(out: Path) -> str:
@@ -1932,9 +1998,18 @@ def _roms_metadata(ds) -> dict[str, Any]:
     """
     import re
 
-    has_sigma = "sigma_r" in ds.variables or (
-        "s_rho" in ds.variables and ds["s_rho"].ndim == 1
-    )
+    from ocean_skill.roms import _record_dims
+
+    # A store that stacked its files' grids along the record dimension (see
+    # ocean_skill.roms._static_grid_fields) has ``s_rho`` as ``(ocean_time, s_rho)`` and
+    # ``hc`` as ``(ocean_time,)``: still the same sigma values and the same scalar.
+    record_dims = set(_record_dims(ds))
+    has_sigma = "sigma_r" in ds.variables
+    if not has_sigma and "s_rho" in ds.variables:
+        dims = ds["s_rho"].dims
+        has_sigma = len(dims) == 1 or (
+            dims[-1] == "s_rho" and set(dims[:-1]) <= record_dims
+        )
     if "Cs_r" not in ds.variables or not has_sigma:
         return {}
     md: dict[str, Any] = {
@@ -1947,13 +2022,17 @@ def _roms_metadata(ds) -> dict[str, Any]:
         """Global attribute ``name`` first, else a 0-d data variable, else ``None``.
 
         UCLA-ROMS writes the vertical-grid scalars as global attributes; classic
-        Rutgers ROMS writes them as 0-d variables. The value comes back as a plain
-        Python number (never a numpy scalar) so it survives a YAML catalog round trip.
+        Rutgers ROMS writes them as 0-d variables -- or, in a store that stacked its
+        files' grids, one per record, of which the first stands for them all. The value
+        comes back as a plain Python number (never a numpy scalar) so it survives a YAML
+        catalog round trip.
         """
         if name in ds.attrs:
             return ds.attrs[name]
-        if name in ds.variables and ds[name].ndim == 0:
-            return ds[name].item()
+        if name in ds.variables and set(ds[name].dims) <= record_dims:
+            # ``.values``: a stacked scalar read from a store is a dask array here,
+            # which has no ``.item()`` of its own
+            return ds[name].isel({d: 0 for d in ds[name].dims}).values.item()
         return None
 
     hc, vt = _scalar("hc"), _scalar("Vtransform")
@@ -2044,6 +2123,14 @@ def _probe(
     apart from anything the caller declares so a rebuild never overwrites a person's
     word. ROMS output is skipped for that: its ``s_rho`` is a stretched coordinate, not
     an observation's depth.
+
+    ROMS output is also the one place a file's own ``standard_name`` does *not* win
+    (see :data:`ocean_skill.roms.GRID_VARIABLE_NAMES`): its grid variables are never
+    recorded, and ``zeta`` is always recorded as ``sea_surface_height_above_geoid``,
+    because :mod:`ocean_skill.roms` finds them by those names and a rename away from
+    them takes the depth coordinate and the land mask with it. And a ROMS store on
+    ``eta_rho``/``xi_rho`` is ``featureType: grid`` whatever its size (see
+    :func:`guess_feature_type`, which would take a one-cell file for a fixed point).
     """
     if hasattr(ds, "columns"):
         return _probe_dataframe(ds, qc=qc, declared=declared, subject=subject)
@@ -2114,7 +2201,16 @@ def _probe(
 
     # --- variable -> standard_name (declared attrs win, then name_map, then the
     # shared vocabulary for anything neither of those two covers) ---
+    from ocean_skill.roms import FREE_SURFACE_NAMES, GRID_VARIABLE_NAMES
     from ocean_skill.vocabulary import is_known, resolve_name
+
+    # Decided up front because ROMS output breaks the "declared attrs win" rule below:
+    # the loader reads its grid (``h``, ``mask_rho``, ``angle``, ...) and free surface
+    # by the model's own names, so a file's ``standard_name`` on one of them (``h``:
+    # ``sea_floor_depth``, ``zeta``: ``sea_surface_elevation_anomaly``) must not become
+    # a rename that hides it from the loader -- see ocean_skill.roms.standardize.
+    roms_md = _roms_metadata(ds)  # {} unless this is ROMS output
+    is_roms = bool(roms_md)
 
     std: dict[str, str] = {}
     auxiliary: dict[str, str] = {}
@@ -2122,11 +2218,15 @@ def _probe(
     claimed: set[str] = set()
     for var in ds.data_vars:
         varname = str(var)
+        if is_roms and varname in GRID_VARIABLE_NAMES:
+            continue  # kept under its own name, never mapped
         sn = (
             ds[var].attrs.get("standard_name")
             or (name_map.get(varname) if name_map else None)
             or (resolve_name(varname) if is_known(varname) else None)
         )
+        if is_roms and varname == "zeta":
+            sn = FREE_SURFACE_NAMES[-1]  # whatever the file or the table calls it
         if not sn:
             continue
         _base, _, modifier = str(sn).partition(" ")
@@ -2149,10 +2249,18 @@ def _probe(
         md["duplicate_standard_names"] = duplicates
 
     ftype, source = guess_feature_type(ds)
+    if is_roms and source == "inferred" and {"eta_rho", "xi_rho"} <= set(ds.dims):
+        # ROMS output on its rho dimensions is a model grid whatever its size. The
+        # generic guess counts a horizontal dim only when it is longer than one, so a
+        # one-cell file (a point extraction) came out as a timeSeriesProfile/timeSeries/
+        # profile/point and a one-cell-wide strip as a trajectory -- and everything
+        # downstream is written for a grid. A featureType the file itself declares is
+        # still believed, and the caller's own (add_source's) still wins in _attach.
+        ftype = "grid"
     md["featureType"] = ftype
     md["featureType_source"] = source
     md.update(_resolution_metadata(ds, coords, ftype))
-    md.update(_roms_metadata(ds))  # model-specific block when this is ROMS output
+    md.update(roms_md)  # model-specific block when this is ROMS output
     if md.get("model") != "roms" and coords["vertical"] is not None:
         vertical = coords["vertical"]
         found = depth_convention.infer_from_coordinate(vertical.name, vertical.attrs)

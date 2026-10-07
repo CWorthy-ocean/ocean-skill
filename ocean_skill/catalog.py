@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import hashlib
+import json
 import os
+import re
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -44,6 +47,7 @@ __all__ = [
     "discover",
     "find",
     "find_catalogs",
+    "fingerprint",
     "match_report",
     "overlap",
     "resolve",
@@ -328,6 +332,222 @@ def resolve(name: str) -> SourceRef:
     call never triggers it. Raises :class:`KeyError` if unknown / ambiguous.
     """
     return _resolve_in(discover(), name)
+
+
+#: Entry-metadata keys :func:`fingerprint` leaves out: the ones that do not change
+#: what a read of the entry returns. Prose for people (``description``, ``title``,
+#: ``tags``) says nothing about the data. The rest is *derived from* the data by the
+#: build probe -- the extents (``geospatial_*``, and ERDDAP's own spelling of the same
+#: bounding box, ``minLatitude`` ... ``maxLongitude``), the time coverage
+#: (``time_coverage_*``, ``minTime`` / ``maxTime``), the ``domain_outline`` ring, the
+#: ``variables`` list -- so it follows from the reader definition that is hashed
+#: anyway, and re-describing an entry, or re-probing it so an extent shifts, must not
+#: throw away every cached result built from it. Everything else in the metadata
+#: (``featureType``, ``axes``, ``standard_names``, ``units``, ``time_zone``,
+#: ``depth_convention``, ``qc``, ...) says how the read is *interpreted*, so it stays
+#: in.
+_FINGERPRINT_SKIP_KEYS = frozenset(
+    {
+        "description",
+        "title",
+        "tags",
+        "minTime",
+        "maxTime",
+        "minLatitude",
+        "maxLatitude",
+        "minLongitude",
+        "maxLongitude",
+        "domain_outline",
+        "variables",
+    }
+)
+#: The families of derived keys :func:`fingerprint` also leaves out; see above.
+_FINGERPRINT_SKIP_PREFIXES = ("geospatial_", "time_coverage_")
+
+#: Globals intake injects into a catalog's ``user_parameters`` when it loads one, and
+#: which leak into the file when a loaded catalog is saved again. They record where the
+#: file *was* last loaded from, not what it defines, so :func:`fingerprint` ignores
+#: them.
+_INTAKE_INJECTED_PARAMETERS = frozenset(
+    {"CATALOG_PATH", "CATALOG_DIR", "STORAGE_OPTIONS"}
+)
+
+#: intake's own syntax for one catalog entity pointing at another -- ``{data(<token>)}``
+#: -- which a reader uses for its data description and a chained step uses for the
+#: reader before it. The token may carry a ``,<n>`` partial-pipeline suffix, which is
+#: dropped.
+_ENTITY_REF = re.compile(r"\{?data\(([^),]+)")
+
+#: ``{catalog file: (mtime_ns, size, {entry name: fingerprint})}`` -- the memo behind
+#: :func:`fingerprint`. One slot per file, so a rewritten catalog replaces its own
+#: stale slot instead of piling up beside it; ``(mtime_ns, size)`` is the freshness
+#: signal :func:`discover` and :func:`ocean_skill.sources.read` already use.
+_fingerprints: dict[str, tuple[int, int, dict[str, str]]] = {}
+
+
+def _load_catalog_yaml(path: str | os.PathLike) -> Any:
+    """Parse a catalog file as plain YAML -- the document intake itself loads."""
+    import yaml
+
+    with open(path, "rb") as stream:
+        return yaml.load(stream, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
+def _entity_refs(entity: Any) -> set[str]:
+    """Tokens of the entities ``entity`` points at, by ``{data(<token>)}`` reference.
+
+    Its own ``metadata`` is not searched: that is description, not definition.
+    """
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            match = _ENTITY_REF.match(value)
+            if match:
+                found.add(match.group(1).strip())
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    if isinstance(entity, dict):
+        walk({k: v for k, v in entity.items() if k != "metadata"})
+    else:
+        walk(entity)
+    return found
+
+
+def _hashed_form(entity: Any) -> Any:
+    """``entity`` as :func:`fingerprint` hashes it: as written, less inert metadata."""
+    if not isinstance(entity, dict):
+        return entity
+    out = dict(entity)
+    metadata = out.get("metadata")
+    if isinstance(metadata, dict):
+        out["metadata"] = {
+            k: v
+            for k, v in metadata.items()
+            if k not in _FINGERPRINT_SKIP_KEYS
+            and not str(k).startswith(_FINGERPRINT_SKIP_PREFIXES)
+        }
+    return out
+
+
+def _stringify_keys(value: Any) -> Any:
+    """Return ``value`` with every mapping key made a string, all the way down."""
+    if isinstance(value, dict):
+        return {str(k): _stringify_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stringify_keys(v) for v in value]
+    return value
+
+
+def _entry_fingerprint(doc: dict[str, Any], key: str) -> str:
+    """Return the :func:`fingerprint` of the entry under ``key`` in a parsed catalog."""
+    entries, data = doc.get("entries") or {}, doc.get("data") or {}
+    aliases = doc.get("aliases") or {}
+    # Follow every reference to the end, resolving each as intake does: an alias first,
+    # then a reader entry, then a data description. A reference to nothing is recorded
+    # as such rather than skipped -- a catalog that dangles is a different definition.
+    refs: dict[str, Any] = {}
+    pending = _entity_refs(entries[key])
+    while pending:
+        token = pending.pop()
+        if token in refs:
+            continue
+        target = aliases.get(token, token)
+        entity = entries[target] if target in entries else data.get(target)
+        refs[token] = _hashed_form(entity)
+        pending |= _entity_refs(entity) - refs.keys()
+    payload: dict[str, Any] = {"entry": _hashed_form(entries[key]), "refs": refs}
+    # Catalog-wide parameters a ``{name}`` template in the entry may read their value
+    # from; empty in every catalog this package builds.
+    parameters = {
+        k: v
+        for k, v in (doc.get("user_parameters") or {}).items()
+        if k not in _INTAKE_INJECTED_PARAMETERS
+    }
+    if parameters:
+        payload["user_parameters"] = parameters
+    try:
+        text = json.dumps(payload, sort_keys=True, default=str)
+    except TypeError:  # mixed-type keys (1 and "1") cannot be sorted
+        text = json.dumps(_stringify_keys(payload), sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _definition_fingerprints(path: str | os.PathLike) -> dict[str, str]:
+    """Return ``{name: fingerprint}`` for every entry of a catalog file, aliases too."""
+    doc = _load_catalog_yaml(path)
+    entries = doc.get("entries") if isinstance(doc, dict) else None
+    if not isinstance(entries, dict):
+        return {}  # not an intake v2 catalog document
+    prints = {key: _entry_fingerprint(doc, key) for key in entries}
+    # A name is an alias when the file has one, else the entry key itself; an alias
+    # outranks a key of the same spelling, as it does in intake's own lookup.
+    for alias, token in (doc.get("aliases") or {}).items():
+        if token in prints:
+            prints[alias] = prints[token]
+    return prints
+
+
+def fingerprint(name: str) -> str:
+    """Return a short fingerprint of ``name``'s catalog *definition*, or ``""`` if none.
+
+    What :mod:`ocean_skill.cache` files a source under besides its name, so an entry
+    redefined under the same name -- a script that rewrites a catalog so ``cast0000``
+    now points at a different CSV, or ``model_win`` at a different time window through a
+    reader chain -- is not handed the result cached for the old one. The first 16 hex
+    digits of a sha256 over the sorted JSON of two things, both read from the catalog
+    *file* (no data is opened):
+
+    * the **reader definition** as written: the reader class, its arguments (URLs and
+      paths included), any chained transforms -- an intake reader chained with
+      ``.tail()``/``.head()``/``.drop_vars()`` is serialized as a pipeline of steps --
+      and every data description or reader entry it references, followed to the end;
+    * the entry's **metadata**, less what does not change a read (prose, and the
+      extents/coverage/variable list the build probe derived; see
+      :data:`_FINGERPRINT_SKIP_KEYS`). ``time_zone``, ``standard_names``, ``axes``,
+      ``depth_convention`` and the rest, which decide how a read is interpreted, are in.
+
+    Paths are part of the definition on purpose: a cache copied to a machine whose
+    catalog points at different paths misses and recomputes, and one copied between
+    identical catalogs hits. What this cannot see is the data behind an *unchanged*
+    definition -- rewriting the same file in place -- which still needs
+    :func:`ocean_skill.cache.clear` or ``refresh=True``.
+
+    ``""`` when there is no definition to speak of -- ``name`` does not resolve, or what
+    it resolves to is not an entry in a catalog file (tests stub :func:`resolve` with
+    bare metadata) -- and never an error: the cache then keys on the name alone, as it
+    always did.
+
+    Stable across processes (plain sha256 over sorted JSON; no hash randomization), and
+    memoized per catalog file on ``(path, mtime_ns, size)``: one parse per version of a
+    file, however many of its entries are asked about.
+    """
+    try:
+        ref = resolve(name)
+    except (KeyError, TypeError):
+        return ""
+    path, entry = getattr(ref, "path", None), getattr(ref, "name", None)
+    if not isinstance(path, (str, os.PathLike)) or not isinstance(entry, str):
+        return ""
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return ""
+    memo_key = os.path.abspath(path)  # a relative search path means the cwd's file
+    slot = _fingerprints.get(memo_key)
+    if slot is None or slot[:2] != (st.st_mtime_ns, st.st_size):
+        try:
+            prints = _definition_fingerprints(path)
+        except Exception:  # unreadable, not YAML, or not shaped like a v2 catalog
+            prints = {}
+        slot = (st.st_mtime_ns, st.st_size, prints)
+        _fingerprints[memo_key] = slot
+    return slot[2].get(entry, "")
 
 
 def _did_you_mean(name: str, options: Iterable[str], n: int = 5) -> str:
@@ -653,6 +873,69 @@ def _boxes_overlap(box_a, box_b) -> bool:
     return _circular_overlap(lon_min_a, lon_max_a, lon_min_b, lon_max_b)
 
 
+#: Allowance, in degrees, added to each side of a *gridded* source's declared extent on
+#: an axis where that extent has zero width. The extent is the span of the build probe's
+#: cell-*centre* coordinates, so a model file holding one cell (or one row/column of
+#: them, for the other axis) declares a point -- which says nothing about the size of
+#: the cell around it, and a station well inside that cell, a few metres off its
+#: centre, would be "provably disjoint" from it and never compared. The pre-compare
+#: skip this feeds (:func:`ocean_skill.comparison._provably_disjoint_axes`) is only a
+#: read-free optimisation, so it errs generous: letting a pair through that turns out
+#: not to meet costs one read, skipping one that did meet costs the comparison. About 5
+#: km is deliberately modest -- not a model of the cell (unknowable without a read),
+#: only enough that an off-centre station inside a regional-model cell is not refused.
+#: Never applied to observation points (stations, casts, moorings) or to a gridded
+#: source's real, non-zero-width extent: for those the declared box is exact, and a
+#: station just outside a regional model must still be skipped.
+POINT_EXTENT_TOLERANCE_DEG = 0.05
+
+
+def _is_gridded(meta: dict[str, Any]) -> bool:
+    """Whether an entry describes a model/regular grid rather than an observation.
+
+    ``featureType: grid`` (:func:`ocean_skill.build.guess_feature_type`'s answer for
+    anything with two horizontal dimensions, and what a gridded climatology declares),
+    or a ``model`` key -- a ROMS entry carries ``model: roms``, and a hand-written
+    catalog need not also set ``featureType`` on it.
+    """
+    if str(meta.get("featureType") or "").lower() == "grid":
+        return True
+    return bool(meta.get("model"))
+
+
+def _declared_box(name: str) -> tuple[float, float, float, float] | None:
+    """Return ``name``'s declared lon/lat box as :func:`overlap` should see it.
+
+    A ``(lon_min, lat_min, lon_max, lat_max)`` tuple, or ``None`` when nothing is
+    declared: :func:`ocean_skill.comparison._domain_of` (longitude convention
+    normalised) plus one allowance -- a *gridded* source's zero-width axis is widened
+    by :data:`POINT_EXTENT_TOLERANCE_DEG` on each side (see that constant for why).
+    Axis by axis, so one row of cells (a real longitude extent, a single latitude)
+    keeps its exact longitude range. Returns a new tuple; the entry's own metadata
+    is never touched.
+    """
+    from ocean_skill.comparison import _domain_of
+
+    box = _domain_of(name)
+    if box is None:
+        return None
+    lon_min, lat_min, lon_max, lat_max = box
+    if lon_min != lon_max and lat_min != lat_max:
+        return box  # a real extent on both axes: nothing to widen, nothing to look up
+    try:
+        meta = resolve(name).metadata
+    except KeyError:
+        return box
+    if not _is_gridded(meta):
+        return box
+    pad = POINT_EXTENT_TOLERANCE_DEG
+    if lon_min == lon_max:
+        lon_min, lon_max = lon_min - pad, lon_max + pad
+    if lat_min == lat_max:
+        lat_min, lat_max = lat_min - pad, lat_max + pad
+    return lon_min, lat_min, lon_max, lat_max
+
+
 @dataclass(frozen=True)
 class Overlap:
     """Whether two sources' catalog-declared extents overlap in space and time.
@@ -697,10 +980,17 @@ def overlap(a: str, b: str) -> Overlap:
     Longitude is compared on the circle, convention-agnostic (0-360 vs
     +/-180, and a domain straddling the antimeridian) -- see
     :func:`_circular_overlap`.
-    """
-    from ocean_skill.comparison import _domain_of, _time_coverage_of
 
-    box_a, box_b = _domain_of(a), _domain_of(b)
+    A gridded source (``featureType: grid``, or a ``model`` entry such as ROMS)
+    whose declared extent has zero width on an axis -- a model file holding one
+    cell -- is widened by :data:`POINT_EXTENT_TOLERANCE_DEG` on that axis first: the
+    extent is built from cell *centres*, so it says nothing about the cell's size and
+    a station inside the cell would otherwise read as disjoint. Observation points
+    are never widened (see :func:`_declared_box`).
+    """
+    from ocean_skill.comparison import _time_coverage_of
+
+    box_a, box_b = _declared_box(a), _declared_box(b)
     space = None if box_a is None or box_b is None else _boxes_overlap(box_a, box_b)
 
     window_a, window_b = _time_coverage_of(a), _time_coverage_of(b)

@@ -1184,11 +1184,11 @@ def _names_geographic_velocity(spec: Any) -> bool:
 #: like what :func:`ocean_skill.sources.read` would have returned -- a smaller,
 #: already-loaded stand-in for the same lazy object -- for every one of those
 #: per-pair steps to reproduce today's exact result. Cleared and rebuilt at the top
-#: of every :func:`compare` call (never explicitly cleared at the *end*): a stale
-#: leftover entry from an earlier call can only ever be a *miss* for a differently
-#: keyed request (the key below is exact on source+qc, never approximate), so it is
-#: never served wrong -- it would just sit unused, which the next call's rebuild
-#: clears anyway. Bounded in size to whatever the most recent call's own window
+#: of every :func:`compare` call, and cleared again once that call has aligned every
+#: pair: the key below is exact on source+qc only, so a slab left behind would answer
+#: *any* later :func:`prepare_source` of the same source -- a field, a direct
+#: comparison -- with this call's spatial window, time window and variables, whatever
+#: that caller actually asked for. Bounded in size to whatever the call's own window
 #: needed, never the model's full domain.
 _SHARED_SLABS: dict[tuple[str, str], Any] = {}
 
@@ -1220,7 +1220,142 @@ def _shared_slab(source: str, qc: Any):
     return _SHARED_SLABS.get(_shared_slab_key(source, qc))
 
 
-def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
+def _variables_needed(obj, variables: Sequence[Any]) -> set[str] | None:
+    """Return the raw data variables ``variables`` read from ``obj``, else ``None``.
+
+    ``None`` means "cannot tell, so all of them": the answer is a set only when *every*
+    request in ``variables`` is a plain name that resolves, exactly as :func:`_prepare`
+    resolves it (:func:`ocean_skill.operators.resolve_variable`), to one data variable
+    of ``obj``. A derived geographic velocity (staggered u/v and the grid angle), a
+    calculator (mixed layer depth reads temperature, salinity and the whole column), a
+    combination, a name that does not resolve, or one that resolves to something that
+    is not a data variable each read more than they name -- or nothing :func:`_prepare`
+    would not itself report -- so they keep the whole dataset standing.
+    """
+    import warnings
+
+    from ocean_skill import operators
+
+    names: set[str] = set()
+    for variable in variables:
+        spec = _expand_derived(variable)
+        if not isinstance(spec, str) or _names_geographic_velocity(spec):
+            return None
+        # A probe, not the resolution of record: _prepare resolves again (and warns
+        # then, once) on the narrowed dataset.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                da = operators.resolve_variable(obj, spec)
+            except Exception:
+                return None
+        name = getattr(da, "name", None)
+        if da is None or name not in obj.data_vars:
+            return None
+        names.add(str(name))
+    return names or None
+
+
+def _narrow_to_variables(
+    obj, meta: dict[str, Any], variables: Sequence[Any], select=None
+):
+    """Return a ROMS dataset without the time-varying variables a request never reads.
+
+    What is kept: the requested variable(s) (:func:`_variables_needed`), every variable
+    with no time dimension -- the grid fields and s-coordinate parameters the vertical
+    transform and the land mask read -- and the free surface, which a depth is matched
+    against (:data:`_FREE_SURFACE_NAMES`). On a long lazy model each variable left in
+    costs a dask graph over every one of its chunks for every crop applied to it (a
+    kerchunk reference over ~225,000 one-step chunks spends minutes on that), so the
+    variables a lane never touches are dropped before the first one.
+
+    ``obj`` itself comes back whenever narrowing cannot be shown to be exact: a source
+    that is not a ROMS dataset, an isopycnal request (``sigma0`` reads temperature and
+    salinity as well as the field it slices), a time-less dataset, or any request
+    :func:`_variables_needed` cannot name exactly. A pure optimisation -- never a
+    change of value.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import _time_name
+
+    if meta.get("model") != "roms" and meta.get("loader") != "ocean_skill.roms":
+        return obj
+    if not isinstance(obj, xr.Dataset):
+        return obj
+    if any(k in (select or {}) for k in _ISOPYCNAL_KEYS):
+        return obj
+    tname = _time_name(obj)
+    if tname is None:
+        return obj
+    needed = _variables_needed(obj, variables)
+    if needed is None:
+        return obj
+    keep = needed | set(_FREE_SURFACE_NAMES)
+    drop = [
+        name
+        for name, var in obj.data_vars.items()
+        if tname in var.dims and name not in keep
+    ]
+    return obj.drop_vars(drop) if drop else obj
+
+
+def _crop_to_windows(obj, windows: Sequence[tuple[Any, Any]]):
+    """Return ``obj`` cut along time to the union of ``windows``, each padded a step.
+
+    ``windows`` are ``(start, stop)`` pairs. The union rather than their hull: sparse
+    casts months apart would otherwise hold every step between the first and the last.
+    Each window keeps one step past either edge, so a pair that matches the nearest
+    step or interpolates between the two around an instant finds them here whatever
+    the model's own cadence -- a window narrower than the model's step holds none of
+    its own, and that padding is what still brackets it. ``obj`` comes back unchanged
+    when it has no time axis, the axis is not sorted, or the cut would keep everything.
+
+    Runs of consecutive steps are taken as slices and joined: on a long lazy axis a
+    slice is far cheaper to build than a fancy index of the same steps.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import _time_name
+
+    name = _time_name(obj)
+    if name is None or name not in obj.dims or not windows:
+        return obj
+    values = np.asarray(obj[name].values)
+    if values.size < 2 or not bool((values[1:] >= values[:-1]).all()):
+        return obj
+    keep = np.zeros(values.size, dtype=bool)
+    for start, stop in windows:
+        lo, hi = sorted((start, stop))
+        if values.dtype.kind == "M":
+            lo, hi = np.datetime64(lo), np.datetime64(hi)
+        first = max(int(np.searchsorted(values, lo, side="left")) - 1, 0)
+        last = min(int(np.searchsorted(values, hi, side="right")), values.size - 1)
+        keep[first : last + 1] = True
+    kept = np.flatnonzero(keep)
+    if kept.size == values.size:
+        return obj
+    breaks = np.flatnonzero(np.diff(kept) > 1)
+    firsts, lasts = kept[np.r_[0, breaks + 1]], kept[np.r_[breaks, kept.size - 1]]
+    parts = [
+        obj.isel({name: slice(int(a), int(b) + 1)})
+        for a, b in zip(firsts, lasts, strict=True)
+    ]
+    if len(parts) == 1:
+        return parts[0]
+    return xr.concat(
+        parts,
+        dim=name,
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+        combine_attrs="override",
+    )
+
+
+def _build_shared_slabs(
+    refs: list[str], tests: list[str], qc: Any, variables: Sequence[Any] | None = None
+) -> None:
     """Read each ROMS source in ``tests`` once, decompressed, over a window that
     covers every point-like reference in ``refs`` -- so a fan of many moorings/
     stations/casts sharing one gridded test lane does not each independently
@@ -1237,6 +1372,14 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
     same way. This is a pure optimization: :func:`_shared_slab` returning ``None``
     for a source this could not batch just means every pair reads it itself,
     exactly as :func:`compare` behaved before this existed.
+
+    ``variables`` -- the variable requests the call will fan over, ``None`` for "any"
+    -- narrows what the slab holds to what they read (:func:`_narrow_to_variables`;
+    one request it cannot narrow keeps every variable), so only those fields are
+    decompressed and loaded. Time is cut before space, to the union of the references'
+    own declared windows (:func:`_crop_to_windows`) -- and not at all when any
+    reference declares none: its pairs cannot be told to need less than the whole
+    record, and a slab cut to the other references' windows would silently starve it.
     """
     _SHARED_SLABS.clear()
     if len(refs) < 2:
@@ -1248,7 +1391,6 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
         _lat_name,
         _lon_name,
         _nearest_indices,
-        subset_to_time,
     )
     from ocean_skill.catalog import resolve as _resolve
     from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
@@ -1262,7 +1404,9 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             # source gets batched at all this call rather than risk that.
             return
         positions.append((bbox[0], bbox[1]))
-    time_windows = [tw for tw in (_time_coverage_of(ref) for ref in refs) if tw]
+    time_windows = [_time_coverage_of(ref) for ref in refs]
+    if any(tw is None for tw in time_windows):
+        time_windows = []
 
     for tst in tests:
         try:
@@ -1276,6 +1420,10 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             obj = osk.read(tst, **read_kwargs)
         except Exception:
             continue
+        if variables is not None:
+            obj = _narrow_to_variables(
+                obj, meta, [variable_for(v, "test") for v in variables]
+            )
         lon_name, lat_name = _lon_name(obj), _lat_name(obj)
         if lon_name is None or lat_name is None:
             continue
@@ -1339,20 +1487,20 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             window["eta_v"] = slice(max(eta0 - 1, 0), min(eta1, n_eta - 1))
             trim[eta_dim] = (1 if eta0 > 0 else 0, 1 if eta1 < n_eta else 0)
 
+        # Time before space: each isel on a long lazy axis builds a graph over every
+        # chunk of every variable it touches, so cutting the (long) time axis first
+        # leaves the spatial crop only the few steps that survive to slice.
+        if time_windows:
+            try:
+                obj = _crop_to_windows(obj, time_windows)
+            except Exception:
+                pass
         try:
             sub = obj.isel(window)
         except Exception:
             continue
         if trim:
             sub.attrs["_roms_stagger_trim"] = trim
-
-        if time_windows and "time" in sub.dims:
-            lo = min(tw[0] for tw in time_windows)
-            hi = max(tw[1] for tw in time_windows)
-            try:
-                sub = subset_to_time(sub, (lo, hi))
-            except Exception:
-                pass
 
         # Drop any pre-derived east/north before ever cropping+loading, defensively:
         # osk.read no longer carries them by default (roms.standardize's own
@@ -1787,6 +1935,19 @@ def _frame_key(frame: dict[str, Any]) -> dict[str, Any]:
 def _vertical_request(select: dict[str, Any] | None) -> Any:
     """Return what ``select`` asks for vertically, under whichever depth key it used."""
     return next((select[k] for k in _VERTICAL_KEYS if k in (select or {})), None)
+
+
+def _keeps_unit_vertical_axis(select: dict[str, Any] | None) -> bool:
+    """Whether ``select`` asks for exactly one level *as a list* (depth or sigma0).
+
+    The one vertical request :func:`_prepare` leaves a length-one axis standing for: a
+    scalar collapses its single interpolated level, a list keeps the axis it asked
+    for, however short it is. Read by :func:`prepare_source` for the cache key.
+    """
+    return any(
+        isinstance(request, list | tuple) and len(request) == 1
+        for request in (_vertical_request(select), (select or {}).get("sigma0"))
+    )
 
 
 def _needs_depth_frame(depth: Any) -> bool:
@@ -2707,6 +2868,14 @@ def _prepare(
         if not over_is_time:
             da = da.squeeze(_tsp_tdim, drop=False)
 
+    # The observational depth axis, bound only by the ladder's final `else:` (the
+    # branch an observational lane takes) -- and read again below, by the profile
+    # pruning, for *any* lane whose catalog entry says it is a profile. A ROMS lane
+    # never takes that branch, yet a one-cell ROMS file an older catalog labelled
+    # `timeSeriesProfile` (or a calculated variable on a profile lane) reaches the
+    # pruning all the same: no observational axis to prune is a perfectly good answer
+    # there, an UnboundLocalError is not.
+    zname = None
     if calculated:
         # A plain surface request is not a contradiction here: it is the default
         # Comparison._prepare_lane/Field._surfaced() inject for *every* grid lane
@@ -2950,14 +3119,27 @@ def _prepare(
             da = sub[name]
             if support_cell is not None:
                 da.attrs["depth_support"] = support_cell
-            # Squeeze only a single interpolated level: a scalar depth
-            # request collapses the axis by itself (as `.sel` does
+            # Squeeze only a single interpolated level *of a scalar request*: a
+            # scalar depth collapses the axis by itself (as `.sel` does
             # everywhere), while a list or band leaves several levels for
             # the vertical aggregation to reduce. Squeezing unconditionally
-            # used to discard every level but the first, silently.
-            if "z" in da.dims and da.sizes["z"] == 1:
+            # used to discard every level but the first, silently. A list of
+            # exactly one level is still a list: it asked for an axis (a profile
+            # with a single depth scores along it, over="Z"), and a lane that
+            # lost it left match_axis nothing to score over. Whatever consumer
+            # wants a map anyway squeezes the leftover singleton itself
+            # (_require_reduced), so only a lane that scores along the axis keeps it.
+            if (
+                "z" in da.dims
+                and da.sizes["z"] == 1
+                and not isinstance(depth, list | tuple)
+            ):
                 da = da.isel(z=0)
-            if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
+            if (
+                "sigma0" in da.dims
+                and da.sizes["sigma0"] == 1
+                and not isinstance(sigma, list | tuple)
+            ):
                 da = da.isel(sigma0=0)
     else:
         # observational depth axes vary: real metres, or an index with depths alongside.
@@ -3630,13 +3812,21 @@ def prepare_source(
     entries are present whether or not the source declares anything -- an undeclared
     one resolves to the defaults, which are themselves a (changed) behaviour.
 
+    The crops run in order of cost: first a ROMS lane is narrowed to the variables the
+    request reads (:func:`_narrow_to_variables`; whole, whenever the request reads more
+    than it names), then it is cut along time (``time_window``, then ``time_targets``),
+    and only then horizontally (``bbox``). Each ``isel`` on a long lazy lane builds a
+    graph over every chunk of every variable it touches, so the long time axis and the
+    variables never read are shed before the spatial crop has anything to slice. None of
+    it changes a value: the crops commute, and a dropped variable was never read.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
     import ocean_skill as osk
     from ocean_skill import cache as _cache
     from ocean_skill import qc as _qc
-    from ocean_skill.catalog import resolve
+    from ocean_skill.catalog import fingerprint, resolve
     from ocean_skill.sources import erddap_constraints
 
     # Hoisted above the key computation below (it used to be read only just before
@@ -3712,6 +3902,12 @@ def prepare_source(
     if meta.get("model") == "roms":
         if _needs_depth_frame(_vertical_request(select)):
             key_select["_depth_frame"] = _frame_key(frame)
+        if _keeps_unit_vertical_axis(select):
+            # A one-level list used to be squeezed to a scalar-style lane and now
+            # stays an axis of length one (see _prepare) -- a lane cached under the
+            # old rule carries no such axis and must not be served in its place.
+            # Re-keys only that request, so every other warm entry is untouched.
+            key_select["_unit_vertical_axis"] = True
     else:
         key_select["_depth_convention"] = own.key()
     zone = time_zone_module.time_zone_label(meta)
@@ -3737,10 +3933,17 @@ def prepare_source(
 
         if _CF_AXES.get(over) == "time" or over == TIME_DEPTH_OVER:
             key_select["_over_is_time"] = True
+    # What the entry is *defined as* -- reader, paths, the metadata that changes a
+    # read -- not only what it is called: an entry rewritten under the same name (a
+    # script pointing `cast0000` at a different CSV) must miss, not hand back the
+    # result cached for the old definition. A source with none ("" -- a stub, an
+    # unresolvable name) leaves the argument out, and keys on its name alone as before.
+    definition = fingerprint(source)
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
         select=key_select,
+        **({"definition": definition} if definition else {}),
     )
     if use_cache and not refresh:
         hit = _cache.load_field(key)
@@ -3804,9 +4007,17 @@ def prepare_source(
     else:
         obj = obj.copy(deep=False)
     _warn_if_chunk_is_large(obj, source)
-    # Crop horizontally and in time *before* _prepare, so the vertical transform it
+    # Narrowed to what this request reads *before* any crop below: each variable left
+    # standing costs a dask graph over every chunk it has for every crop applied to it,
+    # and on a long lazy model (hundreds of thousands of one-step chunks) the fields a
+    # lane never touches were most of that bill. See _narrow_to_variables for what is
+    # kept, and for when nothing is dropped.
+    obj = _narrow_to_variables(obj, meta, [variable], select)
+    # Crop in time and then horizontally *before* _prepare, so the vertical transform it
     # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
     # expensive step in the pipeline) only ever touches the cells this lane keeps.
+    # Time goes first because it is the long axis: a spatial isel on a lazy lane builds
+    # a graph over every one of its time chunks, and the steps kept here are a handful.
     # Applied to the whole Dataset, not the resolved variable, so z_rho/zeta/h stay
     # consistent with the cropped field; exact rather than approximate, since the
     # transform is per-column and commutes with a horizontal/time subset -- cropping
@@ -3882,18 +4093,32 @@ def prepare_source(
         from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
 
         obj = obj.drop_vars(list(GEOGRAPHIC_VELOCITY_NAMES), errors="ignore")
-    if pre_crop and bbox is not None:
-        from ocean_skill.align import subset_to_bbox
-
-        obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
     if pre_crop_time and time_window is not None:
         from ocean_skill.align import subset_to_time
 
         obj = subset_to_time(obj, time_window)
+    # The targets are applied in two halves, one either side of the spatial crop. The
+    # steps they use are picked out by indexing alone first -- time is the long axis,
+    # and picking is a slice -- so the spatial crop has only those to slice; the
+    # targets' own work (for "interp", the interpolation) comes after it, on the few
+    # cells that are left. Interpolating before the crop would interpolate whole-domain
+    # fields, which xarray's dask `interp` does by concatenating the time chunks per
+    # output block. See align.preselect_time_targets.
+    pending_targets = time_targets
+    if pre_crop_time and time_targets is not None:
+        from ocean_skill.align import preselect_time_targets
+
+        obj, pending_targets = preselect_time_targets(
+            obj, time_targets, method=time_targets_method
+        )
+    if pre_crop and bbox is not None:
+        from ocean_skill.align import subset_to_bbox
+
+        obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
     if pre_crop_time and time_targets is not None:
         from ocean_skill.align import subset_to_time_targets
 
-        obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
+        obj = subset_to_time_targets(obj, pending_targets, method=time_targets_method)
     if roms_velocity_point:
         # Re-derive now, after every space/time crop above -- the raw staggered
         # components this re-derives from are already narrowed to (a small halo
@@ -4991,6 +5216,14 @@ class Comparison:
             if windows
             else None
         )
+        if self._interpolates_onto_profile():
+            # Interpolating onto a cast's instant needs the model steps on *both
+            # sides* of it, and a contiguous crop to the cast's own (day-padded)
+            # coverage can keep only one -- or none -- of them for a low-frequency
+            # model, the very case interpolation is for. The discrete target
+            # (see _reference_time_targets_uncached) already prunes the lane to just
+            # those bracketing steps, so the window has nothing left to save.
+            window = None
         if len(sources) > 1:
             # An ordered collection of discrete casts (a from_reference section,
             # the only way _reference_sources() ever returns more than one name)
@@ -5005,6 +5238,42 @@ class Comparison:
             lat = 0.5 * (bbox[1] + bbox[3])
             bbox = (lon, lat, lon, lat)
         return bbox, window
+
+    def _interpolates_onto_profile(self) -> bool:
+        """Report whether ``time_method`` interpolates onto one ``profile``'s instant.
+
+        A ``profile`` is a single instant, which the test lane is otherwise matched to
+        by the model step nearest it (:func:`ocean_skill.align._sample_test_at_instant`)
+        -- a match ``"interp"``/``"linear"`` has nothing to act on. Offering the cast's
+        own time as a discrete target (:meth:`_reference_time_targets_uncached`) hands
+        it to the machinery a mooring's times already travel through
+        (:func:`ocean_skill.align.subset_to_time_targets`), which interpolates the
+        whole lane -- free surface and depth frame included. A pair-spec select stays
+        unrouted, as it does everywhere this reads the reference's own times, and so
+        does a collection of casts (a section), which has no single instant.
+        """
+        sources = self._reference_sources()
+        return (
+            self.time_method in ("interp", "linear")
+            and not is_pair_spec(self.select)
+            and len(sources) == 1
+            and _feature_type(sources[0]) == "profile"
+        )
+
+    def _outside_the_record(self, start: Any, stop: Any):
+        """Return the ``NoValidData`` for a target the model's record misses."""
+        import pandas as pd
+
+        from ocean_skill.align import NoValidData
+
+        return NoValidData(
+            f"time_method={self.time_method!r} interpolates {self.test_name!r} onto "
+            f"{self.reference_name!r}'s own instant, which falls outside the model's "
+            f"record ({pd.Timestamp(start)} to {pd.Timestamp(stop)}) -- there is no "
+            "step on both sides to interpolate between, and quietly taking the "
+            "nearest one instead would be a different comparison. Leave time_method "
+            "at its default to match the nearest step, or drop this cast."
+        )
 
     def _reference_time_targets(self) -> np.ndarray | None:
         """Memoized :meth:`_reference_time_targets_uncached`.
@@ -5030,7 +5299,9 @@ class Comparison:
         fixed-position or repeat-visit reference -- :data:`POINT_FEATURE_TYPES`
         plus ``timeSeriesProfile``, the same population
         :meth:`_reference_narrowing` collapses to a point, minus ``profile``
-        (already a single instant, with nothing to prune between) and
+        (already a single instant, with nothing to prune between -- except under
+        ``time_method="interp"``, where that instant is itself the target to
+        interpolate onto: see :meth:`_interpolates_onto_profile`) and
         ``trajectory``/``trajectoryProfile`` (a moving position pairs on space
         *and* time together, which a time-only prune here could get wrong). A
         pair-spec select stays unrouted for the same reason
@@ -5090,7 +5361,11 @@ class Comparison:
         test_agg = aggregate_for(self.aggregate, "test")
         collapses_time = _collapses_time(test_agg)
         folds_time = _time_is_climatology(test_agg)
-        if not over_is_time and not collapses_time and not folds_time:
+        # A single profile has no time axis to keep, collapse or fold -- but under
+        # time_method="interp" its one instant is itself the target to interpolate
+        # the model onto (see _interpolates_onto_profile).
+        interp_profile = self._interpolates_onto_profile()
+        if not (over_is_time or collapses_time or folds_time or interp_profile):
             return None
         if is_pair_spec(self.select):
             return None
@@ -5105,7 +5380,7 @@ class Comparison:
         # windows can span the whole campaign, with the model's every step in
         # between read for nothing, so the featureType gate below only applies
         # to the single-source case.
-        if len(sources) == 1:
+        if len(sources) == 1 and not interp_profile:
             feature = _feature_type(sources[0])
             if feature not in POINT_FEATURE_TYPES and feature != "timeSeriesProfile":
                 return None
@@ -5143,6 +5418,18 @@ class Comparison:
         if not all_values:
             return None
         values = np.unique(np.concatenate(all_values))
+        if interp_profile and not collapses_time:
+            # Interpolation never extrapolates, so a cast outside the model's own
+            # catalog-declared record has nothing to land on -- refused here, read-
+            # free, before the lane is read at all (align() checks the lane itself
+            # too, for a source that declares no record). The record is declared to
+            # the day, padded a day each side (see _time_coverage_of), so a cast just
+            # outside it still reaches that second check.
+            test_cov = _time_coverage_of(self.test_name)
+            if test_cov is not None:
+                lo, hi = (np.datetime64(x) for x in test_cov)
+                if not ((values >= lo) & (values <= hi)).any():
+                    raise self._outside_the_record(*test_cov)
         # When a time aggregate collapses the axis (a profile-family {"time":
         # "mean"} station comparison, most often -- and, since the check above
         # never gates a casts collection on featureType, the from_reference
@@ -5428,12 +5715,23 @@ class Comparison:
         # demeaned run of the same comparison share this one entry, each deriving its
         # own view from it on load. Pooling still tells the two apart -- that is
         # `_identity`'s job, not the cache key's (see the note there).
+        # Each side's catalog *definition* alongside its name (see prepare_source's own
+        # note on `definition=`). A section's reference_name is a "+"-joined display
+        # string that resolves to nothing, so its definition is its casts' own, in
+        # order -- from the list the comparison holds, never by splitting the string.
+        from ocean_skill.catalog import fingerprint
+
+        reference_prints = [fingerprint(s) for s in self._reference_sources()]
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
             variable=self.variable,
             select={**self.select, "_aggregate": self.aggregate, **extra},
             method=self.method,
+            test_definition=fingerprint(self.test_name),
+            reference_definition=(
+                "+".join(reference_prints) if any(reference_prints) else ""
+            ),
         )
 
     def _use_cache(self) -> bool:
@@ -6269,6 +6567,24 @@ class Comparison:
             time_targets_method=tt_method,
             point_window_cells=test_cells,
         )
+        if (
+            t is not None
+            and time_targets is not None
+            and self._interpolates_onto_profile()
+        ):
+            # subset_to_time_targets drops a target the lane's own span does not
+            # bracket (with a warning) and, when that is every one of them, hands the
+            # lane back untouched -- which the nearest-step match below would then
+            # quietly snap to, however far. Interpolation was asked for and cannot
+            # happen: refuse the pair instead of answering a different question.
+            from ocean_skill.operators import resolve_dim
+
+            _tdim = resolve_dim(t, "T")
+            if _tdim is not None and _tdim in t.dims:
+                stamps = np.asarray(t[_tdim].values).astype("datetime64[ns]")
+                wanted = np.asarray(time_targets).astype("datetime64[ns]")
+                if stamps.shape != wanted.shape or not (stamps == wanted).all():
+                    raise self._outside_the_record(stamps.min(), stamps.max())
         self._warn_on_pair_spec_mismatch(t, r)
         # Each lane's resolved name, computed once: the plain-request definition check
         # reads them here, and they are stored on the aligned pair below so a later
@@ -6295,6 +6611,20 @@ class Comparison:
         match_time_method = (
             "auto" if self.time_method in ("interp", "linear") else self.time_method
         )
+        # The vertical twin of the translation above, for a one-level test lane (a
+        # profile with a single depth, kept standing by _prepare): a linear match
+        # needs two levels to interpolate between and divides by the zero-width span
+        # of one, returning NaN everywhere -- though the model's own vertical
+        # transform already interpolated onto exactly that depth. Pairing the lone
+        # level with the reference's is all that is left to do, which is what a
+        # nearest match does (within a metre; the lanes arrive on the same depth).
+        match_depth_method = self.depth_method
+        if match_depth_method in ("interp", "linear"):
+            from ocean_skill.operators import resolve_dim
+
+            _zdim = resolve_dim(t, "Z")
+            if _zdim is not None and _zdim in t.dims and t.sizes[_zdim] == 1:
+                match_depth_method = "nearest"
         self._aligned = _align.align(
             t,
             r,
@@ -6303,7 +6633,7 @@ class Comparison:
             reference_name="reference",
             over=self.over,
             time_method=match_time_method,
-            depth_method=self.depth_method,
+            depth_method=match_depth_method,
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
             min_coverage=self.min_coverage,
@@ -9871,6 +10201,12 @@ def _compare_aggregate_fan(kwargs: dict[str, Any]) -> ComparisonSet:
     return ComparisonSet(members)
 
 
+def _error_text(exc: BaseException, limit: int = 160) -> str:
+    """Return ``TypeName: message`` on one line, cut to ``limit`` characters."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def compare(
     *,
     reference,
@@ -9966,10 +10302,11 @@ def compare(
         One of ``"auto"`` (default), ``"mean"``, ``"nearest"``, or
         ``"exact"`` -- how the two lanes are matched along a kept time axis.
         Doubles as the sample-matching knob against a fixed-position or
-        repeat-visit reference (a mooring, a revisited station), where
-        ``"nearest"`` (the default there) keeps only the closest model step
-        to each of the reference's own times and ``"interp"``/``"linear"``
-        interpolates onto them instead.
+        repeat-visit reference (a mooring, a revisited station) or a
+        ``profile``, where ``"nearest"`` (the default there) keeps only the
+        closest model step to each of the reference's own times (to the
+        cast's, for a profile) and ``"interp"``/``"linear"`` interpolates
+        onto them instead.
     depth_method
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"`` -- how
         the model is matched onto target depths: the nearest real level
@@ -9997,7 +10334,12 @@ def compare(
     skip_missing
         Bool (default ``True``) -- skip a pair whose variable is absent from
         a source, or whose catalog extents never overlap, with a message,
-        rather than raising.
+        rather than raising. Any other error a pair raises (an unreadable
+        model file, a lane that cannot be matched) skips just that pair too,
+        printed with its type and named in one warning at the end -- and is
+        re-raised, the first one, when no comparison formed at all, so a
+        systematic failure is never returned as an empty set. ``False`` raises
+        at the first failure of any kind.
     cache
         ``None`` (default, follows the global :mod:`ocean_skill.cache`
         setting), or an explicit ``True``/``False`` to force caching on/off
@@ -10059,7 +10401,12 @@ def compare(
     test grid -- no valid data to sample there at all (see
     :func:`ocean_skill.align.sample_at`) -- is skipped the same way, discovered only
     once that one station's read is attempted. Progress prints one line per pair
-    considered, plus a final count of comparisons formed and skipped.
+    considered, plus a final count of comparisons formed and skipped. A pair that fails
+    some *other* way is skipped like any of those, so one bad file does not discard the
+    comparisons already formed, but it is the kind of failure that should not pass
+    quietly: it is printed with its exception type, named in a single closing warning,
+    and -- if nothing at all formed -- the first one is raised rather than leaving an
+    empty result that reads as "no data".
 
     Whether a source "has" the variable is decided by
     :func:`ocean_skill.vocabulary.covers`, the rule :func:`ocean_skill.catalog.find`
@@ -10249,6 +10596,12 @@ def compare(
     the ``"auto"`` way: ``"interp"``/``"linear"`` is never passed on to
     :func:`ocean_skill.align.match_axis`, which still reads ``mean``/``nearest``/
     ``exact``/``auto`` for every other comparison (a gridded reference, a profile).
+    A ``profile`` reference takes ``"interp"`` too, with its one instant as the
+    target: the model is interpolated onto the cast's own time (free surface and
+    depth frame with it) instead of being matched to the nearest step, which is what
+    the default still does. Interpolation never extrapolates, so a cast outside the
+    model's record is skipped (``NoValidData``) rather than snapped to its nearest
+    step.
 
     ``depth_method`` is the vertical twin of ``time_method``, and applies whenever a
     depth-resolved lane is asked for -- an ADCP mooring or CTD profile
@@ -10858,10 +11211,43 @@ def compare(
     # is not a plain string (a pair-spec select's own reference list, say) or any
     # problem along the way just leaves no slab, and every pair reads its own test
     # lane exactly as before this existed.
-    _build_shared_slabs(refs, tests, qc)
+    # The variables each test lane will be asked for narrow what the slab loads --
+    # except under an isopycnal request, whose density needs temperature and salinity
+    # whatever field is being sliced (see _narrow_to_variables).
+    _build_shared_slabs(
+        refs, tests, qc, None if sigma_request is not None else variables
+    )
 
     out: list[Comparison] = []
     n_skipped = 0
+    # Pairs that failed with something other than what skip_missing is *for* (a
+    # variable a source lacks, a cell with no valid data, a source with no time
+    # axis): `(pair, exception)`, kept for the one summary warning after the loops
+    # and for re-raising the first when nothing at all formed. See _skip below.
+    unexpected: list[tuple[str, Exception]] = []
+
+    def _skip(
+        label: str,
+        pair: str,
+        exc: Exception,
+        expected: tuple[type[Exception], ...] = (KeyError, NoValidData),
+    ) -> None:
+        """Count one skipped pair and say why, naming the type of an unexpected error.
+
+        Under ``skip_missing=True`` any exception a pair raises skips *that pair*, not
+        the whole call -- an unreadable model file or a lane shape nobody anticipated
+        would otherwise throw away every comparison already formed. ``expected`` is
+        the kind this site has always skipped (printed as before, without a type);
+        anything else is printed with its type, and remembered in ``unexpected``.
+        """
+        nonlocal n_skipped
+        n_skipped += 1
+        if isinstance(exc, expected):
+            print(f"  skipped {label}: {exc}")
+        else:
+            print(f"  skipped {label}: {type(exc).__name__}: {exc}")
+            unexpected.append((pair, exc))
+
     for var in variables:
         # Pair each variable with the sources that actually carry it, rather than
         # forming a blind cross-product. Observational catalogs are usually one
@@ -10972,11 +11358,10 @@ def compare(
                 )
                 try:
                     c.align(refresh=refresh)
-                except (KeyError, NoValidData) as exc:
+                except Exception as exc:
                     if not skip_missing:
                         raise
-                    n_skipped += 1
-                    print(f"  skipped {short}: {exc}")
+                    _skip(short, f"{tst!r} vs {len(matching)} casts", exc)
                     continue
                 out.append(c)
             continue
@@ -11042,15 +11427,15 @@ def compare(
                     ref_time_collapsed=_ref_time_collapsed,
                     ref_time_climatology=_ref_time_climatology,
                 )
-            except ValueError as exc:
+            except Exception as exc:
                 # Reading a profile reference's own levels can fail (no vertical axis
-                # found, or none finite) -- treat it like any other per-reference
-                # failure: skip with a message unless the caller asked not to.
+                # found, or none finite -- a ValueError -- or the source would not
+                # open) -- treat it like any other per-reference failure: skip with a
+                # message unless the caller asked not to.
                 if not skip_missing:
                     raise
                 pair_num += len(viable_tests)
-                n_skipped += 1
-                print(f"  skipped {ref!r}: {exc}")
+                _skip(repr(ref), repr(ref), exc, expected=(ValueError,))
                 continue
             for tst in viable_tests:
                 pair_num += 1
@@ -11058,11 +11443,10 @@ def compare(
                 print(f"  comparing {prefix}{tst!r} vs {ref!r} [{pair_num}/{n_pairs}]")
                 try:
                     these_times = _times_for(tst)
-                except ValueError as exc:
+                except Exception as exc:
                     if not skip_missing:
                         raise
-                    n_skipped += 1
-                    print(f"  skipped {tst!r}: {exc}")
+                    _skip(repr(tst), repr(tst), exc, expected=(ValueError,))
                     continue
                 many_times = times_fan is not None and len(these_times) > 1
                 for d in these_values:
@@ -11134,12 +11518,32 @@ def compare(
                         )
                         try:
                             c.align(refresh=refresh)
-                        except (KeyError, NoValidData) as exc:
+                        except Exception as exc:
                             if not skip_missing:
                                 raise
-                            n_skipped += 1
-                            print(f"  skipped {label}: {exc}")
+                            _skip(label, f"{tst!r} vs {ref!r}", exc)
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
+    # Every pair is aligned by now: the slab has done its job, and left behind it would
+    # answer a later prepare_source of the same source with this call's window and
+    # variables, whatever that caller asked for.
+    _SHARED_SLABS.clear()
+    if unexpected:
+        if not out:
+            # Nothing formed *and* something went wrong that skip_missing is not
+            # for: a systematic failure (a bug, a broken read) would otherwise come
+            # back as an empty set that looks like "no data". The first one says why.
+            raise unexpected[0][1]
+        shown = list(
+            dict.fromkeys(f"{pair}: {_error_text(exc)}" for pair, exc in unexpected)
+        )
+        more = f" (and {len(shown) - 3} more)" if len(shown) > 3 else ""
+        warnings.warn(
+            f"compare() skipped {len(unexpected)} pair(s) that failed with an error "
+            "other than a missing variable or no valid data, so they are not in the "
+            f"result: {'; '.join(shown[:3])}{more}. Pass skip_missing=False to stop at "
+            "the first such error instead.",
+            stacklevel=_stacklevel.find(),
+        )
     return ComparisonSet(out)
