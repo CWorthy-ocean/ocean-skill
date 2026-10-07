@@ -1789,6 +1789,19 @@ def _vertical_request(select: dict[str, Any] | None) -> Any:
     return next((select[k] for k in _VERTICAL_KEYS if k in (select or {})), None)
 
 
+def _keeps_unit_vertical_axis(select: dict[str, Any] | None) -> bool:
+    """Whether ``select`` asks for exactly one level *as a list* (depth or sigma0).
+
+    The one vertical request :func:`_prepare` leaves a length-one axis standing for: a
+    scalar collapses its single interpolated level, a list keeps the axis it asked
+    for, however short it is. Read by :func:`prepare_source` for the cache key.
+    """
+    return any(
+        isinstance(request, list | tuple) and len(request) == 1
+        for request in (_vertical_request(select), (select or {}).get("sigma0"))
+    )
+
+
 def _needs_depth_frame(depth: Any) -> bool:
     """Whether a vertical request is matched *in a depth frame* (a number, a band).
 
@@ -2958,14 +2971,27 @@ def _prepare(
             da = sub[name]
             if support_cell is not None:
                 da.attrs["depth_support"] = support_cell
-            # Squeeze only a single interpolated level: a scalar depth
-            # request collapses the axis by itself (as `.sel` does
+            # Squeeze only a single interpolated level *of a scalar request*: a
+            # scalar depth collapses the axis by itself (as `.sel` does
             # everywhere), while a list or band leaves several levels for
             # the vertical aggregation to reduce. Squeezing unconditionally
-            # used to discard every level but the first, silently.
-            if "z" in da.dims and da.sizes["z"] == 1:
+            # used to discard every level but the first, silently. A list of
+            # exactly one level is still a list: it asked for an axis (a profile
+            # with a single depth scores along it, over="Z"), and a lane that
+            # lost it left match_axis nothing to score over. Whatever consumer
+            # wants a map anyway squeezes the leftover singleton itself
+            # (_require_reduced), so only a lane that scores along the axis keeps it.
+            if (
+                "z" in da.dims
+                and da.sizes["z"] == 1
+                and not isinstance(depth, list | tuple)
+            ):
                 da = da.isel(z=0)
-            if "sigma0" in da.dims and da.sizes["sigma0"] == 1:
+            if (
+                "sigma0" in da.dims
+                and da.sizes["sigma0"] == 1
+                and not isinstance(sigma, list | tuple)
+            ):
                 da = da.isel(sigma0=0)
     else:
         # observational depth axes vary: real metres, or an index with depths alongside.
@@ -3720,6 +3746,12 @@ def prepare_source(
     if meta.get("model") == "roms":
         if _needs_depth_frame(_vertical_request(select)):
             key_select["_depth_frame"] = _frame_key(frame)
+        if _keeps_unit_vertical_axis(select):
+            # A one-level list used to be squeezed to a scalar-style lane and now
+            # stays an axis of length one (see _prepare) -- a lane cached under the
+            # old rule carries no such axis and must not be served in its place.
+            # Re-keys only that request, so every other warm entry is untouched.
+            key_select["_unit_vertical_axis"] = True
     else:
         key_select["_depth_convention"] = own.key()
     zone = time_zone_module.time_zone_label(meta)
@@ -6303,6 +6335,20 @@ class Comparison:
         match_time_method = (
             "auto" if self.time_method in ("interp", "linear") else self.time_method
         )
+        # The vertical twin of the translation above, for a one-level test lane (a
+        # profile with a single depth, kept standing by _prepare): a linear match
+        # needs two levels to interpolate between and divides by the zero-width span
+        # of one, returning NaN everywhere -- though the model's own vertical
+        # transform already interpolated onto exactly that depth. Pairing the lone
+        # level with the reference's is all that is left to do, which is what a
+        # nearest match does (within a metre; the lanes arrive on the same depth).
+        match_depth_method = self.depth_method
+        if match_depth_method in ("interp", "linear"):
+            from ocean_skill.operators import resolve_dim
+
+            _zdim = resolve_dim(t, "Z")
+            if _zdim is not None and _zdim in t.dims and t.sizes[_zdim] == 1:
+                match_depth_method = "nearest"
         self._aligned = _align.align(
             t,
             r,
@@ -6311,7 +6357,7 @@ class Comparison:
             reference_name="reference",
             over=self.over,
             time_method=match_time_method,
-            depth_method=self.depth_method,
+            depth_method=match_depth_method,
             tolerance=self.tolerance,
             bin_anchor=self.bin_anchor,
             min_coverage=self.min_coverage,
@@ -9879,6 +9925,12 @@ def _compare_aggregate_fan(kwargs: dict[str, Any]) -> ComparisonSet:
     return ComparisonSet(members)
 
 
+def _error_text(exc: BaseException, limit: int = 160) -> str:
+    """Return ``TypeName: message`` on one line, cut to ``limit`` characters."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def compare(
     *,
     reference,
@@ -10005,7 +10057,12 @@ def compare(
     skip_missing
         Bool (default ``True``) -- skip a pair whose variable is absent from
         a source, or whose catalog extents never overlap, with a message,
-        rather than raising.
+        rather than raising. Any other error a pair raises (an unreadable
+        model file, a lane that cannot be matched) skips just that pair too,
+        printed with its type and named in one warning at the end -- and is
+        re-raised, the first one, when no comparison formed at all, so a
+        systematic failure is never returned as an empty set. ``False`` raises
+        at the first failure of any kind.
     cache
         ``None`` (default, follows the global :mod:`ocean_skill.cache`
         setting), or an explicit ``True``/``False`` to force caching on/off
@@ -10067,7 +10124,12 @@ def compare(
     test grid -- no valid data to sample there at all (see
     :func:`ocean_skill.align.sample_at`) -- is skipped the same way, discovered only
     once that one station's read is attempted. Progress prints one line per pair
-    considered, plus a final count of comparisons formed and skipped.
+    considered, plus a final count of comparisons formed and skipped. A pair that fails
+    some *other* way is skipped like any of those, so one bad file does not discard the
+    comparisons already formed, but it is the kind of failure that should not pass
+    quietly: it is printed with its exception type, named in a single closing warning,
+    and -- if nothing at all formed -- the first one is raised rather than leaving an
+    empty result that reads as "no data".
 
     Whether a source "has" the variable is decided by
     :func:`ocean_skill.vocabulary.covers`, the rule :func:`ocean_skill.catalog.find`
@@ -10870,6 +10932,34 @@ def compare(
 
     out: list[Comparison] = []
     n_skipped = 0
+    # Pairs that failed with something other than what skip_missing is *for* (a
+    # variable a source lacks, a cell with no valid data, a source with no time
+    # axis): `(pair, exception)`, kept for the one summary warning after the loops
+    # and for re-raising the first when nothing at all formed. See _skip below.
+    unexpected: list[tuple[str, Exception]] = []
+
+    def _skip(
+        label: str,
+        pair: str,
+        exc: Exception,
+        expected: tuple[type[Exception], ...] = (KeyError, NoValidData),
+    ) -> None:
+        """Count one skipped pair and say why, naming the type of an unexpected error.
+
+        Under ``skip_missing=True`` any exception a pair raises skips *that pair*, not
+        the whole call -- an unreadable model file or a lane shape nobody anticipated
+        would otherwise throw away every comparison already formed. ``expected`` is
+        the kind this site has always skipped (printed as before, without a type);
+        anything else is printed with its type, and remembered in ``unexpected``.
+        """
+        nonlocal n_skipped
+        n_skipped += 1
+        if isinstance(exc, expected):
+            print(f"  skipped {label}: {exc}")
+        else:
+            print(f"  skipped {label}: {type(exc).__name__}: {exc}")
+            unexpected.append((pair, exc))
+
     for var in variables:
         # Pair each variable with the sources that actually carry it, rather than
         # forming a blind cross-product. Observational catalogs are usually one
@@ -10980,11 +11070,10 @@ def compare(
                 )
                 try:
                     c.align(refresh=refresh)
-                except (KeyError, NoValidData) as exc:
+                except Exception as exc:
                     if not skip_missing:
                         raise
-                    n_skipped += 1
-                    print(f"  skipped {short}: {exc}")
+                    _skip(short, f"{tst!r} vs {len(matching)} casts", exc)
                     continue
                 out.append(c)
             continue
@@ -11050,15 +11139,15 @@ def compare(
                     ref_time_collapsed=_ref_time_collapsed,
                     ref_time_climatology=_ref_time_climatology,
                 )
-            except ValueError as exc:
+            except Exception as exc:
                 # Reading a profile reference's own levels can fail (no vertical axis
-                # found, or none finite) -- treat it like any other per-reference
-                # failure: skip with a message unless the caller asked not to.
+                # found, or none finite -- a ValueError -- or the source would not
+                # open) -- treat it like any other per-reference failure: skip with a
+                # message unless the caller asked not to.
                 if not skip_missing:
                     raise
                 pair_num += len(viable_tests)
-                n_skipped += 1
-                print(f"  skipped {ref!r}: {exc}")
+                _skip(repr(ref), repr(ref), exc, expected=(ValueError,))
                 continue
             for tst in viable_tests:
                 pair_num += 1
@@ -11066,11 +11155,10 @@ def compare(
                 print(f"  comparing {prefix}{tst!r} vs {ref!r} [{pair_num}/{n_pairs}]")
                 try:
                     these_times = _times_for(tst)
-                except ValueError as exc:
+                except Exception as exc:
                     if not skip_missing:
                         raise
-                    n_skipped += 1
-                    print(f"  skipped {tst!r}: {exc}")
+                    _skip(repr(tst), repr(tst), exc, expected=(ValueError,))
                     continue
                 many_times = times_fan is not None and len(these_times) > 1
                 for d in these_values:
@@ -11142,12 +11230,28 @@ def compare(
                         )
                         try:
                             c.align(refresh=refresh)
-                        except (KeyError, NoValidData) as exc:
+                        except Exception as exc:
                             if not skip_missing:
                                 raise
-                            n_skipped += 1
-                            print(f"  skipped {label}: {exc}")
+                            _skip(label, f"{tst!r} vs {ref!r}", exc)
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
+    if unexpected:
+        if not out:
+            # Nothing formed *and* something went wrong that skip_missing is not
+            # for: a systematic failure (a bug, a broken read) would otherwise come
+            # back as an empty set that looks like "no data". The first one says why.
+            raise unexpected[0][1]
+        shown = list(
+            dict.fromkeys(f"{pair}: {_error_text(exc)}" for pair, exc in unexpected)
+        )
+        more = f" (and {len(shown) - 3} more)" if len(shown) > 3 else ""
+        warnings.warn(
+            f"compare() skipped {len(unexpected)} pair(s) that failed with an error "
+            "other than a missing variable or no valid data, so they are not in the "
+            f"result: {'; '.join(shown[:3])}{more}. Pass skip_missing=False to stop at "
+            "the first such error instead.",
+            stacklevel=_stacklevel.find(),
+        )
     return ComparisonSet(out)
