@@ -605,6 +605,15 @@ def subset_to_time(obj, window):
     just because the reference's record runs longer than the test's. A value
     mask answers "which steps fall in ``window``" directly, for any axis shape
     or order, and never raises.
+
+    The mask only decides *which* steps; how they are then selected depends on
+    what it kept. A sorted axis and a ``[lo, hi]`` window always keep one
+    contiguous run, and that run is selected with a ``slice`` -- on a long lazy
+    dataset (a year of hourly history files is hundreds of thousands of
+    one-step chunks) a fancy-index selection is much more expensive to build
+    than a slice, which only has to find the few chunks it keeps, and the
+    result is identical. Any other kept set (a gappy selection on an unsorted
+    axis) is selected by the mask itself, as before.
     """
     name = _time_name(obj)
     if name is None or window is None or name not in obj.dims:
@@ -621,9 +630,12 @@ def subset_to_time(obj, window):
         mask &= values >= lo
     if hi is not None:
         mask &= values <= hi
-    if not mask.any():
+    kept = np.flatnonzero(mask)
+    if kept.size == 0:
         return obj
-    out = obj.isel({name: mask})
+    first, last = int(kept[0]), int(kept[-1])
+    contiguous = last - first + 1 == kept.size  # no gap between first and last kept
+    out = obj.isel({name: slice(first, last + 1) if contiguous else mask})
     return obj if out.sizes.get(name, 0) == 0 else out
 
 

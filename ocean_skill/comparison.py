@@ -1184,11 +1184,11 @@ def _names_geographic_velocity(spec: Any) -> bool:
 #: like what :func:`ocean_skill.sources.read` would have returned -- a smaller,
 #: already-loaded stand-in for the same lazy object -- for every one of those
 #: per-pair steps to reproduce today's exact result. Cleared and rebuilt at the top
-#: of every :func:`compare` call (never explicitly cleared at the *end*): a stale
-#: leftover entry from an earlier call can only ever be a *miss* for a differently
-#: keyed request (the key below is exact on source+qc, never approximate), so it is
-#: never served wrong -- it would just sit unused, which the next call's rebuild
-#: clears anyway. Bounded in size to whatever the most recent call's own window
+#: of every :func:`compare` call, and cleared again once that call has aligned every
+#: pair: the key below is exact on source+qc only, so a slab left behind would answer
+#: *any* later :func:`prepare_source` of the same source -- a field, a direct
+#: comparison -- with this call's spatial window, time window and variables, whatever
+#: that caller actually asked for. Bounded in size to whatever the call's own window
 #: needed, never the model's full domain.
 _SHARED_SLABS: dict[tuple[str, str], Any] = {}
 
@@ -1220,7 +1220,142 @@ def _shared_slab(source: str, qc: Any):
     return _SHARED_SLABS.get(_shared_slab_key(source, qc))
 
 
-def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
+def _variables_needed(obj, variables: Sequence[Any]) -> set[str] | None:
+    """Return the raw data variables ``variables`` read from ``obj``, else ``None``.
+
+    ``None`` means "cannot tell, so all of them": the answer is a set only when *every*
+    request in ``variables`` is a plain name that resolves, exactly as :func:`_prepare`
+    resolves it (:func:`ocean_skill.operators.resolve_variable`), to one data variable
+    of ``obj``. A derived geographic velocity (staggered u/v and the grid angle), a
+    calculator (mixed layer depth reads temperature, salinity and the whole column), a
+    combination, a name that does not resolve, or one that resolves to something that
+    is not a data variable each read more than they name -- or nothing :func:`_prepare`
+    would not itself report -- so they keep the whole dataset standing.
+    """
+    import warnings
+
+    from ocean_skill import operators
+
+    names: set[str] = set()
+    for variable in variables:
+        spec = _expand_derived(variable)
+        if not isinstance(spec, str) or _names_geographic_velocity(spec):
+            return None
+        # A probe, not the resolution of record: _prepare resolves again (and warns
+        # then, once) on the narrowed dataset.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                da = operators.resolve_variable(obj, spec)
+            except Exception:
+                return None
+        name = getattr(da, "name", None)
+        if da is None or name not in obj.data_vars:
+            return None
+        names.add(str(name))
+    return names or None
+
+
+def _narrow_to_variables(
+    obj, meta: dict[str, Any], variables: Sequence[Any], select=None
+):
+    """Return a ROMS dataset without the time-varying variables a request never reads.
+
+    What is kept: the requested variable(s) (:func:`_variables_needed`), every variable
+    with no time dimension -- the grid fields and s-coordinate parameters the vertical
+    transform and the land mask read -- and the free surface, which a depth is matched
+    against (:data:`_FREE_SURFACE_NAMES`). On a long lazy model each variable left in
+    costs a dask graph over every one of its chunks for every crop applied to it (a
+    kerchunk reference over ~225,000 one-step chunks spends minutes on that), so the
+    variables a lane never touches are dropped before the first one.
+
+    ``obj`` itself comes back whenever narrowing cannot be shown to be exact: a source
+    that is not a ROMS dataset, an isopycnal request (``sigma0`` reads temperature and
+    salinity as well as the field it slices), a time-less dataset, or any request
+    :func:`_variables_needed` cannot name exactly. A pure optimisation -- never a
+    change of value.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import _time_name
+
+    if meta.get("model") != "roms" and meta.get("loader") != "ocean_skill.roms":
+        return obj
+    if not isinstance(obj, xr.Dataset):
+        return obj
+    if any(k in (select or {}) for k in _ISOPYCNAL_KEYS):
+        return obj
+    tname = _time_name(obj)
+    if tname is None:
+        return obj
+    needed = _variables_needed(obj, variables)
+    if needed is None:
+        return obj
+    keep = needed | set(_FREE_SURFACE_NAMES)
+    drop = [
+        name
+        for name, var in obj.data_vars.items()
+        if tname in var.dims and name not in keep
+    ]
+    return obj.drop_vars(drop) if drop else obj
+
+
+def _crop_to_windows(obj, windows: Sequence[tuple[Any, Any]]):
+    """Return ``obj`` cut along time to the union of ``windows``, each padded a step.
+
+    ``windows`` are ``(start, stop)`` pairs. The union rather than their hull: sparse
+    casts months apart would otherwise hold every step between the first and the last.
+    Each window keeps one step past either edge, so a pair that matches the nearest
+    step or interpolates between the two around an instant finds them here whatever
+    the model's own cadence -- a window narrower than the model's step holds none of
+    its own, and that padding is what still brackets it. ``obj`` comes back unchanged
+    when it has no time axis, the axis is not sorted, or the cut would keep everything.
+
+    Runs of consecutive steps are taken as slices and joined: on a long lazy axis a
+    slice is far cheaper to build than a fancy index of the same steps.
+    """
+    import xarray as xr
+
+    from ocean_skill.align import _time_name
+
+    name = _time_name(obj)
+    if name is None or name not in obj.dims or not windows:
+        return obj
+    values = np.asarray(obj[name].values)
+    if values.size < 2 or not bool((values[1:] >= values[:-1]).all()):
+        return obj
+    keep = np.zeros(values.size, dtype=bool)
+    for start, stop in windows:
+        lo, hi = sorted((start, stop))
+        if values.dtype.kind == "M":
+            lo, hi = np.datetime64(lo), np.datetime64(hi)
+        first = max(int(np.searchsorted(values, lo, side="left")) - 1, 0)
+        last = min(int(np.searchsorted(values, hi, side="right")), values.size - 1)
+        keep[first : last + 1] = True
+    kept = np.flatnonzero(keep)
+    if kept.size == values.size:
+        return obj
+    breaks = np.flatnonzero(np.diff(kept) > 1)
+    firsts, lasts = kept[np.r_[0, breaks + 1]], kept[np.r_[breaks, kept.size - 1]]
+    parts = [
+        obj.isel({name: slice(int(a), int(b) + 1)})
+        for a, b in zip(firsts, lasts, strict=True)
+    ]
+    if len(parts) == 1:
+        return parts[0]
+    return xr.concat(
+        parts,
+        dim=name,
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+        combine_attrs="override",
+    )
+
+
+def _build_shared_slabs(
+    refs: list[str], tests: list[str], qc: Any, variables: Sequence[Any] | None = None
+) -> None:
     """Read each ROMS source in ``tests`` once, decompressed, over a window that
     covers every point-like reference in ``refs`` -- so a fan of many moorings/
     stations/casts sharing one gridded test lane does not each independently
@@ -1237,6 +1372,14 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
     same way. This is a pure optimization: :func:`_shared_slab` returning ``None``
     for a source this could not batch just means every pair reads it itself,
     exactly as :func:`compare` behaved before this existed.
+
+    ``variables`` -- the variable requests the call will fan over, ``None`` for "any"
+    -- narrows what the slab holds to what they read (:func:`_narrow_to_variables`;
+    one request it cannot narrow keeps every variable), so only those fields are
+    decompressed and loaded. Time is cut before space, to the union of the references'
+    own declared windows (:func:`_crop_to_windows`) -- and not at all when any
+    reference declares none: its pairs cannot be told to need less than the whole
+    record, and a slab cut to the other references' windows would silently starve it.
     """
     _SHARED_SLABS.clear()
     if len(refs) < 2:
@@ -1248,7 +1391,6 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
         _lat_name,
         _lon_name,
         _nearest_indices,
-        subset_to_time,
     )
     from ocean_skill.catalog import resolve as _resolve
     from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
@@ -1262,7 +1404,9 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             # source gets batched at all this call rather than risk that.
             return
         positions.append((bbox[0], bbox[1]))
-    time_windows = [tw for tw in (_time_coverage_of(ref) for ref in refs) if tw]
+    time_windows = [_time_coverage_of(ref) for ref in refs]
+    if any(tw is None for tw in time_windows):
+        time_windows = []
 
     for tst in tests:
         try:
@@ -1276,6 +1420,10 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             obj = osk.read(tst, **read_kwargs)
         except Exception:
             continue
+        if variables is not None:
+            obj = _narrow_to_variables(
+                obj, meta, [variable_for(v, "test") for v in variables]
+            )
         lon_name, lat_name = _lon_name(obj), _lat_name(obj)
         if lon_name is None or lat_name is None:
             continue
@@ -1339,20 +1487,20 @@ def _build_shared_slabs(refs: list[str], tests: list[str], qc: Any) -> None:
             window["eta_v"] = slice(max(eta0 - 1, 0), min(eta1, n_eta - 1))
             trim[eta_dim] = (1 if eta0 > 0 else 0, 1 if eta1 < n_eta else 0)
 
+        # Time before space: each isel on a long lazy axis builds a graph over every
+        # chunk of every variable it touches, so cutting the (long) time axis first
+        # leaves the spatial crop only the few steps that survive to slice.
+        if time_windows:
+            try:
+                obj = _crop_to_windows(obj, time_windows)
+            except Exception:
+                pass
         try:
             sub = obj.isel(window)
         except Exception:
             continue
         if trim:
             sub.attrs["_roms_stagger_trim"] = trim
-
-        if time_windows and "time" in sub.dims:
-            lo = min(tw[0] for tw in time_windows)
-            hi = max(tw[1] for tw in time_windows)
-            try:
-                sub = subset_to_time(sub, (lo, hi))
-            except Exception:
-                pass
 
         # Drop any pre-derived east/north before ever cropping+loading, defensively:
         # osk.read no longer carries them by default (roms.standardize's own
@@ -3664,6 +3812,14 @@ def prepare_source(
     entries are present whether or not the source declares anything -- an undeclared
     one resolves to the defaults, which are themselves a (changed) behaviour.
 
+    The crops run in order of cost: first a ROMS lane is narrowed to the variables the
+    request reads (:func:`_narrow_to_variables`; whole, whenever the request reads more
+    than it names), then it is cut along time (``time_window``, then ``time_targets``),
+    and only then horizontally (``bbox``). Each ``isel`` on a long lazy lane builds a
+    graph over every chunk of every variable it touches, so the long time axis and the
+    variables never read are shed before the spatial crop has anything to slice. None of
+    it changes a value: the crops commute, and a dropped variable was never read.
+
     Returns ``(DataArray, actual_depth)``, or ``(None, None)`` if the source does not
     carry the variable.
     """
@@ -3844,9 +4000,17 @@ def prepare_source(
     else:
         obj = obj.copy(deep=False)
     _warn_if_chunk_is_large(obj, source)
-    # Crop horizontally and in time *before* _prepare, so the vertical transform it
+    # Narrowed to what this request reads *before* any crop below: each variable left
+    # standing costs a dask graph over every chunk it has for every crop applied to it,
+    # and on a long lazy model (hundreds of thousands of one-step chunks) the fields a
+    # lane never touches were most of that bill. See _narrow_to_variables for what is
+    # kept, and for when nothing is dropped.
+    obj = _narrow_to_variables(obj, meta, [variable], select)
+    # Crop in time and then horizontally *before* _prepare, so the vertical transform it
     # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
     # expensive step in the pipeline) only ever touches the cells this lane keeps.
+    # Time goes first because it is the long axis: a spatial isel on a lazy lane builds
+    # a graph over every one of its time chunks, and the steps kept here are a handful.
     # Applied to the whole Dataset, not the resolved variable, so z_rho/zeta/h stay
     # consistent with the cropped field; exact rather than approximate, since the
     # transform is per-column and commutes with a horizontal/time subset -- cropping
@@ -3922,10 +4086,6 @@ def prepare_source(
         from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
 
         obj = obj.drop_vars(list(GEOGRAPHIC_VELOCITY_NAMES), errors="ignore")
-    if pre_crop and bbox is not None:
-        from ocean_skill.align import subset_to_bbox
-
-        obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
     if pre_crop_time and time_window is not None:
         from ocean_skill.align import subset_to_time
 
@@ -3934,6 +4094,10 @@ def prepare_source(
         from ocean_skill.align import subset_to_time_targets
 
         obj = subset_to_time_targets(obj, time_targets, method=time_targets_method)
+    if pre_crop and bbox is not None:
+        from ocean_skill.align import subset_to_bbox
+
+        obj = subset_to_bbox(obj, bbox, point_window_cells=point_window_cells)
     if roms_velocity_point:
         # Re-derive now, after every space/time crop above -- the raw staggered
         # components this re-derives from are already narrowed to (a small halo
@@ -11015,7 +11179,12 @@ def compare(
     # is not a plain string (a pair-spec select's own reference list, say) or any
     # problem along the way just leaves no slab, and every pair reads its own test
     # lane exactly as before this existed.
-    _build_shared_slabs(refs, tests, qc)
+    # The variables each test lane will be asked for narrow what the slab loads --
+    # except under an isopycnal request, whose density needs temperature and salinity
+    # whatever field is being sliced (see _narrow_to_variables).
+    _build_shared_slabs(
+        refs, tests, qc, None if sigma_request is not None else variables
+    )
 
     out: list[Comparison] = []
     n_skipped = 0
@@ -11324,6 +11493,10 @@ def compare(
                             continue
                         out.append(c)
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
+    # Every pair is aligned by now: the slab has done its job, and left behind it would
+    # answer a later prepare_source of the same source with this call's window and
+    # variables, whatever that caller asked for.
+    _SHARED_SLABS.clear()
     if unexpected:
         if not out:
             # Nothing formed *and* something went wrong that skip_missing is not
