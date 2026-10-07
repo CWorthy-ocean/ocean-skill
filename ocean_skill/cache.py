@@ -11,14 +11,16 @@ Enabled by default; :func:`disable` turns it off globally, ``cache=False`` per c
 The first time it is used in a process it prints where it lives and how to turn it
 off, so it is never silently doing work behind your back.
 
-**The key is identity, not content.** It is a hash of the two source names, the
-variable, the selection, and the regrid method (the plan's
+**The key is identity, not content.** It is a hash of the two source names, a
+fingerprint of each one's catalog *definition* (:func:`ocean_skill.catalog.fingerprint`:
+the reader as written, its paths/URLs and transforms, and the metadata that changes what
+a read returns), the variable, the selection, and the regrid method (the plan's
 ``f(sources, variable, select, align-mode)``) — deliberately *not* of the underlying
-data, which would mean reading the very files the cache exists to avoid. So if a
-model run is rewritten in place at the same catalog path, the cache will happily
-serve the old result. Call :func:`clear` after rerunning a model, or pass
-``cache=False``. Anything under :func:`path` is reproducible and safe to delete at
-any time.
+data, which would mean reading the very files the cache exists to avoid. So an entry
+redefined under the same name misses cleanly, but if a model run is rewritten in place
+at the same catalog path, the cache will happily serve the old result. Call
+:func:`clear` after rerunning a model, or pass ``cache=False``. Anything under
+:func:`path` is reproducible and safe to delete at any time.
 """
 
 from __future__ import annotations
@@ -117,6 +119,19 @@ __all__ = [
 #: ``depth_origin``, a source declaring nothing new) a pre-change entry still holds
 #: the old answer under it, and a stale hit would silently keep it.
 #:
+#: **9** — a source's *name* stopped being the whole of its identity in a key. Every key
+#: now also carries a fingerprint of the catalog entry's **definition**
+#: (:func:`ocean_skill.catalog.fingerprint`: the reader as written -- class, arguments,
+#: URLs and paths, chained transforms, the data it references -- plus the metadata that
+#: changes what a read returns), because an entry redefined under the same name
+#: (``cast0000`` rewritten to point at a different CSV, ``model_win`` at a different
+#: window through a reader chain) hashed to the very same key and was silently handed
+#: the previous definition's result. The stored layout is untouched and nothing fails
+#: loudly, which is the case this counter exists for; every version-8 entry was filed
+#: without a definition, can no longer be asked for, and is orphaned. A key built with
+#: no definition (``""``, a source that is not a catalog entry) is still valid, but it
+#: never collides with a fingerprinted one.
+#:
 #: A related fix that did *not* bump this: :func:`ocean_skill.sources.read`'s
 #: singleton-horizontal squeeze (giving an ADCP-shaped station a recoverable
 #: scalar lon/lat) changed what a *fresh* read produces without changing what
@@ -127,7 +142,7 @@ __all__ = [
 #: cache hit for exactly this shape on the way out (see
 #: ``_is_stale_positionless_station`` there) and discards only an entry that
 #: actually lacks a position, recomputing and overwriting just that one.
-_FORMAT_VERSION = 8
+_FORMAT_VERSION = 9
 
 #: Zarr stores variables in its own (alphabetical) order, so a round trip would
 #: otherwise hand back ``coverage, difference, reference, test`` where the pipeline
@@ -309,12 +324,20 @@ def key_for(
     variable: Any,
     select: dict[str, Any],
     method: str,
+    test_definition: str = "",
+    reference_definition: str = "",
 ) -> str:
     """Return the cache key for one aligned comparison.
 
     Stable across processes and across dict ordering (``sort_keys``), and
     ``default=str`` keeps values a plain ``json.dumps`` would choke on — a numpy
     float depth, a ``slice`` in a selection — from raising instead of hashing.
+
+    ``test_definition`` / ``reference_definition`` are each side's
+    :func:`ocean_skill.catalog.fingerprint` (``""`` for a source with none): what lets
+    an entry redefined under the same name miss instead of returning the old
+    definition's result. They are separate fields, so swapping the two sides'
+    definitions is a different key, as swapping the two names is.
     """
     payload = json.dumps(
         {
@@ -324,6 +347,8 @@ def key_for(
             "variable": variable,
             "select": select,
             "method": method,
+            "test_definition": test_definition,
+            "reference_definition": reference_definition,
         },
         sort_keys=True,
         default=str,
@@ -331,13 +356,19 @@ def key_for(
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def key_for_prepared(*, source: str, variable: Any, select: dict[str, Any]) -> str:
+def key_for_prepared(
+    *, source: str, variable: Any, select: dict[str, Any], definition: str = ""
+) -> str:
     """Return the cache key for one *lane*: a single source reduced to a 2-D field.
 
     Deliberately excludes the other source and the regrid method — that is the whole
     point of the lane layer. The same model, variable and depth reduce to the same
     field whether it is about to be compared against WOA, against GLODAP, or with a
     different regridder, so all of those should hit one entry.
+
+    ``definition`` is the source's own :func:`ocean_skill.catalog.fingerprint` (``""``
+    for a source with none) -- the source's, and only the source's: the other side's
+    definition has no more business in a lane's key than its name does.
     """
     payload = json.dumps(
         {
@@ -345,6 +376,7 @@ def key_for_prepared(*, source: str, variable: Any, select: dict[str, Any]) -> s
             "source": source,
             "variable": variable,
             "select": select,
+            "definition": definition,
         },
         sort_keys=True,
         default=str,
@@ -352,14 +384,24 @@ def key_for_prepared(*, source: str, variable: Any, select: dict[str, Any]) -> s
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def key_for_calculated(*, source: str, name: str, params: dict[str, Any]) -> str:
+def key_for_calculated(
+    *, source: str, name: str, params: dict[str, Any], definition: str = ""
+) -> str:
     """Return the cache key for one calculator intermediate (see :data:`KINDS`).
 
     ``params`` is whatever decides the result besides the source: the calculator's
     own options and the time coverage it actually saw, so a narrower window misses.
+    ``definition`` is the source's :func:`ocean_skill.catalog.fingerprint` (``""`` for
+    none): a redefined entry is a different source, whatever it is still called.
     """
     payload = json.dumps(
-        {"v": _FORMAT_VERSION, "source": source, "name": name, "params": params},
+        {
+            "v": _FORMAT_VERSION,
+            "source": source,
+            "name": name,
+            "params": params,
+            "definition": definition,
+        },
         sort_keys=True,
         default=str,
     )
@@ -376,8 +418,8 @@ def _announce() -> None:
         f"ocean-skill: caching aligned results in {path()}\n"
         "  (reused automatically on repeat; osk.cache.disable() to turn off, "
         "osk.cache.clear() to empty.\n"
-        "   Keyed on source/variable/selection, NOT file contents — clear it after "
-        "rerunning a model.)"
+        "   Keyed on source definition/variable/selection, NOT file contents — clear "
+        "it after rerunning a model in place.)"
     )
 
 

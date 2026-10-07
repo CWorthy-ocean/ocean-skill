@@ -3826,7 +3826,7 @@ def prepare_source(
     import ocean_skill as osk
     from ocean_skill import cache as _cache
     from ocean_skill import qc as _qc
-    from ocean_skill.catalog import resolve
+    from ocean_skill.catalog import fingerprint, resolve
     from ocean_skill.sources import erddap_constraints
 
     # Hoisted above the key computation below (it used to be read only just before
@@ -3933,10 +3933,17 @@ def prepare_source(
 
         if _CF_AXES.get(over) == "time" or over == TIME_DEPTH_OVER:
             key_select["_over_is_time"] = True
+    # What the entry is *defined as* -- reader, paths, the metadata that changes a
+    # read -- not only what it is called: an entry rewritten under the same name (a
+    # script pointing `cast0000` at a different CSV) must miss, not hand back the
+    # result cached for the old definition. A source with none ("" -- a stub, an
+    # unresolvable name) leaves the argument out, and keys on its name alone as before.
+    definition = fingerprint(source)
     key = _cache.key_for_prepared(
         source=source,
         variable=variable,
         select=key_select,
+        **({"definition": definition} if definition else {}),
     )
     if use_cache and not refresh:
         hit = _cache.load_field(key)
@@ -5694,12 +5701,23 @@ class Comparison:
         # demeaned run of the same comparison share this one entry, each deriving its
         # own view from it on load. Pooling still tells the two apart -- that is
         # `_identity`'s job, not the cache key's (see the note there).
+        # Each side's catalog *definition* alongside its name (see prepare_source's own
+        # note on `definition=`). A section's reference_name is a "+"-joined display
+        # string that resolves to nothing, so its definition is its casts' own, in
+        # order -- from the list the comparison holds, never by splitting the string.
+        from ocean_skill.catalog import fingerprint
+
+        reference_prints = [fingerprint(s) for s in self._reference_sources()]
         return _cache.key_for(
             test=self.test_name,
             reference=self.reference_name,
             variable=self.variable,
             select={**self.select, "_aggregate": self.aggregate, **extra},
             method=self.method,
+            test_definition=fingerprint(self.test_name),
+            reference_definition=(
+                "+".join(reference_prints) if any(reference_prints) else ""
+            ),
         )
 
     def _use_cache(self) -> bool:

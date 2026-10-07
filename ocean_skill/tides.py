@@ -108,7 +108,7 @@ def harmonic_constants(
     the horizontal dims / time. All-NaN (land) cells give NaN; a cell with only some
     NaN also gives NaN, counted in one summary warning.
     """
-    from ocean_skill import _stacklevel, cache, operators
+    from ocean_skill import _stacklevel, cache, catalog, operators
     from ocean_skill.cf import find_coord
     from ocean_skill.units import find_variable
 
@@ -174,6 +174,8 @@ def harmonic_constants(
                 "stride": stride,
                 "time_stride": time_stride,
             },
+            # A source redefined under the same name is a different record.
+            definition=catalog.fingerprint(source),
         )
         hit = cache.load(key, kind="calculated")
         if hit is not None:

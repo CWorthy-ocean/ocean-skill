@@ -165,9 +165,9 @@ def test_a_one_level_list_lane_is_keyed_apart_from_a_squeezed_one(monkeypatch):
     seen = []
     real = cache.key_for_prepared
 
-    def spy(*, source, variable, select):
+    def spy(*, source, variable, select, **kw):
         seen.append(select)
-        return real(source=source, variable=variable, select=select)
+        return real(source=source, variable=variable, select=select, **kw)
 
     monkeypatch.setattr(cache, "key_for_prepared", spy)
     ds, meta = _model()

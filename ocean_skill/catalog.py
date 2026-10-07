@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import hashlib
+import json
 import os
+import re
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -44,6 +47,7 @@ __all__ = [
     "discover",
     "find",
     "find_catalogs",
+    "fingerprint",
     "match_report",
     "overlap",
     "resolve",
@@ -328,6 +332,222 @@ def resolve(name: str) -> SourceRef:
     call never triggers it. Raises :class:`KeyError` if unknown / ambiguous.
     """
     return _resolve_in(discover(), name)
+
+
+#: Entry-metadata keys :func:`fingerprint` leaves out: the ones that do not change
+#: what a read of the entry returns. Prose for people (``description``, ``title``,
+#: ``tags``) says nothing about the data. The rest is *derived from* the data by the
+#: build probe -- the extents (``geospatial_*``, and ERDDAP's own spelling of the same
+#: bounding box, ``minLatitude`` ... ``maxLongitude``), the time coverage
+#: (``time_coverage_*``, ``minTime`` / ``maxTime``), the ``domain_outline`` ring, the
+#: ``variables`` list -- so it follows from the reader definition that is hashed
+#: anyway, and re-describing an entry, or re-probing it so an extent shifts, must not
+#: throw away every cached result built from it. Everything else in the metadata
+#: (``featureType``, ``axes``, ``standard_names``, ``units``, ``time_zone``,
+#: ``depth_convention``, ``qc``, ...) says how the read is *interpreted*, so it stays
+#: in.
+_FINGERPRINT_SKIP_KEYS = frozenset(
+    {
+        "description",
+        "title",
+        "tags",
+        "minTime",
+        "maxTime",
+        "minLatitude",
+        "maxLatitude",
+        "minLongitude",
+        "maxLongitude",
+        "domain_outline",
+        "variables",
+    }
+)
+#: The families of derived keys :func:`fingerprint` also leaves out; see above.
+_FINGERPRINT_SKIP_PREFIXES = ("geospatial_", "time_coverage_")
+
+#: Globals intake injects into a catalog's ``user_parameters`` when it loads one, and
+#: which leak into the file when a loaded catalog is saved again. They record where the
+#: file *was* last loaded from, not what it defines, so :func:`fingerprint` ignores
+#: them.
+_INTAKE_INJECTED_PARAMETERS = frozenset(
+    {"CATALOG_PATH", "CATALOG_DIR", "STORAGE_OPTIONS"}
+)
+
+#: intake's own syntax for one catalog entity pointing at another -- ``{data(<token>)}``
+#: -- which a reader uses for its data description and a chained step uses for the
+#: reader before it. The token may carry a ``,<n>`` partial-pipeline suffix, which is
+#: dropped.
+_ENTITY_REF = re.compile(r"\{?data\(([^),]+)")
+
+#: ``{catalog file: (mtime_ns, size, {entry name: fingerprint})}`` -- the memo behind
+#: :func:`fingerprint`. One slot per file, so a rewritten catalog replaces its own
+#: stale slot instead of piling up beside it; ``(mtime_ns, size)`` is the freshness
+#: signal :func:`discover` and :func:`ocean_skill.sources.read` already use.
+_fingerprints: dict[str, tuple[int, int, dict[str, str]]] = {}
+
+
+def _load_catalog_yaml(path: str | os.PathLike) -> Any:
+    """Parse a catalog file as plain YAML -- the document intake itself loads."""
+    import yaml
+
+    with open(path, "rb") as stream:
+        return yaml.load(stream, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+
+
+def _entity_refs(entity: Any) -> set[str]:
+    """Tokens of the entities ``entity`` points at, by ``{data(<token>)}`` reference.
+
+    Its own ``metadata`` is not searched: that is description, not definition.
+    """
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            match = _ENTITY_REF.match(value)
+            if match:
+                found.add(match.group(1).strip())
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    if isinstance(entity, dict):
+        walk({k: v for k, v in entity.items() if k != "metadata"})
+    else:
+        walk(entity)
+    return found
+
+
+def _hashed_form(entity: Any) -> Any:
+    """``entity`` as :func:`fingerprint` hashes it: as written, less inert metadata."""
+    if not isinstance(entity, dict):
+        return entity
+    out = dict(entity)
+    metadata = out.get("metadata")
+    if isinstance(metadata, dict):
+        out["metadata"] = {
+            k: v
+            for k, v in metadata.items()
+            if k not in _FINGERPRINT_SKIP_KEYS
+            and not str(k).startswith(_FINGERPRINT_SKIP_PREFIXES)
+        }
+    return out
+
+
+def _stringify_keys(value: Any) -> Any:
+    """Return ``value`` with every mapping key made a string, all the way down."""
+    if isinstance(value, dict):
+        return {str(k): _stringify_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stringify_keys(v) for v in value]
+    return value
+
+
+def _entry_fingerprint(doc: dict[str, Any], key: str) -> str:
+    """Return the :func:`fingerprint` of the entry under ``key`` in a parsed catalog."""
+    entries, data = doc.get("entries") or {}, doc.get("data") or {}
+    aliases = doc.get("aliases") or {}
+    # Follow every reference to the end, resolving each as intake does: an alias first,
+    # then a reader entry, then a data description. A reference to nothing is recorded
+    # as such rather than skipped -- a catalog that dangles is a different definition.
+    refs: dict[str, Any] = {}
+    pending = _entity_refs(entries[key])
+    while pending:
+        token = pending.pop()
+        if token in refs:
+            continue
+        target = aliases.get(token, token)
+        entity = entries[target] if target in entries else data.get(target)
+        refs[token] = _hashed_form(entity)
+        pending |= _entity_refs(entity) - refs.keys()
+    payload: dict[str, Any] = {"entry": _hashed_form(entries[key]), "refs": refs}
+    # Catalog-wide parameters a ``{name}`` template in the entry may read their value
+    # from; empty in every catalog this package builds.
+    parameters = {
+        k: v
+        for k, v in (doc.get("user_parameters") or {}).items()
+        if k not in _INTAKE_INJECTED_PARAMETERS
+    }
+    if parameters:
+        payload["user_parameters"] = parameters
+    try:
+        text = json.dumps(payload, sort_keys=True, default=str)
+    except TypeError:  # mixed-type keys (1 and "1") cannot be sorted
+        text = json.dumps(_stringify_keys(payload), sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _definition_fingerprints(path: str | os.PathLike) -> dict[str, str]:
+    """Return ``{name: fingerprint}`` for every entry of a catalog file, aliases too."""
+    doc = _load_catalog_yaml(path)
+    entries = doc.get("entries") if isinstance(doc, dict) else None
+    if not isinstance(entries, dict):
+        return {}  # not an intake v2 catalog document
+    prints = {key: _entry_fingerprint(doc, key) for key in entries}
+    # A name is an alias when the file has one, else the entry key itself; an alias
+    # outranks a key of the same spelling, as it does in intake's own lookup.
+    for alias, token in (doc.get("aliases") or {}).items():
+        if token in prints:
+            prints[alias] = prints[token]
+    return prints
+
+
+def fingerprint(name: str) -> str:
+    """Return a short fingerprint of ``name``'s catalog *definition*, or ``""`` if none.
+
+    What :mod:`ocean_skill.cache` files a source under besides its name, so an entry
+    redefined under the same name -- a script that rewrites a catalog so ``cast0000``
+    now points at a different CSV, or ``model_win`` at a different time window through a
+    reader chain -- is not handed the result cached for the old one. The first 16 hex
+    digits of a sha256 over the sorted JSON of two things, both read from the catalog
+    *file* (no data is opened):
+
+    * the **reader definition** as written: the reader class, its arguments (URLs and
+      paths included), any chained transforms -- an intake reader chained with
+      ``.tail()``/``.head()``/``.drop_vars()`` is serialized as a pipeline of steps --
+      and every data description or reader entry it references, followed to the end;
+    * the entry's **metadata**, less what does not change a read (prose, and the
+      extents/coverage/variable list the build probe derived; see
+      :data:`_FINGERPRINT_SKIP_KEYS`). ``time_zone``, ``standard_names``, ``axes``,
+      ``depth_convention`` and the rest, which decide how a read is interpreted, are in.
+
+    Paths are part of the definition on purpose: a cache copied to a machine whose
+    catalog points at different paths misses and recomputes, and one copied between
+    identical catalogs hits. What this cannot see is the data behind an *unchanged*
+    definition -- rewriting the same file in place -- which still needs
+    :func:`ocean_skill.cache.clear` or ``refresh=True``.
+
+    ``""`` when there is no definition to speak of -- ``name`` does not resolve, or what
+    it resolves to is not an entry in a catalog file (tests stub :func:`resolve` with
+    bare metadata) -- and never an error: the cache then keys on the name alone, as it
+    always did.
+
+    Stable across processes (plain sha256 over sorted JSON; no hash randomization), and
+    memoized per catalog file on ``(path, mtime_ns, size)``: one parse per version of a
+    file, however many of its entries are asked about.
+    """
+    try:
+        ref = resolve(name)
+    except (KeyError, TypeError):
+        return ""
+    path, entry = getattr(ref, "path", None), getattr(ref, "name", None)
+    if not isinstance(path, (str, os.PathLike)) or not isinstance(entry, str):
+        return ""
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return ""
+    memo_key = os.path.abspath(path)  # a relative search path means the cwd's file
+    slot = _fingerprints.get(memo_key)
+    if slot is None or slot[:2] != (st.st_mtime_ns, st.st_size):
+        try:
+            prints = _definition_fingerprints(path)
+        except Exception:  # unreadable, not YAML, or not shaped like a v2 catalog
+            prints = {}
+        slot = (st.st_mtime_ns, st.st_size, prints)
+        _fingerprints[memo_key] = slot
+    return slot[2].get(entry, "")
 
 
 def _did_you_mean(name: str, options: Iterable[str], n: int = 5) -> str:

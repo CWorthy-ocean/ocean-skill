@@ -27,7 +27,7 @@ turn it off, so it is never silently working behind your back:
 ```
 ocean-skill: caching aligned results in /Users/you/Library/Caches/ocean-skill/cache/aligned
   (reused automatically on repeat; osk.cache.disable() to turn off, osk.cache.clear() to empty.
-   Keyed on source/variable/selection, NOT file contents — clear it after rerunning a model.)
+   Keyed on source definition/variable/selection, NOT file contents — clear it after rerunning a model in place.)
 ```
 
 > **In-session repeats were already free.** `Comparison.aligned` memoizes in memory,
@@ -59,17 +59,19 @@ read → resolve variable → time mean → vertical interp (xgcm) → unit conv
 There are two cache layers, because they answer different questions.
 
 **`aligned/` — one file per pair**, keyed `(test, reference, variable, select,
-method)`. This is the fast path, and the right outer boundary because it is exactly
+method)`, each source standing for its name *and* its
+[catalog definition](#the-one-thing-to-know-the-key-is-identity-not-content). This is
+the fast path, and the right outer boundary because it is exactly
 *"everything needed to remake the plot, for both model and data, with no source
 access"*: all reading, depth interpolation, unit conversion, regridding and
 differencing are behind it, and nothing downstream touches the catalog again. It is
 also small — four 2-D fields — so it is instant to reload, unlike the multi-GB
 sources it came from.
 
-**`prepared/` — one file per lane**, keyed `(source, variable, select)` with *no*
-reference and *no* regrid method in it. This one makes a *miss* cheap. A lane's own
-work depends only on that source, so comparing one model against several references
-should prepare it once:
+**`prepared/` — one file per lane**, keyed `(source, variable, select)` (the source
+again meaning its name and definition) with *no* reference and *no* regrid method in
+it. This one makes a *miss* cheap. A lane's own work depends only on that source, so
+comparing one model against several references should prepare it once:
 
 ```python
 osk.compare(reference=["woa23_nitrate", "glodap"], test="GOM_bgc",
@@ -127,20 +129,40 @@ Neither is worth *caching*, for its own reason:
 
 ## The one thing to know: the key is identity, not content
 
-An entry is keyed on a hash of **the two source names, the variable, the selection,
-and the regrid method** — deliberately *not* on the data itself, since hashing the
-data would mean reading the very files the cache exists to avoid.
+An entry is keyed on a hash of **the two source names, a fingerprint of each source's
+catalog definition, the variable, the selection, and the regrid method** — deliberately
+*not* on the data itself, since hashing the data would mean reading the very files the
+cache exists to avoid.
 
-So if you **rerun a model and write new output to the same catalog path**, the cache
-cannot tell, and will serve you the old result. After rerunning a model:
+The fingerprint (`osk.catalog.fingerprint(name)`) is read from the catalog *file*, never
+from the data: the entry's reader as written — its class and arguments, the URLs and
+paths in them, any chained transforms (`.tail()`, `.sel(...)`, …), the data it points
+at — plus the metadata that changes what a read returns (`time_zone`, `standard_names`,
+`axes`, `depth_convention`, …). Prose (`description`, `title`, `tags`) and what the build
+probe derived from the data (extents, time coverage, the variable list) are left out, so
+re-describing an entry does not throw its results away.
+
+So **redefining an entry under the same name misses cleanly**: rewrite a catalog so
+`cast0000` points at a different CSV, or `model_win` at a different time window, and the
+result cached for the old definition is not served. Two things follow:
+
+- **A cache copied to another machine hits only where the catalog entries are
+  identical** — paths included. The same catalog over the same paths shares every hit;
+  data at different paths misses and is recomputed. Slower, never wrong.
+- **Rewriting the same file in place is still invisible.** If you **rerun a model and
+  write new output to the same catalog path**, the definition has not changed, so the
+  cache cannot tell, and will serve you the old result.
+
+After rerunning a model in place:
 
 ```bash
 python -c "import ocean_skill as osk; print(osk.cache.clear(), 'entries removed')"
 ```
 
 or, for a single call, `refresh=True` (recompute and overwrite) or `cache=False`
-(bypass disk entirely). Changing the variable, depth, sources, or regrid method all
-change the key on their own — those need no special handling.
+(bypass disk entirely). Changing the variable, depth, sources, or regrid method — or
+redefining a catalog entry — all change the key on their own; those need no special
+handling.
 
 ### Scored comparisons are bigger entries
 
@@ -208,4 +230,6 @@ alphabetically, so the original order is recorded and restored; nothing indexes
 invariant worth not having to think about later).
 
 The key embeds a format version, so if what gets stored ever changes shape, old
-entries are orphaned rather than loaded into a pipeline expecting something else.
+entries are orphaned rather than loaded into a pipeline expecting something else. (The
+definition fingerprint arrived with version 9: entries from before it are never asked for
+again, and `osk.cache.clear()` reclaims them.)
