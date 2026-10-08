@@ -206,6 +206,47 @@ def test_average_pools_profiles_whose_axes_differ_in_name_and_order():
     np.testing.assert_allclose(ref.transpose("time", "depth").values, [[3, 4], [5, 6]])
 
 
+def test_average_pools_members_whose_position_coords_differ_in_name():
+    """A mooring labelling its position ``LONGITUDE``/``LATITUDE`` pools with bottles
+    that say ``lon``/``lat``; the composite position is the members' mean. (Two
+    bottles: xr.concat only refuses once two or more, but not all, members carry
+    ``lat``.)"""
+    hv1 = _series_pair(TIMES, [10, 11, 12, 13], [10, 11, 12, 13], lon=-150.0, lat=20.0)
+    hv5 = _series_pair(TIMES, [13, 14, 15, 16], [13, 14, 15, 16], lon=-151.0, lat=21.0)
+    mooring = _series_pair(
+        TIMES, [16, 17, 18, 19], [16, 17, 18, 19], lon=-152.0, lat=22.0
+    ).rename({"lon": "LONGITUDE", "lat": "LATITUDE"})
+    pooled = ComparisonSet(
+        [
+            _station_comparison(reference="HV1", test="his", variable=TEMPERATURE, aligned=hv1),
+            _station_comparison(reference="HV5", test="his", variable=TEMPERATURE, aligned=hv5),
+            _station_comparison(reference="HVSV1", test="his", variable=TEMPERATURE, aligned=mooring),
+        ]
+    )
+    ref = pooled.average(by="variable").comparisons[0].aligned["reference"]
+
+    np.testing.assert_allclose(ref.values, [13, 14, 15, 16])
+    assert float(ref["lon"]) == -151.0
+    assert float(ref["lat"]) == 21.0
+
+
+def test_average_refuses_to_pool_a_series_with_a_profile():
+    """xr.concat would copy the series' value to every depth of the profile."""
+    series = _series_pair(TIMES, [10, 11, 12, 13], [10, 11, 12, 13], lon=-150.0, lat=20.0)
+    da = xr.DataArray(
+        np.ones((4, 2)), dims=("time", "depth"), coords={"time": TIMES, "depth": [0.0, 10.0]}
+    ).assign_coords(lon=-151.0, lat=21.0)
+    profile = xr.Dataset({"test": da, "reference": da, "difference": da * 0})
+    pooled = ComparisonSet(
+        [
+            _station_comparison(reference="HV1", test="his", variable=TEMPERATURE, aligned=series),
+            _station_comparison(reference="CTD", test="his", variable=TEMPERATURE, aligned=profile),
+        ]
+    )
+    with pytest.raises(ValueError, match=r"different dimensions.*\(time\).*\(depth, time\)"):
+        pooled.average(by="variable")
+
+
 # -- group of one --------------------------------------------------------------------
 
 
