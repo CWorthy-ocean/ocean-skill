@@ -51,6 +51,10 @@ __all__ = ["derivable", "derive"]
 #: ``"T"`` only, so a lowercase ``"t"`` there would be skipped silently -- not
 #: derivable).
 _SELECT_TIME_KEYS = frozenset({"time", "T", "t"})
+#: ``season`` picks one group off the axis a ``{"groupby": "season"}`` aggregate
+#: creates, so it is derivable only alongside one (see :func:`_check`); it never narrows
+#: the raw time axis.
+_SEASON_KEY = "season"
 _AGGREGATE_TIME_KEYS = frozenset({"time", "T"})
 
 #: How close two depths must be (m) to count as the same level.
@@ -148,7 +152,7 @@ def _check(select, aggregate, *, feature_type, obs_levels) -> None:
     vertical_keys = c._VERTICAL_KEYS
     horizontal = operators._POINT_LON_KEYS | operators._POINT_LAT_KEYS
     for what, spec, time_keys in (
-        ("select", select, _SELECT_TIME_KEYS),
+        ("select", select, _SELECT_TIME_KEYS | {_SEASON_KEY}),
         ("aggregate", aggregate, _AGGREGATE_TIME_KEYS),
     ):
         for key in spec:
@@ -164,6 +168,20 @@ def _check(select, aggregate, *, feature_type, obs_levels) -> None:
             raise _NotDerivable(
                 f"a time {what} on a profile chooses or combines casts, and the "
                 "saved pair is one cast"
+            )
+
+    if _SEASON_KEY in select:
+        t_agg = next(
+            (aggregate[k] for k in _AGGREGATE_TIME_KEYS if k in aggregate), None
+        )
+        if not (
+            isinstance(t_agg, dict)
+            and t_agg.get("groupby") == "season"
+            and isinstance(select[_SEASON_KEY], str)
+        ):
+            raise _NotDerivable(
+                "a season select needs a seasonal time aggregate "
+                '({"groupby": "season", ...}) to pick the season from'
             )
 
     depth = next((select[k] for k in vertical_keys if k in select), None)
@@ -485,6 +503,11 @@ def derive(
         test, reference = _joint(test, reference)
         test = operators.aggregate(test, time_spec)
         reference = operators.aggregate(reference, time_spec)
+        if _SEASON_KEY in select:
+            # the season select narrows the axis the aggregate just created
+            pick = {_SEASON_KEY: select[_SEASON_KEY]}
+            test = operators.select(test, pick, subject="the saved pairs")
+            reference = operators.select(reference, pick, subject="the saved pairs")
 
     # 5. difference (and coverage) from the reduced lanes
     test, reference, attach_spread = align._split_spread(test, reference)
