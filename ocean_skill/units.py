@@ -36,6 +36,7 @@ import re
 import warnings
 
 from ocean_skill import _stacklevel
+from ocean_skill.cf import quiet_dropped_ancillaries
 from ocean_skill.vocabulary import narrower_names, nickname, resolve_name
 
 __all__ = [
@@ -588,7 +589,8 @@ def _warn_if_only_a_flag_matched(ds, standard_name: str) -> None:
     and nothing on the common one.
     """
     try:
-        candidate = str(ds.cf[standard_name].name)
+        with quiet_dropped_ancillaries():
+            candidate = str(ds.cf[standard_name].name)
     except (KeyError, AttributeError):
         return
     if is_qc_name(candidate):
@@ -641,11 +643,15 @@ def _cf_name(searchable, name: str, standard_name: str) -> str | None:
     and the answer is the same as for any other ambiguity: ask for one by name.
     """
     try:
-        return str(searchable.cf[standard_name].name)
+        with quiet_dropped_ancillaries():
+            return str(searchable.cf[standard_name].name)
     except KeyError:
         pass
     try:
-        candidates = sorted(str(v) for v in searchable.cf[[standard_name]].data_vars)
+        with quiet_dropped_ancillaries():
+            candidates = sorted(
+                str(v) for v in searchable.cf[[standard_name]].data_vars
+            )
     except KeyError:
         return None  # genuinely absent
     if len(candidates) > 1:

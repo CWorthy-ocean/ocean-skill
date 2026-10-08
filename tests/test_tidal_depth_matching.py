@@ -35,6 +35,9 @@ pytestmark = pytest.mark.filterwarnings(
 
 SURFACE = {"origin": "surface", "source": "declared"}
 FIXED = {"origin": "fixed", "source": "declared"}
+# Fixed by default, nobody having said so: the only fixed origin that is advised about
+# the samples above the free surface (a declared one is a decision, not a guess).
+FIXED_UNDECLARED = {"origin": "fixed"}
 NAN = np.nan
 COUNTS = (
     "depth_edge_top",
@@ -80,7 +83,9 @@ def _meta_with(meta, **vertical):
 
 def test_nearest_level_one_metre_down_follows_the_tide_when_fixed_in_space():
     ds, meta = tidal_roms()
-    out, caught = _captured(roms.nearest_depth_levels, ds, meta, 1.0, convention=FIXED)
+    out, caught = _captured(
+        roms.nearest_depth_levels, ds, meta, 1.0, convention=FIXED_UNDECLARED
+    )
     # zeta = [3, 0, -3, 0]: the cell nearest z = -1 is a different one at high tide,
     # and at low tide the free surface (-3) is below the target -- no water there.
     np.testing.assert_array_equal(_per_step(out["level"]), [8, 9, NAN, 9])
@@ -720,7 +725,9 @@ def test_a_span_of_unreachable_targets_is_one_warning_not_one_each():
 
 def test_fixed_origin_partial_above_surface_warns_and_names_the_fix():
     ds, meta = tidal_roms()
-    _, caught = _captured(roms.nearest_depth_levels, ds, meta, 1.0, convention=FIXED)
+    _, caught = _captured(
+        roms.nearest_depth_levels, ds, meta, 1.0, convention=FIXED_UNDECLARED
+    )
     above = [m for m in caught if "above the free surface" in m]
     assert len(above) == 1
     assert "9 of 36" in above[0]

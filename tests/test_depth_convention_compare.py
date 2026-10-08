@@ -140,9 +140,10 @@ def test_the_same_depth_fixed_in_space_follows_the_tide_and_runs_dry(monkeypatch
     c = _series(monkeypatch, meta={"depth_convention": {"origin": "fixed"}})
     _, caught = _warnings_of(c.align)
     np.testing.assert_array_equal(_test_lane(c), [8, 9, NAN, 9])
-    # declared fixed: a decision, so the large-tide default warning stays quiet, but the
-    # samples above the surface are counted and the fix named
-    assert any("above the free surface" in m and "origin: surface" in m for m in caught)
+    # declared fixed: a decision, so neither the large-tide default warning nor the
+    # "above the free surface, declare origin: surface" advice applies -- dry bins at
+    # low tide are what the declaration asked for
+    assert not any("above the free surface" in m for m in caught)
     assert not any("declares no `depth_convention`" in m for m in caught)
 
 

@@ -11,11 +11,13 @@ test × variable × depth cross-product and collects the results into a
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Self
 
 import numpy as np
 
@@ -6701,6 +6703,36 @@ class Comparison:
             stacklevel=_stacklevel.find(),
         )
 
+    def _within_declared_extent(
+        self, point: tuple[float, float], cell_km: float
+    ) -> bool:
+        """Whether ``point`` (lon, lat) lies in the reference's declared extent.
+
+        The extent is the reference's own ``geospatial_*`` catalog box, padded by one
+        model cell (``cell_km``) so a position just past its edge -- below what the
+        test grid can resolve anyway -- still counts as inside. ``False`` when the
+        entry declares no box (or several sources make "the" box ambiguous), so the
+        caller falls back to treating the disagreement as a stale position.
+        """
+        sources = self._reference_sources()
+        if len(sources) != 1:
+            return False
+        box = _domain_of(sources[0])
+        if box is None:
+            return False
+        lon_min, lat_min, lon_max, lat_max = box
+        lon, lat = point
+        pad_lat = cell_km / 111.0
+        # Degrees of longitude shrink with latitude; floored so a box near a pole does
+        # not pad to the whole circle.
+        pad_lon = cell_km / (111.0 * max(np.cos(np.radians(lat)), 0.05))
+        if not (lat_min - pad_lat <= lat <= lat_max + pad_lat):
+            return False
+        # Modulo 360 so a catalog box declared in -180..180 and a position in 0..360
+        # (or a box straddling the antimeridian) still compare on one circle.
+        span = (lon_max - lon_min) + 2.0 * pad_lon
+        return span >= 360.0 or (lon - (lon_min - pad_lon)) % 360.0 <= span
+
     def _verify_point_window(
         self,
         t,
@@ -6798,7 +6830,13 @@ class Comparison:
                 "actual position.",
                 stacklevel=_stacklevel.find(),
             )
-        else:
+        elif not self._within_declared_extent(target, cell):
+            # A repeat-visit station logs a slightly different GPS fix per visit, so
+            # its data's median can sit a few hundred metres from the centre of the
+            # box the catalog declares for exactly that wobble -- inside that box the
+            # catalog is right, and "may be stale" would be a false alarm. The re-read
+            # below still happens either way: the window was centred on the box's
+            # centre, not on where the data actually is.
             warnings.warn(
                 f"{self.reference_name!r}'s catalog position is {dist:.1f} km "
                 "from its data's actual position -- the catalog metadata may be "
@@ -11445,12 +11483,277 @@ def _compare_aggregate_fan(kwargs: dict[str, Any]) -> ComparisonSet:
     return ComparisonSet(members)
 
 
+#: Numbers (``0.0022``, ``2024-08-01``, ``51``) vary pair to pair in an otherwise
+#: identical warning, so they are masked when deciding two warnings are the same one.
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+#: How many distinct reference names a collapsed warning's ``[×N pairs: ...]`` lists.
+_SUMMARY_NAMES = 5
+
+
+def _warning_template(text: str, ref: str | None, test: str | None) -> str:
+    """``text`` with this pair's names and every number masked, for grouping.
+
+    Two warnings are "the same one" when they differ only in which reference/test
+    they were raised for and in their numbers. Names are matched as whole words so a
+    model called ``his`` is not found inside "this".
+    """
+    for name, mask in sorted(
+        ((n, m) for n, m in ((ref, "<reference>"), (test, "<test>")) if n),
+        key=lambda nm: -len(nm[0]),
+    ):
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", mask, text
+        )
+    return _NUMBER.sub("N", text)
+
+
+def _summarize_warnings(
+    records: Sequence[tuple[Any, ...]],
+) -> list[tuple[type[Warning], Any, tuple[str, int] | None]]:
+    """Collapse warnings that repeat once per pair into one, in first-seen order.
+
+    ``records`` are ``(category, message, pair[, where])``, ``pair`` being the
+    ``(reference, test, variable)`` the warning was raised for (``None`` outside any
+    pair) and ``where`` the ``(filename, lineno)`` it was raised from. Warnings with
+    the same category and :func:`_warning_template` become one entry (a pair's own
+    differing texts of one template stay apart): the first occurrence's full
+    message, plus ``[×3]`` when it recurred, or
+    ``[×24 pairs: a, b, c, d, e, … (+19 more)]`` when it recurred across pairs. A
+    warning seen once comes back untouched (the original message object). Each
+    result is ``(category, message, where)``, ``where`` being the first
+    occurrence's own.
+    """
+    groups: dict[tuple[type[Warning], str, int], dict[str, Any]] = {}
+    # Per pair, the distinct texts each template has taken so far: two different
+    # texts of one template from the *same* pair (the 20-30 m and the 40-50 m layer
+    # of one reference) are different warnings -- the numbers are the substance --
+    # so they number apart and only merge with their counterparts from other pairs.
+    seen: dict[tuple[Any, type[Warning], str], list[str]] = {}
+    for category, message, pair, *rest in records:
+        where = rest[0] if rest else None
+        ref, test = (pair[0], pair[1]) if pair else (None, None)
+        template = _warning_template(str(message), ref, test)
+        texts = seen.setdefault((pair, category, template), [])
+        if str(message) not in texts:
+            texts.append(str(message))
+        key = (category, template, texts.index(str(message)))
+        group = groups.setdefault(
+            key,
+            {
+                "message": message,
+                "where": where,
+                "hits": 0,
+                "pairs": {},
+                "refs": {},
+            },
+        )
+        group["hits"] += 1
+        if pair is not None and pair[0] is not None:
+            group["pairs"][pair] = None
+            group["refs"][pair[0]] = None
+    out: list[tuple[type[Warning], Any, tuple[str, int] | None]] = []
+    for (category, _, _), group in groups.items():
+        message, where = group["message"], group["where"]
+        n_pairs = len(group["pairs"])
+        if n_pairs > 1:
+            names = list(group["refs"])
+            shown = ", ".join(names[:_SUMMARY_NAMES])
+            more = (
+                f", … (+{len(names) - _SUMMARY_NAMES} more)"
+                if len(names) > _SUMMARY_NAMES
+                else ""
+            )
+            suffix = f"[×{n_pairs} pairs: {shown}{more}]"
+        elif group["hits"] > 1:
+            suffix = f"[×{group['hits']}]"
+        else:
+            out.append((category, message, where))
+            continue
+        out.append((category, f"{str(message).rstrip()} {suffix}", where))
+    return out
+
+
+class _PairLog:
+    """Context for compare()'s pair loop: one summary warning per repeated warning.
+
+    A ``compare()`` over many references, tests and variables raises the same
+    warning once per pair -- thousands of lines in a notebook, most of them one
+    message with a different name in it. This records what the loop warns, and when
+    it ends (normally or on an exception, which still propagates) re-emits each
+    distinct warning once, at the caller's own line, noting how many pairs it hit
+    (see :func:`_summarize_warnings`). Pairs also skipped for a declared
+    no-overlap are listed in one line instead of one each.
+
+    ``warnings.catch_warnings`` swaps process-wide state and is not thread-safe, so
+    this only works because the pair loop is sequential; code inside it that
+    silences warnings with its own ``catch_warnings`` nests inside this one and
+    restores it on exit, so is unaffected. Each summary is re-raised from the place
+    its first warning came from (``warnings.warn_explicit``), not from the caller's
+    line, so the caller's filters see what they would have seen originally -- a
+    library's ``DeprecationWarning`` Python hides by default stays hidden, and a
+    filter set to ``"error"`` turns the re-raise into an exception (after the
+    others' summaries are lost, as the first raise unwinds). It is entered by
+    :func:`_summarize_pair_warnings` around the whole call, and found from inside the
+    loop through :data:`_ACTIVE_PAIR_LOG`, so the loop's body needs no ``with``.
+    """
+
+    def __init__(self) -> None:
+        self._cm: Any = None
+        self._log: list[Any] = []
+        # (index into the log where this pair began, pair) -- the pair a record
+        # belongs to is the last mark at or before its index.
+        self._marks: list[tuple[int, tuple[str | None, str | None, str] | None]] = [
+            (0, None)
+        ]
+        self._disjoint: dict[str, list[tuple[str, str]]] = {}
+        self._token: Any = None
+
+    def set_pair(self, ref: str | None, test: str | None, label: str) -> None:
+        """Say which pair the warnings raised from here on belong to."""
+        self._marks.append((len(self._log), (ref, test, label)))
+
+    def note_disjoint(self, test: str, ref: str, axes: str) -> None:
+        """Remember a pair skipped for declared extents that never meet on ``axes``."""
+        self._disjoint.setdefault(axes, []).append((test, ref))
+
+    def __enter__(self) -> Self:
+        import warnings
+
+        self._cm = warnings.catch_warnings(record=True)
+        self._log = self._cm.__enter__()
+        warnings.simplefilter("always")
+        self._token = _ACTIVE_PAIR_LOG.set(self)
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        _ACTIVE_PAIR_LOG.reset(self._token)
+        self._cm.__exit__(*exc_info)
+        self.print_disjoint()
+        self._emit()
+        return False
+
+    def print_disjoint(self) -> None:
+        """Say the no-overlap skips so far (once, then forget them)."""
+        disjoint, self._disjoint = self._disjoint, {}
+        for axes, pairs in disjoint.items():
+            if len(pairs) == 1:
+                tst, ref = pairs[0]
+                print(
+                    f"  skipped {tst!r} vs {ref!r}: no declared overlap in {axes} "
+                    "(osk.catalog.overlap shows the bounds)"
+                )
+                continue
+            shown = ", ".join(f"{t!r} vs {r!r}" for t, r in pairs[:_SUMMARY_NAMES])
+            more = (
+                f", … (+{len(pairs) - _SUMMARY_NAMES} more)"
+                if len(pairs) > _SUMMARY_NAMES
+                else ""
+            )
+            print(
+                f"  skipped {len(pairs)} pair(s) with no declared overlap in "
+                f"{axes}: {shown}{more} (osk.catalog.overlap shows the bounds)"
+            )
+
+    def _emit(self) -> None:
+        import bisect
+        import warnings
+
+        starts = [m[0] for m in self._marks]
+        records = [
+            (
+                w.category,
+                w.message,
+                self._marks[bisect.bisect_right(starts, i) - 1][1],
+                (w.filename, w.lineno),
+            )
+            for i, w in enumerate(self._log)
+        ]
+        modules = _module_names()
+        for category, message, (filename, lineno) in _summarize_warnings(records):
+            # Re-raised from where the first one came from, not from the caller's
+            # line, so the user's filters decide exactly as they would have: a
+            # library's DeprecationWarning that Python hides by default stays hidden.
+            warnings.warn_explicit(
+                message,
+                category,
+                filename,
+                lineno,
+                module=modules.get(filename) or _module_for(filename),
+                registry=None,
+            )
+
+
+def _module_names() -> dict[str, str]:
+    """Map each imported module's source file to its name, for filter matching."""
+    import sys
+
+    names: dict[str, str] = {}
+    for name, module in list(sys.modules.items()):
+        file = getattr(module, "__file__", None)
+        if isinstance(file, str):
+            names.setdefault(file, name)
+    return names
+
+
+def _module_for(filename: str) -> str | None:
+    """Return the module name a warning from an unimported ``filename`` carries.
+
+    A ``module=`` filter (``"ignore::DeprecationWarning:xarray"``, or Python's own
+    ``default::DeprecationWarning:__main__``) matches the *module name*, which a
+    recorded warning does not keep. A source file that is no module's and does not
+    exist on disk is a notebook cell or interactive input, which is ``__main__``;
+    otherwise ``None``, and Python derives a name from the file as ``warn_explicit``
+    does.
+    """
+    return None if Path(filename).exists() else "__main__"
+
+
+#: The :class:`_PairLog` of the :func:`compare` call in progress, if any.
+_ACTIVE_PAIR_LOG: contextvars.ContextVar[_PairLog | None] = contextvars.ContextVar(
+    "_ACTIVE_PAIR_LOG", default=None
+)
+
+
+def _set_pair(ref: str | None, test: str | None, label: str) -> None:
+    """Tell the active :class:`_PairLog` which pair is being compared (else no-op)."""
+    log = _ACTIVE_PAIR_LOG.get()
+    if log is not None:
+        log.set_pair(ref, test, label)
+
+
+def _note_disjoint(test: str, ref: str, axes: str) -> None:
+    """Hand a no-overlap skip to the active :class:`_PairLog` to say once, later."""
+    log = _ACTIVE_PAIR_LOG.get()
+    if log is not None:
+        log.note_disjoint(test, ref, axes)
+
+
+def _flush_disjoint() -> None:
+    """Print the collected no-overlap skips now, ahead of ``compare()``'s summary."""
+    log = _ACTIVE_PAIR_LOG.get()
+    if log is not None:
+        log.print_disjoint()
+
+
+def _summarize_pair_warnings(fn):
+    """Run ``fn`` under a :class:`_PairLog` (``functools.wraps`` keeps its identity)."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _PairLog():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _error_text(exc: BaseException, limit: int = 160) -> str:
     """Return ``TypeName: message`` on one line, cut to ``limit`` characters."""
     text = " ".join(f"{type(exc).__name__}: {exc}".split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+@_summarize_pair_warnings
 def compare(
     *,
     reference,
@@ -12581,6 +12884,7 @@ def compare(
         short = _short_variable_label(var)
         prefix = f"{short} " if len(variables) > 1 else ""
         for pair_num, tst in enumerate(tests_, start=1):
+            _set_pair(display_name, tst, short)
             print(f"  comparing {prefix}{tst!r} vs {shown} [{pair_num}/{len(tests_)}]")
             c = Comparison(
                 reference=display_name,
@@ -12616,6 +12920,7 @@ def compare(
             out.append(c)
 
     for var in variables:
+        _set_pair(None, None, _short_variable_label(var))
         # Pair each variable with the sources that actually carry it, rather than
         # forming a blind cross-product. Observational catalogs are usually one
         # entry per variable (WOA ships nitrate and phosphate separately), and so
@@ -12795,6 +13100,7 @@ def compare(
         n_pairs = len(matching) * len(matching_tests)
         pair_num = 0
         for ref in matching:
+            _set_pair(ref, None, _short_variable_label(var))
             # A pair whose catalog-declared extents provably never meet can only
             # end empty -- but align() would learn that only after reading the
             # test lane in full (an empty derived time crop deliberately falls
@@ -12822,10 +13128,9 @@ def compare(
                         "bounds, or pass skip_missing=True to skip such pairs."
                     )
                 n_skipped += 1
-                print(
-                    f"  skipped {tst!r} vs {ref!r}: no declared overlap in "
-                    f"{' or '.join(bad)} (osk.catalog.overlap shows the bounds)"
-                )
+                # Said once, before the summary line below: a many-reference call
+                # skips the same disjoint model for dozens of references.
+                _note_disjoint(tst, ref, " or ".join(bad))
             if not viable_tests:
                 continue
             # A profile reference keeps the depth axis standing (over="Z"), so its
@@ -12895,6 +13200,7 @@ def compare(
                         continue
             for tst in viable_tests:
                 pair_num += 1
+                _set_pair(ref, tst, _short_variable_label(var))
                 prefix = f"{_short_variable_label(var)} " if many_vars else ""
                 print(f"  comparing {prefix}{tst!r} vs {ref!r} [{pair_num}/{n_pairs}]")
                 try:
@@ -12980,6 +13286,7 @@ def compare(
                             _skip(label, f"{tst!r} vs {ref!r}", exc)
                             continue
                         out.append(c)
+    _flush_disjoint()
     print(f"  {len(out)} comparison(s) formed; {n_skipped} skipped")
     if left_out and not out:
         # Every reference lacked the depth asked for: an empty set would look like "no
