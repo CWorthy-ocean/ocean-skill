@@ -8888,6 +8888,26 @@ def _poolable_members(aligned: list[Any]) -> list[Any]:
     ]
 
 
+#: Longest "+"-joined source list an averaged comparison keeps as its name; past
+#: this the legend would be mostly source names, so the name becomes a count.
+MAX_POOLED_NAME_LENGTH = 40
+
+
+def _pooled_name(names: list[str], role: str) -> str:
+    """Name an averaged group's test or reference lane for legends and titles.
+
+    A few sources read fine joined (``"HV1+HV5"``); a dozen long catalog nicknames
+    joined that way fill the legend, so past :data:`MAX_POOLED_NAME_LENGTH` the
+    name is a count instead (``"mean of 12 reference sources"``). The name is for
+    display; the group's members keep their own source names.
+    """
+    unique = list(dict.fromkeys(names))
+    joined = "+".join(unique)
+    if len(unique) == 1 or len(joined) <= MAX_POOLED_NAME_LENGTH:
+        return joined
+    return f"mean of {len(unique)} {role} sources"
+
+
 def _average_aligned(comps: list[Comparison]) -> Any:
     """Average a group of comparisons' aligned pairs into one composite dataset.
 
@@ -9769,9 +9789,9 @@ class ComparisonSet:
                 Comparison._averaged(
                     comps[0],
                     _average_aligned(comps),
-                    test_name="+".join(dict.fromkeys(c.test_name for c in comps)),
-                    reference_name="+".join(
-                        dict.fromkeys(c.reference_name for c in comps)
+                    test_name=_pooled_name([c.test_name for c in comps], "test"),
+                    reference_name=_pooled_name(
+                        [c.reference_name for c in comps], "reference"
                     ),
                     label=label,
                 )
