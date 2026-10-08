@@ -16,7 +16,7 @@
 equivalent = mole = eq
 
 # Two more spellings of degrees Celsius found in real files; cf-xarray has the others.
-@alias degree_Celsius = degrees_celsius = degrees_C
+@alias degree_Celsius = degrees_celsius = degrees_C = degree_C
 
 # Dissolved oxygen as a gas volume (mL of O2 per L of seawater), the way Winkler
 # titration and CTD oxygen-sensor software report it. To pint a bare mL/L is plain

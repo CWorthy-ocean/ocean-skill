@@ -1855,6 +1855,115 @@ def _bin_label(value) -> str:
     return str(value)[:10]
 
 
+#: Fewer samples than this per bin and the data are sampling the period rather than
+#: covering it: a monthly bottle cruise, a handful of casts a year. Short-bin checks
+#: leave such data alone — "this bin has one cast where the usual has two" is the nature
+#: of the product, not a mean taken over part of a period.
+MIN_SAMPLES_PER_BIN = 10
+
+
+def _seconds_since(values, origin):
+    """Return ``values`` as float seconds after ``origin``, for numpy or cftime stamps.
+
+    Both datetime families spell subtraction differently (a numpy array of datetime64
+    against a cftime object array), and the short-bin arithmetic below only needs
+    durations, so it is done once here and in plain floats from then on.
+    """
+    import numpy as np
+
+    arr = np.asarray(values)
+    if arr.dtype.kind == "M":
+        return (arr - np.datetime64(origin)) / np.timedelta64(1, "s")
+    return np.array([(v - origin).total_seconds() for v in arr.ravel()]).reshape(
+        arr.shape
+    )
+
+
+def _bin_bounds(labels, freq: str):
+    """Return the ``(starts, ends)`` of each resample bin as datetime-likes.
+
+    Real boundaries rather than a fixed length, because months differ. Most aliases
+    label a bin with its start, so the end is one period on; the period-*end* aliases
+    (``ME``, ``QE``, ``YE``, ``W``) label it with its last day, and those bins run from
+    the day after the previous label to the end of the labelled day.
+    """
+    import datetime as dt
+
+    import numpy as np
+    import pandas as pd
+
+    labels = np.asarray(labels)
+    if labels.dtype.kind == "M":
+        offset = pd.tseries.frequencies.to_offset(freq)
+        stamps = [pd.Timestamp(v) for v in labels]
+        right = str(offset.name).split("-")[0] in _END_LABELLED
+    else:
+        from xarray.coding.cftime_offsets import to_offset
+
+        offset = to_offset(freq)
+        stamps = list(labels)
+        right = type(offset).__name__ in _END_LABELLED_CFTIME
+    day = dt.timedelta(days=1)
+
+    def midnight(t):
+        return t.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if right:
+        ends = [midnight(t) + day for t in stamps]
+        starts = [midnight(t - offset) + day for t in stamps]
+    else:
+        starts = stamps
+        ends = [t + offset for t in stamps]
+    return starts, ends
+
+
+_END_LABELLED = frozenset({"ME", "BME", "SME", "QE", "BQE", "YE", "BYE", "W"})
+_END_LABELLED_CFTIME = frozenset(
+    {"MonthEnd", "QuarterEnd", "YearEnd", "SemiMonthEnd"}
+)
+
+
+def _short_edge_bins(
+    stamps, first_span, last_span, bin_len: float
+) -> list[tuple[str, float]]:
+    """Return ``(which, coverage)`` for each edge bin the data cover only in part.
+
+    ``stamps`` are the data's own time stamps and each span is a bin's
+    ``(start, end)``, all in float seconds; ``which`` is ``"first"`` or ``"last"``.
+    Coverage is a *time* share, not a sample count: the first bin is covered from its
+    first stamp to its end, the last from its start to its last stamp plus one more
+    data step (a stamp stands for the step it opens). Only the two edges can be partial
+    in this sense — a bin in the middle that is short is a gap, and an empty one is
+    nothing at all, neither of which is "a mean over part of a period".
+
+    Empty for data too coarse to cover a bin at all (fewer than
+    :data:`MIN_SAMPLES_PER_BIN` samples across it): there the counts are the sampling
+    of the product, and every cruise and cast would warn for being a cruise.
+    """
+    import numpy as np
+
+    stamps = np.sort(np.asarray(stamps, dtype="float64"))
+    steps = np.diff(stamps)
+    steps = steps[steps > 0]
+    if not steps.size or bin_len <= 0:
+        return []
+    step = float(np.median(steps))
+    if step * MIN_SAMPLES_PER_BIN > bin_len:
+        return []
+    first, last = float(stamps[0]), float(stamps[-1])
+    if first_span == last_span:  # one bin holds everything
+        share = (last - first + step) / bin_len
+        return [("first", share)] if share < SHORT_BIN_FRACTION else []
+    found = []
+    head = (first_span[1] - first) / bin_len
+    if head < SHORT_BIN_FRACTION:
+        found.append(("first", head))
+    tail = (last - last_span[0] + step) / bin_len
+    if tail < SHORT_BIN_FRACTION:
+        found.append(("last", tail))
+    return found
+
+
 def _warn_short_bins(coord, freq: str, dim: str) -> None:
     """Warn about resample bins the selection only partly covers.
 
@@ -1864,9 +1973,16 @@ def _warn_short_bins(coord, freq: str, dim: str) -> None:
     ``May 2012``, and a half-month mean sitting beside full ones under one shared
     colour scale is the kind of wrong number that looks right on a map.
 
-    Compared against the *median* bin rather than the longest: month lengths genuinely
-    differ, and flagging February every time would train the warning away.
+    Only the first and last non-empty bins are candidates, judged on how much of the
+    bin's *time* the data span (:func:`_short_edge_bins`), and only for data sampled
+    regularly enough to cover a bin. Sample counts are the wrong yardstick for the
+    rest: month lengths genuinely differ, and a cruise that took one cast in a month
+    and two in the next, or missed December altogether, is sampling, not a mean over
+    part of a period. The counts only supply the "usual" quoted in the message — their
+    median, since flagging February every time would train the warning away.
     """
+    import numpy as np
+
     counts = _bin_counts(coord, freq)
     values = [float(v) for v in counts.values]
     if len(values) < 2:
@@ -1874,10 +1990,20 @@ def _warn_short_bins(coord, freq: str, dim: str) -> None:
     median = sorted(values)[len(values) // 2]
     if median <= 0:
         return
+    nonempty = [i for i, n in enumerate(values) if n > 0]
+    first_bin, last_bin = nonempty[0], nonempty[-1]
+    starts, ends = _bin_bounds(counts[dim].values, freq)
+    origin = starts[0]
+    start_s, end_s = _seconds_since(starts, origin), _seconds_since(ends, origin)
+    flagged = _short_edge_bins(
+        _seconds_since(coord.values, origin),
+        (float(start_s[first_bin]), float(end_s[first_bin])),
+        (float(start_s[last_bin]), float(end_s[last_bin])),
+        float(np.median(end_s - start_s)),
+    )
     short = [
-        (_bin_label(label), int(n))
-        for label, n in zip(counts[dim].values, values, strict=True)
-        if n < SHORT_BIN_FRACTION * median
+        (_bin_label(counts[dim].values[i]), int(values[i]))
+        for i in (first_bin if which == "first" else last_bin for which, _ in flagged)
     ]
     if not short:
         return

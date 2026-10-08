@@ -7,6 +7,9 @@ map or dataset attributes), and tag the object with its ``featureType``.
 
 from __future__ import annotations
 
+import contextlib
+import warnings
+
 from ocean_skill import vocabulary
 
 __all__ = ["find_coord", "standardize", "tag_feature_type"]
@@ -24,6 +27,28 @@ def standardize(
 def tag_feature_type(obj, feature_type: str):
     """Attach a ``featureType`` tag to a standardized object."""
     raise NotImplementedError
+
+
+@contextlib.contextmanager
+def quiet_dropped_ancillaries():
+    """Silence cf-xarray's "referred to in the CF attributes" warning around a lookup.
+
+    A QC'd variable keeps ``ancillary_variables="TEMP_flag"`` after a subset or a
+    flag-dropping step has removed ``TEMP_flag``, and every ``ds.cf[...]`` lookup then
+    repeats cf-xarray's "Variables {...} not found in object but are referred to in
+    the CF attributes". It is true and no use to anyone: the lookup is for a
+    coordinate or a measurement, and the dangling pointer is to a flag nobody asked
+    for. Only that one message is filtered, so a warning about anything else raised
+    inside the block still reaches the caller.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Variables .* not found in object but are referred to in the CF "
+            r"attributes",
+            category=UserWarning,
+        )
+        yield
 
 
 def find_coord(ds, kind: str):
@@ -44,7 +69,8 @@ def find_coord(ds, kind: str):
         known = ds.coords
     for key in (kind, axis):
         try:
-            got = ds.cf[key]
+            with quiet_dropped_ancillaries():
+                got = ds.cf[key]
         except (KeyError, ValueError):
             continue
         name = getattr(got, "name", None)

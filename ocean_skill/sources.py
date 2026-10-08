@@ -165,6 +165,9 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
         from ocean_skill.qc import apply as _apply_qc
 
         obj = _apply_qc(obj, meta, qc)
+        # The entry's name, so a table's warnings (tabular._subject_of) can say which
+        # source they are about when the entry declares no datasetID or title.
+        obj.attrs = {**obj.attrs, "source_name": ref.name}
 
         # A table whose time is split over several columns (``time_columns``) gets one
         # time column here: after qc, whose contract names the original columns, and

@@ -234,10 +234,22 @@ def numeric_in_range(series, axis: str):
 _CF_SINCE = re.compile(r"[_\s]+since[_\s]+", re.IGNORECASE)
 
 
-def _subject_of(meta) -> str:
-    """Name a source for a warning: its dataset ID, else its title, else a stand-in."""
+def _subject_of(meta, df=None) -> str:
+    """Name a source for a warning: its dataset ID, else its title, else its entry name.
+
+    The entry name is only there when whoever read the table stamped it on
+    ``df.attrs["source_name"]`` (the catalog name; a table built by hand has none), so
+    a catalog entry with no ``datasetID``/``title`` -- most of them -- is still
+    named rather than called "this source".
+    """
     meta = meta or {}
-    return meta.get("datasetID") or meta.get("title") or "this source"
+    named = getattr(df, "attrs", None) or {}
+    return (
+        meta.get("datasetID")
+        or meta.get("title")
+        or named.get("source_name")
+        or "this source"
+    )
 
 
 def decode_time_column(series, column, meta=None, *, subject=None):
@@ -582,12 +594,32 @@ def _units_map(df, meta: dict[str, Any]) -> dict[str, str]:
     the entry's ``units`` metadata — which is keyed by the column's *original* name, so
     a frame that ``sources.read`` has already renamed needs those keys split back to
     their base names to match what the frame now says.
+
+    ``sources.read`` also renames columns to the entry's ``standard_names``, and a
+    column that was renamed to something other than its own base name would otherwise
+    lose the units declared (or suffixed) under its old name: ``units={"TA":
+    "umol/kg"}`` with ``standard_names={"TA": "sea_water_alkalinity..."}`` must still
+    give the renamed column its units. A rename is followed only where it really
+    happened -- the new name is a column and the old one is gone, and the first
+    original to claim a target wins, the rule ``sources.read`` itself applies -- so
+    units are never put on a column that merely shares the target's name.
     """
     out: dict[str, str] = {}
-    for original, unit in (meta.get("units") or {}).items():
+    declared = {str(k): str(v) for k, v in (meta.get("units") or {}).items()}
+    for original, unit in declared.items():
         base, _ = split_units(original)
-        out[str(original)] = str(unit)
-        out.setdefault(base, str(unit))
+        out[original] = unit
+        out.setdefault(base, unit)
+    columns = {str(c) for c in df.columns}
+    claimed: set[str] = set()
+    for source, target in (meta.get("standard_names") or {}).items():
+        source, target = str(source), str(target)
+        if source not in columns and target in columns and target not in claimed:
+            claimed.add(target)
+            base, suffix = split_units(source)
+            unit = suffix or declared.get(source) or declared.get(base)
+            if unit:
+                out.setdefault(target, unit)
     for column in df.columns:
         _, unit = split_units(column)
         if unit:
@@ -1006,7 +1038,7 @@ def to_dataset(df, meta: dict[str, Any]):
     import pandas as pd
     import xarray as xr
 
-    subject = _subject_of(meta)
+    subject = _subject_of(meta, df)
     # A table whose time is split over columns is joined here when it has not been
     # already (sources.read does it on the way in; this covers a table handed over
     # directly), so every build below finds one time column.
@@ -1149,7 +1181,10 @@ def to_dataset(df, meta: dict[str, Any]):
             long_name="instrument depth",
             **_depth_attrs(station.convention, approximate=station.approximate),
         )
-        if not np.isscalar(depth):
+        if not np.isscalar(depth) and meta.get("nominal_depth_m") is None:
+            # An entry that declares its own nominal_depth_m has already said where the
+            # instrument is: the pressure-derived depth wandering by a couple of metres
+            # with the tide is expected there, not news worth a warning on every read.
             # Describe the spread rather than diagnose its cause: a range can mean a
             # profiling instrument, a mooring blown down by a current, deployment and
             # recovery casts, or -- as on the Papa flanking moorings -- a record
@@ -1322,12 +1357,20 @@ def _station_position(
         lat_values = numeric_in_range(frame[lat_col], "Y").to_numpy()
         lat_finite = lat_values[np.isfinite(lat_values)]
 
-    spread_deg = float(np.ptp(lon_finite))
-    if lat_finite.size:
-        spread_deg = max(spread_deg, float(np.ptp(lat_finite)))
+    # Metres, not degrees times 111 km: a degree of longitude shrinks with cos(lat)
+    # (about 49 km at 64N), so scaling the larger degree range by the full 111 km
+    # overstated high-latitude wobble by more than a factor of two. The larger of the
+    # two ranges, each in its own metres, is reported.
+    lon_deg = float(np.ptp(lon_finite))
+    lat_deg = float(np.ptp(lat_finite)) if lat_finite.size else 0.0
+    mid_lat = float(np.median(lat_finite)) if lat_finite.size else 0.0
+    spread_m = max(
+        lon_deg * 111_000 * float(np.cos(np.radians(mid_lat))), lat_deg * 111_000
+    )
     warnings.warn(
-        f"{subject}: longitude/latitude vary by up to ~{spread_deg:.4f}\N{DEGREE SIGN} "
-        f"(~{spread_deg * 111_000:.0f} m) across visits — ordinary GPS/positioning "
+        f"{subject}: longitude/latitude vary by up to ~{max(lon_deg, lat_deg):.4f}"
+        f"\N{DEGREE SIGN} (spread up to ~{spread_m:.0f} m, the larger of the "
+        "east-west and north-south ranges) across visits — ordinary GPS/positioning "
         "wobble for a declared fixed station, not a trajectory. Using the median "
         "position for the whole record.",
         stacklevel=_stacklevel.find(),

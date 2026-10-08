@@ -1289,9 +1289,24 @@ def _check_units(test, reference):
         )
     if same:
         return _units.to_units(test, reference.attrs.get("units"))
+    t_units, r_units = test.attrs.get("units"), reference.attrs.get("units")
+    # say which side is the problem: "None" for a lane that never had units reads as if
+    # a unit were literally called that, and does not say whom to go and fix
+    if r_units is None and t_units is None:
+        why = "neither the test nor the reference has a units attribute"
+    elif r_units is None:
+        why = f"the reference has no units attribute (the test is {t_units!r})"
+    elif t_units is None:
+        why = f"the test has no units attribute (the reference is {r_units!r})"
+    else:
+        # both present, so `compatible` was None because a spelling did not parse
+        why = " and ".join(
+            f"the {role}'s units {u!r} are not recognised"
+            for role, u in (("test", t_units), ("reference", r_units))
+            if _units.parse(u) is None
+        )
     warnings.warn(
-        f"cannot verify units {test.attrs.get('units')!r} vs "
-        f"{reference.attrs.get('units')!r}; differencing them unchecked.",
+        f"cannot verify units: {why}; differencing them unchecked.",
         stacklevel=_stacklevel.find(),
     )
     return test
@@ -1415,6 +1430,10 @@ COARSER_BY = 1.5
 #: pairing is unambiguous rather than merely closest.
 NEAREST_TOLERANCE_FRACTION = 0.5
 
+#: A nearest-match shift under this many seconds is stamp noise, not a convention
+#: difference, and is not worth a warning (it is still reported in the attrs).
+NEAREST_NOISE_SECONDS = 1.0
+
 #: Matched steps below which a pointwise metric is worth warning about: a correlation
 #: over five time steps is noise wearing a number's clothes.
 MIN_OVERLAP = 10
@@ -1428,7 +1447,11 @@ def _axis_floats(da, axis: str, role: str) -> np.ndarray:
 
     Seconds rather than nanoseconds deliberately: ns since 1970 is ~1.3e18, well past
     float64's exactly-representable range, so a round trip through it jitters stamps by
-    hundreds of nanoseconds. Seconds are exact and nothing here needs finer.
+    hundreds of nanoseconds. Microseconds are held exactly as integers and divided once,
+    which is good to a fraction of a microsecond in the float and nothing here needs
+    finer. Sub-second digits are kept rather than truncated: a stamp decoded a few
+    milliseconds *before* its nominal second would otherwise be floored a whole second
+    early, turning millisecond noise into a second of it (see :func:`_match_by_mean`).
     """
     if axis not in da.coords:
         raise ValueError(
@@ -1440,7 +1463,7 @@ def _axis_floats(da, axis: str, role: str) -> np.ndarray:
         )
     arr = np.asarray(da[axis].values)
     if arr.dtype.kind == "M":
-        return arr.astype("datetime64[s]").astype("float64")
+        return arr.astype("datetime64[us]").astype("int64") / 1e6
     if arr.dtype.kind in "iuf":
         return arr.astype("float64")
     raise ValueError(
@@ -1637,6 +1660,20 @@ def resolve_match_method(
             "test",
         )
     if ct * COARSER_BY <= cr:
+        if composite is False and test_composite is True:
+            # A daily model average stamped at the start of its day, against bottles
+            # taken at 10:30: the sample belongs to the day it was taken *in*, which
+            # nearest-stamp matching only gets right before noon. Nothing is shifted,
+            # so there is nothing to warn about either.
+            return (
+                "contained",
+                f"the reference is an instantaneous product every "
+                f"{_duration(cr, calendar)} and the test is a period average every "
+                f"{_duration(ct, calendar)}; each reference instant takes the test "
+                "bin that contains it",
+                tolerance,
+                "reference",
+            )
         if composite is False:
             return (
                 "nearest",
@@ -2081,13 +2118,18 @@ def match_axis(
             test, reference, tdim, rdim, tf, rf, tolerance, target=target
         )
         report.update(extra)
+    elif method == "contained":
+        test, reference, extra = _match_by_containment(
+            test, reference, tdim, rdim, tf, rf, bin_anchor
+        )
+        report.update(extra)
     elif method == "exact":
         test, reference, extra = _match_exactly(test, reference, tdim, rdim)
         report.update(extra)
     else:
         raise ValueError(
-            f"unknown time_method {method!r}; expected 'auto', 'mean', 'nearest' or "
-            "'exact'"
+            f"unknown time_method {method!r}; expected 'auto', 'mean', 'nearest', "
+            "'contained' or 'exact'"
         )
 
     matched = int(reference.sizes[rdim])
@@ -2139,7 +2181,26 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="refe
         bin_anchor = infer_bin_anchor(frame[fdim].values)
     edges = axis_edges(fvals, anchor=bin_anchor)
 
-    which = np.searchsorted(edges, bvals, side="right") - 1
+    # Snap both the stamps and the edges to a decimal lattice before comparing. A stamp
+    # that is nominally *on* an edge decides its bin by its last digit, and decoded
+    # "days since 1950" floats carry tens of milliseconds of noise: a 30-minute mooring
+    # binned at hh:30 would put one half-hour in its own bin, then two, then three,
+    # the counts cycling with the noise. The lattice is the power of ten at or below a
+    # thousandth of the binned lane's step (and never coarser than a second, where
+    # calendar edges live), so on-edge stamps land on the edge exactly and always go
+    # the same way, while a stamp a real fraction of a step off moves too little to
+    # cross anything.
+    cadence = _cadence(bvals)
+    if cadence:
+        quantum = min(1.0, 10.0 ** np.floor(np.log10(cadence * 1e-3)))
+        which = (
+            np.searchsorted(
+                np.round(edges / quantum), np.round(bvals / quantum), side="right"
+            )
+            - 1
+        )
+    else:
+        which = np.searchsorted(edges, bvals, side="right") - 1
     inside = (which >= 0) & (which < fvals.size)
     stamps = np.asarray(frame[fdim].values)
     if not inside.any():
@@ -2167,9 +2228,24 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="refe
 
     counts = np.bincount(which[inside], minlength=fvals.size)
     typical = float(np.median(counts[counts > 0])) if (counts > 0).any() else 0.0
-    from ocean_skill.operators import SHORT_BIN_FRACTION
+    from ocean_skill.operators import SHORT_BIN_FRACTION, _short_edge_bins
 
-    short = int(((counts > 0) & (counts < SHORT_BIN_FRACTION * typical)).sum())
+    # Only the first and last bin can be "a mean over part of a period", judged on how
+    # much of the bin's time the data span -- not on sample counts, which wobble for
+    # honest reasons (see _short_edge_bins). Data too coarse to cover a bin never warn.
+    short = 0
+    if (counts > 0).any():
+        occupied = np.flatnonzero(counts)
+        lo, hi = int(occupied[0]), int(occupied[-1])
+        bin_len = float(np.median(np.diff(edges)))
+        short = len(
+            _short_edge_bins(
+                np.sort(bvals[inside]),
+                (float(edges[lo]), float(edges[lo + 1])),
+                (float(edges[hi]), float(edges[hi + 1])),
+                bin_len,
+            )
+        )
     empty = int((counts == 0).sum())
     if empty:
         warnings.warn(
@@ -2183,8 +2259,8 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="refe
             f"{short} of the {frame_role}'s bins caught fewer than "
             f"{SHORT_BIN_FRACTION:.0%} of the usual {typical:g} {binned_role} steps, "
             "so those steps are averages over part of a period labelled like a whole "
-            "one — usually the first and last bin of the selection. Narrow select= to "
-            "whole periods to drop them.",
+            "one — the first or last bin of the selection. Narrow select= to whole "
+            "periods to drop them.",
             stacklevel=_stacklevel.find(),
         )
     extra = {
@@ -2197,6 +2273,44 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="refe
     if target == "reference":
         return grouped, frame_out, extra
     return frame_out, grouped, extra
+
+
+def _match_by_containment(test, reference, tdim, rdim, tf, rf, bin_anchor):
+    """Pair each reference instant with the test bin (period average) that contains it.
+
+    The test's stamps are read as bin labels — start or middle, as
+    :func:`infer_bin_anchor` reads off them, or ``bin_anchor`` if one was given — and
+    the test is *not* averaged or shifted: the whole bin's value is taken. This is
+    :func:`_match_by_mean`'s bin lookup run the other way round, for a finer-stepping
+    instantaneous reference against a coarser period-averaged test. An instant outside
+    every bin has no counterpart and is dropped, and said so.
+    """
+    if bin_anchor == "auto":
+        bin_anchor = infer_bin_anchor(test[tdim].values)
+    edges = axis_edges(tf, anchor=bin_anchor)
+    pos = np.searchsorted(edges, rf, side="right") - 1
+    keep = (pos >= 0) & (pos < tf.size)
+
+    frame = reference.isel({rdim: keep})
+    mover = test.isel({tdim: pos[keep]})
+    attrs = dict(mover.attrs)
+    mover = mover.assign_coords({tdim: np.asarray(frame[rdim].values)})
+    if tdim != rdim:
+        mover = mover.rename({tdim: rdim})
+    mover.attrs = attrs
+
+    unmatched = int((~keep).sum())
+    if unmatched:
+        warnings.warn(
+            f"{unmatched} reference steps fell outside every test bin and were "
+            "dropped.",
+            stacklevel=_stacklevel.find(),
+        )
+    return (
+        mover,
+        frame,
+        {"bin_anchor": bin_anchor, "steps_unmatched": unmatched},
+    )
 
 
 def _match_by_nearest(
@@ -2247,7 +2361,9 @@ def _match_by_nearest(
         (mover_da, frame_da) if target == "reference" else (frame_da, mover_da)
     )
 
-    if offsets.size and float(offsets.max()) > 0:
+    # a shift of milliseconds is float noise in decoded stamps ("days since 1950"), not
+    # two products stamping a period differently; it is still recorded in the report
+    if offsets.size and float(offsets.max()) >= NEAREST_NOISE_SECONDS:
         warnings.warn(
             f"paired {int(keep.sum())} steps by nearest match, shifting each by up to "
             f"{_duration(float(offsets.max()), calendar)} (typically "

@@ -625,9 +625,44 @@ def standardize(
                 ds[var] = da.where(mask)
 
     ds = add_depth_coord(ds, meta)
+    ds = _stamp_time_semantics(ds, meta)
     ds.attrs["featureType"] = meta.get("featureType", "grid")
     ds.attrs["ocean_skill_model"] = meta.get("model", "roms")
     return ds
+
+
+def _stamp_time_semantics(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
+    """Say, as CF ``cell_methods``, whether each variable is an instant or a mean.
+
+    ROMS writes both kinds and states it only in passing: a history file carries the
+    global attribute ``type = "ROMS history file"`` and holds snapshots, an averages
+    file says "average" there, and a biogeochemical output has each variable's
+    ``long_name`` start with ``avg_`` (``avg_Alkalinity``) for the period mean it is.
+    Nothing downstream reads those, but :func:`ocean_skill.align.is_composite` reads
+    ``cell_methods`` -- without it the time axis is guessed at, and a monthly mean is
+    matched against hourly snapshots as though both were instants. ``"time: point"``
+    goes on the variables of a history file, ``"time: mean"`` on an ``avg_`` variable
+    or any variable of an averages file; a variable that already has ``cell_methods``
+    keeps it, and one this cannot place is left alone. The variable's own ``avg_`` is
+    the more specific statement, so it wins over the file's.
+    """
+    kind = str(ds.attrs.get("type", "")).casefold()
+    tdim = meta.get("time_dim", "time")
+    stamped = {}
+    for name in ds.data_vars:
+        da = ds[name]
+        if tdim not in da.dims and "time" not in da.dims:
+            continue
+        if "cell_methods" in da.attrs:
+            continue
+        if str(da.attrs.get("long_name", "")).startswith("avg_") or "average" in kind:
+            methods = "time: mean"
+        elif "history" in kind:
+            methods = "time: point"
+        else:
+            continue
+        stamped[name] = da.assign_attrs(cell_methods=methods)
+    return ds.assign(stamped) if stamped else ds
 
 
 def _vertical_params(ds: xr.Dataset, meta: dict[str, Any]) -> tuple[float, int]:
@@ -1412,10 +1447,11 @@ def _warn_depth_match(
        profile's own depths can drive dozens of below-the-bottom targets (a cast
        reaching past the model's deepest cell is routine) and one line each buries the
        signal.
-    2. *Fixed origin, and some samples are above the free surface*: how many, and the
-       likeliest cause -- a depth measured below the surface (a CTD, a profiler) being
-       matched as if fixed in space, which the surface drops out from under at low
-       tide.
+    2. *Fixed origin by default, and some samples are above the free surface*: how
+       many, and the likeliest cause -- a depth measured below the surface (a CTD, a
+       profiler) being matched as if fixed in space, which the surface drops out from
+       under at low tide. Not raised when the source declares ``origin: fixed``: that
+       is a decision, and the dry bins are then what it asked for.
     3. *Fixed origin by default, over a surface that moves a lot*: nothing declared how
        this depth is measured, so it was matched fixed in space, which is wrong by up
        to the tidal range if it was in fact measured below the surface. Silenced the
@@ -1447,7 +1483,11 @@ def _warn_depth_match(
     if origin != "fixed":
         return
     above = counts[_ABOVE_SURFACE]
-    if above:
+    # Only for a convention nobody declared (the tide warning below is the same): a
+    # source that states ``origin: fixed`` -- an ADCP, say -- has made that decision on
+    # purpose, and bins above mean sea level simply being dry at low tide is then the
+    # expected result, not a sign the depth was measured below the surface.
+    if above and source == "default":
         live = sum(counts) - counts[_MASKED]
         warnings.warn(
             f"{above} of {live} (sample, target) matches lie above the free surface "
