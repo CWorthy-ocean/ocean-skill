@@ -6061,7 +6061,10 @@ class Comparison:
         What is stripped before :func:`~ocean_skill.pairs.derivable` sees the select:
         every key that is neither time nor vertical (a point lon/lat, a depth-origin
         declaration). The basic comparison keeps them, so they are reproduced, not
-        varied. A ``season`` select is time-narrowing it cannot derive, and stays in.
+        varied. A ``season`` select (the season fan's) is derived when the aggregate is the
+        matching ``{"groupby": "season", ...}`` -- it picks one group off the axis that
+        aggregate creates -- and refused otherwise (and always on a cast, whose time
+        choices are casts).
 
         A ``timeSeries``/``station``/``point`` base has one level and no depth axis, so
         what its depth request may be depends on where its instrument is:

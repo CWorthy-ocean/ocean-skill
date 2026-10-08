@@ -264,6 +264,76 @@ def test_a_mooring_time_slice_matches_the_lane_pipeline(world, monkeypatch):
     )
 
 
+def _lanes_only(monkeypatch):
+    monkeypatch.setattr(
+        Comparison,
+        "_derivation_plan",
+        lambda self: _DerivationPlan(None, "switched off for the comparison", {}, []),
+    )
+
+
+def _season_fan(**kw):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = compare(
+            test="his",
+            variables=[TEMPERATURE],
+            times={"groupby": "season", "seasons": ["MJJA"], "reduce": "mean"},
+            **kw,
+        )
+        return [c.align() for c in cs]
+
+
+def test_a_mooring_season_fan_derives_from_the_saved_pairs(world):
+    # the lanes cannot score a seasonal mean against a timeSeries (its model lane loses
+    # the time axis the pairs are matched on), so the pairs are the check: the mean of
+    # the basic pairs over the season
+    basic = _align("moor")
+    reads = world.model_reads
+    world.block_model()
+
+    (derived,) = _season_fan(reference="moor", select={"depth": 5.0})
+    assert derived.attrs["derived_from"] == "pairs"
+    assert world.model_reads == reads
+    assert derived["test"].ndim == 0
+    assert float(derived["test"]) == pytest.approx(float(basic["test"].mean()))
+    assert float(derived["reference"]) == pytest.approx(
+        float(basic["reference"].mean())
+    )
+
+
+def test_a_visit_station_season_fan_matches_the_lane_pipeline(world, monkeypatch):
+    select = {"depth": {"min": 0, "max": 8}}
+    kw = {"reference": "visits", "select": select, "aggregate": {"Z": "mean"}}
+    _align("visits")  # the basic comparison, so the base exists
+    series = _align("visits", select=select, aggregate={"Z": "mean"})
+    reads = world.model_reads
+    world.block_model()
+    (derived,) = _season_fan(**kw)
+    assert derived.attrs["derived_from"] == "pairs"
+    assert world.model_reads == reads
+
+    world.model_blocked = False
+    _lanes_only(monkeypatch)
+    (lanes,) = _season_fan(**kw)
+    assert lanes.attrs["derived_from"] == "lanes"
+    for name in ("test", "reference", "difference"):
+        assert derived[name].dims == lanes[name].dims
+        assert derived[name].shape == lanes[name].shape
+    # a band is the plain mean of the pairs inside it, not the model's
+    # thickness-weighted band average (see pairs.py), so against the lanes the values
+    # are close, not equal;
+    # the season is exact against the band's own series, averaged over the visits
+    for name in ("test", "reference"):
+        np.testing.assert_allclose(
+            _values(derived, name), _values(lanes, name), atol=0.2
+        )
+    assert float(derived["test"]) == pytest.approx(float(series["test"].mean()))
+    assert float(derived["reference"]) == pytest.approx(
+        float(series["reference"].mean())
+    )
+
+
 def test_the_basic_result_is_what_the_lane_pipeline_always_gave(world, monkeypatch):
     first = _align("moor", cache=False)
     monkeypatch.setattr(

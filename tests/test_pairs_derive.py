@@ -322,6 +322,41 @@ def test_monthly_resample_gives_one_pair_per_month():
     assert out.attrs["scored_over"] == "time"
 
 
+SEASONAL = {"groupby": "season", "seasons": ["DJF"], "reduce": "mean"}
+
+
+def test_a_season_select_picks_the_group_the_seasonal_aggregate_made():
+    base = series_base()
+    out = derive(
+        base,
+        "timeSeries",
+        select={"depth": "surface", "season": "DJF"},
+        aggregate={"time": SEASONAL},
+    )
+    assert "time" not in out["test"].dims
+    assert out["test"].ndim == 0
+    assert float(out["test"]) == pytest.approx(float(base["test"].mean()))
+    assert float(out["reference"]) == pytest.approx(float(base["reference"].mean()))
+
+
+def test_a_season_select_without_a_seasonal_aggregate_is_not_derivable():
+    for aggregate in (
+        {},
+        {"time": "mean"},
+        {"time": {"groupby": "month", "reduce": "mean"}},
+        {"time": [SEASONAL, "max"]},
+    ):
+        ok, why = pairs.derivable(
+            {"season": "DJF"},
+            aggregate,
+            feature_type="timeSeries",
+            obs_levels=None,
+            detide=False,
+        )
+        assert not ok
+        assert "seasonal time aggregate" in why
+
+
 def test_climatology_groupby_renames_the_axis():
     out = derive(
         series_base(),
@@ -464,7 +499,12 @@ def derivable_profile(select, aggregate):
         ({"lon": -158.0, "lat": 22.75}, {}, "horizontal"),
         ({"lon": {"min": 1, "max": 2}}, {}, "horizontal"),
         ({"sigma0": 25.0}, {}, "unrecognized"),
-        ({"season": "JJA"}, {}, "unrecognized"),
+        ({"season": "JJA"}, {}, "one cast"),
+        (
+            {"season": "JJA"},
+            {"time": {"groupby": "season", "seasons": ["JJA"], "reduce": "mean"}},
+            "one cast",
+        ),
         ({}, {"lon": "mean"}, "horizontal"),
         ({}, {"depth": "max"}, "plain mean"),
         ({"depth": "deep"}, {}, "not one the saved pairs answer"),
