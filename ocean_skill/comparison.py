@@ -8857,14 +8857,20 @@ def _warn_sparse_time_overlap(stacked: Any) -> None:
     )
 
 
-def _common_axis_names(aligned: list[Any]) -> list[Any]:
-    """Rename each member's time/vertical axis to one shared name before pooling.
+def _poolable_members(aligned: list[Any]) -> list[Any]:
+    """Make a group's aligned pairs stackable by ``xr.concat``.
 
     Products spell the same axis differently -- the SEANOE CTD moorings say ``TIME``
     and ``DEPTH`` where the discrete samples say ``time`` and ``depth`` -- and
     ``xr.concat`` lines members up by name, so without this it refuses ("'time' not
     present in all datasets") or, joining outer, would treat the two spellings as
-    two separate axes. The first member that has the axis sets the name.
+    two separate axes. Each member's time/vertical axis is renamed to one shared
+    name; the first member that has the axis sets it.
+
+    Non-index coordinates only some members carry (``lat`` on one, ``LATITUDE`` on
+    another) are dropped for the same reason -- concat cannot pool a coordinate
+    that is missing from a member. Nothing is lost: the composite position is
+    re-derived from every member afterward (:func:`_average_aligned`).
     """
     from ocean_skill import operators
 
@@ -8875,7 +8881,11 @@ def _common_axis_names(aligned: list[Any]) -> list[Any]:
             ds.rename({n: target}) if n is not None and n != target else ds
             for ds, n in zip(aligned, names)
         ]
-    return aligned
+    shared = set.intersection(*(set(ds.coords) for ds in aligned))
+    return [
+        ds.drop_vars([c for c in ds.coords if c not in shared and c not in ds.dims])
+        for ds in aligned
+    ]
 
 
 def _average_aligned(comps: list[Comparison]) -> Any:
@@ -8898,16 +8908,32 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     or more members (stations visited minutes apart share none), the "average" is
     really one member's value at each step, so a warning suggests binning time first.
     Members without a time axis are never checked. Members spelling the time or
-    vertical axis differently (``TIME`` vs ``time``) are renamed to one name first
-    (:func:`_common_axis_names`).
+    vertical axis differently (``TIME`` vs ``time``) are renamed to one name first,
+    and coordinates only some members carry are dropped (:func:`_poolable_members`).
+    Members must then share the same dimensions -- concat would otherwise broadcast
+    a series across a profile's depths -- so a mixed group raises, naming each
+    member's shape.
     """
     import numpy as np
     import xarray as xr
 
     from ocean_skill.align import point_of
 
+    members = _poolable_members([c.aligned for c in comps])
+    dims = [tuple(sorted(m["reference"].dims)) for m in members]
+    if len(set(dims)) > 1:
+        shapes = "; ".join(
+            f"{c.label}: ({', '.join(d)})" for c, d in zip(comps, dims)
+        )
+        raise ValueError(
+            "cannot average comparisons whose pairs have different dimensions -- "
+            "xr.concat would copy a member's values along every axis it lacks "
+            f"(a series repeated at each depth of a profile). Members: {shapes}. "
+            "Group them so like pools with like (e.g. by=[..., 'depth']), or reduce "
+            "them to the same shape first."
+        )
     stacked = xr.concat(
-        _common_axis_names([c.aligned for c in comps]),
+        members,
         dim="_average",
         join="outer",
         combine_attrs="drop_conflicts",
