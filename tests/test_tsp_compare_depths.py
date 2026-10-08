@@ -397,16 +397,21 @@ def test_implied_over_gives_trajectoryprofile_its_own_reason(monkeypatch):
 @pytest.fixture
 def stubbed_trajectoryprofile_fan():
     """Record each fanned comparison's select/over against a trajectoryProfile ref."""
+    from ocean_skill import casts
+
     formed = []
     declared = {
         "glider": {"featureType": "trajectoryProfile", "variables": [TEMPERATURE]},
         "his": {"variables": [TEMPERATURE]},
     }
+    # the entry declares no casts=, which casts.names says without a source to read
+    unidentified = casts.NoCasts("'glider': its casts are not identified.")
     with (
         mock.patch(
             "ocean_skill.catalog.resolve",
             lambda n: SimpleNamespace(metadata=declared[n]),
         ),
+        mock.patch("ocean_skill.casts.names", side_effect=unidentified),
         mock.patch.object(
             comparison.Comparison,
             "align",
@@ -436,6 +441,9 @@ def test_explicit_depths_silence_the_trajectoryprofile_warning(
 ):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        # compare() says once that the casts are not identified; depths= silences
+        # only the surface-collapse warning
+        warnings.filterwarnings("ignore", message=".*not identified")
         comparison.compare(
             reference="glider", test="his", variables=[TEMPERATURE], depths=[10]
         )

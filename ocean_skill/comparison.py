@@ -345,8 +345,9 @@ def _implied_over(
     if feature in ("trajectory", "trajectoryProfile"):
         return None, (
             f"the reference's featureType is {feature!r} -- a moving platform has "
-            "no single recipe to keep an axis by, so name over= (or depths=/"
-            "select=, for a trajectoryProfile) explicitly"
+            "no single recipe to keep an axis by, so name over= explicitly (or, for a "
+            "trajectoryProfile with identified casts (casts=), let osk.compare() "
+            "compare it as one transect, or its casts one by one, each a profile)"
         )
     return None, "the reference is gridded"
 
@@ -4293,10 +4294,17 @@ def _cast_labels(names: Sequence[str]) -> list[str]:
     ``HV10`` stay ``HV1`` and ``HV10``, not ``1`` and ``10`` from a prefix that ran
     into the first digit. If stripping would leave any label empty (one name is a
     prefix of another, or the names are all identical), the full names are kept.
+    The casts of one transect (``ctd_line[03]``, ``ctd_line[04]``, ...) are told
+    apart by their cast ids alone.
     """
+    from ocean_skill import casts
+
     names = [str(n) for n in names]
     if len(names) < 2:
         return names
+    parts = [casts.split_name(n) for n in names]
+    if len({base for base, _ in parts}) == 1 and all(cast_id for _, cast_id in parts):
+        return [cast_id for _, cast_id in parts]
     prefix = os.path.commonprefix(names)
     cut = max((prefix.rfind(sep) for sep in "_- ."), default=-1) + 1
     labels = [n[cut:] for n in names]
@@ -4618,6 +4626,12 @@ class Comparison:
         Optional list of source names standing in for ``reference`` on a
         ``select={"transect": {"from": "reference"}}`` section -- built by
         :func:`compare`'s own fan-out; rarely passed directly.
+    section_own_levels
+        With ``section_casts``: ``select``'s depth list is the union of the levels
+        each cast sampled the variable at (a transect entry's default), not one the
+        caller named -- each cast is then compared on exactly its own levels and
+        left NaN (in both lanes) on the others of the union, never snapped onto
+        them; a cast with no sample of the variable is left out.
 
     Ordinarily both sources are reduced to a single map and the comparison is that pair
     plus their difference. Naming an axis in ``over`` instead keeps that axis: the lanes
@@ -4653,6 +4667,7 @@ class Comparison:
         detide: Any = False,
         literal_depths: bool | None = None,
         section_casts: list[str] | None = None,
+        section_own_levels: bool = False,
     ):
         from ocean_skill.vocabulary import resolve_and_report
 
@@ -4672,6 +4687,25 @@ class Comparison:
         # Read by _point_depth_applies, which the over= inference just below asks (see
         # _default_depth_is_own_levels); _sibling flips it to True on the twin it makes.
         self._is_pairs_base = False
+        # The section's depth list is the levels each cast sampled the variable at,
+        # merged, rather than a list the caller named (see _prepare_section_from_casts).
+        self._section_own_levels = bool(section_own_levels and section_casts)
+        # What each cast's own comparison is built from (see
+        # _prepare_section_from_casts): the arguments this class normalizes below,
+        # as they were given, so a cast is prepared exactly as compare() would
+        # prepare it alone as a profile reference.
+        self._section_child_kwargs = (
+            {
+                "variable": variable,
+                "select": {k: v for k, v in (select or {}).items() if k != "transect"},
+                "aggregate": aggregate,
+                "depth_origin": depth_origin,
+                "qc": qc,
+                "detide": detide,
+            }
+            if section_casts
+            else None
+        )
         self.reference_name = reference
         self.test_name = test
         # A plain name resolves through the vocabulary (short name, canonical
@@ -5324,9 +5358,8 @@ class Comparison:
         if len(sources) > 1:
             # An ordered collection of discrete casts (a from_reference section,
             # the only way _reference_sources() ever returns more than one name)
-            # has no single catalog position or extent for a bbox to mean -- the
-            # test lane is already cropped to exactly these positions by the
-            # transect's own resolved `points` select (see
+            # has no single catalog position or extent for a bbox to mean -- each
+            # cast's own comparison crops the test lane to its own position (see
             # _prepare_section_from_casts). Only the time half applies here.
             return None, window
         bbox = _domain_of(sources[0])
@@ -5720,6 +5753,16 @@ class Comparison:
             # list (a different section) would silently share a cache entry with
             # the original order.
             extra["_section_casts"] = list(self._section_casts)
+            # Each cast is now compared on its own (the model at that cast's own
+            # time and position); an entry cached by the earlier build -- one read
+            # at every cast's position, averaged over all their times -- is a
+            # different pair and must not be served. The global cache format is
+            # left alone: it would orphan every unrelated entry.
+            extra["_section_build"] = "per_cast"
+            if self._section_own_levels:
+                # The same union named by the caller snaps each cast onto it
+                # (literal depths), a different result under an identical select.
+                extra["_section_levels"] = "own"
         # Unlike `min_pairs`, `min_coverage` changes the *aligned* pair itself (which
         # regridded cells survive `align`'s `min_coverage` threshold -- see
         # ocean_skill.align.align), not a downstream metric mask, so it has to be
@@ -7170,9 +7213,9 @@ class Comparison:
         else:
             # select={"transect": {"from": "reference"}}: the reference IS the
             # path -- an ordered collection of discrete casts (self._section_casts,
-            # from compare()'s own reference=[...] fan-out), each reduced like any
-            # other profile reference and stacked along a new `along` dimension in
-            # list order, with the model sampled at exactly those cast positions.
+            # from compare()'s own reference=[...] fan-out), each compared on its
+            # own as a profile (the model at that cast's own time and position) and
+            # the pairs stacked along a new `along` dimension in list order.
             # See _prepare_section_from_casts. None of the point/mooring-narrowing
             # machinery above applies -- there is no single catalog position or
             # extent to read it from -- so this lane skips straight to keep=
@@ -7312,105 +7355,169 @@ class Comparison:
 
         The inverse of the ordinary transect route (:meth:`_resolved_path`, where
         the *test* lane already carries a path and the reference is sampled at
-        wherever it snapped to): here the reference IS the path. Each cast in
-        :attr:`_section_casts` is reduced on its own, in order, exactly like any
-        other profile reference (:meth:`_prepare_lane` with ``role="reference"``
-        -- the shared ``select={"depth": [...]}`` reindexes it onto the section's
-        fixed levels the same way a single profile reference already is, via
-        :attr:`literal_depths`, which the explicit depth list in ``select``
-        already sets regardless of this route). The casts' own ``"transect"``
-        entry (the ``{"from": "reference"}`` sentinel, meaningless to a single
-        profile with no path of its own) is dropped before each one is prepared.
+        wherever it snapped to): here the reference IS the path, and every cast of
+        :attr:`_section_casts` is compared on its own, in order, as the profile it
+        is. Each gets a child :class:`Comparison` built as :func:`compare` builds
+        one for that cast alone -- the section's own select less its ``"transect"``
+        entry (the ``{"from": "reference"}`` sentinel, meaningless to one profile),
+        so ``select={"depth": [...]}`` reindexes the cast onto the section's fixed
+        levels as it does for a single profile -- and aligned like any other pair.
+        The model is thus read at *each cast's own time and position*, never at all
+        of them at once, and a time aggregate averages it over that cast's own
+        times alone. A cast the model has no valid data for (``NoValidData``: a
+        masked cell, a record that misses it) is left out with one warning, and
+        fewer than two left is an error.
 
-        The reduced columns are then stacked along a new
+        With :attr:`_section_own_levels` the section's depth list is instead, per
+        variable, the levels each cast sampled that variable at, merged: each child is
+        built as :func:`compare` builds a cast alone (``depth`` = those levels, not
+        named by the caller) and its two lanes are then put on the union, NaN in both
+        where the cast has no sample of the variable -- a cast is never snapped onto a
+        level it did not measure. A cast with no sample of the variable at all is left
+        out, like one the model has no valid data for.
+
+        The children's aligned columns are then stacked along a new
         :data:`~ocean_skill.align.ALONG_DIM` dimension, in the caller's own list
-        order, and given the same cumulative-distance coordinate
-        :func:`ocean_skill.transect.grid_slice`/:func:`~ocean_skill.transect.
-        sample_along` themselves attach (:func:`ocean_skill.transect.
-        _attach_along_coord`) -- so the result is indistinguishable, downstream,
-        from a section sampled off a gridded reference: :func:`ocean_skill.align.
-        path_of` recognizes it, and :meth:`align` (which called this) hands it to
-        the same ``_align_along_path``/``section_row`` machinery unchanged.
-
-        The model is then sampled at exactly those cast positions
-        (:func:`ocean_skill.transect.apply_transect` via a resolved ``points``
-        ``extra_select``, mirroring :meth:`_resolved_path`), never densified --
-        one column per cast, in the casts' own order, the honest read of "the
-        model at these repeat stations" rather than a smoothed line between them.
+        order, both lanes carrying the casts' own positions, the same
+        cumulative-distance coordinate :func:`ocean_skill.transect.
+        _attach_along_coord` gives any section, and the casts' times as
+        ``cast_time`` -- so :func:`ocean_skill.align.path_of` recognizes the result
+        and :meth:`align` hands it to the ordinary ``_align_along_path``/
+        ``section_row`` machinery, which pairs the lanes column for column. Two
+        casts taken at one place stay two columns.
         """
+        import warnings
+
         import xarray as xr
 
+        from ocean_skill import _stacklevel
         from ocean_skill.align import (
             ALONG_DIM,
-            SECTION_VERTICAL_DIMS,
+            NoValidData,
             _lat_name,
             _lon_name,
+            _observational_vertical_to_z,
         )
+        from ocean_skill.cf import find_coord
+        from ocean_skill.operators import resolve_dim
         from ocean_skill.transect import _attach_along_coord
 
-        columns = []
-        lons: list[float] = []
-        lats: list[float] = []
-        r_depth = None
-        lon_name = lat_name = None
-        for i, cast in enumerate(self._section_casts):
-            col, depth = self._prepare_lane(
-                cast,
-                use_cache,
-                refresh,
-                role="reference",
-                drop_keys=("transect",),
-                keep=SECTION_VERTICAL_DIMS,
-            )
-            if col is None:
-                raise KeyError(
-                    f"{variable_for(self.variable, 'reference')!r} not available "
-                    f"in {cast!r}"
+        # The transect's own method= (how the model is sampled at a cast's place)
+        # outranks compare()'s, which a station reads as nearest anyway.
+        spec = self.select.get("transect") or {}
+        method = self._transect_route()["method"] if "method" in spec else self.method
+        own = self._section_own_levels
+        union = np.asarray(self.select["depth"], float) if own else None
+        # each cast's levels for this variable (own only), keyed by cast and variable
+        levels_of: dict[Any, list[float]] = {}
+        kept, left_out, r_depth = [], [], None
+        for cast in self._section_casts:
+            kwargs = dict(self._section_child_kwargs)
+            if own:
+                # What compare() would give this cast alone: the levels it sampled
+                # this variable at, not named by the caller. The child's reference
+                # lane drops the levels its variable is NaN at, so these are exactly
+                # the levels it keeps (_on_union_levels checks as much).
+                levels = _profile_reference_depths(
+                    cast,
+                    levels_of,
+                    variable_for(kwargs["variable"], "reference"),
+                    qc=qc_for(kwargs["qc"], "reference"),
                 )
-            this_lon, this_lat = _lon_name(col), _lat_name(col)
-            if this_lon is None or this_lat is None:
-                raise ValueError(
-                    f"{cast!r} has no longitude/latitude coordinate, so it "
-                    "cannot take a place along a section."
+                if not levels:
+                    short = _short_variable_label(kwargs["variable"])
+                    left_out.append(f"{cast!r} (no {short} sample)")
+                    continue
+                kwargs["select"] = _fanned_select(
+                    kwargs["select"], "depth", levels, False
                 )
-            if i == 0:
-                lon_name, lat_name, r_depth = this_lon, this_lat, depth
-            lons.append(float(np.asarray(col[this_lon]).reshape(-1)[0]))
-            lats.append(float(np.asarray(col[this_lat]).reshape(-1)[0]))
-            columns.append(col.drop_vars([this_lon, this_lat]))
-
-        stacked = xr.concat(
-            columns,
-            dim=ALONG_DIM,
-            coords="minimal",
-            compat="override",
-            combine_attrs="override",
-            join="override",
-        )
-        stacked = stacked.assign_coords(
-            {lon_name: (ALONG_DIM, lons), lat_name: (ALONG_DIM, lats)}
-        )
-        stacked = _attach_along_coord(
-            stacked, lon_name, lat_name, path_method="from_reference"
-        )
-
-        troute = self._transect_route()
-        method = troute.get("method", "nearest") if troute else "nearest"
-        points = [[lo, la] for lo, la in zip(lons, lats, strict=True)]
-        t, _ = self._prepare_lane(
-            self.test_name,
-            use_cache,
-            refresh,
-            role="test",
-            extra_select={"transect": {"points": points, "method": method}},
-            keep=SECTION_VERTICAL_DIMS,
-        )
-        if t is None:
-            raise KeyError(
-                f"{variable_for(self.variable, 'test')!r} not available in "
-                f"{self.test_name!r}"
+            child = Comparison(
+                reference=cast,
+                test=self.test_name,
+                method=method,
+                over=None,
+                time_method=self.time_method,
+                depth_method=self.depth_method,
+                tolerance=self.tolerance,
+                bin_anchor=self.bin_anchor,
+                min_coverage=self.min_coverage,
+                min_pairs=self.min_pairs,
+                cache=use_cache,
+                subtract_mean=False,
+                literal_depths=False if own else self.literal_depths,
+                **kwargs,
             )
-        return t, stacked, r_depth
+            try:
+                aligned = child.align(refresh=refresh)
+            except NoValidData as exc:
+                left_out.append(f"{cast!r} ({exc})")
+                continue
+            except Exception as exc:
+                exc.add_note(f"(while comparing cast {cast!r} for a section)")
+                raise
+            if own:
+                # one obs depth does not describe a section of casts
+                aligned = _on_union_levels(aligned, levels, union, cast)
+            else:
+                r_depth = r_depth if kept else child._actual_depth
+            kept.append((cast, aligned))
+        if len(kept) < 2:
+            raise NoValidData(
+                "a section needs at least 2 casts with valid data, and "
+                f"{len(kept)} of {len(self._section_casts)} have: {'; '.join(left_out)}"
+            )
+        if left_out:
+            warnings.warn(
+                f"{len(left_out)} of the {len(self._section_casts)} casts are left out "
+                f"of the section, with no valid data: {'; '.join(left_out)}",
+                stacklevel=_stacklevel.find(),
+            )
+            # the casts the section is now built from, which is what casts= labels
+            self._section_casts = [cast for cast, _ in kept]
+
+        first = kept[0][1]
+        lon_name = _lon_name(first["reference"])
+        lat_name = _lat_name(first["reference"])
+        lons, lats, times = [], [], []
+        for _, aligned in kept:
+            ref = aligned["reference"]
+            lons.append(float(np.asarray(ref[lon_name]).reshape(-1)[0]))
+            lats.append(float(np.asarray(ref[lat_name]).reshape(-1)[0]))
+            when = find_coord(ref, "time")  # the cast's instant; none once averaged
+            scalar = when is not None and when.ndim == 0
+            times.append(when.values if scalar else np.datetime64("NaT", "ns"))
+        times = np.array(times, dtype="datetime64[ns]")
+
+        def stack(role: str):
+            lane = xr.concat(
+                [aligned[role].reset_coords(drop=True) for _, aligned in kept],
+                dim=ALONG_DIM,
+                coords="minimal",
+                compat="override",
+                combine_attrs="override",
+                join="override",
+            ).assign_coords(
+                {
+                    lon_name: (ALONG_DIM, lons),
+                    lat_name: (ALONG_DIM, lats),
+                    "cast_time": (ALONG_DIM, times),
+                }
+            )
+            lane = _attach_along_coord(
+                lane, lon_name, lat_name, path_method="from_reference"
+            )
+            # What the child resolved this lane to: a ROMS lane carries its
+            # standard_name only as the array's name, which align() replaced.
+            lane.name = first.attrs.get(f"{role}_standard_name")
+            return lane
+
+        reference, test = stack("reference"), stack("test")
+        # The child matched the model onto the cast's own levels, so the test lane
+        # wears the cast's vertical name; _align_along_path wants it on z.
+        vdim = resolve_dim(reference, "Z")
+        if vdim not in (None, "depth"):
+            test = test.rename({vdim: "depth"})
+        return _observational_vertical_to_z(test), reference, r_depth
 
     def _subtract_scalar_means(self) -> None:
         """Remove each requested lane's own scalar mean from the just-aligned pair.
@@ -9832,7 +9939,13 @@ def _is_profile_reference(
     )
 
 
-def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> list[float]:
+def _profile_reference_depths(
+    source: str,
+    cache: dict[Any, list[float]],
+    variable: Any = None,
+    *,
+    qc: Any = None,
+) -> list[float]:
     """The reference profile's own vertical levels, read once and memoized.
 
     Coordinate-only and cheap: a ``profile`` is a single water column, so this opens
@@ -9848,9 +9961,22 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     (:func:`ocean_skill.depth_convention.positive_down_values`), so a height or a
     pressure comes back as metres, positive down -- the scale the model is asked for
     and the observation's own picks are made on.
+
+    With ``variable`` (a reference-side spec, already through :func:`variable_for`) the
+    levels are only those the cast sampled that variable at: where the field has a value
+    (at any index of its other dimensions, if it has some). A lane drops the levels its
+    variable is NaN at (:func:`_prepare`), so a section places each cast on exactly
+    those (:meth:`Comparison._prepare_section_from_casts`) -- and a missing value in
+    one variable is ordinary in a CTD file. ``qc`` is that lane's policy
+    (:func:`qc_for`), passed to the read as the lane passes it, so a flagged value is as
+    missing here as there. ``[]`` when the source has no such variable, or no value of
+    it at any level; the axis itself still raises as it does without one. Memoized
+    under ``(source, repr(variable))``: ``qc`` is neither in that key nor used without
+    a ``variable``, so a cache serves one call's policy.
     """
-    if source in cache:
-        return cache[source]
+    key = source if variable is None else (source, repr(variable))
+    if key in cache:
+        return cache[key]
     import warnings
 
     import numpy as np
@@ -9863,13 +9989,14 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
         meta = resolve(source).metadata
     except KeyError:
         meta = {}
+    read_kwargs = {"qc": qc} if variable is not None and qc is not None else {}
     # Coordinate-only: warnings that belong to *reading* this source (a cast's
     # duplicate depths, a time-varying profile) are the align() lane's to emit when it
     # reads the data for real -- firing them here too, just to learn the axis, would
     # double them. A genuine problem (no vertical axis) raises below, unsuppressed.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        obj = read(source)
+        obj = read(source, **read_kwargs)
         if tabular.is_frame(obj):
             obj = tabular.to_dataset(obj, meta)
     # The catalog's own declared Z axis wins when there is one (a builder records it
@@ -9891,14 +10018,30 @@ def _profile_reference_depths(source: str, cache: dict[str, list[float]]) -> lis
     values = depth_convention_module.positive_down_values(
         obj[zname].values, obj[zname].attrs, convention=convention
     )
-    values = values[np.isfinite(values)]
-    if values.size == 0:
+    keep = np.isfinite(values)
+    if not keep.any():
         raise ValueError(
             f"{source!r}'s vertical axis ({zname!r}) has no finite levels to compare "
             "on -- pass depths=[...] explicitly."
         )
-    depths = [float(v) for v in np.unique(values)]
-    cache[source] = depths
+    if variable is not None:
+        # The same lookup _prepare makes, and its dropna(zname, how="all") is what is
+        # mirrored: a level stays where the field has any value, across the rest of
+        # its dimensions. Quiet for the reason the read is.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            field = operators.resolve_variable(obj, variable)
+        if field is None:
+            keep[:] = False
+        else:
+            sampled = field.notnull()
+            if zname in sampled.dims:
+                others = [d for d in sampled.dims if d != zname]
+                keep &= (sampled.any(others) if others else sampled).values
+            else:  # no vertical dimension to drop levels along: all of them, or none
+                keep &= bool(sampled.any())
+    depths = [float(v) for v in np.unique(values[keep])]
+    cache[key] = depths
     return depths
 
 
@@ -10324,11 +10467,13 @@ def _profile_depth_plan(
       like the profile case; a warning says which depth was chosen and why, since
       unlike a profile's *whole* column, this quietly overrides a real default
       (surface) rather than filling in one that never existed;
-    * a bare **trajectoryProfile** reference (position varies too, so even a
-      genuinely empty select has no single depth -- or single axis -- to default
-      to) warns that this call is about to collapse depth to the surface and leave
-      ``over=`` unresolved, pointing at ``depths=``/``select=``/``over=`` as the
-      way out;
+    * a **trajectoryProfile** reference still standing as one (a transect whose casts
+      are identified is compared as one section, or cast by cast, by
+      :func:`_expand_transects` before this runs; only an explicit non-vertical
+      ``over=``, or casts that are not identified, keep it whole) is a moving platform
+      with no single depth to default to, so this warns that the call is about to
+      collapse depth to the surface, pointing at ``depths=``/``select=`` as the way
+      out;
     * anything else keeps the ordinary depth fan unchanged.
 
     ``literal`` says whether the depths this call settled on were named by the
@@ -10437,24 +10582,33 @@ def _profile_depth_plan(
             )
             return (depth,), False, False
         if _feature_type(ref) == "trajectoryProfile":
-            # A moving platform with more than one candidate vertical reading (see
-            # _is_profile_reference's own note on it) has no natural default the
-            # way a profile's own column or a fixed station's metadata depth do --
-            # this call is about to fall through to the ordinary fan below, which
-            # for a bare call means the surface sentinel, and over stays unresolved
-            # (see _implied_over's own trajectoryProfile branch). Both are silent
-            # otherwise, so say so once, pointing at the escape hatches.
+            # A transect reaches here whole only under an explicit non-vertical
+            # over= or with its casts not identified (otherwise _expand_transects has
+            # split it into its casts), where it is a moving platform with more
+            # than one candidate vertical reading
+            # (see _is_profile_reference's own note on it): no natural default the
+            # way a profile's own column or a fixed station's metadata depth do.
+            # This call is about to fall through to the ordinary fan below, which
+            # for a bare call means the surface sentinel -- silent otherwise, so say
+            # so once, pointing at the escape hatch.
             import warnings
 
             from ocean_skill import _stacklevel
 
             warnings.warn(
-                f"{ref!r} is a trajectoryProfile -- a moving platform with more "
-                "than one candidate vertical reading, so there is no single depth "
-                "to default to and no single recipe to keep an axis by. This call "
-                "collapses depth to the surface and leaves over= unresolved. Pass "
-                "depths=[...] (or select={'depth': ...}) to name a depth "
-                'explicitly, or over="time"/over="Z" to choose which axis to keep.',
+                f"{ref!r} is a trajectoryProfile, compared as a moving platform "
+                + (
+                    f"because over={over!r} is not vertical (without it, or with "
+                    'over="Z", its identified casts are compared as one transect '
+                    "or as profiles)"
+                    if over is not None
+                    else "because its casts are not identified (casts= on the "
+                    "catalog entry)"
+                )
+                + ". A moving "
+                "platform has no single depth to default to, so this call collapses "
+                "depth to the surface. Pass depths=[...] (or select={'depth': ...}) "
+                "to name a depth explicitly.",
                 stacklevel=_stacklevel.find(),
             )
     # A profile reference whose vertical select was already explicit (has_vertical_
@@ -10465,6 +10619,119 @@ def _profile_depth_plan(
     # select has no "clamp to the deepest observed level" behavior for literal to
     # change, so marking it there would be meaningless, not just unused).
     return fan_values, len(fan_values) > 1, bool(is_profile_ref and has_vertical_select)
+
+
+def _expand_transects(
+    refs: list[str], over: str | None, *, one_transect: bool = False
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Replace each CTD transect in ``refs`` by its casts, in time order.
+
+    Returns ``(refs, groups)``: the flat list, every transect entry standing as its
+    casts (so each check :func:`compare` runs on its references sees them), and
+    ``{entry: casts}`` for the entries to compare as **one transect** each.
+
+    A ``trajectoryProfile`` entry is one ship visit to a line of stations, each cast
+    at its own time and position, and every cast is a ``profile`` source of its own
+    (:mod:`ocean_skill.casts`). With ``one_transect`` (the caller's request carries
+    nothing that needs the casts apart: see :func:`compare`) an entry of more than one
+    cast is a group, which compare() stacks into one section, each cast at its own
+    time and place. Otherwise -- a lone cast, a vertical ``over=``, or ``one_transect``
+    off -- it is compared cast by cast, everything below seeing a plain list of
+    profiles, as it is for a list of cast names. An explicit ``over=`` that is not
+    vertical keeps the moving-platform reading instead (nothing is expanded or read:
+    see :func:`_implied_over`), and so does an entry whose casts are not identified
+    (:class:`ocean_skill.casts.NoCasts`), with a warning saying how to identify them.
+    """
+    import warnings
+
+    from ocean_skill import _stacklevel, casts
+    from ocean_skill.operators import _CF_AXES
+
+    if over is not None and _CF_AXES.get(over) != "vertical":
+        return refs, {}
+    out: list[str] = []
+    groups: dict[str, list[str]] = {}
+    for ref in refs:
+        if not casts.is_transect(ref):
+            out.append(ref)
+            continue
+        try:
+            names = casts.names(ref)
+        except casts.NoCasts as exc:
+            warnings.warn(
+                f"{exc} Until then {ref!r} is compared as one moving platform.",
+                stacklevel=_stacklevel.find(),
+            )
+            out.append(ref)
+            continue
+        if not names:
+            raise ValueError(f"{ref!r} is a trajectoryProfile with no casts to compare")
+        out.extend(names)
+        if one_transect and over is None and len(names) > 1:
+            groups[ref] = names
+            print(
+                f"  {ref!r}: trajectoryProfile of {len(names)} casts -- compared as "
+                "one transect, each cast at its own time and place "
+                f"(reference=osk.cast_names({ref!r}) compares them one by one)"
+            )
+        else:
+            print(
+                f"  {ref!r}: trajectoryProfile of {len(names)} "
+                f"cast{'' if len(names) == 1 else 's'} -- compared cast by cast"
+            )
+    return out, groups
+
+
+def _on_union_levels(aligned, own: list[float], union: np.ndarray, cast: str):
+    """Return a cast's aligned lanes on ``union``, NaN where it has no sample.
+
+    ``aligned`` is the child comparison of one cast (:meth:`Comparison.
+    _prepare_section_from_casts`), made at that cast's ``own`` levels -- the levels it
+    sampled the variable at: sorted, unique, metres positive down, as
+    :func:`_profile_reference_depths` gives them for the variable. The lanes
+    arrive in that order, on whatever the child's vertical coordinate carries (the
+    cast's raw values, a scalar for one level), so the levels are set by *position*
+    and stamped as the normalized metres they are; each then lands on its ``union``
+    entry (the same level within 1e-6 m) and every other entry is left NaN. Nothing is
+    snapped: the lanes keep only what the cast measured. A lane whose level count is
+    not ``len(own)`` raises: a guard only, as ``own`` already leaves out the levels a
+    lane drops for a missing value.
+    """
+    import xarray as xr
+
+    from ocean_skill.operators import resolve_dim
+
+    spots = np.abs(union[:, None] - np.asarray(own, float)[None, :]).argmin(0)
+    normalized = depth_convention_module.NORMALIZED_ATTR
+    stamp = {"positive": "down", "units": "m", normalized: 1}
+    lanes = {}
+    for role in ("test", "reference"):
+        lane = aligned[role]
+        vdim = resolve_dim(lane, "Z")
+        if vdim is not None and vdim not in lane.dims:  # a lone level, kept as a scalar
+            lane = lane.expand_dims(vdim)
+        if vdim is None or lane.sizes[vdim] != len(own):
+            raise ValueError(
+                f"cast {cast!r}: its {role} lane has "
+                f"{None if vdim is None else lane.sizes[vdim]} level(s) along "
+                f"{vdim!r}, but the cast has {len(own)} -- cannot place them on the "
+                "section's levels."
+            )
+        lane = lane.assign_coords({vdim: (vdim, union[spots], stamp)})
+        lane = lane.reindex({vdim: union})
+        lane[vdim].attrs = dict(stamp)
+        lanes[role] = lane
+    return xr.Dataset(lanes, attrs=aligned.attrs)
+
+
+def _union_levels(per_cast: list[list[float]]) -> list[float]:
+    """Return the sorted levels of all of ``per_cast``, those within 1e-6 m as one."""
+    values = np.sort(np.concatenate([np.asarray(v, float) for v in per_cast]))
+    merged = [float(values[0])]
+    for v in values[1:]:
+        if v - merged[-1] > 1e-6:
+            merged.append(float(v))
+    return merged
 
 
 def _selected_time(select: dict[str, Any]) -> Any:
@@ -11217,6 +11484,8 @@ def compare(
     reference
         Catalog source name, or a list of names to fan over (one comparison
         per name paired with each ``test``/variable/depth/time combination).
+        A CTD transect (a ``trajectoryProfile`` entry) is compared as one transect
+        (see below); a list of its cast names compares them one by one.
     test
         Catalog source name, or a list of names, matching ``reference``.
     variables
@@ -11700,10 +11969,25 @@ def compare(
     the bins (``.plot()`` draws one row per month); no ``over=`` or ``depths=``
     needed. Left with neither axis narrowed nor a climatology fold (or both), it is
     still the ordinary ``timeSeriesProfile`` ambiguity, needing an explicit
-    ``over=``. A ``trajectoryProfile`` carries more than one candidate axis regardless, so it
-    still needs an explicit ``depths=``/``select={"depth": [...]}``, and a vertical
-    ``over=`` with no depth axis left standing is refused rather than compared
-    against a single collapsed level.
+    ``over=``. A ``trajectoryProfile`` reference whose casts are identified
+    (:mod:`ocean_skill.casts`: a CTD transect, one file of casts each at its own time
+    and position) is compared as **one transect**: its casts, in time order
+    (:func:`ocean_skill.casts.names`), are the columns of one section, each the model at
+    that cast's own time and place, plotted as a section with the metrics pooled over
+    all (cast, level) pairs. The levels are, per variable, those each cast sampled it
+    at, merged (``depths=[...]``/``select={"depth": [...]}``, at least 2 fixed depths,
+    name them instead); each cast is compared on exactly its own and left NaN, in both
+    lanes, on the others -- a cast with no sample of a variable at all is left out of
+    that variable's section, with a warning -- and casts that look unbinned (raw
+    samples at their own depths) are refused, naming the levels or the cast-by-cast
+    route. A list of cast names
+    (``reference=osk.cast_names(entry)``) gives one comparison per cast, each a
+    ``profile`` as above, and so does an entry with one cast, a vertical ``over=``,
+    ``times=``, isopycnals, a pair-spec ``select``, a vertical ``aggregate=`` or levels
+    that are not such a list; with ``select={"transect": {"from": "reference"}}`` all
+    the references are the columns of one section. A non-vertical ``over=`` keeps the
+    moving-platform reading (which needs an explicit ``depths=``/``select={"depth":
+    [...]}``), and so does an entry whose casts are not identified, with a warning.
 
     A **fixed-station** reference (``featureType`` ``timeSeries``/``point``/``station``
     -- a mooring, most often) is auto-derived the same way, but to a single depth
@@ -11817,12 +12101,6 @@ def compare(
     select = _normalize_pair(select, "select", normalize_side=as_select)
     aggregate = _normalize_pair(aggregate, "aggregate")
 
-    # Computed here, ahead of the has_transect block below, so a
-    # select={"transect": {"from": "reference"}} request can check its one real
-    # precondition -- an ordered *collection* of casts, not a single source --
-    # before anything else runs. Reused unchanged by the fan-out further down.
-    refs = [reference] if isinstance(reference, str) else list(reference)
-
     # depths defaults to the vertical entry already in `select`, if any, so the two
     # spellings agree instead of one clobbering the other. Recorded *before*
     # defaulting -- see the calculated-variable check below, which needs to tell a
@@ -11840,6 +12118,54 @@ def compare(
             "surfaces, not both."
         )
 
+    has_transect = (
+        (
+            "transect" in (select.get("test") or {})
+            or "transect" in (select.get("reference") or {})
+        )
+        if is_pair_spec(select)
+        else "transect" in select
+    )
+
+    # A CTD transect entry is compared as ONE transect -- its casts stacked into one
+    # section, each at its own time and place -- unless the request needs them apart
+    # (see _expand_transects): an explicit transect select (which already makes one
+    # section of all the references), isopycnals, a pair-spec select, a time fan,
+    # a vertical aggregate (a section keeps its vertical axis), or levels the caller
+    # named that are not a list of at least 2 fixed depths (a scalar, a band). Named
+    # levels that are such a list are the section's own; none named means, per
+    # variable, the levels each cast sampled it at, merged (see the section loop
+    # below).
+    named_levels = (
+        (list(depths) if isinstance(depths, list | tuple) else depths)
+        if depths_was_explicit
+        else next(iter(explicit_vertical_select.values()), None)
+    )
+    collapses_vertical = any(
+        _vertical_only(aggregate_for(aggregate, role)) for role in ("test", "reference")
+    )
+    one_transect = not (
+        has_transect
+        or sigma_request is not None
+        or is_pair_spec(select)
+        or times is not None
+        or collapses_vertical
+        or (named_levels is not None and not _is_fixed_depth_list(named_levels))
+    )
+
+    # Computed here, ahead of the has_transect checks below, so a
+    # select={"transect": {"from": "reference"}} request can check its one real
+    # precondition -- an ordered *collection* of casts, not a single source --
+    # before anything else runs. A CTD transect (one entry holding many casts) is
+    # already its casts here, so that check, the availability filter and both
+    # fan-outs below only ever see profiles; `transects` names the entries among
+    # them that make one section each. Reused unchanged by the fan-out.
+    refs, transects = _expand_transects(
+        [reference] if isinstance(reference, str) else list(reference),
+        over,
+        one_transect=one_transect,
+    )
+
     # A transect select needs its own checks before the ordinary vertical fan
     # runs, since a section wants none of the usual defaults: no ("surface",)
     # sentinel (there is no free surface to hoist to once both lanes are being
@@ -11849,14 +12175,6 @@ def compare(
     # those turning into a confusing error further down instead of a clear one
     # here, and it is cheap: the same check Comparison.__init__ runs on
     # construction, just early enough to name the compare()-level spelling.
-    has_transect = (
-        (
-            "transect" in (select.get("test") or {})
-            or "transect" in (select.get("reference") or {})
-        )
-        if is_pair_spec(select)
-        else "transect" in select
-    )
     if has_transect:
         if is_pair_spec(select):
             raise ValueError(
@@ -11877,7 +12195,9 @@ def compare(
                 "select={'transect': ...} needs an explicit depth list "
                 "alongside it -- the two lanes' native verticals share no "
                 "axis, so there is no default to guess: "
-                "select={'transect': ..., 'depth': [50, 200, ...]}."
+                "select={'transect': ..., 'depth': [50, 200, ...]}. (A CTD "
+                "transect entry needs none without select={'transect': ...}: "
+                "its casts are stacked on their own levels.)"
             )
         if over is not None:
             raise ValueError(
@@ -11951,7 +12271,7 @@ def compare(
                 "*collection* of casts to lay a path through -- "
                 f"reference={reference!r} names only one source. Pass "
                 "reference=[cast_1, cast_2, ...], in the order they fall "
-                "along the section."
+                "along the section, or one transect entry holding several casts."
             )
 
     # `fan_key`/`fan_values` generalize `depths` to whichever vertical axis is
@@ -11990,8 +12310,9 @@ def compare(
             "compare() got both times= and "
             "select={'transect': {'from': 'reference'}} -- fanning a section "
             "into one comparison per time bin is a follow-up, not yet built. "
-            "Drop times= (the aggregate's own {'time': 'mean'} already "
-            "collapses the axis)."
+            "Drop times= (each cast is matched at its own time, so a section has "
+            "no time axis left to fan). A CTD transect entry given with times= "
+            "and no select={'transect': ...} is compared cast by cast instead."
         )
     time_freq: str | None = None
     time_window: Any = None
@@ -12238,6 +12559,62 @@ def compare(
             print(f"  skipped {label}: {type(exc).__name__}: {exc}")
             unexpected.append((pair, exc))
 
+    def _form_sections(
+        var: Any,
+        members: list[str],
+        shown: str,
+        display_name: str,
+        sel: dict[str, Any],
+        tests_: list[str],
+        *,
+        own_levels: bool = False,
+    ) -> None:
+        """Align one section stacked from ``members`` (casts, in order) per test.
+
+        The casts together are the section's reference lane -- one Comparison per
+        test, named ``display_name`` (never a catalog name), printed and skipped as
+        ``shown`` -- and ``sel`` its select (the ``{"from": "reference"}`` transect
+        and the levels). ``own_levels``: the levels are, per variable, those each cast
+        sampled it at, merged, rather than a list the caller named
+        (:attr:`Comparison._section_own_levels`).
+        """
+        short = _short_variable_label(var)
+        prefix = f"{short} " if len(variables) > 1 else ""
+        for pair_num, tst in enumerate(tests_, start=1):
+            print(f"  comparing {prefix}{tst!r} vs {shown} [{pair_num}/{len(tests_)}]")
+            c = Comparison(
+                reference=display_name,
+                test=tst,
+                variable=var,
+                select=sel,
+                aggregate=aggregate,
+                method=method,
+                over=over,
+                time_method=time_method,
+                depth_method=depth_method,
+                tolerance=tolerance,
+                bin_anchor=bin_anchor,
+                min_coverage=min_coverage,
+                min_pairs=min_pairs,
+                metrics=metrics,
+                label=short,
+                cache=cache,
+                qc=qc,
+                subtract_mean=subtract_mean,
+                detide=detide,
+                depth_origin=depth_origin,
+                section_casts=members,
+                section_own_levels=own_levels,
+            )
+            try:
+                c.align(refresh=refresh)
+            except Exception as exc:
+                if not skip_missing:
+                    raise
+                _skip(short, f"{tst!r} vs {shown}", exc)
+                continue
+            out.append(c)
+
     for var in variables:
         # Pair each variable with the sources that actually carry it, rather than
         # forming a blind cross-product. Observational catalogs are usually one
@@ -12314,47 +12691,106 @@ def compare(
                 )
                 n_skipped += len(matching_tests)
                 continue
-            short = _short_variable_label(var)
-            display_name = "+".join(matching)
-            n_pairs = len(matching_tests)
-            for pair_num, tst in enumerate(matching_tests, start=1):
-                print(
-                    f"  comparing {short + ' ' if many_vars else ''}{tst!r} vs "
-                    f"{len(matching)} casts [{pair_num}/{n_pairs}]"
-                )
-                sel = _fanned_select(select, fan_key, fan_values[0], calculated)
-                c = Comparison(
-                    reference=display_name,
-                    test=tst,
-                    variable=var,
-                    select=sel,
-                    aggregate=aggregate,
-                    method=method,
-                    over=over,
-                    time_method=time_method,
-                    depth_method=depth_method,
-                    tolerance=tolerance,
-                    bin_anchor=bin_anchor,
-                    min_coverage=min_coverage,
-                    min_pairs=min_pairs,
-                    metrics=metrics,
-                    label=short,
-                    cache=cache,
-                    qc=qc,
-                    subtract_mean=subtract_mean,
-                    detide=detide,
-                    depth_origin=depth_origin,
-                    section_casts=matching,
-                )
+            _form_sections(
+                var,
+                matching,
+                f"{len(matching)} casts",
+                "+".join(matching),
+                _fanned_select(select, fan_key, fan_values[0], calculated),
+                matching_tests,
+            )
+            continue
+
+        # A CTD transect entry (see _expand_transects) is ONE section per test,
+        # built from the casts of it that offer this variable -- the same
+        # Comparison an explicit select={"transect": {"from": "reference"}} makes.
+        # Its levels are the caller's own list when they named one, else, per
+        # variable, the levels each cast sampled that variable at, merged, each cast
+        # then compared on exactly its own (NaN in both lanes where it has no
+        # sample of it). A calculated diagnostic has no vertical axis to stack, and
+        # fewer than 2 casts (with a sample of the variable, or sharing 2 levels) no
+        # section: those compare cast by cast, below, as the profiles they are.
+        sectioned: list[str] = []
+        for entry, entry_casts in transects.items():
+            members = [c for c in entry_casts if c in matching]
+            if calculated or len(members) < 2:
+                if members and not calculated:
+                    print(
+                        f"  only {len(members)} of {entry!r}'s {len(entry_casts)} "
+                        f"casts offer {var!r}; compared cast by cast"
+                    )
+                continue
+            own = named_levels is None
+            if own:
+                # Per variable. No cache-key bump: where these differ from the axis's
+                # levels the section used to raise, so none was ever stored.
                 try:
-                    c.align(refresh=refresh)
+                    per_cast = [
+                        _profile_reference_depths(
+                            c,
+                            _ref_depths_cache,
+                            variable_for(var, "reference"),
+                            qc=qc_for(qc, "reference"),
+                        )
+                        for c in members
+                    ]
                 except Exception as exc:
                     if not skip_missing:
                         raise
-                    _skip(short, f"{tst!r} vs {len(matching)} casts", exc)
+                    print(
+                        f"  {entry!r}: cannot read its casts' own levels ({exc}); "
+                        "compared cast by cast"
+                    )
                     continue
-                out.append(c)
-            continue
+                # A cast with no sample of this variable stays a member (the name
+                # counts it, as it does a cast left out for want of model data) and
+                # is left out of the section with a warning; it adds no level.
+                sampled = [v for v in per_cast if v]
+                if len(sampled) < 2:
+                    print(
+                        f"  {entry!r}: only {len(sampled)} of its {len(members)} casts "
+                        f"have a {variable_for(var, 'reference')!r} sample; "
+                        "compared cast by cast"
+                    )
+                    continue
+                levels = _union_levels(sampled)
+                longest = max(len(v) for v in sampled)
+                if len(levels) > 2 * longest:
+                    raise ValueError(
+                        f"{entry!r}: its {len(members)} casts have {len(levels)} "
+                        f"distinct levels between them, and the longest cast has "
+                        f"{longest} -- they look like raw samples at their own "
+                        "depths, not binned onto shared levels, so they cannot be "
+                        "stacked into one section as they are. Name the levels "
+                        "(select={'depth': [...]}, e.g. every metre), or compare "
+                        f"them cast by cast (reference=osk.cast_names({entry!r}))."
+                    )
+                if len(levels) < 2:
+                    print(
+                        f"  {entry!r}: its casts have {len(levels)} level in all, "
+                        "too few for a section; compared cast by cast"
+                    )
+                    continue
+            else:
+                levels = list(named_levels)
+            name = f"{entry} ({len(members)} casts)"
+            _form_sections(
+                var,
+                members,
+                repr(name),
+                name,
+                {
+                    **_fanned_select(select, "depth", levels, False),
+                    "transect": {"from": "reference"},
+                },
+                matching_tests,
+                own_levels=own,
+            )
+            sectioned.extend(members)
+        # Only the occurrences the entry expanded into: a cast also named on its own
+        # (reference=["line", "line[S1]"]) is still compared alone, below.
+        for cast in sectioned:
+            matching.remove(cast)
 
         n_pairs = len(matching) * len(matching_tests)
         pair_num = 0

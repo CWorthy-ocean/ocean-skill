@@ -1249,6 +1249,62 @@ so AKDT data is `-8`, local standard time kept year-round `-9`. `time_zone` is t
 DST-aware alternative; declare one or the other, per entry. Either applies only to
 naive timestamps — one carrying its own offset (`...Z`) is converted as written.
 
+### CTD transects
+
+A ship's CTD line is one file holding many casts, each at its own time and place — CF
+`featureType: trajectoryProfile`. Register it as one entry, saying how its casts are told
+apart; it then compares as one transect, and every cast of it is also a source of its
+own, `"<entry>[<cast id>]"`, that compares exactly like a `profile` registered by hand:
+
+```python
+build.add_source(cat, "line_p", url, featureType="trajectoryProfile",
+                 casts={"id": "station"},                   # the column that names the casts
+                 depth_convention={"origin": "surface"})    # a CTD's depths ride the tide
+osk.compare(reference="line_p", test="run_new", variables=[TEMPERATURE],
+            time_method="interp").plot()                    # one transect, drawn as a section
+osk.cast_names("line_p")              # ['line_p[P1]', 'line_p[P2]', ...], in time order
+osk.compare(reference=osk.cast_names("line_p"), test="run_new", variables=[TEMPERATURE],
+            time_method="interp")     # one profile comparison per cast
+```
+
+The transect is the casts side by side, in time order, each column **the model at that
+cast's own time and place**. A cast's depths follow its own `depth_convention` — for a
+surface-referenced cast the model target is z = ζ(t_cast) − d — and
+`time_method="interp"` interpolates between the model's steps onto the cast's instant
+(the default takes the nearest step). Nothing is averaged across the line, and the
+metrics pool every (cast, level) pair. Each variable's levels are the ones its casts
+sampled it at, merged (binned CTD data shares them), NaN in both lanes where a cast has
+no sample of it — salinity missing at one cast's top level leaves that one cell blank,
+and a cast with none at all is left out of that variable's transect with a warning.
+Casts that share almost none — raw,
+unbinned data, with more than twice as many merged levels as the longest cast has — are
+refused until the levels are named, `select={"depth": [10, 50, 100, 200]}` (or
+`depths=`), which reads each cast at its nearest sample, as for a profile. A transect of
+one cast is that cast's profile comparison.
+
+A list of cast names gives one comparison per cast: all of them, some
+(`osk.cast_names("line_p")[2:]`), or — with
+`select={"transect": {"from": "reference"}, "depth": [...]}` — one section of them in the
+list's order. `over=` picks the other readings of the entry: a vertical one (`over="Z"`)
+compares it cast by cast, and any other (`over="time"`) reads it as one moving platform,
+sampled along its track, which wants a `depths=`.
+
+`casts` says where one cast ends and the next begins, by the first of these that applies:
+`id`, a column (or netCDF variable) whose value names the cast; a netCDF variable with
+`cf_role: profile_id`, or a profile × level file (one cast per profile) — these two need
+no `casts=`; otherwise, once `casts=` is declared (`{"gap": "15min"}`, say), a pause
+between consecutive samples longer than `gap` (default `"15min"`) or a jump longer than
+`distance_m` (default 200), the casts then numbered `1`, `2`, ... A station that comes
+back later is `P1#2`. Nothing else is guessed: a `trajectoryProfile` with none of these
+(a glider's table, a ship's ADCP) is compared as one moving platform, with a warning that
+says how to declare its casts (a glider's: `casts={"id": "profile_id"}`), and
+`osk.cast_names` refuses it. `casts=` on any other featureType is ignored, with a
+warning. (A ragged array — CF `sample_dimension` — is not read yet.)
+
+A cast's time is its earliest sample and its position the median of its samples', so a
+ship that drifts during the cast is still one place (`casts={"position": "first"}`, or
+`"mean"`, changes that).
+
 ## Layout
 
 ```
