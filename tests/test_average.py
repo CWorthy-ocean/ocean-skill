@@ -162,6 +162,50 @@ def test_average_unions_mismatched_time_axes_with_skipna():
     assert temp.aligned["reference"].sel(time=extra[-1]).item() == pytest.approx(23)
 
 
+def test_average_pools_members_that_spell_the_time_axis_differently():
+    """SEANOE CTD moorings say ``TIME`` where the discrete samples say ``time``."""
+    bottle = _series_pair(TIMES[:3], [10, 11, 12], [10, 11, 12], lon=-150.0, lat=20.0)
+    mooring = _series_pair(
+        TIMES, [20, 21, 22, 23], [20, 21, 22, 23], lon=-152.0, lat=22.0
+    ).rename({"time": "TIME"})
+    pooled = ComparisonSet(
+        [
+            _station_comparison(reference="HV1", test="his", variable=TEMPERATURE, aligned=bottle),
+            _station_comparison(reference="HVSV1", test="his", variable=TEMPERATURE, aligned=mooring),
+        ]
+    )
+    ref = pooled.average(by="variable").comparisons[0].aligned["reference"]
+
+    assert ref.dims == ("time",)
+    np.testing.assert_allclose(ref.values, [15, 16, 17, 23])
+
+
+def test_average_pools_profiles_whose_axes_differ_in_name_and_order():
+    times = TIMES[:2]
+    depths = [0.0, 10.0]
+
+    def profile(tname, zname, values, lon):
+        da = xr.DataArray(
+            np.asarray(values, float), dims=("time", "depth"),
+            coords={"time": times, "depth": depths},
+        ).assign_coords(lon=lon, lat=20.0)
+        ds = xr.Dataset({"test": da, "reference": da, "difference": da * 0})
+        return ds.rename({"time": tname, "depth": zname})
+
+    a = profile("time", "depth", [[1, 2], [3, 4]], -150.0)
+    b = profile("TIME", "DEPTH", [[5, 6], [7, 8]], -151.0).transpose("DEPTH", "TIME")
+    pooled = ComparisonSet(
+        [
+            _station_comparison(reference="A", test="his", variable=TEMPERATURE, aligned=a),
+            _station_comparison(reference="B", test="his", variable=TEMPERATURE, aligned=b),
+        ]
+    )
+    ref = pooled.average(by="variable").comparisons[0].aligned["reference"]
+
+    assert set(ref.dims) == {"time", "depth"}
+    np.testing.assert_allclose(ref.transpose("time", "depth").values, [[3, 4], [5, 6]])
+
+
 # -- group of one --------------------------------------------------------------------
 
 

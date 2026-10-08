@@ -8857,6 +8857,27 @@ def _warn_sparse_time_overlap(stacked: Any) -> None:
     )
 
 
+def _common_axis_names(aligned: list[Any]) -> list[Any]:
+    """Rename each member's time/vertical axis to one shared name before pooling.
+
+    Products spell the same axis differently -- the SEANOE CTD moorings say ``TIME``
+    and ``DEPTH`` where the discrete samples say ``time`` and ``depth`` -- and
+    ``xr.concat`` lines members up by name, so without this it refuses ("'time' not
+    present in all datasets") or, joining outer, would treat the two spellings as
+    two separate axes. The first member that has the axis sets the name.
+    """
+    from ocean_skill import operators
+
+    for axis in ("T", "Z"):
+        names = [operators.resolve_dim(ds["reference"], axis) for ds in aligned]
+        target = next((n for n in names if n is not None), None)
+        aligned = [
+            ds.rename({n: target}) if n is not None and n != target else ds
+            for ds, n in zip(aligned, names)
+        ]
+    return aligned
+
+
 def _average_aligned(comps: list[Comparison]) -> Any:
     """Average a group of comparisons' aligned pairs into one composite dataset.
 
@@ -8876,7 +8897,9 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     :data:`MIN_AVERAGE_TIME_OVERLAP` of the resulting timestamps hold data from two
     or more members (stations visited minutes apart share none), the "average" is
     really one member's value at each step, so a warning suggests binning time first.
-    Members without a time axis are never checked.
+    Members without a time axis are never checked. Members spelling the time or
+    vertical axis differently (``TIME`` vs ``time``) are renamed to one name first
+    (:func:`_common_axis_names`).
     """
     import numpy as np
     import xarray as xr
@@ -8884,7 +8907,7 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     from ocean_skill.align import point_of
 
     stacked = xr.concat(
-        [c.aligned for c in comps],
+        _common_axis_names([c.aligned for c in comps]),
         dim="_average",
         join="outer",
         combine_attrs="drop_conflicts",
