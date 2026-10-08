@@ -1835,6 +1835,35 @@ any axis whose lines don't share one colour (`encode={"color": "source"}`, for e
 | `sharey` | `False` | every panel keeps its own value range; refused with `residual=True` |
 | `wspace` | `None` | tighten/loosen the gap between panels (static only); see [`wspace`/`hspace`](#wspace--hspace-series-profile-and-xy-static-only) |
 | `hspace` | `None` | as `wspace`, the vertical gap |
+| `highlight` | `None` | shade labelled stretches of the time axis behind the lines — `"seasons"`, `{"seasons": [...]}`, or a `{label: spec}` dict; see [`highlight`](#highlight-series) |
+
+### `highlight` (series)
+
+Shades labelled stretches of the time axis behind the lines, in both renderers. Colour
+already means *variable* on this family, so the bands are light grey (two alternating
+greys by order, translucent so lines stay legible); a spec's `"color"` overrides.
+
+```python
+avg.plot(highlight="seasons")                           # DJF / MAM / JJA / SON, labelled
+avg.plot(highlight={"seasons": ["AMJ", "JAS", "ON"]})   # your own seasons
+avg.plot(highlight={"spring": {"season": "AMJ"}, "fall": {"months": [10, 11]}})
+avg.plot(highlight={"bloom": slice("2024-05-01", "2024-06-15"), "storm": "2024-09"})
+avg.plot(highlight={"bloom": {"time": slice("2024-05", "2024-06"), "color": "#cfe3f1"}})
+```
+
+A spec is either anything `select={"time": ...}` accepts (a partial date, a `slice`, a
+`{"min", "max"}` dict, a list — selecting exactly what `select` would), or
+`{"season": "AMJ"}` / `{"months": [4, 5, 6]}`, which repeat every year (DJF wraps the
+year end, and a record spanning two winters draws two bands, both labelled). A dict may
+also carry `"time"` instead of the bare form, plus `"color"`; any other key raises. The
+`"seasons"` shorthands refuse seasons that share a month; hand-written highlights may
+overlap and simply stack. Each band's edges fall *halfway* between a selected point and
+its unselected neighbour (half a step beyond the ends of the record), so monthly means
+stamped on the 1st sit inside their band, not on its edge. Needs a real date axis (a
+`groupby` climatology is refused), and a highlight that selects none of a panel's
+points is skipped with one warning. Labels sit above the top row of panels in the static
+renderer; interactively they are data-coordinate text just inside the top edge, so they
+pan and zoom with the data.
 
 ### The statistics box
 
