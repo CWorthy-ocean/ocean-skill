@@ -127,6 +127,14 @@ def test_average_names_the_composite_reference_and_test():
     assert temp.test_name == "his"
 
 
+def test_average_names_a_long_source_list_by_its_count():
+    from ocean_skill.comparison import _pooled_name
+
+    names = [f"iceland_mooring_station_{i:02d}_ctd" for i in range(12)]
+    assert _pooled_name(names, "reference") == "mean of 12 reference sources"
+    assert _pooled_name(names[:1] * 3, "reference") == names[0]
+
+
 def test_average_reports_a_composite_station_position():
     pooled = _two_station_set()
     averaged = pooled.average(by="variable")
