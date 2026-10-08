@@ -17,6 +17,8 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from ocean_skill.align import TIME_DEPTH_OVER
+
 TEMPERATURE = "sea_water_temperature"
 
 
@@ -100,8 +102,8 @@ def test_whots_depth_axis_resolves_despite_being_uppercase(whots_and_model):
 
 def test_a_bare_read_of_whots_implies_a_profile(whots_and_model, monkeypatch):
     """No explicit over=: the featureType alone (both axes present, both unset --
-    depth defaults to SURFACE, a scalar) implies a mooring-at-the-surface series,
-    not a profile -- the pre-existing reading, unchanged.
+    depth defaults to the station's own levels, not a scalar surface) keeps both axes,
+    pooled to one metric, decided at construction exactly as compare() decides it.
     """
     from ocean_skill.comparison import Comparison
 
@@ -110,7 +112,7 @@ def test_a_bare_read_of_whots_implies_a_profile(whots_and_model, monkeypatch):
         c = Comparison(
             reference="whots_station", test="run_new", variable=TEMPERATURE, cache=False
         )
-    assert c.over == "time"
+    assert c.over == TIME_DEPTH_OVER
 
 
 def test_a_depth_list_with_time_pinned_reads_as_a_profile_end_to_end(

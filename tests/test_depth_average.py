@@ -173,6 +173,42 @@ def test_a_weighted_mean_differs_from_an_unweighted_one(roms_column):
     assert float(band.isel(**shelf)) != pytest.approx(float(unweighted.isel(**shelf)))
 
 
+def _with_a_land_cell(ds):
+    """Mask one rho cell the way standardize does: mask_rho 0, zeta and data NaN."""
+    land = {"eta_rho": 0, "xi_rho": 1}
+    mask = ds["mask_rho"].copy()
+    mask[land] = 0.0
+    zeta = xr.zeros_like(ds["h"]).where(mask > 0)
+    return ds.assign(mask_rho=mask, zeta=zeta, chl=ds["chl"].where(mask > 0)), land
+
+
+def test_a_band_mean_over_land_cells_is_nan_not_an_error(roms_column):
+    """Land-masked zeta makes the weights NaN there; weighted() would refuse them."""
+    ds, meta = roms_column
+    ref, _ = _prepare(ds, meta, "chl", {"depth": {"min": 0, "max": 5}}, {"Z": "mean"})
+    masked, land = _with_a_land_cell(ds)
+    da, _ = _prepare(
+        masked, meta, "chl", {"depth": {"min": 0, "max": 5}}, {"Z": "mean"}
+    )
+    assert np.isnan(float(da[land]))
+    water = masked["mask_rho"] > 0
+    xr.testing.assert_allclose(da.where(water), ref.where(water))
+
+
+def test_a_dask_band_mean_over_land_cells_computes(roms_column):
+    """Dask-backed weights defer xarray's NaN-weights check to compute time."""
+    ds, meta = roms_column
+    ref, _ = _prepare(ds, meta, "chl", {"depth": {"min": 0, "max": 5}}, {"Z": "mean"})
+    masked, land = _with_a_land_cell(ds)
+    da, _ = _prepare(
+        masked.chunk(), meta, "chl", {"depth": {"min": 0, "max": 5}}, {"Z": "mean"}
+    )
+    out = da.compute()
+    assert np.isnan(float(out[land]))
+    water = masked["mask_rho"] > 0
+    xr.testing.assert_allclose(out.where(water), ref.where(water))
+
+
 def test_several_interpolated_levels_are_all_kept(roms_column):
     """Regression: _prepare used to isel(z=0) and silently drop every level but one."""
     ds, meta = roms_column

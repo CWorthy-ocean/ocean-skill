@@ -88,6 +88,9 @@ def _write(cats, model, obs):
         featureType="timeSeries",
         standard_names={"temp (degC)": TEMPERATURE},
         nominal_depth_m=0.0,
+        # a mooring is compared at the surface only if its entry says it is there
+        geospatial_vertical_min=0.0,
+        geospatial_vertical_max=0.0,
     )
     path = build.save(cat, cats / "mine.yaml")
     st = path.stat()

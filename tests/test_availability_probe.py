@@ -70,7 +70,14 @@ def test_a_tabular_reference_is_converted_before_the_probe_resolves():
     available regardless -- which would let this test's ``AssertionError`` sentinel
     on the model lane trip instead of the intended ``KeyError``.
     """
-    meta = {"variables": [], "featureType": "timeSeries", "axes": {"T": "time"}}
+    meta = {
+        "variables": [],
+        "featureType": "timeSeries",
+        "axes": {"T": "time"},
+        # a surface buoy: a mooring is refused "surface" until its entry says so
+        "geospatial_vertical_min": 0.0,
+        "geospatial_vertical_max": 0.0,
+    }
 
     def fake_read(name, **kwargs):
         if name == "model":

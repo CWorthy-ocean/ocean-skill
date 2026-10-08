@@ -160,14 +160,15 @@ def test_a_bare_compare_keeps_both_axes_standing(hvalfjordur_and_model):
     assert m["std_reference"] > 0
 
 
-def test_explicit_surface_depths_still_reach_the_old_sparse_series(
+def test_an_explicit_shallow_depth_reaches_the_old_sparse_series(
     hvalfjordur_and_model,
 ):
-    """A control: depths=("surface",) named explicitly must still get today's
+    """A control: naming one depth explicitly (depths=(1,)) must still get the
     collapsed behavior (over="time", family="series") -- and, against this same
     ragged station, a visibly sparser sample than the bare pooled path above,
-    which is the whole motivation for this feature (only 2 of the 4 visits carry
-    anything close to the surface, so the old recipe throws the other two away).
+    which is the whole motivation for this feature (only 2 of the 4 visits sample
+    1 m, so the old recipe throws the other two away). The old spelling of this
+    control, depths=("surface",), is refused now: a cast has no surface.
     """
     from ocean_skill.comparison import compare
 
@@ -177,7 +178,7 @@ def test_explicit_surface_depths_still_reach_the_old_sparse_series(
             reference="hvalfjordur_hv1",
             test="run_new",
             variables=[TEMPERATURE],
-            depths=("surface",),
+            depths=(1,),
         )
     comparisons = list(result)
     assert len(comparisons) == 1
@@ -188,15 +189,33 @@ def test_explicit_surface_depths_still_reach_the_old_sparse_series(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         m = c.metrics()
-    assert m["n"] == 2  # only visits 1 and 3 have a near-surface (<=2 m) sample
+    assert m["n"] == 2  # only visits 1 and 3 sampled 1 m
 
 
-def test_a_direct_comparison_still_defaults_to_the_surface(hvalfjordur_and_model):
-    """A raw Comparison(...), built directly rather than through compare(), has no
-    depth-fan auto-fill to reach for -- _profile_depth_plan (and the both_standing
-    routing it computes) only runs inside compare()'s own fan loop. So this stays
-    exactly the pre-existing reading: depth defaults to the surface, time is what
-    survives.
+def test_an_explicit_surface_is_refused_for_a_repeat_visit_station(
+    hvalfjordur_and_model,
+):
+    """The old "surface" meant "the shallowest level of whichever visit" -- an
+    answer to a question nobody asked. It now says what the station does have.
+    """
+    from ocean_skill.comparison import compare
+
+    with pytest.raises(ValueError, match="no surface measurement") as err:
+        compare(
+            reference="hvalfjordur_hv1",
+            test="run_new",
+            variables=[TEMPERATURE],
+            depths=("surface",),
+        )
+    assert "its shallowest level is 1 m" in str(err.value)
+
+
+def test_a_direct_comparison_is_built_on_the_pre_default_reading(hvalfjordur_and_model):
+    """A raw Comparison(...), built directly rather than through compare(), decides
+    ``over`` at construction -- as if the depth it defaults to were already there (the
+    station's own levels, filled in at align() time from the same _profile_depth_plan
+    compare() uses; see tests/test_surface_and_layers.py), not the surface a station
+    does not have. So both axes are kept, before and after the align.
     """
     from ocean_skill.comparison import Comparison
 
@@ -208,7 +227,7 @@ def test_a_direct_comparison_still_defaults_to_the_surface(hvalfjordur_and_model
             variable=TEMPERATURE,
             cache=False,
         )
-    assert c.over == "time"
+    assert c.over == TIME_DEPTH_OVER
 
 
 def test_a_pinned_visit_reads_as_one_profile_on_its_own_depths(hvalfjordur_and_model):

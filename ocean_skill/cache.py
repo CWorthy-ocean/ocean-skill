@@ -45,6 +45,8 @@ __all__ = [
     "info",
     "obs_dir",
     "path",
+    "report_use",
+    "verbose",
 ]
 
 #: Bumped when the stored layout changes in a way that makes old entries wrong to
@@ -154,6 +156,14 @@ _ORDER_ATTR = "_osk_var_order"
 _enabled = True
 _override_dir: Path | None = None
 _announced = False
+_verbose = True
+
+#: What :func:`report_use` says a cache hit did, in the words the user reads. Kept here
+#: rather than at each call site so the wording is one list and a test can assert on it.
+USED_ALIGNED = "reused the saved comparison"
+USED_PAIRS = "derived from saved model-data matches (model not read)"
+USED_LANE = "reused the saved model lane"
+SAVED_PAIRS = "saved model-data matches for reuse"
 
 
 def base_dir() -> Path:
@@ -408,10 +418,36 @@ def key_for_calculated(
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def verbose(on: bool = True) -> None:
+    """Turn the cache's informational printing on (the default) or off.
+
+    Covers the one-time banner and the per-comparison :func:`report_use` lines --
+    everything the cache says about itself, never a warning. Quiet is for a script
+    or a notebook cell that runs hundreds of comparisons.
+    """
+    global _verbose
+    _verbose = bool(on)
+
+
+def report_use(label: str, what: str) -> None:
+    """Say, in one line, that the cache answered (or filled) a comparison.
+
+    A cache hit is otherwise invisible, and a result that came from saved pairs
+    rather than a fresh model read is exactly what a user comparing run times or
+    chasing a stale entry wants to know. ``label`` names the comparison, ``what``
+    is one of the ``USED_*``/``SAVED_*`` phrases. Silent when caching is off or
+    :func:`verbose` was turned off.
+    """
+    if _enabled and _verbose:
+        print(f"ocean-skill: cache: {label} -- {what}")
+
+
 def _announce() -> None:
     """Print where the cache lives and how to turn it off — once per process."""
     global _announced
     if _announced:
+        return
+    if not _verbose:
         return
     _announced = True
     print(
