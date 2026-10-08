@@ -1351,6 +1351,52 @@ def _draw_series_lines(
     return drawn
 
 
+#: Colour of a ``highlight=`` band's label, and its size as a fraction of the tick
+#: label.
+_HIGHLIGHT_LABEL_COLOR = "0.35"
+_HIGHLIGHT_LABEL_SCALE = 0.9
+
+
+def _draw_highlights(ax, spans, *, label_size: float | None = None) -> None:
+    """Shade ``spans`` behind ``ax``'s lines; with ``label_size``, label each band too.
+
+    ``spans`` come from :func:`ocean_skill.plot.series.highlight_spans`; a label is
+    centred on its band just above the axes.
+
+    ``zorder=0`` puts a band under every line and gridline regardless of when it is
+    drawn. The label is a blended transform -- x in data, y in axes fractions -- so it
+    sits on the frame's top edge however the y range turns out; the caller clears the
+    title's way for it (see the pad in :func:`series`). Only the top row carries labels,
+    the same way a shared time axis only carries its dates on the bottom.
+    """
+    import matplotlib.dates as mdates
+
+    from ocean_skill.plot.series import HIGHLIGHT_ALPHA
+
+    for span in spans:
+        ax.axvspan(
+            span.start,
+            span.end,
+            color=span.color,
+            alpha=HIGHLIGHT_ALPHA,
+            linewidth=0,
+            zorder=0,
+        )
+        if label_size is not None:
+            centre = mdates.date2num(span.start) / 2 + mdates.date2num(span.end) / 2
+            ax.text(
+                centre,
+                1.0,
+                span.label,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="bottom",
+                fontsize=label_size,
+                color=_HIGHLIGHT_LABEL_COLOR,
+                clip_on=False,
+            )
+
+
 def _metrics_box(ax, panel, metrics_kwargs: dict[str, Any]) -> None:
     """Put the statistics box in the corner :mod:`ocean_skill.plot.series` measured."""
     if not panel.metrics_text:
@@ -1426,6 +1472,7 @@ def series(
     suptitle_kwargs: dict[str, Any] | None = None,
     legend_kwargs: dict[str, Any] | None = None,
     line_kwargs: dict[str, Any] | None = None,
+    highlight=None,
 ):
     """Draw time series: one panel per group, both lanes of each comparison overlaid.
 
@@ -1486,6 +1533,15 @@ def series(
     of a panel's own width/height ``constrained_layout`` reserves as a gutter
     (matplotlib's own names; default ``0.02`` each, left alone when unset).
 
+    ``highlight=`` shades labelled stretches of the time axis behind the lines --
+    ``"seasons"`` for DJF/MAM/JJA/SON, ``{"seasons": [...]}`` for your own, or a
+    ``{label: spec}`` dict where a spec is anything ``select={"time": ...}`` takes, or
+    ``{"season": "AMJ"}`` / ``{"months": [4, 5, 6]}``, plus an optional ``"color"``. The
+    bands are grey by default (colour already means *variable* here); each is labelled
+    above the top row of panels. Needs a real date axis. See
+    :func:`ocean_skill.plot.series.normalize_highlight` and
+    :func:`ocean_skill.plot.series.highlight_spans` (where the edges fall).
+
     Sized like every other family — ``size``/``zoom``/``figsize``, type from geometry
     (:mod:`ocean_skill.plot.typography`) — with the statistics box placed in whichever
     corner the data leaves emptiest, since a line panel, unlike a map, does not fill
@@ -1529,6 +1585,7 @@ def series(
         colors=colors,
         ncols=ncols,
         nrows=nrows,
+        highlight=highlight,
     )
     canvas = resolve_canvas(size, zoom)
     _warn_if_overplotted(layout, canvas)
@@ -1590,6 +1647,8 @@ def series(
     _apply_subplot_spacing(fig, wspace=wspace, hspace=hspace)
     flat = list(axes.ravel())
 
+    labelled_panels = set(_series_layout.top_row_panels(layout))
+    label_size = scale["tick_label"] * _HIGHLIGHT_LABEL_SCALE
     per_panel: list[tuple[Any, list]] = []
     for index, panel in enumerate(layout.panels):
         ax = flat[index * (2 if residual else 1)]
@@ -1602,10 +1661,23 @@ def series(
             ax.set_visible(False)
             per_panel.append((ax, []))
             continue
+        title_pad: dict[str, float] = {}
+        if panel.highlight_spans:
+            labelled = index in labelled_panels
+            _draw_highlights(
+                ax, panel.highlight_spans, label_size=label_size if labelled else None
+            )
+            if labelled:
+                # The band labels sit on the frame's top edge, exactly where a title
+                # at the default pad would go: lift the title by their height (a
+                # title_kwargs pad wins, as with the cast names on a section).
+                title_pad["pad"] = plt.rcParams["axes.titlepad"] + 1.4 * label_size
         handles = _draw_series_lines(ax, panel.lines, line_kwargs, mark=mark)
         per_panel.append((ax, handles))
         ax.set_title(
-            panel.title, fontsize=scale["title"], **_without_font(title_kwargs)
+            panel.title,
+            fontsize=scale["title"],
+            **{**title_pad, **_without_font(title_kwargs)},
         )
         ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
         if panel.ylabel_color:
@@ -1626,6 +1698,7 @@ def series(
         _x_axis(ax, scale, tick_label_kwargs, date=layout.date_axis, ticks=layout.xticks)
         if panel.residual:
             strip = flat[index * 2 + 1]
+            _draw_highlights(strip, panel.highlight_spans)
             _draw_series_lines(strip, panel.residual, line_kwargs, mark=mark)
             strip.axhline(0.0, color="0.7", linewidth=0.7, zorder=1)
             # Spelled exactly as field_grid labels its difference colorbar, so the two

@@ -34,15 +34,21 @@ from ocean_skill.plot import style as _style
 from ocean_skill.plot._statistic import statistic_of, units_text
 
 __all__ = [
+    "HIGHLIGHT_ALPHA",
+    "Highlight",
+    "HighlightSpan",
     "Layout",
     "Panel",
     "compose",
     "corner_placement",
+    "highlight_spans",
     "item_roles",
     "line_specs",
+    "normalize_highlight",
     "panel_title",
     "remap_line_labels",
     "time_values",
+    "top_row_panels",
     "value_span",
 ]
 
@@ -172,6 +178,9 @@ class Panel:
     #: such a panel's axes rather than drawing an empty one, the same way a
     #: grid wider than its panel count already hides its trailing cells.
     blank: bool = False
+    #: Bands ``highlight=`` shades behind this panel's lines, already resolved to this
+    #: panel's own x values (see :func:`highlight_spans`); empty without ``highlight=``.
+    highlight_spans: tuple[HighlightSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -373,6 +382,275 @@ def groupby_ticks(dim: str, values) -> tuple[tuple[float, str], ...] | None:
         return None
     uniq = sorted({int(v) for v in np.asarray(values).ravel().tolist()})
     return tuple((float(v), month_label(v)) for v in uniq)
+
+
+#: Fill for ``highlight=`` bands, alternating by highlight order. Grey, not hue: the
+#: lines drawn over a band already spend the categorical colour cycle on *variable*
+#: (see :mod:`ocean_skill.plot.style`), so a coloured band would read as one more
+#: variable, and two neighbouring greys are all that is needed to tell adjacent bands
+#: (DJF beside MAM) apart. The alpha keeps lines and markers legible through a band.
+HIGHLIGHT_COLORS = ("#d9d9d9", "#bdbdbd")
+HIGHLIGHT_ALPHA = 0.4
+
+#: What a single-point record's band spans either side of the point -- an arbitrary
+#: but visible width, since there is no neighbour to take a step from.
+_LONE_POINT_HALF_BAND = np.timedelta64(12, "h")
+
+#: The keys a ``highlight=`` spec dict may carry: exactly one of the first three picks
+#: the stretch, ``color`` is optional. See :func:`normalize_highlight`.
+_HIGHLIGHT_WHAT = ("time", "season", "months")
+_HIGHLIGHT_KEYS = frozenset((*_HIGHLIGHT_WHAT, "color"))
+
+
+@dataclass(frozen=True)
+class Highlight:
+    """One ``highlight=`` entry, validated.
+
+    A label and *either* a time-select form (``time``, anything ``select={"time":
+    ...}`` accepts) *or* a month set (``months``, repeated every year).
+    """
+
+    label: str
+    time: Any = None
+    months: tuple[int, ...] | None = None
+    color: str | None = None
+    #: Set for the seasons the bare ``"seasons"`` shorthand generates: a season the
+    #: record never reaches (DJF on an Apr-Nov cruise) is expected there, not a
+    #: mistake, so it is skipped without the "selects none" warning a named
+    #: highlight gets.
+    quiet: bool = False
+
+
+@dataclass(frozen=True)
+class HighlightSpan:
+    """One band to shade on one panel, resolved to concrete edges.
+
+    What a renderer draws. A highlight that recurs yearly yields one span per year, all
+    labelled.
+    """
+
+    start: np.datetime64
+    end: np.datetime64
+    label: str
+    color: str
+
+
+def _month_name(month: int) -> str:
+    import calendar
+
+    return calendar.month_name[month]
+
+
+def _season_highlights(seasons, *, quiet: bool = False) -> tuple[Highlight, ...]:
+    """Expand the ``"seasons"`` shorthand: one month-set highlight per season, by name.
+
+    Refuses seasons that share a month. A generic highlight may overlap another (the
+    fills simply stack), but a *seasons* list is read as a partition of the year -- two
+    seasons both claiming July would draw the same band twice under two different
+    labels, which is a typo far more often than a wish.
+    """
+    from ocean_skill import operators
+
+    validated = operators._validate_seasons(seasons)
+    owner: dict[int, str] = {}
+    for season in validated:
+        for month in operators._season_months(season):
+            if month in owner:
+                raise ValueError(
+                    f"highlight seasons {owner[month]!r} and {season!r} both contain "
+                    f"{_month_name(month)}; seasons shaded this way must not overlap. "
+                    "Use the {label: {'season': ...}} form for overlapping stretches."
+                )
+            owner[month] = season
+    return tuple(
+        Highlight(label=s, months=operators._season_months(s), quiet=quiet)
+        for s in validated
+    )
+
+
+def _month_set(label: str, months) -> tuple[int, ...]:
+    ok = (
+        isinstance(months, (list, tuple, set, np.ndarray))
+        and len(months) > 0
+        and all(
+            isinstance(m, (int, np.integer))
+            and not isinstance(m, bool)
+            and 1 <= m <= 12
+            for m in months
+        )
+    )
+    if not ok:
+        raise ValueError(
+            f"highlight {label!r}: 'months' must be a non-empty list of integers "
+            f"1-12, got {months!r}."
+        )
+    return tuple(sorted({int(m) for m in months}))
+
+
+def _parse_highlight(label: Any, spec: Any) -> Highlight:
+    from ocean_skill import operators
+
+    label = str(label)
+    if isinstance(spec, dict) and set(spec) & _HIGHLIGHT_KEYS:
+        # A dict naming any of time/season/months/color is the keyed form; a bare
+        # {"min", "max"} dict is a time-select form instead (the YAML spelling of a
+        # slice), and the two never share a key, so the split is unambiguous.
+        unknown = sorted(str(k) for k in set(spec) - _HIGHLIGHT_KEYS)
+        if unknown:
+            raise ValueError(
+                f"highlight {label!r} has unknown key(s) {unknown}; a spec dict takes "
+                "one of 'time', 'season' or 'months', plus an optional 'color'."
+            )
+        given = [k for k in _HIGHLIGHT_WHAT if k in spec]
+        if len(given) != 1:
+            raise ValueError(
+                f"highlight {label!r} needs exactly one of 'time', 'season' or "
+                f"'months'; got {given or 'none of them'}."
+            )
+        color = spec.get("color")
+        if color is not None and not isinstance(color, str):
+            raise ValueError(
+                f"highlight {label!r}: 'color' must be a string, got {color!r}."
+            )
+        if "time" in spec:
+            return Highlight(label=label, time=spec["time"], color=color)
+        if "season" in spec:
+            months = operators._season_months(spec["season"])
+        else:
+            months = _month_set(label, spec["months"])
+        return Highlight(label=label, months=months, color=color)
+    if isinstance(spec, dict) and not (spec and set(spec) <= {"min", "max"}):
+        unknown = sorted(str(k) for k in spec) or ["(empty dict)"]
+        raise ValueError(
+            f"highlight {label!r} has unknown key(s) {unknown}; use {{'min': .., "
+            "'max': ..}} for a time range, or one of 'time', 'season', 'months'."
+        )
+    return Highlight(label=label, time=spec)
+
+
+def normalize_highlight(highlight) -> tuple[Highlight, ...]:
+    """Validate ``highlight=``; return its entries in draw order (``()`` for ``None``).
+
+    ``"seasons"`` shades :data:`ocean_skill.operators.DEFAULT_SEASONS`;
+    ``{"seasons": [...]}`` shades a custom list (and must be the dict's only key);
+    anything else is a ``{label: spec}`` dict, in insertion order. A spec is either a
+    time-select form -- whatever ``operators.select(obj, {"time": spec})`` accepts: a
+    partial-date string, a ``slice``, a ``{"min", "max"}`` dict or a list -- or
+    ``{"season": "AMJ"}`` / ``{"months": [4, 5, 6]}``, a month set repeated every year;
+    a dict may also carry ``"time"`` (instead of the bare form) and a ``"color"``.
+    ``"seasons"`` is therefore a reserved label.
+    """
+    if highlight is None:
+        return ()
+    if isinstance(highlight, str):
+        if highlight != "seasons":
+            raise ValueError(
+                f"highlight={highlight!r} is not a shorthand this family knows; "
+                "expected 'seasons', {'seasons': [...]}, or a {label: spec} dict."
+            )
+        from ocean_skill import operators
+
+        return _season_highlights(operators.DEFAULT_SEASONS, quiet=True)
+    if not isinstance(highlight, dict) or not highlight:
+        raise ValueError(
+            "highlight= takes 'seasons', {'seasons': [...]}, or a non-empty "
+            f"{{label: spec}} dict; got {highlight!r}."
+        )
+    if "seasons" in highlight:
+        extra = sorted(str(k) for k in highlight if k != "seasons")
+        if extra:
+            raise ValueError(
+                "highlight={'seasons': ...} must be the only key, but also got "
+                f"{extra}."
+            )
+        return _season_highlights(highlight["seasons"])
+    return tuple(_parse_highlight(label, spec) for label, spec in highlight.items())
+
+
+def _selected(times, highlight: Highlight) -> np.ndarray:
+    """Return, per time in ``times``, whether it is inside ``highlight``.
+
+    A month set is a plain month test. A time-select form goes through
+    :func:`ocean_skill.operators.select` on a probe indexed by ``times`` -- not
+    reimplemented -- so a partial date, a slice, a ``{"min", "max"}`` dict or a list
+    mean here exactly what they mean in ``select={"time": ...}``. The probe carries
+    positions, so the answer is read back as indices rather than by matching times
+    (``select`` snaps an instant to its nearest step, so values would not round-trip).
+    """
+    mask = np.zeros(len(times), dtype=bool)
+    if highlight.months is not None:
+        months = times.astype("datetime64[M]").astype("int64") % 12 + 1
+        return np.isin(months, highlight.months)
+    import xarray as xr
+
+    from ocean_skill import operators
+
+    probe = xr.DataArray(np.arange(len(times)), coords={"time": times}, dims="time")
+    try:
+        picked = operators.select(probe, {"time": highlight.time})
+    except KeyError:
+        # select's own "no data within that period" -- an empty selection here, which
+        # compose() reports as a warning naming the highlight rather than an error.
+        return mask
+    mask[np.atleast_1d(picked.values)] = True
+    return mask
+
+
+def highlight_spans(times, highlights) -> tuple[HighlightSpan, ...]:
+    """Return the bands ``highlights`` shade over a panel whose lines sit at ``times``.
+
+    The edge rule, in one place so both renderers draw the same bands. The panel's
+    x values are the sorted unique union of ``times``; a highlight selects some of
+    them, and each maximal run of consecutive selected points is one band. A band
+    edge lies *halfway* between a selected point and its unselected neighbour, and
+    at either end of the record half a step beyond the end point (``+-12 h`` for a
+    one-point record). Monthly means stamped on the 1st therefore sit visibly inside
+    their band rather than on its edge, and a band never claims time nearer an
+    unselected point than a selected one. A highlight recurring across years (DJF)
+    gives one band per run, each carrying the label.
+
+    Bands come back in highlight order (the draw order), coloured by the highlight's
+    own ``color`` or else :data:`HIGHLIGHT_COLORS` alternating by position. A
+    highlight selecting nothing contributes no band.
+    """
+    x = np.asarray(times).astype("datetime64[ns]")
+    x = np.unique(x[~np.isnat(x)])
+    if not x.size or not highlights:
+        return ()
+    if x.size == 1:
+        left, right = x - _LONE_POINT_HALF_BAND, x + _LONE_POINT_HALF_BAND
+    else:
+        step = np.diff(x)
+        mid = x[:-1] + step // 2
+        left = np.concatenate([[x[0] - step[0] // 2], mid])
+        right = np.concatenate([mid, [x[-1] + step[-1] // 2]])
+    spans = []
+    for position, highlight in enumerate(highlights):
+        flags = np.concatenate([[0], _selected(x, highlight).astype(int), [0]])
+        edges = np.diff(flags)
+        first = np.flatnonzero(edges == 1)
+        last = np.flatnonzero(edges == -1) - 1
+        color = highlight.color or HIGHLIGHT_COLORS[position % len(HIGHLIGHT_COLORS)]
+        spans.extend(
+            HighlightSpan(left[i], right[j], highlight.label, color)
+            for i, j in zip(first, last, strict=True)
+        )
+    return tuple(spans)
+
+
+def top_row_panels(layout: Layout) -> tuple[int, ...]:
+    """Return the indices of panels with no drawn panel above them.
+
+    These carry a ``highlight=`` band's label. Usually the first row; a hidden blank
+    cell lets the panel below it inherit the labels, so no column goes unlabelled.
+    """
+    n, ncols = len(layout.panels), layout.ncols
+    return tuple(
+        i
+        for i in range(n)
+        if not layout.panels[i].blank
+        and all(layout.panels[j].blank for j in range(i - ncols, -1, -ncols))
+    )
 
 
 def _depth_of(aligned) -> float | None:
@@ -956,6 +1234,7 @@ def compose(
     colors=None,
     ncols: int | None = None,
     nrows: int | None = None,
+    highlight=None,
 ) -> Layout:
     """Group ``items`` into panels and resolve every line's style and labelling.
 
@@ -1000,10 +1279,18 @@ def compose(
     ``ncols=``/``nrows=`` with a two-axis facet is refused instead -- the
     grid's shape is already fixed by how many distinct rows/columns exist --
     and so is ``residual=True``, which only ever lays out in a single column.
+
+    ``highlight=`` shades labelled stretches of the time axis behind the lines --
+    seasons, a bloom, a storm; see :func:`normalize_highlight` for the forms and
+    :func:`highlight_spans` for where the band edges fall. Each panel gets its own
+    bands, resolved against that panel's own x values. It needs a real date axis, so a
+    groupby/climatology axis refuses it, and a highlight selecting none of a panel's
+    points is skipped with one warning per label.
     """
     items = list(items)
     if not items:
         raise ValueError("a series needs at least one comparison to draw")
+    highlights = normalize_highlight(highlight)
     two_facets = rows is not None and cols is not None
     if two_facets and (ncols is not None or nrows is not None):
         raise ValueError(
@@ -1064,6 +1351,13 @@ def compose(
     axis_values = all_specs[0].values
     date_axis = date_axis_of(axis_values)
     axis_dim = str(axis_values.dims[0])
+    if highlights and not date_axis:
+        raise ValueError(
+            "highlight= shades stretches of a real-date time axis, but this figure's "
+            f"x axis is a {axis_dim!r} groupby (a climatology folds the record onto "
+            "one cycle, so there are no dates to shade). Drop highlight=, or plot "
+            "against the real time axis (aggregate with a resample instead)."
+        )
     xlabel = "time" if date_axis else axis_dim
     axis_coord = axis_values.coords.get(axis_dim)
     xticks = (
@@ -1116,6 +1410,7 @@ def compose(
         [[i for _, i in group] for group in grouped], metric_keys, metrics_labels
     )
     panels = []
+    unmatched: dict[str, list[str]] = {}
     for group, label_slice in zip(grouped, metrics_label_slices, strict=True):
         if not group:
             # A two-axis grid's cell nothing matched (facet_grid's own empty
@@ -1179,6 +1474,23 @@ def compose(
         # Colour a y label like its lines only where a twin axis makes the label/axis
         # pairing ambiguous; a lone axis already says what it is via its title.
         colored = bool(second)
+        spans = ()
+        if highlights:
+            # The panel's own x values -- its secondary axis shares the time axis, and
+            # the residual strip is the primary lines differenced, so the union of the
+            # drawn lines' times is every point a band can enclose.
+            spans = highlight_spans(
+                np.concatenate(
+                    [time_values(line.spec.values) for line in primary + second]
+                ),
+                highlights,
+            )
+            hit = {span.label for span in spans}
+            for h in highlights:
+                if h.label not in hit and not h.quiet:
+                    unmatched.setdefault(h.label, []).append(
+                        panel_title(specs, varying=varying)
+                    )
         panels.append(
             Panel(
                 title=panel_title(specs, varying=varying),
@@ -1194,7 +1506,19 @@ def compose(
                 metrics_text=box,
                 metrics_corner=free,
                 legend_corner=legend_at,
+                highlight_spans=spans,
             )
+        )
+
+    # Collected over every panel and warned once per label: a label that selects
+    # nothing is a property of the request, not of one panel, and a ten-panel figure
+    # should not say so ten times.
+    for label, where in unmatched.items():
+        warnings.warn(
+            f"highlight {label!r} selects none of the plotted points"
+            + (f" in panel(s) {where}" if len(where) < len(panels) else "")
+            + "; it is skipped.",
+            stacklevel=_stacklevel.find(),
         )
 
     resolved_titles = _titles.resolve_titles([p.title for p in panels], titles)

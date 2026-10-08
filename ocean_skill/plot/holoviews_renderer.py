@@ -5423,6 +5423,7 @@ def _series(
     sharey: bool = False,
     ncols=None,
     nrows=None,
+    highlight=None,
     **_,
 ):
     """Draw the ``series`` family interactively — the same layout, drawn with bokeh.
@@ -5453,10 +5454,21 @@ def _series(
     ``shared_axes`` — off here, since it links by label alone and would otherwise
     couple every panel drawing a dimension it happens to call "value", regardless
     of what this option asked for).
+
+    ``highlight=`` bands are ``hv.VSpan`` elements drawn first, so they sit under the
+    curves, with their labels as ``hv.Text`` along the top of the top row's panels --
+    in data coordinates, so (like the statistics box) they pan and zoom with the data
+    rather than staying pinned to the frame. The bands themselves come from
+    :func:`ocean_skill.plot.series.highlight_spans`, identical to the static renderer's.
     """
     hv = _extension()
 
-    from ocean_skill.plot.series import compose, time_values, value_span
+    from ocean_skill.plot.series import (
+        compose,
+        time_values,
+        top_row_panels,
+        value_span,
+    )
     from ocean_skill.plot.typography import SERIES_ASPECT
 
     if residual and sharey:
@@ -5482,6 +5494,7 @@ def _series(
         colors=colors,
         ncols=ncols,
         nrows=nrows,
+        highlight=highlight,
     )
     width, height, fontsize = _series_geometry(
         font_scale=font_scale,
@@ -5497,14 +5510,23 @@ def _series(
     # axis) draws to when sharex; a value range every panel draws to when sharey
     # or an explicit ylim was given. None otherwise -- each panel keeps its own
     # Bokeh-computed range, same as leaving the option off entirely.
-    shared_x = None
-    if sharex:
-        all_lines = [
-            line
-            for panel in layout.panels
+    # A highlight band's outer edges lie half a step beyond the end points, where
+    # bokeh's own range (drawn from the curves alone; annotations do not count) would
+    # clip them -- so the bands' edges join the range, as matplotlib's autoscale does.
+    def x_range_of(panels):
+        arrays = [
+            time_values(line.spec.values)
+            for panel in panels
             for line in panel.lines + panel.secondary + panel.residual
         ]
-        shared_x = value_span([time_values(line.spec.values) for line in all_lines])
+        arrays += [
+            np.array([span.start, span.end])
+            for panel in panels
+            for span in panel.highlight_spans
+        ]
+        return value_span(arrays)
+
+    shared_x = x_range_of(layout.panels) if sharex else None
     shared_y = None
     if ylim is not None:
         shared_y = value_span([], lim=ylim)
@@ -5517,8 +5539,9 @@ def _series(
             ]
         )
 
+    labelled_panels = set(top_row_panels(layout))
     plots = []
-    for panel in layout.panels:
+    for index, panel in enumerate(layout.panels):
         if panel.blank:
             # An empty cell in a two-axis rows=/cols= grid (see Panel.blank) --
             # holoviews' own explicit "nothing here" placeholder for a Layout
@@ -5526,12 +5549,22 @@ def _series(
             # grid keeps its shape) axes for the same cell.
             plots.append(hv.Empty())
             continue
+        panel_x = shared_x
+        if panel_x is None and panel.highlight_spans:
+            panel_x = x_range_of([panel])
         x_dim = hv.Dimension(layout.xlabel, label=layout.xlabel)
         # label=, never unit=: hv spells `unit` as "name (unit)" where matplotlib writes
         # "name [unit]", and the two renderers must print one axis label, not two.
         y_dim = hv.Dimension("value", label=panel.ylabel)
+        # Under the curves, and given the curves' own dimensions: a VSpan's default
+        # x/y would otherwise become the overlay's axis labels (the first one wins).
+        bands = _series_highlight_bands(hv, panel, x_dim, y_dim)
         overlay = hv.Overlay(
-            [_series_curve(hv, line, (x_dim, y_dim), mark=mark) for line in panel.lines]
+            bands
+            + [
+                _series_curve(hv, line, (x_dim, y_dim), mark=mark)
+                for line in panel.lines
+            ]
         )
         if panel.secondary:
             second = hv.Dimension("secondary", label=panel.secondary_ylabel or "")
@@ -5543,6 +5576,12 @@ def _series(
             )
         if panel.metrics_text:
             overlay = overlay * _series_metrics_text(hv, panel)
+        if panel.highlight_spans and index in labelled_panels:
+            overlay = overlay * hv.Overlay(
+                _series_highlight_labels(
+                    hv, panel, shared_y, font_size=fontsize["ticks"]
+                )
+            )
         hooks = [_axis_label_color_hook(panel)]
         if layout.legend_placement in ("below", "right"):
             hooks.append(_outside_legend_hook(layout.legend_placement))
@@ -5554,7 +5593,7 @@ def _series(
                 show_grid=True,
                 tools=["hover"],
                 **({"xticks": xticks} if xticks else {}),
-                **({"xlim": shared_x} if shared_x is not None else {}),
+                **({"xlim": panel_x} if panel_x is not None else {}),
                 **({"ylim": shared_y} if shared_y is not None else {}),
             ),
             hv.opts.Overlay(
@@ -5576,14 +5615,11 @@ def _series(
         plot = overlay.opts(*opt_specs)
         plots.append(plot)
         if panel.residual:
+            residual_dim = hv.Dimension("residual", label="test − reference")
             strip = hv.Overlay(
-                [
-                    _series_curve(
-                        hv,
-                        line,
-                        (x_dim, hv.Dimension("residual", label="test − reference")),
-                        mark=mark,
-                    )
+                _series_highlight_bands(hv, panel, x_dim, residual_dim)
+                + [
+                    _series_curve(hv, line, (x_dim, residual_dim), mark=mark)
                     for line in panel.residual
                 ]
             ) * hv.HLine(0.0).opts(color="0.7", line_width=1)
@@ -5593,7 +5629,7 @@ def _series(
                     frame_height=int(height * 0.35),
                     fontsize=fontsize,
                     **({"xticks": xticks} if xticks else {}),
-                    **({"xlim": shared_x} if shared_x is not None else {}),
+                    **({"xlim": panel_x} if panel_x is not None else {}),
                 ),
                 hv.opts.Overlay(show_legend=False, fontsize=fontsize),
             ]
@@ -5603,6 +5639,59 @@ def _series(
 
     out = hv.Layout(plots).cols(layout.ncols).opts(hv.opts.Layout(shared_axes=False))
     return out.opts(title=title or "")
+
+
+#: Colour of a ``highlight=`` band's label -- the static renderer's own grey.
+_HIGHLIGHT_LABEL_COLOR = "#595959"
+
+
+def _series_highlight_bands(hv, panel, x_dim, y_dim) -> list:
+    """Return one ``hv.VSpan`` per entry of the panel's ``highlight_spans``.
+
+    ``kdims`` are the panel's own x/y dimensions: left at a VSpan's default they would
+    win the axis labels, being first in the overlay, and the axes would read
+    ``x``/``y``.
+    """
+    from ocean_skill.plot.series import HIGHLIGHT_ALPHA
+
+    return [
+        hv.VSpan(span.start, span.end, kdims=[x_dim, y_dim]).opts(
+            color=span.color, alpha=HIGHLIGHT_ALPHA, line_width=0
+        )
+        for span in panel.highlight_spans
+    ]
+
+
+def _series_highlight_labels(hv, panel, y_limits, *, font_size: str) -> list:
+    """One ``hv.Text`` per band, centred on it, hung from the top of the panel's range.
+
+    The data-coordinate compromise :func:`_series_metrics_text` makes too: bokeh has no
+    axes-fraction annotation, so a label cannot sit above the frame as the static
+    renderer's does and instead sits just inside its top edge. The top is the explicit
+    y range when one was fixed, else the data's own maximum plus the 10% bokeh pads an
+    autoranged axis by.
+    """
+    if y_limits is not None:
+        top = float(y_limits[1])
+    else:
+        ys = np.concatenate(
+            [
+                np.asarray(line.spec.values.values, dtype="float64")
+                for line in panel.lines
+            ]
+        )
+        low, high = float(np.nanmin(ys)), float(np.nanmax(ys))
+        top = high + 0.1 * (high - low)
+    return [
+        hv.Text(
+            span.start + (span.end - span.start) // 2,
+            top,
+            span.label,
+            halign="center",
+            valign="top",
+        ).opts(text_color=_HIGHLIGHT_LABEL_COLOR, text_font_size=font_size)
+        for span in panel.highlight_spans
+    ]
 
 
 def _series_metrics_text(hv, panel):

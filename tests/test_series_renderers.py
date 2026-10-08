@@ -1501,3 +1501,319 @@ def test_taylor_and_target_accept_series_items_unchanged():
             warnings.simplefilter("ignore")
             fig = render(PlotSpec(family=family, items=items), renderer="matplotlib")
         assert fig is not None
+
+
+# -- highlight=: shaded, labelled stretches of the time axis --------------------------
+
+
+def _dated_item(
+    variable: str = TEMPERATURE,
+    *,
+    start: str = "2024-04-01",
+    periods: int = 8,
+    freq: str = "MS",
+    **kwargs,
+) -> dict:
+    """``_item`` on a chosen time axis (it always starts in January 2015)."""
+    item = _item(variable, n=periods, **kwargs)
+    item["aligned"] = item["aligned"].assign_coords(
+        time=pd.date_range(start, periods=periods, freq=freq)
+    )
+    return item
+
+
+def _highlight_layout(items, highlight):
+    return _series.compose(items, highlight=highlight)
+
+
+def _covered(spans, times):
+    """Return the ``times`` falling inside any of ``spans``."""
+    times = np.asarray(times, dtype="datetime64[ns]")
+    inside = np.zeros(len(times), dtype=bool)
+    for span in spans:
+        inside |= (times >= span.start) & (times < span.end)
+    return times[inside]
+
+
+MONTH_STARTS = pd.date_range("2024-04-01", periods=8, freq="MS").values  # Apr..Nov
+
+
+def test_highlight_edges_are_midpoints_so_monthly_points_sit_inside_their_band():
+    highlights = _series.normalize_highlight({"summer": {"months": [6, 7, 8]}})
+    (span,) = _series.highlight_spans(MONTH_STARTS, highlights)
+    # halfway between May 1 and Jun 1 (31 days apart), and between Aug 1 and Sep 1
+    assert span.start == np.datetime64("2024-05-16T12:00:00")
+    assert span.end == np.datetime64("2024-08-16T12:00:00")
+    assert span.label == "summer"
+    assert np.datetime64("2024-06-01") > span.start
+    assert np.datetime64("2024-08-01") < span.end
+
+
+def test_highlight_ends_of_the_record_extend_half_a_step():
+    highlights = _series.normalize_highlight({"all": {"months": list(range(1, 13))}})
+    (span,) = _series.highlight_spans(MONTH_STARTS, highlights)
+    # half of the Apr 1 -> May 1 step (30 d) before the first point, and half of the
+    # Oct 1 -> Nov 1 step (31 d) after the last
+    assert span.start == np.datetime64("2024-03-17T00:00:00")
+    assert span.end == np.datetime64("2024-11-16T12:00:00")
+    (lone,) = _series.highlight_spans(
+        MONTH_STARTS[:1], _series.normalize_highlight({"a": {"months": [4]}})
+    )
+    assert lone.end - lone.start == np.timedelta64(24, "h")
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "2024-06",
+        slice("2024-05-10", "2024-07-20"),
+        {"min": "2024-05-01", "max": "2024-06-30"},
+        ["2024-04-01", "2024-09-01"],
+    ],
+)
+def test_highlight_time_forms_select_the_points_select_would(form):
+    from ocean_skill import operators
+
+    probe = xr.DataArray(np.arange(8), coords={"time": MONTH_STARTS}, dims="time")
+    expected = operators.select(probe, {"time": form}).time.values
+    spans = _series.highlight_spans(
+        MONTH_STARTS, _series.normalize_highlight({"x": form})
+    )
+    assert list(_covered(spans, MONTH_STARTS)) == list(expected)
+    # ...and the keyed spelling means the same thing
+    keyed = _series.highlight_spans(
+        MONTH_STARTS, _series.normalize_highlight({"x": {"time": form}})
+    )
+    assert keyed == spans
+
+
+def test_highlight_djf_wraps_the_year_end_and_a_two_year_season_gives_two_bands():
+    times = pd.date_range("2023-10-01", "2025-03-01", freq="MS").values
+    (first, second) = _series.highlight_spans(
+        times, _series.normalize_highlight({"DJF": {"season": "DJF"}})
+    )
+    assert first.label == second.label == "DJF"
+    # Dec 2023, Jan 2024 and Feb 2024 are one band across the year end
+    assert list(_covered([first], times)) == list(
+        pd.to_datetime(["2023-12-01", "2024-01-01", "2024-02-01"]).values
+    )
+    assert second.start > first.end
+    assert list(_covered([second], times)) == list(
+        pd.to_datetime(["2024-12-01", "2025-01-01", "2025-02-01"]).values
+    )
+
+
+def test_highlight_seasons_shorthand_names_and_orders_the_default_seasons():
+    assert [h.label for h in _series.normalize_highlight("seasons")] == [
+        "DJF", "MAM", "JJA", "SON"
+    ]
+    custom = _series.normalize_highlight({"seasons": ["AMJ", "JAS", "ON"]})
+    assert [h.label for h in custom] == ["AMJ", "JAS", "ON"]
+    assert custom[2].months == (10, 11)
+
+
+def test_highlight_seasons_shorthand_refuses_overlapping_seasons():
+    with pytest.raises(ValueError, match=r"'AMJ' and 'JJA'.*June"):
+        _series.normalize_highlight({"seasons": ["AMJ", "JJA"]})
+    # generic highlights may overlap: the fills just stack
+    spans = _series.highlight_spans(
+        MONTH_STARTS,
+        _series.normalize_highlight(
+            {"a": {"season": "AMJ"}, "b": {"season": "JJA"}}
+        ),
+    )
+    assert [s.label for s in spans] == ["a", "b"]
+
+
+def test_highlight_seasons_must_be_the_only_key():
+    with pytest.raises(ValueError, match="only key"):
+        _series.normalize_highlight({"seasons": ["DJF"], "storm": "2024-09"})
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ({"x": {"season": "AMJ", "colour": "red"}}, "colour"),
+        ({"x": {"months": [4], "foo": 1, "bar": 2}}, r"\['bar', 'foo'\]"),
+        ({"x": {"min": "2024-05", "max": "2024-06", "extra": 1}}, "extra"),
+        ({"x": {"season": "AMJ", "months": [4]}}, "exactly one"),
+        ({"x": {"color": "red"}}, "exactly one"),
+        ({"x": {"months": [0, 13]}}, "1-12"),
+        ({"x": {"months": [4.5]}}, "1-12"),
+        ({"x": {"months": []}}, "1-12"),
+        ({"x": {"season": "XYZ"}}, "XYZ"),
+        ("winter", "shorthand"),
+        ({}, "non-empty"),
+    ],
+)
+def test_highlight_spec_errors_name_the_problem(bad, match):
+    with pytest.raises(ValueError, match=match):
+        _series.normalize_highlight(bad)
+
+
+def test_highlight_none_is_no_highlights_and_no_change():
+    assert _series.normalize_highlight(None) == ()
+    layout = _highlight_layout([_item()], None)
+    assert all(panel.highlight_spans == () for panel in layout.panels)
+
+
+def test_highlight_default_colours_alternate_and_a_colour_override_is_honoured():
+    spans = _series.highlight_spans(
+        MONTH_STARTS,
+        _series.normalize_highlight(
+            {
+                "a": {"season": "AMJ"},
+                "b": {"season": "JAS", "color": "tab:green"},
+                "c": {"time": slice("2024-10", "2024-11")},
+            }
+        ),
+    )
+    assert [s.color for s in spans] == [
+        _series.HIGHLIGHT_COLORS[0], "tab:green", _series.HIGHLIGHT_COLORS[0]
+    ]
+
+
+def test_highlight_needs_a_real_date_axis():
+    item = _dated_item()
+    item["aligned"] = item["aligned"].groupby("time.month").mean()
+    for renderer in ("matplotlib", "holoviews"):
+        with pytest.raises(ValueError, match="real-date"):
+            render(_spec([item], highlight="seasons"), renderer=renderer)
+
+
+def test_highlight_selecting_nothing_warns_once_per_label_and_is_skipped():
+    items = [_dated_item(), _dated_item(SALINITY, units="1e-3"), _dated_item("x_var")]
+    highlight = {
+        "nothing": "2030",
+        "summer": {"season": "JJA"},
+        "never": {"months": [1]},
+    }
+    with pytest.warns(UserWarning) as record:
+        layout = _highlight_layout(items, highlight)
+    messages = [str(w.message) for w in record if "selects none" in str(w.message)]
+    assert len(layout.panels) == 3, "three variables, three panels"
+    assert len([m for m in messages if "'nothing'" in m]) == 1
+    assert len([m for m in messages if "'never'" in m]) == 1
+    assert not [m for m in messages if "'summer'" in m]
+    for panel in layout.panels:
+        assert {s.label for s in panel.highlight_spans} == {"summer"}
+
+
+def test_highlight_is_resolved_per_panel_against_that_panels_own_times():
+    early = _dated_item(start="2024-01-01", periods=6)
+    late = _dated_item(SALINITY, start="2024-07-01", periods=6, units="1e-3")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        layout = _series.compose(
+            [early, late], rows="variable", highlight={"q": {"months": [3, 4, 8]}}
+        )
+    first, second = (p.highlight_spans for p in layout.panels)
+    assert len(first) == 1 and first[0].start < np.datetime64("2024-03-01")
+    assert len(second) == 1 and second[0].start > np.datetime64("2024-07-01")
+
+
+def _spans_per_axes(fig):
+    return [len(ax.patches) for ax in fig.axes]
+
+
+def _vspans(obj):
+    import holoviews as hv
+
+    return obj.traverse(lambda x: x, [hv.VSpan])
+
+
+def test_highlight_draws_the_same_bands_in_both_renderers():
+    import holoviews as hv
+
+    items = [
+        _dated_item(),
+        _dated_item(SALINITY, units="1e-3"),
+        _dated_item("third_var"),
+    ]
+    highlight = {
+        "spring": {"season": "AMJ", "color": "tab:green"},
+        "summer": {"season": "JAS"},
+        "storm": slice("2024-09", "2024-10"),
+    }
+    layout = _highlight_layout(items, highlight)
+    expected = [len(p.highlight_spans) for p in layout.panels]
+    assert expected == [3, 3, 3]
+
+    fig = render(_spec(items, highlight=highlight), renderer="matplotlib")
+    assert _spans_per_axes(fig) == expected
+    first = [p for p in fig.axes[0].patches]
+    import matplotlib.colors as mcolors
+
+    assert mcolors.to_rgb(first[0].get_facecolor()) == mcolors.to_rgb("tab:green")
+    assert first[0].get_alpha() == _series.HIGHLIGHT_ALPHA
+
+    obj = render(_spec(items, highlight=highlight), renderer="holoviews")
+    assert len(_vspans(obj)) == sum(expected)
+    colours = [v.opts.get("style").kwargs.get("color") for v in _vspans(obj)]
+    assert colours[0] == "tab:green"
+    # curves still come out as before, one per role
+    assert len(obj.traverse(lambda x: x, [hv.Curve])) == 6
+
+
+def test_highlight_seasons_shorthand_skips_absent_seasons_silently():
+    # DJF on an Apr-Nov record is expected for the bare shorthand, not a mistake;
+    # a list the caller spelled out still warns (see the test above).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        layout = _highlight_layout([_dated_item()], "seasons")
+    assert {s.label for s in layout.panels[0].highlight_spans} == {"MAM", "JJA", "SON"}
+    with pytest.warns(UserWarning, match="'DJF' selects none"):
+        _highlight_layout([_dated_item()], {"seasons": ["DJF", "MAM"]})
+
+
+def test_highlight_labels_the_top_row_only_in_both_renderers():
+    import holoviews as hv
+
+    items = [
+        _dated_item(),
+        _dated_item(SALINITY, units="1e-3"),
+        _dated_item("third_var"),
+    ]
+    base = render(_spec(items), renderer="matplotlib")
+    fig = render(_spec(items, highlight="seasons"), renderer="matplotlib")
+    n = len(_highlight_layout(items, "seasons").panels[0].highlight_spans)
+    assert n == 3  # MAM, JJA, SON; DJF has no data in Apr-Nov
+    extra = [
+        len(a.texts) - len(b.texts) for a, b in zip(fig.axes, base.axes, strict=True)
+    ]
+    assert extra == [n, 0, 0]
+    seasons = ("MAM", "JJA", "SON")
+    labels = [t.get_text() for t in fig.axes[0].texts if t.get_text() in seasons]
+    assert labels == ["MAM", "JJA", "SON"]
+
+    obj = render(_spec(items, highlight="seasons"), renderer="holoviews")
+    drawn = [t.data[2] for t in obj.traverse(lambda x: x, [hv.Text])]
+    assert sorted(t for t in drawn if t in seasons) == ["JJA", "MAM", "SON"]
+
+
+def test_highlight_also_shades_the_residual_strip():
+    item = _dated_item()
+    n = len(_highlight_layout([item], "seasons").panels[0].highlight_spans)
+    spec = _spec([item], highlight="seasons", residual=True)
+    fig = render(spec, renderer="matplotlib")
+    assert [len(ax.patches) for ax in fig.axes] == [n, n]
+    obj = render(spec, renderer="holoviews")
+    assert len(_vspans(obj)) == 2 * n
+
+
+def test_highlight_none_changes_nothing_in_either_renderer():
+    items = [_dated_item(), _dated_item(SALINITY, units="1e-3")]
+    fig = render(_spec(items, highlight=None), renderer="matplotlib")
+    base = render(_spec(items), renderer="matplotlib")
+    assert _spans_per_axes(fig) == [0] * len(fig.axes)
+    assert [len(a.texts) for a in fig.axes] == [len(a.texts) for a in base.axes]
+    assert _vspans(render(_spec(items, highlight=None), renderer="holoviews")) == []
+
+
+def test_highlight_is_a_declared_option_of_both_renderers():
+    import inspect
+
+    from ocean_skill.plot.matplotlib_renderer import _top_level_options, series
+
+    assert "highlight" in _top_level_options()
+    assert "highlight" in inspect.signature(series).parameters
