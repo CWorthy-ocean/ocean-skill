@@ -4405,6 +4405,7 @@ def _portrait(
     hover: bool = True,
     titles=None,
     colorbar_label_clipped: bool = False,
+    level_labels: dict[str, dict[str, str]] | None = None,
     **_,
 ):
     """Interactive portrait plot: hover a cell for its full metric record.
@@ -4430,6 +4431,10 @@ def _portrait(
     in ``names`` order -- ``None`` at a position keeps that panel's own title;
     the wrong count raises a copy-pasteable ``ValueError`` listing the current
     titles.
+
+    ``level_labels`` renames the row/column categories (and so the hover's row and
+    column fields) exactly as it does statically — see
+    :func:`ocean_skill.plot.summary.taylor`.
     """
     import pandas as pd
 
@@ -4443,7 +4448,7 @@ def _portrait(
         _resolve_metric_names,
         _shared_standard_name,
     )
-    from ocean_skill.plot.summary import pretty_level
+    from ocean_skill.plot.summary import _resolve_level_labels, pretty_level
     from ocean_skill.plot.typography import facet_layout
 
     hv = _extension()
@@ -4465,6 +4470,7 @@ def _portrait(
             rec["group"] = groups.get(
                 rec.get("reference"), groups.get(rec["label"], "other")
             )
+    level_labels = _resolve_level_labels(level_labels, recs)
     names = _resolve_metric_names(
         recs, metric_names if metric_names is not None else DEFAULT_MAP_METRICS
     )
@@ -4486,8 +4492,8 @@ def _portrait(
     # what field_levels' raw values feed into there too, so building the category
     # from the same function keeps the two renderers reading identically even though
     # bokeh's categorical axis has no separate "tick label" step to hook instead.
-    pretty_row = [pretty_level(row_by, v) for v in row_levels]
-    pretty_col = [pretty_level(col_by, v) for v in col_levels]
+    pretty_row = [pretty_level(row_by, v, level_labels) for v in row_levels]
+    pretty_col = [pretty_level(col_by, v, level_labels) for v in col_levels]
     row_dim = hv.Dimension(row_by, values=pretty_row)
     col_dim = hv.Dimension(col_by, values=pretty_col)
     hover_cols = [c for c in recs[0] if c not in (row_by, col_by)]
@@ -4499,8 +4505,8 @@ def _portrait(
             [
                 {
                     **r,
-                    row_by: pretty_level(row_by, r[row_by]),
-                    col_by: pretty_level(col_by, r[col_by]),
+                    row_by: pretty_level(row_by, r[row_by], level_labels),
+                    col_by: pretty_level(col_by, r[col_by], level_labels),
                     "value": float(r[name]),
                 }
                 for r in finite
@@ -6876,6 +6882,7 @@ def _target(
     summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
     **_,
 ):
     """Interactive Target diagram: hover a point for its full metric record.
@@ -6909,6 +6916,10 @@ def _target(
     ``normalize=False``, and (for ``robust``/``lim``) the clipped-not-annotated
     handling of whatever falls outside the axes.
 
+    ``level_labels`` renames legend levels exactly as it does statically — see
+    :func:`ocean_skill.plot.summary.taylor`. Only the legend entries are renamed: a
+    point's hover still lists the raw record, which is what the data holds.
+
     ``arrows`` means exactly what it does statically — see
     :func:`ocean_skill.plot.summary.target`'s docstring. Bokeh has no arrow glyph, so
     each segment is a separate ``Arrow`` annotation added via a finalize hook (the
@@ -6927,6 +6938,7 @@ def _target(
         _resolve_arrows,
         _resolve_colors,
         _resolve_legend_style,
+        _resolve_level_labels,
         _resolve_overlay_style,
         _resolve_per_level,
         _scalar_scale,
@@ -6971,6 +6983,20 @@ def _target(
         )
         for i in items
     ]
+    # groups= lands on `df` only (below), so the check gets its own copy carrying the
+    # synthesized "group" field, the same one summary._records builds statically.
+    level_labels = _resolve_level_labels(
+        level_labels,
+        [
+            dict(
+                r,
+                group=groups.get(r.get("reference"), groups.get(r["label"], "other")),
+            )
+            for r in recs
+        ]
+        if groups and level_labels is not None
+        else recs,
+    )
     recs = _drop_unplottable(recs, family="target", normalize=normalize)
     df = pd.DataFrame(recs)
     if groups:
@@ -7037,12 +7063,12 @@ def _target(
         # two renderers must not disagree about what the same group is called.
         if marker_levels and color_by:
             return (
-                f"{pretty_level(color_dim, color_level)} · "
-                f"{pretty_level(marker_by, marker_level)}"
+                f"{pretty_level(color_dim, color_level, level_labels)} · "
+                f"{pretty_level(marker_by, marker_level, level_labels)}"
             )
         if marker_levels:
-            return pretty_level(marker_by, marker_level)
-        return pretty_level(color_dim, color_level)
+            return pretty_level(marker_by, marker_level, level_labels)
+        return pretty_level(color_dim, color_level, level_labels)
 
     elements = []
     for mi, marker_level in enumerate(marker_levels or [None]):

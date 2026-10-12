@@ -157,6 +157,7 @@ def portrait(
     hover: bool | None = None,
     rasterize: bool | str | None = None,
     titles: Sequence[str | None] | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
 ):
     """Portrait plot: a heatmap scoreboard, one cell per ``(row_by, col_by)`` pair.
 
@@ -198,6 +199,12 @@ def portrait(
     in ``names`` order -- ``None`` at a position keeps that panel's own title;
     the wrong count raises a copy-pasteable ``ValueError`` listing the current
     titles.
+
+    ``level_labels={field: {level: text}}`` renames row/column tick labels for this
+    figure alone — ``{"test": {"run_a": "Baseline"}}`` — with the same matching rules
+    as :func:`ocean_skill.plot.summary.taylor` (raw value or default spelling, case-
+    and space-insensitive). A field no record carries raises; a level that matches
+    nothing warns, naming the levels present.
     """
     import matplotlib.pyplot as plt
 
@@ -210,7 +217,7 @@ def portrait(
         _warn_if_interactive_only,
         metric_panel_titles,
     )
-    from ocean_skill.plot.summary import _records, pretty_level
+    from ocean_skill.plot.summary import _records, _resolve_level_labels, pretty_level
     from ocean_skill.plot.typography import (
         facet_figsize,
         facet_layout,
@@ -222,6 +229,7 @@ def portrait(
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("portrait needs at least one comparison, got none")
+    level_labels = _resolve_level_labels(level_labels, recs)
     names = _resolve_metric_names(recs, metric_names)
     grids = {name: _grid(recs, row_by, col_by, name) for name in names}
     standard_name = _shared_standard_name(recs) if row_by == "variable" else None
@@ -266,11 +274,11 @@ def portrait(
         im = ax.imshow(matrix, cmap=colors.cmap, norm=colors.norm(), aspect="auto")
         ax.set_xticks(range(len(col_levels)))
         ax.set_xticklabels(
-            [pretty_level(col_by, v) for v in col_levels], **merged_tick
+            [pretty_level(col_by, v, level_labels) for v in col_levels], **merged_tick
         )
         ax.set_yticks(range(len(row_levels)))
         ax.set_yticklabels(
-            [pretty_level(row_by, v) for v in row_levels], **merged_tick
+            [pretty_level(row_by, v, level_labels) for v in row_levels], **merged_tick
         )
         ax.xaxis.set_ticks_position("top")
         ax.xaxis.set_label_position("top")

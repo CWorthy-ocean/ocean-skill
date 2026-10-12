@@ -590,3 +590,80 @@ def test_a_season_mask_fan_pools_stations_as_samples(world):
     assert record["time"] == "JJA"
     for name in ("bias", "rmse", "corr"):
         assert record[name] == pytest.approx(expected[name])
+
+
+def test_a_whole_year_season_rides_along_with_the_seasons(world):
+    # a season string can name any run of consecutive months, so "MAMJJASON" next
+    # to the three seasons gives a whole-period row in the same pooled table; on this
+    # July-only fixture it scores the same pile as JJA, and matches no times= at all
+    _align("visits")
+    _align("moor")
+    kwargs = dict(
+        test="his",
+        reference=["moor", "visits"],
+        variables=[TEMPERATURE],
+        select={"depth": {"min": 0, "max": 8}},
+        aggregate={"Z": "mean"},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        seasons = compare(**kwargs, times={"seasons": ["JJA", "MAMJJASON"]})
+        table = seasons.pool(by=["variable", "depth", "time"]).metrics()
+        whole = compare(**kwargs).pool(by=["variable", "depth"]).metrics()
+    rows = table.set_index("time")
+    assert list(rows.index) == ["JJA", "MAMJJASON"]
+    for name in ("n", "bias", "rmse", "corr"):
+        assert rows.loc["MAMJJASON", name] == pytest.approx(rows.loc["JJA", name])
+        assert whole.iloc[0][name] == pytest.approx(rows.loc["JJA", name])
+
+
+
+def test_sel_filters_by_depth_and_time_labels(world):
+    # .sel(depth=, time=) matches the metrics table's depth/time columns, ignoring
+    # case and spaces, on a pooled set and on the fan it came from
+    _align("visits")
+    _align("moor")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = compare(
+            test="his",
+            reference=["moor", "visits"],
+            variables=[TEMPERATURE],
+            depths=[{"min": 0, "max": 5}, {"min": 0, "max": 8}],
+            aggregate={"Z": "mean"},
+            times={"seasons": ["JJA", "MAMJJASON"]},
+        )
+        pooled = cs.pool(by=["variable", "depth", "time"])
+    surface = pooled.sel(depth="0-5m")
+    assert len(surface) == 2
+    assert set(surface.metrics()["depth"]) == {"0-5 m"}
+    assert len(pooled.sel(depth="0-5 M", time=["jja"])) == 1
+    assert len(cs.sel(depth="0-8m", time="MAMJJASON")) == 2
+    with pytest.raises(ValueError, match="have: 0-5 m, 0-8 m"):
+        pooled.sel(depth="0-9m")
+
+
+def test_relabel_renames_a_real_pooled_set_through_metrics_and_sel(world):
+    # relabel() renames the depth/time a pooled table reports once, so metrics() and
+    # .sel() read the new names, on the real compare -> pool pipeline
+    _align("visits")
+    _align("moor")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = compare(
+            test="his",
+            reference=["moor", "visits"],
+            variables=[TEMPERATURE],
+            depths=[{"min": 0, "max": 5}, {"min": 0, "max": 8}],
+            aggregate={"Z": "mean"},
+            times={"seasons": ["JJA", "MAMJJASON"]},
+        )
+        pooled = cs.pool(by=["variable", "depth", "time"])
+        table = pooled.relabel(
+            time={"MAMJJASON": "Mar–Nov"}, depth={"0-5 m": "Surface"}
+        ).metrics()
+        renamed = pooled.relabel(time={"MAMJJASON": "Mar–Nov"})
+    assert set(table["depth"]) == {"Surface", "0-8 m"}
+    assert set(table["time"]) == {"JJA", "Mar–Nov"}
+    assert len(renamed.sel(time="mar–nov")) == 2
+    assert set(pooled.metrics()["time"]) == {"JJA", "MAMJJASON"}  # original untouched
