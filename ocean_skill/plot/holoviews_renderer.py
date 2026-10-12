@@ -327,6 +327,22 @@ def _mark_clipped(obj, clim, data_range, *, log: bool = False, label_clipped=Fal
     )
 
 
+def _display_units(da, statistic):
+    """Return ``da`` with a spread's units spelled as its colour bar spells them.
+
+    hvplot labels the value dimension -- and so bokeh's hover readout -- from the
+    DataArray's own ``attrs["units"]``, which an aggregated field carries in its
+    machine spelling (``(mmol/m^3)^2``) while the colour bar, through
+    :func:`~ocean_skill.plot._statistic.units_text`, reads ``(mmol/m³)²``. A plain
+    field comes back as the same object, unchanged.
+    """
+    raw = da.attrs.get("units")
+    shown = units_text(raw, statistic)
+    if not raw or shown == str(raw):
+        return da
+    return da.assign_attrs(units=shown)  # a new object; the caller's attrs untouched
+
+
 def _quadmesh(
     da,
     *,
@@ -352,6 +368,7 @@ def _quadmesh(
     xticks: tuple[tuple[float, str], ...] | None = None,
     data_range: tuple[float, float] | None = None,
     label_clipped: bool = False,
+    statistic: str | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -386,9 +403,15 @@ def _quadmesh(
     ``clim`` against, for a panel whose bar answers for more than its own data (a row's
     test and reference share one scale); it defaults to this panel's.
     ``label_clipped=True`` adds the true extreme to the marked label.
+
+    ``statistic`` is the aggregation statistic the panel's field answers for, so the
+    hover readout spells a spread's units the way its colour bar does (see
+    :func:`_display_units`); it defaults to the field's own ``attrs["statistic"]``,
+    which a *difference* of two fields has lost to arithmetic -- its caller passes it.
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
+    da = _display_units(da, statistic if statistic is not None else statistic_of(da))
     frame_w, frame_h, fontsize = _panel_geometry(
         da,
         font_scale=font_scale,
@@ -1500,6 +1523,7 @@ def _field_row(
             clim=(vmin, vmax),
             data_range=scale_range,
             units=units,
+            statistic=statistic,
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -1516,6 +1540,7 @@ def _field_row(
             clim=(vmin, vmax),
             data_range=scale_range,
             units=units,
+            statistic=statistic,
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -1531,6 +1556,7 @@ def _field_row(
             cmap=div,
             clim=(-dmax, dmax),
             units=f"test − reference {units}",
+            statistic=statistic,
             geo=geo,
             font_scale=font_scale,
             canvas_factor=factor,
@@ -1910,6 +1936,7 @@ def _field_facet(
             clim=clims[row],
             data_range=ranges[row],
             units=units,
+            statistic=statistic,
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -2090,6 +2117,7 @@ def _section(
         clim=clim,
         data_range=data_range,
         units=units,
+        statistic=statistic,
         geo=False,
         log=log,
         font_scale=font_scale,
@@ -2510,6 +2538,7 @@ def _time_depth(
         clim=(lo, hi),
         data_range=data_range,
         units=units,
+        statistic=statistic,
         geo=False,
         log=log,
         font_scale=font_scale,
@@ -2989,6 +3018,7 @@ def _field_map_grid(
             clim=clim,
             data_range=reaches.get(i),
             units=units_text(item.get("units"), statistic),
+            statistic=statistic,
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -3281,14 +3311,14 @@ def _section_row(
             t, mark=mark, fill_levels=fill_levels, lines=lines["test"],
             casts=cast_layers,
             title=tl, cmap=seq, clim=seq_clim, units=units, log=log,
-            data_range=seq_range, **section_opts,
+            statistic=statistic, data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _section_panel(
             r, mark=mark, fill_levels=fill_levels, lines=lines["reference"],
             casts=cast_layers,
             title=rl, cmap=seq, clim=seq_clim, units=units, log=log,
-            data_range=seq_range, **section_opts,
+            statistic=statistic, data_range=seq_range, **section_opts,
             label_clipped=colorbar_label_clipped,
         ),
         _section_panel(
@@ -3300,6 +3330,7 @@ def _section_row(
             cmap=div,
             clim=div_clim,
             units=f"test − reference {units}",
+            statistic=statistic,
             data_range=div_range,
             **section_opts,
             label_clipped=colorbar_label_clipped,
@@ -3683,6 +3714,7 @@ def _time_depth_row(
             clim=clim,
             data_range=reach,
             units=panel_units,
+            statistic=statistic,
             geo=False,
             log=log_scale,
             font_scale=font_scale,
@@ -4964,6 +4996,7 @@ def _facet_movie(
             clim=(vmin, vmax),
             data_range=reach,
             units=units,
+            statistic=statistic,
             geo=geo,
             log=log,
             font_scale=font_scale,
@@ -5125,6 +5158,7 @@ def _field_movie(
                 clim=(vmin, vmax),
                 data_range=reach,
                 units=units,
+                statistic=statistic,
                 geo=geo,
                 log=log,
                 font_scale=font_scale,
@@ -5143,6 +5177,7 @@ def _field_movie(
                 clim=(vmin, vmax),
                 data_range=reach,
                 units=units,
+                statistic=statistic,
                 geo=geo,
                 log=log,
                 font_scale=font_scale,
@@ -5161,6 +5196,7 @@ def _field_movie(
             clim=(-dmax, dmax),
             data_range=diff_reach,
             units=f"test − reference {units}",
+            statistic=statistic,
             geo=geo,
             font_scale=font_scale,
             canvas_factor=factor,
