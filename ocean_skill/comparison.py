@@ -9416,8 +9416,23 @@ class ComparisonSet:
     def __getitem__(self, i):
         return self.comparisons[i]
 
-    #: Filter keys :meth:`sel` accepts.
-    _SEL_KEYS = ("variable", "standard_name", "source", "test", "reference")
+    #: Filter keys :meth:`sel` accepts -- every :data:`_LABEL_DIMS` dimension (the
+    #: same ones :meth:`pool`/:meth:`average`/``color_by`` group by) plus the
+    #: ``standard_name``/``source`` synonyms.
+    _SEL_KEYS = (
+        "variable",
+        "standard_name",
+        "source",
+        "test",
+        "reference",
+        "depth",
+        "time",
+        "demeaned",
+        "detided",
+    )
+
+    #: :meth:`sel` keys matched against a comparison's :data:`_LABEL_DIMS` label.
+    _SEL_LABEL_KEYS = ("depth", "time", "demeaned", "detided")
 
     def sel(self, **filters: Any) -> ComparisonSet:
         """Narrow this set to members matching every filter, returning a new set.
@@ -9441,6 +9456,14 @@ class ComparisonSet:
         narrowing to one station is ``.sel(reference="HV1")`` -- ``source="HV1"``
         would look for it among the (single) test names and match nothing.
 
+        ``depth``, ``time``, ``demeaned`` and ``detided`` match the label the
+        comparison reads as on a diagram and in :meth:`metrics` (:data:`_LABEL_DIMS`),
+        ignoring spaces and case -- so ``depth="0-5m"`` and ``depth="0-5 m"`` both pick
+        out a 0-5 m band and ``time="mam"`` a spring season. A depth or time may also be
+        given as the spec it was requested with (``depth={"min": 0, "max": 5}``,
+        ``time={"season": "MAM"}``), which is spelled into its label first. This is how
+        to narrow a :meth:`pool` over variable x depth x season to one layer.
+
         Every :class:`Comparison` in a :class:`ComparisonSet` is already aligned
         (:func:`compare` calls :meth:`Comparison.align` while fanning out), so this
         is a cheap filter over cached results, never a recomputation.
@@ -9456,12 +9479,30 @@ class ComparisonSet:
                     f"{', '.join(self._SEL_KEYS)}."
                 )
 
+        readers = dict(_LABEL_DIMS)
+
+        def norm(label: Any) -> str:
+            return "".join(str(label).split()).casefold()
+
+        def as_label(key: str, value: Any) -> str:
+            if isinstance(value, str):
+                return norm(value)
+            if key == "depth":
+                return norm(_depth_label(value))
+            if key == "time":
+                return norm(_time_label(value))
+            return norm(value)
+
         def matches(c: Comparison) -> bool:
             for key, wanted in filters.items():
                 choices = (
                     wanted if isinstance(wanted, (list, tuple, set)) else (wanted,)
                 )
-                if key in ("variable", "standard_name"):
+                if key in self._SEL_LABEL_KEYS:
+                    have = norm(readers[key](c))
+                    if not any(as_label(key, w) == have for w in choices):
+                        return False
+                elif key in ("variable", "standard_name"):
                     if not any(
                         _variable_matches(c.standard_name, c.variable, w)
                         for w in choices
@@ -9482,6 +9523,10 @@ class ComparisonSet:
                 ),
                 "source": sorted({c.test_name for c in self.comparisons}),
                 "reference": sorted({c.reference_name for c in self.comparisons}),
+                **{
+                    k: sorted({str(readers[k](c)) for c in self.comparisons})
+                    for k in self._SEL_LABEL_KEYS
+                },
             }
             group_of = {
                 "variable": "variable",
@@ -9489,6 +9534,7 @@ class ComparisonSet:
                 "source": "source",
                 "test": "source",
                 "reference": "reference",
+                **{k: k for k in self._SEL_LABEL_KEYS},
             }
             detail = "; ".join(
                 f"{k}={v!r} (have: {', '.join(present[group_of[k]])})"
