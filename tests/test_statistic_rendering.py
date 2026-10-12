@@ -317,3 +317,163 @@ def test_both_renderers_title_a_statistic_and_its_window_alike():
     assert render(spec)._suptitle.get_text() == expected
     obj = render(spec, renderer="holoviews")
     assert obj.opts.get("plot").kwargs.get("title") == expected
+
+
+# --- the summary diagrams spell a spread's units as the colour bar does ---------------
+
+
+class _SpreadComparison:
+    """A comparison's metric record, label and units -- the summary diagrams' interface.
+
+    ``aligned``, given, is the Dataset ``_records`` reads units and statistic off;
+    without it they come from the ``units``/``statistic`` attributes.
+    """
+
+    def __init__(self, label, *, units=None, statistic=None, aligned=None):
+        self.label = label
+        self.units = units
+        self.statistic = statistic
+        if aligned is not None:
+            self.aligned = aligned
+        self._record = {
+            "corr": 0.9,
+            "std_test": 2.4,
+            "std_reference": 2.0,
+            "bias": 0.6,
+            "crmsd": 0.8,
+            "variable": NITRATE,
+            "test": "model",
+            "reference": "obs",
+        }
+
+    def metrics(self):
+        return self._record
+
+
+def _spread_item(units="(mmol/m^3)^2", statistic="var") -> dict:
+    metrics = _SpreadComparison("m1").metrics()
+    return {"metrics": metrics, "label": "m1", "units": units, "statistic": statistic}
+
+
+def _spread_comparisons(units="(mmol/m^3)^2", statistic="var"):
+    return [
+        _SpreadComparison("m1", units=units, statistic=statistic),
+        _SpreadComparison("m2", units=units, statistic=statistic),
+    ]
+
+
+def test_static_target_labels_a_variance_with_readable_units():
+    from ocean_skill.plot.summary import target
+
+    fig = target(_spread_comparisons(), normalize=False, legend_style=None)
+    ax = fig.axes[0]
+    assert "(mmol/m³)²" in ax.get_xlabel()
+    assert "(mmol/m³)²" in ax.get_ylabel()
+    assert "^" not in ax.get_xlabel() + ax.get_ylabel()
+
+
+def test_static_taylor_labels_a_variance_with_readable_units():
+    from ocean_skill.plot.summary import taylor
+
+    fig = taylor(_spread_comparisons(), normalize=False, legend_style=None)
+    label = fig.axes[0].axis["left"].label.get_text()
+    assert label == "Standard deviation [(mmol/m³)²]"
+
+
+def test_static_target_through_a_spec_reads_the_items_statistic():
+    spec = PlotSpec(
+        family="target",
+        items=[_spread_item()],
+        options={"normalize": False, "legend_style": None},
+    )
+    fig = render(spec)
+    assert "(mmol/m³)²" in fig.axes[0].get_ylabel()
+
+
+def test_holoviews_target_labels_a_variance_with_readable_units():
+    spec = PlotSpec(
+        family="target",
+        items=[_spread_item()],
+        options={"normalize": False},
+    )
+    kwargs = render(spec, renderer="holoviews").opts.get().kwargs
+    assert "(mmol/m³)²" in kwargs["xlabel"]
+    assert "(mmol/m³)²" in kwargs["ylabel"]
+    assert "^" not in kwargs["xlabel"] + kwargs["ylabel"]
+
+
+def test_holoviews_portrait_hover_reads_readable_units():
+    import holoviews as hv
+
+    spec = PlotSpec(
+        family="portrait",
+        items=[_spread_item()],
+        options={"metric_names": "bias"},
+    )
+    obj = render(spec, renderer="holoviews")
+    (heat,) = obj.traverse(lambda x: x, [hv.HeatMap])
+    assert set(heat.dframe()["units"]) == {"(mmol/m³)²"}
+
+
+def test_records_read_the_statistic_off_an_aligned_dataset_and_leave_its_attrs():
+    from ocean_skill.plot.summary import _records
+
+    attrs = {"units": "(mmol/m^3)^2", "statistic": "var"}
+    aligned = xr.Dataset(
+        {
+            "test": xr.DataArray([1.0, 2.0], dims="x", attrs=dict(attrs)),
+            "reference": xr.DataArray([1.5, 2.5], dims="x", attrs=dict(attrs)),
+        }
+    )
+    (rec,) = _records([_SpreadComparison("m1", aligned=aligned)])
+    assert rec["units"] == "(mmol/m³)²"
+    assert aligned["test"].attrs == attrs
+    assert aligned["reference"].attrs == attrs
+
+
+def test_records_keep_a_missing_unit_none():
+    from ocean_skill.plot.summary import _records
+
+    (rec,) = _records([_SpreadComparison("m1")])
+    assert rec["units"] is None
+
+
+def test_a_plain_field_keeps_its_units_on_every_summary_label():
+    from ocean_skill.plot.summary import target, taylor
+
+    plain = _spread_comparisons("mg/m^3", None)
+    fig = target(plain, normalize=False, legend_style=None)
+    assert fig.axes[0].get_ylabel() == "bias [mg/m^3]"
+    assert "[mg/m^3]" in fig.axes[0].get_xlabel()
+    fig = taylor(plain, normalize=False, legend_style=None)
+    assert fig.axes[0].axis["left"].label.get_text() == "Standard deviation [mg/m^3]"
+
+    spec = PlotSpec(
+        family="target",
+        items=[_spread_item("mg/m^3", None)],
+        options={"normalize": False},
+    )
+    kwargs = render(spec, renderer="holoviews").opts.get().kwargs
+    assert kwargs["ylabel"] == "bias [mg/m^3]"
+
+
+def test_metric_items_carry_the_statistic_of_each_comparison():
+    from ocean_skill.comparison import ComparisonSet
+
+    attrs = {"units": "(mmol/m^3)^2", "statistic": "var"}
+    aligned = xr.Dataset(
+        {
+            "test": xr.DataArray([1.0, 2.0], dims="x", attrs=dict(attrs)),
+            "reference": xr.DataArray([1.5, 2.5], dims="x", attrs=dict(attrs)),
+        }
+    )
+    with_aligned = _SpreadComparison("m1", aligned=aligned)
+    by_attribute = _SpreadComparison("m2", units="mg/m^3", statistic="std")
+    plain = _SpreadComparison("m3")
+    # the constructor's de-duplication needs a full specification; _metric_items needs
+    # only the comparisons list and the label overrides
+    cset = object.__new__(ComparisonSet)
+    cset.comparisons = [with_aligned, by_attribute, plain]
+    cset.labels = None
+    items = cset._metric_items()
+    assert [i["statistic"] for i in items] == ["var", "std", None]

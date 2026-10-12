@@ -9350,17 +9350,21 @@ class ComparisonSet:
         self, labels: list[str] | None = None
     ) -> list[dict[str, Any]]:
         """Spec items carrying only what a summary diagram reads: metrics, a label,
-        and the reference's units.
+        the reference's units, and the statistic those units describe.
 
         The summary families are the one place :meth:`_items` is more than is needed and
         the extra costs real work: for a set scored ``over`` an axis, ``as_item`` builds
         a metric map per comparison (:meth:`Comparison.pointwise_metrics`) that a Taylor
         or target point never looks at. Both renderers take exactly ``metrics``,
-        ``label``, and ``units`` off these items — see ``matplotlib_renderer._Record``
-        and the interactive target — so this is the whole contract, not a subset of it.
-        ``units`` mirrors :meth:`Comparison.as_item`, defensively: a hand-built
-        comparison (see ``test_pooling``) has no ``aligned`` to read it from and gets
-        ``None`` instead, which the absolute-axes diagrams already treat as "unknown".
+        ``label``, ``units``, and ``statistic`` off these items — see
+        ``matplotlib_renderer._Record`` and the interactive target — so this is the
+        whole contract, not a subset of it. ``units`` mirrors
+        :meth:`Comparison.as_item`, defensively: a hand-built comparison (see
+        ``test_pooling``) has no ``aligned`` to read it from and gets ``None`` instead,
+        which the absolute-axes diagrams already treat as "unknown". ``statistic``
+        rides along because the units of an aggregated spread are the machine spelling
+        (``(mmol/m^3)^2``) and the renderers need to know to print them readably
+        (``(mmol/m³)²``).
 
         ``labels``, given, overrides the point text one-for-one in comparison order —
         the last word on what a diagram calls each point, applied here rather than
@@ -9381,12 +9385,26 @@ class ComparisonSet:
                 f"labels has {len(labels)} entries for {len(self.comparisons)} "
                 "comparisons — there must be one per comparison"
             )
+        from ocean_skill.plot._statistic import statistic_of
+
         items = []
         for i, c in enumerate(self.comparisons):
             aligned = getattr(c, "aligned", None)
             units = aligned["reference"].attrs.get("units") if aligned is not None else None
+            statistic = (
+                statistic_of(aligned)
+                if aligned is not None
+                else getattr(c, "statistic", None)
+            )
             label = labels[i] if labels is not None else self._label_for(i)
-            items.append({"metrics": c.metrics(), "label": label, "units": units})
+            items.append(
+                {
+                    "metrics": c.metrics(),
+                    "label": label,
+                    "units": units,
+                    "statistic": statistic,
+                }
+            )
         return items
 
     @graft_plot_options()

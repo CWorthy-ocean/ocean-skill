@@ -4277,7 +4277,11 @@ def _portrait(
     # _target's own recs are, rather than shared: these are raw spec-item dicts, not
     # the comparison-like objects _records (and portrait(), its static twin) expects.
     recs = [
-        dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
+        dict(
+            i.get("metrics", {}),
+            label=i.get("label") or "",
+            units=units_text(i.get("units"), statistic_of(i)) or None,
+        )
         for i in items
     ]
     if not recs:
@@ -6777,7 +6781,11 @@ def _target(
         )
         labels_mode = "legend"
     recs = [
-        dict(i.get("metrics", {}), label=i.get("label") or "", units=i.get("units"))
+        dict(
+            i.get("metrics", {}),
+            label=i.get("label") or "",
+            units=units_text(i.get("units"), statistic_of(i)) or None,
+        )
         for i in items
     ]
     recs = _drop_unplottable(recs, family="target", normalize=normalize)
