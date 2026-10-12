@@ -2019,3 +2019,31 @@ def test_build_field_contours_mapping_builds_a_second_field(monkeypatch):
     assert lines.kwargs["variable"] == "salinity" and lines.kwargs["source"] == "stub"
     assert lines.kwargs["cache"] == p.cache
     assert main.opts["contours"] is lines
+
+
+# -- notes: -- display text carried to compare(notes=) ---------------------------------
+
+
+def _notes_page(notes):
+    return {
+        "title": "x",
+        "compare": {
+            "reference": ["ref"],
+            "variables": ["temperature"],
+            "notes": notes,
+        },
+    }
+
+
+def test_compare_page_notes_pass_through_to_compare(monkeypatch):
+    calls = _fake_osk(monkeypatch, test_families=["map"])
+    (p,) = P.expand(
+        _suite([_notes_page("ice-free months only")], defaults={"test": "stub"})
+    )
+    P.build(p)
+    assert calls["compare"][0]["notes"] == "ice-free months only"
+
+
+def test_compare_page_notes_must_be_a_string():
+    with pytest.raises(ValueError, match=r"page 'x': compare: notes must be a string"):
+        P.expand(_suite([_notes_page(["a", "b"])], defaults={"test": "stub"}))

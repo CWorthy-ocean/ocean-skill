@@ -1727,6 +1727,10 @@ categorical axis) rather than above the grid as the static renderer draws them;
 that is the one cosmetic divergence, and it does not touch cell values, colour, or
 level order.
 
+For the same scoreboard as numbers rather than colours -- a publishable table of
+selected metrics, with seasonal sub-rows, joined cells and Notes -- see
+[`osk.table()`](tables.md).
+
 ## The `series` family (time series)
 
 A comparison whose two lanes reduce to one time axis draws as lines rather than maps:

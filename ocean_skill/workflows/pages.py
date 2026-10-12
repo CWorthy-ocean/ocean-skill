@@ -1093,6 +1093,12 @@ def _resolve_compare_kwargs(
     source = kwargs["test"]
     if source is None:
         raise ValueError(f"page {title!r}: no test source (set defaults.test)")
+    # ``notes:`` is display text for osk.table(); it passes straight to compare(notes=).
+    if "notes" in kwargs and not isinstance(kwargs["notes"], str):
+        raise ValueError(
+            f"page {title!r}: compare: notes must be a string, got "
+            f"{type(kwargs['notes']).__name__} ({kwargs['notes']!r})"
+        )
     index = get_index(source)
     t0, t1 = index[0].isoformat(), index[-1].isoformat()
     select = kwargs.get("select")

@@ -7863,6 +7863,15 @@ class Comparison:
     #: no station position or autocorrelation weight, and nothing draws it.
     _pooled: bool = False
 
+    #: Free-text note from ``compare(notes=)``: copied into the metrics record for
+    #: :func:`table`, never into the cache key or :func:`_identity`.
+    notes: str | None = None
+
+    #: ``("average" | "pool", n_members)`` on a comparison built by
+    #: :meth:`ComparisonSet.average`/:meth:`~ComparisonSet.pool`, else ``None`` -- read
+    #: by :func:`table` for its automatic notes ("station average (6)").
+    _combined: tuple[str, int] | None = None
+
     @classmethod
     def _averaged(
         cls,
@@ -8278,6 +8287,9 @@ class Comparison:
                 demeaned=_demean_label(self.subtract_mean),
                 # Mirrors demeaned exactly, for detide= -- see _detide_label.
                 detided=_detide_label(self.detide),
+                # Display text (compare(notes=)); only present when set, so a record
+                # without a note is exactly what it was before.
+                **({"notes": self.notes} if self.notes else {}),
                 # Read off the aligned pair's own attrs (written once, in
                 # _subtract_scalar_means) rather than recomputed here, so a cached
                 # result read back in a fresh process reports the exact number that
@@ -9092,22 +9104,29 @@ def _pooled_labels(comparisons: list[Comparison]) -> list[str]:
     return labels
 
 
-def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]:
+def _named_labels(
+    mapping: dict[str, Any],
+) -> tuple[list[Comparison], list[str], list[str]]:
     """Label a ``{name: comparisons}`` pool by its keys rather than by a rule.
 
     Your key is what disambiguates across groups, so a group's members keep their own
     labels and get the key in front of them. A group of one is labelled with the key
     alone — ``{"run A": c}`` means the point is called ``run A``, not ``run A: no3``.
+
+    The third return is each comparison's dict key on its own (the ``group`` a
+    :func:`table` can pivot on), one per comparison.
     """
     comparisons: list[Comparison] = []
     labels: list[str] = []
+    groups: list[str] = []
     for name, obj in mapping.items():
         members = _flatten(obj)
         for c in members:
             own = c.label or _short_variable_label(c.variable)
             labels.append(str(name) if len(members) == 1 else f"{name}: {own}")
+            groups.append(str(name))
         comparisons += members
-    return comparisons, labels
+    return comparisons, labels, groups
 
 
 #: Smallest share of an averaged group's timestamps that must hold data from at
@@ -9396,9 +9415,10 @@ class ComparisonSet:
                     "pass either a {name: comparisons} dict or labels=, not both — "
                     "the dict's keys are already the labels"
                 )
-            self.comparisons, labels = _named_labels(comparisons)
+            self.comparisons, labels, self._groups = _named_labels(comparisons)
         else:
             self.comparisons = _flatten(comparisons)
+            self._groups = None
         if labels is not None and len(labels) != len(self.comparisons):
             raise ValueError(
                 f"labels has {len(labels)} entries for {len(self.comparisons)} "
@@ -9575,6 +9595,68 @@ class ComparisonSet:
         import pandas as pd
 
         return pd.DataFrame([c.metrics() for c in self.comparisons])
+
+    def table(
+        self,
+        *,
+        metrics: tuple[str, ...] | list[str] = (
+            "bias",
+            "rmse",
+            "crmsd",
+            "corr",
+            "sigma_ratio",
+            "n",
+        ),
+        rows: str = "label",
+        cols: str | None = None,
+        split: dict[str, str] | None = None,
+        join: dict[str, str] | None = None,
+        join_labels: dict[str, list[str]] | None = None,
+        layout: str = "rows",
+        headers: dict[str, str] | None = None,
+        units: bool = True,
+        round: bool = True,
+        info: dict[str, dict[str, str]] | None = None,
+        notes: dict[str, str] | None = None,
+        auto_notes: Any = True,
+        save: str | Path | None = None,
+    ):
+        """Return selected metrics as a publication-style metrics table.
+
+        The result is a :class:`~ocean_skill.table.MetricsTable`.
+
+        The set's metric records (:meth:`metrics`) pivoted into a table of *chosen*
+        metrics instead of every column: the same records and pivot
+        :meth:`portrait` draws, written as numbers. See :func:`table` for every
+        parameter, and :mod:`ocean_skill.table` for what the result can write
+        (notebook HTML, plain text, Markdown, LaTeX, CSV).
+
+        Rows are the pooled/dict/``labels=`` names this set draws (``rows="label"``),
+        or any record field; ``cols=`` pivots a second field across the metrics.
+        ``split={"bias": "time"}`` breaks a metric out by the levels of a field
+        (seasons, from a ``compare(times={"seasons": [...]})`` set pooled with the
+        whole-record set); ``join={"rmse": "depth"}`` puts those levels in one cell
+        (``0.91 / 0.85``).
+        """
+        from ocean_skill.table import build_table
+
+        return build_table(
+            self,
+            metrics=metrics,
+            rows=rows,
+            cols=cols,
+            split=split,
+            join=join,
+            join_labels=join_labels,
+            layout=layout,
+            headers=headers,
+            units=units,
+            round=round,
+            info=info,
+            notes=notes,
+            auto_notes=auto_notes,
+            save=save,
+        )
 
     def write_metrics(self, out_dir: str | Path, stem: str = "metrics") -> Path:
         """Write the tidy metrics table to ``<out_dir>/metrics/<stem>.csv``.
@@ -10210,17 +10292,18 @@ class ComparisonSet:
         out = []
         for key, comps in self._grouped(by, caller="average", verb="averaged"):
             label = " ".join(str(k) for k in key)
-            out.append(
-                Comparison._averaged(
-                    comps[0],
-                    _average_aligned(comps),
-                    test_name=_pooled_name([c.test_name for c in comps], "test"),
-                    reference_name=_pooled_name(
-                        [c.reference_name for c in comps], "reference"
-                    ),
-                    label=label,
-                )
+            averaged = Comparison._averaged(
+                comps[0],
+                _average_aligned(comps),
+                test_name=_pooled_name([c.test_name for c in comps], "test"),
+                reference_name=_pooled_name(
+                    [c.reference_name for c in comps], "reference"
+                ),
+                label=label,
             )
+            # what table()'s automatic notes say about where the numbers came from
+            averaged._combined = ("average", len(comps))
+            out.append(averaged)
         return ComparisonSet(out)
 
     def _grouped(
@@ -10332,6 +10415,7 @@ class ComparisonSet:
             # metrics() reduces it whole and never builds per-cell maps.
             pooled.over = None
             pooled._pooled = True
+            pooled._combined = ("pool", len(comps))
             out.append(pooled)
         return ComparisonSet(out)
 
@@ -10460,6 +10544,81 @@ def summary(
     if kind != "portrait":
         method_kwargs["labels"] = labels
     return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **method_kwargs)
+
+
+def table(comparisons: Any, **kwargs: Any):
+    """Metrics from comparisons you already have, as one publishable table.
+
+    Parameters
+    ----------
+    comparisons
+        A :class:`Comparison`, any nesting of lists/tuples of them and/or
+        :class:`ComparisonSet` objects, or a ``{name: comparisons}`` dict whose keys
+        become the row labels *and* a ``group`` field usable as ``rows=``/``cols=``
+        (``osk.table({"hindcast": a, "forecast": b}, rows="variable", cols="group")``).
+        Pooled exactly as :func:`summary` pools them, so a row is named like the
+        same comparison's Taylor/target point.
+    metrics
+        Metric names to show, in order (default ``bias``, ``rmse``, ``crmsd``,
+        ``corr``, ``sigma_ratio``, ``n``); an unknown name raises.
+    rows
+        A metric-record field (``"variable"``, ``"depth"``, ``"test"``, ...) or
+        ``"label"`` (default), the pooled/dict/``labels=`` name.
+    cols
+        ``None`` (default; the columns are the metrics) or a record field, giving
+        ``(metric, level)`` column groups.
+    split
+        ``{metric: field}``: break those metrics out by the field's levels, one
+        sub-row (or sub-column, see ``layout``) per level -- typically
+        ``{"bias": "time"}`` over a seasonal set. Unsplit metrics read the
+        whole-record comparison of the same row; a row with no seasonal records gets
+        one line holding its whole-record value.
+    join
+        ``{metric: field}``: put the levels of ``field`` in one cell, ``"0.91 /
+        0.85"`` in level order, the header naming them (``R² (surface / column)``);
+        a missing level reads ``"–"``.
+    join_labels
+        ``{field: [names]}`` replacing the level names a join header shows.
+    layout
+        How ``split`` is drawn: ``"rows"`` (default; sub-rows, with the level in its
+        own sub-column left of the first split metric) or ``"columns"``
+        (``(metric, level)`` column groups).
+    headers
+        ``{key: text}`` overriding display names: a metric name, or ``"label"``,
+        ``"split"``, ``"units"``, ``"notes"``, ``"user_notes"`` or an ``info`` column.
+    units
+        ``True`` (default) appends the reference units to dimensional metric headers
+        when every row shares them, else adds a per-row ``units`` column; ``False``
+        omits units.
+    round
+        ``True`` (default) formats as the portrait's cell annotations do (two
+        decimals for dimensionless metrics, integers for counts, three significant
+        figures otherwise); ``False`` shows every digit.
+    info
+        ``{row: {column: text}}``: extra text columns after the metrics.
+    notes
+        ``{row: text}``: a user note for a row, overriding any ``compare(notes=)``.
+    auto_notes
+        ``True`` (default) adds a "Notes" column built from each row's selection
+        (depth, time window, station/sample average, demeaned, detided); ``False``
+        drops it; a callable ``record -> str`` replaces the generator; a
+        ``{row: text}`` dict overrides individual rows.
+    save
+        A ``.tex``/``.md``/``.html``/``.csv`` path to write (see
+        :meth:`ocean_skill.table.MetricsTable.save`).
+
+    Returns
+    -------
+    ocean_skill.table.MetricsTable
+        Displays as an HTML table in a notebook; ``.to_latex()``, ``.to_markdown()``,
+        ``.to_html()``, ``.to_dataframe()`` and ``.save()`` write it.
+    """
+    if isinstance(comparisons, dict):
+        pooled = ComparisonSet(comparisons)  # keys are the labels (and the groups)
+    else:
+        members = _flatten(comparisons)
+        pooled = ComparisonSet(members, labels=_pooled_labels(members))
+    return pooled.table(**kwargs)
 
 
 def _fan_vertical_entries(
@@ -12503,6 +12662,7 @@ def compare(
     subtract_mean: Any = False,
     detide: Any = False,
     depth_origin: Any = None,
+    notes: str | None = None,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -12668,6 +12828,13 @@ def compare(
 
             osk.compare(reference="ctd", test="his", variables=["temp"],
                         depths=[1], depth_origin="surface")
+
+    notes
+        Free text attached to every comparison this call forms (``None``, the
+        default, attaches nothing): carried into each comparison's metrics record as
+        ``notes`` and shown in the "User notes" column of :func:`table`. Display text
+        only -- it is not part of a comparison's identity or its cache key, so adding
+        or editing one never recomputes anything.
 
     ``reference`` and ``test`` each take a source name or a list; ``variables`` is a
     list of anything :mod:`ocean_skill.vocabulary` recognizes — a short vocabulary key
@@ -14092,4 +14259,9 @@ def compare(
             "the first such error instead.",
             stacklevel=_stacklevel.find(),
         )
+    if notes is not None:
+        # set after construction, not passed to Comparison(): a note is display text, so
+        # it stays out of the constructor's identity/cache-key plumbing altogether
+        for c in out:
+            c.notes = str(notes)
     return ComparisonSet(out)
