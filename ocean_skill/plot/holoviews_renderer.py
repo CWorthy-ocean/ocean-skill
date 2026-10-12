@@ -227,27 +227,6 @@ def _output_projection(da):
     return None
 
 
-def _lonlat_extent(da) -> tuple[float, float, float, float] | None:
-    """``(lon0, lon1, lat0, lat1)`` spanned by ``da``'s own lon/lat coordinates.
-
-    Feeds :func:`~ocean_skill.plot.coastline.auto_ne_resolution` the same shape
-    ``GeoAxes.get_extent()`` hands cartopy statically — this renderer draws no axes to
-    ask before the coastline option has to be resolved. ``None`` for a panel with no
-    lon/lat to measure (a non-geographic section), which the scaler already treats as
-    "assume the coarsest scale".
-    """
-    try:
-        lons, lats = np.asarray(da["lon"]), np.asarray(da["lat"])
-        return (
-            float(np.nanmin(lons)),
-            float(np.nanmax(lons)),
-            float(np.nanmin(lats)),
-            float(np.nanmax(lats)),
-        )
-    except Exception:  # pragma: no cover - unlabelled coords; fall back to coarsest
-        return None
-
-
 def _clip_colorbar_opts(
     clim, data_range, *, log: bool = False, label_clipped: bool = False
 ) -> dict[str, Any] | None:
@@ -364,9 +343,6 @@ def _quadmesh(
     hover: bool = True,
     rasterize: bool = False,
     tiles: str | bool | None = None,
-    coastline: bool = True,
-    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
-    land: bool | float = True,
     project: bool = False,
     x: str = "lon",
     y: str = "lat",
@@ -398,11 +374,10 @@ def _quadmesh(
     section's y-axis reads shallow-at-top, and its off-domain/below-bathymetry
     cells want the same grey a map draws for land.
 
-    ``land`` mirrors the static renderer's option of the same name: there is no land
-    *fill* here (this panel already draws data through land, unlike the opaque grey
-    the static renderer paints by default — see ``matplotlib_renderer._basemap``), so
-    a float has no fill to fade and is treated as truthy; only ``land=False`` has a
-    visible effect here, dropping the coastline outline too for a fully bare map.
+    A geographic panel draws **no coastline of its own**: the outline is a separate
+    once-built path the caller overlays (see :func:`_offline_coastline`, which also
+    explains ``land``), so every panel of a figure shares one object instead of each
+    paying for a geoviews ``Feature``.
 
     Every colour bar ticks at the round values and reads in the text the static
     renderer's bar does (see :func:`_clip_colorbar_opts`), and one whose ``clim`` has
@@ -466,32 +441,31 @@ def _quadmesh(
             from ocean_skill.plot.proj_check import warn_projection_skew
 
             warn_projection_skew()
-        # resolved here, ahead of the coastline decision below, so a basemap and its
-        # redundant offline coastline are never drawn together. Movie callers already
+        # resolved here, ahead of the frame decision below, because an untiled panel
+        # has its frame pinned and a tiled one must not. Movie callers already
         # downgrade via _tiles_for before reaching here (a no-op resolving it again
         # below); a caller that hands tiles straight to _quadmesh still gets the same
         # seam protection rather than a silently broken map.
         tiles = _tiles_for(tiles, da)
-        if coastline and land is not False and not tiles:
-            # hvplot's coastline is a geoviews Feature, which the plot re-projects
-            # from scratch every time it renders a frame. Fine for the single draw
-            # every other family does; ruinous for an embedded movie, which renders
-            # every frame — movies pass coastline=False and overlay a static,
-            # once-projected path instead (see _movie_coastline).
-            #
-            # geoviews/hvplot can only draw Natural Earth, so "auto" resolves against
-            # this panel's own lon/lat extent and a GSHHS request falls back to its
-            # nearest Natural Earth scale (with a warning) — see
-            # ocean_skill.plot.coastline.
-            #
-            # Skipped outright once tiles are on: the basemap already draws the
-            # coast (see docs/movies.md), so a second, offline outline on top of it
-            # would be redundant — the same reasoning movie callers already act on
-            # explicitly via coastline=False.
-            opts["coastline"] = nearest_ne_resolution(
-                normalize_coastline_resolution(coastline_resolution),
-                extent=_lonlat_extent(da),
-            )
+        if not tiles:
+            # Pin the frame to degrees, always. hvplot only sets a plot ``projection``
+            # when it is passed one or on the coastline Feature it attaches, so a mesh
+            # drawn without that Feature (every untiled map here, whose outline is the
+            # once-built path from _offline_coastline) would fall back to geoviews' Web
+            # Mercator default and be drawn in metres -- while every plain-holoviews
+            # overlay this module adds (the coastline path, the domain ring, the station
+            # dots, the skill_map extent) is in degrees and would land near (0, 0), off
+            # the map. Whether a coastline is drawn must not decide the frame, so it is
+            # stated here: PlateCarree, or the 180-centred frame of a straddling field.
+            # Only ``opts["projection"]`` changes -- ``projection`` itself stays None
+            # for an ordinary field, so the skew warning above and the ``project``
+            # decision below are exactly as before.
+            try:
+                import cartopy.crs as ccrs
+
+                opts["projection"] = projection or ccrs.PlateCarree()
+            except ImportError:  # pragma: no cover - cartopy is not a core dependency
+                pass
         if project or projection is not None:
             # project the data to the output projection now, once, instead of
             # letting the plot re-project it per rendered frame. Movies set
@@ -523,7 +497,6 @@ def _quadmesh(
         result = da.hvplot.quadmesh(**opts)
     except Exception:  # pragma: no cover - geoviews/cartopy unavailable
         opts.pop("geo", None)
-        opts.pop("coastline", None)
         opts.pop("projection", None)
         opts.pop("project", None)
         # tiles-without-geo is a different hvplot code path (it swaps x/y into
@@ -1477,7 +1450,8 @@ def _field_row(
 
     ``coastline_resolution`` picks the coastline dataset for every panel — see
     :mod:`ocean_skill.plot.coastline` and the static renderer's ``field_row`` docstring.
-    ``land`` is honored the same way as :func:`_quadmesh` — see there.
+    ``land`` is honored the same way as in :func:`_offline_coastline` — see there; that
+    one path is built once and overlaid on all three panels.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``field_row`` docstring.
@@ -1533,8 +1507,6 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
@@ -1551,8 +1523,6 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         ),
         _quadmesh(
@@ -1567,14 +1537,23 @@ def _field_row(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         ),
     ]
+    # one offline coastline, built once from both fields' extent and overlaid on all
+    # three panels (None under tiles, which draw the coast themselves)
+    coast = _offline_coastline(
+        t,
+        r,
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+    )
     outline = _domain_overlay(domain, t, geo=geo, tiles=tiles)
-    if outline is not None:
-        panels = [p * outline for p in panels]
+    for overlay in (coast, outline):
+        if overlay is not None:
+            panels = [p * overlay for p in panels]
     row = panels[0] + panels[1] + panels[2]
     row = row.opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
@@ -1630,7 +1609,8 @@ def _field_grid(
     ``rasterize`` and ``hover`` pass straight through to every row (see
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
     can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
-    same way, as does ``robust`` — each row's colour scale is its own. So does
+    same way (each row builds its own once-made coastline path, from its own extent),
+    as does ``robust`` — each row's colour scale is its own. So does
     ``tiles`` (on by default) — each row resolves its own antimeridian/source check
     independently, appropriate since rows commonly carry different reference domains.
 
@@ -1765,12 +1745,13 @@ def _field_facet(
     coastline and terrain where the field is masked, and a notebook reading one
     interactively is already on the web. Pass a source name (``"EsriOceanBase"``,
     ``"EsriTerrain"``, any :mod:`geoviews.tile_sources` entry) or ``tiles=False`` for
-    the offline Natural Earth coastline instead — see :func:`_quadmesh` and
+    the offline Natural Earth coastline instead — see :func:`_offline_coastline` and
     :func:`_tiles_for` for when a domain straddling the antimeridian downgrades to the
     coastline regardless.
 
     ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
-    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
+    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_offline_coastline`,
+    which builds the one outline path that every panel of the facet shares.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``field_facet`` docstring. ``vmin``/``vmax``
@@ -1842,8 +1823,16 @@ def _field_facet(
     )
     seq, _div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
+    # every panel shares one grid, so one once-built coastline serves them all
+    coast = _offline_coastline(
+        field,
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+    )
     outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
-    loc_xform = _location_xform(field, tiles, geo=geo)
+    loc_xform = _overlay_xform(field, tiles, geo=geo)
     loc_font_size = None
     if location_items:
         loc_font_size = _panel_geometry(
@@ -1928,11 +1917,12 @@ def _field_facet(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         )
-        panel = mesh if outline is None else mesh * outline
+        panel = mesh
+        for overlay in (coast, outline):
+            if overlay is not None:
+                panel = panel * overlay
         if location_items:
             keyed = (row, col) == (0, 0)
             for element in _location_elements(
@@ -2860,7 +2850,9 @@ def _field_map_grid(
     ``tiles`` puts a web basemap under every panel, on by default -- see
     :func:`_field_facet`'s docstring for what it accepts. Resolved once across every
     item's field, since a straddling domain on any one variable would tear the same
-    way on its own panel -- see :func:`_tiles_for`.
+    way on its own panel -- see :func:`_tiles_for`. The untiled coastline is built once
+    across every item's field too (:func:`_offline_coastline`) and that one path is
+    shared by every panel.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits`, applied to each panel's (or, with ``shared_limits=``, that group's
@@ -2922,6 +2914,15 @@ def _field_map_grid(
         cell_items = list(items)
 
     drawn = [(i, item) for i, item in enumerate(cell_items) if item is not None]
+    # one offline coastline for the whole grid, from every item's extent, shared by
+    # every panel (None under tiles, which draw the coast themselves)
+    coast = _offline_coastline(
+        *(it["field"] for it in items),
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+    )
 
     if faceted:
         components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
@@ -2995,12 +2996,13 @@ def _field_map_grid(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         )
         outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
-        panels.append(mesh if outline is None else mesh * outline)
+        for overlay in (coast, outline):
+            if overlay is not None:
+                mesh = mesh * overlay
+        panels.append(mesh)
 
     if len(panels) == 1:
         # A lone panel is an Overlay, which has no .cols() -- the same
@@ -3851,8 +3853,9 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool, tiles=None):
     :func:`_domain_overlay` makes and for the same reason: a static figure has no
     per-frame reprojection cost to worry about, but staying in one coordinate
     family with the outline it is drawn alongside is simpler than mixing two. The
-    antimeridian shift matches :func:`_domain_overlay`'s: identity for every panel
-    except one in :func:`_output_projection`'s shifted frame.
+    longitudes are moved into the panel's frame by the same :func:`_overlay_xform`
+    :func:`_domain_overlay` uses: the 180-centred shift for a panel in
+    :func:`_output_projection`'s shifted frame, a wrap into ±180 for any other.
 
     Under ``tiles`` the panel is in Web Mercator metres, which plain degree
     ``hv.Points`` would miss entirely — the dots would land near (0, 0), off the map.
@@ -3860,7 +3863,7 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool, tiles=None):
     reading metres, so this branch builds a ``gv.Points`` with ``crs=PlateCarree``
     instead: geoviews projects it into the basemap's frame itself, and its hover reads
     lon/lat in degrees — the same choice :func:`_location_elements` makes for its point
-    markers. That is also why this branch skips the 180-shift above: geoviews projects
+    markers. That is also why this branch skips the frame shift above: geoviews projects
     from ``crs``, so shifting the longitudes first would move them twice.
     """
     if stations is None or name not in stations.get("values", {}):
@@ -3871,8 +3874,8 @@ def _station_overlay(stations, name: str, colors, da, *, geo: bool, tiles=None):
     lon = np.asarray(stations["lon"], dtype="float64")
     lat = np.asarray(stations["lat"], dtype="float64")
     tiled = bool(geo and tiles)
-    if geo and not tiled and _output_projection(da) is not None:
-        lon = (lon % 360.0) - 180.0
+    if not tiled:
+        lon, lat = _overlay_xform(da, None, geo=geo)(lon, lat)
     frame = {"lon": lon, "lat": lat, "value": np.asarray(stations["values"][name])}
     names = stations.get("names")
     vdims = ["value"]
@@ -3960,11 +3963,13 @@ def _skill_map(
     :func:`_tiles_for` for the antimeridian downgrade. Resolved once across every item,
     since a straddling domain on any one comparison would tear the same way on its own
     panel. The basemap draws the coast itself, so the offline coastline is skipped
-    under it — and that offline coastline is what made an untiled panel slow to draw,
-    since bokeh re-projects the world's coastline afresh for every panel;
-    ``tiles=False`` brings it back for a notebook that has to work offline. Both the
-    station dots (:func:`_station_overlay`) and the ``extent`` window below are
-    projected into the basemap's Web Mercator frame to match.
+    under it; ``tiles=False`` brings it back for a notebook that has to work offline.
+    That offline coastline is one pre-clipped path built once across every item
+    (:func:`_offline_coastline`) and shared by every panel — a geoviews ``Feature``
+    would have bokeh re-project the world's coastline afresh for each one, which made an
+    untiled map slow to draw. Both the station dots (:func:`_station_overlay`) and the
+    ``extent`` window below are projected into the basemap's Web Mercator frame to
+    match.
 
     ``extent`` crops the view the same way its static twin does — ``"tight"`` frames
     the drawn skill surface (the non-``NaN`` cells) with a small margin, a
@@ -3972,7 +3977,10 @@ def _skill_map(
     (the default) leaves each panel framing its whole grid. Resolved through the same
     :func:`~ocean_skill.plot.matplotlib_renderer.resolve_extent` both backends share,
     then applied as each panel's ``xlim``/``ylim`` (projected to Web Mercator metres
-    first under ``tiles``, since a tiled panel's axes are no longer degrees).
+    first under ``tiles``, since a tiled panel's axes are no longer degrees; untiled,
+    the window's west edge goes through :func:`_overlay_xform` like every other overlay
+    and the east edge follows it by the same shift, so a 0-360-spelled window still
+    lands on a mesh drawn in ±180 and a window cannot split at a seam).
 
     ``shared_limits=True`` pools each metric's values over every row before choosing
     its colour limits, the same as the static family — every panel of one metric then
@@ -3985,7 +3993,7 @@ def _skill_map(
     own label in its own title.
 
     ``coastline_resolution``/``land`` pick the coastline dataset and its visibility for
-    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_quadmesh`.
+    every panel — see :mod:`ocean_skill.plot.coastline` and :func:`_offline_coastline`.
 
     ``titles=`` overrides the drawn panel titles by hand, one string per panel
     in row-major (``order``) order -- the full displayed text, comparison
@@ -4041,6 +4049,16 @@ def _skill_map(
     ncols = max(int(ncols), 1)
     factor = _canvas_factor(size, zoom)
     arrays = {i: metric_arrays(item["skill"], names) for i, item in enumerate(items)}
+    # one offline coastline for the whole figure -- every panel shares it, where a
+    # Feature per panel would be re-projected from the whole world each time (None under
+    # tiles, which draw the coast themselves)
+    coast = _offline_coastline(
+        *(item["skill"][names[0]] for item in items),
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+    )
     outline = _domain_overlay(domain, items[0]["skill"][names[0]], geo=geo, tiles=tiles)
     raster = _should_rasterize(items[0]["skill"][names[0]], rasterize)
 
@@ -4081,7 +4099,18 @@ def _skill_map(
         xs, ys = _to_mercator([box[0], box[1]], [box[2], box[3]])
         view_opts = {"xlim": (xs[0], xs[1]), "ylim": (ys[0], ys[1])}
     elif box:
-        view_opts = {"xlim": (box[0], box[1]), "ylim": (box[2], box[3])}
+        # Untiled, the window must be in the frame the mesh is drawn in: a 0-360-spelled
+        # box over a mesh geoviews wrapped into ±180 (or any box on a 180-centred frame)
+        # would miss it entirely, since xlim/ylim are applied verbatim in frame
+        # coordinates. The west edge is moved by the overlay transform and the east edge
+        # follows by the same offset, so one shift serves the pair and the window cannot
+        # split at a seam.
+        xform = _overlay_xform(items[0]["skill"][names[0]], None, geo=geo)
+        x0 = float(np.asarray(xform([box[0]], [box[2]])[0])[0])
+        view_opts = {
+            "xlim": (x0, box[1] + (x0 - box[0])),
+            "ylim": (box[2], box[3]),
+        }
 
     def _auto_title(row, name):
         item = items[row]
@@ -4123,8 +4152,6 @@ def _skill_map(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline_resolution=coastline_resolution,
-            land=land,
             label_clipped=colorbar_label_clipped,
         )
         points = (
@@ -4139,7 +4166,7 @@ def _skill_map(
             if station_markers
             else None
         )
-        for extra in (outline, points):
+        for extra in (coast, outline, points):
             if extra is not None:
                 mesh = mesh * extra
         if view_opts:
@@ -4395,7 +4422,7 @@ def _tiles_for(tiles, *fields):
     projects there as two disjoint pieces meeting at ±2e7 metres, so the tiled
     quadmesh renders split across the map rather than as one contiguous field.
     There is no tiled frame that keeps such a domain whole, so the basemap is
-    dropped in favour of the offline coastline (:func:`_movie_coastline`) rather
+    dropped in favour of the offline coastline (:func:`_offline_coastline`) rather
     than shipping a broken map; pass ``tiles=False`` to silence the warning.
 
     Tested with :func:`~ocean_skill.align.natural_convention` rather than
@@ -4506,54 +4533,99 @@ def _coastline_clips(
     return clips
 
 
-def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION):
-    """The coastline as one static ``hv.Path``, clipped to the fields' extent.
+def _offline_coastline(
+    *fields,
+    extent: tuple[float, float, float, float] | None = None,
+    geo: bool = True,
+    tiles=None,
+    land: bool | float = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    per_frame: bool = False,
+):
+    """Return the offline coastline as one static ``hv.Path``, clipped to the map.
 
-    hvplot's own ``coastline`` overlay is a geoviews ``Feature``, and a Feature is
-    lazy: rendering it projects the whole world's coastline geometry from scratch —
-    which an embedded movie does once per frame, measured at 0.6–1.2 s and ~1.5 MB of
-    page *per frame*, dominating everything else the movie does. The coastline never
-    changes between frames, so it is built here exactly once: clipped to the fields'
-    own extent (plus margin to pan into) and returned as a plain holoviews Path, in
-    the movie's own output frame, that no geoviews machinery touches again. Movies
-    with tiles don't need it at all — the basemap draws the coast — so this only ever
-    joins the untiled (offline) movie.
+    Every untiled interactive map — a still figure or a movie — draws this once-built
+    path instead of hvplot's own ``coastline`` overlay. That overlay is a geoviews
+    ``Feature``, and a Feature is lazy: rendering it projects the whole world's
+    coastline geometry from scratch, once for every panel of a figure (~10 s for a
+    four-panel map at the 10m scale) and once per frame of an embedded movie (0.6–1.2 s
+    and ~1.5 MB of page *per frame*), dominating everything else either does. The
+    coastline never changes between panels or frames, so it is built here exactly once:
+    clipped to the map's own extent (plus margin to pan into) and returned as a plain
+    holoviews Path, in the map's own output frame, that no geoviews machinery touches
+    again — and the one object is overlaid on every panel of the figure. A map with
+    tiles doesn't need it at all, the basemap drawing the coast.
+
+    It is therefore ``None`` straight away when there is nothing to draw: ``geo=False``
+    (a section has no coast), ``tiles`` truthy, or ``land=False``. ``land`` mirrors the
+    static renderer's option of the same name, except that there is no land *fill* here
+    (these panels draw data through land, unlike the opaque grey the static renderer
+    paints by default — see ``matplotlib_renderer._basemap``), so a float has no fill to
+    fade and is treated as truthy; only ``land=False`` has a visible effect, dropping
+    the coastline outline too for a fully bare map.
+
+    The extent is measured off ``fields``' own lon/lat, or given outright as
+    ``extent=(lon0, lon1, lat0, lat1)`` for a map with no field to measure (see
+    :func:`_locations`), which is always drawn in plain PlateCarree degrees.
 
     ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`) picks the Natural
-    Earth scale: ``"auto"`` (the default) resolves against the fields' own extent,
-    computed below; a fixed ``"110m"``/``"50m"``/``"10m"`` pins one; a GSHHS scale
-    falls back to its nearest Natural Earth neighbour and warns, since this path is
-    built from Natural Earth geometry only.
+    Earth scale: ``"auto"`` (the default) resolves against the data's own extent, the
+    unpadded one the static renderer's view has, unless ``per_frame`` says otherwise; a
+    fixed ``"110m"``/``"50m"``/``"10m"`` pins one; a GSHHS scale falls back to its
+    nearest Natural Earth neighbour and warns, since this path is built from Natural
+    Earth geometry only.
 
-    That output frame is plain PlateCarree degrees for most domains, but one
-    straddling the antimeridian is drawn in :func:`_output_projection`'s 180-centred
-    frame instead (the same test :func:`_tiles_for` uses to decide tiles cannot show
-    such a domain at all) — so the coastline's x is shifted into that frame too, or
-    it would land 180° away from the mesh it is meant to outline. That frame's seam
-    is Natural Earth's longitude 0, so the coastline is cut there (see
-    :func:`_coastline_clips`) rather than drawn across it: a coast that crossed the
-    seam whole would be a stroke the width of the map. The margin is capped at one
-    turn of the globe for the same reason — past that it would only draw every coast
-    twice. ``apply_ranges=False`` keeps the clip margin from widening the view.
+    ``per_frame`` is for a path that an embedded movie sends again with every frame, so
+    its size is paid once per frame rather than once. A movie resolves ``"auto"``
+    against the padded clip box instead of the data's extent: that box is twice as wide,
+    which usually lands on a coarser scale and a lighter path (on a 10°×8° domain the
+    10m scale adds ~44 KB to every frame) at the price of a coastline less detailed than
+    a still of the same field. A fixed scale or a GSHHS request never consults the
+    extent, so it is the same either way.
+
+    That output frame is plain PlateCarree degrees for most domains, but one straddling
+    the antimeridian is drawn in :func:`_output_projection`'s 180-centred frame instead
+    (the same test :func:`_tiles_for` uses to decide tiles cannot show such a domain at
+    all) — so the coastline's x is shifted into that frame too, or it would land 180°
+    away from the mesh it is meant to outline. That frame's seam is Natural Earth's
+    longitude 0, so the coastline is cut there (see :func:`_coastline_clips`) rather
+    than drawn across it: a coast that crossed the seam whole would be a stroke the
+    width of the map. The margin is capped at one turn of the globe for the same reason
+    — past that it would only draw every coast twice. ``apply_ranges=False`` keeps the
+    clip margin from widening the view.
 
     Returns ``None`` when the coastline cannot be built (no cartopy, or Natural Earth
-    data unavailable offline) — a movie without an outline still plays.
+    data unavailable offline) — a map without an outline still draws.
     """
+    if not geo or tiles or land is False:
+        return None
     import holoviews as hv
 
     # 180 for a domain _output_projection would centre the mesh on (straddling the
     # antimeridian); 0 -- no shift in _coastline_clips -- for every other domain,
-    # leaving today's coordinates untouched.
-    central = 180.0 if any(_output_projection(f) is not None for f in fields) else 0.0
+    # leaving today's coordinates untouched. An explicit extent has no field to ask,
+    # and is plain degrees.
+    if extent is not None:
+        central = 0.0
+    else:
+        central = (
+            180.0 if any(_output_projection(f) is not None for f in fields) else 0.0
+        )
 
     try:
         import cartopy.feature as cfeature
         from shapely.geometry import box
 
-        lons = np.concatenate([np.asarray(f["lon"]).ravel() for f in fields])
-        lats = np.concatenate([np.asarray(f["lat"]).ravel() for f in fields])
-        lon0, lon1 = float(np.nanmin(lons)), float(np.nanmax(lons))
-        lat0, lat1 = float(np.nanmin(lats)), float(np.nanmax(lats))
+        if extent is not None:
+            lon0, lon1, lat0, lat1 = (float(v) for v in extent)
+        else:
+            lons = np.concatenate([np.asarray(f["lon"]).ravel() for f in fields])
+            lats = np.concatenate([np.asarray(f["lat"]).ravel() for f in fields])
+            lon0, lon1 = float(np.nanmin(lons)), float(np.nanmax(lons))
+            lat0, lat1 = float(np.nanmin(lats)), float(np.nanmax(lats))
+        # a still resolves "auto" against the data's own extent, before the margin below
+        # widens it -- the same extent the static renderer's view has
+        data_extent = (lon0, lon1, lat0, lat1)
         pad_x, pad_y = 0.5 * max(lon1 - lon0, 1e-3), 0.5 * max(lat1 - lat0, 1e-3)
         lat0, lat1 = max(lat0 - pad_y, -90.0), min(lat1 + pad_y, 90.0)
         lon0_padded, lon1_padded = lon0 - pad_x, lon1 + pad_x
@@ -4563,9 +4635,11 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
             # anything can pan into
             mid = 0.5 * (lon0 + lon1)
             lon0_padded, lon1_padded = mid - 180.0, mid + 180.0
+        # a movie re-sends the path in every frame, so it resolves "auto" against the
+        # padded clip box (after the one-turn cap) and keeps the coarser, lighter scale
         ne_resolution = nearest_ne_resolution(
             normalize_coastline_resolution(coastline_resolution),
-            extent=(lon0_padded, lon1_padded, lat0, lat1),
+            extent=(lon0_padded, lon1_padded, lat0, lat1) if per_frame else data_extent,
         )
         geoms = list(
             cfeature.NaturalEarthFeature(
@@ -4590,7 +4664,7 @@ def _movie_coastline(*fields, coastline_resolution: str = DEFAULT_COASTLINE_RESO
                         segments.append(xy)
     except Exception as err:  # pragma: no cover - depends on local NE cache/network
         warnings.warn(
-            f"could not build the movie's coastline overlay ({err}); the frames play "
+            f"could not build the offline coastline overlay ({err}); the map draws "
             "without one. Natural Earth data downloads on first use, so a machine "
             "that has never drawn a coastline needs to be online once.",
             stacklevel=2,
@@ -4636,18 +4710,15 @@ def _domain_overlay(domain, da, *, geo: bool = True, tiles=None):
     """Return the model-domain outline as one dashed ``hv.Path`` in the panel's frame.
 
     Plain holoviews rather than a geoviews element — the same choice
-    :func:`_movie_coastline` and :func:`_locations` make, and for the same reason: a
+    :func:`_offline_coastline` and :func:`_locations` make, and for the same reason: a
     geoviews element re-projects its geometry from scratch on every render, fine once
-    but ruinous embedded in a movie. Under tiles the ring is projected to Web
-    Mercator (:func:`_to_mercator`); for an untiled geo panel it is shifted into
-    :func:`_output_projection`'s frame with the same formula :func:`_movie_coastline`
-    uses for its coastline — a plain ``PlateCarree(central_longitude=180)`` frame is
-    ``x = (lon % 360) - 180``, an identity shift for every other domain (one already
-    in ``_output_projection``'s own default frame needs no correction). ``domain``
-    accepts either spelling :func:`~ocean_skill.plot.matplotlib_renderer.domain_ring`
-    does — the bbox this option has always taken, or the true-perimeter ring a
-    curvilinear source's catalog entry supplies. Returns ``None`` when there is
-    nothing to draw.
+    but ruinous embedded in a movie. The ring is moved into the panel's frame by
+    :func:`_overlay_xform` — Web Mercator under tiles, the 180-centred shift on a
+    dateline-straddling field, and otherwise a wrap into ±180 (a no-op for a ring
+    already spelled that way). ``domain`` accepts either spelling
+    :func:`~ocean_skill.plot.matplotlib_renderer.domain_ring` does — the bbox this
+    option has always taken, or the true-perimeter ring a curvilinear source's catalog
+    entry supplies. Returns ``None`` when there is nothing to draw.
     """
     from ocean_skill.plot.matplotlib_renderer import domain_ring
 
@@ -4657,10 +4728,7 @@ def _domain_overlay(domain, da, *, geo: bool = True, tiles=None):
     import holoviews as hv
 
     xs, ys = ring[:, 0].astype(float), ring[:, 1].astype(float)
-    if geo and tiles:
-        xs, ys = _to_mercator(xs, ys)
-    elif geo and _output_projection(da) is not None:
-        xs = (xs % 360.0) - 180.0
+    xs, ys = _overlay_xform(da, tiles, geo=geo)(xs, ys)
     return hv.Path([np.column_stack([xs, ys])]).opts(
         color="black",
         line_dash="dashed",
@@ -4805,9 +4873,9 @@ def _facet_movie(
       :mod:`geoviews.tile_sources` name (e.g. ``tiles="EsriTerrain"`` or
       ``"EsriOceanBase"``) for a different one, or ``tiles=False`` for a
       notebook that has to work offline — which swaps the basemap for a static
-      coastline outline at ``coastline_resolution`` (see :func:`_movie_coastline` for
-      why a movie never uses hvplot's own). Has no effect when ``tiles`` is truthy,
-      the basemap drawing the coast already.
+      coastline outline at ``coastline_resolution`` (see :func:`_offline_coastline` for
+      why no interactive map uses hvplot's own). Has no effect when ``tiles`` is
+      truthy, the basemap drawing the coast already.
 
     ``land=False`` drops that static coastline outline too (a fully bare map); it has
     no effect when ``tiles`` is truthy, for the same reason ``tiles`` overrides
@@ -4873,10 +4941,13 @@ def _facet_movie(
     tiles = _tiles_for(_check_tiles(tiles), frames_da)
     # with tiles the basemap draws the coast; without them a static, once-built
     # outline stands in for the per-frame Feature that hvplot would overlay
-    coast = (
-        _movie_coastline(frames_da, coastline_resolution=coastline_resolution)
-        if geo and not tiles and land is not False
-        else None
+    coast = _offline_coastline(
+        frames_da,
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+        per_frame=True,
     )
     outline = _domain_overlay(domain, frames_da, geo=geo, tiles=tiles)
     subject = _subject(item) if title is None else title
@@ -4902,7 +4973,6 @@ def _facet_movie(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline=False,
             project=True,
             label_clipped=colorbar_label_clipped,
         )
@@ -4958,7 +5028,7 @@ def _field_movie(
     in the same way it does for :func:`_facet_movie`. Pass a :mod:`geoviews.tile_sources`
     name for a different map, or ``tiles=False`` for a notebook that has to work
     offline, which swaps the basemap for one static coastline outline shared by all
-    three panels, at ``coastline_resolution`` (see :func:`_movie_coastline`).
+    three panels, at ``coastline_resolution`` (see :func:`_offline_coastline`).
     ``land=False`` drops that outline too, for a fully bare map; it has no effect
     when ``tiles`` is truthy, for the same reason ``tiles`` overrides
     ``coastline_resolution`` above.
@@ -5000,14 +5070,14 @@ def _field_movie(
     )
     # one static coastline for all three panels and every frame (the frames share the
     # aligned grid); with tiles the basemap draws the coast instead
-    coast = (
-        _movie_coastline(
-            first["aligned"]["test"],
-            first["aligned"]["reference"],
-            coastline_resolution=coastline_resolution,
-        )
-        if geo and not tiles and land is not False
-        else None
+    coast = _offline_coastline(
+        first["aligned"]["test"],
+        first["aligned"]["reference"],
+        geo=geo,
+        tiles=tiles,
+        land=land,
+        coastline_resolution=coastline_resolution,
+        per_frame=True,
     )
     outline = _domain_overlay(domain, first["aligned"]["test"], geo=geo, tiles=tiles)
     scope = items if shared_limits else items[:1]
@@ -5062,7 +5132,6 @@ def _field_movie(
                 hover=hover,
                 rasterize=raster,
                 tiles=tiles,
-                coastline=False,
                 project=True,
                 label_clipped=colorbar_label_clipped,
             )
@@ -5081,7 +5150,6 @@ def _field_movie(
                 hover=hover,
                 rasterize=raster,
                 tiles=tiles,
-                coastline=False,
                 project=True,
                 label_clipped=colorbar_label_clipped,
             )
@@ -5099,7 +5167,6 @@ def _field_movie(
             hover=hover,
             rasterize=raster,
             tiles=tiles,
-            coastline=False,
             project=True,
             label_clipped=colorbar_label_clipped,
         )
@@ -6985,24 +7052,52 @@ def _identity_xform(xs, ys):
 def _shift_to_180_frame(xs, ys):
     """Shift ±180 longitudes into a ``PlateCarree(central_longitude=180)`` frame.
 
-    ``x = (lon % 360) - 180`` -- the same formula :func:`_domain_overlay` and
-    :func:`_movie_coastline` use for their plain-holoviews geometry, which takes no
-    part in geoviews's automatic projection and so has to be moved by hand.
+    ``x = (lon % 360) - 180`` -- the same formula :func:`_offline_coastline` uses for
+    its plain-holoviews geometry, which takes no part in geoviews's automatic projection
+    and so has to be moved by hand.
     """
     return (np.asarray(xs, dtype=float) % 360.0) - 180.0, np.asarray(ys, dtype=float)
 
 
-def _location_xform(field, tiles, *, geo: bool = True):
-    """Return the plain-element transform for ``locations`` geometry over ``field``.
+def _wrap_to_180(xs, ys):
+    """Wrap a 0-360-spelled overlay into the ±180 frame geoviews draws a mesh in.
 
-    Web Mercator under a tile basemap, the 180-centred shift on an untiled
-    dateline-straddling field (see :func:`_output_projection`), and the identity
-    otherwise -- the same three-way choice :func:`_domain_overlay` makes for its ring.
+    A domain ring, a station or a window may be spelled ``261…269`` while the mesh they
+    belong to is stored 0-360 without straddling anything: geoviews wraps such a mesh
+    into ``-99…-91`` itself, so a plain overlay left at ``261…269`` would sit a full
+    turn off it. Only an ``x`` outside [−180, 180] moves (``((x + 180) % 360) - 180``);
+    in-range values — including exactly 180 and −180, which the plain modulo would fold
+    onto each other — are left as they are, as is ``y``.
+    """
+    xs = np.array(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    out = (xs < -180.0) | (xs > 180.0)
+    xs[out] = ((xs[out] + 180.0) % 360.0) - 180.0
+    return xs, ys
+
+
+def _overlay_xform(field, tiles, *, geo: bool = True):
+    """Return the transform that moves plain-element geometry into ``field``'s frame.
+
+    Plain holoviews elements (a domain ring, the ``extent`` window, a location's paths
+    and boxes) take no part in geoviews's automatic projection, so they are moved into
+    the panel's frame by hand, and which frame that is decides how:
+
+    * Web Mercator metres under a tile basemap (:func:`_to_mercator`);
+    * the 180-centred shift on an untiled dateline-straddling field, whose frame
+      :func:`_output_projection` picks (:func:`_shift_to_180_frame`);
+    * any other untiled geographic panel, plain degrees in ±180 (:func:`_wrap_to_180`):
+      already right for a ±180 overlay, and it pulls a 0-360-spelled one over a mesh
+      geoviews has wrapped into ±180;
+    * the identity for a non-geographic panel (``geo=False``), which has no frame to
+      move into.
     """
     if geo and tiles:
         return _to_mercator
     if geo and _output_projection(field) is not None:
         return _shift_to_180_frame
+    if geo:
+        return _wrap_to_180
     return _identity_xform
 
 
@@ -7257,8 +7352,12 @@ def _locations(
     Web tiles are on by default (``"EsriOceanBase"``): a locations map exists to be
     panned and zoomed into, which a bare coastline serves poorly. Pass ``tiles=None``
     for the offline coastline basemap the other map families default to, at
-    ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`). Extent boxes
-    are plain ``hv.Rectangles`` deliberately —
+    ``coastline_resolution`` (see :mod:`ocean_skill.plot.coastline`): one clipped,
+    once-built path (:func:`_offline_coastline`, cut to the ``extent`` given here)
+    rather than a geoviews ``Feature``, and the frame is pinned to plain PlateCarree
+    degrees, since an overlay with no geoviews ``Feature`` in it would otherwise fall
+    back to Web Mercator metres and leave the markers far off the degree view. Extent
+    boxes are plain ``hv.Rectangles`` deliberately —
     ``gv.Rectangles`` + hover crashes in geoviews's bokeh hover handling (its
     ``_process_hover_geo`` assumes two kdims) — so with tiles on, their corners
     (and the ``extent`` limits) are projected to Web Mercator here, since plain
@@ -7278,8 +7377,6 @@ def _locations(
     group, a list as the selection palette, or a ``{legend label: colour}`` dict; see
     :func:`~ocean_skill.plot.locations.legend_groups`.
     """
-    import geoviews as gv
-
     hv = _extension()
     if tiles is True:
         tiles = "EsriOceanBase"
@@ -7300,17 +7397,20 @@ def _locations(
         from geoviews import tile_sources
 
         overlay = tile_sources.tile_sources[tiles]
-    elif land is not False:
-        ne_resolution = nearest_ne_resolution(
-            normalize_coastline_resolution(coastline_resolution),
-            extent=(lon0, lon1, lat0, lat1),
-        )
-        overlay = gv.feature.coastline.opts(scale=ne_resolution)
     else:
-        # land=False and no tiles: a bare basemap. An empty Overlay rather than None
-        # so every subsequent group below can keep composing with `overlay * ...`
-        # unconditionally.
-        overlay = hv.Overlay([])
+        # the same once-built, clipped path every other untiled map draws, cut to this
+        # map's own window (there is no field here to measure). None for land=False or a
+        # coastline that could not be built: a bare basemap, as an empty Overlay rather
+        # than None so every subsequent group below can keep composing with
+        # `overlay * ...` unconditionally.
+        overlay = _offline_coastline(
+            extent=(lon0, lon1, lat0, lat1),
+            tiles=tiles,
+            land=land,
+            coastline_resolution=coastline_resolution,
+        )
+        if overlay is None:
+            overlay = hv.Overlay([])
 
     for element in _location_elements(
         items,
@@ -7334,6 +7434,12 @@ def _locations(
         xs, ys = to_mercator([lon0, lon1], [lat0, lat1])
         opts["xlim"], opts["ylim"] = (xs[0], xs[1]), (ys[0], ys[1])
     else:
+        import cartopy.crs as ccrs
+
+        # Pin the frame to degrees: with no geoviews Feature in the overlay (the
+        # coastline is a plain path) geoviews would default the gv.Points' frame to
+        # Web Mercator, putting every marker at ~1e7 m against limits in degrees.
+        opts["projection"] = ccrs.PlateCarree()
         opts["xlim"], opts["ylim"] = (lon0, lon1), (lat0, lat1)
     return overlay.opts(**opts)
 

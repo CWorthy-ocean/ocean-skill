@@ -508,16 +508,21 @@ def test_gets_a_basemap_on_every_panel_by_default_interactively():
     kinds = [type(n).__name__ for n in obj.traverse()]
     assert kinds.count("WMTS") == 2, kinds
     assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+    assert "Path" not in kinds, "a redundant offline coastline was also drawn"
 
 
 def test_tiles_false_is_the_offline_coastline_interactively():
+    """Both panels overlay the one coastline ``Path`` the figure built, by identity."""
     from ocean_skill.plot.registry import render
 
     items = [_map_item("run_a", NITRATE, 5.0), _map_item("run_a", SILICATE, 20.0)]
     obj = render(_spec(items, tiles=False), renderer="holoviews")
     kinds = [type(n).__name__ for n in obj.traverse()]
     assert "WMTS" not in kinds, kinds
-    assert kinds.count("Feature") == 2, kinds
+    assert "Feature" not in kinds, kinds
+    paths = [n for n in obj.traverse() if type(n).__name__ == "Path"]  # no domain ring
+    assert len(paths) == 2, kinds
+    assert paths[0] is paths[1], "panels rebuilt the coastline"
 
 
 def test_static_accepts_tiles_with_a_warning():

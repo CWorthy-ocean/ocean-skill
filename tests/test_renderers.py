@@ -1759,36 +1759,65 @@ def test_coastline_resolution_rejects_an_unknown_value():
         render(spec)
 
 
-def _coastline_scale(row):
-    """The Natural Earth scale a rendered interactive row's coastline opts to."""
-    import holoviews as hv
+@pytest.fixture
+def coastline_scales(monkeypatch):
+    """The Natural Earth scale of every coastline built while the test runs.
 
-    feat = next(el for el in row.traverse() if isinstance(el, hv.Element)
-                and type(el).__name__ == "Feature")
-    return feat.opts.get("plot").kwargs.get("scale")
+    The interactive renderer no longer hands hvplot a ``Feature`` to inspect: each
+    untiled figure builds one ``hv.Path`` from a cartopy ``NaturalEarthFeature`` (see
+    ``_offline_coastline``), so the scale it *built* is the observable. Recording
+    subclass rather than a function so ``isinstance`` checks on the class (the static
+    renderer's, and ``_land_features`` above) keep working while the fixture is live.
+    """
+    import cartopy.feature as cfeature
+
+    built: list[str] = []
+
+    class _Recording(cfeature.NaturalEarthFeature):
+        def __init__(self, category, name, scale, *args, **kwargs):
+            if name == "coastline":
+                built.append(scale)
+            super().__init__(category, name, scale, *args, **kwargs)
+
+    monkeypatch.setattr(cfeature, "NaturalEarthFeature", _Recording)
+    return built
+
+
+def _coast_paths(obj) -> list:
+    """Every ``Path`` in ``obj``, one entry per panel that overlays it.
+
+    Specs here carry no ``domain``, stations or locations, so a ``Path`` in a map
+    figure can only be the offline coastline -- the tests below rely on that.
+    """
+    return [n for n in obj.traverse() if type(n).__name__ == "Path"]
 
 
 @pytest.mark.adaptive_coastline
-def test_coastline_resolution_auto_resolves_by_extent_interactively():
+def test_coastline_resolution_auto_resolves_by_extent_interactively(coastline_scales):
     """``"auto"`` reaches the interactive renderer too, not just the static one.
 
     ``tiles=False``: tiles are on by default now and draw the coast themselves
-    (see :func:`_quadmesh`), which would leave no offline ``Feature`` to inspect.
+    (see :func:`_quadmesh`), which would leave no offline coastline to build. One
+    entry for a three-panel row also proves the row builds it once, not per panel.
     """
-    row = _hv_row(_row_item(), tiles=False)  # 8x10 deg: under both NE thresholds
-    assert _coastline_scale(row) == "10m"
+    _hv_row(_row_item(), tiles=False)  # 8x10 deg: under both NE thresholds
+    assert coastline_scales == ["10m"]
 
 
-def test_coastline_resolution_accepts_a_fixed_natural_earth_scale_interactively():
-    row = _hv_row(_row_item(), coastline_resolution="50m", tiles=False)
-    assert _coastline_scale(row) == "50m"
+def test_coastline_resolution_accepts_a_fixed_natural_earth_scale_interactively(
+    coastline_scales,
+):
+    _hv_row(_row_item(), coastline_resolution="50m", tiles=False)
+    assert coastline_scales == ["50m"]
 
 
-def test_coastline_resolution_gshhs_falls_back_to_natural_earth_interactively():
+def test_coastline_resolution_gshhs_falls_back_to_natural_earth_interactively(
+    coastline_scales,
+):
     """GSHHS has no interactive renderer support, so it degrades -- loudly."""
     with pytest.warns(UserWarning, match="GSHHS"):
-        row = _hv_row(_row_item(), coastline_resolution="full", tiles=False)
-    assert _coastline_scale(row) == "10m"
+        _hv_row(_row_item(), coastline_resolution="full", tiles=False)
+    assert coastline_scales == ["10m"]
 
 
 # ---------------------------------------------------------------------------
@@ -1874,25 +1903,26 @@ def test_land_accepted_by_every_map_family(family, build_spec):
     render(build_spec(), renderer="matplotlib", land=False)
 
 
-def test_land_false_drops_the_coastline_interactively():
+def test_land_false_drops_the_coastline_interactively(coastline_scales):
     """Interactively there is no fill to hide -- ``land=False`` drops the outline too.
 
-    ``tiles=False``: with tiles on (the default) there would be no ``Feature``
+    ``tiles=False``: with tiles on (the default) there would be no coastline
     either way, which would pass for the wrong reason -- see :func:`_quadmesh`.
+    Nothing was even *built*: ``_offline_coastline`` returns before it constructs a
+    Natural Earth feature.
     """
-    import holoviews as hv
-
     row = _hv_row(_row_item(), land=False, tiles=False)
-    assert not any(
-        isinstance(el, hv.Element) and type(el).__name__ == "Feature"
-        for el in row.traverse()
-    )
+    kinds = _element_kinds(row)
+    assert "Feature" not in kinds, kinds
+    assert _coast_paths(row) == []
+    assert coastline_scales == []
 
 
 @pytest.mark.adaptive_coastline
-def test_land_true_keeps_the_coastline_interactively():
+def test_land_true_keeps_the_coastline_interactively(coastline_scales):
     row = _hv_row(_row_item(), tiles=False)
-    assert _coastline_scale(row) == "10m"
+    assert coastline_scales == ["10m"]
+    assert len(_coast_paths(row)) == 3, "every panel should carry the coastline"
 
 
 # ---------------------------------------------------------------------------
@@ -1902,11 +1932,13 @@ def test_land_true_keeps_the_coastline_interactively():
 # ---------------------------------------------------------------------------
 
 
-def test_field_row_gets_a_basemap_by_default_interactively():
+def test_field_row_gets_a_basemap_by_default_interactively(coastline_scales):
     row = _hv_row(_row_item())
     kinds = _element_kinds(row)
     assert kinds.count("WMTS") == 3, kinds  # test, reference, difference
     assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+    assert "Path" not in kinds, "a redundant offline coastline was also drawn"
+    assert coastline_scales == [], "tiles draw the coast; none should have been built"
 
 
 def test_field_row_named_tile_source_interactively():
@@ -1916,10 +1948,18 @@ def test_field_row_named_tile_source_interactively():
 
 
 def test_field_row_tiles_false_is_the_offline_coastline_interactively():
+    """One coastline ``Path`` built once for the row and overlaid on all three panels.
+
+    Shared by identity, not merely equal: per-panel copies are what bokeh had to
+    re-project from scratch each time, roughly nine seconds for a four-panel map.
+    """
     row = _hv_row(_row_item(), tiles=False)
     kinds = _element_kinds(row)
     assert "WMTS" not in kinds, kinds
-    assert kinds.count("Feature") == 3, kinds
+    assert "Feature" not in kinds, kinds
+    paths = _coast_paths(row)
+    assert len(paths) == 3, kinds  # test, reference, difference
+    assert all(p is paths[0] for p in paths), "panels rebuilt the coastline"
 
 
 def test_static_field_row_accepts_tiles_with_a_warning():
@@ -1965,20 +2005,25 @@ def test_static_field_grid_accepts_tiles_with_a_warning():
 def test_skill_map_gets_a_basemap_by_default_interactively():
     """Every skill-metric panel carries a basemap, like the other map families.
 
-    Without one, each panel drew hvplot's offline coastline ``Feature``, which bokeh
-    re-projects from scratch per panel -- roughly nine seconds for a four-panel map.
+    Without one, each panel drew its own offline coastline, which bokeh re-projects
+    from scratch per panel -- roughly nine seconds for a four-panel map.
     """
     layout = render(_skill_spec(_skill_item()), renderer="holoviews")
     kinds = _element_kinds(layout)
     assert kinds.count("WMTS") == len(_SKILL_METRICS), kinds  # one per metric panel
     assert "Feature" not in kinds, "a redundant offline coastline was also drawn"
+    assert "Path" not in kinds, "a redundant offline coastline was also drawn"
 
 
 def test_skill_map_tiles_false_is_the_offline_coastline_interactively():
+    """One coastline ``Path`` shared by every metric panel, not one per panel."""
     layout = render(_skill_spec(_skill_item(), tiles=False), renderer="holoviews")
     kinds = _element_kinds(layout)
     assert "WMTS" not in kinds, kinds
-    assert kinds.count("Feature") == len(_SKILL_METRICS), kinds
+    assert "Feature" not in kinds, kinds
+    paths = _coast_paths(layout)  # no ``domain`` option, so no ring among them
+    assert len(paths) == len(_SKILL_METRICS), kinds
+    assert all(p is paths[0] for p in paths), "panels rebuilt the coastline"
 
 
 def test_static_skill_map_accepts_tiles_with_a_warning():

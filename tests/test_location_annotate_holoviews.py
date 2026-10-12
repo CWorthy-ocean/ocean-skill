@@ -180,7 +180,8 @@ def test_labels_sit_on_their_shapes_plain_frame():
 
 
 def test_labels_sit_on_their_shapes_180_centred_frame():
-    overlay = _hv(STRADDLER, STRADDLE_ITEMS, legend="annotate")
+    # land=False: no coastline Path, so the selection line is the only one
+    overlay = _hv(STRADDLER, STRADDLE_ITEMS, legend="annotate", land=False)
     xy = _label_xy(overlay)
     # x = lon % 360 - 180: 155E -> -25
     assert xy["Pt"] == (-25.0, -15.0)
