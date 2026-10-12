@@ -473,6 +473,24 @@ def test_holoviews_locations_hover_carries_the_metadata(index):
         assert [name for name, _ in hover.tooltips] == list(HOVER_FIELDS)
 
 
+def _assert_markers_inside_the_view(fig):
+    """Every point marker's x lies between the figure's own x limits."""
+    from bokeh.models import Scatter
+
+    scatters = [
+        r for r in fig.renderers if isinstance(getattr(r, "glyph", None), Scatter)
+    ]
+    assert scatters, "no point markers were drawn"
+    for renderer in scatters:
+        spec = renderer.glyph.x  # a column name here, a Field in other bokeh versions
+        xs = np.asarray(renderer.data_source.data[getattr(spec, "field", spec)], float)
+        assert xs.size
+        assert np.all((xs >= fig.x_range.start) & (xs <= fig.x_range.end)), (
+            f"markers at x={xs.min()}..{xs.max()} are outside the view "
+            f"({fig.x_range.start}, {fig.x_range.end})"
+        )
+
+
 def test_holoviews_locations_tiles(index):
     from ocean_skill.plot.holoviews_renderer import _locations
 
@@ -484,9 +502,31 @@ def test_holoviews_locations_tiles(index):
 
     fig = hv.render(_locations(items, extent=extent, tiles=None), backend="bokeh")
     assert (fig.x_range.start, fig.x_range.end) == (extent[0], extent[2])
+    # ...and the markers are in those degrees too. The limits alone passed while the
+    # markers sat in Web Mercator metres (x ~ -1e7), a long way off the view
+    _assert_markers_inside_the_view(fig)
     # tiled (the default) projects the limits: Mercator metres, not degrees
     fig = hv.render(_locations(items, extent=extent), backend="bokeh")
     assert abs(fig.x_range.start) > 1000.0
+
+
+@pytest.mark.parametrize("land", [True, False])
+def test_holoviews_locations_untiled_markers_share_the_degree_frame(index, land):
+    """With or without the offline coastline, markers land in the degree limits.
+
+    ``land=False`` draws no coastline at all, so nothing but the markers themselves
+    can pin the frame -- the case a coastline-only fix would leave in Mercator.
+    """
+    import holoviews as hv
+
+    from ocean_skill.plot.holoviews_renderer import _locations
+
+    items, extent = _items(index)
+    fig = hv.render(
+        _locations(items, extent=extent, tiles=None, land=land), backend="bokeh"
+    )
+    assert (fig.x_range.start, fig.x_range.end) == (extent[0], extent[2])
+    _assert_markers_inside_the_view(fig)
 
 
 def test_holoviews_locations_default_tiles_avoid_carto(index):

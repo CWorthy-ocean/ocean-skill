@@ -256,22 +256,49 @@ def _elements(overlay, name):
     return [e for e in overlay if type(e).__name__ == name]
 
 
+# The untiled facet now carries the one shared offline coastline as a ``Path`` of its
+# own, so a test about the *locations'* geometry passes ``land=False`` to leave only
+# that geometry to find; the coastline has its own test below.
+
+
 def test_interactive_overlay_draws_every_kind_as_context():
-    overlay = _hv(PLAIN, PLAIN_ITEMS)
+    overlay = _hv(PLAIN, PLAIN_ITEMS, land=False)
     for kind in ("Rectangles", "Points", "Path"):
         (element,) = _elements(overlay, kind)
         assert element.opts.get().kwargs["apply_ranges"] is False
+
+
+def test_interactive_untiled_locations_sit_beside_the_one_shared_coastline():
+    """The coastline is a ``Path`` too, and context like the locations' own.
+
+    One extra ``Path`` when the coastline is on, nothing else added or moved, and it
+    widens no view -- ``apply_ranges=False``, like every location element above.
+    """
+    bare = _hv(PLAIN, PLAIN_ITEMS, land=False)
+    coasted = _hv(PLAIN, PLAIN_ITEMS)
+
+    assert len(_elements(coasted, "Path")) == len(_elements(bare, "Path")) + 1
+    assert [type(e).__name__ for e in coasted if type(e).__name__ != "Path"] == [
+        type(e).__name__ for e in bare if type(e).__name__ != "Path"
+    ]
+    assert all(
+        e.opts.get().kwargs["apply_ranges"] is False for e in _elements(coasted, "Path")
+    )
 
 
 def test_interactive_no_items_is_the_map_it_always_was():
     assert [type(e).__name__ for e in _hv(PLAIN, None)] == [
         type(e).__name__ for e in _hv(PLAIN, [])
     ]
-    assert not _elements(_hv(PLAIN, None), "Path")
+    # no locations means no location geometry: the only Path left is the coastline
+    assert len(_elements(_hv(PLAIN, None), "Path")) == 1
+    # (with the coastline off as well nothing is overlaid, so it is the bare mesh)
+    bare = _hv(PLAIN, None, land=False)
+    assert "Path" not in [type(e).__name__ for e in bare.traverse()]
 
 
 def test_interactive_plain_map_is_not_shifted():
-    (path,) = _elements(_hv(PLAIN, PLAIN_ITEMS), "Path")
+    (path,) = _elements(_hv(PLAIN, PLAIN_ITEMS, land=False), "Path")
     (segment,) = path.split()
     assert segment.dimension_values(0).tolist() == [-95.0, -85.0]
 
@@ -283,7 +310,7 @@ def test_interactive_straddling_map_shifts_plain_geometry_but_not_geoviews_point
     frame here; ``gv.Points`` is projected by geoviews itself and must be left in
     degrees, or it is moved twice.
     """
-    overlay = _hv(STRADDLER, STRADDLE_ITEMS)
+    overlay = _hv(STRADDLER, STRADDLE_ITEMS, land=False)
 
     (path,) = _elements(overlay, "Path")
     spans = [
@@ -305,15 +332,38 @@ def test_interactive_straddling_map_shifts_plain_geometry_but_not_geoviews_point
 def test_interactive_transform_follows_the_frame():
     from ocean_skill.plot.holoviews_renderer import (
         _identity_xform,
-        _location_xform,
+        _overlay_xform,
         _shift_to_180_frame,
         _to_mercator,
+        _wrap_to_180,
     )
 
-    assert _location_xform(STRADDLER, None) is _shift_to_180_frame
-    assert _location_xform(PLAIN, None) is _identity_xform
-    assert _location_xform(PLAIN, "EsriOceanBase") is _to_mercator
-    assert _location_xform(STRADDLER, None, geo=False) is _identity_xform
+    assert _overlay_xform(STRADDLER, None) is _shift_to_180_frame
+    # an ordinary untiled map is no longer the identity: it wraps, so a 0-360-spelled
+    # overlay follows a mesh geoviews has already wrapped into ±180
+    assert _overlay_xform(PLAIN, None) is _wrap_to_180
+    assert _overlay_xform(PLAIN, "EsriOceanBase") is _to_mercator
+    assert _overlay_xform(STRADDLER, None, geo=False) is _identity_xform
+    assert _overlay_xform(PLAIN, None, geo=False) is _identity_xform
+
+
+def test_wrap_to_180_moves_only_longitudes_outside_the_frame():
+    """``261`` becomes ``-99``; ``180`` and ``-180`` stay, though a modulo folds them.
+
+    ``((x + 180) % 360) - 180`` applied to everything would turn an in-range ``180``
+    into ``-180``, moving an overlay that was already where the mesh is. ``y`` is never
+    touched, and neither is the caller's array.
+    """
+    from ocean_skill.plot.holoviews_renderer import _wrap_to_180
+
+    xs = np.array([-100.0, 180.0, -180.0, 261.0, 540.0, -190.0])
+    ys = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    xs_in = xs.copy()
+    out_x, out_y = _wrap_to_180(xs, ys)
+
+    assert out_x.tolist() == [-100.0, 180.0, -180.0, -99.0, -180.0, 170.0]
+    assert out_y.tolist() == ys.tolist()
+    assert xs.tolist() == xs_in.tolist(), "the input array was modified in place"
 
 
 def test_interactive_facets_key_the_first_panel_only():
@@ -433,6 +483,7 @@ def test_field_plot_colors_works_interactively_too(stub):
         obj = make_field("stub", "nitrate").plot(
             renderer="holoviews",
             tiles=False,
+            land=False,  # no coastline Path, so the transect is the only one
             locations=[_transect_field()],
             colors="navy",
         )

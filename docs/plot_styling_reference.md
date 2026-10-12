@@ -536,9 +536,9 @@ cook_inlet.plot(coastline_resolution="full")       # GSHHS, resolves the Homer S
 ```
 
 **GSHHS only draws on the static renderer.** geoviews/hvplot has no GSHHS support, so
-`renderer="holoviews"` (and a movie's offline coastline outline) falls back to the
-*nearest* Natural Earth scale and warns once, rather than silently drawing something
-coarser than asked for:
+`renderer="holoviews"` (and the offline coastline outline an untiled still map or movie
+draws) falls back to the *nearest* Natural Earth scale and warns once, rather than
+silently drawing something coarser than asked for:
 
 ```python
 cook_inlet.plot(coastline_resolution="full", renderer="holoviews")

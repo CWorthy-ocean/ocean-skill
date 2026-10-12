@@ -875,6 +875,64 @@ def test_offline_movie_coastline_resolution_gshhs_falls_back_with_a_warning():
     assert len(path.dimension_values(0)) > 2, "the fallback coastline came back empty"
 
 
+@pytest.fixture
+def coastline_scales(monkeypatch):
+    """Record the Natural Earth scale of every coastline built while the test runs.
+
+    The interactive renderer builds one ``hv.Path`` from a cartopy
+    ``NaturalEarthFeature`` per untiled figure (see ``_offline_coastline``), so the
+    scale it *built* is the observable. A recording subclass rather than a function so
+    ``isinstance`` checks on the class keep working while the fixture is live.
+    """
+    import cartopy.feature as cfeature
+
+    built: list[str] = []
+
+    class _Recording(cfeature.NaturalEarthFeature):
+        def __init__(self, category, name, scale, *args, **kwargs):
+            if name == "coastline":
+                built.append(scale)
+            super().__init__(category, name, scale, *args, **kwargs)
+
+    monkeypatch.setattr(cfeature, "NaturalEarthFeature", _Recording)
+    return built
+
+
+# ``_run``'s grid spans 18 deg of longitude by 13 of latitude. Natural Earth's adaptive
+# scale goes by the narrower side (10m up to 15 deg, 50m up to 50, 110m beyond), and the
+# clip box a map overlays its coastline on is half its span wider on each side: 13 deg
+# of data is 10m, 26 deg of box is 50m. The two tests below pin each side of that.
+
+
+@pytest.mark.adaptive_coastline
+def test_an_untiled_movie_resolves_auto_against_its_padded_clip_box(coastline_scales):
+    """A movie re-sends its coastline in every frame, so it keeps the coarser scale.
+
+    The unpadded 13 deg of data would pick 10m, tens of KB heavier in every embedded
+    frame; the padded 26 deg box picks 50m. One build, shared by every frame.
+    """
+    _hv(_facet_film(_run(3), renderer="holoviews", domain=None, tiles=False))
+    assert coastline_scales == ["50m"]
+
+
+@pytest.mark.adaptive_coastline
+def test_an_untiled_still_resolves_auto_against_the_data_extent(coastline_scales):
+    """The same field as a still keeps the finer scale the static renderer picks.
+
+    Nothing is embedded once per frame, so a still has no size to save: it resolves
+    ``"auto"`` against the data's own 13 deg, below the 15 deg threshold, and gets 10m.
+    """
+    render(
+        PlotSpec(
+            family="field_facet",
+            items=[_facet_item(_run(3), "time")],
+            options={"tiles": False, "domain": None},
+        ),
+        renderer="holoviews",
+    )
+    assert coastline_scales == ["10m"]
+
+
 def test_the_field_is_projected_once_at_build_not_once_per_frame():
     """``project=True``: frames land in the output projection before embedding.
 

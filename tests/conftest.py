@@ -143,12 +143,13 @@ def coarse_auto_coastlines(request, monkeypatch):
     Nearly every fixture draws an 8x10-degree domain, which cartopy's
     ``AdaptiveScaler`` resolves to the 10m Natural Earth coastline -- about 40% of the
     whole suite's CPU: the static ``FeatureArtist.draw`` spends seconds per multi-panel
-    figure, and bokeh re-projects the world's 10m coastline once per interactive panel.
+    figure, and the interactive path clips the world's 10m coastline to the map once per
+    figure (one ``hv.Path`` shared by every panel).
     Pinning the scaler to its coarsest scale changes only *which shapefile* cartopy
     loads. Every line of ``ocean_skill`` still runs as in production, because both the
     static path (``cfeature.LAND`` / ``ax.coastlines(resolution="auto")`` in
     ``_basemap``) and the interactive one (:func:`ocean_skill.plot.coastline.
-    auto_ne_resolution`, used by ``_quadmesh``) go through
+    auto_ne_resolution`, used by ``_offline_coastline``) go through
     ``AdaptiveScaler.scale_from_extent``. An explicit ``"10m"`` / ``"50m"`` or a GSHHS
     scale never asks the scaler, so those requests are untouched.
 

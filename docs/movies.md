@@ -249,11 +249,13 @@ overlay is a geoviews `Feature`, which re-projects the whole world's coastline g
 for *every frame* the page embeds — measured at 0.6–1.2 s and ~1.5 MB of page per frame,
 several times the cost of the frame's own data. So a movie never carries a `Feature`:
 with tiles (the default) the basemap draws the coast, and without them a static outline —
-clipped to the domain, built once, shared by every frame — stands in. The field itself is
-projected once up front (`project=True`) rather than per frame, and a dask-backed field's
-frames are loaded in one parallel read instead of one read per frame (fields past ~4 GB
-stay lazy and warn, since `every=` or a coarser `aggregate=` is the real fix at that
-size). Together: a 40-frame 400×500 movie that took ~46 s to appear now takes ~3 s, on a
+clipped to the domain, built once, shared by every frame — stands in. Untiled still maps
+draw that same outline (one path shared by every panel of the figure, rather than a
+`Feature` re-projected per panel), so no interactive map carries a `Feature`. The field
+itself is projected once up front (`project=True`) rather than per frame, and a
+dask-backed field's frames are loaded in one parallel read instead of one read per frame
+(fields past ~4 GB stay lazy and warn, since `every=` or a coarser `aggregate=` is the
+real fix at that size). Together: a 40-frame 400×500 movie that took ~46 s to appear now takes ~3 s, on a
 ~34 MB page instead of ~99 MB (`tiles=False` pays a little more, ~13 s, for the offline
 coastline).
 

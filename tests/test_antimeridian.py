@@ -573,12 +573,12 @@ def test_tiles_for_keeps_tiles_for_a_domain_nowhere_near_the_dateline():
     assert not any("Web Mercator" in str(w.message) for w in caught)
 
 
-def test_movie_coastline_lands_in_the_180_centred_frame_for_a_straddling_domain():
+def test_offline_coastline_lands_in_the_180_centred_frame_for_a_straddling_domain():
     pytest.importorskip("cartopy.feature")
-    from ocean_skill.plot.holoviews_renderer import _extension, _movie_coastline
+    from ocean_skill.plot.holoviews_renderer import _extension, _offline_coastline
 
     _extension()
-    path = _movie_coastline(_straddling_field())
+    path = _offline_coastline(_straddling_field())
     if path is None:  # pragma: no cover - depends on local Natural Earth cache
         pytest.skip("Natural Earth coastline data unavailable offline")
     xs = np.asarray(path.dimension_values(0))
@@ -590,13 +590,13 @@ def test_movie_coastline_lands_in_the_180_centred_frame_for_a_straddling_domain(
     assert not np.any(finite > 180.0)
 
 
-def test_movie_coastline_is_unshifted_for_a_non_straddling_domain():
+def test_offline_coastline_is_unshifted_for_a_non_straddling_domain():
     pytest.importorskip("cartopy.feature")
-    from ocean_skill.plot.holoviews_renderer import _extension, _movie_coastline
+    from ocean_skill.plot.holoviews_renderer import _extension, _offline_coastline
 
     _extension()
     field = _gom_like_field()
-    path = _movie_coastline(field)
+    path = _offline_coastline(field)
     if path is None:  # pragma: no cover - depends on local Natural Earth cache
         pytest.skip("Natural Earth coastline data unavailable offline")
     xs = np.asarray(path.dimension_values(0))
@@ -609,20 +609,20 @@ def test_movie_coastline_is_unshifted_for_a_non_straddling_domain():
     assert finite.max() <= lon1 + pad + 1e-6
 
 
-def test_movie_coastline_has_no_seam_crossing_strokes_for_a_wide_straddling_domain():
-    """No coastline stroke spans the seam of a PACMED-wide movie.
+def test_offline_coastline_has_no_seam_crossing_strokes_for_a_wide_straddling_domain():
+    """No coastline stroke spans the seam of a PACMED-wide map.
 
     Such a domain pads its clip past Greenwich, where the 180-centred frame has its
     seam. A coast crossing it (Britain, Iberia, Ghana) used to come out as one stroke
     from edge to edge of the map -- the horizontal lines across the movie.
     """
     pytest.importorskip("cartopy.feature")
-    from ocean_skill.plot.holoviews_renderer import _extension, _movie_coastline
+    from ocean_skill.plot.holoviews_renderer import _extension, _offline_coastline
 
     _extension()
     field = _rectilinear_field(77.4, 316.2, nx=48, ny=40)
     field = field.assign_coords(lat=np.linspace(-54.3, 66.1, 40))
-    path = _movie_coastline(field)
+    path = _offline_coastline(field)
     if path is None:  # pragma: no cover - depends on local Natural Earth cache
         pytest.skip("Natural Earth coastline data unavailable offline")
     xs = np.asarray(path.dimension_values(0))
@@ -683,7 +683,6 @@ def test_interactive_still_projects_a_straddling_mesh_onto_the_180_frame():
         geo=True,
         rasterize=True,
         tiles=False,
-        coastline=False,  # avoid a Natural Earth download in the test
         hover=False,
     )
     fig = hv.render(mesh)
@@ -762,6 +761,46 @@ def test_a_non_straddling_facet_movie_keeps_tiles_without_a_warning():
     assert "WMTS" in kinds, kinds
 
 
+def _assert_coastline_shares_the_meshs_180_frame(obj):
+    """Render ``obj`` with bokeh and check each figure's coastline sits over its mesh.
+
+    The elements existing is not enough: the coastline is a plain ``hv.Path`` that no
+    geoviews projection touches, so it lands wherever its own x says. Three ways to get
+    that wrong, each caught by one line below -- Web Mercator metres (~1e7, a tiled
+    figure's frame), the raw 0-360 or ±180 longitudes (a full or half a turn off the
+    mesh, which the straddling field's 180-centred frame has moved to about -30..70),
+    or no coastline in the view at all. ``apply_ranges=False`` on the path means the
+    figure's ``x_range`` is the mesh's own, so "in the view" really does mean "over the
+    mesh". Specs here carry no ``domain``, so the only ``MultiLine`` is the coastline.
+    """
+    import holoviews as hv
+    from bokeh.models import MultiLine, Plot
+
+    root = hv.render(obj, backend="bokeh")
+    figures = list(root.select({"type": Plot}))  # a lone panel is itself the Plot
+    assert figures, "nothing rendered"
+    for fig in figures:
+        lines = [
+            r for r in fig.renderers if isinstance(getattr(r, "glyph", None), MultiLine)
+        ]
+        assert lines, "the figure drew no coastline"
+        xs = np.concatenate(
+            [
+                np.asarray(x, dtype=float).ravel()
+                for r in lines
+                for x in r.data_source.data["xs"]
+            ]
+        )
+        finite = xs[np.isfinite(xs)]
+        assert finite.size, "the clipped coastline came back empty"
+        assert np.all(np.abs(finite) <= 180.0 + 1e-6), "coastline is not in degrees"
+        start, end = float(fig.x_range.start), float(fig.x_range.end)
+        assert np.any((finite >= start) & (finite <= end)), (
+            f"coastline x in ({finite.min()}, {finite.max()}) misses the mesh's "
+            f"frame x_range=({start}, {end})"
+        )
+
+
 def test_a_straddling_field_facet_drops_tiles_for_a_coastline():
     """A still map gets the same seam protection a movie already has.
 
@@ -781,7 +820,9 @@ def test_a_straddling_field_facet_drops_tiles_for_a_coastline():
         )
     kinds = [type(n).__name__ for n in obj.traverse()]
     assert "WMTS" not in kinds, kinds
-    assert "Feature" in kinds, kinds
+    assert "Feature" not in kinds, kinds
+    assert "Path" in kinds, kinds
+    _assert_coastline_shares_the_meshs_180_frame(obj)
 
 
 def test_a_straddling_skill_map_drops_tiles_for_a_coastline():
@@ -807,7 +848,9 @@ def test_a_straddling_skill_map_drops_tiles_for_a_coastline():
         )
     kinds = [type(n).__name__ for n in obj.traverse()]
     assert "WMTS" not in kinds, kinds
-    assert "Feature" in kinds, kinds
+    assert "Feature" not in kinds, kinds
+    assert "Path" in kinds, kinds
+    _assert_coastline_shares_the_meshs_180_frame(obj)
 
 
 def test_a_non_straddling_field_facet_keeps_tiles_without_a_warning():
