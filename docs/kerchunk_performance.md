@@ -40,8 +40,9 @@ or slower than the files it indexes, and what ocean-skill should do about it.
   - Opting in to Dask's expression arrays (`dask-array`, `dask_array.xarray.register()`)
     makes the nested path 30× faster, because those arrays optimize without walking
     the whole graph. That is a workaround, not the fix.
-- **For ocean-skill**, the fix was to open kerchunk references with **one** dask layer
-  whose chunks span several time steps, and to pass `storage_options` through for
+- **For ocean-skill**, the fix is to open kerchunk references with **one** dask layer
+  (chunked at the storage chunks by default; multi-step time blocks are opt-in, see the
+  [correction](#correction-2026-10-12)), and to pass `storage_options` through for
   kerchunk entries, which also fixes the parquet `boolean value of NA is ambiguous`
   crash. Both are now done in `build.open_reference`. See
   [Recommendations](#recommendations-for-ocean-skill).
@@ -322,6 +323,7 @@ adopting now.
 | opening a long multi-file record (years of daily/hourly files) | **reference** | one index read against N HDF5 metadata parses (0.15 s/file on lakes02, 11 s/file on S3) |
 | point time series from compressed files, local/NFS/GlusterFS/GPFS, read with one dask layer (time-aggregated chunks) or none | **reference** | same bytes and decode, but zarr runs them concurrently: 2.2–3.6× faster than netCDF4 cold on lakes02, 4–8× on anvil |
 | the same, through ocean-skill before the fix (`engine="kerchunk", chunks={}`) | files | the nested dask layer costs 0.3–1.1 s per chunk on long records |
+| the same, through ocean-skill now (one layer at the storage chunks) | **reference** | no nesting; reads never exceed the bytes asked for. Multi-step time blocks (`chunks="time_blocks"`) are faster still for long contiguous series on GPFS, but read many times the bytes for snapshots and scattered times ([correction](#correction-2026-10-12)) |
 | full-field snapshots at a few times | reference, opened lazily (no dask) | dask's per-compute graph cost dominates when few chunks are read |
 | files on S3/HTTP | **reference** | 9–38× faster on S3 ([E3](#e3-lakes02--s3)); opening alone is 11 s per file directly |
 | uncompressed files with large chunks (a whole 2-D field per chunk), small window, long record on cold/remote storage | possibly the files | a reference fetches the whole chunk (14 MB/step for PACMED); a netCDF reader fetches only the box. Short records: no difference measured ([E4](#e4-anvil-iceland-and-pacmed)) |
@@ -331,10 +333,55 @@ adopting now.
 Items 1 and 2 are implemented; the rest are not. They are ranked by measured gain for
 the CIOFS-style use.
 
-1. **Open kerchunk references with one dask layer, chunked over ~24 time steps.**
-   - **Done:** `build.open_reference`, used by `osk.read` and catalog probes; chunks
-     sized to `KERCHUNK_CHUNK_BYTES` = 256 MiB instead of a fixed 24 steps.
-   - **Measured after the change** (laptop, synthetic 225k-step CIOFS-shaped reference,
+### Correction (2026-10-12)
+
+The first version of item 1 opened references with byte-sized, multi-step time chunks
+(`KERCHUNK_CHUNK_BYTES` = 256 MiB). Testing on real data (Iceland ROMS `his.parquet` on
+anvil: `temp` (7272, 60, 514, 514), storage chunks (1, 20, 172, 172)) found two
+problems, and that default has been replaced.
+
+1. **A sizing bug.** The block was derived from the largest stored time chunk over the
+   data variables. In real UCLA output `ocean_time` is a 1-D *data variable* on `time`
+   (not a coordinate), stored as **one chunk of the whole record**. Every variable then
+   got a dask chunk of the entire record (3.4 GB), and `osk.read` point reads were
+   OOM-killed at 30 GB, twice. The same store read 20–90 MiB in 2–8 s per pattern
+   before. `_time_chunks` now ignores variables with fewer than two dimensions.
+2. **A design problem, independent of the bug.** `roms.standardize` masks land with
+   `.where(mask_rho)` on every rho-point variable, so every ROMS read does lazy
+   arithmetic before any time selection, and dask loads each dask chunk it touches
+   whole. Multi-step blocks therefore multiply the bytes read for snapshots and
+   scattered times. Laptop, 26-year synthetic store, blocks of 23 steps: one full-field
+   step after the arithmetic read **1.07 GB against 47 MiB**; three scattered steps
+   read **3.2 GB against 139 MiB**. Blocks were faster only for long contiguous point
+   series on GPFS.
+
+**Now:** the default (`chunks="auto"`, and `{}` as baked into existing catalogs) is one
+dask layer at the **storage chunks**, so the time chunk is the stored one (typically 1).
+That never reads more bytes than the old nested open did, and it keeps the removal of
+the per-chunk graph overhead (0.3–1.1 s per chunk on long records). Time blocks remain
+available as the opt-in `chunks="time_blocks"` for a long contiguous point series on
+high-latency storage, where the 24-step numbers above still apply. Read the
+measurements below as describing that opt-in, not the default.
+
+**Verified against the code before PR #303**, through `osk.read`, with each run on its
+own time steps and old/new order alternated. Every pattern read the same bytes (to
+within the different steps' compression) and gave identical values:
+
+| Machine, store | Patterns (point, snapshot, scattered, strided, after arithmetic) | `osk.compare` HVIN1 ADCP vs `his` |
+|---|---|---|
+| anvil GPFS, Iceland `his` (7,272 steps) | 1.0–9.2 s → 0.3–1.4 s (3.5–9×) | 4,234 s → 1,013 s (4.2×), aligned results identical |
+| laptop SSD, synthetic 26-year store | 6.6–296 s → 0.6–7.7 s (4–38×) | — |
+| tanagra NFS, PACMED `smallgrid_physics` (144 steps) | same within noise (0.7–5 s) | — |
+
+The gain grows with record length, since the nested graph cost does; a 144-step record
+has almost none to remove. No pattern got slower.
+
+1. **Open kerchunk references with one dask layer.** *(Originally: chunked over ~24
+   time steps; see the correction above.)*
+   - **Done:** `build.open_reference`, used by `osk.read` and catalog probes. Default:
+     the storage chunks. Opt-in `chunks="time_blocks"`: blocks sized to
+     `KERCHUNK_CHUNK_BYTES` = 256 MiB instead of a fixed 24 steps.
+   - **Measured after the change, with time blocks** (laptop, synthetic 225k-step CIOFS-shaped reference,
      one process, `PYTHONHASHSEED=1`):
      - 24 hours at one point: old open 468–551 ms per chunk, `osk.read` 7–10 ms;
        240 hours 6–9 ms.
@@ -348,16 +395,19 @@ the CIOFS-style use.
      - 26-year CIOFS3 store on lakes02: 1,130 → 18–36 ms per chunk (30–60×);
      - Iceland on anvil: ~215 → 28–32 ms (7×);
      - laptop: 317 → 4.4–5.1 ms (60–70×).
-   - **Why not one storage chunk per task?** One dask layer with storage-sized chunks
-     (`chunks={}`) fixes the nesting but caps reads in flight at the dask thread count,
-     which is 7× slower on GPFS.
-   - **Memory:** a 24-step task holds up to 24 decoded storage chunks (CIOFS3 `temp`:
-     ~270 MB before cropping).
+   - **Why storage chunks are the default despite this:** One dask layer with
+     storage-sized chunks (`chunks={}`) fixes the nesting but caps reads in flight at
+     the dask thread count, which is ~7× slower than blocks for a long contiguous series
+     on GPFS. Blocks lose for every ROMS read that is not that (the land-mask
+     arithmetic loads each block whole), so they are opt-in.
+   - **Memory (time blocks):** a 24-step task holds up to 24 decoded storage chunks
+     (CIOFS3 `temp`: ~270 MB before cropping).
    - **Effect:** the reference becomes the fastest route for point time series in every
      environment tested. No data or caching changes.
 2. **Pass `storage_options` through for kerchunk entries, and set `remote_protocol`.**
-   - **Done:** `build.open_reference`, used by `osk.read` and catalog probes; chunks
-     sized to `KERCHUNK_CHUNK_BYTES` = 256 MiB instead of a fixed 24 steps.
+   - **Done:** `build.open_reference` works out `remote_protocol` from where the
+     reference's chunks live (`_reference_protocol`), and `_reader_for` now passes the
+     entry's `storage_options` through.
    - **The bug:** `_reader_for` builds the kerchunk reader without the entry's
      `storage_options`, so `remote_protocol`, `remote_options` and the reference
      mapper's `cache_size` can't be set.

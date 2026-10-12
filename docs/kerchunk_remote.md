@@ -114,9 +114,15 @@ CIOFS3 hindcast. In short:
 - `engine="kerchunk", chunks={}` stacks two dask layers. That costs 0.3–1.1 s per
   storage chunk on a multi-decade hourly record, and it was the CIOFS3 "30× slower than
   the netCDF files".
-- One dask layer whose chunks span a block of time steps makes the reference the
-  fastest way to read a point time series on every storage tested: SSD, GlusterFS,
-  GPFS and S3. This is how ocean-skill opens references (`build.open_reference`).
+- One dask layer makes the reference the fastest way to read a point time series on
+  every storage tested: SSD, GlusterFS, GPFS and S3. This is how ocean-skill opens
+  references (`build.open_reference`), chunked at the storage chunks by default so a read
+  never fetches more bytes than it needs.
+- Chunks spanning a block of time steps (`chunks="time_blocks"`, opt-in) are faster still
+  for a long contiguous point series on high-latency storage, but they read many times
+  the bytes for a snapshot or scattered times on a ROMS run, because the land mask is
+  applied before the time selection and dask loads each block whole. See the
+  [correction in kerchunk_performance.md](kerchunk_performance.md#correction-2026-10-12).
 
 ## Chunk size: the manifest inherits the source file's layout
 
@@ -129,13 +135,16 @@ so reading it, or reducing over it before narrowing it down, pulls the whole thi
 memory. Dask chunks smaller than the storage chunk only add read amplification, never
 shrink the actual I/O.
 
-What the dask chunk is, however, is no longer tied to the storage chunk. ocean-skill
-opens references through `build.open_reference`, which builds one dask layer whose
-chunks span whole time steps, sized to about `KERCHUNK_CHUNK_BYTES` (256 MiB) of
-storage chunks. A read therefore no longer costs one dask task per storage chunk, and
-`reader_kwargs={"chunks": ...}` on a catalog entry is not needed for speed (a dict
-there is still honoured as given). It does not make the storage chunk smaller: a
-manifest holding 1.3 GiB chunks still needs the splitting below.
+ocean-skill opens references through `build.open_reference`, which builds a single dask
+layer at the storage chunks (the default, also for `chunks: {}`). That removes the
+per-chunk graph overhead of the old nested open without ever reading more than the old
+open did, and `reader_kwargs={"chunks": ...}` on a catalog entry is not needed for speed
+(a dict there is still honoured as given). For a long contiguous point series on
+high-latency storage, `chunks="time_blocks"` instead groups whole time steps into dask
+chunks of about `KERCHUNK_CHUNK_BYTES` (256 MiB); it is opt-in because every dask chunk
+a read touches is loaded whole, which multiplies the bytes for snapshots and scattered
+times. Neither makes the storage chunk smaller: a manifest holding 1.3 GiB chunks still
+needs the splitting below.
 
 `make_kerchunk`/`build_kerchunk` split the manifest itself instead, which is possible
 because an **uncompressed** chunk's bytes are one contiguous run: any leading axis
