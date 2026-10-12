@@ -6,16 +6,20 @@ calls ``xr.open_zarr``), so xarray wrapped them in a *second* dask layer, and ev
 outer task then ``compute()``-d the inner array: about a second per storage chunk on a
 long record, and a read of a few time steps paid for every chunk the outer task spanned.
 :func:`ocean_skill.build.open_reference` opens with one layer instead
-(``open_dataset_options={"chunks": None}`` inside the engine), sizes the dask chunks in
-whole time steps by bytes (:data:`ocean_skill.build.KERCHUNK_CHUNK_BYTES`), and passes
-``storage_options={"remote_protocol": ...}`` so fsspec does not scan the reference to
-guess the protocol (a scan that raises ``TypeError: boolean value of NA is ambiguous``
-on a parquet reference under pandas 3, depending on ``PYTHONHASHSEED``).
+(``open_dataset_options={"chunks": None}`` inside the engine), chunks it at the
+**storage chunks** (the default, ``chunks="auto"`` / ``{}``: one dask chunk per stored
+chunk, so a read never fetches more bytes than it needs -- ROMS reads do lazy land-mask
+arithmetic first, and dask loads every dask chunk it touches whole), offers multi-step
+time blocks sized by bytes (:data:`ocean_skill.build.KERCHUNK_CHUNK_BYTES`) only as the
+opt-in ``chunks="time_blocks"``, and passes ``storage_options={"remote_protocol": ...}``
+so fsspec does not scan the reference to guess the protocol (a scan that raises
+``TypeError: boolean value of NA is ambiguous`` on a parquet reference under pandas 3,
+depending on ``PYTHONHASHSEED``).
 
 The references are tiny and built with :func:`ocean_skill.build.make_kerchunk` from a
 few compressed, chunked netCDF files, in both ROMS layouts: classic (record dimension
 ``ocean_time``) and UCLA (record dimension ``time``, ``ocean_time`` a coordinate on
-it).
+it, or -- as in real UCLA output -- a 1-D data variable stored as one chunk).
 No network: the ``https`` reference is only ever inspected, never opened.
 """
 
@@ -55,12 +59,18 @@ def _part(
     *,
     t_chunk: int = 1,
     temp_chunks: tuple[int, int, int] = SUB,
+    ocean_time_as_data: bool = False,
 ) -> Path:
     """Write one compressed, chunked ROMS-like file of ``nt`` records.
 
     ``temp`` is 4-D ``(time, s_rho, eta_rho, xi_rho)`` stored in chunks of
     ``(t_chunk, *temp_chunks)``; ``zeta`` is 3-D ``(time, eta_rho, xi_rho)``. The values
     are a function of the global step alone, so any read that mixes records up shows.
+
+    By default ``ocean_time`` is a coordinate on the record dimension. With
+    ``ocean_time_as_data=True`` it is instead a 1-D *data variable* there, stored
+    contiguous (one chunk spanning the file's whole record), as in real UCLA-ROMS
+    output.
     """
     dim = LAYOUTS[layout]
     rng = np.random.default_rng(first_step)
@@ -75,6 +85,8 @@ def _part(
         },
         coords={"ocean_time": (dim, time, {"units": "seconds since 1970-01-01"})},
     )
+    if ocean_time_as_data:
+        ds = ds.reset_coords("ocean_time")
     ds["temp"][0, 0, 0, 0] = np.nan  # a masked cell, to keep the NaN comparison honest
     enc = {
         "temp": {
@@ -159,12 +171,32 @@ def _per_step_bytes(ds: xr.Dataset, dim: str) -> int:
     return max(sizes)
 
 
+def _count_bytes(monkeypatch) -> list[int]:
+    """Patch ``LocalFileSystem.cat_file`` to record the bytes of every read.
+
+    Returns the list the sizes are appended to; ``clear()`` it to count from a point.
+    Call before the open: the reference filesystem binds the local filesystem's methods
+    when it is built.
+    """
+    sizes: list[int] = []
+    original = LocalFileSystem.cat_file
+
+    def counting(self, *args, **kw):
+        data = original(self, *args, **kw)
+        sizes.append(len(data))
+        return data
+
+    monkeypatch.setattr(LocalFileSystem, "cat_file", counting)
+    return sizes
+
+
 # --------------------------------------------------------------------- one dask layer
 
 
-def test_open_reference_builds_one_dask_layer(ref, layout):
+@pytest.mark.parametrize("chunks", ["auto", {}, "time_blocks"])
+def test_open_reference_builds_one_dask_layer(ref, layout, chunks):
     """No ``dask.array.Array`` hides under the graph's ``original`` layer."""
-    ds = build.open_reference(ref)
+    ds = build.open_reference(ref, chunks=chunks)
 
     for name in ("temp", "zeta"):
         assert da.Array not in _wrapped_arrays(ds[name]), name
@@ -181,7 +213,31 @@ def test_the_direct_kerchunk_open_nests_a_second_dask_layer(ref):
     assert da.Array in _wrapped_arrays(ds["temp"])
 
 
-# ------------------------------------------------------------------ byte-sized chunks
+# ------------------------------------------------------- storage chunks (the default)
+
+
+def test_the_default_open_chunks_at_the_storage_chunks(ref, layout):
+    """One dask chunk per stored chunk along time: ``(1,) * NSTEPS``, never a block."""
+    dim = LAYOUTS[layout]
+
+    ds = build.open_reference(ref)
+
+    for name in ("temp", "zeta"):
+        var = ds[name]
+        assert var.chunks[var.dims.index(dim)] == (1,) * NSTEPS, name
+    assert ds["temp"].chunks[1:] == ((2, 2), (3, 3), (4, 4)), "horizontal as stored"
+
+
+def test_the_default_follows_a_stored_time_chunk_larger_than_one(tmp_path, layout):
+    """Files storing two records per chunk give dask chunks of two, not the record."""
+    ref = _make_ref(tmp_path, layout, nt=4, t_chunk=2)
+
+    ds = build.open_reference(ref)
+
+    assert ds["temp"].chunks[0] == (2,) * 6
+
+
+# ------------------------------------------------ time blocks (opt-in, byte-sized)
 
 
 def test_time_chunks_follow_the_byte_target(tmp_path, layout, monkeypatch):
@@ -191,7 +247,7 @@ def test_time_chunks_follow_the_byte_target(tmp_path, layout, monkeypatch):
     per_step = _per_step_bytes(_direct_open(ref), dim)
     monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 3 * per_step)
 
-    ds = build.open_reference(ref)
+    ds = build.open_reference(ref, chunks="time_blocks")
 
     assert ds["temp"].chunks[ds["temp"].dims.index(dim)] == (3, 3)
     assert ds["zeta"].chunks[0] == (3, 3), "every variable on the dim shares the size"
@@ -202,7 +258,7 @@ def test_a_huge_byte_target_is_clipped_to_the_record_length(tmp_path, layout):
     ref = _make_ref(tmp_path, layout)
     dim = LAYOUTS[layout]
 
-    ds = build.open_reference(ref)
+    ds = build.open_reference(ref, chunks="time_blocks")
 
     assert ds["temp"].chunks[0] == (NSTEPS,)
     assert build._time_chunks(ds) == {dim: NSTEPS}
@@ -215,7 +271,7 @@ def test_a_target_below_one_step_still_gives_whole_stored_time_chunks(
     ref = _make_ref(tmp_path, layout)
     monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 1)
 
-    ds = build.open_reference(ref)
+    ds = build.open_reference(ref, chunks="time_blocks")
 
     assert ds["temp"].chunks[0] == (1,) * NSTEPS
 
@@ -234,7 +290,7 @@ def test_the_time_chunk_is_a_multiple_of_the_stored_time_chunk(
     per_step = _per_step_bytes(_direct_open(ref), dim)
     monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 3 * per_step)
 
-    ds = build.open_reference(ref)
+    ds = build.open_reference(ref, chunks="time_blocks")
 
     assert ds["temp"].chunks[0] == (2,) * 6
     assert build._time_chunks(ds) == {dim: 2}
@@ -249,19 +305,54 @@ def test_a_dataset_without_a_time_dimension_has_no_time_chunks():
     assert build._time_chunks(ds) == {}
 
 
+def test_a_whole_record_ocean_time_data_variable_does_not_set_the_time_block(
+    tmp_path, monkeypatch
+):
+    """The real UCLA layout: ``ocean_time`` is a 1-D data variable stored whole.
+
+    Not a coordinate, so ``_time_chunks`` sees it among the data variables, with a
+    stored chunk spanning the entire record. Taking that as the stored time chunk made
+    every variable's block the whole record (3.4 GB per dask chunk on an Iceland run,
+    which OOM-killed point reads). Variables with fewer than two dimensions say nothing
+    about how the fields are stored, so they are skipped: the block follows ``temp``.
+    """
+    nt, nfiles = 10, 3
+    total = nt * nfiles
+    ref = _make_ref(tmp_path, "ucla", nfiles=nfiles, nt=nt, ocean_time_as_data=True)
+    lazy = build.open_reference(ref, chunks=None)
+    # the layout really is the one that caused the bug
+    assert "ocean_time" in lazy.data_vars
+    assert lazy["ocean_time"].dims == ("time",)
+    assert lazy["ocean_time"].encoding["chunks"] == (total,)
+    assert lazy["temp"].encoding["chunks"][0] == 1
+    per_step = _per_step_bytes(lazy, "time")
+    assert per_step == int(np.prod(SUB)) * 8, "temp's stored step sets the size"
+    monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 4 * per_step)
+
+    assert build._time_chunks(lazy) == {"time": 4}
+    blocks = build.open_reference(ref, chunks="time_blocks")
+    default = build.open_reference(ref)
+
+    assert blocks["temp"].chunks[0][0] == 4 < total
+    assert default["temp"].chunks[0] == (1,) * total
+    assert default["zeta"].chunks[0] == (1,) * total
+
+
 # ---------------------------------------------------------------- no read amplification
 
 
+@pytest.mark.parametrize("chunks", ["auto", "time_blocks"])
 def test_reading_a_small_box_reads_only_the_storage_chunks_it_touches(
-    tmp_path, layout, monkeypatch
+    tmp_path, layout, monkeypatch, chunks
 ):
     """Three steps of one horizontal chunk cost 3 x (vertical chunks) file reads.
 
-    Dask chunks now span several time steps (here all six), so a slice must reach the
-    zarr array and fetch only the storage chunks it needs, rather than load the whole
-    dask chunk and cut it afterwards: that would be 6 x 8 reads here, not 6. (The old
-    nested open does not amplify bytes at this size -- its cost was per-task overhead --
-    so this guards the new, larger chunks, not the old bug.) The count is of
+    With ``"time_blocks"`` dask chunks span several time steps (here all six), so a
+    slice must reach the zarr array and fetch only the storage chunks it needs, rather
+    than load the whole dask chunk and cut it afterwards: that would be 6 x 8 reads
+    here, not 6. (The old nested open does not amplify bytes at this size -- its cost
+    was per-task overhead -- so this guards the blocks, not the old bug.) The default
+    is one dask chunk per storage chunk and reads the same. The count is of
     ``cat_file`` calls on the local filesystem during ``.values`` alone (the open's own
     reads are not counted). ``temp`` is stored in 2 vertical x 2 x 2 chunks per step;
     the box lies inside one horizontal chunk and takes the whole vertical, so it touches
@@ -279,8 +370,9 @@ def test_reading_a_small_box_reads_only_the_storage_chunks_it_touches(
     # Patched before the open: the reference filesystem binds the local filesystem's
     # methods when it is built.
     monkeypatch.setattr(LocalFileSystem, "cat_file", counting)
-    ds = build.open_reference(ref)
-    assert ds["temp"].chunks[0] == (NSTEPS,), "one dask chunk spans all six steps"
+    ds = build.open_reference(ref, chunks=chunks)
+    expected = (NSTEPS,) if chunks == "time_blocks" else (1,) * NSTEPS
+    assert ds["temp"].chunks[0] == expected
     opened = len(calls)
 
     box = ds["temp"].isel(
@@ -290,6 +382,73 @@ def test_reading_a_small_box_reads_only_the_storage_chunks_it_touches(
 
     assert values.shape == (3, NS, 2, 2)
     assert len(calls) - opened == 3 * 2
+
+
+def _land_mask() -> xr.DataArray:
+    """Return a 2-D ``(eta_rho, xi_rho)`` boolean mask with one land cell."""
+    mask = np.ones((NY, NX), dtype=bool)
+    mask[0, 0] = False
+    return xr.DataArray(mask, dims=("eta_rho", "xi_rho"))
+
+
+def test_a_land_masked_snapshot_reads_only_its_steps_storage_chunks(
+    tmp_path, layout, monkeypatch
+):
+    """``.where(mask).isel(time=k)`` costs the same bytes as ``.isel(time=k)``.
+
+    ``roms.standardize`` masks land with ``.where(mask_rho)`` on every rho-point
+    variable, so every ROMS read does lazy arithmetic *before* the time selection, and
+    dask loads each dask chunk the arithmetic touches in full. With one dask chunk per
+    storage chunk that is exactly the step's 8 stored chunks.
+    """
+    ref = _make_ref(tmp_path, layout)
+    dim = LAYOUTS[layout]
+    sizes = _count_bytes(monkeypatch)
+    ds = build.open_reference(ref)
+    k = 3
+
+    sizes.clear()
+    plain = ds["temp"].isel({dim: k}).load()
+    plain_bytes = sum(sizes)
+    sizes.clear()
+    masked = ds["temp"].where(_land_mask()).isel({dim: k}).load()
+
+    assert len(sizes) == 8, "one step is 2 x 2 x 2 stored chunks"
+    assert sum(sizes) == plain_bytes > 0
+    assert bool(np.isnan(masked.values[:, 0, 0]).all())
+    np.testing.assert_array_equal(masked.values[:, 1:, :], plain.values[:, 1:, :])
+
+
+def test_time_blocks_amplify_a_land_masked_snapshot_read(tmp_path, layout, monkeypatch):
+    """Why blocks are opt-in: the same masked read pulls in the whole block of steps.
+
+    The arithmetic runs on the dask chunk, which under ``"time_blocks"`` spans several
+    steps, so picking one step out afterwards has already paid for all of them
+    (1.07 GB against 47 MiB for one full-field step on a 26-year synthetic store).
+    """
+    ref = _make_ref(tmp_path, layout, temp_chunks=(NS, NY, NX))
+    dim = LAYOUTS[layout]
+    per_step = _per_step_bytes(build.open_reference(ref, chunks=None), dim)
+    monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 3 * per_step)
+    sizes = _count_bytes(monkeypatch)
+    default = build.open_reference(ref)
+    blocks = build.open_reference(ref, chunks="time_blocks")
+    assert blocks["temp"].chunks[0] == (3, 3)
+    k = 4
+
+    sizes.clear()
+    default["temp"].where(_land_mask()).isel({dim: k}).load()
+    one_step = sum(sizes)
+    sizes.clear()
+    blocks["temp"].where(_land_mask()).isel({dim: k}).load()
+    block = sum(sizes)
+    sizes.clear()
+    blocks["temp"].isel({dim: k}).load()
+    unmasked_block = sum(sizes)
+
+    assert one_step > 0
+    assert block > 2 * one_step, "the whole 3-step block is read for one step"
+    assert unmasked_block == one_step, "without the arithmetic only the step is read"
 
 
 # ------------------------------------------------------------------------ same values
@@ -327,15 +486,40 @@ def test_an_explicit_chunks_dict_is_honoured(ref, layout):
     assert da.Array not in _wrapped_arrays(ds["temp"]), "still one dask layer"
 
 
-def test_chunks_auto_and_an_empty_dict_both_mean_byte_sized_time_chunks(ref, layout):
-    """The catalog's ``chunks: {}`` and the default ``"auto"`` size time alike."""
+def test_chunks_auto_and_an_empty_dict_both_give_the_storage_time_chunk(ref, layout):
+    """The catalog's ``chunks: {}`` and the default ``"auto"`` chunk alike: as stored.
+
+    One dask layer whose time chunk is the stored one (one step per chunk here).
+    """
     dim = LAYOUTS[layout]
 
     auto = build.open_reference(ref, chunks="auto")
     empty = build.open_reference(ref, chunks={})
+    default = build.open_reference(ref)
 
-    assert auto["temp"].chunks == empty["temp"].chunks
-    assert auto["temp"].chunks[0][0] == build._time_chunks(auto)[dim]
+    for ds in (auto, empty, default):
+        assert ds["temp"].chunks[ds["temp"].dims.index(dim)] == (1,) * NSTEPS
+        assert da.Array not in _wrapped_arrays(ds["temp"])
+    assert auto["temp"].chunks == empty["temp"].chunks == default["temp"].chunks
+
+
+def test_time_blocks_gives_the_byte_sized_time_chunk(tmp_path, layout, monkeypatch):
+    """``chunks="time_blocks"`` opens at the size ``_time_chunks`` works out.
+
+    A target of three steps' worth of the largest variable on a six-step record: a block
+    of three, more than the stored one and fewer than the whole record.
+    """
+    ref = _make_ref(tmp_path, layout, temp_chunks=(NS, NY, NX))
+    dim = LAYOUTS[layout]
+    per_step = _per_step_bytes(build.open_reference(ref, chunks=None), dim)
+    monkeypatch.setattr(build, "KERCHUNK_CHUNK_BYTES", 3 * per_step)
+
+    blocks = build.open_reference(ref, chunks="time_blocks")
+
+    size = build._time_chunks(blocks)[dim]
+    assert 1 < size < NSTEPS
+    assert blocks["temp"].chunks[0] == (size,) * (NSTEPS // size)
+    assert da.Array not in _wrapped_arrays(blocks["temp"]), "still one dask layer"
 
 
 def test_keyword_arguments_reach_xarray(ref):
@@ -429,7 +613,7 @@ def test_a_catalog_entry_reads_with_one_dask_layer_and_an_unchanged_definition(
     The YAML still says ``chunks: {}`` (the reader definition is what the cache is keyed
     on), so the entry's fingerprint is identical before and after a read, and caches
     written under the old open stay valid. What differs is the dataset that comes back:
-    one dask layer, with time chunks spanning more than one step.
+    one dask layer, chunked at the storage chunks (one time step each).
     """
     ref = _make_ref(tmp_path, layout)
     out = build.build_catalog(
@@ -445,11 +629,48 @@ def test_a_catalog_entry_reads_with_one_dask_layer_and_an_unchanged_definition(
     for var in ds.data_vars.values():
         assert var.dims[0] == LAYOUTS[layout], var.dims
         assert da.Array not in _wrapped_arrays(var), var.name
-        assert max(var.chunks[0]) > 1, var.name
+        assert var.chunks[0] == (1,) * NSTEPS, var.name
     assert catalog.fingerprint("kc:run") == before
     text = Path(out).read_text()
     assert yaml.safe_load(text) == doc, "reading must not rewrite the catalog"
     assert "chunks: {}" in text, "the catalog definition still says chunks: {}"
+
+
+def test_a_roms_read_through_osk_is_storage_chunked_and_reads_one_step_per_step(
+    tmp_path, isolated_catalogs, monkeypatch
+):
+    """``osk.read`` of a UCLA ROMS store: one layer at the storage chunks, no blocks.
+
+    ``roms.standardize`` masks land with ``.where(mask_rho)`` on the fields, so this is
+    the lazy-arithmetic-first path real reads take. One full-field step of temperature
+    must cost its stored chunks (two vertical halves here), not a block of steps.
+    """
+    from tests.test_roms_store_grid import _ucla_part
+
+    # that module's grid is 4 x 3 x 5: two vertical chunks per step
+    enc = {"temp": {"chunksizes": (1, 2, 3, 5)}, "zeta": {"chunksizes": (1, 3, 5)}}
+    files = []
+    for i in range(3):
+        files.append(tmp_path / f"his_{i}.nc")
+        _ucla_part(2 * i).to_netcdf(files[-1], encoding=enc)
+    refs = build.make_kerchunk(files, out=tmp_path / "refs.json")
+    build.build_catalog(
+        {"run": str(refs)}, isolated_catalogs / "romsstore.yaml", title="roms store"
+    )
+    sizes = _count_bytes(monkeypatch)
+
+    ds = osk.read("romsstore:run")
+    temp = ds["sea_water_potential_temperature"]
+
+    assert ds.attrs["ocean_skill_model"] == "roms"
+    assert temp.chunks[0] == (1,) * 6
+    assert da.Array not in _wrapped_arrays(temp)
+    sizes.clear()
+    temp.isel(time=4).load()
+    # The files are uncompressed, so a temperature chunk is 2 x 3 x 5 float64 = 240 B;
+    # the other (smaller) reads are the grid and the time axis.
+    assert sizes.count(240) == 2, "one step is 2 stored vertical chunks, read once"
+    assert max(sizes) == 240, "no read is bigger than a stored chunk"
 
 
 # ------------------------------------------------------------------- parquet NA flake

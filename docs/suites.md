@@ -155,6 +155,10 @@ Keys map onto `osk.compare(test=, reference=, variables=, select=, aggregate=, .
 as one figure per family, suffixed in the PNG filename; an empty result (every pair
 `skip_missing`-ed) is a skipped page, not a fatal error.
 
+An optional `notes:` string is display text for a later [`osk.table()`](tables.md): it
+goes to `compare(notes=)`, is stored on each comparison and in its metrics record, and
+does not enter the cache key. A non-string `notes:` is refused when the suite is expanded.
+
 `aggregate:` may be a **list of whole specs**, which fans the page over statistics the
 way `variables:` and `depths:` fan it -- one member per spec, one figure, each member
 labelled by its statistic. A list *under* an axis is something else: a chain of steps

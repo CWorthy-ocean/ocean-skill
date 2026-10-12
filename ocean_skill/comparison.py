@@ -16,8 +16,9 @@ import contextvars
 import functools
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple, Self
 
 import numpy as np
@@ -824,6 +825,61 @@ def _sigma_label(value: Any) -> str:
             return f"σ₀ = {span} kg/m³"
         return ", ".join(_sigma_label(v) for v in value)
     return f"σ₀ = {float(value):g} kg/m³"
+
+
+def _squash(value: Any) -> str:
+    """Lower-case ``str(value)`` without whitespace: ``"0-5m"`` matches ``"0-5 m"``."""
+    return "".join(str(value).split()).lower()
+
+
+def _record_label(c: Comparison, key: str, *, squash: bool = True) -> str:
+    """Return the ``depth`` or ``time`` label a metrics record shows for ``c``.
+
+    What :meth:`ComparisonSet.sel` matches ``depth=``/``time=`` against: a band or
+    window dict is spelled as its label (``"0-5 m"``, ``"JJA"``) whether or not ``c``
+    is pooled, the same spelling :meth:`Comparison._record_depth_time` gives a pooled
+    record.
+    """
+    depth, time = c._record_depth_time()
+    value = depth if key == "depth" else time
+    if isinstance(value, dict | list | tuple):
+        value = _depth_label(value) if key == "depth" else _time_label(value)
+    return _squash(value) if squash else str(value)
+
+
+def _raw_record_label(c: Comparison, key: str) -> str:
+    """Return ``c``'s ``depth``/``time`` label as it was before any ``relabel()``.
+
+    Spelled as :func:`_record_label` spells it, squashed: the key a rename is stored
+    under, so it keeps pointing at the same members however many times it is renamed.
+    """
+    depth, time = c._record_depth_time(renamed=False)
+    value = depth if key == "depth" else time
+    if isinstance(value, dict | list | tuple):
+        value = _depth_label(value) if key == "depth" else _time_label(value)
+    return _squash(value)
+
+
+def _renamed(c: Any, key: str, fallback: Any) -> Any:
+    """Return ``c``'s ``relabel()`` name for its ``depth``/``time``, else ``fallback``.
+
+    For the grouping/labelling readers (:data:`_LABEL_DIMS`), so a set that has been
+    relabeled is pooled, averaged and named by the new names. A comparison with
+    nothing renamed (or a stand-in that has no such attribute) is untouched.
+    """
+    renames = getattr(c, "_relabels", None)
+    if not renames or key not in renames:
+        return fallback
+    return renames[key].get(_raw_record_label(c, key), fallback)
+
+
+def _merge_relabels(comps: list[Any]) -> dict[str, dict[str, str]]:
+    """Combine the renames of several comparisons into one map (later members win)."""
+    merged: dict[str, dict[str, str]] = {}
+    for c in comps:
+        for key, mapping in (getattr(c, "_relabels", None) or {}).items():
+            merged.setdefault(key, {}).update(mapping)
+    return merged
 
 
 def _depth_label(depth: Any) -> str:
@@ -8064,6 +8120,20 @@ class Comparison:
     #: no station position or autocorrelation weight, and nothing draws it.
     _pooled: bool = False
 
+    #: Free-text note from ``compare(notes=)``: copied into the metrics record for
+    #: :func:`table`, never into the cache key or :func:`_identity`.
+    notes: str | None = None
+
+    #: ``("average" | "pool", n_members)`` on a comparison built by
+    #: :meth:`ComparisonSet.average`/:meth:`~ComparisonSet.pool`, else ``None`` -- read
+    #: by :func:`table` for its automatic notes ("station average (6)").
+    _combined: tuple[str, int] | None = None
+
+    #: Renamed ``depth``/``time`` labels (:meth:`ComparisonSet.relabel`), as
+    #: ``{"depth" | "time": {squashed original label: new name}}``. Replaced, never
+    #: mutated in place, so this empty class default is safe to share.
+    _relabels: Mapping[str, Mapping[str, str]] = MappingProxyType({})
+
     @classmethod
     def _averaged(
         cls,
@@ -8479,6 +8549,9 @@ class Comparison:
                 demeaned=_demean_label(self.subtract_mean),
                 # Mirrors demeaned exactly, for detide= -- see _detide_label.
                 detided=_detide_label(self.detide),
+                # Display text (compare(notes=)); only present when set, so a record
+                # without a note is exactly what it was before.
+                **({"notes": self.notes} if self.notes else {}),
                 # Read off the aligned pair's own attrs (written once, in
                 # _subtract_scalar_means) rather than recomputed here, so a cached
                 # result read back in a fresh process reports the exact number that
@@ -8496,7 +8569,7 @@ class Comparison:
                 self._metrics["n_eff"] = n_eff
         return self._metrics
 
-    def _record_depth_time(self) -> tuple[Any, Any]:
+    def _record_depth_time(self, *, renamed: bool = True) -> tuple[Any, Any]:
         """The ``depth`` and ``time`` a metrics record reports for this comparison.
 
         What :func:`_display_depth`/:func:`_display_time` say, except for a pooled
@@ -8505,6 +8578,11 @@ class Comparison:
         which a table cannot group by. Those are spelled as their label there
         (``"0-5 m"``, ``"2024-01-01–2024-12-31"``); a plain depth or time stays as it
         is.
+
+        A name given through :meth:`ComparisonSet.relabel` replaces the label here
+        (as a string, whether or not this comparison is pooled), which is why
+        :meth:`metrics`, :meth:`ComparisonSet.sel` and every plot read the new name.
+        ``renamed=False`` gives the labels as the comparison itself spells them.
         """
         depth = _display_depth(self.variable, self.select)
         time = _display_time(self.select)
@@ -8513,7 +8591,20 @@ class Comparison:
                 depth = _depth_label(depth)
             if isinstance(time, dict | list | tuple):
                 time = _time_label(time)
+        if renamed and self._relabels:
+            depth = self._renamed_value("depth", depth)
+            time = self._renamed_value("time", time)
         return depth, time
+
+    def _renamed_value(self, key: str, value: Any) -> Any:
+        """``value`` or, when :meth:`ComparisonSet.relabel` named it, the new name."""
+        mapping = self._relabels.get(key)
+        if value is None or not mapping:
+            return value
+        label = value
+        if isinstance(value, dict | list | tuple):
+            label = _depth_label(value) if key == "depth" else _time_label(value)
+        return mapping.get(_squash(label), value)
 
     def _n_eff(self, aligned) -> float | None:
         """Effective-sample-size weight for this comparison's record (see
@@ -9222,13 +9313,20 @@ def _detide_label(spec: dict[str, dict[str, Any] | None] | None) -> str:
 #: carries, so ``color_by``/``marker_by`` can group by anything a label can name.
 _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
     ("variable", lambda c: _short_variable_label(c.variable)),
-    ("depth", lambda c: _depth_label(_display_depth(c.variable, c.select))),
+    (
+        "depth",
+        lambda c: _renamed(
+            c, "depth", _depth_label(_display_depth(c.variable, c.select))
+        ),
+    ),
     (
         "time",
-        lambda c: (
+        lambda c: _renamed(
+            c,
+            "time",
             _time_label(t)
             if (t := _display_time(c.select)) is not None
-            else "full record"
+            else "full record",
         ),
     ),
     ("test", lambda c: c.test_name),
@@ -9293,22 +9391,29 @@ def _pooled_labels(comparisons: list[Comparison]) -> list[str]:
     return labels
 
 
-def _named_labels(mapping: dict[str, Any]) -> tuple[list[Comparison], list[str]]:
+def _named_labels(
+    mapping: dict[str, Any],
+) -> tuple[list[Comparison], list[str], list[str]]:
     """Label a ``{name: comparisons}`` pool by its keys rather than by a rule.
 
     Your key is what disambiguates across groups, so a group's members keep their own
     labels and get the key in front of them. A group of one is labelled with the key
     alone — ``{"run A": c}`` means the point is called ``run A``, not ``run A: no3``.
+
+    The third return is each comparison's dict key on its own (the ``group`` a
+    :func:`table` can pivot on), one per comparison.
     """
     comparisons: list[Comparison] = []
     labels: list[str] = []
+    groups: list[str] = []
     for name, obj in mapping.items():
         members = _flatten(obj)
         for c in members:
             own = c.label or _short_variable_label(c.variable)
             labels.append(str(name) if len(members) == 1 else f"{name}: {own}")
+            groups.append(str(name))
         comparisons += members
-    return comparisons, labels
+    return comparisons, labels, groups
 
 
 #: Smallest share of an averaged group's timestamps that must hold data from at
@@ -9597,9 +9702,10 @@ class ComparisonSet:
                     "pass either a {name: comparisons} dict or labels=, not both — "
                     "the dict's keys are already the labels"
                 )
-            self.comparisons, labels = _named_labels(comparisons)
+            self.comparisons, labels, self._groups = _named_labels(comparisons)
         else:
             self.comparisons = _flatten(comparisons)
+            self._groups = None
         if labels is not None and len(labels) != len(self.comparisons):
             raise ValueError(
                 f"labels has {len(labels)} entries for {len(self.comparisons)} "
@@ -9776,6 +9882,68 @@ class ComparisonSet:
         import pandas as pd
 
         return pd.DataFrame([c.metrics() for c in self.comparisons])
+
+    def table(
+        self,
+        *,
+        metrics: tuple[str, ...] | list[str] = (
+            "bias",
+            "rmse",
+            "crmsd",
+            "corr",
+            "sigma_ratio",
+            "n",
+        ),
+        rows: str = "label",
+        cols: str | None = None,
+        split: dict[str, str] | None = None,
+        join: dict[str, str] | None = None,
+        join_labels: dict[str, list[str]] | None = None,
+        layout: str = "rows",
+        headers: dict[str, str] | None = None,
+        units: bool = True,
+        round: bool = True,
+        info: dict[str, dict[str, str]] | None = None,
+        notes: dict[str, str] | None = None,
+        auto_notes: Any = True,
+        save: str | Path | None = None,
+    ):
+        """Return selected metrics as a publication-style metrics table.
+
+        The result is a :class:`~ocean_skill.table.MetricsTable`.
+
+        The set's metric records (:meth:`metrics`) pivoted into a table of *chosen*
+        metrics instead of every column: the same records and pivot
+        :meth:`portrait` draws, written as numbers. See :func:`table` for every
+        parameter, and :mod:`ocean_skill.table` for what the result can write
+        (notebook HTML, plain text, Markdown, LaTeX, CSV).
+
+        Rows are the pooled/dict/``labels=`` names this set draws (``rows="label"``),
+        or any record field; ``cols=`` pivots a second field across the metrics.
+        ``split={"bias": "time"}`` breaks a metric out by the levels of a field
+        (seasons, from a ``compare(times={"seasons": [...]})`` set pooled with the
+        whole-record set); ``join={"rmse": "depth"}`` puts those levels in one cell
+        (``0.91 / 0.85``).
+        """
+        from ocean_skill.table import build_table
+
+        return build_table(
+            self,
+            metrics=metrics,
+            rows=rows,
+            cols=cols,
+            split=split,
+            join=join,
+            join_labels=join_labels,
+            layout=layout,
+            headers=headers,
+            units=units,
+            round=round,
+            info=info,
+            notes=notes,
+            auto_notes=auto_notes,
+            save=save,
+        )
 
     def write_metrics(self, out_dir: str | Path, stem: str = "metrics") -> Path:
         """Write the tidy metrics table to ``<out_dir>/metrics/<stem>.csv``.
@@ -10411,17 +10579,19 @@ class ComparisonSet:
         out = []
         for key, comps in self._grouped(by, caller="average", verb="averaged"):
             label = " ".join(str(k) for k in key)
-            out.append(
-                Comparison._averaged(
-                    comps[0],
-                    _average_aligned(comps),
-                    test_name=_pooled_name([c.test_name for c in comps], "test"),
-                    reference_name=_pooled_name(
-                        [c.reference_name for c in comps], "reference"
-                    ),
-                    label=label,
-                )
+            averaged = Comparison._averaged(
+                comps[0],
+                _average_aligned(comps),
+                test_name=_pooled_name([c.test_name for c in comps], "test"),
+                reference_name=_pooled_name(
+                    [c.reference_name for c in comps], "reference"
+                ),
+                label=label,
             )
+            # what table()'s automatic notes say about where the numbers came from
+            averaged._combined = ("average", len(comps))
+            averaged._relabels = _merge_relabels(comps)
+            out.append(averaged)
         return ComparisonSet(out)
 
     def _grouped(
@@ -10533,8 +10703,115 @@ class ComparisonSet:
             # metrics() reduces it whole and never builds per-cell maps.
             pooled.over = None
             pooled._pooled = True
+            pooled._combined = ("pool", len(comps))
+            pooled._relabels = _merge_relabels(comps)
             out.append(pooled)
         return ComparisonSet(out)
+
+    #: Keys :meth:`relabel` accepts.
+    _RELABEL_KEYS = ("depth", "time")
+
+    def relabel(self, **renames: dict[str, str]) -> ComparisonSet:
+        """Rename the ``depth`` and/or ``time`` labels this set's records carry.
+
+        Parameters
+        ----------
+        **renames
+            ``depth=`` and/or ``time=``, each a ``{current label: new name}`` dict.
+            Labels match as :meth:`sel` matches them -- ignoring case and spaces -- and
+            must be ones the set has now (the ``depth``/``time`` columns of
+            :meth:`metrics`).
+
+        Returns a new :class:`ComparisonSet`; this one, and the comparisons in it, are
+        untouched (the new set holds shallow copies carrying the names, and keeps
+        this set's ``labels``). The new names are the labels from then on, in every
+        place a label is read: the ``depth``/``time`` columns of :meth:`metrics` (and
+        so a pivot table's columns), ``.sel(depth="Surface")``, the legend of
+        :meth:`summary`/:meth:`target`/:meth:`taylor` with ``color_by="time"`` or
+        ``marker_by="depth"``, and the names :meth:`pool`/:meth:`average`/``+`` build
+        from them. ``sel`` matches the new name only, not the old one. Calling it
+        again renames the current names (later wins)::
+
+            pooled = comp.pool(by=["variable", "depth", "time"]).relabel(
+                time={"MAMJJASON": "Mar–Nov"},
+                depth={"0-5 m": "Surface", "20-65 m": "Deep"},
+            )
+            pooled.sel(depth="Surface").summary(color_by="variable", marker_by="time")
+
+        Relabel after :meth:`pool` is the usual order -- one rename per row of the
+        table. Before it also works: the renames ride along onto the pooled
+        comparison, and grouping by ``depth``/``time`` then uses the new names, so two
+        labels renamed to the same name pool together. A label is spelled as a string
+        either way; a name that is not renamed behaves as before.
+
+        ``level_labels=`` on :meth:`summary`/:meth:`target`/:meth:`taylor`/
+        :meth:`portrait` renames for that one plot only; ``relabel`` is the one to use
+        when the names should carry through tables, ``sel`` and every plot.
+
+        Raises ``ValueError`` for a key other than ``depth``/``time``, a value that
+        is not a ``{str: str}`` dict, or a label this set does not have.
+        """
+        import copy
+
+        if not renames:
+            raise ValueError(
+                "relabel() needs at least one of "
+                f"{', '.join(k + '=' for k in self._RELABEL_KEYS)} -- e.g. "
+                '.relabel(time={"JJA": "Summer"}).'
+            )
+        for key, mapping in renames.items():
+            if key not in self._RELABEL_KEYS:
+                raise ValueError(
+                    f"ComparisonSet.relabel() does not know {key!r} -- pass "
+                    f"{' and/or '.join(k + '=' for k in self._RELABEL_KEYS)}."
+                )
+            if not isinstance(mapping, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in mapping.items()
+            ):
+                raise ValueError(
+                    f"relabel({key}=...) takes a {{current label: new name}} dict of "
+                    f"strings, not {mapping!r}."
+                )
+
+        new_maps: list[dict[str, dict[str, str]]] = [
+            {k: dict(v) for k, v in (c._relabels or {}).items()}
+            for c in self.comparisons
+        ]
+        for key, mapping in renames.items():
+            current = [_record_label(c, key) for c in self.comparisons]
+            for old, new in mapping.items():
+                hits = [i for i, label in enumerate(current) if label == _squash(old)]
+                if not hits:
+                    have = sorted(
+                        {_record_label(c, key, squash=False) for c in self.comparisons}
+                    )
+                    raise ValueError(
+                        f"no comparisons match relabel({key}={old!r}) "
+                        f"(have: {', '.join(have)})"
+                    )
+                for i in hits:
+                    new_maps[i].setdefault(key, {})[
+                        _raw_record_label(self.comparisons[i], key)
+                    ] = new
+
+        out = []
+        for c, maps in zip(self.comparisons, new_maps, strict=True):
+            relabeled = copy.copy(c)
+            relabeled._relabels = maps
+            # A record computed before the rename is cached on the copy: bring its
+            # depth/time up to date rather than recompute the metrics.
+            cached = getattr(relabeled, "_metrics", None)
+            if isinstance(cached, dict):
+                depth, time = relabeled._record_depth_time()
+                was = c._record_depth_time()
+                cached = dict(cached)
+                if "depth" in cached and depth != was[0]:
+                    cached["depth"] = depth
+                if "time" in cached and time != was[1]:
+                    cached["time"] = time
+                relabeled._metrics = cached
+            out.append(relabeled)
+        return ComparisonSet(out, labels=self.labels)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
         """Map where this set's comparisons look: each one's selection, deduped.
@@ -10661,6 +10938,81 @@ def summary(
     if kind != "portrait":
         method_kwargs["labels"] = labels
     return getattr(pooled, _SUMMARY_KINDS[kind])(renderer=renderer, **method_kwargs)
+
+
+def table(comparisons: Any, **kwargs: Any):
+    """Metrics from comparisons you already have, as one publishable table.
+
+    Parameters
+    ----------
+    comparisons
+        A :class:`Comparison`, any nesting of lists/tuples of them and/or
+        :class:`ComparisonSet` objects, or a ``{name: comparisons}`` dict whose keys
+        become the row labels *and* a ``group`` field usable as ``rows=``/``cols=``
+        (``osk.table({"hindcast": a, "forecast": b}, rows="variable", cols="group")``).
+        Pooled exactly as :func:`summary` pools them, so a row is named like the
+        same comparison's Taylor/target point.
+    metrics
+        Metric names to show, in order (default ``bias``, ``rmse``, ``crmsd``,
+        ``corr``, ``sigma_ratio``, ``n``); an unknown name raises.
+    rows
+        A metric-record field (``"variable"``, ``"depth"``, ``"test"``, ...) or
+        ``"label"`` (default), the pooled/dict/``labels=`` name.
+    cols
+        ``None`` (default; the columns are the metrics) or a record field, giving
+        ``(metric, level)`` column groups.
+    split
+        ``{metric: field}``: break those metrics out by the field's levels, one
+        sub-row (or sub-column, see ``layout``) per level -- typically
+        ``{"bias": "time"}`` over a seasonal set. Unsplit metrics read the
+        whole-record comparison of the same row; a row with no seasonal records gets
+        one line holding its whole-record value.
+    join
+        ``{metric: field}``: put the levels of ``field`` in one cell, ``"0.91 /
+        0.85"`` in level order, the header naming them (``R² (surface / column)``);
+        a missing level reads ``"–"``.
+    join_labels
+        ``{field: [names]}`` replacing the level names a join header shows.
+    layout
+        How ``split`` is drawn: ``"rows"`` (default; sub-rows, with the level in its
+        own sub-column left of the first split metric) or ``"columns"``
+        (``(metric, level)`` column groups).
+    headers
+        ``{key: text}`` overriding display names: a metric name, or ``"label"``,
+        ``"split"``, ``"units"``, ``"notes"``, ``"user_notes"`` or an ``info`` column.
+    units
+        ``True`` (default) appends the reference units to dimensional metric headers
+        when every row shares them, else adds a per-row ``units`` column; ``False``
+        omits units.
+    round
+        ``True`` (default) formats as the portrait's cell annotations do (two
+        decimals for dimensionless metrics, integers for counts, three significant
+        figures otherwise); ``False`` shows every digit.
+    info
+        ``{row: {column: text}}``: extra text columns after the metrics.
+    notes
+        ``{row: text}``: a user note for a row, overriding any ``compare(notes=)``.
+    auto_notes
+        ``True`` (default) adds a "Notes" column built from each row's selection
+        (depth, time window, station/sample average, demeaned, detided); ``False``
+        drops it; a callable ``record -> str`` replaces the generator; a
+        ``{row: text}`` dict overrides individual rows.
+    save
+        A ``.tex``/``.md``/``.html``/``.csv`` path to write (see
+        :meth:`ocean_skill.table.MetricsTable.save`).
+
+    Returns
+    -------
+    ocean_skill.table.MetricsTable
+        Displays as an HTML table in a notebook; ``.to_latex()``, ``.to_markdown()``,
+        ``.to_html()``, ``.to_dataframe()`` and ``.save()`` write it.
+    """
+    if isinstance(comparisons, dict):
+        pooled = ComparisonSet(comparisons)  # keys are the labels (and the groups)
+    else:
+        members = _flatten(comparisons)
+        pooled = ComparisonSet(members, labels=_pooled_labels(members))
+    return pooled.table(**kwargs)
 
 
 def _fan_vertical_entries(
@@ -12704,6 +13056,7 @@ def compare(
     subtract_mean: Any = False,
     detide: Any = False,
     depth_origin: Any = None,
+    notes: str | None = None,
 ) -> ComparisonSet:
     """Fan over reference × test × variable × depth × time into a ComparisonSet.
 
@@ -12878,6 +13231,13 @@ def compare(
 
             osk.compare(reference="ctd", test="his", variables=["temp"],
                         depths=[1], depth_origin="surface")
+
+    notes
+        Free text attached to every comparison this call forms (``None``, the
+        default, attaches nothing): carried into each comparison's metrics record as
+        ``notes`` and shown in the "User notes" column of :func:`table`. Display text
+        only -- it is not part of a comparison's identity or its cache key, so adding
+        or editing one never recomputes anything.
 
     ``reference`` and ``test`` each take a source name or a list; ``variables`` is a
     list of anything :mod:`ocean_skill.vocabulary` recognizes — a short vocabulary key
@@ -14318,4 +14678,9 @@ def compare(
             "the first such error instead.",
             stacklevel=_stacklevel.find(),
         )
+    if notes is not None:
+        # set after construction, not passed to Comparison(): a note is display text, so
+        # it stays out of the constructor's identity/cache-key plumbing altogether
+        for c in out:
+            c.notes = str(notes)
     return ComparisonSet(out)

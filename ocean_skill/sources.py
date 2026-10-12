@@ -149,7 +149,7 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
             url = entry.data.url
     if isinstance(url, str):
         # A kerchunk reference is opened by build.open_reference rather than by the
-        # reader's own read(): one dask layer, time chunks sized by bytes, and a
+        # reader's own read(): one dask layer at the storage chunks, and a
         # remote_protocol given instead of guessed -- see that function. The entry's
         # kwargs are what the catalog saved; the caller's override them, as when an
         # intake entry is called.

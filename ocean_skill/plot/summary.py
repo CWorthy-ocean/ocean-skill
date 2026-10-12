@@ -416,14 +416,21 @@ def _field_levels(recs, field) -> list:
     return _column_levels(r.get(field) for r in recs)
 
 
-def pretty_level(field, value) -> str:
-    """Legend text for one level: short variable names, units on depths.
+def _level_key(text) -> str:
+    """Reduce a level spelling for matching: case- and whitespace-insensitive."""
+    return "".join(str(text).split()).casefold()
 
-    Module level and public to the package because the interactive renderer builds its
-    own legend and has to spell the levels identically — a legend reading
-    ``sea_water_temperature`` in one renderer and ``temperature`` in the other is the
-    same plot disagreeing with itself.
+
+class _LevelLabels(dict):
+    """A ``level_labels=`` dict that :func:`_resolve_level_labels` has already checked.
+
+    A marker type only: ``paired`` validates once and hands the same object to its
+    Taylor and Target panels, which would otherwise each re-validate it and each
+    repeat the same unmatched-level warning.
     """
+
+
+def _default_level(field, value) -> str:
     from ocean_skill.vars import short_name
 
     if field == "variable":
@@ -435,6 +442,78 @@ def pretty_level(field, value) -> str:
 
         return month_label(value)
     return str(value)
+
+
+def pretty_level(field, value, level_labels=None) -> str:
+    """Legend text for one level: short variable names, units on depths.
+
+    Module level and public to the package because the interactive renderer builds its
+    own legend and has to spell the levels identically — a legend reading
+    ``sea_water_temperature`` in one renderer and ``temperature`` in the other is the
+    same plot disagreeing with itself.
+
+    ``level_labels`` (a ``{field: {level: text}}`` dict, the diagrams' per-plot
+    ``level_labels=``) renames a level for one figure: a key matches the raw value or
+    this function's own default spelling of it, ignoring case and spaces, and a level
+    no key matches keeps the default.
+    """
+    default = _default_level(field, value)
+    table = (level_labels or {}).get(field)
+    if table:
+        by_key = {_level_key(k): v for k, v in table.items()}
+        for spelling in (value, default):
+            hit = by_key.get(_level_key(spelling))
+            if hit is not None:
+                return str(hit)
+    return default
+
+
+def _resolve_level_labels(level_labels, recs, *, extra_fields=()):
+    """Validate a diagram's ``level_labels=`` against its records.
+
+    Raises :class:`TypeError` for a value that is not a ``{field: {level: text}}``
+    dict, and :class:`ValueError` for a field no record carries (``extra_fields``
+    adds fields the records don't have yet, e.g. ``groups=``'s synthesized
+    ``"group"``). A field none of whose
+    levels any record spells — by raw value or default spelling — only warns, naming
+    the levels present: that is what a typo looks like. A field where *some* keys
+    match stays silent, since one dict reused across ``.sel()`` subsets legitimately
+    names levels a given figure lacks. Returns a :class:`_LevelLabels` (or ``None``).
+    """
+    if level_labels is None or isinstance(level_labels, _LevelLabels):
+        return level_labels
+    if not isinstance(level_labels, dict):
+        raise TypeError(
+            f"level_labels must be a {{field: {{level: text}}}} dict, got "
+            f"{type(level_labels).__name__}"
+        )
+    known = {k for r in recs for k in r} | set(extra_fields)
+    for field, table in level_labels.items():
+        if field not in known:
+            raise ValueError(
+                f"level_labels names {field!r}, which is not a field of these "
+                f"metric records — available fields: {', '.join(sorted(known))}"
+            )
+        if not isinstance(table, dict):
+            raise TypeError(
+                f"level_labels[{field!r}] must be a {{level: text}} dict, got "
+                f"{type(table).__name__}"
+            )
+        levels = _field_levels(recs, field)
+        spelled = {
+            _level_key(s) for lev in levels for s in (lev, _default_level(field, lev))
+        }
+        unmatched = [k for k in table if _level_key(k) not in spelled]
+        if table and len(unmatched) == len(table):
+            present = ", ".join(
+                f"{lev!r} ({_default_level(field, lev)})" for lev in levels
+            )
+            warnings.warn(
+                f"level_labels[{field!r}]: no level matches "
+                f"{', '.join(repr(u) for u in unmatched)} — levels present: {present}",
+                stacklevel=3,
+            )
+    return _LevelLabels(level_labels)
 
 
 class _Styles(NamedTuple):
@@ -570,7 +649,13 @@ def _resolve_colors(colors, levels, field):
 
 
 def _group_styles(
-    recs, color_by=None, marker_by=None, colors=None, marker_scale=1.0, alpha=None
+    recs,
+    color_by=None,
+    marker_by=None,
+    colors=None,
+    marker_scale=1.0,
+    alpha=None,
+    level_labels=None,
 ):
     """Assign a colour, marker, alpha and size to every record; plus legend handles.
 
@@ -585,7 +670,8 @@ def _group_styles(
     """
     from matplotlib.lines import Line2D
 
-    _pretty = pretty_level
+    def _pretty(field, level):
+        return pretty_level(field, level, level_labels)
 
     def _levels(field):
         return _field_levels(recs, field)
@@ -674,7 +760,14 @@ def _group_styles(
 
 
 def _grid_handles(
-    recs, color_by, marker_by, colors=None, marker_scale=1.0, alpha=None, star_scale=1.0
+    recs,
+    color_by,
+    marker_by,
+    colors=None,
+    marker_scale=1.0,
+    alpha=None,
+    star_scale=1.0,
+    level_labels=None,
 ):
     """Legend handles laid out as a colour x marker matrix, column-major.
 
@@ -711,10 +804,14 @@ def _grid_handles(
 
     handles = [_blank(header_size)]
     for lev in rows:
-        handles.append(_blank(7 * level_scales[lev], pretty_level(color_by, lev)))
+        handles.append(
+            _blank(7 * level_scales[lev], pretty_level(color_by, lev, level_labels))
+        )
 
     for j, mlev in enumerate(cols):
-        handles.append(_blank(header_size, pretty_level(marker_by, mlev)))
+        handles.append(
+            _blank(header_size, pretty_level(marker_by, mlev, level_labels))
+        )
         m = _MARKERS[j % len(_MARKERS)]
         for lev in rows:
             ms = 7 * level_scales[lev]
@@ -1381,6 +1478,7 @@ def taylor(
     summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
 ):
     """Taylor diagram with one point per comparison.
 
@@ -1499,6 +1597,16 @@ def taylor(
     ``compare(..., times=...)`` fan-out) with an arrow per consecutive pair, each
     chain's first sample drawn hollow. Static only: the interactive renderer
     delegates Taylor diagrams to matplotlib entirely, so this rides along with it.
+
+    ``level_labels={field: {level: text}}`` renames levels in this one figure's key
+    (``color_by``/``marker_by``/``groups`` legends, including ``legend_style="grid"``)
+    without touching the records: ``{"time": {"MAMJJASON": "Mar–Nov"}, "variable":
+    {"alkalinity": "TA"}}``. A level key matches the raw record value or its default
+    display spelling (``"temp"`` and ``"sea_water_temperature"`` both name the
+    temperature level), ignoring case and spaces; unmatched levels keep their text.
+    Per-point labels (``labels=``, ``legend_style="annotate"``) are not levels and are
+    unaffected. A field no record carries, or a non-dict value, raises; a level that
+    matches nothing warns, naming the levels present.
     """
     import matplotlib.pyplot as plt
 
@@ -1508,6 +1616,7 @@ def taylor(
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    level_labels = _resolve_level_labels(level_labels, recs)
     recs = _drop_unplottable(recs, family="taylor", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
@@ -1571,7 +1680,9 @@ def taylor(
         # dict marker_scale has no single "the" scale for the reference, so it stays
         # unscaled (_scalar_scale's fallback) rather than guessing which entry applies.
         dia.samplePoints[0].set_markersize(10 * star_scale)
-    styles = _group_styles(recs, color_by, marker_by, colors, marker_scale, alpha)
+    styles = _group_styles(
+        recs, color_by, marker_by, colors, marker_scale, alpha, level_labels
+    )
 
     per_rec = zip(
         recs,
@@ -1692,7 +1803,14 @@ def taylor(
         )
     elif legend_style == "grid":
         handles, ncols = _grid_handles(
-            recs, color_by, marker_by, colors, marker_scale, alpha, star_scale
+            recs,
+            color_by,
+            marker_by,
+            colors,
+            marker_scale,
+            alpha,
+            star_scale,
+            level_labels,
         )
         _grid_legend_below(fig, handles, ncols, scale["legend"])
     elif legend_style == "annotate":
@@ -1757,6 +1875,7 @@ def target(
     summary_weights: str | Any | None = _weighting.AUTO,
     summary_split_markers: bool = False,
     arrows: bool | str | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
 ):
     """Target diagram (Jolliff et al. 2009) with one point per comparison.
 
@@ -1812,6 +1931,9 @@ def target(
     which way it got there; a chain of one point (nothing to connect) draws
     unchanged. Arrow colour follows the *end* point's colour, so this composes with
     ``color_by``/``colors`` rather than needing its own.
+
+    ``level_labels={field: {level: text}}`` renames key levels for this figure alone,
+    exactly as in :func:`taylor`.
     """
     import matplotlib.pyplot as plt
 
@@ -1819,6 +1941,7 @@ def target(
     recs = _records(comparisons, groups)
     if not recs:
         raise ValueError("no comparisons to plot")
+    level_labels = _resolve_level_labels(level_labels, recs)
     recs = _drop_unplottable(recs, family="target", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
@@ -1874,7 +1997,9 @@ def target(
         0, 0, marker="*", ms=11 * star_scale, color="k", zorder=3, label="reference"
     )
 
-    styles = _group_styles(recs, color_by, marker_by, colors, marker_scale, alpha)
+    styles = _group_styles(
+        recs, color_by, marker_by, colors, marker_scale, alpha, level_labels
+    )
     per_point = zip(
         x, y, styles.colors, styles.markers, styles.alphas, styles.scales, strict=True
     )
@@ -1976,7 +2101,14 @@ def target(
         )
     elif labels_mode == "grid":
         handles, ncols = _grid_handles(
-            recs, color_by, marker_by, colors, marker_scale, alpha, star_scale
+            recs,
+            color_by,
+            marker_by,
+            colors,
+            marker_scale,
+            alpha,
+            star_scale,
+            level_labels,
         )
         _grid_legend_below(fig, handles, ncols, scale["legend"])
 
@@ -2003,6 +2135,7 @@ def paired(
     size=None,
     zoom: float = 1.0,
     scale: dict[str, float] | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
     **kwargs,
 ):
     """Taylor and Target side by side — the pairing they are usually read as.
@@ -2029,6 +2162,12 @@ def paired(
     import matplotlib.pyplot as plt
 
     legend_style = _resolve_legend_style(legend_style)
+    # Validated once here, then handed to both panels as the already-checked object, so
+    # a typo warns once rather than once per panel.
+    if level_labels is not None:
+        paired_recs = _records(comparisons, kwargs.get("groups"))
+        if paired_recs:
+            level_labels = _resolve_level_labels(level_labels, paired_recs)
     color_by = kwargs.get("color_by")
     marker_by = kwargs.get("marker_by")
     if kwargs.get("groups") and not color_by and not marker_by:
@@ -2047,6 +2186,7 @@ def paired(
         legend_style=panel_legend_style,
         title="Taylor",
         scale=scale,
+        level_labels=level_labels,
         **kwargs,
     )
     ax_t = fig.add_subplot(122)
@@ -2056,6 +2196,7 @@ def paired(
         legend_style=panel_legend_style,
         title="Target",
         scale=scale,
+        level_labels=level_labels,
         **kwargs,
     )
 
@@ -2077,6 +2218,7 @@ def paired(
                 panel_marker_scale,
                 kwargs.get("alpha"),
                 _scalar_scale(panel_marker_scale),
+                level_labels,
             )
             _grid_legend_below(fig, handles, ncols, scale["legend"])
         else:
@@ -2087,6 +2229,7 @@ def paired(
                 kwargs.get("colors"),
                 panel_marker_scale,
                 kwargs.get("alpha"),
+                level_labels,
             )
             _legend_below(
                 fig,

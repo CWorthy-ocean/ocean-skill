@@ -51,6 +51,7 @@ def test_the_scalar_record_keeps_its_columns_and_their_order():
         "rmse",
         "mae",
         "corr",
+        "r2",
         "sigma_ratio",
         "std_test",
         "std_reference",
