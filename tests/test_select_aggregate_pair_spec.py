@@ -234,6 +234,88 @@ def test_a_season_select_key_the_aggregate_creates_is_applied_after_it(monthly):
     assert float(da.isel(lat=0, lon=0)) == pytest.approx((6 + 7 + 8) / 3)
 
 
+@pytest.fixture
+def jul_oct():
+    """Build a daily July-October record whose value is its own month.
+
+    Short enough that a season groupby drops DJF/MAM (operators._filter_seasons
+    warns) and a month groupby holds only months 7-10 -- the case a deferred
+    select naming an absent label must refuse rather than snap or surface pandas'
+    "try method='nearest'" text.
+    """
+    time = xr.date_range("2020-07-01", "2020-10-31", freq="D")
+    values = np.array([t.month for t in time], dtype=float)
+    da = xr.DataArray(
+        values[:, None, None] * np.ones((1, 2, 2)),
+        dims=("time", "lat", "lon"),
+        coords={"time": time, "lat": [1.0, 2.0], "lon": [1.0, 2.0]},
+        attrs={"units": "1"},
+    )
+    return xr.Dataset({"a": da})
+
+
+_MONTH_AGG = {"time": {"groupby": "month", "reduce": "mean"}}
+_SEASON_AGG = {"time": {"groupby": "season", "reduce": "mean"}}
+
+
+def _prepare_jul_oct(ds, select, agg):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return _prepare(ds, {}, "a", select, agg, source="model")
+
+
+def test_a_season_the_record_lacks_is_refused_with_what_is_present(jul_oct):
+    with pytest.raises(KeyError) as err:
+        _prepare_jul_oct(jul_oct, {"season": "DJF"}, _SEASON_AGG)
+    msg = str(err.value)
+    # DeferredSelectMissing.__str__ is the bare message: a plain KeyError would wrap
+    # it in repr() quotes, giving "\"'model': ..." (it starts with the source name).
+    assert msg.startswith("'model': select season=")
+    assert "'DJF'" in msg
+    assert "season" in msg
+    assert "2020-07-01 to 2020-10-31" in msg
+    assert "[7, 8, 9, 10]" in msg
+    assert "['JJA', 'SON']" in msg
+    assert "np.str_" not in msg
+    assert "method=" not in msg
+
+
+def test_a_month_the_record_lacks_does_not_snap_to_the_nearest(jul_oct):
+    """month=1 on a July-October record used to give July, silently."""
+    with pytest.raises(comparison.DeferredSelectMissing, match="month=1"):
+        _prepare_jul_oct(jul_oct, {"month": 1}, _MONTH_AGG)
+
+
+def test_a_month_list_names_only_the_absent_labels(jul_oct):
+    with pytest.raises(KeyError) as err:
+        _prepare_jul_oct(jul_oct, {"month": [6, 7, 8]}, _MONTH_AGG)
+    msg = str(err.value)
+    assert "found no data for [6]" in msg
+    assert "covers [6]" in msg
+    assert "[7, 8, 9, 10]" in msg
+
+
+def test_a_month_range_the_record_lacks_is_refused(jul_oct):
+    with pytest.raises(KeyError, match="found no data"):
+        _prepare_jul_oct(jul_oct, {"month": {"min": 1, "max": 3}}, _MONTH_AGG)
+    with pytest.raises(KeyError, match="found no data"):
+        _prepare_jul_oct(jul_oct, {"month": slice(1, 3)}, _MONTH_AGG)
+
+
+def test_a_month_range_the_record_covers_still_works(jul_oct):
+    da, _ = _prepare_jul_oct(jul_oct, {"month": {"min": 8, "max": 9}}, _MONTH_AGG)
+    assert da.sizes["month"] == 2
+
+
+def test_months_and_seasons_the_record_holds_still_select(jul_oct):
+    da, _ = _prepare_jul_oct(jul_oct, {"month": [7, 8]}, _MONTH_AGG)
+    assert da.sizes["month"] == 2
+    da, _ = _prepare_jul_oct(jul_oct, {"season": "JJA"}, _SEASON_AGG)
+    assert "season" not in da.dims
+    # JJA holds July (31 days at 7) and August (31 days at 8) of this record
+    assert float(da.isel(lat=0, lon=0)) == pytest.approx(7.5)
+
+
 def test_seasonal_test_lane_against_a_time_meaned_reference():
     """The seasonal analogue of the WOA month recipe this module documents: a
     model spanning several years needs a season picked out of its own

@@ -2291,6 +2291,120 @@ def _is_vertical_dim(da, dim: str) -> bool:
     return attrs.get("axis") == "Z" or "positive" in attrs
 
 
+class DeferredSelectMissing(KeyError):
+    """A select on an axis the aggregate created named a label that isn't there.
+
+    A ``KeyError`` (so :func:`compare`'s per-pair skip treats it as an expected
+    refusal rather than a crash) whose ``__str__`` is the plain message rather than
+    the quoted ``repr`` a bare ``KeyError`` would print.
+    """
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+def _deferred_axis_span(da_before, dim: str, agg: dict[str, Any] | None) -> str:
+    """Describe the source axis an aggregate-created ``dim`` was grouped from.
+
+    Finds the ``aggregate`` entry whose groupby step created ``dim`` (the entry is a
+    step dict or a chain of them) and, when that axis on ``da_before`` is a decoded
+    datetime, returns e.g. ``"its time covers 2020-07-01 to 2020-10-31 (months [7,
+    8, 9, 10])"``; an empty string when there is no such axis or it isn't
+    datetime-like. Coordinate reads only -- no data values are loaded.
+    """
+    from ocean_skill import operators
+
+    for axis, steps in (agg or {}).items():
+        for step in steps if isinstance(steps, list | tuple) else [steps]:
+            if not (isinstance(step, dict) and step.get("groupby") == dim):
+                continue
+            src = operators.resolve_dim(da_before, axis)
+            if src is None or src not in da_before.coords:
+                continue
+            coord = da_before[src]
+            if coord.ndim != 1 or coord.size == 0:
+                continue
+            try:
+                days = coord.dt.strftime("%Y-%m-%d").values
+                months = sorted({int(m) for m in coord.dt.month.values.tolist()})
+            except Exception:  # not a decoded datetime: no span
+                continue
+            return f"its {axis} covers {min(days)} to {max(days)} (months {months})"
+    return ""
+
+
+def _deferred_missing_error(
+    da_before, da, dim: str, key: str, value, absent: list | None, agg, source: str
+) -> DeferredSelectMissing:
+    """Build the refusal for a deferred select naming labels ``da`` doesn't hold.
+
+    ``absent`` is the list of missing labels, or ``None`` for a range (which has no
+    one label to name). Present labels print as plain python values.
+    """
+    present = sorted(set(np.asarray(da[dim].values).tolist()))
+    span = _deferred_axis_span(da_before, dim, agg)
+    if absent is None:
+        found, hint = "", "Widen the range to cover some of those."
+    elif isinstance(value, list | tuple):
+        found = f" for {absent}"
+        hint = f"Select from those, or use a record that covers {absent}."
+    else:
+        found = ""
+        hint = f"Select one of those, or use a record that covers {value!r}."
+    cause = f"{span}, so the {dim!r} axis" if span else f"the {dim!r} axis"
+    return DeferredSelectMissing(
+        f"{source!r}: select {key}={value!r} found no data{found} -- {cause} the "
+        f"aggregate created holds only {present}. {hint}"
+    )
+
+
+def _check_deferred_labels(
+    da_before, da, to_apply: dict[str, Any], agg, source: str, *, after=None
+) -> None:
+    """Refuse a deferred select naming a label the aggregate didn't produce.
+
+    A deferred key (one naming an axis the aggregate created -- ``month``/``season``
+    from a time groupby) is applied to ``da``, the aggregated array. That axis is a
+    set of labels, not a continuum, so it has no "nearest": left to
+    :func:`ocean_skill.operators.select` a scalar silently snaps to a neighbour
+    (``month=1`` on a July-October record gives July) and a list fails with a pandas
+    "try method='nearest'" message. Instead each scalar/list label must be present
+    exactly, else :class:`DeferredSelectMissing` names the absent labels, the span
+    of ``da_before``'s time, and what the axis does hold. A range can't be judged
+    before it is applied, so when ``after`` (``da`` once selected) is passed, a range
+    key that left the axis empty is refused the same way.
+    """
+    from ocean_skill import operators
+
+    for key, value in to_apply.items():
+        dim = operators.resolve_dim(da, key)
+        if dim is None or dim not in da.coords:
+            continue
+        if operators._index_spec(value) is not None:
+            continue
+        if isinstance(value, slice) or (
+            isinstance(value, dict) and ("min" in value or "max" in value)
+        ):
+            if after is not None and after.sizes.get(dim, 1) == 0:
+                raise _deferred_missing_error(
+                    da_before, da, dim, key, value, None, agg, source
+                )
+            continue
+        if after is not None or isinstance(value, dict):
+            continue
+        labels = value if isinstance(value, list | tuple) else [value]
+        have = set(np.asarray(da[dim].values).tolist())
+        absent = [
+            lab
+            for lab in (x.item() if isinstance(x, np.generic) else x for x in labels)
+            if lab not in have
+        ]
+        if absent:
+            raise _deferred_missing_error(
+                da_before, da, dim, key, value, absent, agg, source
+            )
+
+
 def _select_horizontal_then_aggregate(
     da, horizontal: dict[str, Any], agg: dict[str, Any] | None, source: str
 ):
@@ -2307,6 +2421,14 @@ def _select_horizontal_then_aggregate(
     a variable genuinely lacks is (:func:`ocean_skill.operators.select`'s own
     contract, needed so one shared spec can cover several variables that don't all
     carry the same axes).
+
+    That second try is exact: an axis the aggregate creates (month, season) is a
+    set of labels with no "nearest", so a label that axis doesn't hold -- ``month=1``
+    on a July-October record, ``season="DJF"`` once the groupby has dropped it -- is
+    refused with :class:`DeferredSelectMissing`, naming what the axis does hold and
+    the span of the source's time, rather than snapping to a neighbouring month or
+    surfacing pandas' "try method='nearest'" text. A range that empties the axis is
+    refused the same way.
 
     A key still unmatched after *both* tries draws a warning naming it, rather
     than vanishing without a trace — it is usually a typo, or a misunderstanding
@@ -2348,6 +2470,7 @@ def _select_horizontal_then_aggregate(
     da = operators.select(
         da, {k: v for k, v in horizontal.items() if k in applied}, subject=source
     )
+    da_before = da
     da = operators.aggregate(da, agg)
     deferred = {k: v for k, v in horizontal.items() if k not in applied}
     if not deferred:
@@ -2358,7 +2481,10 @@ def _select_horizontal_then_aggregate(
         if (dim := operators.resolve_dim(da, k)) is None or dim not in da.dims
     }
     if to_apply := {k: v for k, v in deferred.items() if k not in still_unmatched}:
-        da = operators.select(da, to_apply, subject=source)
+        _check_deferred_labels(da_before, da, to_apply, agg, source)
+        selected = operators.select(da, to_apply, subject=source)
+        _check_deferred_labels(da_before, da, to_apply, agg, source, after=selected)
+        da = selected
     if still_unmatched:
         warnings.warn(
             f"{source!r}: select key(s) {sorted(still_unmatched)} matched no axis "
@@ -12129,7 +12255,10 @@ def compare(
     creates* (a groupby renames its dim to the grouping key), which is why it can't
     run before the aggregate the way ``select`` ordinarily does — it is deferred and
     applied a second time once the aggregate has run, and only warns (rather than
-    silently doing nothing) if it still matches no axis afterward. ``depths=``/
+    silently doing nothing) if it still matches no axis afterward. That second try
+    is exact (month and season are labels with no "nearest"), so a month or season
+    the aggregate didn't produce -- ``month=1`` on a July-October record -- is
+    refused, naming what is present. ``depths=``/
     ``select={"depth": ...}`` sugar still applies to both lanes of a pair-spec select
     at once — write the vertical key into only one side, or into both agreeing on the
     same value, and let the sugar fan it out.
