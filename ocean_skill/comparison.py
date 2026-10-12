@@ -11,6 +11,7 @@ test × variable × depth cross-product and collects the results into a
 
 from __future__ import annotations
 
+import calendar
 import contextvars
 import functools
 import os
@@ -229,6 +230,20 @@ def _collapses_vertical(select: dict[str, Any], agg: dict[str, Any] | None) -> b
     return False
 
 
+def _is_time_mask(value: Any) -> bool:
+    """Whether a time ``select`` value is a season/months mask.
+
+    ``{"season": "MAM"}`` or ``{"months": [3, 4, 5]}``, optionally carrying a
+    ``min``/``max`` year window --
+    :func:`ocean_skill.operators.select` applies the window, then keeps every sample
+    whose month is in the set. It is a *subset* of the time axis (the axis stays, so
+    pairs remain a series), never a collapse to one instant; and it is not the
+    top-level ``select={"season": ...}`` key, which picks one group off a season axis
+    an *aggregate* created.
+    """
+    return isinstance(value, dict) and ("season" in value or "months" in value)
+
+
 def _time_collapsed(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
     """Whether select/agg narrows time to one instant rather than keeping an axis.
 
@@ -245,6 +260,11 @@ def _time_collapsed(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
     select :func:`compare`'s season fan (or a hand-written one) applies against
     the axis a ``{"groupby": "season"}`` aggregate created, narrowing that axis
     back down to one group -- exactly as reduced as a scalar time instant.
+
+    ``select={"time": {"season": "MAM"}}`` (or ``{"months": [3, 4, 5]}``, optionally
+    with a ``min``/``max`` year window) is the opposite: a *mask* that keeps every
+    sample falling in those months, so it narrows the time axis without collapsing
+    it (:func:`_is_time_mask`) -- the comparison keeps a series.
     """
     if isinstance(select.get("season"), str):
         return True
@@ -252,6 +272,10 @@ def _time_collapsed(select: dict[str, Any], agg: dict[str, Any] | None) -> bool:
         if key not in select:
             continue
         value = select[key]
+        if _is_time_mask(value):
+            # A season/months mask keeps every sample in those months -- a subset
+            # of the time axis, not a single instant (see _is_time_mask).
+            break
         if isinstance(value, dict) and {"min", "max"} <= set(value):
             break
         if isinstance(value, list | tuple):
@@ -7834,6 +7858,11 @@ class Comparison:
 
     data = aligned  # alias: prepared arrays for bespoke plotting
 
+    #: Whether this comparison is a pile of pooled samples (:meth:`ComparisonSet.pool`)
+    #: rather than a pair along real axes: ``metrics()`` then reports ``samples`` with
+    #: no station position or autocorrelation weight, and nothing draws it.
+    _pooled: bool = False
+
     @classmethod
     def _averaged(
         cls,
@@ -8222,7 +8251,10 @@ class Comparison:
                         "station_lon": self.aligned.attrs.get("station_lon"),
                         "station_lat": self.aligned.attrs.get("station_lat"),
                     }
-                    if self.is_series or self.is_profile or self.is_time_depth
+                    if not self._pooled
+                    and (self.is_series or self.is_profile or self.is_time_depth)
+                    else {"weighted": False, "sample_noun": "samples"}
+                    if self._pooled
                     else {"weighted": False, "sample_noun": "section cells"}
                     if self.is_section
                     else {}
@@ -8230,8 +8262,8 @@ class Comparison:
                 variable=self.standard_name or str(self.variable),
                 test=self.test_name,
                 reference=self.reference_name,
-                depth=_display_depth(self.variable, self.select),
-                time=_display_time(self.select),
+                depth=self._record_depth_time()[0],
+                time=self._record_depth_time()[1],
                 obs_depth=self._actual_depth,
                 regrid=self.method,
                 **(
@@ -8262,6 +8294,25 @@ class Comparison:
             if n_eff is not None:
                 self._metrics["n_eff"] = n_eff
         return self._metrics
+
+    def _record_depth_time(self) -> tuple[Any, Any]:
+        """The ``depth`` and ``time`` a metrics record reports for this comparison.
+
+        What :func:`_display_depth`/:func:`_display_time` say, except for a pooled
+        comparison (:meth:`ComparisonSet.pool`): its record is meant to be grouped
+        and pivoted on these columns, and a depth band or time window is a ``dict``,
+        which a table cannot group by. Those are spelled as their label there
+        (``"0-5 m"``, ``"2024-01-01–2024-12-31"``); a plain depth or time stays as it
+        is.
+        """
+        depth = _display_depth(self.variable, self.select)
+        time = _display_time(self.select)
+        if self._pooled:
+            if isinstance(depth, dict | list | tuple):
+                depth = _depth_label(depth)
+            if isinstance(time, dict | list | tuple):
+                time = _time_label(time)
+        return depth, time
 
     def _n_eff(self, aligned) -> float | None:
         """Effective-sample-size weight for this comparison's record (see
@@ -8307,6 +8358,9 @@ class Comparison:
 
         n = self._metrics.get("n")
         if not n:
+            return None
+        if getattr(self, "_pooled", False):
+            # Samples pooled from many places and times have no order to lag along.
             return None
         reference = aligned["reference"]
 
@@ -8371,13 +8425,33 @@ class Comparison:
         """Return the ``test − reference`` field on the aligned (coarser) grid."""
         return self.aligned["difference"]
 
+    def _require_drawable(self) -> None:
+        """Raise ``ValueError`` if this comparison has no axis to draw along.
+
+        Two cases: a pooled comparison (a 1-D pile of samples), and an unpooled one
+        that would draw as a ``field_row`` but whose aligned reference is 0-d -- one
+        model value against one observation, which two single-cell panels would
+        show as two dots.
+        """
+        if self._pooled:
+            raise ValueError(_undrawable_message("pooled"))
+        if self.family == "field_row" and self.aligned["reference"].ndim == 0:
+            raise ValueError(_undrawable_message("single"))
+
     def as_item(self) -> dict[str, Any]:
         """Return this comparison as a spec item.
 
         Two shapes, because a scored comparison is a different figure: with ``over`` set
         the item carries the metric maps and the overall record that annotates them, and
         with it unset the aligned trio the ``test | reference | difference`` row draws.
+
+        A pooled comparison (:meth:`ComparisonSet.pool`), and one that reduced to a
+        single test value against a single reference value, have nothing to draw and
+        raise ``ValueError`` here -- before anything is computed -- so every plotting
+        route (:meth:`plot`, :meth:`ComparisonSet.plot`, a movie) says so once, in
+        :func:`_undrawable_message`'s words.
         """
+        self._require_drawable()
         # The depth and time a select= has collapsed to one map, spelled for a title —
         # what a single field_row has no row label to say. Uses the same test-side
         # precedent as standard_name (a calculated diagnostic reports NO_VERTICAL_AXIS,
@@ -8500,6 +8574,7 @@ class Comparison:
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
 
+        self._require_drawable()
         family = self.family
         if family != "skill_map":
             kwargs.setdefault("labels", (self.test_name, self.reference_name))
@@ -9109,19 +9184,21 @@ def _poolable_members(aligned: list[Any]) -> list[Any]:
 MAX_POOLED_NAME_LENGTH = 40
 
 
-def _pooled_name(names: list[str], role: str) -> str:
+def _pooled_name(names: list[str], role: str, *, how: str = "mean of") -> str:
     """Name an averaged group's test or reference lane for legends and titles.
 
     A few sources read fine joined (``"HV1+HV5"``); a dozen long catalog nicknames
     joined that way fill the legend, so past :data:`MAX_POOLED_NAME_LENGTH` the
-    name is a count instead (``"mean of 12 reference sources"``). The name is for
-    display; the group's members keep their own source names.
+    name is a count instead (``"mean of 12 reference sources"``). ``how`` is the
+    count's opening words -- ``"pool of"`` for :meth:`ComparisonSet.pool`, whose
+    group is a pile of samples, not a mean. The name is for display; the group's
+    members keep their own source names.
     """
     unique = list(dict.fromkeys(names))
     joined = "+".join(unique)
     if len(unique) == 1 or len(joined) <= MAX_POOLED_NAME_LENGTH:
         return joined
-    return f"mean of {len(unique)} {role} sources"
+    return f"{how} {len(unique)} {role} sources"
 
 
 def _average_aligned(comps: list[Comparison]) -> Any:
@@ -9202,6 +9279,88 @@ def _average_aligned(comps: list[Comparison]) -> Any:
     return avg
 
 
+def _pool_aligned(comps: list[Comparison]) -> Any:
+    """Pool a group's matched pairs as *samples* into one composite dataset.
+
+    The counterpart of :func:`_average_aligned`: where that averages members
+    point by point (so each must share its axes, and the result has as many values
+    as one member), this keeps every member's every valid pair as its own sample.
+    Each member's aligned ``test``/``reference`` is flattened -- every dimension,
+    whatever it is -- into one ``sample`` axis, only the pairs where **both**
+    lanes are finite are kept, and the members are concatenated along it. The
+    members need not share a shape (a 40-step series, a 12-level profile and a
+    single value pool fine), nor any coordinate: every coordinate is dropped, since
+    a sample's identity is not what the pooled metrics read. ``difference`` is
+    recomputed from the pooled ``test - reference``, keeping the member's
+    attributes (:func:`_average_aligned` does the same).
+
+    Members spelling the time or vertical axis differently are first harmonized by
+    :func:`_poolable_members` -- the same preparation the average gets -- though
+    nothing here depends on the name once the axes are flattened. ``test`` and
+    ``reference`` keep their own ``units`` attributes (conflicting ones are
+    dropped, never silently picked).
+
+    Raises ``ValueError`` when no member has a single pair finite in both lanes.
+    """
+    import xarray as xr
+
+    members = _poolable_members([c.aligned for c in comps])
+    pieces = []
+    for member in members:
+        test, reference = xr.broadcast(member["test"], member["reference"])
+        dims = list(reference.dims)
+        t = np.asarray(test.transpose(*dims).values, dtype=float).reshape(-1)
+        r = np.asarray(reference.transpose(*dims).values, dtype=float).reshape(-1)
+        good = np.isfinite(t) & np.isfinite(r)
+        piece = xr.Dataset(
+            {
+                "test": ("sample", t[good], dict(member["test"].attrs)),
+                "reference": ("sample", r[good], dict(member["reference"].attrs)),
+            },
+            attrs={
+                k: v
+                for k, v in member.attrs.items()
+                if k not in ("station_lon", "station_lat", "scored_over")
+            },
+        )
+        if piece.sizes["sample"]:
+            pieces.append(piece)
+    if not pieces:
+        raise ValueError(
+            "pool(): none of this group's comparisons has a pair valid in both the "
+            "test and the reference, so there is nothing to score."
+        )
+    pooled = xr.concat(pieces, dim="sample", combine_attrs="drop_conflicts")
+    attrs = next(
+        (m["difference"].attrs for m in members if "difference" in m.data_vars), {}
+    )
+    pooled["difference"] = pooled["test"] - pooled["reference"]
+    pooled["difference"].attrs = dict(attrs)
+    return pooled
+
+
+def _undrawable_message(what: str) -> str:
+    """The error for drawing a comparison that has no axis left to draw along.
+
+    Shared by a pooled comparison (:meth:`ComparisonSet.pool`) and an unpooled one
+    whose pair reduced to one test value against one reference value, so the two
+    say the same thing: a figure needs an axis, and the numbers are in ``.metrics()``.
+    """
+    if what == "pooled":
+        return (
+            "pooled comparisons are a pile of matched samples with no time or depth "
+            "axis left to draw along -- use .metrics() for the table, or .target() "
+            "/ .taylor() for the skill diagrams."
+        )
+    return (
+        "this comparison reduced to one test value against one reference value, so "
+        "there is no axis to draw along and no map to show -- the figure would be "
+        "two dots. To keep the samples instead, fan the time axis into a subset "
+        "with times={'seasons': [...]} (and pool them with .pool(by=[..., 'time']) "
+        "for one score per season), or read the numbers from .metrics()."
+    )
+
+
 class ComparisonSet:
     """A set of comparisons: stacked rows in one figure, one tidy metrics table.
 
@@ -9257,8 +9416,23 @@ class ComparisonSet:
     def __getitem__(self, i):
         return self.comparisons[i]
 
-    #: Filter keys :meth:`sel` accepts.
-    _SEL_KEYS = ("variable", "standard_name", "source", "test", "reference")
+    #: Filter keys :meth:`sel` accepts -- every :data:`_LABEL_DIMS` dimension (the
+    #: same ones :meth:`pool`/:meth:`average`/``color_by`` group by) plus the
+    #: ``standard_name``/``source`` synonyms.
+    _SEL_KEYS = (
+        "variable",
+        "standard_name",
+        "source",
+        "test",
+        "reference",
+        "depth",
+        "time",
+        "demeaned",
+        "detided",
+    )
+
+    #: :meth:`sel` keys matched against a comparison's :data:`_LABEL_DIMS` label.
+    _SEL_LABEL_KEYS = ("depth", "time", "demeaned", "detided")
 
     def sel(self, **filters: Any) -> ComparisonSet:
         """Narrow this set to members matching every filter, returning a new set.
@@ -9282,6 +9456,14 @@ class ComparisonSet:
         narrowing to one station is ``.sel(reference="HV1")`` -- ``source="HV1"``
         would look for it among the (single) test names and match nothing.
 
+        ``depth``, ``time``, ``demeaned`` and ``detided`` match the label the
+        comparison reads as on a diagram and in :meth:`metrics` (:data:`_LABEL_DIMS`),
+        ignoring spaces and case -- so ``depth="0-5m"`` and ``depth="0-5 m"`` both pick
+        out a 0-5 m band and ``time="mam"`` a spring season. A depth or time may also be
+        given as the spec it was requested with (``depth={"min": 0, "max": 5}``,
+        ``time={"season": "MAM"}``), which is spelled into its label first. This is how
+        to narrow a :meth:`pool` over variable x depth x season to one layer.
+
         Every :class:`Comparison` in a :class:`ComparisonSet` is already aligned
         (:func:`compare` calls :meth:`Comparison.align` while fanning out), so this
         is a cheap filter over cached results, never a recomputation.
@@ -9297,12 +9479,30 @@ class ComparisonSet:
                     f"{', '.join(self._SEL_KEYS)}."
                 )
 
+        readers = dict(_LABEL_DIMS)
+
+        def norm(label: Any) -> str:
+            return "".join(str(label).split()).casefold()
+
+        def as_label(key: str, value: Any) -> str:
+            if isinstance(value, str):
+                return norm(value)
+            if key == "depth":
+                return norm(_depth_label(value))
+            if key == "time":
+                return norm(_time_label(value))
+            return norm(value)
+
         def matches(c: Comparison) -> bool:
             for key, wanted in filters.items():
                 choices = (
                     wanted if isinstance(wanted, (list, tuple, set)) else (wanted,)
                 )
-                if key in ("variable", "standard_name"):
+                if key in self._SEL_LABEL_KEYS:
+                    have = norm(readers[key](c))
+                    if not any(as_label(key, w) == have for w in choices):
+                        return False
+                elif key in ("variable", "standard_name"):
                     if not any(
                         _variable_matches(c.standard_name, c.variable, w)
                         for w in choices
@@ -9323,6 +9523,10 @@ class ComparisonSet:
                 ),
                 "source": sorted({c.test_name for c in self.comparisons}),
                 "reference": sorted({c.reference_name for c in self.comparisons}),
+                **{
+                    k: sorted({str(readers[k](c)) for c in self.comparisons})
+                    for k in self._SEL_LABEL_KEYS
+                },
             }
             group_of = {
                 "variable": "variable",
@@ -9330,6 +9534,7 @@ class ComparisonSet:
                 "source": "source",
                 "test": "source",
                 "reference": "reference",
+                **{k: k for k in self._SEL_LABEL_KEYS},
             }
             detail = "; ".join(
                 f"{k}={v!r} (have: {', '.join(present[group_of[k]])})"
@@ -9548,6 +9753,8 @@ class ComparisonSet:
                 "requested variable (its catalog metadata lists them under "
                 "'variables') or a real-but-missing time/depth in that source."
             )
+        for c in self.comparisons:
+            c._require_drawable()
         items = self._items()
         if contours is not None:
             from ocean_skill._overlay import comparison_contour, contour_members
@@ -10000,32 +10207,8 @@ class ComparisonSet:
         spanning more than one ``test`` source is averaged as asked but warned
         about, since that is rarely what was intended.
         """
-        import warnings
-        from collections import OrderedDict
-
-        readers = dict(_LABEL_DIMS)
-        dims = [by] if isinstance(by, str) else list(by)
-        unknown = [d for d in dims if d not in readers]
-        if unknown:
-            raise ValueError(
-                f"average(by=...) unknown dimension(s) {unknown}; "
-                f"choose from {list(readers)}"
-            )
-
-        groups: OrderedDict[tuple, list[Comparison]] = OrderedDict()
-        for c in self.comparisons:
-            key = tuple(readers[d](c) for d in dims)
-            groups.setdefault(key, []).append(c)
-
         out = []
-        for key, comps in groups.items():
-            if len({c.test_name for c in comps}) > 1:
-                warnings.warn(
-                    "average(): a group spans multiple test sources; their "
-                    "fields were averaged together. Pass by=[..., \"test\"] to "
-                    "keep them distinct if that wasn't intended.",
-                    stacklevel=2,
-                )
+        for key, comps in self._grouped(by, caller="average", verb="averaged"):
             label = " ".join(str(k) for k in key)
             out.append(
                 Comparison._averaged(
@@ -10038,6 +10221,118 @@ class ComparisonSet:
                     label=label,
                 )
             )
+        return ComparisonSet(out)
+
+    def _grouped(
+        self, by: str | list[str], *, caller: str, verb: str
+    ) -> list[tuple[tuple, list[Comparison]]]:
+        """Group this set's comparisons by ``by``, as :meth:`average`/:meth:`pool` do.
+
+        Returns ``[(key, members), ...]`` in first-seen order, ``key`` being each
+        ``by`` dimension's label read off the comparison (:data:`_LABEL_DIMS`).
+        Raises ``ValueError`` for an unknown dimension, naming ``caller``; warns
+        (naming ``caller``, saying the group was ``verb``) when a group spans more
+        than one ``test`` source, which is rarely intended.
+        """
+        import warnings
+        from collections import OrderedDict
+
+        readers = dict(_LABEL_DIMS)
+        dims = [by] if isinstance(by, str) else list(by)
+        unknown = [d for d in dims if d not in readers]
+        if unknown:
+            raise ValueError(
+                f"{caller}(by=...) unknown dimension(s) {unknown}; "
+                f"choose from {list(readers)}"
+            )
+
+        groups: OrderedDict[tuple, list[Comparison]] = OrderedDict()
+        for c in self.comparisons:
+            key = tuple(readers[d](c) for d in dims)
+            groups.setdefault(key, []).append(c)
+
+        for comps in groups.values():
+            if len({c.test_name for c in comps}) > 1:
+                warnings.warn(
+                    f"{caller}(): a group spans multiple test sources; their "
+                    f"fields were {verb} together. Pass by=[..., \"test\"] to "
+                    "keep them distinct if that wasn't intended.",
+                    stacklevel=3,
+                )
+        return list(groups.items())
+
+    def pool(self, by: str | list[str] = "variable") -> ComparisonSet:
+        """Pool comparisons' matched pairs as samples, one comparison per group.
+
+        Parameters
+        ----------
+        by
+            A dimension name, or list of them, naming what to group by before
+            pooling -- the same choices as :meth:`average`'s ``by``: ``"variable"``
+            (default), ``"depth"``, ``"time"``, ``"test"``, ``"reference"``,
+            ``"demeaned"``, ``"detided"`` (see :data:`_LABEL_DIMS`).
+
+        :meth:`average` and :meth:`pool` both fold a group of comparisons into one,
+        and differ in what the group's members are *to each other*. ``average``
+        treats them as the same thing observed in several places: it lines the
+        members up point by point (same time axis, same depths) and averages them,
+        so a station's identity is gone before any score is computed. ``pool``
+        treats every matched pair as a **sample**: the members' valid pairs (both
+        test and reference finite) are all put in one pile, whatever shape each
+        member had, and the metrics are computed from the pile.
+
+        A small example. Stations A and B each have 3 daily pairs::
+
+            A: (test, reference) = (10, 11), (12, 12), (14, 13)
+            B: (test, reference) = (20, 22), (21, 21), (22, 20)
+
+        ``average()`` makes 3 samples out of the two stations' means -- day 1
+        ``(15, 16.5)``, day 2 ``(16.5, 16.5)``, day 3 ``(18, 16.5)`` -- and scores
+        those. ``pool()`` makes 6 samples, the six pairs above, and scores those: the
+        bias and RMSE are over all 6 pairs, and the correlation also reflects how the
+        two stations *differ from each other* (A sits near 12, B near 21), which the
+        averaged series -- already smoothed to the stations' mean -- cannot show.
+        Members need not agree on a shape: a series of 40 steps, a profile of 12
+        levels and a single value pool together, which ``average()`` refuses.
+
+        The intended use is a skill table over variable x depth layer x season,
+        pooling a campaign's CTD/bottle stations as samples::
+
+            comp = osk.compare(reference=stations, test=["his", "bgc"],
+                               variables=[...], depths=[{"min": 0, "max": 5}, ...],
+                               aggregate={"Z": "mean"},
+                               times={"seasons": ["MAM", "JJA", "SON"]})
+            comp.pool(by=["variable", "depth", "time"]).metrics()
+
+        Each pooled comparison is named by its group's key and carries the first
+        member's own ``variable``/``depth``/``time`` (so name every dimension that
+        varies across a group in ``by``, or those columns describe only its first
+        member). Its :meth:`~Comparison.metrics` record is a plain pile of
+        ``samples``: unweighted, with no station position and no
+        autocorrelation-based effective sample size. A pooled set feeds
+        ``.metrics()``, ``.target()`` and ``.taylor()``; ``.plot()`` raises, as
+        there is no time or depth axis left to draw along. A group spanning more
+        than one ``test`` source is pooled as asked but warned about.
+        """
+        out = []
+        for key, comps in self._grouped(by, caller="pool", verb="pooled"):
+            label = " ".join(str(k) for k in key)
+            pooled = Comparison._averaged(
+                comps[0],
+                _pool_aligned(comps),
+                test_name=_pooled_name(
+                    [c.test_name for c in comps], "test", how="pool of"
+                ),
+                reference_name=_pooled_name(
+                    [c.reference_name for c in comps], "reference", how="pool of"
+                ),
+                label=label,
+            )
+            # One axis, "sample", with no coordinate: nothing to score along, so
+            # metrics() reduces it whole and never builds per-cell maps.
+            pooled.over = None
+            pooled._pooled = True
+            out.append(pooled)
         return ComparisonSet(out)
 
     def map_locations(self, *, renderer: str = "matplotlib", **kwargs: Any):
@@ -11115,8 +11410,14 @@ def _display_time(select: dict[str, Any]) -> Any:
     A pair-spec select reports the **test** side, matching :func:`_display_depth`'s
     own precedent: the test side names the figure when the two lanes could
     disagree, which is exactly why a pair-spec select exists.
+
+    A season/months mask (:func:`_is_time_mask`) is reported as its label
+    (``"MAM"``, :func:`_time_label`) rather than as the dict, so the metrics table's
+    ``time`` column, a pooled label and a row title all read the season's name and a
+    grouped table can pivot on it; a ``{"min", "max"}`` window stays a dict, as before.
     """
-    return _selected_time(select_for(select, "test"))
+    value = _selected_time(select_for(select, "test"))
+    return _time_label(value) if _is_time_mask(value) else value
 
 
 def _is_range(value: Any) -> bool:
@@ -11173,7 +11474,26 @@ def _time_label(value: Any) -> str:
     frequency with no single partial-date spelling) reads as ``"start–stop"``,
     each end sliced to ten characters; anything else — the common case, a
     partial-date string like ``"2010-01"`` — is already its own label.
+
+    A season/months mask (:func:`_is_time_mask`) reads as the season's own name
+    (``"MAM"``) or its month abbreviations (``"Mar,Apr,May"``), followed by the
+    year window when it carries one (``"MAM 2024-01-01–2024-12-31"``) -- the same
+    way the window alone reads, so a metrics table's ``time`` column says which
+    months a row's samples came from.
     """
+    if _is_time_mask(value):
+        if "season" in value:
+            what = str(value["season"]).upper()
+        else:
+            what = ",".join(
+                calendar.month_abbr[int(m)] if 1 <= int(m) <= 12 else str(m)
+                for m in value["months"]
+            )
+        if "min" in value or "max" in value:
+            lo = str(value["min"])[:10] if "min" in value else ""
+            hi = str(value["max"])[:10] if "max" in value else ""
+            return f"{what} {lo}–{hi}"
+        return what
     if isinstance(value, dict) and {"min", "max"} <= set(value):
         return f"{str(value['min'])[:10]}–{str(value['max'])[:10]}"
     return str(value)
@@ -11334,15 +11654,28 @@ def _normalize_time_value(value: Any) -> Any:
 def _normalize_times(times: Any) -> tuple[str, Any] | None:
     """Return what ``times=`` means: a fan-out kind and its spec, or ``None``.
 
-    ``("bins", spec)``, ``("seasons", spec)``, ``("list", tuple)``, or ``None``
-    for ``times=None``. A dict names how to *derive* bins from the test
+    ``("bins", spec)``, ``("seasons", spec)``, ``("season_mask", spec)``,
+    ``("list", tuple)``, or ``None`` for ``times=None``. A dict names how to
+    *derive* bins from the test
     source's own time axis (:func:`_time_bins`) — it must carry
     ``"resample"`` and ``"reduce"``, the same vocabulary
     ``aggregate={"time": ...}`` already uses. ``{"groupby": "season",
     "reduce": ...}`` is the one climatology ``times=`` *can* fan over
     directly, since a season list is a fixed, spec-enumerable set of names --
     no data has to be read to know what the bins are, unlike a real
-    calendar's months or years. Anything else names an explicit set of time
+    calendar's months or years.
+
+    ``{"seasons": [...]}`` with none of ``groupby``/``resample``/``reduce`` is the
+    *sample-subset* form (``"season_mask"``): one comparison per season, each
+    keeping every sample that falls in that season's months (a time select
+    ``{"season": "MAM"}``, see :func:`ocean_skill.operators.select`) rather than
+    averaging them to one value. The comparison keeps its time axis, so a pair of
+    point observations stays a series of matched samples -- what
+    ``ComparisonSet.pool(by=[..., "time"]).metrics()`` scores a season by.
+    ``{"seasons": [...], "groupby": "season", "reduce": "mean"}`` is the other
+    one: each season's samples averaged to a single value.
+
+    Anything else names an explicit set of time
     values, one comparison per entry, mirroring how a bare ``depths=50`` is
     sugar for ``depths=(50,)``.
 
@@ -11372,7 +11705,9 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
                     f"times={times!r} needs 'reduce' (how each season's "
                     "months collapse, e.g. 'mean') alongside {'groupby': "
                     "'season'} -- the same vocabulary as "
-                    "aggregate={'time': ...}."
+                    "aggregate={'time': ...}. To keep each season's samples "
+                    "instead (no averaging), drop 'groupby' and pass "
+                    "times={'seasons': [...]}."
                 )
             from ocean_skill import operators
 
@@ -11380,6 +11715,25 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
                 times.get("seasons") or operators.DEFAULT_SEASONS
             )
             return "seasons", {**times, "seasons": seasons}
+        if (
+            "seasons" in times
+            and "groupby" not in times
+            and "resample" not in times
+            and "reduce" not in times
+        ):
+            from ocean_skill import operators
+
+            extra = sorted(set(times) - {"seasons"})
+            if extra:
+                raise ValueError(
+                    f"times={times!r} is the sample-subset form "
+                    "{'seasons': [...]}, which takes no other key (found "
+                    f"{extra}). Narrow which years feed it with select= "
+                    "{'time': {'min': ..., 'max': ...}} instead."
+                )
+            return "season_mask", {
+                "seasons": operators._validate_seasons(times["seasons"])
+            }
         if "groupby" in times:
             raise ValueError(
                 f"times={times!r} names a climatology (every January of the "
@@ -11396,9 +11750,10 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
                 f"times={times!r} needs both 'resample' (a bin width, e.g. "
                 "'1MS') and 'reduce' (how each bin collapses, e.g. 'mean') -- "
                 "the same vocabulary as aggregate={'time': ...} -- or "
-                "'groupby': 'season' to fan one comparison per season. Or "
-                "pass an explicit list of time values instead, one "
-                "comparison per entry."
+                "'groupby': 'season' (with 'reduce') to average each season "
+                "to one value, or {'seasons': [...]} alone to keep each "
+                "season's samples. Or pass an explicit list of time values "
+                "instead, one comparison per entry."
             )
         return "bins", dict(times)
     values = (
@@ -11538,6 +11893,64 @@ def _fanned_time_select(sel: dict[str, Any], value: Any) -> dict[str, Any]:
             "reference": {**_strip(sel["reference"]), "time": value},
         }
     return {**_strip(sel), "time": value}
+
+
+def _time_window_entry(side: dict[str, Any] | None) -> dict[str, str] | None:
+    """The ``{"min", "max"}`` year window a select side's time entry names, else ``None``.
+
+    Only the window spelling counts (a plain range of times, with or without one
+    end); a scalar, a list or a mask is not a window and reads as ``None`` here.
+    Values are stringified so a ``Timestamp`` and its string hash alike
+    (:func:`_normalize_time_value`'s reasoning).
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    for key in _TIME_KEYS:
+        value = (side or {}).get(key)
+        if (
+            isinstance(value, dict)
+            and not _is_time_mask(value)
+            and ({"min", "max"} & set(value))
+            and not set(value) - {"min", "max"}
+        ):
+            return {k: str(v) for k, v in value.items()}
+    return None
+
+
+def _season_mask(season: str, window: dict[str, str] | None) -> dict[str, str]:
+    """One season's time-mask select value: ``{"season": "MAM"[, "min", "max"]}``.
+
+    Canonical (season upper-cased, the window's keys in ``min``/``max`` order) so the
+    spelling that reaches the cache key is the same however the caller wrote it.
+    """
+    mask = {"season": str(season).upper()}
+    for key in ("min", "max"):
+        if window is not None and key in window:
+            mask[key] = window[key]
+    return mask
+
+
+def _fanned_mask_select(sel: dict[str, Any], season: str) -> dict[str, Any]:
+    """Write one season's time mask into ``sel``'s time entry, on both sides.
+
+    The sample-subset analog of :func:`_fanned_time_select`: the time entry becomes
+    ``{"season": season}`` (:func:`_season_mask`), the spelling
+    :func:`ocean_skill.operators.select` applies as a window, then a month mask. Unlike
+    that function, an existing ``{"min", "max"}`` year window on a side is *kept* --
+    merged into the mask -- since a window narrowing which years feed each season is
+    orthogonal to the season itself. A side's other time entries are replaced
+    (``compare()`` warns about them once). Nothing is written to ``aggregate``: the
+    mask keeps the time axis, so the comparison stays a series of matched samples.
+    """
+    from ocean_skill.sources import _TIME_KEYS
+
+    def _side(side: dict[str, Any] | None) -> dict[str, Any]:
+        kept = {k: v for k, v in (side or {}).items() if k not in _TIME_KEYS}
+        return {**kept, "time": _season_mask(season, _time_window_entry(side))}
+
+    if is_pair_spec(sel):
+        return {"test": _side(sel["test"]), "reference": _side(sel["reference"])}
+    return _side(sel)
 
 
 def _merged_time_aggregate(aggregate: Any, time_entry: dict[str, Any]) -> Any:
@@ -12680,6 +13093,17 @@ def compare(
     ``skip_missing``); pass ``spread="std"`` alongside ``reduce`` for a
     mean-and-spread comparison, the same as ``aggregate=`` accepts directly.
 
+    ``times={"seasons": ["MAM", "JJA", "SON"]}`` -- no ``groupby``/``reduce`` -- is
+    the **sample-subset** form of the same fan: one comparison per season, each
+    keeping *every sample* that falls in that season's months instead of averaging
+    them to one value. It writes ``select={"time": {"season": "MAM"}}`` on both
+    lanes and merges nothing into ``aggregate=``, so the comparison keeps its time
+    axis -- a point-observation pair stays a series of matched samples. This is the
+    form to pool: ``comp.pool(by=["variable", "depth", "time"]).metrics()`` scores
+    each variable x layer x season from all its samples (see
+    :meth:`ComparisonSet.pool`). A ``{"min", "max"}`` year window in ``select=``'s
+    time entry is kept and narrows each season's years.
+
     A ``select`` time entry alongside the resample-bins form narrows *which*
     bins are enumerated — the window, not a conflict, mirroring how ``depths=``
     can default from a select entry already present; a ``select={"season":
@@ -13006,6 +13430,30 @@ def compare(
                     stacklevel=_stacklevel.find(),
                 )
             season_entry = times_fan[1]
+        elif times_fan[0] == "season_mask":
+            # Sample-subset form: nothing is merged into aggregate (the mask keeps
+            # the time axis; an aggregate time entry, if the caller wants one, then
+            # reduces each season's samples as it would any other). A select time
+            # entry that is a plain year window is kept and merged into each mask
+            # (see _fanned_mask_select); any other is replaced, with a warning.
+            sides = (
+                (select.get("test") or {}, select.get("reference") or {})
+                if is_pair_spec(select)
+                else (select or {},)
+            )
+            if _has_season_entry(select) or any(
+                any(k in side for k in _TIME_KEYS)
+                and _time_window_entry(side) is None
+                for side in sides
+            ):
+                warnings.warn(
+                    f"compare() got both times={times!r} and a select= time or "
+                    "'season' entry that is not a {'min', 'max'} year window; "
+                    "times= already says exactly which seasons to keep, so that "
+                    "entry is dropped (a {'min', 'max'} window is kept and "
+                    "narrows each season's years).",
+                    stacklevel=_stacklevel.find(),
+                )
         elif _has_time_entry(select):
             warnings.warn(
                 f"compare() got both times={times!r} and a select= time entry; "
@@ -13135,6 +13583,8 @@ def compare(
             # Spec-enumerated, not data-derived -- unlike a resample bin, a
             # season name needs no source opened to know it exists.
             return tuple(season_entry["seasons"])
+        if times_fan[0] == "season_mask":
+            return tuple(times_fan[1]["seasons"])
         if tst not in _time_bins_cache:
             bins = _time_bins(tst, time_freq, time_window)
             _time_bins_cache[tst] = tuple(
@@ -13558,6 +14008,8 @@ def compare(
                             if times_fan is None
                             else _fanned_season_select(sel, t)
                             if is_seasons
+                            else _fanned_mask_select(sel, t)
+                            if times_fan[0] == "season_mask"
                             else _fanned_time_select(sel, t)
                         )
                         # A season fan merges per-iteration -- each comparison

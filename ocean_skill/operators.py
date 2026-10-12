@@ -809,6 +809,122 @@ def _index_spec(value: Any) -> Any:
     return inner
 
 
+#: Keys a time-select entry may carry to *mask* the axis by calendar month rather than
+#: slice it by date. Exactly one of the two; see :func:`_time_mask_months`.
+_TIME_MASK_KEYS = frozenset({"season", "months"})
+
+#: The window keys that may ride alongside a month mask (the ``{"min", "max"}`` spelling
+#: of a slice, applied first).
+_TIME_WINDOW_KEYS = frozenset({"min", "max"})
+
+
+def _time_mask_months(entry: Any) -> tuple[int, ...] | None:
+    """Return the months a time-select entry masks to, ``None`` if it is not a mask.
+
+    A time entry is a *month mask* when it is a dict carrying ``"season"`` (a season
+    string, ``{"time": {"season": "MAM"}}``) or ``"months"`` (a list of 1-12 integers,
+    ``{"time": {"months": [3, 4, 5]}}``), optionally with a ``"min"``/``"max"`` window
+    (``{"time": {"season": "MAM", "min": "2024-01-01", "max": "2024-12-31"}}``). It
+    keeps every sample whose month is in the set and drops the rest -- the axis stays
+    a time axis, with all of the season's samples on it, which is the difference from
+    a seasonal *aggregate* (one mean per season) that per-season metrics need.
+
+    This is the dict *value of a time key*. The separate top-level ``select={"season":
+    "MAM"}`` key picks one group off an already-aggregated season axis and is not
+    touched here: it is a key of the select, not of a time entry.
+
+    Returns ``None`` for anything that is not a mask (a string, a slice, a
+    ``{"min", "max"}`` window, ``{"index": ...}``, a list, a scalar) so a caller can
+    ask "is this a mask?" of any entry. Raises ``ValueError`` for a malformed mask:
+    both ``season`` and ``months``, a key other than ``min``/``max``/``season``/
+    ``months``, an unknown season string (see :func:`_season_months`), or a ``months``
+    that is not a non-empty, duplicate-free list of integers 1-12. Months come back
+    in the order a season spells them (``"DJF"`` -> ``(12, 1, 2)``) or, for a
+    ``months`` list, as given.
+    """
+    if not (isinstance(entry, dict) and set(entry) & _TIME_MASK_KEYS):
+        return None
+    unknown = sorted(str(k) for k in set(entry) - _TIME_MASK_KEYS - _TIME_WINDOW_KEYS)
+    if unknown:
+        raise ValueError(
+            "a time select with 'season' or 'months' takes only those plus 'min'/"
+            f"'max', not {unknown!r}: got {entry!r}."
+        )
+    if set(entry) >= _TIME_MASK_KEYS:
+        raise ValueError(
+            f"a time select names either 'season' or 'months', not both: got {entry!r}."
+        )
+    if "season" in entry:
+        return _season_months(entry["season"])
+    months = entry["months"]
+    ok = (
+        isinstance(months, list | tuple)
+        and len(months) > 0
+        and all(
+            isinstance(m, numbers.Integral) and not isinstance(m, bool) and 1 <= m <= 12
+            for m in months
+        )
+    )
+    if not ok:
+        raise ValueError(
+            "a time select's 'months' must be a non-empty list of integers 1-12, "
+            f"got {months!r}."
+        )
+    if len(set(months)) != len(months):
+        raise ValueError(
+            f"a time select's 'months' repeats a month, got {list(months)!r}."
+        )
+    return tuple(int(m) for m in months)
+
+
+def _split_time_mask(entry: Any) -> tuple[Any, tuple[int, ...] | None]:
+    """Split a time entry into ``(window, months)``: the date slice and the month mask.
+
+    ``window`` is what :func:`select` should apply first as an ordinary time entry --
+    the ``{"min", "max"}`` part of a mask entry, or ``None`` when it has none -- and
+    ``months`` is what :func:`_time_mask_months` returns (``None`` for an entry that is
+    not a mask, in which case ``window`` is the entry itself, untouched). Callers that
+    must do something *between* the two -- :func:`ocean_skill.pairs.derive` detides the
+    regular series after the window and before the mask, since a month mask leaves
+    gaps a filter cannot run across -- use this to take them apart.
+    """
+    months = _time_mask_months(entry)
+    if months is None:
+        return entry, None
+    window = {k: v for k, v in entry.items() if k in _TIME_WINDOW_KEYS}
+    return (window or None), months
+
+
+def _mask_months(obj, dim: str, name: str, months: tuple[int, ...], entry: Any):
+    """Keep the samples of ``obj`` whose ``dim`` month is in ``months``.
+
+    Read through the ``.dt`` accessor, which handles ``datetime64`` and cftime axes
+    alike (a 360-day or no-leap model calendar has no ``pandas`` equivalent, but its
+    months read the same). An axis that is not a decoded calendar -- a climatology's
+    raw "months since" position -- has no month to read and is refused. Nothing left
+    is an error, in the same spirit as an empty period: a season with no samples must
+    say so, not hand back a size-zero axis.
+    """
+    import numpy as np
+
+    try:
+        present = obj[dim].dt.month.values
+    except (AttributeError, TypeError) as err:
+        raise ValueError(
+            f"cannot mask {name!r} to {entry!r}: {dim!r} is not a decoded calendar "
+            "axis, so there is no month to read off it (a climatology read with "
+            "decode_times=False is usually why)."
+        ) from err
+    keep = np.isin(present, months)
+    if not keep.any():
+        raise KeyError(
+            f"{name!r} has no data in months {sorted(months)!r} (from {entry!r}); "
+            f"the months present are {sorted({int(m) for m in present})!r}. A month "
+            "mask must contain data."
+        )
+    return obj.isel({dim: keep})
+
+
 def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     """Subset ``obj`` along each dimension in ``spec``. Returns it unchanged if empty.
 
@@ -827,6 +943,13 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
     - a dict — ``{"lat": {"min": 20, "max": 30}}``, the YAML-friendly spelling of a
       slice, since YAML has no slice literal;
     - a list — an explicit set of values;
+    - a month mask — ``{"time": {"season": "MAM"}}`` or ``{"time": {"months": [3, 4,
+      5]}}``, optionally with a ``"min"``/``"max"`` window applied first: every sample
+      whose calendar month is in the set, all of them, with the time axis left
+      standing (a season's worth of samples, not a seasonal mean; see
+      :func:`_time_mask_months`, and note this is a *value* of the time key, unrelated
+      to a top-level ``select={"season": ...}`` key, which picks off an aggregated
+      season axis);
     - a scalar — exact if present, otherwise the nearest value, because a float
       coordinate almost never matches exactly and failing on that is unhelpful;
     - ``{"index": ...}`` — position rather than value, for when there is no
@@ -953,6 +1076,14 @@ def select(obj, spec: dict[str, Any] | None, *, subject: str = "the source"):
         index_value = _index_spec(value)
         if index_value is not None:
             obj = obj.isel({dim: index_value})
+            continue
+        window, months = _split_time_mask(value)
+        if months is not None:
+            # a month mask: the date window first (the ordinary path, so every
+            # spelling of min/max works), then the months within it
+            if window is not None:
+                obj = select(obj, {name: window}, subject=subject)
+            obj = _mask_months(obj, dim, name, months, value)
             continue
         if isinstance(value, dict):
             value = slice(value.get("min"), value.get("max"))

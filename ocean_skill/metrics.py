@@ -409,6 +409,10 @@ def _units_for(metric: Metric, reference) -> str:
     return "" if metric.units == "1" else metric.units
 
 
+#: Name of the throwaway length-1 dimension :func:`_evaluate` adds to a 0-d pair.
+_SAMPLE_DIM = "_sample"
+
+
 def _evaluate(
     aligned: xr.Dataset,
     names: Iterable[str] | None,
@@ -445,6 +449,19 @@ def _evaluate(
     else:
         dim = list(dim)
 
+    # A 0-d pair -- one model value against one observed value, which is what a
+    # station comparison reduced all the way down becomes -- leaves nothing to reduce
+    # over, and xskillscore refuses an empty ``dim`` ("metric must be applied along one
+    # dimension"). Give it a temporary length-1 sample dimension so the registry runs
+    # unchanged: every reduction over it returns a 0-d result, so no ``_sample`` dim
+    # leaks out, and ``n`` counts the one finite pair (or 0 if either member is NaN).
+    scalar = not dim
+    if scalar:
+        t, r, valid = (x.expand_dims(_SAMPLE_DIM) for x in (t, r, valid))
+        if weights is not None:
+            weights = weights.expand_dims(_SAMPLE_DIM)
+        dim = [_SAMPLE_DIM]
+
     # xskillscore hands `dim` to apply_ufunc as *core* dimensions, and dask's
     # 'parallelized' mode refuses a core dimension that is split across chunks:
     #   "dimension lat ... consists of multiple chunks, but is also a core dimension".
@@ -458,11 +475,18 @@ def _evaluate(
     res: dict[str, xr.DataArray] = {}
     for name in _closure(requested):
         metric = REGISTRY[name]
-        out = (
-            metric.fn(t, r, valid=valid, dim=dim, weights=weights, skipna=skipna)
-            if metric.fn is not None
-            else metric.derive(res)
-        )
+        if metric.fn is not None:
+            with warnings.catch_warnings():
+                if scalar:
+                    # One sample has no spread: Pearson's r divides 0 by 0 and
+                    # std/var of a single value can warn about degrees of freedom.
+                    # NaN is the right answer there, not a warning per station.
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                out = metric.fn(
+                    t, r, valid=valid, dim=dim, weights=weights, skipna=skipna
+                )
+        else:
+            out = metric.derive(res)
         # Named and labelled here so a map arrives at the plotting layer knowing what it
         # is; harmless on the scalar path, which reads the values and drops the rest.
         res[name] = out.rename(name).assign_attrs(

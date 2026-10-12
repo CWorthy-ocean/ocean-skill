@@ -186,6 +186,23 @@ averaged.plot()                            # usable like any other ComparisonSet
 `test` and `reference` are averaged separately (never mixed), and `difference` is
 recomputed afterward — see the method's docstring for grouping options and edge cases.
 
+To score stations **as samples** instead — every station's matched pairs piled
+together, so the metric also reflects station-to-station differences — use
+`ComparisonSet.pool(by=...)`. With `times={"seasons": [...]}` (each season keeps all of
+its samples, rather than `{"groupby": "season", "reduce": "mean"}`'s one value per
+season), that gives a per-season table directly:
+
+```python
+comp = osk.compare(reference=stations, test="his", variables=["temperature", "salinity"],
+                   depths=[{"min": 0, "max": 5}, {"min": 20, "max": 65}],
+                   aggregate={"Z": "mean"},
+                   times={"seasons": ["MAM", "JJA", "SON"]})
+table = comp.pool(by=["variable", "depth", "time"]).metrics()   # one row per var × layer × season
+```
+
+A pooled set has no time or depth axis left to draw, so `.plot()` refuses it; use
+`.metrics()`, `.target()` or `.taylor()`.
+
 `osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
 surface through the scattered values** — a cross-validated spline
 ([verde](https://www.fatiando.org/verde/)) in a local projection centred on the
