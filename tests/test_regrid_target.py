@@ -149,10 +149,13 @@ def test_coverage_masks_the_regridded_reference_on_the_test_grid():
         out["coverage"].attrs["long_name"]
         == "fraction of the test cell covered by valid reference data"
     )
-    # cells inside the hole lose their reference value; the test lane keeps its own
+    # cells inside the hole lose their reference value, and the test lane is masked
+    # to the reference's finite cells (_mask_test_to_reference) so every panel draws
+    # the same cells; outside the hole the test lane keeps its own value
     hole = out["reference"].sel(lat=20.0, lon=-150.0, method="nearest")
     assert not np.isfinite(hole)
-    assert float(out["test"].sel(lat=20.0, lon=-150.0, method="nearest")) == 10.0
+    assert not np.isfinite(out["test"].sel(lat=20.0, lon=-150.0, method="nearest"))
+    assert float(out["test"].sel(lat=28.0, lon=-158.0, method="nearest")) == 10.0
 
 
 # -- a NaN source cell (land) no longer poisons a partially-covered destination cell --

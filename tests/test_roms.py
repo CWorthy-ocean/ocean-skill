@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import ocean_skill as osk
-from ocean_skill import roms
+from ocean_skill import build, roms
 from ocean_skill.catalog import resolve
 
 COMBINED = "/Users/kthyng/packages/roms-tools/docs/OUTPUT/old/combined.nc"
@@ -20,6 +20,20 @@ pytestmark = [
         reason="roms-tools combined example output not available locally",
     ),
 ]
+
+
+@pytest.fixture(autouse=True)
+def roms_example_catalog(isolated_catalogs):
+    """Catalog the example file the way a user would, as ``roms_example_combined``.
+
+    Built here rather than read from a hand-made ``catalogs/`` file, which is
+    gitignored and so absent from worktrees and exports of the repo.
+    """
+    return build.build_catalog(
+        {"roms_example_combined": COMBINED},
+        isolated_catalogs / "roms_example.yaml",
+        title="ROMS example (Gulf of Mexico)",
+    )
 
 
 def _finite_frac(da) -> float:
