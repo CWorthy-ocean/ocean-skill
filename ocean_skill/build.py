@@ -1974,11 +1974,13 @@ def _rollup_metadata(cat) -> None:
         cat.metadata["standard_names"] = sorted(snames)
 
 
-# Decoded bytes per dask chunk when a kerchunk reference is opened by open_reference():
-# the target the time-chunk size is rounded to. Half of comparison.CHUNK_WARN_BYTES, so
-# a chunk chosen here never trips that warning, and big enough (~22 hourly steps of a
-# 30 x 1044 x 724 CIOFS temperature field) that zarr's async fetch has many storage
-# chunks to read concurrently inside one task. Read at call time, so a test (or a user
+# Decoded bytes per dask chunk when open_reference() is asked for byte-sized time
+# blocks (``chunks="time_blocks"``): the target the time-chunk size is rounded to. This
+# is NOT the default open, which is one dask layer at the storage chunks. Time blocks
+# are opt-in because any arithmetic before a time selection (including the land mask
+# roms.standardize applies to every ROMS read) loads whole dask chunks, so a block of
+# n steps reads n times the bytes of a snapshot. Half of comparison.CHUNK_WARN_BYTES, so
+# a chunk chosen here never trips that warning. Read at call time, so a test (or a user
 # on a small-memory machine) can set `osk.build.KERCHUNK_CHUNK_BYTES` and be heard.
 KERCHUNK_CHUNK_BYTES = 256 * 2**20
 
@@ -2067,26 +2069,29 @@ def _reference_protocol(url) -> str | None:
 def _time_chunks(ds, target: int | None = None) -> dict[str, int]:
     """Dask chunk size along time, in whole storage chunks, for ~``target`` bytes.
 
-    A kerchunk reference of a model run is usually stored one time step per chunk, and
-    opening it with ``chunks={}`` makes one dask task per storage chunk -- so a read of
-    a month of hourly output is 720 tasks, each fetching one chunk, and the number of
-    reads in flight is whatever the scheduler happens to run at once. Giving each task
-    a block of consecutive time steps lets the fetches inside it overlap (zarr issues
-    them concurrently), which is what a high-latency file system or object store needs.
-    The size is chosen by *bytes*, not by a step count, because the right count depends
-    on the store's per-step size: 256 MiB is ~22 steps of a CIOFS temperature field
-    but ~100 of the smaller Iceland one. One count applies to every variable on the
-    time axis, set by the largest of them.
+    Used only by ``open_reference(chunks="time_blocks")``; the default open keeps the
+    storage chunks. A kerchunk reference of a model run is usually stored one time step
+    per chunk, and a block of consecutive steps per dask task lets the fetches inside it
+    overlap (zarr issues them concurrently), which a high-latency file system or object
+    store can use. The size is chosen by *bytes*, not by a step count, because the right
+    count depends on the store's per-step size: 256 MiB is ~22 steps of a CIOFS
+    temperature field but ~100 of the smaller Iceland one. One count applies to every
+    variable on the time axis, set by the largest of them. The catch: any arithmetic
+    before a time selection (the land mask ``roms.standardize`` applies to every ROMS
+    read, say) loads whole dask chunks, so a block of n steps reads n times the bytes of
+    a snapshot or of scattered times.
 
     The block is the largest multiple of the stored time chunk that keeps the *largest*
     variable (per time step, decoded) under ``target`` bytes, never less than one
     stored chunk and never more than the whole axis. ``target`` defaults to
-    :data:`KERCHUNK_CHUNK_BYTES`, read at call time. Returns ``{}`` -- i.e. leave
-    xarray at the storage chunks -- when there is no time dimension or no variable
-    reports its storage chunks, which is the case for a dataset not opened lazily
-    from a zarr-style store. Only the time dimension is touched: horizontal and depth
-    chunks stay as stored, since slicing a small box out of a map is the common
-    request and merging horizontal chunks would read more than it needs.
+    :data:`KERCHUNK_CHUNK_BYTES`, read at call time. Only data variables with at least
+    two dimensions count: a 1-D variable along time (``ocean_time`` in UCLA output is a
+    data variable, stored as one chunk of the whole record) says nothing about the
+    fields that dominate the bytes, and once made the block the entire record. Returns
+    ``{}`` -- i.e. leave xarray at the storage chunks -- when there is no time dimension
+    or no variable reports its storage chunks, which is the case for a dataset not
+    opened lazily from a zarr-style store. Only the time dimension is touched:
+    horizontal and depth chunks stay as stored.
     """
     import math
 
@@ -2106,11 +2111,12 @@ def _time_chunks(ds, target: int | None = None) -> dict[str, int]:
 
     stored_t = 0
     per_step = 0.0
-    # Data variables only: a 1-D time coordinate is usually stored whole (kerchunk
-    # inlines it), and its "chunk" of the entire axis would say nothing about how the
-    # fields that dominate the bytes are stored.
+    # Data variables of two or more dimensions only: a 1-D variable along time (a
+    # coordinate, or UCLA's ``ocean_time`` data variable) is usually stored whole, and
+    # its "chunk" of the entire axis would say nothing about how the fields that
+    # dominate the bytes are stored.
     for var in ds.data_vars.values():
-        if tdim not in var.dims:
+        if tdim not in var.dims or var.ndim < 2:
             continue
         shape = var.encoding.get("chunks") or var.encoding.get("preferred_chunks")
         if isinstance(shape, Mapping):
@@ -2145,11 +2151,19 @@ def open_reference(url, *, storage_options=None, chunks="auto", **kwargs):
        (1.8 million chunks for 26 years of hourly output) -- about a second per
        storage chunk before any bytes move. The inner open is made lazy
        (``open_dataset_options={"chunks": None}``) so there is one layer, chunked once.
-    2. **Chunks sized by bytes, along time.** ``chunks="auto"`` (also ``{}``, the value
-       already baked into catalogs written before this existed) opens lazily, asks
-       :func:`_time_chunks` for a block of consecutive time steps of about
-       :data:`KERCHUNK_CHUNK_BYTES`, and reopens with that. Any other ``chunks`` is
-       used as given; ``None`` returns the lazy dataset untouched.
+    2. **Chunks at the storage chunks by default.** ``chunks="auto"`` (also ``{}``, the
+       value already baked into catalogs written before this existed) is one open, one
+       dask layer at the stored chunks (xarray takes them from the store's preferred
+       chunks). That never reads more bytes than the old open and removes the
+       per-chunk graph overhead. Byte-sized time blocks are opt-in,
+       ``chunks="time_blocks"``: a lazy pass, :func:`_time_chunks` for a block of
+       consecutive steps of about :data:`KERCHUNK_CHUNK_BYTES`, and a reopen with that.
+       They help a high-latency store read many steps, but any arithmetic before a
+       time selection (including the land mask ``roms.standardize`` applies to every
+       ROMS read) loads whole dask chunks, so multi-step blocks multiply the bytes read
+       for snapshots and scattered times (and a 1-D whole-record variable once made the
+       block the entire record). ``None`` returns the lazy dataset untouched; any other
+       ``chunks`` is used as given.
     3. **``remote_protocol`` is given, not guessed.** See :func:`_reference_protocol`:
        the guess scans every reference and can crash under pandas 3. A
        ``remote_protocol`` in the caller's ``storage_options`` wins over the one found.
@@ -2187,13 +2201,19 @@ def open_reference(url, *, storage_options=None, chunks="auto", **kwargs):
     if (isinstance(chunks, str) and chunks == "auto") or (
         isinstance(chunks, dict) and not chunks
     ):
+        # One layer at the storage chunks: xarray reads them off the store's preferred
+        # chunks, and the engine's own open is lazy (options["chunks"] is None).
+        return _open({})
+    if isinstance(chunks, str) and chunks == "time_blocks":
         # The lazy pass is only to read the storage chunks off the variables'
         # encoding; it is closed before the real open.
         lazy = _open(None, cache=False)
         try:
-            chunks = _time_chunks(lazy)
+            blocks = _time_chunks(lazy)
         finally:
             lazy.close()
+        if not blocks:
+            return _open({})
         with warnings.catch_warnings():
             # A 1-D time coordinate is stored whole, so a block that does not divide
             # it evenly draws xarray's "chunks separate the stored chunks" warning --
@@ -2202,7 +2222,7 @@ def open_reference(url, *, storage_options=None, chunks="auto", **kwargs):
             warnings.filterwarnings(
                 "ignore", message=".*separate the stored chunks.*", category=UserWarning
             )
-            return _open(chunks)
+            return _open(blocks)
     return _open(chunks)
 
 
@@ -2898,7 +2918,7 @@ def _read_reader(reader):
 
     The reader still says *what* to open (its data's url and storage_options, its
     kwargs); :func:`open_reference` decides *how*, so the probe and every later read
-    of the entry get the one-layer, byte-sized-chunk open. A reader whose url is a
+    of the entry get the one-layer open at the storage chunks. A reader whose url is a
     list (not a single reference) keeps the plain read.
     """
     kwargs = getattr(reader, "kwargs", None) or {}
