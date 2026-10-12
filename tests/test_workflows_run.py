@@ -1487,9 +1487,7 @@ def test_snapshot_survives_the_next_refresh_overwriting_the_shared_ref(
 def test_a_parquet_reference_directory_is_copied_as_a_tree(tmp_path):
     """A parquet kerchunk target is a directory; the copy must be a full tree.
 
-    Built and compared byte-for-byte without ever opening it as parquet (see the
-    module note at the top of tests/test_build_helpers.py: the parquet reference
-    reader is intermittently broken upstream).
+    Built and compared byte-for-byte without ever opening it as parquet.
     """
     import filecmp
 

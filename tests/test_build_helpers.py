@@ -1597,6 +1597,90 @@ def test_the_extension_picks_the_kerchunk_format(tmp_path):
     assert _kerchunk_format(tmp_path / "refs") == "parquet"
 
 
+def test_a_parquet_reference_opens_whichever_variable_fsspec_visits_first(
+    tmp_path, monkeypatch
+):
+    """A parquet reference opens even when fsspec scans the inlined variable first.
+
+    Without ``remote_protocol``, fsspec's ``ReferenceFileSystem`` scans the references
+    for a protocol, visiting variables in ``LazyReferenceMapper.listdir()`` order --
+    a ``set``, so the hash seed picks the order at random. A fully inlined variable
+    (the loadable ``ocean_time``) has only ``raw`` rows, so reaching it first used to
+    run the scan into padded null-path rows and raise ``boolean value of NA is
+    ambiguous``. Forcing ``ocean_time`` to come first pins the order the hash seed
+    otherwise chooses by chance, so the failure is deterministic here.
+    """
+    from fsspec.implementations.reference import LazyReferenceMapper
+
+    from ocean_skill.build import make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0)
+        for i in range(2)
+    ]
+    out = make_kerchunk(files, tmp_path / "r.parquet")
+
+    orig = LazyReferenceMapper.listdir
+    monkeypatch.setattr(
+        LazyReferenceMapper,
+        "listdir",
+        lambda self: sorted(orig(self), key=lambda f: f != "ocean_time"),
+    )
+    ds = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    got = ds["NO3"].load().values
+    assert got.shape == (4, 4, 5)
+    assert (got[:2] == 1.0).all()
+    assert (got[2:] == 2.0).all()
+
+
+def test_parquet_padding_is_trimmed_only_past_each_variables_last_chunk(tmp_path):
+    """Record files keep exactly the rows up to a variable's last chunk, no fewer.
+
+    Rows inside ``[0, nchunks)`` are never touched, so every chunk lookup (row =
+    chunk number % ``record_size``) is unchanged; only the null padding after the
+    last chunk goes, which is what fsspec's protocol scan trips over.
+    """
+    import json
+
+    import kerchunk.df
+    import pandas as pd
+    from fsspec.implementations.reference import LazyReferenceMapper
+
+    from ocean_skill.build import _trim_parquet_padding, make_kerchunk
+
+    files = [
+        _roms_like(tmp_path / f"o.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0)
+        for i in range(4)
+    ]
+    ref = make_kerchunk(
+        files, tmp_path / "r.json", subchunk={"ocean_time": 1}, target_chunk_mb=None
+    )
+    refs = json.loads(ref.read_text())
+    out = tmp_path / "r.parquet"
+    kerchunk.df.refs_to_dataframe(refs, url=str(out), record_size=3)
+    _trim_parquet_padding(out)
+
+    def nrows(field, n):
+        part = out / field / f"refs.{n}.parq"
+        return len(pd.read_parquet(part, engine="fastparquet"))
+
+    # NO3: 4 files x 2 records, one chunk each -> 8 chunks -> records of 3, 3, 2 rows
+    assert [nrows("NO3", n) for n in range(3)] == [3, 3, 2]
+    assert not (out / "NO3" / "refs.3.parq").exists()
+    # ocean_time is inlined and a single chunk -> a single row
+    assert nrows("ocean_time", 0) == 1
+
+    # no padding left for the protocol scan to hit: every list ref names a path
+    mapper = LazyReferenceMapper(str(out))
+    for value in mapper.values():
+        if isinstance(value, list):
+            assert isinstance(value[0], str)
+
+    a = xr.open_dataset(str(ref), engine="kerchunk", chunks={}, decode_times=False)
+    b = xr.open_dataset(str(out), engine="kerchunk", chunks={}, decode_times=False)
+    np.testing.assert_array_equal(b["NO3"].values, a["NO3"].values)
+
+
 def test_a_json_reference_round_trips_as_one_file(tmp_path):
     """End-to-end: build a JSON reference over two files and read the values back."""
     from ocean_skill.build import make_kerchunk
@@ -2225,10 +2309,7 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
     _grid(fake_home / "grid.nc", "NETCDF4")
 
     # Building at all is the assertion: before the fix this raised obstore's
-    # "Unable to canonicalize filesystem root: ~/grid.nc". Deliberately no read-back —
-    # build_kerchunk writes parquet, and the parquet reference reader is intermittently
-    # broken upstream ("boolean value of NA is ambiguous"), which would make this test
-    # flaky for a reason with nothing to do with tilde expansion.
+    # "Unable to canonicalize filesystem root: ~/grid.nc".
     refs = build_kerchunk(
         {"dev": "runs/o.*.nc"},
         root="~/",
@@ -2281,12 +2362,6 @@ def test_build_kerchunk_rejects_a_missing_grid_before_opening_output(tmp_path):
 # (created but nothing flushed yet) or truncated (the header promises more bytes
 # than have landed on disk) -- both are what h5py raises on for real, not a
 # simulation of the failure mode.
-
-
-# Read back via make_kerchunk's own .json output rather than build_kerchunk's default
-# .parquet, per test_build_kerchunk_accepts_tilde_for_every_path's note above: the
-# parquet reference reader is intermittently broken upstream ("boolean value of NA is
-# ambiguous"), for reasons that have nothing to do with what's under test here.
 
 
 def test_a_truncated_file_is_skipped_with_a_warning(tmp_path):

@@ -1147,8 +1147,74 @@ def _write_reference(vds, out: Path, fmt: str) -> None:
         refs_to_dataframe(
             refs, url=str(out), record_size=100_000, categorical_threshold=10
         )
+        _trim_parquet_padding(out)
     else:
         raise ValueError(f"Unrecognized output format: {fmt}")
+
+
+def _trim_parquet_padding(out: Path) -> None:
+    """Drop the null padding rows fsspec appends to each parquet record file.
+
+    **An upstream workaround**, not a feature. ``kerchunk.df.refs_to_dataframe`` hands
+    the references to fsspec's ``LazyReferenceMapper``, which pads every variable's
+    last ``<field>/refs.<n>.parq`` out to ``record_size`` rows of ``path=null,
+    raw=null``. Opening the store without a ``remote_protocol`` then makes
+    ``ReferenceFileSystem.__init__`` scan the references for a protocol (see the
+    ``isinstance(ref, list) and ref[0]`` loop in ``fsspec/implementations/
+    reference.py``), visiting variables in ``LazyReferenceMapper.listdir()`` order --
+    a ``set``, so the hash seed picks it -- and stopping at the first list reference
+    with a truthy path. A fully inlined variable (the loadable time coordinate) has
+    only ``raw`` rows, so the scan runs into its padding; fastparquet >= 2026.5 reads
+    those null paths as ``pd.NA`` under pandas 3 (NaN in 2026.9), and ``bool()`` of
+    either raises ``TypeError: boolean value of NA is ambiguous`` -- exactly when an
+    inlined variable is visited first, i.e. intermittently. Older fastparquet/pandas
+    read ``None``, which the scan skips.
+
+    Trimming the padding at write time sidesteps it: only rows *past* a variable's
+    last chunk are removed (``nchunks`` from its ``.zarray`` shape and chunks), so a
+    chunk's row (``chunk number % record_size``) never moves and a genuinely missing
+    chunk stays missing. Anything not in the layout fsspec writes today is left
+    alone. Remove this once fsspec tolerates null paths in that scan.
+    """
+    import json
+    import math
+
+    import pandas as pd
+
+    meta = json.loads((out / ".zmetadata").read_text())
+    record_size = meta["record_size"]
+    for key, zarray in meta["metadata"].items():
+        if not key.endswith("/.zarray"):
+            continue
+        field = key.rsplit("/", 1)[0]
+        # a 0-d array: empty product -> 1 chunk, like fsspec's ``size_ratio or [1]``
+        nchunks = math.prod(
+            math.ceil(s / c) for s, c in zip(zarray["shape"], zarray["chunks"])
+        )
+        if nchunks == 0:
+            continue
+        last, rem = divmod(nchunks - 1, record_size)
+        keep = rem + 1
+        path = out / field / f"refs.{last}.parq"
+        if not path.exists():  # fsspec writes no file for an all-missing variable
+            continue
+        df = pd.read_parquet(path, engine="fastparquet")
+        if list(df.columns) != ["path", "offset", "size", "raw"] or len(df) <= keep:
+            continue
+        df = df.iloc[:keep].copy()
+        if not isinstance(df["path"].dtype, pd.CategoricalDtype):
+            # what fsspec's own writer hands fastparquet: object dtype, None for nulls
+            # (also avoids fastparquet #972, pandas-3 ``str`` columns failing to write)
+            df["path"] = df["path"].astype(object).where(df["path"].notna(), None)
+        df.to_parquet(
+            path,
+            engine="fastparquet",
+            compression="zstd",
+            index=False,
+            stats=False,
+            object_encoding={"raw": "bytes", "path": "utf8"},
+            has_nulls=["path", "raw"],
+        )
 
 
 def _kerchunk_format(out: Path) -> str:
