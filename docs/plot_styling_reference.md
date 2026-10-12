@@ -740,7 +740,9 @@ physics.plot(renderer="holoviews", shared_axes=False)   # each row zooms indepen
 ### `vmin`/`vmax`
 
 `field_facet`, `section`, `cross`, `time_depth` (and its `time_depth_grid`/movie
-forms) — the single-field colour-scale families. Pin an exact colourbar range instead
+forms), and the comparison families (`field_row`, `field_grid`, `field_map_grid`,
+`section_row`/`section_row_grid`, `time_depth_row`/`time_depth_row_grid`, and the
+`field_movie` form). Pin an exact colourbar range instead
 of the data-derived default: pass one to pin just that end (the other still comes from
 the plain range, or `robust`), or both for an exact range regardless of the data.
 Given together with `robust=`, `robust` only fills whichever end `vmin`/`vmax` left
@@ -755,10 +757,14 @@ osk.field(run, "salinity", select={"time": "2012-01", "transect": {"cross": pt}}
 
 Outranks a variable's own built-in display range too (chlorophyll's fixed log-scale
 limits, say) — a `vmin`/`vmax` you name always wins; only the log-vs-linear scale
-itself is unaffected. Not available on the comparison families (`field_row`,
-`field_grid`, `field_map_grid`, `skill_map`, and their movie/row forms) — a test/
-reference pair's shared scale and a difference panel's own symmetric one are a
-different question, unaddressed here.
+itself is unaffected.
+
+On a comparison (test vs reference), `vmin`/`vmax` pin the **test/reference** scale —
+the one the two panels share — exactly as on the single-field families, for every row,
+panel or frame alike (with or without `shared_limits`, and across mixed variables in
+`field_map_grid`). The **difference** panel keeps its own symmetric scale, set by the
+size of the differences; `vmin`/`vmax` never touch it. `skill_map` is still not
+covered: its scales are metric scales, not data scales.
 
 `XY` and `TS` take the same two names to pin the ends of their `color_by` scale (metres
 for depth, dates for time); see [`color_by`](#color_by--colour-the-cloud-by-depth-or-time).

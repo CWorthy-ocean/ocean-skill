@@ -2182,6 +2182,78 @@ def test_both_renderers_tick_every_colourbar_at_the_same_round_labels(family, it
         assert decimals <= {0, 1}
 
 
+CHL = "mass_concentration_of_chlorophyll_a_in_sea_water"
+
+
+def _chl_items(key: str) -> list[dict]:
+    """Chlorophyll items for ``key``: the usual builder, its standard name swapped."""
+    if key == "field_map_grid":
+        return [
+            {"field": _field(o), "units": "mg m-3", "standard_name": CHL}
+            for o in (0.0, 1.0)
+        ]
+    return [{**i, "standard_name": CHL} for i in _INTERACTIVE_FAMILIES[key]()]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "field_row",
+        "field_grid[stacked]",
+        "field_map_grid",
+        "section_row",
+        "section_row[stacked]",
+        "time_depth_row",
+        "field_movie",
+        "field_facet",
+        "section",
+        "time_depth",
+    ],
+)
+def test_vmin_vmax_pin_a_declared_log_range_the_same_way_in_both_renderers(key):
+    """The user's pin beats chlorophyll's 0.01-10 log range, and the bars agree."""
+    import holoviews as hv
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    from tests.test_colorbar_clipping import _mappables
+
+    items = _chl_items(_family_of(key)) * (2 if "[stacked]" in key else 1)
+    spec = PlotSpec(family=_family_of(key), items=items)
+    movie = spec.family == "field_movie"
+
+    fig = render(spec, vmin=1, vmax=20)
+    static_fig = fig._fig if movie else fig
+    norms = [m.norm for m in _mappables(static_fig)]
+    # the difference panel keeps its own plain, symmetric scale; everything else is log
+    sequential = [n for n in norms if (n.vmin, n.vmax) == pytest.approx((1.0, 20.0))]
+    assert len(sequential) == len([n for n in norms if n.vmin >= 0]) > 0
+    assert all(isinstance(n, LogNorm) for n in sequential)
+    static_labels = _static_bar_labels(static_fig)
+    plt.close(static_fig)
+
+    obj = render(spec, renderer="holoviews", vmin=1, vmax=20)
+    hv.extension("bokeh")
+    drawn = obj
+    if movie:
+        # one HoloMap per panel; lay their first frames side by side
+        maps = [
+            el for el in getattr(obj, "object", obj).traverse()
+            if isinstance(el, hv.HoloMap)
+        ]
+        drawn = hv.Layout([m[m.kdims[0].values[0]] for m in maps])
+    meshes = drawn.traverse(lambda x: x, [hv.QuadMesh, hv.Image])
+    assert meshes
+    for mesh in meshes:
+        lo, hi = mesh.range(mesh.vdims[0].name)
+        if lo == -hi:  # the difference panel, symmetric about zero
+            continue
+        assert mesh.opts.get().kwargs.get("logz")
+        assert (lo, hi) == pytest.approx((1.0, 20.0))
+    assert sum(m.opts.get().kwargs.get("logz", False) for m in meshes) >= 1
+    assert _interactive_bar_labels(drawn) == static_labels
+
+
 def test_the_interactive_renderer_loads_bokeh_even_after_a_bare_hvplot_import():
     """``import hvplot`` registers bokeh's renderer but leaves ``hv.opts`` empty.
 

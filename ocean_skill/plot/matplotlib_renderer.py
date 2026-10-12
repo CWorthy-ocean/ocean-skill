@@ -973,6 +973,8 @@ def _draw_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     statistic: str | None = None,
 ):
@@ -981,7 +983,8 @@ def _draw_row(
     ``seq_norm``/``div_norm``, if given, override the row's own colour limits —
     how :func:`field_grid`'s ``shared_limits=True`` makes every row share one
     scale instead of each computing its own. ``robust`` means what it does in
-    :func:`_limits`, and is ignored once ``seq_norm`` is given.
+    :func:`_limits`, and is ignored once ``seq_norm`` is given; ``vmin``/``vmax`` pin
+    the test/reference scale likewise (the difference panel keeps its own).
 
     ``titles=`` overrides this row's three panel titles by hand -- test,
     reference, difference, in that order -- with ``None`` at a position
@@ -1019,9 +1022,25 @@ def _draw_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
+        lo, hi = _limits(
+            t,
+            r,
+            log=is_log(standard_name, statistic),
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         seq_norm = _with_range(
-            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+            norm_for(
+                standard_name,
+                lo,
+                hi,
+                user_vmin=vmin,
+                user_vmax=vmax,
+                statistic=statistic,
+            ),
+            t,
+            r,
         )
     if div_norm is None:
         dmax = difference_limit(d)
@@ -1095,6 +1114,8 @@ def _draw_section_row(
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     statistic: str | None = None,
     fill_levels: Any = None,
@@ -1118,9 +1139,10 @@ def _draw_section_row(
     ``values``/``geometry`` are :func:`ocean_skill.plot.section.prepare_section_row`'s
     own return, unpacked by the caller so this function stays a pure drawing step.
     ``robust`` means what it does in :func:`_limits`, and is ignored once ``seq_norm``
-    is given. ``titles=`` overrides this row's three panel titles by hand -- test,
-    reference, difference, in that order -- with ``None`` at a position keeping that
-    panel's own title; see :func:`ocean_skill.plot._titles.resolve_titles`.
+    is given; so are ``vmin``/``vmax``. ``titles=`` overrides this row's three panel
+    titles by hand -- test, reference, difference, in that order -- with ``None`` at a
+    position keeping that panel's own title; see
+    :func:`ocean_skill.plot._titles.resolve_titles`.
 
     ``seq_norm``/``div_norm``, if given, override this row's own colour limits -- how
     :func:`section_row_grid`'s ``shared_limits=True`` makes every row share one scale
@@ -1165,9 +1187,25 @@ def _draw_section_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
+        lo, hi = _limits(
+            t,
+            r,
+            log=is_log(standard_name, statistic),
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         seq_norm = _with_range(
-            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+            norm_for(
+                standard_name,
+                lo,
+                hi,
+                user_vmin=vmin,
+                user_vmax=vmax,
+                statistic=statistic,
+            ),
+            t,
+            r,
         )
     if div_norm is None:
         dmax = difference_limit(d)
@@ -2606,6 +2644,8 @@ def field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
@@ -2695,6 +2735,9 @@ def field_row(
     (test/reference) spans the full range of the pair by default, or its 10th–90th
     percentile with ``robust=True`` — useful when a few outlier cells would
     otherwise crush the rest of the map against one end of the bar.
+
+    ``vmin``/``vmax`` pin the test/reference colour scale as in :func:`field_facet`;
+    the difference panel keeps its own.
     """
     import matplotlib.pyplot as plt
 
@@ -2749,6 +2792,8 @@ def field_row(
         coastline_resolution=coastline_resolution,
         land=land,
         robust=robust,
+        vmin=vmin,
+        vmax=vmax,
         titles=titles,
         statistic=statistic_of(aligned),
     )
@@ -3153,14 +3198,21 @@ def _row_height(
 
 
 def _shared_norms(
-    comparisons, test_name: str, reference_name: str, *, robust: bool | float = False
+    comparisons,
+    test_name: str,
+    reference_name: str,
+    *,
+    robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Return one ``(seq_norm, div_norm)`` computed across *every* row.
 
     For ``field_grid(..., shared_limits=True)``: colour limits derived from all
     rows' test+reference values combined, and one difference range from all rows'
     diffs — rather than each row scaling to its own data. ``robust`` means what it
-    does in :func:`_limits`.
+    does in :func:`_limits`; ``vmin``/``vmax`` pin the sequential scale (the
+    difference range stays symmetric).
     """
     import matplotlib.colors as mcolors
 
@@ -3168,11 +3220,20 @@ def _shared_norms(
     statistic = statistic_of(comparisons[0])
     all_t = [np.asarray(c["aligned"][test_name]) for c in comparisons]
     all_r = [np.asarray(c["aligned"][reference_name]) for c in comparisons]
-    vmin, vmax = _limits(
-        *all_t, *all_r, log=is_log(standard_name, statistic), robust=robust
+    lo, hi = _limits(
+        *all_t,
+        *all_r,
+        log=is_log(standard_name, statistic),
+        robust=robust,
+        vmin=vmin,
+        vmax=vmax,
     )
     seq_norm = _with_range(
-        norm_for(standard_name, vmin, vmax, statistic=statistic), *all_t, *all_r
+        norm_for(
+            standard_name, lo, hi, user_vmin=vmin, user_vmax=vmax, statistic=statistic
+        ),
+        *all_t,
+        *all_r,
     )
 
     all_d = np.concatenate(
@@ -3218,6 +3279,8 @@ def field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
@@ -3258,6 +3321,8 @@ def field_grid(
     ``robust`` means what it does in :func:`_limits`: each row's (or, with
     ``shared_limits=True``, the whole grid's) sequential colour scale spans the
     full data range by default, or the 10th–90th percentile with ``robust=True``.
+    ``vmin``/``vmax`` pin the test/reference scale of every row alike (with or without
+    ``shared_limits``) as in :func:`field_facet`; each difference panel keeps its own.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only labels the leftmost column's latitude axis and the bottom row's longitude
@@ -3346,7 +3411,12 @@ def field_grid(
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
-            comparisons, test_name, reference_name, robust=robust
+            comparisons,
+            test_name,
+            reference_name,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
         )
 
     row_labels = [
@@ -3382,6 +3452,8 @@ def field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            vmin=vmin,
+            vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
             statistic=statistic_of(comp),
         )
@@ -6104,6 +6176,8 @@ def _draw_time_depth_row(
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     statistic: str | None = None,
 ):
@@ -6125,7 +6199,7 @@ def _draw_time_depth_row(
     .default_mark`) and applied to every panel alike, so test, reference and
     difference are never drawn two different ways in the same row. ``robust``
     means what it does in :func:`_limits`, and is ignored once ``seq_norm`` is
-    given.
+    given, as are ``vmin``/``vmax``.
 
     ``seq_norm``/``div_norm``, if given, override this row's own colour
     limits -- how :func:`time_depth_row_grid`'s ``shared_limits=True`` makes
@@ -6156,9 +6230,25 @@ def _draw_time_depth_row(
     tl, rl = labels
     seq, div = cmaps_for(standard_name, statistic=statistic)
     if seq_norm is None:
-        vmin, vmax = _limits(t, r, log=is_log(standard_name, statistic), robust=robust)
+        lo, hi = _limits(
+            t,
+            r,
+            log=is_log(standard_name, statistic),
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
         seq_norm = _with_range(
-            norm_for(standard_name, vmin, vmax, statistic=statistic), t, r
+            norm_for(
+                standard_name,
+                lo,
+                hi,
+                user_vmin=vmin,
+                user_vmax=vmax,
+                statistic=statistic,
+            ),
+            t,
+            r,
         )
     if div_norm is None:
         dmax = difference_limit(d)
@@ -6231,6 +6321,8 @@ def time_depth_row(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Draw one ``test | reference | difference`` row of ``time_depth`` panels.
 
@@ -6242,7 +6334,8 @@ def time_depth_row(
     instead, the same way one that reduces to a single time or depth axis gets
     :func:`series`/:func:`profile`. Test and reference share one colour scale
     (the full range of the pair by default, or its 10th-90th percentile with
-    ``robust=True``); the difference panel uses a diverging map centred on
+    ``robust=True``; ``vmin``/``vmax`` pin it as in :func:`field_facet`); the
+    difference panel uses a diverging map centred on
     zero; metrics go in the difference panel's corner box -- all exactly as
     :func:`section_row` draws its own row, just against time and depth instead
     of along-path distance and depth.
@@ -6320,6 +6413,8 @@ def time_depth_row(
         scale=scale,
         defaults=defaults,
         robust=robust,
+        vmin=vmin,
+        vmax=vmax,
         statistic=statistic_of(aligned),
     )
     _draw_colorbar(
@@ -6384,6 +6479,8 @@ def time_depth_row_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
 ):
     """Stack one ``test | reference | difference`` ``time_depth`` row per comparison.
@@ -6404,7 +6501,8 @@ def time_depth_row_grid(
     row's titles instead. ``shared_limits=True`` reverses
     that for the colour scale, exactly as it does in :func:`field_grid` -- meaningful
     only when every row is the same variable, and warns if the rows'
-    ``standard_name``s actually differ.
+    ``standard_name``s actually differ. ``vmin``/``vmax`` pin every row's
+    test/reference scale as in :func:`field_facet`; each difference panel keeps its own.
 
     There is no ``domain``, ``region`` or ``gridline_kwargs``: a ``time_depth`` row
     has no map to outline or gridline, the same omission :func:`time_depth_row` makes
@@ -6475,7 +6573,12 @@ def time_depth_row_grid(
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
-            items, "test", "reference", robust=robust
+            items,
+            "test",
+            "reference",
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
         )
 
     row_labels = [
@@ -6506,6 +6609,8 @@ def time_depth_row_grid(
             scale=scale,
             defaults=defaults,
             robust=robust,
+            vmin=vmin,
+            vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
             statistic=statistic_of(item),
         )
@@ -6576,6 +6681,8 @@ def field_map_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     shared_limits: bool | str = False,
     titles: Sequence[str | None] | None = None,
 ):
@@ -6624,7 +6731,8 @@ def field_map_grid(
     Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`,
     including ``robust`` (see :func:`_limits`) -- each panel's (or, with
     ``shared_limits=``, that group's shared) colour scale spans the full data range by
-    default, or its 10th–90th percentile with ``robust=True``.
+    default, or its 10th–90th percentile with ``robust=True``. ``vmin``/``vmax`` pin
+    an exact range on every panel/group alike, mixed variables included.
     ``rasterize``/``hover``/``tiles`` are accepted only so ``renderer="both"`` can
     pass one option set to each renderer (see :func:`_warn_if_interactive_only`) --
     see :func:`field_row`'s docstring for what each does there and why a truthy
@@ -6769,13 +6877,22 @@ def field_map_grid(
             standard_name = cell_items[group_indices[0]].get("standard_name")
             statistic = statistic_of(cell_items[group_indices[0]])
             cmap, _ = cmaps_for(standard_name, statistic=statistic)
-            vmin, vmax = _limits(
+            lo, hi = _limits(
                 *(cell_items[i]["field"] for i in group_indices),
                 log=is_log(standard_name, statistic),
                 robust=robust,
+                vmin=vmin,
+                vmax=vmax,
             )
             norm = _with_range(
-                norm_for(standard_name, vmin, vmax, statistic=statistic),
+                norm_for(
+                    standard_name,
+                    lo,
+                    hi,
+                    user_vmin=vmin,
+                    user_vmax=vmax,
+                    statistic=statistic,
+                ),
                 *(cell_items[i]["field"] for i in group_indices),
             )
             for i in group_indices:
@@ -6791,11 +6908,22 @@ def field_map_grid(
         else:
             statistic = statistic_of(item)
             cmap, _ = cmaps_for(standard_name, statistic=statistic)
-            vmin, vmax = _limits(
-                field, log=is_log(standard_name, statistic), robust=robust
+            lo, hi = _limits(
+                field,
+                log=is_log(standard_name, statistic),
+                robust=robust,
+                vmin=vmin,
+                vmax=vmax,
             )
             norm = _with_range(
-                norm_for(standard_name, vmin, vmax, statistic=statistic),
+                norm_for(
+                    standard_name,
+                    lo,
+                    hi,
+                    user_vmin=vmin,
+                    user_vmax=vmax,
+                    statistic=statistic,
+                ),
                 field,
             )
         # No drawn cell to my left in this row (the grid's own edge, or an
@@ -6892,6 +7020,8 @@ def section_row(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
@@ -6910,7 +7040,8 @@ def section_row(
     (see :func:`ocean_skill.comparison.Comparison.is_section`) gets this family
     instead, the same way one that reduces to a single time axis gets
     :func:`series`. Test and reference share one colour scale (the full range of
-    the pair by default, or its 10th-90th percentile with ``robust=True``); the
+    the pair by default, or its 10th-90th percentile with ``robust=True``;
+    ``vmin``/``vmax`` pin it as in :func:`field_facet`); the
     difference panel uses a diverging map centred on zero; metrics go in the
     difference panel's corner box — all exactly as
     :func:`field_row` draws a gridded comparison, just against depth and
@@ -7036,6 +7167,8 @@ def section_row(
         scale=scale,
         defaults=defaults,
         robust=robust,
+        vmin=vmin,
+        vmax=vmax,
         titles=titles,
         statistic=statistic_of(aligned),
         fill_levels=fill_levels,
@@ -7129,6 +7262,8 @@ def section_row_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     fill_levels: int | Sequence[float] | None = None,
     contour_levels: bool | int | Sequence[float] | None = None,
@@ -7156,7 +7291,9 @@ def section_row_grid(
     first. An explicit ``labels=`` overrides every row's titles instead.
     ``shared_limits=True`` reverses that for the colour scale, exactly as it
     does in :func:`field_grid` -- meaningful only when every row is the same variable,
-    and warns if the rows' ``standard_name``s actually differ.
+    and warns if the rows' ``standard_name``s actually differ. ``vmin``/``vmax`` pin
+    every row's test/reference scale as in :func:`field_facet`; each difference panel
+    keeps its own.
 
     **Rows do not share an x axis.** What runs along x is each row's own: kilometres
     along a transect for one row, degrees of latitude along a meridional slab for the
@@ -7310,7 +7447,12 @@ def section_row_grid(
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
-            items, "test", "reference", robust=robust
+            items,
+            "test",
+            "reference",
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
         )
 
     row_labels = [
@@ -7344,6 +7486,8 @@ def section_row_grid(
             scale=scale,
             defaults=defaults,
             robust=robust,
+            vmin=vmin,
+            vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
             statistic=statistic_of(item),
             fill_levels=fill_levels,
@@ -8112,6 +8256,8 @@ def field_movie(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    vmin: float | None = None,
+    vmax: float | None = None,
 ):
     """Animate one ``test | reference | difference`` row over a sequence of frames.
 
@@ -8140,6 +8286,8 @@ def field_movie(
     frame alone. Either way the scale is fixed for the whole movie — a per-frame scale
     makes an animation unreadable, since every frame's colours would mean something
     different and the eye cannot tell a change in the field from a change in the ruler.
+    ``vmin``/``vmax`` pin the test/reference scale for every frame, in either case, as
+    in :func:`field_facet`; the difference panel keeps its own.
 
     Only the values, the frame label and the metrics box are redrawn per frame: the
     figure, its layout, its colorbars and its axis labelling are built once from the
@@ -8191,7 +8339,12 @@ def field_movie(
     seq_norm = div_norm = None
     if shared_limits and len(frames) > 1:
         seq_norm, div_norm = _shared_norms(
-            frames, test_name, reference_name, robust=robust
+            frames,
+            test_name,
+            reference_name,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
         )
 
     fig, axes = plt.subplots(
@@ -8225,6 +8378,8 @@ def field_movie(
         coastline_resolution=coastline_resolution,
         land=land,
         robust=robust,
+        vmin=vmin,
+        vmax=vmax,
         statistic=statistic_of(first),
     )
     # The scale came from the first frame (or every one, when shared) but the bars are

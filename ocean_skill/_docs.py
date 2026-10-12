@@ -113,8 +113,11 @@ accepted varies with the data rather than with this method. Option families
 shared across most of them: ``color_by``/``marker_by`` (grouping), ``labels``,
 ``title``, ``domain`` (map extent), ``robust`` (colour-limit clipping),
 ``colorbar_label_clipped`` (write the true min/max at a clipped colourbar end),
-``vmin``/``vmax`` (exact colour limits -- single-field families only:
-``field_facet``, ``section``, ``cross``, ``time_depth``),
+``vmin``/``vmax`` (exact colour limits -- on the single-field families
+``field_facet``, ``section``, ``cross``, ``time_depth``, and on the comparison
+families (``field_row``/``field_grid``, ``field_map_grid``, the ``section_row``/
+``time_depth_row`` rows and grids, movies), where they pin the test/reference scale
+and the difference panel keeps its own; not ``skill_map``),
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
 ``nrows`` (grid layout; ``rows``/``cols`` facet a stacked ``section``/``time_depth``
 grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
