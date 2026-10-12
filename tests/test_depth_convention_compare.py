@@ -557,8 +557,8 @@ def test_the_mean_aggregate_keeps_the_binning_and_drops_the_statistic():
 def test_detide_filters_the_free_surface_with_the_field():
     """The free surface is low-passed like the field: a stand-in proves it was."""
 
-    def fake_detide(da, *, T, component):
-        assert (T, component) == (33, "subtidal")
+    def fake_detide(da, *, T, component, max_gap):
+        assert (T, component, max_gap) == (33, "subtidal", 6.0)
         return da * 0.0 if da.name == "zeta" else da  # a perfectly flat free surface
 
     with mock.patch("ocean_skill.detide.detide", fake_detide):

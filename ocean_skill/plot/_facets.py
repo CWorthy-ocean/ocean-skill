@@ -288,7 +288,7 @@ def resolve_limit_groups(
                 warnings.warn(
                     f"shared_limits='source' but the {label!r} group mixes "
                     f"variables ({sorted(nm for nm in names if nm)}); their "
-                    "ranges/units differ, so one shared colour scale won't "
+                    "ranges/units differ, so one shared color scale won't "
                     "mean the same thing on every panel.",
                     stacklevel=_stacklevel.find(),
                 )
@@ -296,7 +296,7 @@ def resolve_limit_groups(
                 warnings.warn(
                     f"shared_limits={shared_limits!r} but panels use "
                     f"different variables ({sorted(nm for nm in names if nm)}); "
-                    "their ranges/units differ, so one shared colour scale "
+                    "their ranges/units differ, so one shared color scale "
                     "won't mean the same thing on every panel.",
                     stacklevel=_stacklevel.find(),
                 )

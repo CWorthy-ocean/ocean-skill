@@ -874,7 +874,7 @@ def frame_coordinate(
     origin = _check_origin(origin)
     if z not in ("z_rho", "z_w"):
         raise ValueError(
-            f"z must be 'z_rho' (cell centres) or 'z_w' (interfaces), got {z!r}."
+            f"z must be 'z_rho' (cell centers) or 'z_w' (interfaces), got {z!r}."
         )
     if z not in ds.coords:
         attach = add_depth_coord if z == "z_rho" else add_interface_coord

@@ -2011,7 +2011,7 @@ def _warn_short_bins(coord, freq: str, dim: str) -> None:
     warnings.warn(
         f"resampling {dim!r} to {freq!r} leaves {len(short)} of {len(values)} bins "
         f"with fewer samples than the usual {median:g}: {detail}. Those means are "
-        "over part of a period but are labelled like whole ones — narrow the "
+        "over part of a period but are labeled like whole ones — narrow the "
         "selection to whole periods, or drop the short bins, if that is not what "
         "you want.",
         stacklevel=2,

@@ -309,8 +309,15 @@ def test_dataframe_both_returns_two_frames():
 def test_meta_routes_a_timeseriesprofile_dataframe_through_tabular_to_dataset():
     from tests.test_tabular import TSP_META, timeseriesprofile_frame
 
+    # the fixture's visits are a month apart (an irregular axis, which detide now
+    # refuses); one hourly step per visit keeps the routing under test on a regular one
+    frame = timeseriesprofile_frame()
+    visit = pd.to_datetime(frame["time"]).rank(method="dense").astype(int) - 1
+    frame["time"] = (
+        pd.Timestamp("2024-01-01") + pd.to_timedelta(visit, unit="h")
+    ).dt.strftime("%Y-%m-%dT%H:%M:%S")
     with pytest.warns(UserWarning, match="duplicate"):
-        out = detide(timeseriesprofile_frame(), meta=TSP_META, T=1.0)
+        out = detide(frame, meta=TSP_META, T=1.0)
     assert isinstance(out, xr.Dataset)
     assert set(out.dims) == {"time", "depth"}
     assert "Temperature" in out.data_vars

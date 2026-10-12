@@ -120,7 +120,7 @@ _RULES = {
         lambda v: (
             isinstance(v, int | float) and not isinstance(v, bool) and 0 < v < np.inf
         ),
-        "a positive number of metres",
+        "a positive number of meters",
     ),
     "position": (lambda v: v in POSITIONS, f"one of {POSITIONS}"),
 }

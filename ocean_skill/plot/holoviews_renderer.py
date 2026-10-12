@@ -43,8 +43,11 @@ from ocean_skill.plot.coastline import (
 )
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
+    _aspect_of,
     _data_range,
+    _lat_stretch,
     _station_values,
+    _stretch_of,
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
@@ -191,12 +194,10 @@ def _panel_geometry(
     :func:`_quadmesh`'s own note), since it has no lon/lat spans to measure at all.
     """
     if aspect is None:
-        try:
-            aspect = float(np.ptp(np.asarray(da["lon"]))) / max(
-                float(np.ptp(np.asarray(da["lat"]))), 1e-6
-            )
-        except Exception:  # pragma: no cover - unlabelled coords; fall back to square
-            aspect = 1.0
+        # the static renderer's own measure, true-shape corrected (a degree of longitude
+        # is cos(lat) a degree of latitude): a frame is the data's aspect, so this is
+        # what keeps an interactive map from being 1/cos(lat) too wide as well
+        aspect = _aspect_of(da)
     # the two compose: width_px is this family's share of the page, canvas_factor is
     # how much bigger a canvas the caller asked for than the default one
     px = frame_px(aspect, width_px=width_px * canvas_factor)
@@ -515,6 +516,12 @@ def _quadmesh(
                 opts["projection"] = projection or ccrs.PlateCarree()
             except ImportError:  # pragma: no cover - cartopy is not a core dependency
                 pass
+            # hvplot's own geo default is data_aspect=1 (a degree as long either way),
+            # which re-pads the ranges until the plot is 1:1 in degrees, leaving the
+            # true-shape frame above half empty at 60N. The same stretch the static
+            # axes get (_true_shape). Under tiles the axes are Web Mercator metres,
+            # already conformal, so 1 stands and the frame's own shape does the work.
+            opts["data_aspect"] = _stretch_of(da)
         if project or projection is not None:
             # project the data to the output projection now, once, instead of
             # letting the plot re-project it per rendered frame. Movies set
@@ -1749,7 +1756,7 @@ def _field_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         all_t = [it["aligned"]["test"] for it in items]
@@ -1922,7 +1929,6 @@ def _field_facet(
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
         _TIME_NOT_GIVEN,
-        _aspect_of,
         facet_labels,
         field_suptitle,
     )
@@ -3022,7 +3028,6 @@ def _field_map_grid(
         resolve_limit_groups,
     )
     from ocean_skill.plot.matplotlib_renderer import (
-        _aspect_of,
         field_title,
         grid_suptitle,
     )
@@ -3634,7 +3639,7 @@ def _section_row_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         all_t = [values["test"] for values, _ in prepared]
@@ -3987,7 +3992,7 @@ def _time_depth_row_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         prepared = [prepare_time_depth_row(it["aligned"]) for it in items]
@@ -4209,7 +4214,6 @@ def _skill_map(
     from ocean_skill.colormaps import metric_colors
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
-        _aspect_of,
         metric_arrays,
         metric_panel_titles,
         metric_panels,
@@ -6955,7 +6959,7 @@ def _target(
         # only the tabular arrangement, not the information.
         warnings.warn(
             'legend_style="grid" has no interactive form (bokeh legends are flat); '
-            'showing combined "colour · marker" entries instead.',
+            'showing combined "color · marker" entries instead.',
             stacklevel=2,
         )
         labels_mode = "legend"
@@ -7613,6 +7617,7 @@ def _locations(
         extent = _default_extent(items)
     lon0, lat0, lon1, lat1 = (float(v) for v in extent)
     aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
+    aspect /= _lat_stretch(lat0, lat1)  # true shape, as the static map is
     px = frame_px(aspect, width_px=SOLO_PANEL_WIDTH_PX * _canvas_factor(size, zoom))
     fontsize = bokeh_fontsize(px, font_scale=font_scale)
 

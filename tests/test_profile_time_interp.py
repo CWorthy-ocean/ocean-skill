@@ -189,11 +189,20 @@ def test_a_cast_inside_the_declared_record_still_interpolates(monkeypatch):
     np.testing.assert_allclose(_test_values(c), [-1.5, -3.5])
 
 
-def test_the_default_still_snaps_a_cast_past_the_record_to_the_last_step(monkeypatch):
-    """Unchanged behaviour: nearest has no span to refuse a cast on."""
-    c = _comparison(monkeypatch, "2024-07-01 05:00")
+def test_the_default_snaps_a_cast_just_past_the_record_to_the_last_step(monkeypatch):
+    """Nearest reaches half a step, past the record's end as anywhere else."""
+    c = _comparison(monkeypatch, "2024-07-01 03:20")
     # the last step (03:00) has zeta = 0
     np.testing.assert_allclose(_test_values(c), [-3.0, -5.0])
+
+
+def test_the_default_refuses_a_cast_well_past_the_record(monkeypatch):
+    """Two hours past an hourly record is a gap in it, not the nearest step's cast."""
+    c = _comparison(monkeypatch, "2024-07-01 05:00")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(NoValidData, match="after the last step"):
+            c.align()
 
 
 def test_compare_skips_a_cast_outside_the_record_and_keeps_the_others(

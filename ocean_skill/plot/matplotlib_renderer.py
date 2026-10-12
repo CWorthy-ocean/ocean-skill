@@ -806,6 +806,45 @@ def _basemap(
     return gl
 
 
+#: Latitude (degrees) a domain's mid-latitude is held to when stretching it: 1/cos
+#: blows up at the pole, and a map up there is a polar projection's job, not this one's.
+_STRETCH_LAT_CAP = 80.0
+
+
+def _lat_stretch(lat_lo: float, lat_hi: float) -> float:
+    """How much longer a degree of latitude is drawn than a degree of longitude.
+
+    PlateCarree spends the same length on both, which is true only at the equator: a
+    degree of longitude is ``cos(lat)`` as long as one of latitude, so at Cook Inlet
+    (~60N) every map came out about twice too wide. ``1 / cos(lat0)``, ``lat0`` being
+    the middle of ``[lat_lo, lat_hi]``, is the data aspect that undoes it -- the axes'
+    own aspect here, and what :func:`_aspect_of` divides the degree shape by so every
+    panel is *sized* to the shape it will be drawn at. ``1`` on an equatorial domain.
+    """
+    lat0 = np.clip((lat_lo + lat_hi) / 2.0, -_STRETCH_LAT_CAP, _STRETCH_LAT_CAP)
+    return float(1.0 / np.cos(np.radians(lat0)))
+
+
+def _stretch_of(da) -> float:
+    """:func:`_lat_stretch` of one field's own latitudes (``1`` when it has none)."""
+    try:
+        lat = np.asarray(da["lat"], dtype="float64")
+        return _lat_stretch(float(np.nanmin(lat)), float(np.nanmax(lat)))
+    except Exception:  # pragma: no cover - unlabelled coords; draw in plain degrees
+        return 1.0
+
+
+def _true_shape(ax, stretch: float) -> None:
+    """Give a map's axes the data aspect that draws its domain in true shape.
+
+    Cartopy sets ``"equal"`` (one degree is as long either way); ``stretch`` replaces
+    it. ``adjustable="box"`` so the *box* takes the shape and the view keeps the extent
+    it was given. It is the axes' own data aspect, so the 180-centred frame a dateline
+    straddler gets (:func:`_map_projection`) needs nothing special: both are degrees.
+    """
+    ax.set_aspect(stretch, adjustable="box")
+
+
 def _map_projection(*fields):
     """Return a PlateCarree centred so every field's longitudes stay contiguous.
 
@@ -903,6 +942,9 @@ def _draw_map(
     draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
     kw = _contour_kw(norm) if mark == "contourf" else {}
     im = draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
+    # the one place every field/skill/movie map passes through, so the one place that
+    # draws them all in true shape rather than in equal-length degrees
+    _true_shape(ax, _stretch_of(da))
     _basemap(
         ax,
         gridline_kwargs=gridline_kwargs,
@@ -1466,7 +1508,7 @@ def _warn_if_overplotted(layout, canvas: Canvas | None) -> None:
     if per_panel < 1.0:
         warnings.warn(
             f"{len(layout.panels)} panels on a canvas capped at {height:.1f}in leaves "
-            f"{per_panel:.2f}in each, less than the labelling needs. Drawing anyway; "
+            f"{per_panel:.2f}in each, less than the labeling needs. Drawing anyway; "
             'size="free" lets the figure grow instead.',
             stacklevel=_stacklevel.find(),
         )
@@ -3074,11 +3116,18 @@ def _centre_suptitle(fig, renderer=None) -> None:
 
 
 def _aspect_of(da) -> float:
-    """Return one field's ``lon_span / lat_span`` — the shape a panel wants to be."""
+    """Return one field's width / height as drawn -- the shape a panel wants to be.
+
+    ``lon_span / lat_span`` is the shape in degrees; a degree of longitude is
+    shorter than one of latitude away from the equator, so it is divided by
+    :func:`_lat_stretch` to give the shape the domain actually has. The axes are drawn
+    at that same stretch (:func:`_true_shape`), so a panel sized to this fills its slot
+    rather than being letterboxed inside one made for the wrong shape.
+    """
     try:
         lon_span = float(np.ptp(np.asarray(da["lon"])))
         lat_span = float(np.ptp(np.asarray(da["lat"])))
-        return lon_span / max(lat_span, 1e-6)
+        return lon_span / max(lat_span, 1e-6) / _stretch_of(da)
     except Exception:  # pragma: no cover - fall back to a square-ish panel
         return 1.0
 
@@ -3154,7 +3203,7 @@ def _warn_if_cramped(
 
 
 def _map_aspect(comparisons, reference_name: str) -> float:
-    """Return the maps' ``lon_span / lat_span`` — the shape a panel wants to be.
+    """Return the maps' true-shape width / height — see :func:`_aspect_of`.
 
     Read off the reference grid, which both renderers can see; ``clamp_aspect`` in
     :mod:`~ocean_skill.plot.typography` bounds it, so a degenerate span here only has
@@ -3407,7 +3456,7 @@ def field_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
@@ -6569,7 +6618,7 @@ def time_depth_row_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
@@ -7443,7 +7492,7 @@ def section_row_grid(
             warnings.warn(
                 f"shared_limits=True but rows use different variables "
                 f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
-                "so one shared colour scale won't mean the same thing on every row.",
+                "so one shared color scale won't mean the same thing on every row.",
                 stacklevel=2,
             )
         shared_seq_norm, shared_div_norm = _shared_norms(
@@ -7609,6 +7658,8 @@ def _apply_extent(axes, extent, items, names) -> None:
         return
     for ax in axes:
         ax.set_extent(box, crs=ccrs.PlateCarree())
+        # the window's shape, not the grid's
+        _true_shape(ax, _lat_stretch(box[2], box[3]))
 
 
 def _station_values(items, name: str) -> np.ndarray:
@@ -8999,7 +9050,8 @@ def locations(
         extent = _default_extent(items)
     lon0, lat0, lon1, lat1 = (float(v) for v in extent)
 
-    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6)
+    stretch = _lat_stretch(lat0, lat1)
+    aspect = max(lon1 - lon0, 1e-6) / max(lat1 - lat0, 1e-6) / stretch
     canvas = resolve_canvas(size, zoom)
     if figsize is None:
         # one panel, no colorbar: the facet fraction (a shared-bar grid's) is the
@@ -9022,6 +9074,7 @@ def locations(
         ax.set_global()
     else:
         ax.set_extent((lon0, lon1, lat0, lat1), crs=proj)
+    _true_shape(ax, stretch)
     _basemap(
         ax,
         gridline_kwargs=_merged(DEFAULT_GRIDLINE_KWARGS, gridline_kwargs),

@@ -1676,7 +1676,7 @@ def test_colors_unknown_level_names_the_field_and_its_levels():
 
 
 def test_colors_without_a_color_channel_is_refused():
-    with pytest.raises(ValueError, match="colour channel is off"):
+    with pytest.raises(ValueError, match="color channel is off"):
         render(
             _spec([_profile_item()], encode={"color": None}, colors="red"),
             renderer="matplotlib",

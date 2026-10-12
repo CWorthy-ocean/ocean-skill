@@ -249,7 +249,7 @@ def _finite_number(value: Any) -> float:
         number = math.nan
     if not math.isfinite(number):
         raise ValueError(
-            f"{value!r} is not a finite number (metres, in the model's z frame)"
+            f"{value!r} is not a finite number (meters, in the model's z frame)"
         )
     return number
 

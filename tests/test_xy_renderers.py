@@ -313,7 +313,7 @@ def test_color_by_with_nothing_to_colour_has_no_scale():
     with pytest.warns(UserWarning, match="carries no depth values"):
         layout = _xy.compose([_item(depth=False)], color_by="depth")
     assert layout.colorbar is None
-    with pytest.warns(UserWarning, match="colours points members, and there are none"):
+    with pytest.warns(UserWarning, match="colors points members, and there are none"):
         assert _xy.compose([_item(mark="line")], color_by="depth").colorbar is None
 
 
@@ -457,7 +457,7 @@ def test_a_time_pin_that_is_not_a_date_is_refused(pin):
     ["deep", "1500", True, float("nan"), float("inf"), np.datetime64("2020-01-01")],
 )
 def test_a_depth_pin_that_is_not_a_number_of_metres_is_refused(pin):
-    with pytest.raises(ValueError, match=r"vmin=.* is not a finite depth in metres"):
+    with pytest.raises(ValueError, match=r"vmin=.* is not a finite depth in meters"):
         _xy.compose([_item()], color_by="depth", vmin=pin)
 
 

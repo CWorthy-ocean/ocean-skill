@@ -284,10 +284,10 @@ def _target_labels(normalize: bool, recs, *, tex: bool) -> tuple[str, str]:
     """
     if normalize:
         sigma = "$\\sigma_{ref}$" if tex else "σ_ref"
-        return f"signed centred RMSD / {sigma}  (← under | over →)", f"bias / {sigma}"
+        return f"signed centered RMSD / {sigma}  (← under | over →)", f"bias / {sigma}"
     units = _shared_units(recs)
     suffix = f" [{units}]" if units else ""
-    return f"signed centred RMSD{suffix}  (← under | over →)", f"bias{suffix}"
+    return f"signed centered RMSD{suffix}  (← under | over →)", f"bias{suffix}"
 
 
 def _resolve_robust(robust: bool | float, lim: float | None = None) -> float | None:
@@ -563,7 +563,7 @@ def _resolve_colors(colors, levels, field):
         pretty = ", ".join(pretty_level(field, lev) for lev in levels)
         raise ValueError(
             f"colors has {len(colors)} entries but there are {len(levels)} "
-            f"{field!r} levels ({pretty}) — give at least one colour per level, or "
+            f"{field!r} levels ({pretty}) — give at least one color per level, or "
             "pass a dict to style only some of them."
         )
     return _LevelMap((lev, colors[i % len(colors)]) for i, lev in enumerate(levels))
