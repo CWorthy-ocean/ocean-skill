@@ -2242,6 +2242,37 @@ def test_build_kerchunk_accepts_tilde_for_every_path(fake_home):
     assert built.is_relative_to(fake_home / "refs")
 
 
+def test_build_kerchunk_resolves_relative_paths_against_cwd(tmp_path, monkeypatch):
+    """A relative grid reached obstore as ``file://grid.nc``, an empty store root."""
+    from ocean_skill.build import build_kerchunk
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    for i in range(2):
+        _roms_like(
+            tmp_path / "runs" / f"o.{i}.nc", "NETCDF4", value=i + 1, t0=i * 86400.0
+        )
+    _grid(tmp_path / "grid.nc", "NETCDF4")
+
+    # No root=, so the output globs are relative too. Building at all is the
+    # assertion; no parquet read-back, for the reason given in the tilde test above.
+    refs = build_kerchunk({"dev": "runs/o.*.nc"}, grid="grid.nc", out_dir="refs")
+
+    built = refs["dev"]
+    assert built.is_absolute()
+    assert built.exists()
+    assert built.is_relative_to(tmp_path / "refs")
+
+
+def test_store_for_anchors_a_relative_path_to_the_cwd(tmp_path, monkeypatch):
+    from ocean_skill.build import _store_for
+
+    monkeypatch.chdir(tmp_path)
+    _grid(tmp_path / "grid.nc", "NETCDF4")
+    url, _ = _store_for("grid.nc")
+    assert url == f"file://{tmp_path / 'grid.nc'}"
+
+
 # ------------------------------------------------------- missing local files
 #
 # obstore blames the *parent directory* for a missing file ("Unable to canonicalize

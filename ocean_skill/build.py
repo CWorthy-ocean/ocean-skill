@@ -54,6 +54,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib
+import os
 import struct
 import warnings
 from collections.abc import Mapping, Sequence
@@ -206,6 +207,18 @@ def _is_remote(target) -> bool:
     return str(target).startswith(("http://", "https://"))
 
 
+def _local_path(target) -> Path:
+    """``target`` as an absolute local path, with ``~`` expanded.
+
+    Relative paths are anchored to the cwd: obstore needs an absolute one, and a bare
+    ``grid.nc`` otherwise becomes ``file://grid.nc`` with an empty store root, failing
+    with "InvalidPath" and no mention of the path being relative. ``abspath`` rather
+    than ``resolve``: it collapses ``..`` but leaves symlinks alone, so a symlinked run
+    directory stays the path written into the reference.
+    """
+    return Path(os.path.abspath(Path(target).expanduser()))
+
+
 def _store_for(target):
     """Return ``(url, store)`` for one file, local or remote.
 
@@ -228,8 +241,8 @@ def _store_for(target):
         )
     # expanduser: "~/refs/grid.nc" reaches obstore as a *literal* tilde directory and
     # fails with "Unable to canonicalize filesystem root", which gives no hint that the
-    # path simply was not expanded.
-    path = Path(url).expanduser()
+    # path simply was not expanded. Absolute: see _local_path.
+    path = _local_path(url)
     # is_file: obstore reports a missing file as "Unable to canonicalize filesystem
     # root: <parent dir>" — naming the wrong path and never saying the file is absent,
     # so a path copied from another machine reads as a broken store, not an absent file.
@@ -1045,7 +1058,7 @@ def make_kerchunk(
         )
     parser = _parser_for(paths[0])
     if grid is not None and not _is_remote(grid):
-        grid = Path(grid).expanduser()
+        grid = _local_path(grid)
         # checked before the outputs are opened: virtualizing months of output only
         # to then trip over a bad grid path wastes the whole run
         if not grid.is_file():
@@ -1114,7 +1127,8 @@ def make_kerchunk(
         if spec:
             vds = _subchunk(vds, spec)
 
-        out = Path(out).expanduser()
+        # absolute: the returned path goes into a catalog, read from some other cwd
+        out = _local_path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
         _write_reference(vds, out, fmt or _kerchunk_format(out))
     return out
