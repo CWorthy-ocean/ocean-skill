@@ -2250,7 +2250,11 @@ def test_keep_latest_per_file_via_build_kerchunk(tmp_path):
     )
 
     ds = xr.open_dataset(
-        str(refs["GOM_rst"]), engine="kerchunk", chunks={}, decode_times=False
+        str(refs["GOM_rst"]),
+        engine="kerchunk",
+        chunks={},
+        decode_times=False,
+        storage_options={"remote_protocol": "file"},
     )
     assert ds.sizes["ocean_time"] == 2
 

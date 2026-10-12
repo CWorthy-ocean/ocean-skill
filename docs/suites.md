@@ -613,7 +613,8 @@ reference at `ref:` is overwritten by the *next* run's own refresh. `manifest.js
 where `snapshot` is the copy's path (`null` if no reference existed yet to copy). The
 copy pins file paths and byte ranges into the model output, not file contents: a
 restart that rewrites an output file in place still changes what the snapshot reads.
-Open a snapshot directly with `xr.open_dataset(path, engine="kerchunk", chunks={})`.
+Open a snapshot directly with `ocean_skill.build.open_reference(path)` (one dask layer, and
+no fsspec protocol scan, which can crash on a parquet reference).
 
 `run.log` is a mirror of stdout/stderr for the run: a `== page i/n: <title> ==` header
 and a `done in Ns`/`SKIPPED after Ns` line bracket each page, so a warning in between
