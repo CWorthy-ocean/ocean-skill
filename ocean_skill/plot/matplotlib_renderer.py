@@ -3228,8 +3228,8 @@ def field_grid(
     own column titles from its own ``labels`` — rows commonly come from *different*
     reference sources in a ``compare()`` fan-out (nitrate from one WOA entry,
     phosphate from another), so reusing one shared pair of titles for every row
-    would mislabel all but the first. The top-level ``labels`` is only the fallback
-    for a row that doesn't carry its own. ``metric_keys`` picks which of
+    would mislabel all but the first. An explicit ``labels=`` overrides every row's
+    titles instead. ``metric_keys`` picks which of
     ``metrics.compute()``'s values appear in each row's corner box (default
     ``bias``/``rmse``/``corr``).
 
@@ -3349,7 +3349,9 @@ def field_grid(
             comparisons, test_name, reference_name, robust=robust
         )
 
-    row_labels = [comp.get("labels") or labels or ("test", "reference") for comp in comparisons]
+    row_labels = [
+        labels or comp.get("labels") or ("test", "reference") for comp in comparisons
+    ]
     auto_titles = [t for tl, rl in row_labels for t in (tl, rl, "difference")]
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
 
@@ -6398,8 +6400,8 @@ def time_depth_row_grid(
     test/reference, separate for the difference), and its own column titles from its
     own ``labels`` -- rows commonly come from *different* stations with different
     ranges, so reusing one shared pair of titles or one shared scale for every row
-    would misrepresent all but the first. The top-level ``labels`` is only the
-    fallback for a row that doesn't carry its own. ``shared_limits=True`` reverses
+    would misrepresent all but the first. An explicit ``labels=`` overrides every
+    row's titles instead. ``shared_limits=True`` reverses
     that for the colour scale, exactly as it does in :func:`field_grid` -- meaningful
     only when every row is the same variable, and warns if the rows'
     ``standard_name``s actually differ.
@@ -6476,7 +6478,9 @@ def time_depth_row_grid(
             items, "test", "reference", robust=robust
         )
 
-    row_labels = [item.get("labels") or labels or ("test", "reference") for item in items]
+    row_labels = [
+        labels or item.get("labels") or ("test", "reference") for item in items
+    ]
     auto_titles = [t for tl, rl in row_labels for t in (tl, rl, "difference")]
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
 
@@ -7149,8 +7153,8 @@ def section_row_grid(
     test/reference, separate for the difference), and its own column titles from its
     own ``labels`` -- rows commonly come from different places with different ranges,
     so one shared pair of titles or one shared scale would misrepresent all but the
-    first. The top-level ``labels`` is only the fallback for a row that doesn't carry
-    its own. ``shared_limits=True`` reverses that for the colour scale, exactly as it
+    first. An explicit ``labels=`` overrides every row's titles instead.
+    ``shared_limits=True`` reverses that for the colour scale, exactly as it
     does in :func:`field_grid` -- meaningful only when every row is the same variable,
     and warns if the rows' ``standard_name``s actually differ.
 
@@ -7310,7 +7314,7 @@ def section_row_grid(
         )
 
     row_labels = [
-        item.get("labels") or labels or ("test", "reference") for item in items
+        labels or item.get("labels") or ("test", "reference") for item in items
     ]
     auto_titles = [
         t
@@ -8202,7 +8206,7 @@ def field_movie(
         first["aligned"],
         test_name=test_name,
         reference_name=reference_name,
-        labels=first.get("labels") or labels or ("test", "reference"),
+        labels=labels or first.get("labels") or ("test", "reference"),
         units=first.get("units"),
         standard_name=first.get("standard_name"),
         metrics=first.get("metrics"),

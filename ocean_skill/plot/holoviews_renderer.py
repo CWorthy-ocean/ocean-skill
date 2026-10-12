@@ -1589,7 +1589,7 @@ def _field_row(
 
 def _field_grid(
     items,
-    labels=("test", "reference"),
+    labels=None,
     geo=True,
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
@@ -1621,11 +1621,11 @@ def _field_grid(
     defaults to the rows' shared identity, the same as the static grid — see
     :func:`~ocean_skill.plot.matplotlib_renderer.grid_suptitle`; ``title=""`` drops it.
 
-    Each row is titled from *its own* ``labels``, exactly as the static renderer
-    does, falling back to the top-level ``labels`` only for a row that carries
-    none. Rows in one ``compare()`` fan-out commonly come from *different*
-    reference sources (nitrate from one WOA entry, phosphate from another), so
-    reusing the first row's pair for every row would mislabel all but the first.
+    An explicit ``labels=`` titles every row, exactly as the static renderer does;
+    without it each row is titled from *its own* sources. Rows in one ``compare()``
+    fan-out commonly come from *different* reference sources (nitrate from one WOA
+    entry, phosphate from another), so reusing the first row's pair for every row
+    would mislabel all but the first.
 
     Type sizes do **not** shrink with the row count the way the static renderer's do:
     a bokeh ``frame_width`` is fixed rather than a share of a page, so stacking more
@@ -1650,7 +1650,7 @@ def _field_grid(
 
     hv = _extension()
     title = _default_grid_title(items, title)
-    row_labels = [it.get("labels") or labels for it in items]
+    row_labels = [labels or it.get("labels") or ("test", "reference") for it in items]
 
     def _row_auto_titles(it, tl, rl):
         test_title = f"{it.get('row_label')} — {tl}" if it.get("row_label") else str(tl)
@@ -3345,7 +3345,7 @@ def _section_row(
 
 def _section_row_grid(
     items,
-    labels=("test", "reference"),
+    labels=None,
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
@@ -3376,10 +3376,10 @@ def _section_row_grid(
     via :func:`_section_row`, laid out ``.cols(3)``, the row label folded into the
     test panel's title (bokeh has no rotated left-edge text).
 
-    Each row is titled from *its own* ``labels``, the top-level ``labels`` being only
-    the fallback. ``shared_limits=True`` computes one shared colour scale (a
-    sequential range from every row's test+reference, a diverging range from every
-    row's difference) instead of each row's own, warning once if the rows'
+    An explicit ``labels=`` overrides every row's titles; without it each row is
+    titled from *its own* sources. ``shared_limits=True`` computes one shared colour
+    scale (a sequential range from every row's test+reference, a diverging range from
+    every row's difference) instead of each row's own, warning once if the rows'
     ``standard_name``s differ -- the static renderer's convention.
 
     Where rows run is named as the static renderer names it
@@ -3440,7 +3440,7 @@ def _section_row_grid(
     )
     if title is None:
         title = auto_title
-    row_labels = [it.get("labels") or labels for it in items]
+    row_labels = [labels or it.get("labels") or ("test", "reference") for it in items]
     row_prefixes = [
         it.get("row_label")
         if not paths_differ or not geometry.path_note
@@ -3746,7 +3746,7 @@ def _time_depth_row(
 
 def _time_depth_row_grid(
     items,
-    labels=("test", "reference"),
+    labels=None,
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
@@ -3769,14 +3769,14 @@ def _time_depth_row_grid(
     ``test | reference | difference`` row per station via :func:`_time_depth_row`,
     laid out ``.cols(3)`` exactly as :func:`_field_grid` lays out its own rows.
 
-    Each row is titled from *its own* ``labels``, falling back to the top-level
-    ``labels`` only for a row that carries none — the same fallback
-    :func:`_field_grid` gives its rows, since a ``compare()`` fan-out's stations
-    can differ. ``shared_limits=True`` computes one shared colour scale (a
-    sequential range from every row's test+reference, a diverging range from
-    every row's difference) across all rows instead of each computing its own —
-    :func:`time_depth_row_grid`'s own convention, so the two renderers agree on
-    what the option means; warns once if the rows' ``standard_name``s differ.
+    An explicit ``labels=`` overrides every row's titles; without it each row is
+    titled from *its own* sources — the same rule :func:`_field_grid` follows, since
+    a ``compare()`` fan-out's stations can differ. ``shared_limits=True`` computes
+    one shared colour scale (a sequential range from every row's test+reference, a
+    diverging range from every row's difference) across all rows instead of each
+    computing its own — :func:`time_depth_row_grid`'s own convention, so the two
+    renderers agree on what the option means; warns once if the rows'
+    ``standard_name``s differ.
 
     ``title`` sets one overall title above the whole grid, defaulting to the
     rows' shared identity (:func:`_default_grid_title`) the same as
@@ -3794,7 +3794,7 @@ def _time_depth_row_grid(
 
     hv = _extension()
     title = _default_grid_title(items, title)
-    row_labels = [it.get("labels") or labels for it in items]
+    row_labels = [labels or it.get("labels") or ("test", "reference") for it in items]
 
     def _row_auto_titles(it, tl, rl):
         test_title = f"{it.get('row_label')} — {tl}" if it.get("row_label") else str(tl)
@@ -5023,7 +5023,7 @@ def _facet_movie(
 
 def _field_movie(
     items,
-    labels=("test", "reference"),
+    labels=None,
     geo=True,
     shared_axes: bool = True,
     metric_keys=DEFAULT_METRIC_KEYS,
@@ -5146,7 +5146,7 @@ def _field_movie(
     def _panel_mesh(position: int, panel: int):
         item = items[position]
         aligned = item["aligned"]
-        tl, rl = item.get("labels") or labels
+        tl, rl = labels or item.get("labels") or ("test", "reference")
         if panel == 0:
             # the frame label goes on the test panel's title as well as on the slider:
             # the static renderer draws it in the panel, and a saved page is read the

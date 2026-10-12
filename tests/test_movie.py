@@ -673,6 +673,25 @@ def test_a_field_movie_names_its_variable_in_both_renderers():
     assert len(set(titles)) == 3, "the name must join the labels, not replace them"
 
 
+def test_an_explicit_labels_titles_every_interactive_movie_frame(frames):
+    """``labels=`` overrides each frame's own pair; unset, the frames' own show."""
+    import holoviews as hv
+    from bokeh.plotting import figure
+
+    def titles(**options):
+        movie = _hv(_interactive(frames, **options))
+        return [
+            f.title.text
+            for el in _frames(movie)
+            for f in hv.render(el, backend="bokeh").select({"type": figure})
+        ]
+
+    assert any("woa23_nitrate" in t for t in titles())
+    explicit = titles(labels=("A", "B"))
+    assert any(t == "B" for t in explicit)
+    assert not any("woa23_nitrate" in t for t in explicit)
+
+
 def test_an_explicit_movie_title_still_wins():
     ani = _facet_film(_run(3), domain=None, title="GOM run")
     assert ani._fig._suptitle.get_text() == "GOM run"
