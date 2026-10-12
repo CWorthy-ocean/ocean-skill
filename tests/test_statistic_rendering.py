@@ -104,6 +104,14 @@ def _hv_mesh_opts(obj) -> dict:
     return hv.Store.lookup_options("bokeh", mesh, "plot").kwargs
 
 
+def _hv_vdims(obj) -> list:
+    """Return each mesh's value dimension, which is what bokeh's hover reads."""
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    return [m.vdims[0] for m in obj.traverse(lambda x: x, [hv.QuadMesh])]
+
+
 # --- the helper -----------------------------------------------------------------------
 
 
@@ -216,6 +224,63 @@ def test_holoviews_row_of_variances_has_no_log_scale_and_a_readable_difference_l
         "(mg/m³)²",
         "test − reference (mg/m³)²",
     ]
+
+
+# --- the hover readout spells units as the colour bar does ---------------------------
+
+NITRATE = "mole_concentration_of_nitrate_in_sea_water"
+
+
+def test_holoviews_hover_of_a_variance_reads_readable_units():
+    obj = render(
+        _facet_spec(_map("(mmol/m^3)^2", "var", NITRATE)), renderer="holoviews"
+    )
+    (vdim,) = _hv_vdims(obj)
+    assert vdim.unit == "(mmol/m³)²"
+    assert vdim.pprint_label.endswith("((mmol/m³)²)")
+    assert "^" not in vdim.pprint_label
+
+
+def test_holoviews_hover_of_a_temperature_variance_reads_degC_squared():
+    obj = render(
+        _facet_spec(_map("delta_degC^2", "var", TEMPERATURE)), renderer="holoviews"
+    )
+    (vdim,) = _hv_vdims(obj)
+    assert vdim.unit == "°C²"
+
+
+def test_holoviews_hover_of_a_plain_field_keeps_its_units():
+    obj = render(
+        _facet_spec(_map("mg/m^3", None, CHLOROPHYLL)), renderer="holoviews"
+    )
+    (vdim,) = _hv_vdims(obj)
+    assert vdim.unit == "mg/m^3"
+
+
+def test_holoviews_row_hover_reads_readable_units_on_every_panel_and_mutates_nothing():
+    spec = _row_spec("(mmol/m^3)^2", "var", NITRATE)
+    obj = render(spec, renderer="holoviews")
+    # the difference has lost its `statistic` to arithmetic; its panel is told it
+    assert [v.unit for v in _hv_vdims(obj)] == ["(mmol/m³)²"] * 3
+    aligned = spec.items[0]["aligned"]
+    assert aligned["test"].attrs["units"] == "(mmol/m^3)^2"
+    assert aligned["difference"].attrs["units"] == "(mmol/m^3)^2"
+
+
+def test_holoviews_hover_tooltips_carry_no_caret_units():
+    import holoviews as hv
+    from bokeh.models import HoverTool
+
+    hv.extension("bokeh")
+    obj = render(_row_spec("(mmol/m^3)^2", "var", NITRATE), renderer="holoviews")
+    state = hv.renderer("bokeh").get_plot(obj).state
+    labels = [
+        label
+        for tool in state.select({"type": HoverTool})
+        for label, _ in (tool.tooltips if isinstance(tool.tooltips, list) else [])
+    ]
+    assert any("(mmol/m³)²" in label for label in labels)
+    assert not any("^2" in label for label in labels)
 
 
 # --- titles that carry a statistic AND its window -------------------------------------
