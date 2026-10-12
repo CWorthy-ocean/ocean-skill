@@ -18,10 +18,20 @@ surface comparison, and a "surface" request of it is the base unchanged.
 
 Two functions: :func:`derivable` says whether a request can be answered this way, and
 :func:`derive` does it. They are deliberately conservative -- an unrecognized key, a
-depth the observations never sampled, a ``"column"`` request, anything horizontal, a
+depth the observations never sampled (unless ``depth_method`` says how to answer
+between their levels, below), a ``"column"`` request, anything horizontal, a
 ``test``/``reference`` pair-spec -- is *not* derivable, and the caller falls back to
 the full pipeline. Deriving a wrong answer quickly is worse than computing the right
 one slowly.
+
+``depth_method`` opens one door: a single depth between the observations' levels (an
+ADCP asked at 10 m when its bins are at 8 and 12). ``"nearest"`` answers a scalar depth
+with the closest level (``actual_depth`` says which, ``depth_requested`` what was
+asked); ``"interp"`` (or ``"linear"``) answers a scalar or a list by interpolating the
+*pairs* linearly in depth between the two levels either side, test and reference each
+on their own, and does not extrapolate past the shallowest or deepest level. Neither
+applies to a station with no depth axis, to a vertical mean, or to bands. With
+``depth_method=None`` only the observations' own levels are derivable.
 
 Derived answers differ from the full pipeline in one honest way: a depth band is the
 plain mean of the *pairs* at the obs levels inside it, not the model's
@@ -134,11 +144,21 @@ def _band(spec: Any) -> tuple[float, float]:
     return float(spec["min"]), float(spec["max"])
 
 
-def _check(select, aggregate, *, feature_type, obs_levels) -> None:
+#: ``depth_method`` spellings that interpolate between levels; ``"nearest"`` snaps.
+_INTERP_METHODS = frozenset({"interp", "linear"})
+_DEPTH_METHODS = _INTERP_METHODS | {"nearest"}
+
+
+def _check(select, aggregate, *, feature_type, obs_levels, depth_method=None) -> None:
     """Raise :class:`_NotDerivable` naming the first thing the saved pairs cannot do."""
     from ocean_skill import operators
 
     c = _vocabulary()
+    if depth_method is not None and depth_method not in _DEPTH_METHODS:
+        raise _NotDerivable(
+            f"depth_method {depth_method!r} is not one of "
+            f"{sorted(_DEPTH_METHODS)} or None"
+        )
     if c.is_pair_spec(select) or c.is_pair_spec(aggregate):
         raise _NotDerivable(
             "a per-lane (test/reference) select or aggregate asks the two sides "
@@ -214,15 +234,36 @@ def _check(select, aggregate, *, feature_type, obs_levels) -> None:
     if kind in ("scalar", "levels"):
         wanted = [payload] if kind == "scalar" else payload
         have = None if obs_levels is None else np.asarray(obs_levels, dtype=float)
+        # off-bin answers need a depth axis to answer from: two or more levels (one is
+        # a mooring's single instrument depth -- the base has no axis to pick along)
+        # and no vertical mean (a mean over interpolated levels is not the full
+        # pipeline's band average either)
+        between = (
+            depth_method is not None
+            and have is not None
+            and have.size >= 2
+            and z_agg is None
+        )
         for depth_m in wanted:
-            if have is None or not np.any(np.abs(have - depth_m) <= _LEVEL_TOLERANCE):
+            if have is not None and np.any(np.abs(have - depth_m) <= _LEVEL_TOLERANCE):
+                continue
+            if between and depth_method == "nearest" and kind == "scalar":
+                continue  # derive snaps to the closest level
+            if between and depth_method in _INTERP_METHODS:
+                lo, hi = float(have.min()), float(have.max())
+                if lo <= depth_m <= hi:
+                    continue
                 raise _NotDerivable(
-                    f"depth {depth_m:g} m is not sampled by the observations"
+                    f"depth {depth_m:g} m is outside the observations' levels "
+                    f"({lo:g}–{hi:g} m), and {depth_method} does not extrapolate"
                 )
+            raise _NotDerivable(
+                f"depth {depth_m:g} m is not sampled by the observations"
+            )
 
 
 def derivable(
-    select, aggregate, *, feature_type: str, obs_levels, detide
+    select, aggregate, *, feature_type: str, obs_levels, detide, depth_method=None
 ) -> tuple[bool, str]:
     """Say whether a saved base of matched pairs can answer a request: ``(ok, reason)``.
 
@@ -235,11 +276,24 @@ def derivable(
     or ``None``/empty when it has none to name (a station at the surface); a literal
     depth is derivable only if the observations sampled it, since anywhere else the
     model would have to be read there, and ``"surface"`` only when there are no levels.
+
+    ``depth_method`` (``None``, ``"nearest"``, ``"interp"``/``"linear"``) lets a depth
+    between the levels be answered from the pairs anyway, and only when there are two
+    or more levels and no vertical mean: ``"nearest"`` for one scalar depth (a list is
+    a literal request for those depths and stays with the full pipeline), ``"interp"``
+    for a scalar or list inside the levels' range -- outside it nothing is derivable,
+    since the pairs do not extrapolate. ``None`` keeps to the observations' own levels.
     ``reason`` says why not, or for ``True`` what was checked.
     """
     select, aggregate = dict(select or {}), dict(aggregate or {})
     try:
-        _check(select, aggregate, feature_type=feature_type, obs_levels=obs_levels)
+        _check(
+            select,
+            aggregate,
+            feature_type=feature_type,
+            obs_levels=obs_levels,
+            depth_method=depth_method,
+        )
     except _NotDerivable as err:
         return False, str(err)
     return True, "the request is a slice or average of the saved pairs"
@@ -344,6 +398,87 @@ def _detide(ds: xr.Dataset, detide: Any) -> xr.Dataset:
     return ds
 
 
+def _from_positive_down(values: np.ndarray, coord: xr.DataArray) -> np.ndarray:
+    """Express metres positive down in the convention ``coord`` was stored in.
+
+    The inverse of :func:`ocean_skill.depth_convention.positive_down_values`, found
+    from the coordinate itself rather than by re-deciding its convention: that mapping
+    is affine (a sign and a unit factor), so two of the coordinate's own values and
+    their positive-down metres fix it. A coordinate already normalized (or already
+    positive-down metres) comes back unchanged.
+    """
+    from ocean_skill import depth_convention
+
+    raw = np.asarray(coord.values, dtype=float)
+    down = depth_convention.positive_down_values(raw, coord.attrs)
+    ok = np.flatnonzero(np.isfinite(raw) & np.isfinite(down))
+    first = ok[0]
+    other = next((i for i in ok if raw[i] != raw[first]), None)
+    if other is None:
+        return np.asarray(values, dtype=float)
+    slope = (down[other] - down[first]) / (raw[other] - raw[first])
+    return raw[first] + (np.asarray(values, dtype=float) - down[first]) / slope
+
+
+def _interpolate_depth(
+    test: xr.DataArray,
+    reference: xr.DataArray,
+    coord: xr.DataArray,
+    levels: np.ndarray,
+    targets: list[float],
+    zdim: str,
+) -> tuple[xr.DataArray, xr.DataArray, dict[str, Any]]:
+    """Interpolate both lanes linearly in depth to each target; return lanes and attrs.
+
+    ``levels`` are the base's depths (m, positive down) in the depth axis's own index
+    order, which need not be sorted, so the bracketing is found in sorted order and the
+    lanes are read back by position. A target on a level takes that level as it is; one
+    between two takes ``w * upper + (1 - w) * lower`` with ``w`` the weight on the
+    shallower level, per lane (NaN in either bracketing level stays NaN: no gap is
+    filled). Targets must lie inside the levels' range (:func:`_check` ensures it).
+
+    A scalar request drops the depth axis and gets ``actual_depth`` (the depth asked)
+    and, when interpolated, ``depth_interpolated_between``; a list keeps a depth axis
+    at the targets, in the coordinate's own convention (sign and units), with the
+    coordinate's attributes.
+    """
+    order = np.argsort(levels, kind="stable")
+    sorted_levels = levels[order]
+
+    def one(lane: xr.DataArray, d: float):
+        hit = np.flatnonzero(np.abs(levels - d) <= _LEVEL_TOLERANCE)
+        if hit.size:
+            return _keep_attrs(lane.isel({zdim: int(hit[0])}, drop=True), lane), None
+        j = int(np.searchsorted(sorted_levels, d))
+        i = j - 1
+        z_i, z_j = float(sorted_levels[i]), float(sorted_levels[j])
+        w = (z_j - d) / (z_j - z_i)  # weight on the shallower (z_i) level
+        shallow = lane.isel({zdim: int(order[i])}, drop=True)
+        deep = lane.isel({zdim: int(order[j])}, drop=True)
+        return _keep_attrs(w * shallow + (1.0 - w) * deep, lane), [z_i, z_j]
+
+    parts_t, parts_r, between = [], [], []
+    for d in targets:
+        t_d, bracket = one(test, d)
+        r_d, _ = one(reference, d)
+        parts_t.append(t_d)
+        parts_r.append(r_d)
+        between.append(bracket)
+    new_attrs: dict[str, Any] = {}
+    if len(targets) == 1:
+        new_attrs["actual_depth"] = float(targets[0])
+        if between[0] is not None:
+            new_attrs["depth_interpolated_between"] = between[0]
+        return parts_t[0], parts_r[0], new_attrs
+    index = pd.Index(_from_positive_down(np.asarray(targets), coord), name=zdim)
+    out = []
+    for parts, lane in ((parts_t, test), (parts_r, reference)):
+        joined = _keep_attrs(xr.concat(parts, dim=index), lane)
+        joined[zdim].attrs = dict(coord.attrs)
+        out.append(joined)
+    return out[0], out[1], new_attrs
+
+
 def _prune_scored_over(attrs: dict[str, Any], out: xr.Dataset) -> None:
     """Drop from ``scored_over`` every axis the derivation reduced away."""
     from ocean_skill import operators
@@ -373,6 +508,7 @@ def derive(
     feature_type: str,
     obs_levels=None,
     subject: str = "the observations",
+    depth_method=None,
 ) -> xr.Dataset:
     """Apply the request's slicing and averaging to the base, as today's aligned pair.
 
@@ -395,6 +531,15 @@ def derive(
     ``obs_levels`` names the levels the pairs sit at when the base has no depth axis to
     read them from -- a mooring's one instrument depth -- so a request naming that depth
     is recognised as the base itself rather than refused as unsampled.
+
+    ``depth_method`` answers a single depth the observations never sampled (see
+    :func:`derivable`; it is ignored for a base with no depth axis, which has nothing
+    to pick or interpolate along). ``"nearest"`` takes the closest level for a scalar
+    depth and records the asked depth as ``depth_requested`` beside ``actual_depth``;
+    ``"interp"``/``"linear"`` interpolates test and reference separately between the
+    two levels either side (NaN in either bracketing level gives NaN), for a scalar
+    sets ``actual_depth`` to the depth asked and ``depth_interpolated_between`` to the
+    two levels used, and for a list returns a depth axis at the targets.
     """
     from ocean_skill import align, operators
 
@@ -406,6 +551,7 @@ def derive(
         feature_type=feature_type,
         obs_levels=_levels_of(base, zdim) if zdim is not None else obs_levels,
         detide=detide,
+        depth_method=depth_method if zdim is not None else None,
     )
     if not ok:
         raise ValueError(f"cannot derive this comparison from saved pairs: {why}")
@@ -464,9 +610,23 @@ def derive(
     elif zdim is not None and kind in ("scalar", "levels"):
         wanted = [payload] if kind == "scalar" else payload
         idx = [int(np.abs(levels - d).argmin()) for d in wanted]
-        if kind == "scalar" and not z_mean:
+        off_bin = [
+            d
+            for d, i in zip(wanted, idx, strict=True)
+            if abs(levels[i] - d) > _LEVEL_TOLERANCE
+        ]
+        if off_bin and depth_method in _INTERP_METHODS and not z_mean:
+            # derivable() only lets these through inside the levels' range
+            test, reference, new_attrs = _interpolate_depth(
+                test, reference, base[zdim], levels, wanted, zdim
+            )
+            attrs.pop("actual_depth", None)
+            attrs.update(new_attrs)
+        elif kind == "scalar" and not z_mean:
             test, reference = test.isel({zdim: idx[0]}), reference.isel({zdim: idx[0]})
             attrs["actual_depth"] = float(levels[idx[0]])
+            if off_bin:
+                attrs["depth_requested"] = float(payload)
         elif z_mean:
             test, reference = _joint(
                 test.isel({zdim: idx}), reference.isel({zdim: idx})
