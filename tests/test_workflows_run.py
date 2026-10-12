@@ -507,7 +507,7 @@ def test_field_page_forwards_qc_detide_and_label(tmp_path, monkeypatch):
 
     assert result.pages[0].status == "ok", result.pages[0].reason
     assert captured["qc"] == {"range": [-2, 40]}
-    assert captured["detide"] == {"T": 33.0}
+    assert captured["detide"] == {"T": 33.0, "max_gap": 6.0}
 
 
 def test_field_page_rejects_a_cache_kwarg(tmp_path, stub_model):

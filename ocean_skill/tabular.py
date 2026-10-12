@@ -128,6 +128,10 @@ DEPTH_DISAGREEMENT_TOLERANCE = 1.0
 #: How far a "fixed" station may wander before it is really a trajectory (degrees).
 FIXED_POSITION_TOLERANCE = 1e-4
 
+#: How far a ship may drift during one declared cast and still have a position
+#: (degrees, ~1 km): the median is used, with a warning (see :func:`_station_position`).
+CAST_DRIFT_TOLERANCE = 0.01
+
 
 def is_frame(obj) -> bool:
     """Whether ``obj`` is a DataFrame-like table rather than an xarray object.
@@ -1260,13 +1264,16 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
     lon_col = _axis_column(frame, meta, "X")
     lat_col = _axis_column(frame, meta, "Y")
     time_col = _axis_column(frame, meta, "T")
-    lon = _scalar_position(frame, lon_col, "X")
-    lat = _scalar_position(frame, lat_col, "Y")
     # One cast of a transect (ocean_skill.casts) states its own position -- the ship
     # drifted while it was on station -- and its samples span minutes by construction.
     cast = meta.get("cast") if isinstance(meta.get("cast"), dict) else {}
     if np.isfinite(cast.get("lon", np.nan)) and np.isfinite(cast.get("lat", np.nan)):
         lon, lat = float(cast["lon"]), float(cast["lat"])
+    else:
+        # A declared profile is one station, though its ship drifts ~1 km during a cast.
+        lon, lat = _station_position(
+            frame, lon_col, lat_col, subject=subject, within=CAST_DRIFT_TOLERANCE
+        )
 
     time = None
     if time_col is not None:
@@ -1330,22 +1337,31 @@ def _profile_dataset(df, meta: dict[str, Any], *, subject: str):
 
 
 def _station_position(
-    frame, lon_col: str | None, lat_col: str | None, *, subject: str
+    frame,
+    lon_col: str | None,
+    lat_col: str | None,
+    *,
+    subject: str,
+    within: float | None = None,
 ) -> tuple[float | None, float | None]:
     """Return ``(lon, lat)`` for a *declared* fixed station, tolerating GPS wobble.
 
-    Unlike :func:`_scalar_position` (used by the plain time/profile builds, where a
-    spread beyond :data:`FIXED_POSITION_TOLERANCE` means "this is actually a
-    trajectory, not a fixed station"), a ``timeSeriesProfile`` entry has already
-    declared itself a fixed station repeat-visited over time. Ordinary GPS noise or
-    re-anchoring between separate visits (seen: 100-400 m across a season of CTD
-    casts at one named station) should not silently relabel it a trajectory or
-    throw the position away -- the median position is used instead, with a warning
-    naming the spread, whenever :func:`_scalar_position` finds it exceeds tolerance.
+    Unlike :func:`_scalar_position` (used by the plain time build, where a spread
+    beyond :data:`FIXED_POSITION_TOLERANCE` means "this is actually a trajectory, not
+    a fixed station"), a ``timeSeriesProfile`` entry has already declared itself a
+    fixed station repeat-visited over time. Ordinary GPS noise or re-anchoring between
+    separate visits (seen: 100-400 m across a season of CTD casts at one named
+    station) should not silently relabel it a trajectory or throw the position away
+    -- the median position is used instead, with a warning naming the spread,
+    whenever :func:`_scalar_position` finds it exceeds tolerance.
+
+    ``within`` is for a ``profile``, one cast whose ship drifts while on station: a
+    spread past it (degrees) is not one station after all, and stays what
+    :func:`_scalar_position` said.
     """
     lon = _scalar_position(frame, lon_col, "X")
     lat = _scalar_position(frame, lat_col, "Y")
-    if lon is not None or lon_col is None:
+    if lon_col is None or (lon is not None and (lat is not None or lat_col is None)):
         return lon, lat
 
     lon_values = numeric_in_range(frame[lon_col], "X").to_numpy()
@@ -1367,12 +1383,22 @@ def _station_position(
     spread_m = max(
         lon_deg * 111_000 * float(np.cos(np.radians(mid_lat))), lat_deg * 111_000
     )
+    spread_deg = max(lon_deg, lat_deg)
+    if spread_deg <= FIXED_POSITION_TOLERANCE or (
+        within is not None and spread_deg > within
+    ):
+        return lon, lat  # nothing to smooth over, or too far to be one station
+    how = (
+        "across visits — ordinary GPS/positioning wobble for a declared fixed "
+        "station, not a trajectory. Using the median position for the whole record."
+        if within is None
+        else "during the cast — ship drift on station, not a trajectory. Using the "
+        "median position for the cast."
+    )
     warnings.warn(
-        f"{subject}: longitude/latitude vary by up to ~{max(lon_deg, lat_deg):.4f}"
+        f"{subject}: longitude/latitude vary by up to ~{spread_deg:.4f}"
         f"\N{DEGREE SIGN} (spread up to ~{spread_m:.0f} m, the larger of the "
-        "east-west and north-south ranges) across visits — ordinary GPS/positioning "
-        "wobble for a declared fixed station, not a trajectory. Using the median "
-        "position for the whole record.",
+        f"east-west and north-south ranges) {how}",
         stacklevel=_stacklevel.find(),
     )
     return float(np.median(lon_finite)), (

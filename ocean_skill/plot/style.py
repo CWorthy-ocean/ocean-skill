@@ -310,7 +310,7 @@ def resolve(
     colours = _levels(specs, channels["color"])
     if colors is not None and not colours:
         raise ValueError(
-            f"colors={colors!r} was given, but the colour channel is off "
+            f"colors={colors!r} was given, but the color channel is off "
             "(encode sets it to None) -- there is no level left to key it on."
         )
     color_map = {}

@@ -270,8 +270,8 @@ def resolve_location_legend(legend: Any) -> bool | str:
     if legend is True or legend is False or legend == "annotate":
         return legend
     raise ValueError(
-        f"legend={legend!r} is not recognised for locations; use True (a framed "
-        'key), False (none) or "annotate" (write each labelled selection\'s name '
+        f"legend={legend!r} is not recognized for locations; use True (a framed "
+        'key), False (none) or "annotate" (write each labeled selection\'s name '
         "beside its shape)."
     )
 
@@ -403,13 +403,13 @@ def _resolve_group_colors(
     if isinstance(colors, (list, tuple)):
         if not colors:
             raise ValueError(
-                "colors is empty -- give at least one colour, or None for the default "
+                "colors is empty -- give at least one color, or None for the default "
                 "palette."
             )
         return tuple(colors), {}
     raise TypeError(
-        "colors must be a colour string, a list of colours or a "
-        f"{{legend label: colour}} dict, not {type(colors).__name__}"
+        "colors must be a color string, a list of colors or a "
+        f"{{legend label: color}} dict, not {type(colors).__name__}"
     )
 
 

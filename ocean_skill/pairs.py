@@ -308,6 +308,7 @@ def _detide(ds: xr.Dataset, detide: Any) -> xr.Dataset:
     regular series, and only worth running where the cadence resolves the tide.
     """
     from ocean_skill.comparison import _normalize_detide
+    from ocean_skill.detide import _max_gap_of
     from ocean_skill.detide import detide as run_detide
 
     spec = _normalize_detide(detide)
@@ -334,7 +335,12 @@ def _detide(ds: xr.Dataset, detide: Any) -> xr.Dataset:
                 stacklevel=_stacklevel.find(),
             )
             continue
-        ds[role] = run_detide(ds[role], T=side["T"], component="subtidal")
+        ds[role] = run_detide(
+            ds[role],
+            T=side["T"],
+            component="subtidal",
+            max_gap=_max_gap_of(side),
+        )
     return ds
 
 

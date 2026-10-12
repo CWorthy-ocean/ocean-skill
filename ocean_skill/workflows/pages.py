@@ -1037,7 +1037,7 @@ def _expand_xy_page(
     if args.at_center and not args.regions:
         raise ValueError(
             f"page {title!r}: {kind}: at_center: needs regions: -- it samples a "
-            "member at each region's centre"
+            "member at each region's center"
         )
     if args.regions is not None:
         from ocean_skill.xy import normalize_regions

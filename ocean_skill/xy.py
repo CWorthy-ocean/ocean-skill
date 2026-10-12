@@ -410,7 +410,7 @@ class XY:
             )
         if self.at_center and self.regions is None:
             raise ValueError(
-                "at_center samples each region's centre, so it needs regions= -- "
+                "at_center samples each region's center, so it needs regions= -- "
                 "without regions, give that member a point in its own select."
             )
         self._pairs: dict[str, tuple[Field, Field]] | None = None
@@ -635,7 +635,7 @@ class XY:
                     if self.regions is not None
                     else f"regions= with at_center=[{label!r}]"
                 )
-                + " to sample its nearest cell to the centre instead."
+                + " to sample its nearest cell to the center instead."
             )
         warnings.warn(
             f"skipping member {label!r}{where}: {reason}{hint}",

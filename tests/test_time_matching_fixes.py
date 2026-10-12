@@ -285,8 +285,8 @@ def _units_pair(t_units, r_units):
         ),
         (None, "PSU", "the test has no units attribute (the reference is 'PSU')"),
         (None, None, "neither the test nor the reference has a units attribute"),
-        ("$$bad", "mmol/m^3", "the test's units '$$bad' are not recognised"),
-        ("mmol/m^3", "$$bad", "the reference's units '$$bad' are not recognised"),
+        ("$$bad", "mmol/m^3", "the test's units '$$bad' are not recognized"),
+        ("mmol/m^3", "$$bad", "the reference's units '$$bad' are not recognized"),
     ],
 )
 def test_the_units_warning_says_which_side_is_the_problem(t_units, r_units, fragment):

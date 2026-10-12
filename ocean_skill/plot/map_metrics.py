@@ -366,7 +366,7 @@ def _model_grid(test_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray] | N
         warnings.warn(
             f"{test_name!r} declares no land mask ('mask_rho') — the interpolated "
             "surface will cover its whole grid, land included. The map's own "
-            "coastline is still drawn on top, but the colour underneath it is not "
+            "coastline is still drawn on top, but the color underneath it is not "
             "physically meaningful there.",
             stacklevel=_stacklevel.find(),
         )

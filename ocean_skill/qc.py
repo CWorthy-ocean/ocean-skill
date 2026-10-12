@@ -269,6 +269,7 @@ _MEANING_TO_QARTOD: tuple[tuple[str, str], ...] = (
     ("nominal", "GOOD"),
     ("fail", "FAIL"),
     ("bad", "FAIL"),
+    ("pass", "GOOD"),  # QARTOD's own "PASS" (AOOS declares 1: PASS), after fail/bad
     ("good", "GOOD"),
 )
 

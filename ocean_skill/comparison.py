@@ -26,6 +26,7 @@ import numpy as np
 from ocean_skill import depth_convention as depth_convention_module
 from ocean_skill import time_zone as time_zone_module
 from ocean_skill._docs import graft_from, graft_plot_options
+from ocean_skill.detide import _max_gap_of
 
 __all__ = [
     "COLUMN",
@@ -1050,17 +1051,21 @@ def _normalize_detide_side(value: Any) -> dict[str, Any] | None:
     if value is None or value is False:
         return None
     if value is True:
-        return {"T": _DEFAULT_DETIDE_T}
+        return {"T": _DEFAULT_DETIDE_T, "max_gap": _max_gap_of({})}
     if isinstance(value, dict):
-        extra = value.keys() - {"T"}
+        extra = value.keys() - {"T", "max_gap"}
         if extra:
             raise ValueError(
-                "detide=...'s spec takes only 'T'; got extra key(s) "
+                "detide=...'s spec takes only 'T' and 'max_gap'; got extra key(s) "
                 f"{sorted(extra)}. {value!r}"
             )
-        return {"T": float(value.get("T", _DEFAULT_DETIDE_T))}
+        return {
+            "T": float(value.get("T", _DEFAULT_DETIDE_T)),
+            "max_gap": _max_gap_of(value),
+        }
     raise TypeError(
-        f"detide= must be True, False, or a {{'T': hours}} dict; got {value!r}"
+        "detide= must be True, False, or a {'T': hours, 'max_gap': ...} dict; "
+        f"got {value!r}"
     )
 
 
@@ -2053,7 +2058,12 @@ def _with_free_surface(
 
         time_coord = find_coord(zeta, "time")
         if time_coord is not None and time_coord.name in zeta.dims:
-            zeta = _run_detide(zeta, T=detide["T"], component="subtidal")
+            zeta = _run_detide(
+                zeta,
+                T=detide["T"],
+                component="subtidal",
+                max_gap=_max_gap_of(detide),
+            )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         zeta = _select_horizontal_then_aggregate(
@@ -2895,7 +2905,12 @@ def _prepare(
                 stacklevel=_stacklevel.find(),
             )
         else:
-            da = _run_detide(da, T=detide["T"], component="subtidal")
+            da = _run_detide(
+                da,
+                T=detide["T"],
+                component="subtidal",
+                max_gap=_max_gap_of(detide),
+            )
             detided = True
 
     # A plain surface request is a free isel -- unlike to_depth/depth_band/to_sigma0,
@@ -3229,9 +3244,9 @@ def _prepare(
                     )
                 except (TypeError, ValueError):
                     raise ValueError(
-                        f"cannot read {depth!r} as a depth selection: use metres (50), "
+                        f"cannot read {depth!r} as a depth selection: use meters (50), "
                         '"surface", a band ({"min": 0, "max": 10}), or a list mixing '
-                        'metres and "surface" (["surface", 50, 100]).'
+                        'meters and "surface" (["surface", 50, 100]).'
                     ) from None
                 support = depth_convention["support"]
                 if support != "point" and isinstance(targets, float):
@@ -4028,8 +4043,14 @@ def prepare_source(
             # Re-keys only a non-default choice -- see time_targets_method=`s
             # own docstring paragraph -- so a "nearest" lane's key (the
             # overwhelming majority, and everything cached before this option
-            # existed) is untouched.
-            key_select["_time_targets_method"] = time_targets_method
+            # existed) is untouched. Carries the gap rule too (a target in a gap
+            # in the record is dropped, not interpolated across; see
+            # align.TIME_GAP_FACTOR), so a lane that bridged one is not served.
+            from ocean_skill.align import TIME_GAP_FACTOR
+
+            key_select["_time_targets_method"] = (
+                f"{time_targets_method}:gap{TIME_GAP_FACTOR:g}"
+            )
     if effective_qc is not None:
         key_select["_qc"] = {
             "keep": sorted(str(v) for v in (effective_qc.get("keep") or [])),
@@ -4039,7 +4060,11 @@ def prepare_source(
             "off": bool(effective_qc.get("off")),
         }
     if detide is not None:
-        key_select["_detide"] = {"filter": "PL33", "T": detide["T"]}
+        key_select["_detide"] = {
+            "filter": "PL33",
+            "T": detide["T"],
+            "max_gap": _max_gap_of(detide),
+        }
     if literal_depths:
         # Re-keys only a lane that actually asked for this treatment -- see the
         # literal_depths= docstring paragraph above -- so every lane cached before
@@ -4962,6 +4987,9 @@ class Comparison:
         # align() call it, and it reads the reference to get it. _UNSET marks
         # "not computed yet" without colliding with a genuine None result.
         self._time_targets_cache = _UNSET
+        # Whether the "interp was asked for but cannot apply" warning has been said (see
+        # _interpolates_onto_profile, which cache key and align() both call).
+        self._interp_fallback_warned = False
         # Memoized the same way, for the same reason (a catalog lookup, and ``None`` --
         # "the reference resolved no frame" -- is itself a result worth keeping).
         self._depth_frame_cache = _UNSET
@@ -5507,16 +5535,32 @@ class Comparison:
         it to the machinery a mooring's times already travel through
         (:func:`ocean_skill.align.subset_to_time_targets`), which interpolates the
         whole lane -- free surface and depth frame included. A pair-spec select stays
-        unrouted, as it does everywhere this reads the reference's own times, and so
-        does a collection of casts (a section), which has no single instant.
+        unrouted, as it does everywhere this reads the reference's own times (with one
+        warning: the nearest step is then used where interpolation was asked for), and
+        so does a collection of casts (a section), which has no single instant -- each
+        cast is compared as a profile of its own, and those interpolate (see
+        :meth:`_prepare_section_from_casts`).
         """
         sources = self._reference_sources()
-        return (
-            self.time_method in ("interp", "linear")
-            and not is_pair_spec(self.select)
-            and len(sources) == 1
-            and _feature_type(sources[0]) == "profile"
-        )
+        if self.time_method not in ("interp", "linear") or len(sources) != 1:
+            return False
+        if _feature_type(sources[0]) != "profile":
+            return False
+        if is_pair_spec(self.select):
+            if not self._interp_fallback_warned:
+                import warnings
+
+                from ocean_skill import _stacklevel
+
+                self._interp_fallback_warned = True
+                warnings.warn(
+                    f"time_method={self.time_method!r} cannot interpolate onto a "
+                    "cast's instant under a pair-spec select (each lane is selected "
+                    "on its own), so the nearest model step is used instead.",
+                    stacklevel=_stacklevel.find(),
+                )
+            return False
+        return True
 
     def _outside_the_record(self, start: Any, stop: Any):
         """Return the ``NoValidData`` for a target the model's record misses."""
@@ -5527,11 +5571,35 @@ class Comparison:
         return NoValidData(
             f"time_method={self.time_method!r} interpolates {self.test_name!r} onto "
             f"{self.reference_name!r}'s own instant, which falls outside the model's "
-            f"record ({pd.Timestamp(start)} to {pd.Timestamp(stop)}) -- there is no "
-            "step on both sides to interpolate between, and quietly taking the "
-            "nearest one instead would be a different comparison. Leave time_method "
-            "at its default to match the nearest step, or drop this cast."
+            f"record ({pd.Timestamp(start)} to {pd.Timestamp(stop)}), or in a gap in "
+            "it -- there is no step close enough on both sides to interpolate between, "
+            "and quietly taking the nearest one instead would be a different "
+            "comparison. Leave time_method at its default to match the nearest step "
+            "(within its reach), or drop this cast."
         )
+
+    def _reference_is_composite(self, obj, meta: dict) -> bool:
+        """Whether the reference's steps are period averages (as alignment reads them).
+
+        :func:`ocean_skill.align.is_composite` on the reference's own variable when it
+        is a plain name (its ``cell_methods``), then on the catalog ``period``; "nothing
+        says" counts as not a composite here, where alignment would take it for one --
+        pruning a lane is only wrong when the reference *declares* averages to score
+        the model's mean against.
+        """
+        import warnings
+
+        from ocean_skill.align import is_composite
+        from ocean_skill.operators import DERIVED
+        from ocean_skill.units import find_variable
+
+        spec = variable_for(self.variable, "reference")
+        da = None
+        if isinstance(spec, str) and spec not in DERIVED:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # the lane's own read says so
+                da = find_variable(obj, spec)
+        return bool(is_composite(obj if da is None else da, "time", meta))
 
     def _reference_time_targets(self) -> np.ndarray | None:
         """Memoized :meth:`_reference_time_targets_uncached`.
@@ -5564,7 +5632,11 @@ class Comparison:
         *and* time together, which a time-only prune here could get wrong). A
         pair-spec select stays unrouted for the same reason
         :meth:`_reference_narrowing` leaves it alone: two independently-named
-        recipes, not one this can second-guess.
+        recipes, not one this can second-guess. So does a reference that declares its
+        steps period averages (a catalog ``period``, a ``cell_methods`` of ``time:
+        mean``; :meth:`_reference_is_composite`) when ``over`` keeps time: the model's
+        mean over each period is what it is scored against, and a lane cut to one step
+        per period has no mean left to take.
 
         ``_reference_narrowing`` only ever narrows the test lane to the
         reference's declared *coverage* -- ``(start, stop)``, a contiguous span
@@ -5653,6 +5725,7 @@ class Comparison:
             ref_qc = qc_for(self.qc, "reference")
             read_kwargs = {"qc": ref_qc} if ref_qc is not None else {}
             all_values = []
+            composite = False
             for source in sources:
                 meta = resolve(source).metadata
                 constraints = erddap_constraints(meta, ref_select, None)
@@ -5663,6 +5736,7 @@ class Comparison:
                 )
                 if tabular.is_frame(obj):
                     obj = tabular.to_dataset(obj, meta)
+                composite = composite or self._reference_is_composite(obj, meta)
                 coord = find_coord(obj, "time")
                 if coord is None:
                     continue
@@ -5674,6 +5748,13 @@ class Comparison:
         except Exception:
             return None
         if not all_values:
+            return None
+        if composite and over_is_time and not (collapses_time or folds_time):
+            # Period averages (daily means, say) are scored against the model's mean
+            # over each of their periods, and the match averages whatever steps the
+            # lane holds -- cut to the one nearest each stamp, that mean is a snapshot.
+            # Left unpruned; the coarser reference then reads the whole window, which
+            # is the data its means are over.
             return None
         values = np.unique(np.concatenate(all_values))
         if interp_profile and not collapses_time:
@@ -5952,6 +6033,12 @@ class Comparison:
             extra["_ref_time_targets"] = hashlib.sha1(
                 ",".join(sorted(str(t) for t in ref_targets)).encode()
             ).hexdigest()
+            if self.time_method in ("interp", "linear"):
+                # Interpolating onto those targets drops one in a gap in the model's
+                # record (align.TIME_GAP_FACTOR) -- an entry that bridged it is stale.
+                from ocean_skill.align import TIME_GAP_FACTOR
+
+                extra["_time_gap_factor"] = TIME_GAP_FACTOR
         # A time aggregate that collapses time now also crops the *reference* (and
         # prunes its cast times) to the *test* source's own catalog-declared record
         # -- see align()'s window/time_targets fallbacks -- which changes the
@@ -6330,7 +6417,7 @@ class Comparison:
             else:
                 return no(
                     "a station's pairs are at its one level, so only a plain depth "
-                    "(in metres), the surface of a surface station, or a layer "
+                    "(in meters), the surface of a surface station, or a layer "
                     "holding the instrument can be derived, not a list"
                 )
         ok, why = pairs.derivable(
@@ -12389,7 +12476,11 @@ def compare(
     depth frame with it) instead of being matched to the nearest step, which is what
     the default still does. Interpolation never extrapolates, so a cast outside the
     model's record is skipped (``NoValidData``) rather than snapped to its nearest
-    step.
+    step -- and never interpolates across a gap in it, a cast whose two steps are more
+    than 1.5x the record's usual step apart (a missing day in an hourly store) being
+    skipped the same way. The default nearest match has the same reach ``over="time"``
+    matching does: a cast more than half the model's usual step from its nearest step
+    is skipped, ``tolerance=`` (seconds) widening it.
 
     ``depth_method`` is the vertical twin of ``time_method``, and applies whenever a
     depth-resolved lane is asked for -- an ADCP mooring or CTD profile
@@ -13207,7 +13298,7 @@ def compare(
                     f"{var!r} is a calculated diagnostic, which already reduces the "
                     f"vertical axis itself, so {' and '.join(asked)} does not apply "
                     "to it and is being dropped for this variable rather than "
-                    "honoured. Compare it on its own without a depth request, or "
+                    "honored. Compare it on its own without a depth request, or "
                     "leave depths=/select= to the variables that do carry a "
                     "vertical axis.",
                     stacklevel=_stacklevel.find(),
@@ -13303,7 +13394,7 @@ def compare(
                         f"{longest} -- they look like raw samples at their own "
                         "depths, not binned onto shared levels, so they cannot be "
                         "stacked into one section as they are. Name the levels "
-                        "(select={'depth': [...]}, e.g. every metre), or compare "
+                        "(select={'depth': [...]}, e.g. every meter), or compare "
                         f"them cast by cast (reference=osk.cast_names({entry!r}))."
                     )
                 if len(levels) < 2:

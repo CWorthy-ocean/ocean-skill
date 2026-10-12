@@ -639,8 +639,15 @@ def subset_to_time(obj, window):
     return obj if out.sizes.get(name, 0) == 0 else out
 
 
+#: How many of a lane's usual steps may lie between the two steps interpolation brackets
+#: a target with before the target counts as falling in a *gap* in the record (a
+#: corrupted day, a missing file) rather than between neighbours. Folded into the cache
+#: key of an interpolating lane and comparison, so changing it re-keys what it changes.
+TIME_GAP_FACTOR = 1.5
+
+
 def _time_target_steps(values, targets, method: str):
-    """Return ``(pos, in_span)``: the steps of ``values`` that ``targets`` use.
+    """Return ``(pos, in_span, in_gap)``: the steps of ``values`` that ``targets`` use.
 
     ``values`` is a time axis already strictly ascending and unique (see
     :func:`_sorted_unique_on`). The one place that decides which steps a discrete time
@@ -651,7 +658,10 @@ def _time_target_steps(values, targets, method: str):
     target's single nearest step, and every target is in span (nearest has no span to
     miss); ``"interp"``/``"linear"`` use the step *before* and the step *after* each
     target (``pandas``' own ``ffill``/``bfill`` indexers), and a target with no step on
-    one side is out of span and uses none.
+    one side is out of span and uses none. A target whose two steps are further apart
+    than :data:`TIME_GAP_FACTOR` times the axis' median step is ``in_gap`` and uses none
+    either: interpolating across a hole in the record would answer from steps days from
+    the target. A target on a step has one step on both sides, and is never in a gap.
     """
     import pandas as pd
 
@@ -659,11 +669,15 @@ def _time_target_steps(values, targets, method: str):
     targets = np.asarray(targets)
     if method not in ("interp", "linear"):
         pos = idx.get_indexer(targets, method="nearest")
-        return np.unique(pos[pos >= 0]), np.ones(targets.shape, dtype=bool)
+        every = np.ones(targets.shape, dtype=bool)
+        return np.unique(pos[pos >= 0]), every, ~every
     lo = idx.get_indexer(targets, method="ffill")
     hi = idx.get_indexer(targets, method="bfill")
     in_span = (lo >= 0) & (hi >= 0)
-    return np.unique(np.concatenate([lo[in_span], hi[in_span]])), in_span
+    width = values[np.where(in_span, hi, 0)] - values[np.where(in_span, lo, 0)]
+    in_gap = in_span & (width > TIME_GAP_FACTOR * np.median(np.diff(values)))
+    use = in_span & ~in_gap
+    return np.unique(np.concatenate([lo[use], hi[use]])), in_span, in_gap
 
 
 def _warn_targets_outside_span(name: str, values, dropped) -> None:
@@ -682,6 +696,36 @@ def _warn_targets_outside_span(name: str, values, dropped) -> None:
     )
 
 
+def _warn_targets_in_gap(name: str, values, dropped) -> None:
+    """Warn that the ``dropped`` target times fall in a gap in the record."""
+    import pandas as pd
+
+    step = np.median(np.diff(values))
+    usual = str(step)
+    if step.dtype.kind == "m":
+        usual = _duration(step / np.timedelta64(1, "s"))
+    first = ", ".join(str(pd.Timestamp(t)) for t in dropped[:3])
+    warnings.warn(
+        f"{dropped.size} target time(s) fall in a gap in {name!r}'s record -- the "
+        f"steps either side of them are more than {TIME_GAP_FACTOR:g}x its usual "
+        f"{usual} apart -- dropped rather than interpolated across: {first}"
+        f"{', ...' if dropped.size > 3 else ''}.",
+        stacklevel=_stacklevel.find(),
+    )
+
+
+def _warn_dropped_targets(name: str, values, targets, in_span, in_gap):
+    """Warn about each kind of target :func:`_time_target_steps` cannot use.
+
+    Returns the mask of those it can, for the callers' two steps to share.
+    """
+    if not in_span.all():
+        _warn_targets_outside_span(name, values, targets[~in_span])
+    if in_gap.any():
+        _warn_targets_in_gap(name, values, targets[in_gap])
+    return in_span & ~in_gap
+
+
 def preselect_time_targets(obj, targets, method: str = "nearest"):
     """Return ``(obj, targets)``, ``obj`` cut by indexing to the steps it will use.
 
@@ -698,10 +742,11 @@ def preselect_time_targets(obj, targets, method: str = "nearest"):
     it would have given on the whole axis: every step it looks at is still there, and
     still the nearest or the bracketing one.
 
-    ``targets`` comes back narrowed to the ones in span, for ``interp``: an out-of-span
-    target is reported here, once, against the whole axis (see
-    :func:`_warn_targets_outside_span`), where the cut object's span would misstate the
-    record. Hand the returned ``targets`` to :func:`subset_to_time_targets` afterwards.
+    ``targets`` comes back narrowed to the ones in span and not in a gap, for
+    ``interp``: such a target is reported here, once, against the whole axis (see
+    :func:`_warn_dropped_targets`), where the cut object's span and step would misstate
+    the record. Hand the returned ``targets`` to :func:`subset_to_time_targets`
+    afterwards.
     ``(obj, targets)`` come back unchanged whenever there is nothing to cut: no time
     dimension, no targets, a single step, every step in use -- or no target in span,
     which :func:`subset_to_time_targets` meets with the whole object, as before.
@@ -726,10 +771,10 @@ def preselect_time_targets(obj, targets, method: str = "nearest"):
     if values.size <= 1:
         return obj, targets
     targets = np.asarray(targets)
-    pos, in_span = _time_target_steps(values, targets, method)
-    if not in_span.all():
-        _warn_targets_outside_span(name, values, targets[~in_span])
-        targets = targets[in_span]
+    pos, in_span, in_gap = _time_target_steps(values, targets, method)
+    keep = _warn_dropped_targets(name, values, targets, in_span, in_gap)
+    if not keep.all():
+        targets = targets[keep]
     if pos.size == 0 or pos.size == values.size:
         return obj, targets
     if first is not None:
@@ -772,7 +817,8 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     bracket to interpolate from and is dropped, with a warning -- no
     extrapolation, the same convention :func:`_match_vertical` uses past its test
     lane's own range (and :func:`ocean_skill.roms.to_depth` outside the water column
-    itself).
+    itself). So is a target in a gap in the record, whose two steps are further apart
+    than :data:`TIME_GAP_FACTOR` of its usual step (see :func:`_time_target_steps`).
     Unlike ``"nearest"``, this never takes the "keep everything, nothing to
     prune" shortcut: even when every target already falls inside the record,
     the object must still land exactly *on* the cast instants, not merely
@@ -806,17 +852,16 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     if values.size <= 1:
         return obj
     targets = np.asarray(targets)
-    pos, in_span = _time_target_steps(values, targets, method)
+    pos, in_span, in_gap = _time_target_steps(values, targets, method)
     if method not in ("interp", "linear"):
         if pos.size == 0 or pos.size == values.size:
             return obj
         return obj.isel({name: pos})
 
-    if not in_span.all():
-        _warn_targets_outside_span(name, values, targets[~in_span])
-    if not in_span.any():
+    keep = _warn_dropped_targets(name, values, targets, in_span, in_gap)
+    if not keep.any():
         return obj
-    targets = targets[in_span]
+    targets = targets[keep]
     cropped = obj.isel({name: pos})
     if values.dtype.kind == "M" and targets.dtype.kind == "M":
         # One resolution on both sides first: interp reads a datetime64 axis and its
@@ -1301,7 +1346,7 @@ def _check_units(test, reference):
     else:
         # both present, so `compatible` was None because a spelling did not parse
         why = " and ".join(
-            f"the {role}'s units {u!r} are not recognised"
+            f"the {role}'s units {u!r} are not recognized"
             for role, u in (("test", t_units), ("reference", r_units))
             if _units.parse(u) is None
         )
@@ -1367,7 +1412,46 @@ def _require_2d(da, role: str, *, keep: tuple[str, ...] = ()) -> None:
     )
 
 
-def _sample_test_at_instant(test, reference, over):
+def _require_near_step(stamps, cast, chosen, tolerance=None) -> None:
+    """Raise :class:`NoValidData` when the step ``chosen`` is no snapshot of ``cast``.
+
+    ``stamps`` is the lane's time axis, ascending and unique. A cast *inside* the record
+    is refused only when the steps either side of it are more than
+    :data:`TIME_GAP_FACTOR` of the usual (median) step apart -- the rule interpolation
+    uses, from :func:`_time_target_steps` -- since on an irregular axis (monthly output,
+    28 to 31 days) a cast mid-interval is far from both neighbours with no gap at all.
+    A cast before the first step or after the last is refused when it is further from
+    it than :data:`NEAREST_TOLERANCE_FRACTION` of the usual step, the reach a nearest
+    match has along ``over="time"``. ``tolerance`` (seconds) replaces both with a plain
+    distance.
+    """
+    cast, chosen = np.datetime64(cast), np.datetime64(chosen)
+    step = np.median(np.diff(stamps)) / np.timedelta64(1, "s")
+    away = abs((chosen - cast) / np.timedelta64(1, "s"))
+    head = (
+        f"the model step nearest the cast at {np.datetime64(cast, 's')} is "
+        f"{np.datetime64(chosen, 's')}, {_duration(away)} away"
+    )
+    if tolerance is not None:
+        if away > tolerance:
+            raise NoValidData(f"{head}, beyond tolerance={_duration(tolerance)}.")
+        return
+    _, in_span, in_gap = _time_target_steps(stamps, np.atleast_1d(cast), "interp")
+    if in_gap[0]:
+        raise NoValidData(
+            f"{head}, and the cast falls in a gap in the model's record: the steps "
+            f"either side of it are more than {TIME_GAP_FACTOR:g}x its usual "
+            f"{_duration(step)} apart. A tolerance= overrides this."
+        )
+    if not in_span[0] and away > NEAREST_TOLERANCE_FRACTION * step:
+        side = "after the last" if cast > chosen else "before the first"
+        raise NoValidData(
+            f"{head}, and the cast falls {side} step of the model's record by more "
+            f"than half its usual {_duration(step)}. A tolerance= widens the reach."
+        )
+
+
+def _sample_test_at_instant(test, reference, over, tolerance=None):
     """Sample a time-varying test lane at a single-instant reference's own time.
 
     A ``profile`` reference is one CTD cast: a depth column at a single instant, its
@@ -1390,9 +1474,11 @@ def _sample_test_at_instant(test, reference, over):
       mooring recipe, where :func:`match_axis` already owns the time pairing.
 
     The chosen snapshot's stamp and its distance from the cast are recorded on the
-    result's attrs, the way :func:`sample_at` records its spatial offset: a large gap
-    (the model run barely covers the cast date) is the caller's to judge, not this to
-    refuse.
+    result's attrs, the way :func:`sample_at` records its spatial offset. A step that
+    is no snapshot of the cast -- it falls in a gap in the record, or past an end of it
+    -- is refused as :class:`NoValidData` rather than answered from a step days away
+    (see :func:`_require_near_step`; ``tolerance``, in seconds, overrides). A lane with
+    one step has no usual step, and nothing is refused.
     """
     if point_of(reference) is None:
         return test
@@ -1414,6 +1500,9 @@ def _sample_test_at_instant(test, reference, over):
             1, "h"
         )
         picked.attrs["time_to_reference_hours"] = float(np.abs(offset))
+        stamps = np.unique(np.asarray(test[tdim].values))
+        if stamps.dtype.kind == "M" and stamps.size > 1:
+            _require_near_step(stamps, rtime.values, chosen, tolerance)
     return picked
 
 
@@ -1835,12 +1924,12 @@ def _match_vertical(test, reference, tdim: str, rdim: str, *, method: str = "nea
         coord = vertical_coord_on(lane, dim)
         if coord is None:
             raise ValueError(
-                f"the {role} lane's {dim!r} axis has no metres coordinate of its "
+                f"the {role} lane's {dim!r} axis has no meters coordinate of its "
                 "own -- still in native s-coordinates (no 1-D coordinate for a "
                 "bare s_rho index, only a per-column z_rho), which varies by grid "
                 "column and so cannot be matched against the reference's fixed "
                 'levels before the test is sampled at a point. Use select='
-                '{"depth": [...]} (a list of metres) to interpolate the test onto '
+                '{"depth": [...]} (a list of meters) to interpolate the test onto '
                 'fixed levels first, rather than select={"depth": "column"} or a '
                 "band."
             )
@@ -2258,7 +2347,7 @@ def _match_by_mean(test, reference, tdim, rdim, tf, rf, bin_anchor, target="refe
         warnings.warn(
             f"{short} of the {frame_role}'s bins caught fewer than "
             f"{SHORT_BIN_FRACTION:.0%} of the usual {typical:g} {binned_role} steps, "
-            "so those steps are averages over part of a period labelled like a whole "
+            "so those steps are averages over part of a period labeled like a whole "
             "one — the first or last bin of the selection. Narrow select= to whole "
             "periods to drop them.",
             stacklevel=_stacklevel.find(),
@@ -2981,7 +3070,7 @@ def align(
         # leftover time axis (which the vertical score keeps depth, not time, so
         # nothing has reduced) is refused below. A no-op for every other shape (see
         # _sample_test_at_instant).
-        test = _sample_test_at_instant(test, reference, over)
+        test = _sample_test_at_instant(test, reference, over, tolerance=tolerance)
         # A section's own shape (vertical + along-path) is validated with its own,
         # more specific messages inside _align_along_path instead -- _require_2d's
         # "beyond its horizontal axes" reading does not apply to it.

@@ -493,7 +493,7 @@ def _explicit_colors(colors, labels: list[str]) -> dict[str, str]:
     if len(colors) < len(labels):
         raise ValueError(
             f"colors has {len(colors)} entries but there are {len(labels)} members "
-            f"({', '.join(labels)}) -- give at least one colour per member, or pass a "
+            f"({', '.join(labels)}) -- give at least one color per member, or pass a "
             "dict to style only some of them."
         )
     return {label: colors[i] for i, label in enumerate(labels)}
@@ -556,8 +556,8 @@ def _default_cmap(color_by: str):
 def _check_color_by(color_by) -> None:
     if color_by is not None and color_by not in COLOR_BY:
         raise ValueError(
-            f"color_by={color_by!r} is not something an XY plot can colour by; "
-            f"expected one of {COLOR_BY} (or None for solid colours)."
+            f"color_by={color_by!r} is not something an XY plot can color by; "
+            f"expected one of {COLOR_BY} (or None for solid colors)."
         )
 
 
@@ -577,7 +577,7 @@ def _check_pin(name: str, value, color_by: str) -> float | None:
             or not np.isfinite(value)
         ):
             raise ValueError(
-                f"{name}={value!r} is not a finite depth in metres (positive down), "
+                f"{name}={value!r} is not a finite depth in meters (positive down), "
                 "which color_by='depth' needs."
             )
         return float(value)
@@ -911,7 +911,7 @@ def compose(
         if missing:
             _warn(
                 f"color_by={color_by!r}: {', '.join(map(repr, missing))} carries no "
-                f"{color_by} values, so it is drawn in a solid colour."
+                f"{color_by} values, so it is drawn in a solid color."
             )
     coloured = [v for v in values if v is not None]
     scale = None
@@ -954,7 +954,7 @@ def compose(
             data_range=data_range,
         )
     elif color_by is not None and not missing:
-        _warn(f"color_by={color_by!r} colours points members, and there are none.")
+        _warn(f"color_by={color_by!r} colors points members, and there are none.")
 
     styled = [
         StyledXY(

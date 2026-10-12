@@ -3997,10 +3997,20 @@ def add_erddap_source(
     variables
         The ERDDAP variables (columns) to request, ``None`` for all of them. This is
         not the ``variables`` metadata key, which the probe derives and which follows
-        the merged ``standard_names``.
+        the merged ``standard_names``. With ``mask_failed_qartod`` each variable's
+        ``<name>_qc_agg`` flag column is requested too (a dataset without one simply
+        drops it), since a list naming only the data brings no flags back to mask by.
     mask_failed_qartod
-        Apply OOI's own QARTOD aggregate flags on read (the default): failed
-        observations come back as NaN instead of needing separate QC downstream.
+        Apply the provider's own QARTOD aggregate flags on read (the default): failed
+        observations come back as NaN instead of needing separate QC downstream. As
+        in intake-erddap, flags 1 and 2 (good, not evaluated) are kept and 3/4/9 are
+        masked -- the contract's ``keep`` is ``["GOOD", "UNKNOWN"]`` unless ``qc``
+        sets its own.
+        intake-erddap's own masking needs the flag columns in the table and then
+        misses them anyway, as its ``"<name> (<units>)"`` data headers never equal
+        ``"<name>_qc_agg"``; the flags that come back are masked by
+        :mod:`ocean_skill.qc` through the ``qc`` contract the probe resolves (see
+        ``qc`` below).
     probe
         Open the table once to derive extents/axes/variables/featureType and to
         resolve ``qc`` (see :func:`add_source`). A read that fails transiently is
@@ -4038,14 +4048,35 @@ def add_erddap_source(
     """
     from intake_erddap.erddap import TableDAPReader
 
+    from ocean_skill.tabular import is_qc_column
+
+    requested = list(variables) if variables else None
+    if requested and mask_failed_qartod:
+        # intake-erddap masks only with the flags in the frame, and drops names the
+        # dataset lacks -- so ask for every variable's, whether or not it has one
+        flags = [f"{v}_qc_agg" for v in requested if not is_qc_column(v)]
+        requested += [f for f in flags if f not in requested]
     reader = TableDAPReader(
         server,
         dataset_id,
-        variables=list(variables) if variables else None,
+        variables=requested,
         mask_failed_qartod=mask_failed_qartod,
         **(reader_kwargs or {}),
     )
     reader.metadata.update({"server": server, "dataset_id": dataset_id})
+
+    def resolve_qc(df):
+        spec = _declared_qc_spec(reader, server, dataset_id, df, qc)
+        if mask_failed_qartod and not (spec or {}).get("keep"):
+            from ocean_skill.qc import detect_flag_columns
+
+            if spec or detect_flag_columns(df):
+                # "mask failed" is intake-erddap's rule: keep QARTOD 1 and 2, so a
+                # stretch whose tests never ran (qc_agg 2) survives. A caller's keep
+                # wins.
+                spec = {**(spec or {}), "keep": ["GOOD", "UNKNOWN"]}
+        return spec
+
     return _attach(
         cat,
         name,
@@ -4054,7 +4085,7 @@ def add_erddap_source(
         name_map=None,
         metadata=metadata,
         # the frame the probe reads also serves the declared-flag lookup
-        resolve_qc=lambda df: _declared_qc_spec(reader, server, dataset_id, df, qc),
+        resolve_qc=resolve_qc,
     )
 
 

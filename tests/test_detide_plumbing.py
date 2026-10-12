@@ -46,36 +46,50 @@ def test_default_is_neither_lane():
 
 def test_true_is_both_lanes_at_pl33_default():
     assert _normalize_detide(True) == {
-        "test": {"T": 33.0},
-        "reference": {"T": 33.0},
+        "test": {"T": 33.0, "max_gap": 6.0},
+        "reference": {"T": 33.0, "max_gap": 6.0},
     }
 
 
 def test_string_sugar_names_one_lane():
-    assert _normalize_detide("test") == {"test": {"T": 33.0}, "reference": None}
-    assert _normalize_detide("reference") == {"test": None, "reference": {"T": 33.0}}
+    side = {"T": 33.0, "max_gap": 6.0}
+    assert _normalize_detide("test") == {"test": side, "reference": None}
+    assert _normalize_detide("reference") == {"test": None, "reference": side}
 
 
 def test_one_sided_dict_defaults_the_missing_side_to_none():
     assert _normalize_detide({"test": True}) == {
-        "test": {"T": 33.0},
+        "test": {"T": 33.0, "max_gap": 6.0},
         "reference": None,
     }
 
 
 def test_pair_dict_gives_each_lane_its_own_cutoff():
     assert _normalize_detide({"test": {"T": 72}, "reference": True}) == {
-        "test": {"T": 72.0},
-        "reference": {"T": 33.0},
+        "test": {"T": 72.0, "max_gap": 6.0},
+        "reference": {"T": 33.0, "max_gap": 6.0},
     }
 
 
 def test_bare_cutoff_dict_applies_to_both_lanes():
     # No "test"/"reference" key -- the dict counterpart of plain `True`, with T set.
     assert _normalize_detide({"T": 72}) == {
-        "test": {"T": 72.0},
-        "reference": {"T": 72.0},
+        "test": {"T": 72.0, "max_gap": 6.0},
+        "reference": {"T": 72.0, "max_gap": 6.0},
     }
+
+
+def test_max_gap_is_normalized_to_hours_and_none_bridges_everything():
+    side = _normalize_detide_side
+    assert side({"max_gap": "12h"}) == {"T": 33.0, "max_gap": 12.0}
+    assert side({"max_gap": 90}) == {"T": 33.0, "max_gap": 90.0}
+    assert side({"T": 72, "max_gap": "1D"}) == {"T": 72.0, "max_gap": 24.0}
+    assert side({"max_gap": None}) == {"T": 33.0, "max_gap": None}
+
+
+def test_a_bad_max_gap_is_refused():
+    with pytest.raises(ValueError, match="max_gap"):
+        _normalize_detide_side({"max_gap": "soon"})
 
 
 # -- normalization: rejected shapes -------------------------------------------------
@@ -105,8 +119,8 @@ def test_side_normalizer_matches_the_pair_normalizer_per_lane():
     # Field has one lane, not two -- _normalize_detide_side is what it uses directly.
     assert _normalize_detide_side(None) is None
     assert _normalize_detide_side(False) is None
-    assert _normalize_detide_side(True) == {"T": 33.0}
-    assert _normalize_detide_side({"T": 72}) == {"T": 72.0}
+    assert _normalize_detide_side(True) == {"T": 33.0, "max_gap": 6.0}
+    assert _normalize_detide_side({"T": 72}) == {"T": 72.0, "max_gap": 6.0}
 
 
 # -- Comparison: stored and defaulted -----------------------------------------------
@@ -117,7 +131,8 @@ def test_default_matches_neither_lane():
 
 
 def test_an_explicit_request_is_stored_normalized():
-    assert _bare(detide="test").detide == {"test": {"T": 33.0}, "reference": None}
+    side = {"T": 33.0, "max_gap": 6.0}
+    assert _bare(detide="test").detide == {"test": side, "reference": None}
 
 
 def test_detide_is_a_keyword_of_compare_and_defaults_to_the_same_value():
@@ -159,6 +174,12 @@ def test_different_lanes_detided_land_different_keys():
 
 def test_different_cutoffs_land_different_keys():
     assert _bare(detide={"T": 33})._cache_key != _bare(detide={"T": 72})._cache_key
+
+
+def test_different_max_gaps_land_different_keys():
+    a = _bare(detide={"max_gap": "6h"})._cache_key
+    assert a != _bare(detide={"max_gap": "24h"})._cache_key
+    assert a != _bare(detide={"max_gap": None})._cache_key
 
 
 # -- pooling identity: a detided comparison and its raw twin must stay distinct --------

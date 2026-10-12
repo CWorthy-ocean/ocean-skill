@@ -204,7 +204,7 @@ for _metric in (
     ),
     Metric(
         "crmsd",
-        "centred root-mean-square difference",
+        "centered root-mean-square difference",
         kind="skill",
         units="same",
         requires=("rmse", "bias"),

@@ -458,7 +458,7 @@ def test_series_carries_qc_and_detide(stub):
     ext = _make(qc=qc_spec, detide=True).extremum("max")
     fs = ext.series(time="2012-01")
     assert fs[0].qc == qc_spec
-    assert fs[0].detide == {"T": 33.0}
+    assert fs[0].detide == {"T": 33.0, "max_gap": 6.0}
 
 
 def test_series_cache_defaults_to_inheriting_the_parent(stub):
