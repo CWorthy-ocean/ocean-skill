@@ -66,23 +66,27 @@ Plain `http://` URLs additionally need `allow_http`, which `_store_for` sets
 automatically — object_store refuses non-TLS URLs by default, and the error it raises
 (`BadScheme`) names neither HTTP nor the option.
 
-## Prefer `.json` over `.parquet` for now
+## Parquet references
 
-The output format follows the extension. Both work, but **parquet reads back
-intermittently**: roughly 1 run in 6 over identical inputs fails with
+The output format follows the extension, `.json` or `.parquet`. Both read back reliably.
+Parquet is the better target for very large references (JSON holds every chunk record in
+memory); for a few thousand daily files, JSON is fine.
 
-```
-TypeError: boolean value of NA is ambiguous
-```
+Parquet used to fail intermittently, about 1 run in 6, with
+`TypeError: boolean value of NA is ambiguous`, even though the bytes on disk were
+identical between passing and failing runs. The cause is upstream in fsspec: its parquet
+reference writer pads every variable's refs file out to 100,000 rows with null path/raw
+entries. Opened without `remote_protocol` (plain `xr.open_dataset(..., engine="kerchunk")`
+and every catalog entry), fsspec scans the references to guess the protocol, visiting
+variables in hash-seeded order. A fully inlined variable such as the time coordinate has
+no file path, so if it is visited first the scan runs into its padding, and with pandas 3
+those nulls read back as `pd.NA`, which fsspec's truth test cannot handle. Only the hash
+seed differed between runs. `make_kerchunk`/`build_kerchunk` now trim the padding rows
+after writing, so the failure no longer occurs.
 
-from `fsspec/implementations/reference.py`, where a null column in the parquet
-reference reaches a truth test. The parquet on disk is byte-identical between passing
-and failing runs, so this is a read-side bug in fsspec/kerchunk, not a corrupt write.
-`.json` round-tripped 6/6 on the same inputs.
-
-Parquet remains the better target for very large references (JSON holds every chunk
-record in memory); use it there and re-open on failure. For a few thousand daily files,
-JSON is fine.
+Rebuild any parquet store made before this change; it still carries the padding. A store
+with genuinely missing chunks (null paths inside a variable's chunk range) can still hit
+the upstream bug; JSON is unaffected.
 
 ## Chunk size: the manifest inherits the source file's layout
 
