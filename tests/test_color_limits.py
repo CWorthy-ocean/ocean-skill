@@ -639,3 +639,156 @@ def test_time_depth_grid_vmin_vmax_pin_every_panel_even_without_shared_limits():
     for mesh in meshes:
         assert mesh.norm.vmin == pytest.approx(0.0)
         assert mesh.norm.vmax == pytest.approx(20.0)
+
+
+# --- vmin/vmax on the row, grid, map-grid and movie families, both renderers ---------
+#
+# ``vmin``/``vmax`` pin the sequential (test + reference) scale exactly -- on every row,
+# panel and frame, with ``shared_limits`` on or off -- and leave the difference panel's
+# own symmetric scale alone. Each pinned case is checked against the unpinned render.
+
+
+def _row_builders():
+    """Return ``{name: (family, items)}`` for every family that takes the pin."""
+    from tests.test_renderers import (
+        _item,
+        _section_row_item,
+        _time_depth_row_item,
+    )
+
+    def field(label):
+        return {**_item(NITRATE, "woa", label), "row_label": label}
+
+    def movie(index):
+        return {**field("n"), "frame_label": f"frame {index}"}
+
+    return {
+        "field_row": ("field_row", [field("a")]),
+        "field_grid": ("field_grid", [field("a"), field("b")]),
+        "section_row": ("section_row", [_section_row_item()]),
+        "section_row_grid": (
+            "section_row",
+            [{**_section_row_item(), "row_label": x} for x in "ab"],
+        ),
+        "time_depth_row": ("time_depth_row", [_time_depth_row_item()]),
+        "time_depth_row_grid": (
+            "time_depth_row",
+            [_time_depth_row_item("s1", "A"), _time_depth_row_item("s2", "B")],
+        ),
+        "field_movie": ("field_movie", [movie(0), movie(1)]),
+    }
+
+
+_PIN_FAMILIES = sorted(_row_builders())
+
+
+def _static_limits(fig):
+    """Return every field's ``(vmin, vmax)``: test, reference, difference order."""
+    from tests.test_colorbar_clipping import _mappables
+
+    return [(m.norm.vmin, m.norm.vmax) for m in _mappables(fig)]
+
+
+def _hv_limits(obj):
+    """Return every field's ``(vmin, vmax)`` in the interactive object."""
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    meshes = obj.traverse(lambda x: x, [hv.QuadMesh, hv.Image])
+    return [tuple(m.range(m.vdims[0].name)) for m in meshes]
+
+
+def _movie_limits_hv(obj):
+    """Limits of every frame of an interactive movie (a panel pane of HoloMaps).
+
+    The movie keeps one ``HoloMap`` per panel (test, reference, difference), all
+    sharing the frame keys, so a frame's limits are those of each map at that key.
+    """
+    import holoviews as hv
+
+    pane = getattr(obj, "object", obj)
+    maps = [el for el in pane.traverse() if isinstance(el, hv.HoloMap)]
+    return [
+        [lim for m in maps for lim in _hv_limits(m[key])]
+        for key in maps[0].kdims[0].values
+    ]
+
+
+def _render_limits(family, items, renderer, **options):
+    """Render; return each frame's per-panel limits (one frame for a still)."""
+    import matplotlib.pyplot as plt
+
+    spec = PlotSpec(family=family, items=items)
+    if renderer == "holoviews":
+        obj = render(spec, renderer="holoviews", **options)
+        return _movie_limits_hv(obj) if family == "field_movie" else [_hv_limits(obj)]
+    out = render(spec, **options)
+    if family != "field_movie":
+        frames = [_static_limits(out)]
+        plt.close(out)
+        return frames
+    frames = []
+    for index in range(len(items)):
+        out._func(index)
+        frames.append(_static_limits(out._fig))
+    plt.close(out._fig)
+    return frames
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("name", _PIN_FAMILIES)
+def test_vmin_vmax_pin_the_sequential_panels_of_every_row_and_frame(
+    name, shared, renderer
+):
+    family, items = _row_builders()[name]
+    if shared and len(items) == 1:
+        pytest.skip("a lone row has no shared_limits to pool")
+    # shared_limits belongs to the stacked/movie forms; a lone row has no pooling
+    options = {"shared_limits": shared} if len(items) > 1 else {}
+    free = _render_limits(family, items, renderer, **options)
+    pinned = _render_limits(family, items, renderer, vmin=0.0, vmax=20.0, **options)
+
+    assert len(pinned) == len(free)
+    for free_frame, frame in zip(free, pinned, strict=True):
+        assert len(frame) == len(free_frame) and len(frame) % 3 == 0
+        for index, (lo_hi, was) in enumerate(zip(frame, free_frame, strict=True)):
+            if index % 3 == 2:  # test, reference, *difference*: the pin leaves it be
+                assert lo_hi == pytest.approx(was)
+            else:
+                assert lo_hi == pytest.approx((0.0, 20.0))
+
+
+def _map_grid_items():
+    return [
+        {"field": _outlier_map(outlier=100.0), "units": "mmol m-3"},
+        {"field": _outlier_map(outlier=6.0), "units": "mmol m-3"},
+    ]
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+@pytest.mark.parametrize("shared", [False, True])
+def test_field_map_grid_vmin_vmax_pin_every_panel(shared, renderer):
+    items = [{**i, "standard_name": NITRATE} for i in _map_grid_items()]
+    options = {"shared_limits": shared, "vmin": 0.0, "vmax": 20.0}
+    (limits,) = _render_limits("field_map_grid", items, renderer, **options)
+    assert len(limits) == len(items)
+    assert limits == pytest.approx([(0.0, 20.0)] * len(items))
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+def test_vmin_vmax_beat_a_variables_declared_range(renderer):
+    """Chlorophyll is normally pinned to 0.01-10 log; the user's pin wins, still log."""
+    chl = "mass_concentration_of_chlorophyll_a_in_sea_water"
+    items = [{"field": _outlier_map(outlier=9.0), "units": "mg m-3"}]
+    items = [{**i, "standard_name": chl} for i in items]
+    (limits,) = _render_limits("field_map_grid", items, renderer, vmin=1.0, vmax=20.0)
+    assert limits == pytest.approx([(1.0, 20.0)])
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+@pytest.mark.parametrize("name", ["field_row", "section_row", "time_depth_row"])
+def test_vmin_not_below_vmax_is_refused_on_the_row_families(name, renderer):
+    family, items = _row_builders()[name]
+    with pytest.raises(ValueError, match="vmin"):
+        render(PlotSpec(family=family, items=items), renderer=renderer, vmin=5, vmax=1)
