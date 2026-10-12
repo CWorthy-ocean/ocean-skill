@@ -351,6 +351,122 @@ def test_a_colorbar_is_drawn(stub):
     assert len(fig.axes) > 1
 
 
+# -- a vertical (or time) coordinate off its own dim's index ---------------------------
+
+
+def _roms_z_point(offset: float = 0.0, depths=(0.0, 50.0, 100.0)):
+    """Build a model column in the shape ``roms.to_depth``/``nearest_depth_levels``
+    leave: the vertical dim is called ``z`` (indexed by negative target depths,
+    metres below the surface) and carries a positive-down ``depth`` coordinate
+    *on that dim* -- so the depth a panel draws against is a coordinate riding
+    on ``z``, not a dimension coordinate of its own, the shape
+    :func:`ocean_skill.plot.time_depth.prepare_time_depth` hands the renderers.
+    """
+    da = _point_time_depth(depths=depths)
+    depth = da["depth"].values
+    da = da.rename(depth="z").assign_coords(z=-depth)
+    return (da + offset).assign_attrs(da.attrs).assign_coords(depth=("z", depth))
+
+
+def _depths_drawn(element):
+    """Return the distinct depth values an interactive element plots, rounded."""
+    return np.unique(np.round(element.dimension_values("depth"), 6))
+
+
+_OFF_INDEX = {
+    # (builder, depths the panel must draw, number of time steps)
+    "roms_z": (_roms_z_point, [0.0, 50.0, 100.0], 6),
+    "native_s_rho": (
+        lambda: _native_s_rho_point(with_z_rho=True),
+        np.linspace(5.0, 100.0, 5),
+        4,
+    ),
+    "time_on_t": (
+        lambda: _point_time_depth().rename(time="t"),
+        [0.0, 50.0, 100.0],
+        6,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_OFF_INDEX))
+def test_a_mesh_draws_when_an_axis_coordinate_rides_on_another_dim(stub, case):
+    """``prepare_time_depth`` attaches ``depth`` (and, for a real time axis,
+    ``time``) as 1-D coordinates on whatever dim carries them -- ROMS's ``z``, a
+    native ``s_rho`` with ``z_rho``, a time axis called ``t``. The static mesh
+    takes those 1-D arrays as they are; the interactive one must too, and
+    failing to is invisible until bokeh *renders* it: building the
+    ``hv.QuadMesh`` succeeds, and holoviews only raises
+    (``cannot select an axis to squeeze out which has size not equal to one``)
+    when ``hv.render`` canonicalizes the grid -- which is why drawing it, not
+    just building it, is what this checks.
+    """
+    import holoviews as hv
+    from matplotlib.collections import QuadMesh
+
+    build, depths, n_time = _OFF_INDEX[case]
+    stub(build())
+    assert _make().family == "time_depth"
+
+    fig = _make().plot(mark="pcolormesh")
+    ax = fig.axes[0]
+    assert any(isinstance(c, QuadMesh) for c in ax.collections)
+    assert ax.yaxis_inverted()
+
+    obj = _make().plot(renderer="holoviews", mark="pcolormesh")
+    hv.render(obj, backend="bokeh")
+    (mesh,) = obj.traverse(lambda x: x, [hv.QuadMesh])
+    assert [d.name for d in mesh.kdims] == ["time", "depth"]
+    np.testing.assert_allclose(_depths_drawn(mesh), depths)
+    assert len(mesh.dimension_values("time", expanded=False)) == n_time
+
+
+def _z_lanes():
+    """Build a comparison's aligned trio with every lane ``(time, z)`` and ``depth``
+    on ``z`` -- what :func:`ocean_skill.align._match_time_and_depth` leaves when
+    the reference's vertical dim is not literally ``depth`` (it names each lane's
+    axes as the reference names them).
+    """
+    test, reference = _roms_z_point(offset=0.5), _roms_z_point()
+    return {"test": test, "reference": reference, "difference": test - reference}
+
+
+@pytest.mark.parametrize("mark", ["pcolormesh", "scatter"])
+def test_a_comparison_row_draws_when_its_depth_rides_on_z(mark):
+    """The :class:`~ocean_skill.comparison.Comparison` ``time_depth_row`` path:
+    three panels whose ``depth`` is a coordinate on ``z``, not a dimension. The
+    mesh hits the same render-time failure a single :class:`Field` panel does
+    (see ``test_a_mesh_draws_when_an_axis_coordinate_rides_on_another_dim``);
+    the scatter row reads its frame through ``to_dataframe`` and never did, so
+    it is here to keep both marks drawing the same row.
+    """
+    import holoviews as hv
+
+    from ocean_skill.plot import holoviews_renderer, matplotlib_renderer
+
+    aligned = _z_lanes()
+    fig = matplotlib_renderer.time_depth_row(
+        aligned,
+        mark=mark,
+        labels=("a", "b"),
+        standard_name=NITRATE,
+        units="mmol m-3",
+    )
+    assert len(fig.axes) == 5  # 3 panels + 2 colorbars (test/reference share one)
+
+    row = holoviews_renderer._time_depth_row(
+        {"aligned": aligned, "standard_name": NITRATE, "units": "mmol m-3"},
+        mark=mark,
+        labels=("a", "b"),
+    )
+    hv.render(row, backend="bokeh")
+    element = hv.QuadMesh if mark == "pcolormesh" else hv.Points
+    panels = row.traverse(lambda x: x, [element])
+    assert len(panels) == 3
+    for panel in panels:
+        np.testing.assert_allclose(_depths_drawn(panel), [0.0, 50.0, 100.0])
+
+
 # -- movie() and FieldSet.plot() refuse ---------------------------------------------------
 
 

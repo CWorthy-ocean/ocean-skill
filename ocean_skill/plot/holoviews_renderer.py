@@ -343,6 +343,31 @@ def _display_units(da, statistic):
     return da.assign_attrs(units=shown)  # a new object; the caller's attrs untouched
 
 
+def _index_on(da, *names):
+    """Return ``da`` with each 1-D coordinate in ``names`` swapped onto its own dim.
+
+    hvplot (and holoviews under it) takes a 1-D ``x``/``y`` to be a *dimension
+    coordinate*. One riding on a differently named dimension -- a ``time_depth``
+    panel's ``depth`` on ROMS's ``z`` or a native ``s_rho``, or its ``time`` on a time
+    axis not literally called ``time`` (see
+    :func:`ocean_skill.plot.time_depth.prepare_time_depth`) -- leaves that dimension
+    looking constant to holoviews, and its ``GridInterface.canonicalize`` squeezes it
+    out at *render* time (``cannot select an axis to squeeze out which has size not
+    equal to one``), long after the element was built without complaint. Swapping the
+    coordinate onto the dimension that carries it makes it the index, which is the
+    shape holoviews expects. A 2-D coordinate (a curvilinear map's lon/lat, a
+    section's distance/depth) is holoviews' irregular case and is left alone, as is
+    one that already is its own dimension. The static renderer never needs this:
+    ``pcolormesh`` takes the 1-D arrays directly.
+    """
+    swaps = {}
+    for n in names:
+        c = da.coords.get(n)
+        if c is not None and c.ndim == 1 and c.dims[0] != n:
+            swaps[c.dims[0]] = n
+    return da.swap_dims(swaps) if swaps else da
+
+
 def _quadmesh(
     da,
     *,
@@ -411,6 +436,7 @@ def _quadmesh(
     """
     import hvplot.xarray  # noqa: F401  (registers the .hvplot accessor)
 
+    da = _index_on(da, x, y)
     da = _display_units(da, statistic if statistic is not None else statistic_of(da))
     frame_w, frame_h, fontsize = _panel_geometry(
         da,
