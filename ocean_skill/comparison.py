@@ -11830,7 +11830,7 @@ def compare(
     *,
     reference,
     test,
-    variables: list[Any],
+    variables: list[Any] | str | dict[str, Any],
     depths=None,
     times: dict[str, Any] | list | tuple | str | None = None,
     select: dict[str, Any] | None = None,
@@ -11867,7 +11867,9 @@ def compare(
         List of variable requests: a vocabulary key/standard_name/alias
         (str), a combination spec (``{"sum": [...], "standard_name":
         ...}``), or a pair-spec (``{"test": ..., "reference": ...}``) naming
-        a different recipe per lane.
+        a different recipe per lane. A single spec on its own (a string or
+        dict) is the same as a one-element list -- still returning a
+        ComparisonSet, as ``variables=[v]`` does.
     depths
         Sequence of depth requests, fanned one comparison per entry --
         ``None`` (default) means ``("surface",)``. Each entry is a literal
@@ -12454,6 +12456,13 @@ def compare(
     — what to use after rerunning a model, since entries are keyed on source and
     selection rather than on file contents.
     """
+    # A lone spec -- a name, a pair-spec, a combination/calculate dict -- is a
+    # one-element list, as with series(variables=). Iterating it directly would
+    # walk a string's characters or a dict's keys. Before the aggregate fan below,
+    # which re-enters with these same arguments.
+    if isinstance(variables, str | dict):
+        variables = [variables]
+
     # A top-level list of whole aggregate specs fans like variables=/depths= do --
     # see _compare_aggregate_fan, which re-enters this function once per spec with
     # every other argument exactly as given. Taken before anything else is
