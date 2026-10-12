@@ -45,10 +45,13 @@ class _FakeComparison:
         label="no3",
         corr=0.9,
         aggregate=None,
+        time=None,
     ):
         self.variable = variable
         self.standard_name = variable if isinstance(variable, str) else None
         self.select = {"depth": depth}
+        if time is not None:
+            self.select["time"] = time
         self.test_name = test
         self.reference_name = reference
         self.label = label
@@ -443,7 +446,46 @@ def test_sel_with_no_match_raises_and_lists_whats_present():
 def test_sel_with_unknown_key_raises():
     cs = ComparisonSet([_FakeComparison()])
     with pytest.raises(ValueError, match="does not know"):
-        cs.sel(depth="surface")
+        cs.sel(region="surface")
+
+
+def _layer_season_set():
+    """Build a set shaped like pool(by=["variable", "depth", "time"]) output."""
+    return ComparisonSet(
+        [
+            _FakeComparison(depth=d, time={"season": t}, label=f"{i}")
+            for i, (d, t) in enumerate(
+                [
+                    ({"min": 0, "max": 5}, "MAM"),
+                    ({"min": 0, "max": 5}, "JJA"),
+                    ({"min": 5, "max": 20}, "MAM"),
+                    ({"min": 5, "max": 20}, "JJA"),
+                ]
+            )
+        ]
+    )
+
+
+@pytest.mark.parametrize("depth", ["0-5m", "0-5 m", {"min": 0, "max": 5}])
+def test_sel_by_depth_matches_label_or_spec(depth):
+    narrowed = _layer_season_set().sel(depth=depth)
+    assert [c.label for c in narrowed] == ["0", "1"]
+
+
+@pytest.mark.parametrize("time", ["MAM", "mam", {"season": "MAM"}])
+def test_sel_by_time_matches_season_label_or_spec(time):
+    narrowed = _layer_season_set().sel(time=time)
+    assert [c.label for c in narrowed] == ["0", "2"]
+
+
+def test_sel_by_depth_and_time_together():
+    narrowed = _layer_season_set().sel(depth="5-20m", time="JJA")
+    assert [c.label for c in narrowed] == ["3"]
+
+
+def test_sel_by_depth_no_match_lists_available_layers():
+    with pytest.raises(ValueError, match=r"have: 0-5 m, 5-20 m"):
+        _layer_season_set().sel(depth="20-50m")
 
 
 def test_sel_never_touches_aligned_data():
