@@ -143,6 +143,18 @@ def _crmsd(res: dict[str, xr.DataArray]) -> xr.DataArray:
     return np.sqrt(np.maximum(res["rmse"] ** 2 - res["bias"] ** 2, 0.0))
 
 
+def _r2(res: dict[str, xr.DataArray]) -> xr.DataArray:
+    """Squared Pearson correlation, the coefficient a paper table usually calls R².
+
+    It is the share of the reference's variance the test tracks.
+
+    Derived from ``corr`` rather than computed again, so the two can never disagree.
+    Note this is *not* the coefficient of determination ``1 - SSE/SST`` (which can go
+    negative and counts bias against the model): it ignores bias and scale entirely.
+    """
+    return res["corr"] ** 2
+
+
 def _sigma_ratio(res: dict[str, xr.DataArray]) -> xr.DataArray:
     """Ratio of the two members' variability; NaN where the reference is flat.
 
@@ -179,6 +191,14 @@ for _metric in (
         kind="skill",
         units="1",
         fn=_pairwise("pearson_r"),
+    ),
+    Metric(
+        "r2",
+        "squared Pearson correlation (R²)",
+        kind="skill",
+        units="1",
+        requires=("corr",),
+        derive=_r2,
     ),
     Metric(
         "sigma_ratio",

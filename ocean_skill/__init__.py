@@ -39,6 +39,8 @@ The public API is intentionally small:
                                                      # osk.XY: any two variables
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
                                                      # pooled onto Taylor + target
+    osk.table([set_a, set_b], rows="variable",       # selected metrics as a paper
+              save="skill.tex")                      # table (.tex/.md/.html/.csv)
     osk.plot([eq, band_a, band_b])                   # comparisons (or fields) built
                                                      # separately, one figure; a
                                                      # {label: item} dict names rows
@@ -73,6 +75,7 @@ from ocean_skill.catalog import (
 )
 from ocean_skill.combine import plot as _plot_items
 from ocean_skill.comparison import Comparison, ComparisonSet, compare, summary
+from ocean_skill.comparison import table as _table
 from ocean_skill.detide import detide
 from ocean_skill.extrema import Extrema, Extremum
 from ocean_skill.field import Cross, Field, FieldSet, field
@@ -102,6 +105,22 @@ class _CallablePlotPackage(_types.ModuleType):
 
 _importlib.import_module("ocean_skill.plot").__class__ = _CallablePlotPackage
 
+
+# ``osk.table(...)`` builds a metrics table, but ``ocean_skill.table`` is also the module
+# holding MetricsTable and its writers -- importing that submodule sets it as a package
+# attribute, which would clobber a plain function of the same name (and a lazy first
+# import of it later would do so at a random moment). Same remedy as ``plot`` above:
+# one object that is both the module and the function.
+class _CallableTableModule(_types.ModuleType):
+    def __call__(self, comparisons, **kwargs):
+        return _table(comparisons, **kwargs)
+
+    __call__.__doc__ = _table.__doc__
+
+
+_importlib.import_module("ocean_skill.table").__class__ = _CallableTableModule
+from ocean_skill.table import MetricsTable  # noqa: E402
+
 __all__ = [
     "TS",
     "XY",
@@ -112,6 +131,7 @@ __all__ = [
     "Extremum",
     "Field",
     "FieldSet",
+    "MetricsTable",
     "Overlap",
     "__version__",
     "cache",
@@ -135,4 +155,5 @@ __all__ = [
     "qc",
     "read",
     "summary",
+    "table",
 ]
