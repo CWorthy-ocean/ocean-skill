@@ -1463,6 +1463,10 @@ def _field_row(
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
+    seq_clim: tuple[float, float] | None = None,
+    div_clim: tuple[float, float] | None = None,
+    seq_range: tuple[float, float] | None = None,
+    div_range: tuple[float, float] | None = None,
     titles=None,
     **_,
 ):
@@ -1505,7 +1509,13 @@ def _field_row(
     one path is built once and overlaid on all three panels.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
-    ._limits` — see the static renderer's ``field_row`` docstring.
+    ._limits` — see the static renderer's ``field_row`` docstring; it and
+    ``vmin``/``vmax`` are ignored once ``seq_clim`` is given. ``seq_clim``/
+    ``div_clim``, if given, override this row's own colour limits -- how
+    :func:`_field_grid`'s ``shared_limits=True`` makes every row share one scale --
+    and ``seq_range``/``div_range`` are the matching extents of the data those limits
+    answer for, which the clipped-end marks on the colour bars are tested against
+    (see :func:`_quadmesh`).
 
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
     :func:`field_facet`; the difference panel keeps its own.
@@ -1527,13 +1537,27 @@ def _field_row(
     standard_name = item.get("standard_name")
     seq, div = cmaps_for(standard_name, statistic=statistic)
     log = is_log(standard_name, statistic)
-    lo, hi = _variable_limits(
-        standard_name, statistic, t, r, log=log, robust=robust, vmin=vmin, vmax=vmax
-    )
-    if log:
-        lo = max(lo, 1e-6)
-    dmax = difference_limit(d)
-    scale_range = _data_range(t, r, log=log)  # the one scale both bars answer for
+    if seq_clim is None:
+        lo, hi = _variable_limits(
+            standard_name,
+            statistic,
+            t,
+            r,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        if log:
+            lo = max(lo, 1e-6)
+        seq_clim = (lo, hi)
+    if div_clim is None:
+        dmax = difference_limit(d)
+        div_clim = (-dmax, dmax)
+    # the one scale both bars answer for: the row's own data unless a grid's shared
+    # scale says more
+    if seq_range is None:
+        seq_range = _data_range(t, r, log=log)
     tl, rl = labels
     raster = _should_rasterize(t, rasterize)
 
@@ -1551,8 +1575,8 @@ def _field_row(
             t,
             title=test_title,
             cmap=seq,
-            clim=(lo, hi),
-            data_range=scale_range,
+            clim=seq_clim,
+            data_range=seq_range,
             units=units,
             statistic=statistic,
             geo=geo,
@@ -1568,8 +1592,8 @@ def _field_row(
             r,
             title=ref_title,
             cmap=seq,
-            clim=(lo, hi),
-            data_range=scale_range,
+            clim=seq_clim,
+            data_range=seq_range,
             units=units,
             statistic=statistic,
             geo=geo,
@@ -1585,7 +1609,8 @@ def _field_row(
             d,
             title=diff_title,
             cmap=div,
-            clim=(-dmax, dmax),
+            clim=div_clim,
+            data_range=div_range,
             units=f"test − reference {units}",
             statistic=statistic,
             geo=geo,
@@ -1638,6 +1663,7 @@ def _field_grid(
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
+    shared_limits: bool = False,
     titles=None,
     **_,
 ):
@@ -1669,9 +1695,15 @@ def _field_grid(
     :func:`_field_row`); each row's ``rasterize="auto"`` decision is its own, since rows
     can carry different-sized grids. ``coastline_resolution``/``land`` pass through the
     same way (each row builds its own once-made coastline path, from its own extent),
-    as does ``robust`` — each row's colour scale is its own. So does
-    ``tiles`` (on by default) — each row resolves its own antimeridian/source check
-    independently, appropriate since rows commonly carry different reference domains.
+    as does ``robust``. So does ``tiles`` (on by default) — each row resolves its own
+    antimeridian/source check independently, appropriate since rows commonly carry
+    different reference domains.
+
+    Each row scales its own colours by default, matching the static renderer.
+    ``shared_limits=True`` gives every row one sequential scale over *all* rows'
+    test and reference (``robust`` applied to the pooled values) and one difference
+    range over all rows' differences, same as the static ``field_grid`` — and warns if
+    the rows' variables differ, since one scale then means different things per row.
 
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
     :func:`field_facet`; the difference panel keeps its own.
@@ -1700,6 +1732,50 @@ def _field_grid(
         for t in _row_auto_titles(it, tl, rl)
     ]
     resolved_titles = _titles.resolve_titles(auto_titles, titles)
+
+    shared: dict[str, tuple[float, float] | None] = {
+        "seq_clim": None,
+        "div_clim": None,
+        "seq_range": None,
+        "div_range": None,
+    }
+    if shared_limits:
+        import warnings
+
+        from ocean_skill.colormaps import is_log
+
+        names = {it.get("standard_name") for it in items}
+        if len(names) > 1:
+            warnings.warn(
+                f"shared_limits=True but rows use different variables "
+                f"({sorted(nm for nm in names if nm)}); their ranges/units differ, "
+                "so one shared colour scale won't mean the same thing on every row.",
+                stacklevel=2,
+            )
+        all_t = [it["aligned"]["test"] for it in items]
+        all_r = [it["aligned"]["reference"] for it in items]
+        all_d = [it["aligned"]["difference"] for it in items]
+        log = is_log(items[0].get("standard_name"), statistic_of(items[0]))
+        lo, hi = _variable_limits(
+            items[0].get("standard_name"),
+            statistic_of(items[0]),
+            *all_t,
+            *all_r,
+            log=log,
+            robust=robust,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        if log:
+            lo = max(lo, 1e-6)
+        dmax = difference_limit(np.concatenate([np.asarray(d).ravel() for d in all_d]))
+        shared = {
+            "seq_clim": (lo, hi),
+            "div_clim": (-dmax, dmax),
+            "seq_range": _data_range(*all_t, *all_r, log=log),
+            "div_range": _data_range(*all_d),
+        }
+
     rows = [
         _field_row(
             it,
@@ -1722,6 +1798,7 @@ def _field_grid(
             vmax=vmax,
             colorbar_label_clipped=colorbar_label_clipped,
             titles=resolved_titles[i * 3 : i * 3 + 3],
+            **shared,
         )
         for i, it in enumerate(items)
     ]

@@ -792,3 +792,122 @@ def test_vmin_not_below_vmax_is_refused_on_the_row_families(name, renderer):
     family, items = _row_builders()[name]
     with pytest.raises(ValueError, match="vmin"):
         render(PlotSpec(family=family, items=items), renderer=renderer, vmin=5, vmax=1)
+
+
+# --- field_grid: shared_limits matches across renderers ---------------------------
+#
+# The static grid pools every row into one sequential scale and one difference range
+# under ``shared_limits=True``; the interactive grid used to swallow the option and
+# scale each row on its own.
+
+
+def _grid_field(low: float, high: float):
+    """Return a small lat/lon map ramping evenly from ``low`` to ``high``."""
+    return xr.DataArray(
+        np.linspace(low, high, 48).reshape(6, 8),
+        dims=("lat", "lon"),
+        coords={
+            "lat": np.linspace(20.0, 30.0, 6),
+            "lon": np.linspace(-100.0, -90.0, 8),
+        },
+        attrs={"units": "mmol m-3"},
+    )
+
+
+def _grid_item(test, reference, standard_name=NITRATE):
+    """One spec item shaped as ``Comparison.as_item()`` builds it."""
+    return {
+        "aligned": {
+            "test": test,
+            "reference": reference,
+            "difference": test - reference,
+        },
+        "units": "mmol m-3",
+        "standard_name": standard_name,
+        "metrics": {"bias": 0.1, "rmse": 0.5, "corr": 0.9},
+        "labels": ("run", "woa"),
+        "row_label": "nitrate",
+    }
+
+
+def _two_scale_grid_items():
+    """Two rows on very different scales, with very different-sized differences."""
+    return [
+        _grid_item(_grid_field(0.0, 10.0), _grid_field(1.0, 9.0)),
+        _grid_item(_grid_field(50.0, 200.0), _grid_field(80.0, 120.0)),
+    ]
+
+
+def _static_grid_clims(items, shared_limits):
+    """(vmin, vmax) of each static QuadMesh, row-major: test, reference, difference."""
+    from matplotlib.collections import QuadMesh
+
+    fig = render(
+        PlotSpec(
+            family="field_grid", items=items, options={"shared_limits": shared_limits}
+        )
+    )
+    # the map panels come first in fig.axes, row-major (test, reference, difference per
+    # row), then the colourbar axes -- whose own QuadMesh is skipped
+    meshes = [
+        next(c for c in ax.collections if isinstance(c, QuadMesh))
+        for ax in fig.axes
+        if ax.get_label() != "<colorbar>"
+    ]
+    assert len(meshes) == 3 * len(items)
+    return [(float(m.norm.vmin), float(m.norm.vmax)) for m in meshes]
+
+
+def _holoviews_grid_clims(items, shared_limits):
+    """Return the colour range of each interactive QuadMesh, row-major."""
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    obj = render(
+        PlotSpec(
+            family="field_grid", items=items, options={"shared_limits": shared_limits}
+        ),
+        renderer="holoviews",
+        tiles=False,
+        rasterize=False,
+    )
+    meshes = list(obj.traverse(lambda x: x, [hv.QuadMesh]))
+    assert len(meshes) == 3 * len(items)
+    return [tuple(float(v) for v in m.vdims[0].range) for m in meshes]
+
+
+@pytest.mark.parametrize("shared_limits", [True, False])
+def test_field_grid_shared_limits_matches_across_renderers(shared_limits):
+    items = _two_scale_grid_items()
+    static = _static_grid_clims(items, shared_limits)
+    interactive = _holoviews_grid_clims(items, shared_limits)
+    for got, want in zip(interactive, static, strict=True):
+        assert got == pytest.approx(want)
+
+    # panel order is (test, reference, difference) per row
+    seq0, seq1 = interactive[0], interactive[3]
+    assert interactive[0] == pytest.approx(interactive[1])  # a row's pair shares a bar
+    assert interactive[3] == pytest.approx(interactive[4])
+    diff0, diff1 = interactive[2], interactive[5]
+    assert diff0 == pytest.approx((-diff0[1], diff0[1]))  # symmetric about zero
+    assert diff1 == pytest.approx((-diff1[1], diff1[1]))
+    if shared_limits:
+        assert seq0 == pytest.approx(seq1)
+        assert diff0 == pytest.approx(diff1)
+        assert seq0[0] <= 0.0 and seq0[1] >= 200.0  # spans both rows' data
+    else:
+        assert seq0 != pytest.approx(seq1)
+        assert diff0 != pytest.approx(diff1)
+
+
+def test_field_grid_holoviews_shared_limits_warns_on_mixed_variables():
+    import holoviews as hv
+
+    hv.extension("bokeh")
+    items = _two_scale_grid_items()
+    items[1]["standard_name"] = "mole_concentration_of_phosphate_in_sea_water"
+    spec = PlotSpec(family="field_grid", items=items, options={"shared_limits": True})
+    with pytest.warns(
+        UserWarning, match="shared_limits=True but rows use different variables"
+    ):
+        render(spec, renderer="holoviews", tiles=False)
