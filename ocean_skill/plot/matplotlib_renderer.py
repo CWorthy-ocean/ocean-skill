@@ -9233,8 +9233,8 @@ def _render(spec, **kwargs: Any):
 
 
 class _Record:
-    """Adapt a spec item to the ``.metrics()``/``.label``/``.units`` interface
-    summaries need.
+    """Adapt a spec item to the ``.metrics()``/``.label``/``.units``/``.statistic``
+    interface summaries need.
     """
 
     def __init__(self, item: dict[str, Any]):
@@ -9250,6 +9250,10 @@ class _Record:
     @property
     def units(self):
         return self._item.get("units")
+
+    @property
+    def statistic(self):
+        return self._item.get("statistic")
 
 
 register_renderer("matplotlib", render)

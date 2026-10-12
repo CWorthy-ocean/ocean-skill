@@ -26,6 +26,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from ocean_skill.plot import _weighting
+from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.typography import (
     MIN_PT,
     PAGE_W,
@@ -97,11 +98,19 @@ def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str
         rec = dict(c.metrics())
         rec["label"] = getattr(c, "label", None) or rec.get("variable", "")
         aligned = getattr(c, "aligned", None)
-        rec["units"] = (
+        units = (
             aligned["reference"].attrs.get("units")
             if aligned is not None
             else getattr(c, "units", None)
         )
+        stat = (
+            statistic_of(aligned)
+            if aligned is not None
+            else getattr(c, "statistic", None)
+        )
+        # display-only: these feed _shared_units (the Target/Taylor axis labels), so a
+        # spread reads as its colour bar does
+        rec["units"] = units_text(units, stat) or None
         if groups:
             rec["group"] = groups.get(
                 rec.get("reference"), groups.get(rec["label"], "other")
