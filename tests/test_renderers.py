@@ -77,9 +77,9 @@ def _matplotlib_panel_titles(fig) -> list[str]:
     return [ax.get_title() for ax in fig.axes if ax.get_title()]
 
 
-# ComparisonSet.plot() setdefault()s `labels` to the *first* comparison's pair, so
-# both renderers get a top-level fallback that is only correct for row 0.
-_TOP_LEVEL = {"labels": ("GOM_bgc", "woa23_nitrate"), "title": "GOM vs WOA"}
+# No top-level ``labels``: ComparisonSet.plot() no longer injects row 0's pair for a
+# stacked set, so each row titles itself from its own sources, as a real set does.
+_TOP_LEVEL = {"title": "GOM vs WOA"}
 
 
 def test_the_static_grid(two_rows):
@@ -331,6 +331,67 @@ def test_a_one_comparison_set_plots_as_a_single_row_not_a_grid(monkeypatch):
 
     ComparisonSet([_C("woa_n", "nitrate"), _C("woa_p", "phosphate")]).plot(domain=None)
     assert captured["family"] == "field_grid"
+
+
+class _StackedC:
+    """A stub comparison for a stacked ``ComparisonSet``: its own reference pair."""
+
+    family = "field_row"
+    family_reason = "field"
+
+    def __init__(self, reference, label):
+        self.test_name, self.reference_name, self.label = "GOM_bgc", reference, label
+
+    def metrics(self):  # _flatten keeps only objects with metrics + as_item
+        return {"bias": 0.1}
+
+    def as_item(self):
+        return _item(
+            "mole_concentration_of_nitrate_in_sea_water",
+            self.reference_name,
+            self.label,
+        )
+
+
+def _stacked_set():
+    from ocean_skill.comparison import ComparisonSet
+
+    return ComparisonSet(
+        [
+            _StackedC("woa23_nitrate", "nitrate"),
+            _StackedC("woa23_phosphate", "phosphate"),
+        ]
+    )
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+def test_a_stacked_set_titles_every_row_from_an_explicit_labels(renderer):
+    """An explicit ``ComparisonSet.plot(labels=...)`` titles every stacked row.
+
+    It used to be silently ignored on a stacked grid: every item carries its own
+    pair, and the renderers preferred it over the top level.
+    """
+    out = _stacked_set().plot(labels=("A", "B"), domain=None, renderer=renderer)
+    titles = (
+        _matplotlib_panel_titles(out)
+        if renderer == "matplotlib"
+        else _holoviews_panel_titles(out)
+    )
+    assert sum(t == "B" for t in titles) == 2, titles
+    assert sum(t.endswith("A") for t in titles) == 2, titles
+    assert not any("woa23_" in t for t in titles)
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+def test_a_stacked_set_without_labels_keeps_each_rows_own_sources(renderer):
+    out = _stacked_set().plot(domain=None, renderer=renderer)
+    titles = (
+        _matplotlib_panel_titles(out)
+        if renderer == "matplotlib"
+        else _holoviews_panel_titles(out)
+    )
+    assert any(t == "woa23_nitrate" for t in titles), titles
+    assert any(t == "woa23_phosphate" for t in titles), titles
 
 
 def test_holoviews_grid_can_unlink_pan_and_zoom(two_rows):
@@ -1309,6 +1370,36 @@ def test_the_holoviews_stacked_section_row_keeps_each_rows_labels_and_metrics():
     assert any("bias=0.125" in t for t in titles)
     figs = list(hv.render(out, backend="bokeh").select({"type": figure}))
     assert len(figs) == 6
+
+
+@pytest.mark.parametrize("renderer", ["matplotlib", "holoviews"])
+@pytest.mark.parametrize("family", ["time_depth_row", "section_row"])
+def test_an_explicit_labels_overrides_every_stacked_rows_own_pair(
+    family, renderer, two_time_depth_rows
+):
+    """The top-level ``labels=`` beats the pair each stacked row carries.
+
+    Both stacked row families, both renderers; the per-row pair is only the default.
+    """
+    if family == "time_depth_row":
+        items = two_time_depth_rows
+    else:
+        items = [
+            {**_section_row_item(), "labels": ("GOM_bgc", ref), "row_label": row}
+            for ref, row in (("woa_a", "A"), ("woa_b", "B"))
+        ]
+    out = render(
+        PlotSpec(family=family, items=items, options={"labels": ("X", "Y")}),
+        renderer=renderer,
+    )
+    titles = (
+        _matplotlib_panel_titles(out)
+        if renderer == "matplotlib"
+        else _holoviews_panel_titles(out)
+    )
+    assert sum(t == "Y" for t in titles) == 2, titles
+    assert sum(t.endswith("X") for t in titles) == 2, titles
+    assert not any(("station_hv" in t) or ("woa_" in t) for t in titles)
 
 
 _INTERACTIVE_FAMILIES = {

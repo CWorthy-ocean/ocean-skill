@@ -9483,7 +9483,16 @@ class ComparisonSet:
         # identity is a rotated left-edge row label. The grid is what more than one
         # comparison needs; one does not.
         single_row = family == "field_row" and len(self.comparisons) == 1
-        if family in (
+        stacked = len(self.comparisons) > 1 and family in (
+            "field_row",
+            "time_depth",
+            "section_row",
+        )
+        # A stacked grid's rows each carry their own (test, reference) pair, and a
+        # top-level ``labels=`` now overrides them all, so injecting row 0's pair here
+        # would retitle every row after it. Left out, the rows title themselves; the
+        # user's own ``labels=`` still passes straight through.
+        if not stacked and family in (
             "field_row",
             "field_grid",
             "series",
@@ -9608,7 +9617,6 @@ class ComparisonSet:
         frames = [
             {**item, "frame_label": item.get("row_label")} for item in self._items()
         ]
-        kwargs.setdefault("labels", (first.test_name, first.reference_name))
         if "domain" not in kwargs:
             convention = first.aligned.attrs.get("lon_convention")
             outline = _outline_of(first.test_name, convention)
