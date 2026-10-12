@@ -557,3 +557,36 @@ def test_verbose_off_silences_every_line(world, capsys):
     _align("moor", select=window)
     _align("moor", select=window)
     assert "cache:" not in capsys.readouterr().out
+
+
+def test_a_season_mask_fan_pools_stations_as_samples(world):
+    # times={"seasons": [...]} keeps each season's samples (not one seasonal mean), and
+    # pool() scores every station's pairs together: n is the sum of the stations'
+    # valid pairs, and the metrics are those of the concatenated pile
+    from ocean_skill import metrics
+
+    _align("visits")
+    _align("moor")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = compare(
+            test="his",
+            reference=["moor", "visits"],
+            variables=[TEMPERATURE],
+            select={"depth": {"min": 0, "max": 8}},
+            aggregate={"Z": "mean"},
+            times={"seasons": ["JJA"]},
+        )
+        members = [c.align() for c in cs]
+        record = cs.pool(by=["variable", "depth", "time"]).metrics().iloc[0]
+    assert len(members) == 2
+    assert all(m["reference"].ndim == 1 for m in members)  # a series, not a mean
+    t = np.concatenate([m["test"].values.ravel() for m in members])
+    r = np.concatenate([m["reference"].values.ravel() for m in members])
+    ok = np.isfinite(t) & np.isfinite(r)
+    pile = xr.Dataset({"test": ("s", t[ok]), "reference": ("s", r[ok])})
+    expected = metrics.compute(pile, test_name="test", reference_name="reference")
+    assert record["n"] == ok.sum()
+    assert record["time"] == "JJA"
+    for name in ("bias", "rmse", "corr"):
+        assert record[name] == pytest.approx(expected[name])

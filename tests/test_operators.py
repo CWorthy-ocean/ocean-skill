@@ -1658,3 +1658,159 @@ def test_lon_lat_shorthand_reduces_a_longitude_named_grid():
     assert aggregate(da, {"lon": "mean"}).dims == ("latitude",)
     # a source that does carry a `lon` dimension resolves exactly as before
     assert resolve_dim(da.rename(longitude="lon"), "lon") == "lon"
+
+
+# -- a month mask on a time select: every sample of a season, not its mean ---------
+
+
+@pytest.fixture
+def three_years_monthly():
+    """Thirty-six month-start values 2010-2012, valued by their position."""
+    time = xr.date_range("2010-01-01", periods=36, freq="MS")
+    return xr.DataArray(np.arange(36.0), dims=("time",), coords={"time": time})
+
+
+def _months_of(da):
+    return sorted({int(m) for m in da["time"].dt.month.values})
+
+
+def test_a_season_mask_keeps_every_sample_of_that_season(three_years_monthly):
+    """Three years of MAM is nine samples on a time axis, not three means."""
+    got = select(three_years_monthly, {"time": {"season": "MAM"}})
+    assert got.sizes["time"] == 9
+    assert _months_of(got) == [3, 4, 5]
+    assert "time" in got.dims
+
+
+def test_a_months_mask_is_the_same_as_the_season_naming_them(three_years_monthly):
+    by_season = select(three_years_monthly, {"time": {"season": "MAM"}})
+    by_months = select(three_years_monthly, {"time": {"months": [3, 4, 5]}})
+    xr.testing.assert_identical(by_season, by_months)
+
+
+def test_a_mask_accepts_the_t_axis_spelling(three_years_monthly):
+    got = select(three_years_monthly, {"T": {"months": [7]}})
+    assert got.sizes["time"] == 3
+
+
+def test_a_window_applies_before_the_mask(three_years_monthly):
+    got = select(
+        three_years_monthly,
+        {"time": {"season": "MAM", "min": "2011-01-01", "max": "2011-12-31"}},
+    )
+    assert list(pd.to_datetime(got.time.values).year) == [2011] * 3
+    assert _months_of(got) == [3, 4, 5]
+
+
+def test_a_window_only_one_sided_still_masks(three_years_monthly):
+    got = select(three_years_monthly, {"time": {"months": [1], "min": "2011-01-01"}})
+    assert list(pd.to_datetime(got.time.values).year) == [2011, 2012]
+
+
+def test_djf_runs_across_the_year_boundary(three_years_monthly):
+    """December of one year and January/February of the next are one season's months.
+
+    The mask is by month, so it keeps all of them (Dec 2010 .. Dec 2012).
+    """
+    got = select(three_years_monthly, {"time": {"season": "DJF"}})
+    assert _months_of(got) == [1, 2, 12]
+    assert got.sizes["time"] == 9  # Jan, Feb, Dec in each of three years
+
+
+def test_a_wraparound_season_that_is_not_a_standard_one(three_years_monthly):
+    got = select(three_years_monthly, {"time": {"season": "NDJ"}})
+    assert _months_of(got) == [1, 11, 12]
+
+
+def test_a_mask_works_on_a_cftime_calendar():
+    """A 360-day or no-leap model calendar has no pandas twin; its months read fine."""
+    for calendar in ("360_day", "noleap"):
+        time = xr.date_range(
+            "2010-01-01", periods=24, freq="MS", calendar=calendar, use_cftime=True
+        )
+        da = xr.DataArray(np.arange(24.0), dims=("time",), coords={"time": time})
+        got = select(da, {"time": {"season": "JJA"}})
+        assert got.sizes["time"] == 6, calendar
+        assert _months_of(got) == [6, 7, 8], calendar
+        windowed = select(
+            da, {"time": {"season": "JJA", "min": "2011-01-01", "max": "2011-12-30"}}
+        )
+        assert windowed.sizes["time"] == 3, calendar
+
+
+def test_a_mask_on_a_dataset_masks_every_variable(three_years_monthly):
+    ds = xr.Dataset({"a": three_years_monthly, "b": three_years_monthly * 2})
+    got = select(ds, {"time": {"months": [6, 7]}})
+    assert got.sizes["time"] == 6
+    assert (got["b"] == got["a"] * 2).all()
+
+
+def test_a_mask_with_no_samples_is_an_error_naming_what_was_asked(three_years_monthly):
+    with pytest.raises(KeyError, match="no data in months"):
+        select(three_years_monthly, {"time": {"season": "JJA", "max": "2010-03-01"}})
+    with pytest.raises(KeyError, match=r"months present are \[1, 2, 3\]"):
+        select(three_years_monthly.isel(time=slice(0, 3)), {"time": {"months": [8]}})
+
+
+def test_a_bad_season_is_refused_with_the_season_named(three_years_monthly):
+    with pytest.raises(ValueError, match="'DJQ'"):
+        select(three_years_monthly, {"time": {"season": "DJQ"}})
+
+
+@pytest.mark.parametrize(
+    "months", [[0], [13], [], [3, 3], [3.5], ["Mar"], 3, [True]], ids=str
+)
+def test_bad_months_are_refused(three_years_monthly, months):
+    with pytest.raises(ValueError, match="months"):
+        select(three_years_monthly, {"time": {"months": months}})
+
+
+def test_season_and_months_together_are_refused(three_years_monthly):
+    with pytest.raises(ValueError, match="either 'season' or 'months'"):
+        select(three_years_monthly, {"time": {"season": "MAM", "months": [3]}})
+
+
+def test_an_unknown_key_in_a_mask_is_refused_by_name(three_years_monthly):
+    with pytest.raises(ValueError, match=r"\['step'\]"):
+        select(three_years_monthly, {"time": {"season": "MAM", "step": 2}})
+
+
+def test_a_mask_on_an_undecoded_axis_says_why():
+    da = xr.DataArray(np.arange(5.0), coords={"time": np.arange(5.0)}, dims="time")
+    with pytest.raises(ValueError, match="not a decoded calendar"):
+        select(da, {"time": {"season": "MAM"}})
+
+
+def test_the_top_level_season_key_is_still_a_group_pick_not_a_mask(three_years_monthly):
+    """``select={"season": ...}`` names a group of an aggregated season axis.
+
+    It is skipped where no such axis exists, exactly as before the time entry grew a
+    mask.
+    """
+    assert select(three_years_monthly, {"season": "MAM"}).sizes["time"] == 36
+    seasonal = aggregate(
+        three_years_monthly, {"time": {"groupby": "season", "reduce": "mean"}}
+    )
+    picked = select(seasonal, {"season": "MAM"})
+    assert picked.ndim == 0
+    assert str(picked["season"].values) == "MAM"
+    assert float(picked) == pytest.approx(
+        float(select(three_years_monthly, {"time": {"season": "MAM"}}).mean())
+    )
+
+
+def test_time_mask_helpers_split_and_classify():
+    from ocean_skill.operators import _split_time_mask, _time_mask_months
+
+    assert _time_mask_months({"season": "DJF"}) == (12, 1, 2)
+    assert _time_mask_months({"months": [5, 3, 4]}) == (5, 3, 4)
+    for not_a_mask in ("2012-01", slice("2012", "2013"), {"min": 1, "max": 2},
+                       {"index": 3}, [1, 2], 5, None):
+        assert _time_mask_months(not_a_mask) is None
+        assert _split_time_mask(not_a_mask) == (not_a_mask, None)
+    assert _split_time_mask({"season": "MAM"}) == (None, (3, 4, 5))
+    window, months = _split_time_mask(
+        {"season": "MAM", "min": "2024-01-01", "max": "2024-12-31"}
+    )
+    assert window == {"min": "2024-01-01", "max": "2024-12-31"}
+    assert months == (3, 4, 5)

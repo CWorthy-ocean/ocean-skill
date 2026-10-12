@@ -412,10 +412,23 @@ def derive(
     c = _vocabulary()
 
     # 1. time select -- the package's own select, so every spelling it takes works here
+    # A month mask ({"season": "MAM"} / {"months": [3, 4, 5]}) is split off the entry:
+    # its min/max window applies here, but the mask itself waits until after the
+    # detide, which needs the regular series the mask would punch gaps in.
     ds = base
-    window = {
-        ("T" if k == "t" else k): v for k, v in select.items() if k in _SELECT_TIME_KEYS
-    }
+    window: dict[str, Any] = {}
+    month_masks: dict[str, dict[str, Any]] = {}
+    for k, v in select.items():
+        if k not in _SELECT_TIME_KEYS:
+            continue
+        key = "T" if k == "t" else k
+        entry, months = operators._split_time_mask(v)
+        if months is not None:
+            month_masks[key] = {
+                name: x for name, x in v.items() if name in operators._TIME_MASK_KEYS
+            }
+        if entry is not None:
+            window[key] = entry
     if window:
         ds = operators.select(ds, window, subject="the saved pairs")
         tdim = _time_dim(ds)
@@ -427,6 +440,12 @@ def derive(
 
     if any(_normalize_detide(detide).values()):
         ds = _detide(ds, detide)
+
+    # 2b. month mask -- the samples of the named months, after the window and the detide
+    # (the entry's own, via select, so the empty-mask error and the cftime reading are
+    # the lane pipeline's)
+    if month_masks:
+        ds = operators.select(ds, month_masks, subject="the saved pairs")
 
     # 3. depth
     test, reference = ds["test"], ds["reference"]

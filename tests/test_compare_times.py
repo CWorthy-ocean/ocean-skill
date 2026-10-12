@@ -22,16 +22,19 @@ import xarray as xr
 from ocean_skill import comparison
 from ocean_skill.comparison import (
     _display_time,
+    _fanned_mask_select,
     _fanned_season_select,
     _fanned_time_select,
     _has_season_entry,
     _has_time_entry,
+    _is_time_mask,
     _merged_season_aggregate,
     _merged_time_aggregate,
     _normalize_time_value,
     _normalize_times,
     _selected_time,
     _time_bins,
+    _time_collapsed,
     _time_label,
     _time_select_value,
 )
@@ -675,6 +678,204 @@ def test_a_dataless_season_reraises_with_skip_missing_false():
 
 
 # -- compare()'s times= fan: dict (bins) form -------------------------------------
+
+
+# -- {"seasons": [...]}: the sample-subset form ------------------------------------
+
+
+def test_a_bare_seasons_dict_is_the_season_mask_form():
+    assert _normalize_times({"seasons": ["mam", "JJA", "son"]}) == (
+        "season_mask",
+        {"seasons": ["MAM", "JJA", "SON"]},
+    )
+
+
+def test_season_mask_form_is_distinct_from_the_averaging_seasons_form():
+    kind, _ = _normalize_times({"groupby": "season", "reduce": "mean", "seasons": ["JJA"]})
+    assert kind == "seasons"
+
+
+def test_an_invalid_season_name_in_the_mask_form_fails_early():
+    with pytest.raises(ValueError, match="XYZ"):
+        _normalize_times({"seasons": ["MAM", "XYZ"]})
+    with pytest.raises(ValueError, match="repeats"):
+        _normalize_times({"seasons": ["MAM", "mam"]})
+
+
+def test_the_mask_form_takes_no_other_key():
+    with pytest.raises(ValueError, match="takes no other key"):
+        _normalize_times({"seasons": ["MAM"], "spread": "std"})
+
+
+def test_error_messages_point_at_the_mask_form():
+    with pytest.raises(ValueError, match=r"\{'seasons': \[\.\.\.\]\}"):
+        _normalize_times({"groupby": "season"})
+    with pytest.raises(ValueError, match=r"\{'seasons': \[\.\.\.\]\}"):
+        _normalize_times({"resample": "1MS"})
+
+
+def test_is_time_mask_reads_season_and_months_dicts_only():
+    assert _is_time_mask({"season": "MAM"})
+    assert _is_time_mask({"months": [3, 4, 5], "min": "2020", "max": "2021"})
+    assert not _is_time_mask({"min": "2020", "max": "2021"})
+    assert not _is_time_mask("2020-03")
+    assert not _is_time_mask(None)
+
+
+def test_a_mask_keeps_the_time_axis_rather_than_collapsing_to_an_instant():
+    assert _time_collapsed({"time": {"season": "MAM"}}, None) is False
+    assert _time_collapsed({"time": {"months": [3]}}, None) is False
+    assert _time_collapsed({"time": "2020-03-15"}, None) is True
+    # the top-level season key keeps its old meaning: one group off an aggregated axis
+    assert _time_collapsed({"season": "MAM"}, None) is True
+
+
+def test_mask_labels_read_the_season_or_months_and_the_window():
+    assert _time_label({"season": "MAM"}) == "MAM"
+    assert _time_label({"months": [3, 4, 5]}) == "Mar,Apr,May"
+    assert (
+        _time_label({"season": "mam", "min": "2024-01-01T00:00", "max": "2024-12-31"})
+        == "MAM 2024-01-01–2024-12-31"
+    )
+    assert _display_time({"time": {"season": "JJA"}}) == "JJA"
+    assert _display_time({"test": {"time": {"season": "JJA"}}, "reference": {}}) == "JJA"
+    # a bare window is unchanged: still a dict, as before
+    assert _display_time({"time": {"min": "2020", "max": "2021"}}) == {
+        "min": "2020",
+        "max": "2021",
+    }
+
+
+def test_fanned_mask_select_writes_both_sides_and_touches_no_aggregate():
+    assert _fanned_mask_select({"depth": 50, "time": "2020-03"}, "mam") == {
+        "depth": 50,
+        "time": {"season": "MAM"},
+    }
+    sel = {"test": {"depth": 50}, "reference": {}}
+    assert _fanned_mask_select(sel, "JJA") == {
+        "test": {"depth": 50, "time": {"season": "JJA"}},
+        "reference": {"time": {"season": "JJA"}},
+    }
+
+
+def test_fanned_mask_select_keeps_a_year_window_per_side():
+    flat = {"time": {"min": "2024-01-01", "max": "2024-12-31"}}
+    assert _fanned_mask_select(flat, "MAM") == {
+        "time": {"season": "MAM", "min": "2024-01-01", "max": "2024-12-31"}
+    }
+    pair = {"test": {"T": {"min": "2024"}}, "reference": {}}
+    assert _fanned_mask_select(pair, "MAM") == {
+        "test": {"time": {"season": "MAM", "min": "2024"}},
+        "reference": {"time": {"season": "MAM"}},
+    }
+
+
+def test_mask_fan_one_comparison_per_season_with_the_mask_on_both_sides(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        select={"test": {"depth": 50}, "reference": {"depth": 50}},
+        times={"seasons": ["MAM", "JJA", "SON"]},
+    )
+    assert [label for _, _, label in stubbed_fan] == ["MAM", "JJA", "SON"]
+    for season, (sel, agg, _label) in zip(
+        ["MAM", "JJA", "SON"], stubbed_fan, strict=True
+    ):
+        assert sel == {
+            "test": {"depth": 50, "time": {"season": season}},
+            "reference": {"depth": 50, "time": {"season": season}},
+        }
+        assert "time" not in (agg or {})  # nothing merged into aggregate
+
+
+def test_mask_fan_leaves_the_callers_aggregate_alone(stubbed_fan):
+    comparison.compare(
+        reference=["obs"],
+        test=["model"],
+        variables=["temperature"],
+        aggregate={"Z": "mean"},
+        times={"seasons": ["MAM", "JJA"]},
+    )
+    assert [agg for _, agg, _ in stubbed_fan] == [{"Z": "mean"}, {"Z": "mean"}]
+
+
+def test_mask_fan_keeps_a_select_year_window_without_warning(stubbed_fan):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=["temperature"],
+            select={"time": {"min": "2024-01-01", "max": "2024-12-31"}},
+            times={"seasons": ["MAM"]},
+        )
+    assert not any("year window" in str(w.message) for w in caught)
+    sel, _agg, _label = stubbed_fan[0]
+    assert sel["time"] == {"season": "MAM", "min": "2024-01-01", "max": "2024-12-31"}
+
+
+def test_mask_fan_drops_another_time_entry_with_a_warning(stubbed_fan):
+    with pytest.warns(UserWarning, match="not a .*year window"):
+        comparison.compare(
+            reference=["obs"],
+            test=["model"],
+            variables=["temperature"],
+            select={"time": "2024-03"},
+            times={"seasons": ["MAM"]},
+        )
+    assert stubbed_fan[0][0]["time"] == {"season": "MAM"}
+
+
+def test_mask_fan_is_stable_across_spellings_of_the_season_names(stubbed_fan):
+    comparison.compare(
+        reference=["obs"], test=["model"], variables=["temperature"],
+        times={"seasons": ["mam", "jja"]},
+    )
+    comparison.compare(
+        reference=["obs"], test=["model"], variables=["temperature"],
+        times={"seasons": ["MAM", "JJA"]},
+    )
+    assert [s for s, _, _ in stubbed_fan[:2]] == [s for s, _, _ in stubbed_fan[2:]]
+
+
+def test_mask_fan_and_over_time_conflict():
+    with pytest.raises(ValueError, match="got both times="):
+        comparison.compare(
+            reference="dummy_ref",
+            test="dummy_test",
+            variables=["temperature"],
+            times={"seasons": ["MAM"]},
+            over="time",
+        )
+
+
+def test_an_invalid_season_in_compare_raises_before_any_comparison_is_built(stubbed_fan):
+    with pytest.raises(ValueError, match="XYZ"):
+        comparison.compare(
+            reference=["obs"], test=["model"], variables=["temperature"],
+            times={"seasons": ["MAM", "XYZ"]},
+        )
+    assert stubbed_fan == []
+
+
+def test_a_mask_comparison_reports_its_season_in_the_metrics_table():
+    """The record's time column reads "MAM", so a pooled table can pivot on it."""
+    c = comparison.Comparison(
+        reference="obs",
+        test="model",
+        variable=TEMPERATURE,
+        select={"time": {"season": "MAM"}},
+        cache=False,
+    )
+    times = pd.date_range("2024-03-01", periods=6, freq="D")
+    da = xr.DataArray(
+        np.arange(6.0), dims=("time",), coords={"time": times}
+    ).assign_coords(lon=-150.0, lat=20.0)
+    c._aligned = xr.Dataset(
+        {"test": da + 0.5, "reference": da, "difference": da * 0 + 0.5}
+    )
+    assert c.metrics()["time"] == "MAM"
 
 
 @pytest.fixture
