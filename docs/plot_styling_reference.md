@@ -1445,6 +1445,40 @@ key on the group labels the same way they'd key on any other `color_by` field.
 Honored by **both renderers** for `target` (`taylor`/`paired` delegate to matplotlib
 interactively, as `labels` does above).
 
+### `level_labels` (summary diagrams: rename levels)
+
+`summary`, `taylor`, `target`, `paired` and `portrait`. Renames the legend (or, for
+`portrait`, axis) text of grouped levels for **that one figure**, without touching the
+records:
+
+```python
+pooled.sel(depth="0-5m").summary(
+    color_by="variable", marker_by="time", legend_style="grid",
+    level_labels={"time": {"MAMJJASON": "Mar–Nov"}, "variable": {"alkalinity": "TA"}},
+)
+```
+
+The shape is `{field: {level: text}}`, where `field` is any metric-record field the
+plot groups by (`color_by`, `marker_by`, `groups`' `"group"`, portrait's
+`row_by`/`col_by`, ...). A level key matches either the **raw record value** or its
+**default display spelling** — `{"variable": {"sea_water_temperature": ...}}` and
+`{"variable": {"temperature": ...}}` both name the temperature level — compared
+case- and space-insensitively. A level no key matches keeps its default text.
+
+A field no record carries raises `ValueError`, a value that is not a dict `TypeError`. A field
+none of whose keys match any level warns, naming the levels present, so a typo is
+visible; when some keys match, the rest pass silently, so one dict can be reused across
+`.sel()` subsets that each lack some levels. Per-point labels
+(`labels=`, and `legend_style="annotate"` text) are not levels and are not renamed;
+`colors=`/`alpha=`/`marker_scale=` dicts keep keying on the raw levels. Honored by
+**both renderers** — interactively the legend entries and, for `portrait`, the axis
+categories and the hover's row/column fields are renamed (a `target` point's hover
+still lists the raw record).
+
+To rename the records themselves instead, use `ComparisonSet.relabel(depth=...,
+time=...)`: the new name then carries through `.sel()`, `.metrics()` tables and every
+plot, where `level_labels` changes only the one figure it is passed to.
+
 ### `colors` / `alpha` / `marker_scale` (summary diagrams)
 
 These three style what a point looks like — colour, transparency, and size — and all
@@ -1704,6 +1738,7 @@ suite.portrait(row_by="depth", col_by="test")        # any record field, either 
 | `missing_color` | `"#e6e6e6"` | colour for a `(row_by, col_by)` pair no comparison names, or whose metric came back non-finite — "no data", never a plotted zero |
 | `ncols` | auto (`facet_layout`) | columns of the small-multiples grid, when `metric_names` names more than one |
 | `groups` | `None` | a `{reference_name: label}` remap, exactly as the other summary diagrams — for splitting on a field not already in the record |
+| `level_labels` | `None` | `{field: {level: text}}` renaming row/column tick labels for this figure — see [`level_labels`](#level_labels-summary-diagrams-rename-levels) |
 
 Colour comes from the same `ocean_skill.colormaps.metric_colors` every metric panel
 in the package calls, pooled over every cell of one metric's grid: diverging about

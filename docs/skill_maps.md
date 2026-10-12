@@ -203,6 +203,20 @@ table = comp.pool(by=["variable", "depth", "time"]).metrics()   # one row per va
 A pooled set has no time or depth axis left to draw, so `.plot()` refuses it; use
 `.metrics()`, `.target()` or `.taylor()`.
 
+To call the layers and seasons something friendlier than `0-5 m` / `MAMJJASON`, rename
+them once with `relabel()` — the new names then show in `.metrics()`, in `.sel()` and in
+every diagram's legend:
+
+```python
+pooled = comp.pool(by=["variable", "depth", "time"]).relabel(
+    depth={"0-5 m": "Surface", "20-65 m": "Deep"}, time={"MAMJJASON": "Mar–Nov"})
+pooled.sel(depth="Surface").summary(color_by="variable", marker_by="time")
+```
+
+`level_labels=` on `summary`/`target`/`taylor`/`portrait` renames for that one plot
+only; `relabel()` carries through tables, `.sel()` and every plot. The original set is
+left unchanged, and relabeling after `pool()` is the usual order.
+
 `osk.map_metrics(mooring_set)` (or `mooring_set.map_metrics()`) instead **fits a smooth
 surface through the scattered values** — a cross-validated spline
 ([verde](https://www.fatiando.org/verde/)) in a local projection centred on the
