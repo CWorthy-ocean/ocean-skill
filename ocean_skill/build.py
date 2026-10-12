@@ -1894,6 +1894,238 @@ def _rollup_metadata(cat) -> None:
         cat.metadata["standard_names"] = sorted(snames)
 
 
+# Decoded bytes per dask chunk when a kerchunk reference is opened by open_reference():
+# the target the time-chunk size is rounded to. Half of comparison.CHUNK_WARN_BYTES, so
+# a chunk chosen here never trips that warning, and big enough (~22 hourly steps of a
+# 30 x 1044 x 724 CIOFS temperature field) that zarr's async fetch has many storage
+# chunks to read concurrently inside one task. Read at call time, so a test (or a user
+# on a small-memory machine) can set `osk.build.KERCHUNK_CHUNK_BYTES` and be heard.
+KERCHUNK_CHUNK_BYTES = 256 * 2**20
+
+# _reference_protocol() memo: the answer costs a file read (a remote one for a remote
+# reference), and every open of the same reference would otherwise pay it again.
+_REFERENCE_PROTOCOLS: dict[Any, str | None] = {}
+
+
+def _reference_protocol(url) -> str | None:
+    """Protocol of the *files a kerchunk reference points at* (``None`` if unknown).
+
+    Not the protocol of the reference itself -- a ``.parquet`` on local disk usually
+    indexes ``s3://`` or ``/gpfs/...`` files, and it is the latter that
+    ``remote_protocol`` has to name. fsspec's ``ReferenceFileSystem`` guesses it when
+    it is not given, by scanning *every* reference value; under pandas 3 a parquet
+    row for a missing chunk carries ``pd.NA`` as its path and that scan raises
+    ``TypeError: boolean value of NA is ambiguous`` (depending on the hash seed, which
+    decides whether the scan meets such a row before a real one). Saying the protocol
+    up front skips the scan, and the crash with it.
+
+    Only the first real file path is read: the first non-empty string reference of a
+    ``.json``, or of the first ``refs.0.parq`` that exists in a ``.parquet`` store.
+    A store mixing protocols is not something a reference builder produces. The answer
+    is memoised per (path, mtime, size) for a local reference and per URL for a
+    remote one. It is only ever an optimisation, so anything unexpected -- an
+    unreadable file, a layout this does not know, no path found -- gives ``None``
+    and today's behaviour; this never raises.
+    """
+    import json
+    import os
+
+    try:
+        locator = str(url)
+        key: Any = locator
+        if "://" not in locator:
+            st = os.stat(os.path.expanduser(locator))
+            key = (locator, st.st_mtime_ns, st.st_size)
+        if key in _REFERENCE_PROTOCOLS:
+            return _REFERENCE_PROTOCOLS[key]
+
+        import fsspec
+        from fsspec.core import split_protocol
+
+        path = None
+        low = locator.lower().rstrip("/")
+        if low.endswith(".json"):
+            with fsspec.open(locator, "rt") as fh:
+                refs = json.load(fh)
+            refs = refs.get("refs", refs)
+            for value in refs.values():
+                if isinstance(value, list) and value:
+                    first = value[0]
+                    if isinstance(first, str) and first:
+                        path = first
+                        break
+        elif low.endswith(".parquet"):
+            import pandas as pd
+
+            root = locator.rstrip("/")
+            with fsspec.open(f"{root}/.zmetadata", "rt") as fh:
+                meta = json.load(fh).get("metadata", {})
+            fs, _, _ = fsspec.get_fs_token_paths(root)
+            for name in meta:
+                if not name.endswith("/.zarray"):
+                    continue
+                part = f"{root}/{name[: -len('/.zarray')]}/refs.0.parq"
+                if not fs.exists(part):
+                    continue
+                with fsspec.open(part, "rb") as fh:
+                    column = pd.read_parquet(fh, columns=["path"])["path"]
+                found = column.dropna()
+                found = found[found.astype(str).str.len() > 0]
+                if len(found):
+                    path = str(found.iloc[0])
+                    break
+        protocol = None
+        if path is not None:
+            protocol = split_protocol(path)[0] or "file"
+        if protocol is not None:  # an unreadable reference may be readable next time
+            _REFERENCE_PROTOCOLS[key] = protocol
+        return protocol
+    except Exception:
+        return None
+
+
+def _time_chunks(ds, target: int | None = None) -> dict[str, int]:
+    """Dask chunk size along time, in whole storage chunks, for ~``target`` bytes.
+
+    A kerchunk reference of a model run is usually stored one time step per chunk, and
+    opening it with ``chunks={}`` makes one dask task per storage chunk -- so a read of
+    a month of hourly output is 720 tasks, each fetching one chunk, and the number of
+    reads in flight is whatever the scheduler happens to run at once. Giving each task
+    a block of consecutive time steps lets the fetches inside it overlap (zarr issues
+    them concurrently), which is what a high-latency file system or object store needs.
+    The size is chosen by *bytes*, not by a step count, because the right count depends
+    on the store's per-step size: 256 MiB is ~22 steps of a CIOFS temperature field
+    but ~100 of the smaller Iceland one. One count applies to every variable on the
+    time axis, set by the largest of them.
+
+    The block is the largest multiple of the stored time chunk that keeps the *largest*
+    variable (per time step, decoded) under ``target`` bytes, never less than one
+    stored chunk and never more than the whole axis. ``target`` defaults to
+    :data:`KERCHUNK_CHUNK_BYTES`, read at call time. Returns ``{}`` -- i.e. leave
+    xarray at the storage chunks -- when there is no time dimension or no variable
+    reports its storage chunks, which is the case for a dataset not opened lazily
+    from a zarr-style store. Only the time dimension is touched: horizontal and depth
+    chunks stay as stored, since slicing a small box out of a map is the common
+    request and merging horizontal chunks would read more than it needs.
+    """
+    import math
+
+    from ocean_skill.align import _time_name
+
+    if target is None:
+        target = KERCHUNK_CHUNK_BYTES
+
+    tdim = None
+    name = _time_name(ds)
+    if name is not None and name in ds.variables and ds[name].ndim == 1:
+        tdim = ds[name].dims[0]
+    if tdim is None:
+        tdim = next((d for d in ("time", "ocean_time") if d in ds.dims), None)
+    if tdim is None:
+        return {}
+
+    stored_t = 0
+    per_step = 0.0
+    # Data variables only: a 1-D time coordinate is usually stored whole (kerchunk
+    # inlines it), and its "chunk" of the entire axis would say nothing about how the
+    # fields that dominate the bytes are stored.
+    for var in ds.data_vars.values():
+        if tdim not in var.dims:
+            continue
+        shape = var.encoding.get("chunks") or var.encoding.get("preferred_chunks")
+        if isinstance(shape, Mapping):
+            shape = tuple(shape.get(d) for d in var.dims)
+        if not shape or len(shape) != len(var.dims) or None in shape:
+            continue
+        along = int(shape[var.dims.index(tdim)])
+        if along < 1:
+            continue
+        stored_t = max(stored_t, along)
+        per_step = max(per_step, math.prod(shape) * var.dtype.itemsize / along)
+    if not stored_t:
+        return {}
+
+    n = stored_t
+    if per_step > 0:
+        n = max(int(target // per_step) // stored_t, 1) * stored_t
+    return {tdim: int(min(n, max(ds.sizes[tdim], 1)))}
+
+
+def open_reference(url, *, storage_options=None, chunks="auto", **kwargs):
+    """Open a kerchunk reference (``.json`` / ``.parquet``) quickly.
+
+    What ``xr.open_dataset(url, engine="kerchunk", chunks={})`` does is correct but
+    slow on a model run, for three reasons this function fixes (measured in
+    ``docs/kerchunk_performance.md``):
+
+    1. **One dask layer, not two.** kerchunk's backend opens the store with
+       ``xr.open_zarr``, which already returns dask arrays at the storage chunk;
+       ``chunks={}`` then wraps *those* in a second layer, and every outer task slices
+       and computes the inner array, whose optimisation walks the whole reference
+       (1.8 million chunks for 26 years of hourly output) -- about a second per
+       storage chunk before any bytes move. The inner open is made lazy
+       (``open_dataset_options={"chunks": None}``) so there is one layer, chunked once.
+    2. **Chunks sized by bytes, along time.** ``chunks="auto"`` (also ``{}``, the value
+       already baked into catalogs written before this existed) opens lazily, asks
+       :func:`_time_chunks` for a block of consecutive time steps of about
+       :data:`KERCHUNK_CHUNK_BYTES`, and reopens with that. Any other ``chunks`` is
+       used as given; ``None`` returns the lazy dataset untouched.
+    3. **``remote_protocol`` is given, not guessed.** See :func:`_reference_protocol`:
+       the guess scans every reference and can crash under pandas 3. A
+       ``remote_protocol`` in the caller's ``storage_options`` wins over the one found.
+
+    ``kwargs`` go to ``xr.open_dataset`` (``decode_times`` and the rest, untouched); an
+    ``engine`` among them is dropped, as this is always kerchunk. The lazy opens use
+    ``cache=False`` so that nothing the lazy pass touches is kept alive.
+    """
+    import os
+
+    import xarray as xr
+
+    url = os.fspath(url) if isinstance(url, os.PathLike) else url
+    kwargs.pop("engine", None)
+    protocol = _reference_protocol(url)
+    so = {
+        **({"remote_protocol": protocol} if protocol else {}),
+        **(storage_options or {}),
+    }
+    options = {**(kwargs.pop("open_dataset_options", None) or {}), "chunks": None}
+
+    def _open(chunking, **extra):
+        return xr.open_dataset(
+            url,
+            engine="kerchunk",
+            chunks=chunking,
+            storage_options=so or None,
+            open_dataset_options=options,
+            **extra,
+            **kwargs,
+        )
+
+    if chunks is None:
+        return _open(None, cache=False)
+    if (isinstance(chunks, str) and chunks == "auto") or (
+        isinstance(chunks, dict) and not chunks
+    ):
+        # The lazy pass is only to read the storage chunks off the variables'
+        # encoding; it is closed before the real open.
+        lazy = _open(None, cache=False)
+        try:
+            chunks = _time_chunks(lazy)
+        finally:
+            lazy.close()
+        with warnings.catch_warnings():
+            # A 1-D time coordinate is stored whole, so a block that does not divide
+            # it evenly draws xarray's "chunks separate the stored chunks" warning --
+            # about a few kilobytes of coordinate, on every open. Only for chunks
+            # chosen here: a caller's own chunks keep the warning.
+            warnings.filterwarnings(
+                "ignore", message=".*separate the stored chunks.*", category=UserWarning
+            )
+            return _open(chunks)
+    return _open(chunks)
+
+
 def _reader_for(
     url: str | Sequence[str],
     storage_options: dict[str, Any] | None = None,
@@ -1948,7 +2180,10 @@ def _reader_for(
     so = storage_options or None
 
     if low.endswith((".parquet", ".json")):
-        data = datatypes.HDF5(url=locator)  # placeholder type; engine drives the read
+        # placeholder type; engine drives the read. storage_options ride on the data
+        # object so open_reference() can hand them to the reference filesystem (they
+        # were dropped here before); None leaves the saved YAML exactly as it was.
+        data = datatypes.HDF5(url=locator, storage_options=so)
         kwargs.setdefault("engine", "kerchunk")
         kwargs.setdefault("chunks", {})
         return readers.XArrayDatasetReader(data, **kwargs)
@@ -2578,6 +2813,30 @@ PROBE_RETRIES = 3
 PROBE_RETRY_BACKOFF = 1.0
 
 
+def _read_reader(reader):
+    """``reader.read()``, but a kerchunk reader is opened by :func:`open_reference`.
+
+    The reader still says *what* to open (its data's url and storage_options, its
+    kwargs); :func:`open_reference` decides *how*, so the probe and every later read
+    of the entry get the one-layer, byte-sized-chunk open. A reader whose url is a
+    list (not a single reference) keeps the plain read.
+    """
+    kwargs = getattr(reader, "kwargs", None) or {}
+    url = None
+    if kwargs.get("engine") == "kerchunk":
+        # A chained reader has no single data object, and intake raises ValueError (not
+        # AttributeError) from the property; such a reader is not a kerchunk one.
+        with contextlib.suppress(Exception):
+            url = reader.data.url
+    if isinstance(url, str):
+        return open_reference(
+            url,
+            storage_options=reader.data.storage_options or None,
+            **{k: v for k, v in kwargs.items() if k not in ("args", "engine")},
+        )
+    return reader.read()
+
+
 def _read_with_retries(reader, name):
     """Call ``reader.read()``, re-attempting a transient failure a few times.
 
@@ -2599,7 +2858,7 @@ def _read_with_retries(reader, name):
     attempt = 0
     while True:
         try:
-            return reader.read()
+            return _read_reader(reader)
         except FileNotFoundError:
             # A missing path is a typo, not a server hiccup: it will be missing on
             # every retry, so fail fast rather than sleeping through backoff for it.

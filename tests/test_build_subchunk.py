@@ -18,7 +18,14 @@ import xarray as xr
 
 from ocean_skill.build import make_kerchunk
 
-READ_KW = {"engine": "kerchunk", "chunks": {}, "decode_times": False}
+# ``remote_protocol`` stops fsspec scanning the reference to guess it, a scan that
+# raises "boolean value of NA is ambiguous" on parquet references under pandas 3.
+READ_KW = {
+    "engine": "kerchunk",
+    "chunks": {},
+    "decode_times": False,
+    "storage_options": {"remote_protocol": "file"},
+}
 
 
 def _roms_like_3d(path, fmt, *, nt=1, ns=4, ny=3, nx=5, t0=0.0, encoding=None):

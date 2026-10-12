@@ -11,6 +11,7 @@ Returns a **known type** by featureType: point featureTypes →
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections import OrderedDict
 from typing import Any
@@ -140,7 +141,28 @@ def _read_uncached(ref: SourceRef, meta: dict[str, Any], qc: Any, kwargs: dict[s
     entry = cat[ref.name]
     # An intake v2 entry is called to re-parameterize it; calling it with nothing would
     # also work but reads oddly, so only when there is something to say.
-    obj = entry(**kwargs).read() if kwargs else entry.read()
+    url = None
+    if entry.kwargs.get("engine") == "kerchunk":
+        # A chained reader has no single data object and intake raises ValueError from
+        # the property; such an entry is not a kerchunk one.
+        with contextlib.suppress(Exception):
+            url = entry.data.url
+    if isinstance(url, str):
+        # A kerchunk reference is opened by build.open_reference rather than by the
+        # reader's own read(): one dask layer, time chunks sized by bytes, and a
+        # remote_protocol given instead of guessed -- see that function. The entry's
+        # kwargs are what the catalog saved; the caller's override them, as when an
+        # intake entry is called.
+        from ocean_skill import build
+
+        merged = {**entry.kwargs, **kwargs}
+        obj = build.open_reference(
+            url,
+            storage_options=entry.data.storage_options or None,
+            **{k: v for k, v in merged.items() if k not in ("args", "engine")},
+        )
+    else:
+        obj = entry(**kwargs).read() if kwargs else entry.read()
     subject = meta.get("datasetID") or meta.get("title") or ref.name
 
     if meta.get("model") == "roms" or meta.get("loader") == "ocean_skill.roms":

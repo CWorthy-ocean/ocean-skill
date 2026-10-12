@@ -84,18 +84,54 @@ Parquet remains the better target for very large references (JSON holds every ch
 record in memory); use it there and re-open on failure. For a few thousand daily files,
 JSON is fine.
 
+The cause has since been pinned down.
+- **What fails:** with no `remote_protocol`, `ReferenceFileSystem.__init__` scans the
+  references to guess one. Under pandas 3, a missing-chunk row's path is `pd.NA`, and
+  the truth test on it raises.
+- **Why it looks intermittent:** the scan order depends on the hash seed, so a given
+  seed always fails or always passes.
+- **Workaround:** passing `remote_protocol` skips the scan.
+
+ocean-skill passes it: `build.open_reference` works out the protocol from where the
+reference's chunks live (`file` for local paths, `https` for URLs), so the crash no
+longer hits `osk.read` or catalog builds, parquet references included. Opening a
+reference directly with `xr.open_dataset(..., engine="kerchunk")` is still exposed:
+pass `storage_options={"remote_protocol": "file"}` (or `"https"`, `"s3"`, ... to match
+where the data is), or call `ocean_skill.build.open_reference(path)`.
+
+See [kerchunk_performance.md](kerchunk_performance.md#recommendations-for-ocean-skill).
+
+## Read speed
+
+A reference does not make reads slower or faster by itself: the bytes and the
+decompression are the same as reading the files. How it is *opened* decides the speed.
+[kerchunk_performance.md](kerchunk_performance.md) measures the alternatives on the
+CIOFS3 hindcast. In short:
+- `engine="kerchunk", chunks={}` stacks two dask layers. That costs 0.3–1.1 s per
+  storage chunk on a multi-decade hourly record, and it was the CIOFS3 "30× slower than
+  the netCDF files".
+- One dask layer whose chunks span a block of time steps makes the reference the
+  fastest way to read a point time series on every storage tested: SSD, GlusterFS,
+  GPFS and S3. This is how ocean-skill opens references (`build.open_reference`).
+
 ## Chunk size: the manifest inherits the source file's layout
 
 A kerchunk reference does not choose a chunk shape — it records whatever the source
 file already has. ROMS writes one time record per output file with the full water
 column in it, so a variable shaped `(time, s_rho, eta_rho, xi_rho)` with 100 vertical
-levels becomes a manifest with **one chunk of ~1.3 GiB per time step**, and every
-downstream reader (dask, `xr.open_dataset(..., chunks={})`, `osk.compare`) inherits
-that as the unit it reads — reading it, or reducing over it before narrowing it down,
-pulls the whole thing into memory. `reader_kwargs={"chunks": ...}` on a catalog entry
-cannot fix this: dask chunks smaller than the *storage* chunk still fetch and decode
-the whole storage chunk per task, so a smaller dask chunk only adds read
-amplification, never shrinks the actual I/O.
+levels becomes a manifest with **one chunk of ~1.3 GiB per time step**. That storage
+chunk is the unit of I/O and decompression: any read fetches and decodes whole chunks,
+so reading it, or reducing over it before narrowing it down, pulls the whole thing into
+memory. Dask chunks smaller than the storage chunk only add read amplification, never
+shrink the actual I/O.
+
+What the dask chunk is, however, is no longer tied to the storage chunk. ocean-skill
+opens references through `build.open_reference`, which builds one dask layer whose
+chunks span whole time steps, sized to about `KERCHUNK_CHUNK_BYTES` (256 MiB) of
+storage chunks. A read therefore no longer costs one dask task per storage chunk, and
+`reader_kwargs={"chunks": ...}` on a catalog entry is not needed for speed (a dict
+there is still honoured as given). It does not make the storage chunk smaller: a
+manifest holding 1.3 GiB chunks still needs the splitting below.
 
 `make_kerchunk`/`build_kerchunk` split the manifest itself instead, which is possible
 because an **uncompressed** chunk's bytes are one contiguous run: any leading axis
