@@ -856,6 +856,10 @@ def test_plot_is_unchanged_and_silent_when_every_member_is_available(stub, unava
     fs = make_field(["stub_a", "stub_b"], NITRATE)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
+        # numpy >= 2.5 deprecates matplotlib's own unitless np.datetime64("NaT")
+        warnings.filterwarnings(
+            "ignore", category=DeprecationWarning, module="matplotlib"
+        )
         fig = fs.plot()
     assert len(fig.axes) == 1
     assert len(fig.axes[0].lines) == 2
