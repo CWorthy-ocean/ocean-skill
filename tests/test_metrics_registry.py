@@ -12,6 +12,8 @@ record a regression as the new truth.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -165,3 +167,78 @@ def test_the_default_map_set_is_the_taylor_and_target_quantities():
 def test_a_metric_must_be_either_primitive_or_derived():
     with pytest.raises(ValueError, match="exactly one"):
         m.Metric("bogus", "both at once", kind="skill", units="1")
+
+
+# --- a 0-d pair: one model value against one observed value -----------------------
+
+
+def _scalar_pair(test: float = 1.0, reference: float = 2.0) -> xr.Dataset:
+    """Build the pair a station comparison reduced to one model/obs value becomes."""
+    return xr.Dataset({"test": ((), test), "reference": ((), reference)})
+
+
+def test_a_zero_d_pair_scores_as_one_sample_without_crashing(recwarn):
+    """A 0-d pair scores as one sample: _evaluate gives xskillscore a temporary dim.
+
+    One pair has no spread, so the two standard deviations are 0, the correlation and
+    the sigma ratio are NaN (not inf, not a crash), and the RMSE/MAE are the single
+    absolute difference with the centred RMSD collapsing to 0.
+    """
+    with pytest.warns(UserWarning, match="only 1 time steps"):
+        rec = m.compute(_scalar_pair(), sample_noun="time steps")
+    assert rec["n"] == 1
+    assert rec["bias"] == pytest.approx(-1.0)
+    assert rec["rmse"] == pytest.approx(1.0)
+    assert rec["mae"] == pytest.approx(1.0)
+    assert rec["std_test"] == 0.0 and rec["std_reference"] == 0.0
+    assert rec["crmsd"] == pytest.approx(0.0)
+    assert rec["mean_test"] == 1.0 and rec["mean_reference"] == 2.0
+    assert np.isnan(rec["corr"]) and np.isnan(rec["sigma_ratio"])
+    # The 1-sample correlation's 0/0 must not leak a numpy RuntimeWarning.
+    assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+
+
+def test_min_samples_only_warns_on_a_single_pair_it_does_not_blank_the_metrics():
+    """Default ``min_samples=30`` warns about n=1 but still reports the numbers.
+
+    ``min_samples=1`` is silent.
+    """
+    with pytest.warns(UserWarning, match="only 1"):
+        warned = m.compute(_scalar_pair())
+    assert warned["rmse"] == pytest.approx(1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        quiet = m.compute(_scalar_pair(), min_samples=1)
+    assert quiet["rmse"] == warned["rmse"] and quiet["n"] == 1
+
+
+@pytest.mark.parametrize("nan_in", ["test", "reference"])
+def test_a_nan_member_of_a_zero_d_pair_counts_no_pairs(nan_in):
+    pair = _scalar_pair(**{nan_in: np.nan})
+    rec = m.compute(pair, min_samples=0)
+    assert rec["n"] == 0
+    assert all(np.isnan(v) for k, v in rec.items() if k not in ("n", "weighted"))
+
+
+def test_evaluate_on_a_zero_d_pair_returns_zero_d_arrays_without_the_temp_dim():
+    out = m.evaluate(_scalar_pair(3.0, 1.0), dim=None)
+    assert set(out) == set(m.METRICS)
+    for da in out.values():
+        assert da.dims == () and "_sample" not in da.coords
+    assert float(out["bias"]) == pytest.approx(2.0)
+    assert int(out["n"]) == 1
+    assert out["bias"].attrs["long_name"]
+
+
+def test_a_zero_d_pair_with_scalar_lat_lon_coords_is_harmless_when_weighted():
+    """A station's scalar lat/lon would let area_weights return 0-d cos(lat) weights."""
+    pair = _scalar_pair().assign_coords(lat=45.0, lon=-120.0)
+    rec = m.compute(pair, min_samples=0, weighted=True)
+    assert rec["n"] == 1 and rec["rmse"] == pytest.approx(1.0)
+
+
+def test_explicit_dim_on_a_nonscalar_pair_is_unchanged_by_the_scalar_branch():
+    pair = _pair()
+    out = m.evaluate(pair, ("bias", "n"), dim="time", weighted=False)
+    assert out["bias"].dims == ("lat", "lon")
+    assert int(out["n"].isel(lat=0, lon=0)) == 8

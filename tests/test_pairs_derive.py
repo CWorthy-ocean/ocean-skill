@@ -581,3 +581,114 @@ def test_derive_keeps_the_pairs_attrs():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         derive(profile_base(), "profile", select={"depth": [5.0, 20.0]})
+
+
+# -- month masks on the time select ---------------------------------------------------
+
+
+def test_a_month_mask_time_select_is_derivable_for_a_series():
+    for entry in (
+        {"season": "MAM"},
+        {"months": [3, 4, 5]},
+        {"season": "MAM", "min": "2024-01-01", "max": "2024-12-31"},
+    ):
+        ok, why = pairs.derivable(
+            {"time": entry},
+            {},
+            feature_type="timeSeries",
+            obs_levels=None,
+            detide=False,
+        )
+        assert ok, why
+
+
+def test_a_month_mask_is_still_refused_on_a_profile():
+    """A time key of any shape chooses casts, and a profile pair is one cast."""
+    ok, why = pairs.derivable(
+        {"time": {"season": "MAM"}},
+        {},
+        feature_type="profile",
+        obs_levels=LEVELS,
+        detide=False,
+    )
+    assert not ok
+    assert "time" in why
+
+
+def test_a_season_mask_derives_the_masked_pairs():
+    base = series_base(hours=24 * 100)  # Jan-Apr 2020
+    out = derive(base, "timeSeries", select={"time": {"season": "FMA"}})
+    months = out["time"].dt.month.values
+    assert set(months) == {2, 3, 4}
+    expected = base.isel(time=np.isin(base["time"].dt.month.values, [2, 3, 4]))
+    xr.testing.assert_equal(out["test"], expected["test"])
+    xr.testing.assert_equal(out["reference"], expected["reference"])
+    xr.testing.assert_equal(out["difference"], expected["test"] - expected["reference"])
+
+
+def test_a_month_mask_with_a_window_applies_the_window_first():
+    base = series_base(hours=24 * 100)
+    out = derive(
+        base,
+        "timeSeries",
+        select={
+            "time": {"months": [1, 2, 3], "min": "2020-02-10", "max": "2020-03-10"}
+        },
+    )
+    assert out["time"].min() >= np.datetime64("2020-02-10")
+    assert out["time"].max() < np.datetime64("2020-03-11")
+    assert set(out["time"].dt.month.values) == {2, 3}
+
+
+def test_a_month_mask_without_detide_equals_masking_the_pairs_directly():
+    """No detide: the order of window and mask is immaterial.
+
+    So the split entry gives exactly what the one-step lane select gives.
+    """
+    from ocean_skill import operators
+
+    base = series_base(hours=24 * 100)
+    entry = {"months": [1, 3], "min": "2020-01-10"}
+    out = derive(base, "timeSeries", select={"T": entry})
+    xr.testing.assert_equal(out["test"], operators.select(base, {"T": entry})["test"])
+
+
+def test_a_month_mask_followed_by_a_time_aggregate_means_the_masked_samples():
+    base = series_base(hours=24 * 100)
+    out = derive(
+        base,
+        "timeSeries",
+        select={"time": {"months": [2]}},
+        aggregate={"time": "mean"},
+    )
+    feb = base.isel(time=base["time"].dt.month.values == 2)
+    both = feb["test"].notnull() & feb["reference"].notnull()
+    assert float(out["test"]) == pytest.approx(float(feb["test"].where(both).mean()))
+
+
+def test_a_month_mask_that_leaves_nothing_is_an_error():
+    with pytest.raises((ValueError, KeyError)):
+        derive(series_base(), "timeSeries", select={"time": {"season": "JJA"}})
+
+
+def test_detide_runs_on_the_full_regular_series_before_the_month_mask():
+    """January and March with February missing is an irregular series.
+
+    Detiding the masked pairs would warn and skip; derive detides first, masks after.
+    """
+    pytest.importorskip("oceans")
+    base = series_base(hours=24 * 100)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        out = derive(
+            base, "timeSeries", select={"time": {"months": [1, 3]}}, detide=_both()
+        )
+    assert set(out["time"].dt.month.values) == {1, 3}
+    by_hand = derive(base, "timeSeries", detide=_both())
+    expected = by_hand.isel(time=np.isin(by_hand["time"].dt.month.values, [1, 3]))
+    xr.testing.assert_equal(out["test"], expected["test"])
+    xr.testing.assert_equal(out["reference"], expected["reference"])
+    # the filter's edge NaNs belong to the full series (Jan 1 start), not to a
+    # re-edged March block: March's first hours carry real values
+    march = out["reference"].sel(time=slice("2020-03-01", "2020-03-02"))
+    assert march.notnull().all()
