@@ -1798,6 +1798,82 @@ _ISOPYCNAL_KEYS = frozenset({"sigma0"})
 _ANY_VERTICAL_KEYS = _VERTICAL_KEYS | _ISOPYCNAL_KEYS
 
 
+_DEPTH_METHODS = ("nearest", "interp", "linear")
+
+
+def _depth_method_from_select(
+    select: dict[str, Any] | None,
+    depth_method: str,
+    *,
+    vertical_named: bool = False,
+) -> tuple[dict[str, Any] | None, str]:
+    """Move a ``select={"depth": d, "method": ...}`` method into ``depth_method``.
+
+    ``select={"depth": 10, "method": "interp"}`` is the spelling people reach for by
+    analogy with xarray's ``.sel(depth=10, method="nearest")``, and it means exactly
+    ``depth_method="interp"``. ``"method"`` is not an axis, so left in the select it
+    would only be ignored (with a warning, by :func:`ocean_skill.operators.select`)
+    while still changing the cache key and the derivation plan's view of the request --
+    which would keep it from ever matching the saved full-column pairs it should be
+    answered from. So it is taken out here, once, before anything reads the select, and
+    ``depth_method`` carries it.
+
+    Only a plain select (not a ``{"test", "reference"}`` pair-spec) that names a
+    vertical key is touched -- ``vertical_named`` lets :func:`compare` say that
+    ``depths=`` stands in for one -- and a ``"method"`` beside no vertical request
+    stays where it is, as before. The value must be one of :data:`_DEPTH_METHODS`.
+
+    ``depth_method`` is a plain keyword whose default is ``"nearest"``, so an explicit
+    ``depth_method="nearest"`` cannot be told from none: the two disagree only when
+    ``depth_method`` is *not* the default and names a different method than the select
+    (``"interp"`` and ``"linear"`` are one method), which raises rather than guessing
+    which spelling was meant. A select ``"method"`` beside the default wins.
+    """
+    if (
+        not isinstance(select, dict)
+        or is_pair_spec(select)
+        or "method" not in select
+        or not (vertical_named or any(k in select for k in _VERTICAL_KEYS))
+    ):
+        return select, depth_method
+    asked = select["method"]
+    if asked not in _DEPTH_METHODS:
+        raise ValueError(
+            f"select={{..., 'method': {asked!r}}} is not a depth method; expected "
+            "'nearest' or 'interp' (or 'linear') -- the same choice as depth_method=."
+        )
+
+    def family(name: str) -> str:
+        return "interp" if name == "linear" else name
+
+    if depth_method != "nearest" and family(depth_method) != family(asked):
+        raise ValueError(
+            f"depth_method={depth_method!r} conflicts with select={{..., 'method': "
+            f"{asked!r}}} -- they are the same setting; give one of them."
+        )
+    return {k: v for k, v in select.items() if k != "method"}, asked
+
+
+def _asks_off_bin_depths(passed: dict[str, Any], obs_levels: list[float]) -> bool:
+    """Whether ``passed``'s depth request has a fixed depth that is not an obs level.
+
+    Bands and the surface are not fixed depths; only a number (or a list of them) can
+    sit between two levels. Used to tell the requests an interpolated depth_method
+    actually reads *between* the saved levels (see ``Comparison._plan_derivation``).
+    """
+    depth = next((passed[k] for k in _VERTICAL_KEYS if k in passed), None)
+    if depth is None:
+        return False
+    values = depth if isinstance(depth, list | tuple) else [depth]
+    levels = np.asarray(obs_levels, dtype=float)
+    return any(
+        isinstance(v, int | float | np.number)
+        and not isinstance(v, bool)
+        and not bool(np.isclose(levels, float(v)).any())
+        for v in values
+    )
+
+
 def _names_vertical(select: dict[str, Any]) -> bool:
     """Report whether ``select`` names a vertical request, any spelling."""
     return any(k in select for k in _ANY_VERTICAL_KEYS)
@@ -4810,7 +4886,10 @@ class Comparison:
         ``"exact"``. See :func:`compare`'s ``time_method=``.
     depth_method
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"``. See
-        :func:`compare`'s ``depth_method=``.
+        :func:`compare`'s ``depth_method=``. A plain ``select`` that names a depth
+        may carry it instead as ``"method"`` (``select={"depth": 10, "method":
+        "interp"}``): it is moved here before anything reads the select, and an
+        explicit, different ``depth_method=`` beside it raises.
     depth_origin
         ``None`` (default, each source's own ``depth_convention`` decides), an
         origin string (``"surface"``/``"fixed"``) or a dict of ``origin``/
@@ -4977,6 +5056,10 @@ class Comparison:
         # lane's own prepare() call resolves this through, mirroring variable_for.
         self.select = _normalize_pair(select, "select", normalize_side=as_select)
         self.select = _resolve_latest_lanes(self.select, test)
+        # select={"depth": d, "method": "interp"} is depth_method="interp" spelled the
+        # way xarray's .sel() spells it; taken out before the literal-depth inference,
+        # the derivation plan and the cache key see it (see _depth_method_from_select).
+        self.select, depth_method = _depth_method_from_select(self.select, depth_method)
         # How the observation's depths are referenced, when the caller says so rather
         # than the catalog: validated once, here, and written into *both* lanes' selects
         # -- where it outranks what either lane's catalog entry (or, for the test lane,
@@ -5082,6 +5165,7 @@ class Comparison:
         self._depth_default_done = False
         self._quiet = False
         self._derivation_cache = _UNSET
+        self._pairs_depth_warned = False
         self._cache_note: str | None = None
         self._lane_hit = False
         self._validate_section_request()
@@ -6021,8 +6105,15 @@ class Comparison:
         # aggregate is taken over pairs), so its numbers differ from what the lane
         # pipeline would give for the same select/aggregate -- the two must never share
         # an entry. Decided read-free of the model (see _derivation_plan).
-        if self._derivation_plan()[0] is not None:
+        plan = self._derivation_plan()
+        if plan.basic is not None:
             extra["_derived"] = "pairs"
+            # Answered from the *nearest*-matched pairs when an interpolated request
+            # found no interp pairs saved (see _plan_derivation): a different set of
+            # numbers from the same request built on interp pairs, and the two must not
+            # share an entry -- or this stopgap would shadow the proper answer for ever.
+            if (plan.attrs or {}).get("pairs_depth_method"):
+                extra["_pairs_depth_method"] = plan.attrs["pairs_depth_method"]
         # What the reference's catalog entry says about its depths and its clock is
         # invisible to everything above: declaring it surface-referenced (or its naive
         # stamps local) changes every value of the aligned pair under an identical
@@ -6379,6 +6470,16 @@ class Comparison:
           is not answerable either (refused by :meth:`_check_depth_request` the same
           way) -- unless it is one of several layers, where it is left NaN;
         * a list, or a vertical aggregate of a plain depth, fall back to the lanes.
+
+        ``depth_method`` is handed to :func:`~ocean_skill.pairs.derivable` and
+        :func:`~ocean_skill.pairs.derive` for a cast or profiling station only, so a
+        fixed depth that is not one of the reference's own levels is answerable: snapped
+        to the nearest level (``"nearest"``) or interpolated between the two around it
+        (``"interp"``/``"linear"``). An interpolated request whose own ``interp`` basic
+        comparison is not saved, but whose ``nearest`` one is, is answered from the
+        latter -- ``extra_attrs["pairs_depth_method"] = "nearest"``, which
+        :attr:`_cache_key` keys apart and :meth:`_warn_on_pairs_depth` reports --
+        rather than reading the model again to save an ``interp`` set.
         """
         from ocean_skill import operators, pairs
         from ocean_skill.sources import _TIME_KEYS as _ALL_TIME_KEYS
@@ -6500,16 +6601,44 @@ class Comparison:
                     "(in meters), the surface of a surface station, or a layer "
                     "holding the instrument can be derived, not a list"
                 )
+        # Only a cast or a profiling station has a depth axis for depth_method to act
+        # on; a station's one level is its own and nothing is read off or between it.
+        depth_method = (
+            self.depth_method if feature in PROFILE_FEATURE_TYPES else None
+        )
         ok, why = pairs.derivable(
             passed,
             aggregate,
             feature_type=feature,
             obs_levels=obs_levels,
             detide=self.detide,
+            depth_method=depth_method,
         )
         if not ok:
             return no(why)
         basic = self._sibling(basic_select, literal_depths=literal)
+        if (
+            depth_method in ("interp", "linear")
+            and self._use_cache()
+            and _asks_off_bin_depths(passed, obs_levels)
+        ):
+            # An interpolated answer between obs levels is built from the saved pairs of
+            # the same depth_method when they exist. When they do not but the *nearest*
+            # pairs do (the usual case: the full-column comparison was run first, with
+            # the default), those answer instead -- interpolating the matched values
+            # between the two bracketing levels -- rather than reading the whole model
+            # again to save an "interp" set just for this. The result says so (see
+            # _warn_on_pairs_depth) and is keyed apart (_cache_key), so a later
+            # interp-built base is never shadowed by this fallback answer.
+            from ocean_skill import cache as _cache
+
+            if not _cache.has(basic._cache_key):
+                nearest = self._sibling(
+                    basic_select, literal_depths=literal, depth_method="nearest"
+                )
+                if _cache.has(nearest._cache_key):
+                    basic = nearest
+                    extra_attrs = {**extra_attrs, "pairs_depth_method": "nearest"}
         if (
             self.select == basic.select
             and not any(aggregate.values())
@@ -6521,7 +6650,12 @@ class Comparison:
         return _DerivationPlan(
             basic,
             why,
-            {"select": passed, "aggregate": aggregate, "feature_type": feature},
+            {
+                "select": passed,
+                "aggregate": aggregate,
+                "feature_type": feature,
+                **({"depth_method": depth_method} if depth_method else {}),
+            },
             obs_levels,
             extra_attrs,
         )
@@ -6567,6 +6701,7 @@ class Comparison:
             aligned.attrs.update(plan.attrs)
         aligned.attrs["derived_from"] = "pairs"
         aligned.attrs["derived_reason"] = plan.reason
+        self._warn_on_pairs_depth(aligned)
         self._aligned = aligned
         self._actual_depth = aligned.attrs.get("actual_depth")
         self._warn_on_definition_mismatch(
@@ -6580,6 +6715,69 @@ class Comparison:
             _cache.save(self._cache_key, aligned)
         self._subtract_scalar_means()
         return self._aligned
+
+    def _warn_on_pairs_depth(self, aligned) -> None:
+        """Say when a depth answered from saved pairs was snapped or interpolated.
+
+        Reads only the pair's own attributes, so a fresh derivation
+        (:meth:`_align_from_pairs`) and a plain cache hit of its saved result say the
+        same thing. Two cases are worth a warning, both only on a result
+        :mod:`ocean_skill.pairs` derived (``derived_from == "pairs"``; the lanes route
+        has its own, native, depth handling and is silent here):
+
+        * ``depth_requested`` is on the pair: the asked depth was not one of the
+          reference's sampled levels and ``depth_method="nearest"`` snapped it to the
+          nearest, ``actual_depth``;
+        * the pairs interpolated between two levels
+          (``depth_interpolated_between``) but were themselves matched with
+          ``depth_method="nearest"`` -- the fallback of :meth:`_plan_derivation` when
+          only the nearest full-column pairs are saved, flagged by
+          ``pairs_depth_method``. Interpolating pairs of the same method is the
+          ordinary answer and is silent.
+        """
+        import warnings
+
+        from ocean_skill import _stacklevel
+
+        attrs = aligned.attrs
+        if attrs.get("derived_from") != "pairs" or self._pairs_depth_warned:
+            return
+        # compare() aligns each comparison once to vet it and the caller usually aligns
+        # again (a plain hit): one comparison says it once, a new call says it afresh.
+        self._pairs_depth_warned = True
+        ref = repr(self.reference_name)
+        if "depth_requested" in attrs and np.ndim(attrs["depth_requested"]) == 0:
+            req = float(attrs["depth_requested"])
+            got = float(attrs["actual_depth"])
+            warnings.warn(
+                f"{ref}: {req:g} m is not one of its sampled depths -- compared at "
+                f"the nearest, {got:g} m (depth_method='nearest'), from the saved "
+                f"model-data pairs. Pass depth_method='interp' to interpolate to "
+                f"{req:g} m instead.",
+                stacklevel=_stacklevel.find(),
+            )
+        elif (
+            attrs.get("pairs_depth_method") == "nearest"
+            and "depth_interpolated_between" in attrs
+        ):
+            between = np.asarray(attrs["depth_interpolated_between"], dtype=float)
+            target = np.asarray(attrs.get("actual_depth"), dtype=float).reshape(-1)
+            if between.size == 2:
+                zi, zj = between.reshape(-1)
+                where = (
+                    f"{float(target[0]):g} m between its levels {zi:g} and {zj:g} m"
+                )
+            else:
+                where = (
+                    f"{', '.join(f'{z:g}' for z in target)} m between the levels "
+                    "each of them sits between"
+                )
+            warnings.warn(
+                f"{ref}: interpolated to {where} from the saved model-data pairs, "
+                "which were matched with depth_method='nearest' (no 'interp' set is "
+                "saved).",
+                stacklevel=_stacklevel.find(),
+            )
 
     def _tidy_derived_profile(self, aligned, plan: _DerivationPlan):
         """Give a derived cast/visit the two behaviours the lane pipeline's reading has.
@@ -7221,6 +7419,9 @@ class Comparison:
                 # fields' own attrs rather than the (always "test"/"reference",
                 # unusable here) array names.
                 self._actual_depth = hit.attrs.get("actual_depth")
+                # A depth answered from saved pairs by snapping or interpolating says
+                # so on every call, not just the one that derived it.
+                self._warn_on_pairs_depth(hit)
                 self._warn_on_pair_spec_mismatch(
                     hit["test"], hit["reference"], trust_name_fallback=False
                 )
@@ -12949,6 +13150,15 @@ def compare(
         One of ``"nearest"`` (default) or ``"interp"``/``"linear"`` -- how
         the model is matched onto target depths: the nearest real level
         (chosen at every time step), or linearly interpolated at every step.
+        ``select={"depth": 10, "method": "interp"}`` is the same setting spelled
+        inside the select (it wins over the default, and conflicts with an
+        explicit different ``depth_method=``). Against a mooring or cast whose
+        full-column comparison is already cached, a depth that is not one of its
+        sampled levels is answered from those saved model-data pairs without
+        reading the model: ``"nearest"`` snaps to the nearest sampled level,
+        ``"interp"`` interpolates the pairs between the two bracketing levels --
+        from the ``"interp"`` pairs when saved, else from the ``"nearest"`` ones.
+        Either way a warning says which.
     tolerance
         Optional float widening a ``"nearest"`` time/position match.
         ``None`` (default) uses each matcher's own built-in tolerance.
@@ -13274,7 +13484,17 @@ def compare(
     station -- see :func:`ocean_skill.align._align_at_point`), depth had no such
     default until this option: the whole comparison is now nearest-by-default in
     space as it is in the vertical, with interpolation available in both wherever it
-    is asked for explicitly.
+    is asked for explicitly. The choice can also ride in the select --
+    ``select={"depth": 10, "method": "interp"}`` is ``select={"depth": 10}`` with
+    ``depth_method="interp"`` (``depths=[10]`` beside ``select={"method": "interp"}``
+    too); a ``"method"`` beside a select that names no depth is ignored with a warning,
+    as before. Against a mooring (``timeSeriesProfile``) or cast whose full-column
+    comparison is cached, a depth that is not one of the reference's own levels does
+    not need the model: ``"nearest"`` snaps to the nearest sampled level and
+    ``"interp"`` linearly interpolates the saved matched pairs between the two levels
+    around it (the pairs of an ``"interp"`` full-column comparison when saved, else
+    the ``"nearest"`` ones -- see :meth:`Comparison._plan_derivation`), each with a
+    warning naming what was done.
 
     What a depth is measured *from* matters as much as how it is read off the grid.
     ROMS's ``z`` is a height above mean sea level and rides the tide, while an
@@ -13514,6 +13734,12 @@ def compare(
     # {"test": ..., "reference": ...}.
     select = _normalize_pair(select, "select", normalize_side=as_select)
     aggregate = _normalize_pair(aggregate, "aggregate")
+    # select={"depth": d, "method": "interp"} is depth_method="interp" (depths=[...]
+    # beside select={"method": ...} too): moved out of the select before it is fanned,
+    # so no per-depth Comparison ever carries the stray "method" key.
+    select, depth_method = _depth_method_from_select(
+        select, depth_method, vertical_named=depths is not None
+    )
 
     # depths defaults to the vertical entry already in `select`, if any, so the two
     # spellings agree instead of one clobbering the other. Recorded *before*

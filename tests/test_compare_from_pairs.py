@@ -95,6 +95,21 @@ def _visits() -> pd.DataFrame:
     return frame
 
 
+ADCP_LEVELS = [2.0, 6.0, 10.5, 14.0]
+
+
+def _adcp() -> pd.DataFrame:
+    """Return a moored profiler: every level sampled every 6 h, so time stands."""
+    times = pd.date_range(START + pd.Timedelta("1D"), periods=4 * 10, freq="6h")
+    rows = []
+    for k, stamp in enumerate(times):
+        for z in ADCP_LEVELS:
+            rows.append((stamp, z, POINT[0], POINT[1], 12.0 - 0.3 * z + 0.1 * k))
+    return pd.DataFrame(
+        rows, columns=["time", "depth (m)", "lon", "lat", "temperature (degC)"]
+    )
+
+
 def _ref_meta(feature: str, **extra) -> dict:
     return {
         "featureType": feature,
@@ -121,6 +136,7 @@ class World:
             ),
             "cast": (_cast(), _ref_meta("profile")),
             "visits": (_visits(), _ref_meta("timeSeriesProfile")),
+            "adcp": (_adcp(), _ref_meta("timeSeriesProfile")),
         }
         self.model_reads = 0
         self.model_blocked = False
@@ -617,7 +633,6 @@ def test_a_whole_year_season_rides_along_with_the_seasons(world):
         assert whole.iloc[0][name] == pytest.approx(rows.loc["JJA", name])
 
 
-
 def test_sel_filters_by_depth_and_time_labels(world):
     # .sel(depth=, time=) matches the metrics table's depth/time columns, ignoring
     # case and spaces, on a pooled set and on the fan it came from
@@ -667,3 +682,264 @@ def test_relabel_renames_a_real_pooled_set_through_metrics_and_sel(world):
     assert set(table["time"]) == {"JJA", "Mar–Nov"}
     assert len(renamed.sel(time="mar–nov")) == 2
     assert set(pooled.metrics()["time"]) == {"JJA", "MAMJJASON"}  # original untouched
+
+
+# -- a depth between an ADCP's bins ---------------------------------------------------
+
+
+def _adcp_compare(**kw) -> tuple[xr.Dataset, list[str]]:
+    """Run ``compare`` on the ADCP; return its one aligned pair and the warnings."""
+    kw.setdefault("variables", [TEMPERATURE])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        (c,) = compare(reference="adcp", test="his", **kw)
+        ds = c.align()
+    return ds, [str(w.message) for w in caught]
+
+
+def _adcp_base(depth_method: str = "nearest") -> xr.Dataset:
+    """Build (and save) the full-column comparison the variants derive from."""
+    ds, _ = _adcp_compare(depth_method=depth_method)
+    assert ds.attrs["derived_from"] == "lanes"
+    assert list(ds["reference"].coords[_zdim(ds)].values) == ADCP_LEVELS
+    return ds
+
+
+def _zdim(ds: xr.Dataset) -> str:
+    return next(d for d in ds["reference"].dims if d not in ("time",))
+
+
+def _said(messages: list[str], *fragments: str) -> list[str]:
+    return [m for m in messages if all(f in m for f in fragments)]
+
+
+def test_an_off_bin_depth_snaps_to_the_nearest_from_the_saved_pairs(world):
+    base = _adcp_base()
+    reads = world.model_reads
+    world.block_model()
+
+    ds, msgs = _adcp_compare(select={"depth": 8.0})
+
+    assert ds.attrs["derived_from"] == "pairs"
+    assert world.model_reads == reads
+    assert ds.attrs["actual_depth"] == 6.0
+    assert ds.attrs["depth_requested"] == 8.0
+    (said,) = _said(msgs, "8 m is not one of its sampled depths")
+    assert "nearest, 6 m" in said and "depth_method='interp'" in said
+    z = _zdim(base)
+    np.testing.assert_allclose(
+        _values(ds), np.asarray(base["test"].sel({z: 6.0})).reshape(-1)
+    )
+    # said again, not just by the call that derived it
+    _, msgs2 = _adcp_compare(select={"depth": 8.0})
+    assert _said(msgs2, "8 m is not one of its sampled depths")
+
+
+def test_an_exact_bin_depth_is_silent_from_the_saved_pairs(world):
+    _adcp_base()
+    world.block_model()
+    ds, msgs = _adcp_compare(select={"depth": 6.0})
+    assert ds.attrs["derived_from"] == "pairs"
+    assert not _said(msgs, "sampled depths")
+
+
+def test_interp_between_bins_uses_the_nearest_pairs_when_only_they_are_saved(world):
+    base = _adcp_base("nearest")
+    reads = world.model_reads
+    world.block_model()
+
+    ds, msgs = _adcp_compare(select={"depth": 8.0}, depth_method="interp")
+
+    assert ds.attrs["derived_from"] == "pairs"
+    assert world.model_reads == reads
+    assert ds.attrs["pairs_depth_method"] == "nearest"
+    assert ds.attrs["actual_depth"] == 8.0
+    np.testing.assert_allclose(ds.attrs["depth_interpolated_between"], [6.0, 10.5])
+    (said,) = _said(msgs, "interpolated to 8 m between its levels 6 and 10.5 m")
+    assert "depth_method='nearest'" in said
+    # linear between the two bracketing levels, each lane on its own
+    z = _zdim(base)
+    w = (8.0 - 6.0) / (10.5 - 6.0)
+    for name in ("test", "reference"):
+        lo = np.asarray(base[name].sel({z: 6.0}))
+        hi = np.asarray(base[name].sel({z: 10.5}))
+        np.testing.assert_allclose(
+            _values(ds, name), ((1 - w) * lo + w * hi).reshape(-1)
+        )
+
+
+def test_the_nearest_pairs_fallback_is_keyed_apart_from_a_proper_interp_answer(world):
+    _adcp_base("nearest")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        (fallback,) = compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            select={"depth": 8.0},
+            depth_method="interp",
+        )
+        fallback.align()
+        fallback_key = fallback._cache_key
+
+        _adcp_base("interp")  # now the interp full column exists
+        (proper,) = compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            select={"depth": 8.0},
+            depth_method="interp",
+        )
+    assert proper._cache_key != fallback_key
+    ds, _ = _adcp_compare(select={"depth": 8.0}, depth_method="interp")
+    # the proper base now answers, so nothing is shadowed by the stopgap
+    assert "pairs_depth_method" not in ds.attrs
+    assert ds.attrs["derived_from"] == "pairs"
+
+
+def test_interp_between_bins_from_interp_pairs_is_silent(world):
+    _adcp_base("interp")
+    world.block_model()
+    ds, msgs = _adcp_compare(select={"depth": 8.0}, depth_method="interp")
+    assert ds.attrs["derived_from"] == "pairs"
+    assert "pairs_depth_method" not in ds.attrs
+    np.testing.assert_allclose(ds.attrs["depth_interpolated_between"], [6.0, 10.5])
+    assert not _said(msgs, "interpolated")
+
+
+def test_depths_with_select_method_derives_too(world):
+    _adcp_base("nearest")
+    world.block_model()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        (c,) = compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            depths=[8.0],
+            select={"method": "interp"},
+        )
+        ds = c.align()
+    assert ds.attrs["derived_from"] == "pairs"
+    assert ds.attrs["actual_depth"] == 8.0
+
+
+def test_the_nearest_pairs_are_not_used_when_the_request_is_not_between_bins(world):
+    _adcp_base("nearest")
+    # 6 m is a bin: its interpolation needs interp pairs, which are not saved, so the
+    # request is built on its own interp base instead of borrowing nearest pairs
+    ds, msgs = _adcp_compare(select={"depth": 6.0}, depth_method="interp")
+    assert "pairs_depth_method" not in ds.attrs
+    assert not _said(msgs, "interpolated")
+
+
+def test_select_method_is_depth_method(world):
+    _adcp_base("nearest")
+    world.block_model()
+    a, _ = _adcp_compare(select={"depth": 8.0}, depth_method="interp")
+    b, msgs = _adcp_compare(select={"depth": 8.0, "method": "interp"})
+    assert not _said(msgs, "ignores 'method'")
+    assert b.attrs["derived_from"] == "pairs"
+    for name in ("test", "reference", "difference"):
+        xr.testing.assert_equal(a[name], b[name])
+    for key in ("actual_depth", "depth_interpolated_between", "pairs_depth_method"):
+        assert a.attrs[key] == b.attrs[key] or np.allclose(a.attrs[key], b.attrs[key])
+
+
+def test_select_method_nearest_is_the_default(world):
+    _adcp_base("nearest")
+    world.block_model()
+    ds, _ = _adcp_compare(select={"depth": 8.0, "method": "nearest"})
+    assert ds.attrs["actual_depth"] == 6.0
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_a_select_method_that_contradicts_depth_method_is_refused(world):
+    with pytest.raises(ValueError, match="same setting"):
+        compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            select={"depth": 8.0, "method": "nearest"},
+            depth_method="interp",
+        )
+    with pytest.raises(ValueError, match="not a depth method"):
+        compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            select={"depth": 8.0, "method": "cubic"},
+        )
+    # a Comparison built directly follows the same rule
+    with pytest.raises(ValueError, match="same setting"):
+        Comparison(
+            reference="adcp",
+            test="his",
+            variable=TEMPERATURE,
+            select={"depth": 8.0, "method": "nearest"},
+            depth_method="interp",
+        )
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_method_beside_no_depth_is_left_alone(world):
+    c = Comparison(
+        reference="adcp",
+        test="his",
+        variable=TEMPERATURE,
+        select={"method": "interp"},
+    )
+    assert c.select == {"method": "interp"}
+    assert c.depth_method == "nearest"
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_a_direct_comparison_moves_select_method_into_depth_method(world):
+    c = Comparison(
+        reference="adcp",
+        test="his",
+        variable=TEMPERATURE,
+        select={"depth": 8.0, "method": "linear"},
+    )
+    assert c.select == {"depth": 8.0}
+    assert c.depth_method == "linear"
+
+
+def test_depths_takes_the_same_derived_route_as_select(world):
+    _adcp_base("nearest")
+    world.block_model()
+    via_select, _ = _adcp_compare(select={"depth": 8.0})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = compare(
+            reference="adcp", test="his", variables=[TEMPERATURE], depths=[8.0]
+        )
+        (c,) = cs
+        via_depths = c.align()
+    assert (
+        via_depths.attrs["derived_from"] == via_select.attrs["derived_from"] == "pairs"
+    )
+    np.testing.assert_allclose(_values(via_depths), _values(via_select))
+
+
+def test_a_catalog_fan_saves_the_base_an_off_bin_interp_then_derives_from(world):
+    # the user sequence: a fan over several references with no depth and the default
+    # depth_method, then one ADCP at a depth between its bins with
+    # select={"depth": d, "method": "interp"} -- answered from the fan's saved pairs
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fan = compare(reference=["adcp", "cast"], test="his", variables=[TEMPERATURE])
+        for c in fan:
+            c.align()
+    reads = world.model_reads
+    assert reads
+    world.block_model()
+
+    ds, msgs = _adcp_compare(select={"depth": 8.0, "method": "interp"})
+
+    assert world.model_reads == reads
+    assert ds.attrs["derived_from"] == "pairs"
+    assert ds.attrs["pairs_depth_method"] == "nearest"
+    assert ds.attrs["actual_depth"] == 8.0
+    np.testing.assert_allclose(ds.attrs["depth_interpolated_between"], [6.0, 10.5])
+    assert _said(msgs, "interpolated to 8 m between its levels 6 and 10.5 m")

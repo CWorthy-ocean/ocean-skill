@@ -459,6 +459,24 @@ def _announce() -> None:
     )
 
 
+def has(key: str, kind: str = "aligned") -> bool:
+    """Report whether an entry for ``key`` is saved, without loading it.
+
+    The existence check :func:`load` does first, on its own: a cheap "would this be a
+    hit?" for a caller choosing *which* saved entry to build on (see
+    ``Comparison._plan_derivation``'s depth-method fallback), where reading the whole
+    entry just to throw it away would defeat the point. ``False`` when caching is off,
+    like :func:`load`'s ``None``. An entry that exists but is unreadable still counts --
+    :func:`load` is what finds that out, and treats it as a miss then.
+    """
+    if not _enabled:
+        return False
+    try:
+        return (path(kind) / f"{key}.zarr").exists()
+    except OSError:  # no cache dir resolvable: nothing saved
+        return False
+
+
 def load(key: str, kind: str = "aligned"):
     """Return the cached Dataset for ``key``, or ``None`` on a miss.
 

@@ -237,8 +237,33 @@ layer = osk.compare(reference=["m_10m", "m_30m", "m_80m"], test="his", variables
 layer.average(by="variable")   # the 10 m and 30 m moorings pooled into one series
 ```
 
+**A depth between an ADCP's bins.** A moored profiler (a `timeSeriesProfile`) or a cast is
+matched with the model at every depth it sampled, and a single depth that isn't one of them
+(10 m, when its bins are at 6 and 10.5) is answered from those saved matches too, with no
+model read. By default (`depth_method="nearest"`) the nearest sampled depth is used, and a
+warning says which. With `depth_method="interp"`, the matches are interpolated linearly
+between the two bins around it:
+
+```python
+osk.compare(reference="adcp_A", test="his", variables=["u"], select={"depth": 10})  # nearest bin
+osk.compare(reference="adcp_A", test="his", variables=["u"], select={"depth": 10},
+            depth_method="interp")
+osk.compare(reference="adcp_A", test="his", variables=["u"],
+            select={"depth": 10, "method": "interp"})   # the same request, spelled in the select
+```
+
+The interpolation uses the matches made with `depth_method="interp"` when they are saved. If
+only the `"nearest"` ones are (the usual case: the full-column comparison ran first, with the
+default), they are used instead, interpolated the same way, with a warning that the matches
+underneath were nearest-matched; no second read of the model is made just to save an `interp`
+set. That answer is saved under its own entry, so running the full column with
+`depth_method="interp"` later is never shadowed by it. A list of depths is answered the same
+way under `"interp"` (each between its own two bins); under `"nearest"` a list, and any depth
+outside the sampled range, still goes through the model.
+
 Some requests can't be answered from matches, and still go through the model as before:
-- a depth the observations didn't sample;
+- a depth the observations didn't sample, except a single depth of a profile or profiling
+  station, as just described;
 - density and mixed-layer-depth calculators;
 - the tidal harmonic calculators;
 - gridded references, area means and trajectories.

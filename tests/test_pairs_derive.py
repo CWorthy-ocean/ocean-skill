@@ -692,3 +692,254 @@ def test_detide_runs_on_the_full_regular_series_before_the_month_mask():
     # re-edged March block: March's first hours carry real values
     march = out["reference"].sel(time=slice("2020-03-01", "2020-03-02"))
     assert march.notnull().all()
+
+
+# -- depth_method: a depth between the levels ----------------------------------------
+
+
+def curved_base(levels=LEVELS) -> xr.Dataset:
+    """Build one cast whose lanes are not linear in depth, so weights are checkable."""
+    z = np.asarray(levels, dtype=float)
+    reference = xr.DataArray(
+        np.sqrt(z), dims=("DEPTH",), coords={"DEPTH": z}
+    ).assign_coords(lon=-158.0, lat=22.75)
+    test = xr.DataArray(z**2 / 100.0, dims=("DEPTH",), coords={"DEPTH": z})
+    return _dataset(test, reference, scored_over="DEPTH", match_method="interp")
+
+
+def _between(select, method, base=None, aggregate=None, obs_levels=LEVELS):
+    return pairs.derivable(
+        select,
+        aggregate or {},
+        feature_type="profile",
+        obs_levels=obs_levels,
+        detide=False,
+        depth_method=method,
+    )
+
+
+def test_depth_method_none_keeps_refusing_an_off_bin_scalar():
+    ok, why = _between({"depth": 7.0}, None)
+    assert not ok and "not sampled" in why
+    with pytest.raises(ValueError, match="not sampled"):
+        derive(profile_base(), "profile", select={"depth": 7.0})
+
+
+def test_nearest_answers_an_off_bin_scalar_from_the_closest_level():
+    ok, _ = _between({"depth": 7.0}, "nearest")
+    assert ok
+    out = pairs.derive(
+        curved_base(),
+        select={"depth": 7.0},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="nearest",
+    )
+    # 7 m is closer to 5 m than to 10 m
+    assert out.attrs["actual_depth"] == 5.0
+    assert out.attrs["depth_requested"] == 7.0
+    assert float(out["reference"]) == pytest.approx(np.sqrt(5.0))
+    assert float(out["test"]) == pytest.approx(0.25)
+    assert out["test"].ndim == 0
+
+
+def test_nearest_on_an_exact_level_does_not_flag_a_request():
+    out = pairs.derive(
+        curved_base(),
+        select={"depth": 10.0},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="nearest",
+    )
+    assert out.attrs["actual_depth"] == 10.0
+    assert "depth_requested" not in out.attrs
+
+
+def test_nearest_with_an_off_bin_list_stays_not_derivable():
+    # a list is a literal request for those depths: the full pipeline answers it
+    ok, why = _between({"depth": [5.0, 7.0]}, "nearest")
+    assert not ok and "not sampled" in why
+    ok, _ = _between({"depth": [5.0, 10.0]}, "nearest")
+    assert ok
+
+
+def test_interp_scalar_weights_both_lanes_and_recomputes_the_difference():
+    base = curved_base()
+    out = pairs.derive(
+        base,
+        select={"depth": 7.0},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="interp",
+    )
+    w = (10.0 - 7.0) / (10.0 - 5.0)  # weight on the 5 m level
+    want_ref = w * np.sqrt(5.0) + (1 - w) * np.sqrt(10.0)
+    want_test = w * 25.0 / 100.0 + (1 - w) * 100.0 / 100.0
+    assert float(out["reference"]) == pytest.approx(want_ref)
+    assert float(out["test"]) == pytest.approx(want_test)
+    assert float(out["difference"]) == pytest.approx(want_test - want_ref)
+    assert out["test"].ndim == 0 and "DEPTH" not in out["test"].coords
+    assert out.attrs["actual_depth"] == 7.0
+    assert out.attrs["depth_interpolated_between"] == [5.0, 10.0]
+    assert out["test"].attrs["units"] == "degC"
+    assert "depth_requested" not in out.attrs
+
+
+def test_interp_on_an_exact_bin_returns_that_bin_unchanged():
+    base = curved_base()
+    out = pairs.derive(
+        base,
+        select={"depth": 10.0},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="interp",
+    )
+    assert float(out["test"]) == pytest.approx(float(base["test"].sel(DEPTH=10.0)))
+    assert float(out["reference"]) == pytest.approx(
+        float(base["reference"].sel(DEPTH=10.0))
+    )
+    assert out.attrs["actual_depth"] == 10.0
+    assert "depth_interpolated_between" not in out.attrs
+
+
+def test_interp_outside_the_levels_is_not_derivable_and_names_the_range():
+    ok, why = _between({"depth": 150.0}, "interp")
+    assert not ok and "outside the observations' levels (2–100 m)" in why
+    assert "does not extrapolate" in why
+    ok, why = _between({"depth": [10.0, 1.0]}, "linear")
+    assert not ok and "1 m is outside" in why
+    with pytest.raises(ValueError, match="outside the observations' levels"):
+        pairs.derive(
+            curved_base(),
+            select={"depth": 150.0},
+            aggregate={},
+            detide=False,
+            feature_type="profile",
+            depth_method="interp",
+        )
+
+
+def test_interp_list_gives_a_depth_axis_at_the_targets():
+    base = curved_base()
+    ok, _ = _between({"depth": [7.0, 20.0, 35.0]}, "interp")
+    assert ok
+    out = pairs.derive(
+        base,
+        select={"depth": [7.0, 20.0, 35.0]},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="interp",
+    )
+    assert list(out["DEPTH"].values) == [7.0, 20.0, 35.0]
+    assert out["DEPTH"].attrs == base["DEPTH"].attrs
+    assert out["test"].dims == ("DEPTH",) and out.attrs["scored_over"] == "DEPTH"
+    assert "actual_depth" not in out.attrs
+    w = (50.0 - 35.0) / (50.0 - 20.0)
+    np.testing.assert_allclose(
+        out["reference"].values,
+        [
+            0.6 * np.sqrt(5.0) + 0.4 * np.sqrt(10.0),
+            np.sqrt(20.0),
+            w * np.sqrt(20.0) + (1 - w) * np.sqrt(50.0),
+        ],
+    )
+    np.testing.assert_allclose(
+        out["difference"].values, out["test"].values - out["reference"].values
+    )
+
+
+def test_interp_handles_unsorted_levels_stored_negative_up():
+    levels = np.array([-50.0, -5.0, -20.0, -10.0])  # heights, in no order
+    base = curved_base(np.abs(levels)).assign_coords(DEPTH=levels)
+    base["DEPTH"].attrs = {"units": "m", "positive": "up"}
+    ok, _ = pairs.derivable(
+        {"depth": [7.0, 30.0]},
+        {},
+        feature_type="profile",
+        obs_levels=np.abs(levels),
+        detide=False,
+        depth_method="interp",
+    )
+    assert ok
+    out = pairs.derive(
+        base,
+        select={"depth": [7.0, 30.0]},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="interp",
+    )
+    # coordinate stays in the base's convention: negative metres, up
+    assert list(out["DEPTH"].values) == [-7.0, -30.0]
+    assert out["DEPTH"].attrs["positive"] == "up"
+    np.testing.assert_allclose(
+        out["reference"].values,
+        [
+            0.6 * np.sqrt(5.0) + 0.4 * np.sqrt(10.0),
+            (2 / 3) * np.sqrt(20.0) + (1 / 3) * np.sqrt(50.0),
+        ],
+    )
+
+
+def test_a_nan_at_a_bracketing_level_gives_nan_in_that_lane_only():
+    base = curved_base()
+    base["test"][2] = np.nan  # the model is missing at 10 m
+    out = pairs.derive(
+        base,
+        select={"depth": 7.0},
+        aggregate={},
+        detide=False,
+        feature_type="profile",
+        depth_method="interp",
+    )
+    assert np.isnan(float(out["test"])) and np.isnan(float(out["difference"]))
+    assert np.isfinite(float(out["reference"]))
+
+
+def test_depth_method_does_not_apply_with_a_vertical_mean_or_without_an_axis():
+    ok, why = _between({"depth": 7.0}, "interp", aggregate={"Z": "mean"})
+    assert not ok and "not sampled" in why
+    # a mooring: one instrument depth, no depth axis in the base
+    ok, why = pairs.derivable(
+        {"depth": 7.0},
+        {},
+        feature_type="timeSeries",
+        obs_levels=[10.0],
+        detide=False,
+        depth_method="nearest",
+    )
+    assert not ok and "not sampled" in why
+    with pytest.raises(ValueError, match="not sampled"):
+        pairs.derive(
+            series_base(),
+            select={"depth": 7.0},
+            aggregate={},
+            detide=False,
+            feature_type="timeSeries",
+            obs_levels=[10.0],
+            depth_method="interp",
+        )
+
+
+def test_interp_works_on_a_repeat_visit_station_with_a_time_axis():
+    base = station_base()
+    out = pairs.derive(
+        base,
+        select={"depth": 15.0},
+        aggregate={},
+        detide=False,
+        feature_type="timeSeriesProfile",
+        depth_method="interp",
+    )
+    assert out["test"].dims == ("time",)
+    np.testing.assert_allclose(
+        out["reference"].values,
+        0.5 * base["reference"].sel(depth=10.0).values
+        + 0.5 * base["reference"].sel(depth=20.0).values,
+    )
+    assert out.attrs["depth_interpolated_between"] == [10.0, 20.0]
