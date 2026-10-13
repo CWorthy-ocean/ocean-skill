@@ -9049,9 +9049,7 @@ _LABEL_DIMS: tuple[tuple[str, Any], ...] = (
 )
 
 
-def _pooled_labels(
-    comparisons: list[Comparison], *, skip: tuple[str, ...] = ()
-) -> list[str]:
+def _pooled_labels(comparisons: list[Comparison]) -> list[str]:
     """Name each point by what distinguishes it *within this pool*.
 
     :func:`compare` labels only what varies across its own fan-out, which is right for
@@ -9071,10 +9069,6 @@ def _pooled_labels(
     aggregated — there is no dimension to name, and each comparison keeps the label it
     came with. Anything still colliding after that is suffixed rather than left
     ambiguous; a diagram with two points called the same thing is unreadable.
-
-    ``skip`` leaves those dimensions out of the label and lets the comparisons that
-    differ only in them share a name, unsuffixed: a :func:`table` row covering every
-    season or depth of one variable, the levels shown in their own column or cell.
     """
     if not comparisons:
         return []
@@ -9085,8 +9079,6 @@ def _pooled_labels(
     chosen: list[tuple[str, Any]] = []
     apart = 1  # points the label currently tells apart; one label, one group
     for dim in _LABEL_DIMS:
-        if dim[0] in skip:
-            continue
         if apart == len(comparisons):
             break
         gain = len(set(spell([*chosen, dim])))
@@ -9094,12 +9086,8 @@ def _pooled_labels(
             chosen.append(dim)
             apart = gain
     if not chosen:
-        if skip:  # the own label may name a skipped level ("temperature MAM")
-            return [_short_variable_label(c.variable) for c in comparisons]
         return [c.label or _short_variable_label(c.variable) for c in comparisons]
     labels = spell(chosen)
-    if skip:
-        return labels
 
     counts: dict[str, int] = {}
     collided = False
@@ -9114,6 +9102,36 @@ def _pooled_labels(
             "(aggregation, region); suffixed them to keep the points apart"
         )
     return labels
+
+
+def _row_labels(
+    comparisons: list[Comparison], skip: tuple[str, ...], levels: list[tuple]
+) -> list[str]:
+    """Name table rows so the ``skip`` fields' levels share one row.
+
+    ``levels[i]`` is comparison ``i``'s value of each ``skip`` field, read from its
+    metric record (the table's own view of season and depth).
+
+    The comparisons of one row differ in the ``skip`` fields (season, depth), and often
+    in incidental ways too: a pooled reference is called "pool of 22 reference sources"
+    in one season and "pool of 20" in the next. So a dimension is named only while two
+    comparisons would otherwise land in the same row *and* the same level -- the one
+    cell a table can't hold twice -- not whenever it tells comparisons apart.
+    """
+
+    def spell(dims) -> list[str]:
+        return [" ".join(str(read(c)) for _, read in dims) for c in comparisons]
+
+    chosen: list[tuple[str, Any]] = [_LABEL_DIMS[0]]  # always name the variable
+    for dim in _LABEL_DIMS[1:]:
+        if len(set(zip(spell(chosen), levels))) == len(comparisons):
+            break
+        if dim[0] in skip:
+            continue
+        before = len(set(zip(spell(chosen), levels)))
+        if len(set(zip(spell([*chosen, dim]), levels))) > before:
+            chosen.append(dim)
+    return spell(chosen)
 
 
 def _named_labels(
