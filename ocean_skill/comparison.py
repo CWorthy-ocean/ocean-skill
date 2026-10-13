@@ -9945,6 +9945,7 @@ class ComparisonSet:
         split: dict[str, str] | None = None,
         join: dict[str, str] | None = None,
         join_labels: dict[str, list[str]] | None = None,
+        split_all: str | None = None,
         layout: str = "rows",
         headers: dict[str, str] | None = None,
         units: bool = True,
@@ -9969,7 +9970,8 @@ class ComparisonSet:
         ``split={"bias": "time"}`` breaks a metric out by the levels of a field
         (seasons, from a ``compare(times={"seasons": [...]})`` set pooled with the
         whole-record set); ``join={"rmse": "depth"}`` puts those levels in one cell
-        (``0.91 / 0.85``).
+        (``0.91 / 0.85``). ``split_all="Mar–Nov"`` adds the whole-record value of each
+        split metric as one more line (or column) after the levels.
         """
         from ocean_skill.table import build_table
 
@@ -9981,6 +9983,7 @@ class ComparisonSet:
             split=split,
             join=join,
             join_labels=join_labels,
+            split_all=split_all,
             layout=layout,
             headers=headers,
             units=units,
@@ -11019,6 +11022,10 @@ def table(comparisons: Any, **kwargs: Any):
         a missing level reads ``"–"``.
     join_labels
         ``{field: [names]}`` replacing the level names a join header shows.
+    split_all
+        ``None`` (default) or a name, ``"Mar–Nov"`` or ``"All year"``: give each split
+        metric one more line (or column, with ``layout="columns"``) after its levels,
+        named this, holding the whole-record value. Needs ``split=``.
     layout
         How ``split`` is drawn: ``"rows"`` (default; sub-rows, with the level in its
         own sub-column left of the first split metric) or ``"columns"``
