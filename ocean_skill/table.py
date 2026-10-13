@@ -631,20 +631,32 @@ class _Row:
     rep: dict[str, Any] = field(default_factory=dict)  # the record that speaks for it
 
 
-def _table_records(cs) -> list[dict[str, Any]]:
+def _table_records(cs, skip: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """The set's metric records, labelled the way the set labels its own members.
 
     :func:`ocean_skill.plot.summary._records` plus what a table needs that a plot does
     not: the *set's* label for each member (``cs._label_for``: the pooled or dict name,
     the same one a Taylor point gets, not the comparison's own), the dict key as
     ``group``, and how the member was combined (``average``/``pool`` and over how many).
+
+    ``skip`` names the split/join fields. A label that names one of their levels
+    (``temperature 0-5 m MAM``) would give every season and depth its own row, so when
+    the labels tell apart comparisons that differ only in those fields they are rebuilt
+    by the pooling rule without them (``temperature``). Labels that already group them
+    (your ``labels=``, or a dict's keys) are kept.
     """
+    from ocean_skill.comparison import _pooled_labels
     from ocean_skill.plot.summary import _records
 
     recs = _records(cs.comparisons)
     groups = getattr(cs, "_groups", None)
+    labels = [str(cs._label_for(i)) for i in range(len(cs.comparisons))]
+    if skip and groups is None:
+        rebuilt = _pooled_labels(cs.comparisons, skip=skip)
+        if len(set(rebuilt)) < len(set(labels)):
+            labels = rebuilt
     for i, (c, rec) in enumerate(zip(cs.comparisons, recs, strict=True)):
-        rec["label"] = str(cs._label_for(i))
+        rec["label"] = labels[i]
         if groups is not None:
             rec["group"] = groups[i]
         combined = getattr(c, "_combined", None)
@@ -708,7 +720,9 @@ def build_table(
     from ocean_skill.plot.portrait import _resolve_metric_names
     from ocean_skill.plot.summary import _hashable
 
-    recs = _table_records(cs)
+    recs = _table_records(
+        cs, skip=tuple(dict.fromkeys([*(split or {}).values(), *(join or {}).values()]))
+    )
     if not recs:
         raise ValueError("table needs at least one comparison, got none")
     names = _resolve_metric_names(recs, metrics)
@@ -840,7 +854,13 @@ def build_table(
         return None if v is None else float(v)
 
     # -- units ----------------------------------------------------------------------
-    row_units = {row.key: _display_units(row.rep) for row in row_objs.values()}
+    # any of the row's records: a pooled/averaged one can come back without units
+    row_units = {
+        row.key: next(
+            (u for u in map(_display_units, [row.rep, *row.recs]) if u), ""
+        )
+        for row in row_objs.values()
+    }
     unit_set = set(row_units.values())
     shared_units = (
         next(iter(unit_set))
