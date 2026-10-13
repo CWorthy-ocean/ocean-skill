@@ -252,6 +252,9 @@ def _model_only_suite(tmp_path, **extra):
         "name": "quick_check",
         "output_dir": str(tmp_path / "out"),
         "defaults": {"test": "stub"},
+        # The cover page has its own tests below; off here so page counts stay figures
+        # plus dividers.
+        "cover": False,
         "pages": [
             {
                 "title": "Physics latest",
@@ -534,14 +537,62 @@ def test_a_missing_variable_page_is_skipped_not_fatal(
     assert "none" in page.reason or "temperature" in page.reason
 
 
-def test_two_runs_never_overwrite_each_other(tmp_path, stub_model):
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+def test_timestamped_dir_runs_never_overwrite_each_other(tmp_path, stub_model):
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, timestamped_dir=True))
     result1 = run_suite(path)
     result2 = run_suite(path)
     assert result1.report_dir != result2.report_dir
     assert result1.report_dir.exists() and result2.report_dir.exists()
     latest = (tmp_path / "out" / "latest.txt").read_text()
     assert latest == str(result2.report_dir)
+
+
+def test_fixed_dir_is_refreshed_in_place_and_only_clears_its_own_artifacts(
+    tmp_path, stub_model
+):
+    """The default report directory is ``<output_dir>/<slug(name)>/`` every run."""
+    from ocean_skill import outputs
+
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    refresh = {
+        "catalog": str(tmp_path / "catalogs" / "x.yaml"),
+        "sources": [
+            {
+                "name": "GOM_bgc",
+                "files": str(tmp_path / "out.*.nc"),
+                "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+            }
+        ],
+    }
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, refresh=refresh))
+
+    result1 = run_suite(path)
+    report_dir = result1.report_dir
+    assert report_dir == tmp_path / "out" / outputs.slug("quick_check")
+    run1_only = "RUN ONE ONLY"
+    result1.log.write_text(result1.log.read_text() + run1_only)
+
+    # What a later run must sweep (a removed page's PNG, a stale refs/ entry) and what
+    # it must leave (an unrelated file, an unrelated directory and its contents).
+    (report_dir / "figures" / "99_old.png").write_bytes(b"stale")
+    (report_dir / "refs" / "stale.json").write_text("{}")
+    (report_dir / "keep.txt").write_text("mine")
+    (report_dir / "mine").mkdir()
+    (report_dir / "mine" / "a.txt").write_text("also mine")
+
+    result2 = run_suite(path)  # refs/ already exists: must not raise
+
+    assert result2.report_dir == report_dir
+    assert not (report_dir / "figures" / "99_old.png").exists()
+    assert not (report_dir / "refs" / "stale.json").exists()
+    assert (report_dir / "refs" / "gom_bgc.json").exists()
+    assert (report_dir / "keep.txt").read_text() == "mine"
+    assert (report_dir / "mine" / "a.txt").read_text() == "also mine"
+    assert run1_only not in result2.log.read_text()
+    assert [p.name for p in (report_dir / "figures").iterdir()] == [
+        "01_Physics_latest.png"
+    ]
+    assert (tmp_path / "out" / "latest.txt").read_text() == str(report_dir)
 
 
 def test_suite_yaml_copy_is_byte_identical(tmp_path, stub_model):
@@ -1464,7 +1515,10 @@ def test_snapshot_survives_the_next_refresh_overwriting_the_shared_ref(
             }
         ],
     }
-    path = _write_suite(tmp_path, _model_only_suite(tmp_path, refresh=refresh_block))
+    path = _write_suite(
+        tmp_path,
+        _model_only_suite(tmp_path, refresh=refresh_block, timestamped_dir=True),
+    )
 
     result1 = run_suite(path)
     snapshot1 = result1.report_dir / "refs" / "gom_bgc.json"
@@ -1857,3 +1911,137 @@ def test_pdf_images_jpeg_without_ghostscript_warns_and_keeps_the_lossless_pdf(
 def test_main_refuses_an_unknown_pdf_images_value(tmp_path):
     path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="png"))
     assert main([str(path)]) == 2
+
+
+# ======================================================================================
+# The cover page: PdfReport.cover buffers it like a divider; run_suite builds it from
+# ``ocean_skill.workflows.cover`` and records the same content as the manifest's
+# ``run_info``. It is not a figure -- PDF-only, unnumbered, dropped if nothing draws.
+# ======================================================================================
+
+
+def _blank_pages(n, *, agg=False):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    from ocean_skill.plot.typography import PAGE_H, PAGE_W
+
+    figs = [Figure(figsize=(PAGE_W, PAGE_H)) for _ in range(n)]
+    if agg:  # emit() measures its figure, which needs a renderer
+        for fig in figs:
+            FigureCanvasAgg(fig)
+    return figs
+
+
+def test_cover_is_written_first_and_before_a_pending_divider(tmp_path):
+    from ocean_skill.workflows.report import PdfReport
+
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        order = []
+        real = report._pdf.savefig
+        report._pdf.savefig = lambda fig, **kw: (order.append(fig), real(fig, **kw))
+        cover = _blank_pages(2)
+        report.cover(cover)
+        report.section(1, "Part one", "notes")
+        assert not report.cover_written  # buffered until a figure follows
+        report.emit(_blank_pages(1, agg=True)[0], "f")
+
+    assert order[:2] == cover and len(order) == 4  # cover, cover, divider, figure
+    assert report.cover_written and report.get_pagecount() == 4
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 4
+    assert [p.name for p in (tmp_path / "figures").iterdir()] == ["01_f.png"]
+
+
+def test_cover_is_dropped_when_nothing_draws_and_a_noop_without_a_pdf(tmp_path):
+    from ocean_skill.workflows.report import PdfReport
+
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        report.cover(_blank_pages(1))
+    assert not report.cover_written and not (tmp_path / "report.pdf").exists()
+
+    with PdfReport(None, tmp_path / "figs2") as report:
+        report.cover(_blank_pages(1))
+        report.emit(_blank_pages(1, agg=True)[0], "f")
+    assert not report.cover_written
+
+
+def test_run_suite_puts_the_cover_pages_in_the_pdf_and_the_manifest(
+    tmp_path, stub_model, monkeypatch
+):
+    monkeypatch.setattr(
+        "ocean_skill.workflows.cover.cover_figures", lambda info: _blank_pages(2)
+    )
+    path = _write_suite(
+        tmp_path,
+        _suite_with_pages(
+            tmp_path,
+            [_section_page("Part one"), _field_page()],
+            cover=True,
+            run_info={"name": "My simulation", "notes": {"Purpose": "a test"}},
+        ),
+    )
+    result = run_suite(path)
+
+    # two cover pages + divider + figure
+    assert _pagecount_by_bytes(result.pdf) == 4
+    assert [p.name for p in result.figures] == ["01_Physics_latest.png"]
+    assert result.exit_code == 0
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["run_info"]["name"] == "My simulation"
+    assert [p["status"] for p in manifest["pages"]] == ["ok", "ok"]
+
+
+def test_the_real_cover_path_runs_end_to_end_without_cstar_files(tmp_path, stub_model):
+    """No ``refresh:``/blueprint to find: the fallback cover still makes page one."""
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path, cover=True))
+    result = run_suite(path)
+
+    assert _pagecount_by_bytes(result.pdf) == 2  # cover + the one figure
+    assert result.exit_code == 0
+    assert len(result.figures) == 1
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["run_info"]["name"]  # falls back to defaults.test / suite name
+    assert not (result.report_dir / "run_info").exists()  # nothing to copy
+
+
+def test_cover_false_or_pdf_false_or_nothing_drawn_writes_no_cover(
+    tmp_path, stub_model, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.workflows.cover.cover_figures",
+        lambda info: calls.append(info) or _blank_pages(1),
+    )
+    off = run_suite(_write_suite(tmp_path, _model_only_suite(tmp_path, cover=False)))
+    assert _pagecount_by_bytes(off.pdf) == 1 and calls == []
+
+    no_pdf = run_suite(
+        _write_suite(tmp_path, _model_only_suite(tmp_path, cover=True, pdf=False))
+    )
+    assert no_pdf.pdf is None and calls == []
+    assert json.loads(no_pdf.manifest.read_text())["run_info"]["name"]
+
+    _fail_titles(monkeypatch, {"Physics latest"})
+    nothing = run_suite(_write_suite(tmp_path, _model_only_suite(tmp_path, cover=True)))
+    assert nothing.pdf is None and not (nothing.report_dir / "report.pdf").exists()
+    assert nothing.exit_code == 1
+
+
+def test_the_c_star_blueprint_and_workplan_are_copied_under_run_info(
+    tmp_path, stub_model, monkeypatch
+):
+    from types import SimpleNamespace
+
+    bp = tmp_path / "bp.yaml"
+    wp = tmp_path / "wp.yaml"
+    bp.write_text("name: bp")
+    wp.write_text("name: wp")
+    info = SimpleNamespace(
+        blueprint=bp, workplan=wp, as_dict=lambda: {"name": "x", "sections": []}
+    )
+    monkeypatch.setattr("ocean_skill.workflows.cover.gather", lambda *a, **k: info)
+    result = run_suite(_write_suite(tmp_path, _model_only_suite(tmp_path)))
+
+    assert (result.report_dir / "run_info" / "bp.yaml").read_text() == "name: bp"
+    assert (result.report_dir / "run_info" / "wp.yaml").read_text() == "name: wp"
+    assert json.loads(result.manifest.read_text())["run_info"]["name"] == "x"

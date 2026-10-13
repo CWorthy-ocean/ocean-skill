@@ -18,7 +18,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-__all__ = ["PageConfig", "RefreshConfig", "RefreshSourceConfig", "SuiteConfig"]
+__all__ = [
+    "PageConfig",
+    "RefreshConfig",
+    "RefreshSourceConfig",
+    "RunInfoConfig",
+    "SuiteConfig",
+]
 
 #: The mutually exclusive page kinds, in the order their error messages list them.
 _PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
@@ -48,6 +54,24 @@ class RefreshConfig(BaseModel):
 
     catalog: str
     sources: list[RefreshSourceConfig]
+
+
+class RunInfoConfig(BaseModel):
+    """What ``report.pdf``'s cover page says about the simulation (``run_info:``).
+
+    Every key is optional. ``blueprint``/``workplan`` name a C-Star resolved blueprint
+    and workplan directly -- absolute, or relative to the suite file -- instead of
+    letting :func:`ocean_skill.workflows.cover.gather` find them from ``refresh:``;
+    ``name`` overrides the simulation name the cover is titled with; ``notes`` is
+    printed on the cover as written, in order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    blueprint: str | None = None
+    workplan: str | None = None
+    notes: dict[str, Any] = Field(default_factory=dict)
 
 
 class PageConfig(BaseModel):
@@ -202,11 +226,21 @@ class PageConfig(BaseModel):
 class SuiteConfig(BaseModel):
     """A suite YAML: the whole file. See ``docs/suites.md`` for the grammar.
 
-    ``name`` is a label the user chooses -- it prefixes the report directory and the
-    metrics CSV, not a catalog source name. ``defaults.test`` (when given) must be a
-    single source string: ``time: latest``, ``month: run``, and the report
-    directory's time range are all read off *one* source's time axis, and several
-    sources have no single "latest" to mean.
+    ``name`` is a label the user chooses -- it names the report directory and prefixes
+    the metrics CSV, not a catalog source name. ``defaults.test`` (when given) must be a
+    single source string: ``time: latest``, ``month: run``, and (with
+    ``timestamped_dir``) the report directory's time range are all read off *one*
+    source's time axis, and several sources have no single "latest" to mean.
+
+    ``timestamped_dir`` picks where a run's report goes: the default ``False`` refreshes
+    one stable ``<output_dir>/<name>/`` in place each run (clearing only the previous
+    run's own artifacts); ``True`` writes a new
+    ``<name>_<test>_<t0>_to_<t1>_<time>_<id>`` directory per run, which is also the safe
+    choice if two runs could overlap.
+
+    ``cover`` (default ``True``) puts a cover page describing the simulation first in
+    ``report.pdf``; ``run_info`` (:class:`RunInfoConfig`) overrides what it is built
+    from. See "Cover page" in ``docs/suites.md``.
 
     ``catalog_search_paths`` registers extra shared catalog directories -- absolute, or
     relative to this suite file (not the working directory) -- in the same tier as
@@ -233,7 +267,10 @@ class SuiteConfig(BaseModel):
 
     name: str
     output_dir: str | None = None
+    timestamped_dir: bool = False
     pdf: bool = True
+    cover: bool = True
+    run_info: RunInfoConfig | None = None
     pdf_images: Literal["lossless", "jpeg"] = "lossless"
     cache: bool = True
     cache_dir: str | None = None
