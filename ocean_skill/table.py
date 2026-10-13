@@ -551,7 +551,8 @@ class MetricsTable:
         extended to a MultiIndex ``(metric, column, slot)`` where there is a ``cols=``
         level, a joined field, or a split-into-columns level. A value spanning several
         lines (an unsplit metric) sits on the row's first line and is ``NaN`` on the
-        rest, mirroring the merged cell.
+        rest, mirroring the merged cell -- or on its ``split_all=`` line, when the row
+        has one, since the value is that whole-record line's.
         """
         import pandas as pd
 
@@ -1021,6 +1022,14 @@ def build_table(
             return split_all
         return "" if lv is None else _level_text(sfield, lv)
 
+    def home_line(row: _Row) -> str:
+        """Name the line the data writers file a merged (unsplit) value under.
+
+        Its own whole-record line when ``split_all=`` gave the row one -- the value *is*
+        that line's -- else the row's first line, like the merged cell.
+        """
+        return split_all if _ALL in row.lines else level_name(row, 0)
+
     def plain_spec(m: str, ck):
         hdr = (metric_header(m),) + ((col_text[ck],) if cols else ())
 
@@ -1030,7 +1039,7 @@ def build_table(
                 dup(row, col_text.get(ck, ""), found)
             val = number(found[0], m) if found else None
             if i == 0 and found:
-                emit(row, level_name(row, 0), col_text.get(ck, ""), m, "", val)
+                emit(row, home_line(row), col_text.get(ck, ""), m, "", val)
             return _format(m, val, round), True
 
         return {"path": hdr, "align": "c", "span": True, "cell": cell}
@@ -1040,7 +1049,7 @@ def build_table(
 
         def cell(row: _Row, i: int):
             found = candidates(row, ck, level=None, level_given=False)
-            text = one_cell(row, ck, m, found, level_name(row, 0))
+            text = one_cell(row, ck, m, found, home_line(row))
             return (text or " / ".join([_MISSING] * len(join_levels[m]))), True
 
         return {"path": hdr, "align": "c", "span": True, "cell": cell}

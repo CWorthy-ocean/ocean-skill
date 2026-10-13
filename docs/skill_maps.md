@@ -203,6 +203,19 @@ table = comp.pool(by=["variable", "depth", "time"]).metrics()   # one row per va
 A pooled set has no time or depth axis left to draw, so `.plot()` refuses it; use
 `.metrics()`, `.target()` or `.taylor()`.
 
+A depth band is a layer *average*. To pool every observed level in a layer as its own
+sample instead, add `"average": False` to the band and drop the vertical aggregate:
+
+```python
+comp = osk.compare(reference=stations, test="his", variables=["temperature"],
+                   depths=[{"min": 0, "max": 5, "average": False},
+                           {"min": 0, "max": 65, "average": False}])
+comp.pool(by=["variable", "depth"]).metrics()   # rows "0-5 m levels", "0-65 m levels"
+```
+
+This is for station data (casts, bottles, ADCPs, moorings) compared from saved pairs
+only; anywhere else, drop the flag to average over the band, or give a list of depths.
+
 To call the layers and seasons something friendlier than `0-5 m` / `MAMJJASON`, rename
 them once with `relabel()` — the new names then show in `.metrics()`, in `.sel()` and in
 every diagram's legend:
