@@ -23,7 +23,9 @@ check with no regridding and no downloads. `suites/pacmed_review.yaml` is a larg
 example that organizes its PDF with `section:` divider pages and combines domain-mean
 time series with observation comparisons at each snapshot and a `TS:` page of T-S
 diagrams in six Pacific boxes. Copy whichever fits, and edit the lines it calls out
-(`defaults.test`, `refresh:`, `output_dir:`).
+(`defaults.test`, `refresh:`, `output_dir:`). Each run's report lands in one stable
+directory, `<output_dir>/<name>/`, with a cover page describing the simulation as page 1
+of `report.pdf` -- see Output layout and Cover page.
 
 ## Before you run one: register the model
 
@@ -51,9 +53,16 @@ directory keeps its own copy under `refs/` -- see Output layout.
 ## Schema
 
 ```yaml
-name: roms_marbl_diagnostic          # a label you choose: report-dir prefix, metrics CSV stem
-output_dir: /path/to/diagnostics      # report dirs go under here; unset -> $OCEAN_SKILL_OUTPUT or ./output
+name: roms_marbl_diagnostic          # a label you choose: the report dir's name, metrics CSV stem
+output_dir: /path/to/diagnostics      # report dir goes under here; unset -> $OCEAN_SKILL_OUTPUT or ./output
+timestamped_dir: false                # true -> a new <name>_<test>_<t0>_to_<t1>_<time>_<id>/ per run (see Output layout)
 pdf: true                             # report.pdf beside the PNGs; false -> PNGs only
+cover: true                           # false -> no cover page as page 1 of report.pdf (see Cover page)
+run_info:                             # optional: override what the cover page finds on its own
+  name: PACMED v2                     # the title; default: found from the C-Star workplan/blueprint
+  blueprint: runs/bp_resolved.yaml    # a resolved C-Star blueprint; relative = to this file
+  workplan: runs/workplan.yaml        # the C-Star workplan; relative = to this file
+  notes: {Purpose: "spin-up check"}   # printed on the cover as written, in order
 pdf_images: lossless                  # jpeg -> re-encode report.pdf's map rasters with Ghostscript (see Page size)
 cache: true                           # false -> never reuse a prepared field from disk (see Caching, below)
 catalog_search_paths:                 # optional: shared catalog dirs; relative = to this file
@@ -551,19 +560,49 @@ are not pruned automatically -- they simply stop being read, and accumulate unti
 
 ## Output layout
 
-Every invocation writes its own report directory -- nothing is ever overwritten:
+By default a suite has one stable report directory, `<output_dir>/<name>/`, refreshed in
+place by every run. Just before a run starts writing, it removes the previous run's own
+artifacts -- `report.pdf`, `figures/`, `metrics/`, `refs/`, `run_info/`, `manifest.json`,
+`run.log`, `suite.yaml` -- and nothing else: any other file or folder you keep in that
+directory is left alone (a suite's `cache_dir:` may even be the same directory). Set
+`timestamped_dir: true` for the older behavior, a new directory per run that never
+overwrites an earlier report; use it if two runs of the same suite might overlap.
 
 ```
-<output_dir>/<name>_<test>_<t0>_to_<t1>_<run-time>/
+<output_dir>/<name>/      (timestamped_dir: true -> <name>_<test>_<t0>_to_<t1>_<run-time>_<id>/)
     report.pdf                (unless pdf: false, or no page drew at all)
-    figures/NN_<slug(title)>[_<family>].png      (figures only: section: pages have none)
+    figures/NN_<slug(title)>[_<family>].png      (figures only: section: and the cover have none)
     metrics/<name>.csv (+ .txt)
     suite.yaml                 -- byte-identical copy of the input
     manifest.json
     run.log                    -- everything printed to the terminal during the run
     refs/<ref name>            -- copy of each refresh: reference, exactly as drawn
+    run_info/                  -- copies of the C-Star blueprint/workplan the cover page used
 <output_dir>/latest.txt        -- path of the newest report dir
+<output_dir>/latest            -- symlink to it
 ```
+
+### Cover page
+
+Page 1 of `report.pdf` says which simulation the report is about. It is titled with the
+simulation's name -- `run_info.name`, else the C-Star workplan's name (with the step),
+else the blueprint's name, else `defaults.test`, else the suite's `name` -- and lists the
+report (suite, generated time, version), then the workplan, the simulation (grid,
+period, ...), forcing (boundary and surface split into physics, BGC, and other; rivers;
+tides), code (the exact repositories and commits), the parameters, and any `run_info:
+notes`. Nothing needs configuring when the suite has a `refresh:` block: the cover finds
+the run from that block's output glob -- the run folder is the one holding
+`work/directives.yaml`, the blueprint is the newest resolved blueprint in its `work/`,
+and the workplan is the one two levels up whose step's `working_dir` matches. Name them
+with `run_info.blueprint`/`workplan` instead when that does not apply (relative paths
+resolve against the suite file, like `catalog_search_paths:`); `cover: false` turns the
+page off. Files that are missing or fail to parse only warn and shorten the page. The
+blueprint and workplan used are copied to `run_info/`, and the same content is the
+manifest's `"run_info"` key.
+
+The cover is not a figure: it has no PNG and takes no `NN_` number, it is not counted in
+the exit code or the "N page(s) drawn" line, and, like a `section:` divider, it is only
+written if some page after it drew -- a run where nothing draws still writes no PDF.
 
 ### Page size
 
@@ -597,16 +636,17 @@ is not installed, fails, takes more than ten minutes, or would not make the file
 the run warns, names the reason, and keeps the lossless PDF. PNGs are never touched, and
 the key does nothing under `pdf: false`.
 
-`t0`/`t1` are the test source's own first/last recorded day; `<run-time>` is when the
-command was run, down to the second, plus a short random suffix so two runs started in
-the same second still land in different directories. `manifest.json` records the fully
+With `timestamped_dir: true`, `t0`/`t1` are the test source's own first/last recorded
+day; `<run-time>` is when the command was run, down to the second, plus a short random
+suffix so two runs started in the same second still land in different directories.
+`manifest.json` records the fully
 expanded page list (every `time: latest`/`month: run`/window already resolved to a
 literal value), each page's outcome, the `pdf_images` setting and whether it was applied,
 the resolved `catalog_search_paths:` directories,
 the effective `cache_dir` (the suite's own if set, otherwise wherever
 `osk.cache.base_dir()` already pointed), and (when the suite has a `refresh:` block) a
-`"refresh"` key -- enough that a second person with the same suite YAML and the same
-catalogs gets the identical report.
+`"refresh"` key, plus the cover page's content as `"run_info"` -- enough that a second
+person with the same suite YAML and the same catalogs gets the identical report.
 
 `refs/` only appears when the suite has a `refresh:` block. Each source's reference
 (`refresh.sources[].ref`, a parquet directory or a `.json` file) is copied there

@@ -8,10 +8,11 @@
 #     ocean-skill-run suites/pacmed_review.yaml --list    # check the page list first
 #     ocean-skill-run suites/pacmed_review.yaml
 #
-# Every run writes its own report directory under output_dir (nothing is ever
-# overwritten) with report.pdf, figures/*.png, metrics/*.csv, a copy of this file,
-# manifest.json, and a refs/ copy of the kerchunk reference as it was when the report
-# was drawn. See docs/suites.md for the full grammar, including section: pages.
+# Every run refreshes <output_dir>/pacmed-review/ in place (set `timestamped_dir: true`
+# to keep one directory per run) with report.pdf -- page 1 a cover describing the
+# simulation, found from the refresh: block -- figures/*.png, metrics/*.csv, a copy of
+# this file, manifest.json, and a refs/ copy of the kerchunk reference as it was when
+# the report was drawn. See docs/suites.md for the full grammar, including section: pages.
 #
 # Before you run it:
 #   (a) The Holte & Talley catalog entry must expose `month` as a dimension. Rebuild

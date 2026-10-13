@@ -11,6 +11,16 @@ what was drawn. It also writes ``run.log`` -- everything printed to the terminal
 the course of the run, plus full tracebacks for skipped pages and for a fatal crash,
 which the terminal itself never shows. See ``docs/suites.md``.
 
+By default the report goes in one stable directory, ``<output_dir>/<name>/``, refreshed
+in place each run: only the previous run's own artifacts (:data:`_REPORT_ARTIFACTS`) are
+cleared first, and anything else a user keeps there is left alone. ``timestamped_dir:
+true`` writes a new directory per run instead (see :func:`_report_dir_name`).
+
+``report.pdf``'s first page is a cover describing the simulation
+(:mod:`ocean_skill.workflows.cover`), also recorded as the manifest's ``run_info`` with
+copies of the C-Star blueprint and workplan under ``run_info/``. Like a ``section:``
+page it is not a figure: PDF-only, unnumbered, and dropped if nothing draws.
+
 A ``section:`` page is not a figure and so is not counted as one: it appears only in
 ``report.pdf`` (and only if some page after it drew -- see
 :meth:`~ocean_skill.workflows.report.PdfReport.section`), and
@@ -31,6 +41,7 @@ import argparse
 import contextlib
 import io
 import json
+import shutil
 import sys
 import time
 import traceback
@@ -42,6 +53,19 @@ from pathlib import Path
 from typing import Any, TextIO
 
 __all__ = ["main", "run_suite"]
+
+#: What a run writes into its report directory, so what a fixed-mode run clears first
+#: (see :func:`_clear_previous_report`). Nothing else in the directory is ever touched.
+_REPORT_ARTIFACTS = (
+    "report.pdf",
+    "figures",
+    "metrics",
+    "refs",
+    "run_info",
+    "manifest.json",
+    "run.log",
+    "suite.yaml",
+)
 
 
 class _Tee:
@@ -239,8 +263,6 @@ def _snapshot_refs(refresh: Any, report_dir: Path) -> list[dict[str, Any]]:
     Returns one record per source: ``{"name", "ref": absolute path str, "snapshot":
     absolute path str or None if no reference exists yet to copy}``.
     """
-    import shutil
-
     records = []
     for source in refresh.sources:
         src = Path(source.ref).expanduser().resolve()
@@ -306,6 +328,25 @@ def _report_dir_name(name: str, test_source: str, index: Any) -> str:
     return outputs.slug(f"{name}_{test_source}_{t0}_to_{t1}_{now}_{suffix}")
 
 
+def _clear_previous_report(report_dir: Path) -> None:
+    """Remove the previous run's own artifacts from ``report_dir``.
+
+    Only the names in :data:`_REPORT_ARTIFACTS` go; ``report_dir`` itself and everything
+    else in it is left alone.
+
+    The suite's ``cache_dir`` may be this very directory, and a user may keep notes or
+    extra exports beside the report, so this names what to remove rather than emptying
+    the directory. It also keeps :func:`_snapshot_refs` from colliding with last run's
+    ``refs/`` and stale PNGs of since-removed pages from lingering in ``figures/``.
+    """
+    for name in _REPORT_ARTIFACTS:
+        target = report_dir / name
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+
+
 def _write_manifest(
     path: Path,
     *,
@@ -315,6 +356,7 @@ def _write_manifest(
     catalog_dirs: list[Path] | None = None,
     refresh: dict[str, Any] | None = None,
     pdf_images_applied: bool = False,
+    run_info: dict[str, Any] | None = None,
 ) -> None:
     import ocean_skill
     from ocean_skill import cache as _cache
@@ -327,6 +369,8 @@ def _write_manifest(
         "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
         "cache_dir": str(_cache.base_dir()),
         "refresh": refresh,
+        # The cover page's content (see ocean_skill.workflows.cover.RunInfo.as_dict).
+        "run_info": run_info,
         # What the suite asked of report.pdf's rasters, and whether the Ghostscript
         # pass actually ran (False for "lossless", pdf: false, no PDF, or a fallback).
         "pdf_images": suite.pdf_images,
@@ -462,12 +506,32 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             else outputs.base_dir()
         )
         output_dir.mkdir(parents=True, exist_ok=True)
-        report_dir = output_dir / _report_dir_name(
-            suite.name, test_source or "model", index
-        )
+        if suite.timestamped_dir:
+            report_dir = output_dir / _report_dir_name(
+                suite.name, test_source or "model", index
+            )
+        else:
+            report_dir = output_dir / outputs.slug(suite.name)
         report_dir.mkdir(parents=True, exist_ok=True)
+        if not suite.timestamped_dir:
+            _clear_previous_report(report_dir)
         cap.attach(report_dir / "run.log")
         (report_dir / "suite.yaml").write_text(path.read_text())
+
+        from ocean_skill.workflows import cover
+
+        # gather() only warns over missing or garbled C-Star files; this guard is for a
+        # bug in it, which must not cost a long suite run its report.
+        try:
+            info = cover.gather(suite, path, test_source=test_source, index=index)
+        except Exception as exc:
+            warnings.warn(f"cover: no cover page ({exc})", stacklevel=2)
+            cap.log_only(traceback.format_exc())
+            info = None
+        for src in (info.blueprint, info.workplan) if info else ():
+            if src is not None and src.exists():
+                (report_dir / "run_info").mkdir(exist_ok=True)
+                shutil.copy2(src, report_dir / "run_info" / src.name)
 
         refresh_info = None
         if suite.refresh is not None:
@@ -485,6 +549,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             report_dir=report_dir,
             catalog_dirs=catalog_dirs,
             refresh=refresh_info,
+            run_info=info.as_dict() if info else None,
         )
 
         pdf_path = (report_dir / "report.pdf") if suite.pdf else None
@@ -493,6 +558,12 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
         from ocean_skill.workflows.report import PdfReport
 
         with PdfReport(pdf_path, report_dir / "figures") as report:
+            if suite.cover and pdf_path is not None and info is not None:
+                try:
+                    report.cover(cover.cover_figures(info))
+                except Exception as exc:
+                    warnings.warn(f"cover: no cover page ({exc})", stacklevel=2)
+                    cap.log_only(traceback.format_exc())
             n = len(expanded)
             for i, page in enumerate(expanded, 1):
                 if page.kind == "section":
@@ -565,6 +636,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             catalog_dirs=catalog_dirs,
             refresh=refresh_info,
             pdf_images_applied=pdf_images_applied,
+            run_info=info.as_dict() if info else None,
         )
 
         latest_path = output_dir / "latest.txt"

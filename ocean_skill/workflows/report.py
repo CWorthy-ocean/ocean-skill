@@ -18,6 +18,10 @@ numbering of the figures, so a suite's ``figures/`` directory reads the same wit
 without sections. It is buffered rather than written at once, so a section whose pages
 all skipped leaves no orphan divider behind (see :meth:`PdfReport.section`).
 
+:meth:`PdfReport.cover` queues the report's cover page(s) the same way: PDF-only,
+unnumbered, written once before the first figure (and before any pending divider), and
+dropped if nothing draws.
+
 :func:`compress_pdf_images` is an optional post-pass over a finished ``report.pdf``
 (``pdf_images: jpeg`` in a suite) that re-encodes its rasterized map images as JPEG
 with Ghostscript -- matplotlib's PDF backend only writes them losslessly.
@@ -340,8 +344,10 @@ class PdfReport:
     _index: int = 0
     _pdf_pages: int = 0
     _pending: tuple[Any, str, str] | None = _dc_field(default=None, repr=False)
+    _cover: list[Any] | None = _dc_field(default=None, repr=False)
     png_paths: list[Path] = _dc_field(default_factory=list)
     written_sections: set[Any] = _dc_field(default_factory=set)
+    cover_written: bool = False
 
     def __post_init__(self) -> None:
         self.figures_dir.mkdir(parents=True, exist_ok=True)
@@ -355,10 +361,22 @@ class PdfReport:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        # A divider still pending here had no figure after it: dropped, never written.
+        # A divider (or cover) still pending here had no figure after it: dropped,
+        # never written.
         self._pending = None
+        self._cover = None
         if self._pdf is not None:
             self._pdf.__exit__(*exc)
+
+    def _write_pending_cover(self) -> None:
+        """Write the buffered cover page(s) (if any) into the PDF, then clear them."""
+        if self._cover is None or self._pdf is None:
+            return
+        figs, self._cover = self._cover, None
+        for fig in figs:
+            self._pdf.savefig(fig)  # exact letter pages: no bbox_inches, like a divider
+            self._pdf_pages += 1
+        self.cover_written = bool(figs)
 
     def _write_pending_section(self) -> None:
         """Write the buffered divider (if any) into the PDF, then clear it."""
@@ -380,6 +398,7 @@ class PdfReport:
         if self._pdf is not None:
             page = _page_bbox(fig, stem)
             _rasterize(fig)
+            self._write_pending_cover()
             self._write_pending_section()
             self._pdf.savefig(fig, dpi=PDF_DPI, bbox_inches=page)
             self._pdf_pages += 1
@@ -410,6 +429,19 @@ class PdfReport:
         if self._pdf is None:
             return
         self._pending = (key, title, text)
+
+    def cover(self, figs: list[Any]) -> None:
+        """Queue the report's cover page(s): letter-size figures, written as page 1.
+
+        Buffered like :meth:`section`: the pages go into the PDF immediately before the
+        first figure that is emitted (ahead of any pending divider), and are dropped if
+        the report closes without one -- so a run where nothing drew writes no PDF.
+        PDF-only: no PNG, and it does not advance the ``NN_`` numbering. A no-op with
+        ``pdf_path=None``; :attr:`cover_written` says whether the pages made it in.
+        """
+        if self._pdf is None:
+            return
+        self._cover = list(figs)
 
     def get_pagecount(self) -> int | None:
         # PdfPages.get_pagecount() reports 0 once the file is closed -- this
