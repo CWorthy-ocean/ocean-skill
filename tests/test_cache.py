@@ -121,6 +121,37 @@ def test_cached_result_is_indistinguishable_from_a_fresh_one(aligned):
         assert np.allclose(back[name], coord)
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        np.array(["NaT", "NaT", "NaT"], dtype="M8[ns]"),
+        np.array(["2024-01-01T06:30:15", "NaT", "2024-03-01"], dtype="M8[ns]"),
+        np.array(["NaT", "2024-01-01", "2024-01-02"], dtype="M8[ns]"),
+        np.array([3_600_000_000_000, "NaT", 0], dtype="m8[ns]"),
+    ],
+    ids=["all-nat", "partial-nat", "nat-first", "timedelta"],
+)
+def test_a_time_coord_containing_nat_round_trips(values):
+    """A NaT time must not make the entry unreadable.
+
+    By default xarray writes NaT as int64-min and then cannot decode it. Any entry
+    with a NaT time (e.g. a cast section's ``cast_time`` after a time mean) was then
+    recomputed on every run.
+    """
+    ds = xr.Dataset({"a": ("x", [1.0, 2.0, 3.0])}, coords={"t": ("x", values)})
+    cache.save("nat", ds)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        back = cache.load("nat")
+
+    assert back is not None
+    assert back.t.dtype.kind == values.dtype.kind
+    nat = np.isnat(values)
+    assert (np.isnat(back.t.values) == nat).all()
+    assert (back.t.values[~nat] == values[~nat]).all()
+    assert "dtype" not in ds.t.encoding, "save() must not touch the caller's encoding"
+
+
 def test_saving_does_not_mutate_the_callers_dataset(aligned):
     """save() records bookkeeping of its own; the live object must not sprout it."""
     before = dict(aligned.attrs)
