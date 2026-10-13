@@ -278,6 +278,130 @@ def test_an_empty_band_among_others_is_nan_with_one_warning():
     assert out["DEPTH_bounds"].values.tolist() == [[0.0, 6.0], [30.0, 35.0]]
 
 
+# -- a band that keeps the observed levels ("average": False) -----------------------
+
+KEEP = {"min": 0, "max": 25, "average": False}
+
+
+def test_a_kept_levels_band_keeps_the_pairs_inside_it_unaveraged_and_jointly_masked():
+    base = profile_base()
+    out = derive(base, "profile", select={"depth": KEEP})
+    # levels 2, 5, 10, 20 are inside; each stands as its own sample
+    assert list(out["DEPTH"].values) == [2.0, 5.0, 10.0, 20.0]
+    assert out["test"].dims == ("DEPTH",) and out.attrs["scored_over"] == "DEPTH"
+    # the model is missing at 10 m: the joint mask blanks both lanes there
+    assert np.isnan(out["test"].values[2]) and np.isnan(out["reference"].values[2])
+    keep = [0, 1, 3]
+    np.testing.assert_allclose(out["test"].values[keep], base["test"].values[keep])
+    np.testing.assert_allclose(
+        out["reference"].values[keep], base["reference"].values[keep]
+    )
+    np.testing.assert_allclose(out["difference"].values[keep], 1.0)
+    assert out.attrs["depth_band"] == [0.0, 25.0]
+    assert "actual_depth" not in out.attrs  # several levels: no single one to name
+
+
+def test_a_kept_levels_band_is_inclusive_and_one_level_names_it():
+    out = derive(
+        profile_base(),
+        "profile",
+        select={"depth": {"min": 5, "max": 5, "average": False}},
+    )
+    assert list(out["DEPTH"].values) == [5.0]
+    assert out.attrs["actual_depth"] == 5.0
+    both = derive(
+        profile_base(),
+        "profile",
+        select={"depth": [{"min": 2, "max": 10, "average": False}]},
+    )
+    assert list(both["DEPTH"].values) == [2.0, 5.0, 10.0]
+
+
+def test_a_kept_levels_band_on_repeat_casts_keeps_time_and_levels():
+    out = derive(
+        station_base(),
+        "timeSeriesProfile",
+        select={"depth": {"min": 0, "max": 25, "average": False}},
+    )
+    assert out["test"].dims == ("time", "depth")
+    assert list(out["depth"].values) == [5.0, 10.0, 20.0]
+
+
+def test_the_averaged_band_on_the_same_base_still_means_and_true_is_the_default():
+    base = profile_base()
+    plain = derive(
+        base,
+        "profile",
+        select={"depth": {"min": 0, "max": 25}},
+        aggregate={"Z": "mean"},
+    )
+    explicit = derive(
+        base,
+        "profile",
+        select={"depth": {"min": 0, "max": 25, "average": True}},
+        aggregate={"Z": "mean"},
+    )
+    assert float(plain["test"]) == float(explicit["test"])
+    assert "DEPTH" not in plain["test"].dims
+    # and True without a vertical mean is the averaged band's own refusal
+    ok, why = derivable_profile({"depth": {"min": 0, "max": 25, "average": True}}, {})
+    assert not ok and "vertical mean" in why
+
+
+def test_a_kept_levels_band_is_derivable_without_a_vertical_aggregate():
+    ok, _ = derivable_profile({"depth": KEEP}, {})
+    assert ok
+    ok, _ = derivable_profile({"depth": [KEEP]}, {})
+    assert ok
+
+
+@pytest.mark.parametrize("aggregate", [{"Z": "mean"}, {"depth": "max"}])
+def test_a_kept_levels_band_with_a_vertical_aggregate_is_a_contradiction(aggregate):
+    ok, why = derivable_profile({"depth": KEEP}, aggregate)
+    assert not ok and "cannot also be reduced by a vertical aggregate" in why
+    with pytest.raises(ValueError, match="drop one"):
+        derive(profile_base(), "profile", select={"depth": KEEP}, aggregate=aggregate)
+
+
+def test_a_kept_levels_band_with_no_level_in_it_is_not_derivable():
+    ok, why = derivable_profile({"depth": {"min": 30, "max": 35, "average": False}}, {})
+    assert not ok
+    assert "none of the observations' levels falls in the 30–35 m layer" in why
+
+
+def test_one_kept_levels_band_at_a_time():
+    other = {"min": 30, "max": 120, "average": False}
+    for depth in ([KEEP, other], [KEEP, {"min": 30, "max": 120}]):
+        ok, why = derivable_profile({"depth": depth}, {})
+        assert not ok and "one band at a time" in why
+
+
+def test_a_non_boolean_average_is_refused():
+    with pytest.raises(ValueError, match="'average' must be True or False"):
+        derivable_profile({"depth": {"min": 0, "max": 10, "average": "no"}}, {})
+
+
+def test_a_kept_levels_band_holding_a_moorings_instrument_is_the_base():
+    base = series_base()
+    out = pairs.derive(
+        base,
+        select={"depth": {"min": 0, "max": 20, "average": False}},
+        aggregate={},
+        detide=False,
+        feature_type="timeSeries",
+        obs_levels=[5.0],
+    )
+    xr.testing.assert_equal(out["test"], base["test"])
+    ok, why = pairs.derivable(
+        {"depth": {"min": 10, "max": 20, "average": False}},
+        {},
+        feature_type="timeSeries",
+        obs_levels=[5.0],
+        detide=False,
+    )
+    assert not ok and "none of the observations' levels" in why
+
+
 def test_band_without_a_vertical_mean_is_not_derivable():
     ok, why = derivable_profile({"depth": {"min": 0, "max": 10}}, {})
     assert not ok and "vertical mean" in why

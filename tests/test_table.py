@@ -843,7 +843,8 @@ def test_split_all_adds_a_whole_record_line_after_the_levels():
     assert sst[0][0].rowspan == 4
     df = t.to_dataframe()
     assert df.loc[("SST", "Mar–Nov"), "bias"] == pytest.approx(0.07)
-    assert df.loc[("SST", "MAM"), "rmse"] == pytest.approx(0.5)
+    assert df.loc[("SST", "Mar–Nov"), "rmse"] == pytest.approx(0.5)  # whole-record line
+    assert np.isnan(df.loc[("SST", "MAM"), "rmse"])
     tex = t.to_latex()
     assert r"\multirow{4}{*}{SST}" in tex
     assert r"\multirow{4}{*}{0.5}" in tex
@@ -906,6 +907,30 @@ def test_split_all_level_is_in_the_tidy_table():
     whole = tidy[(tidy.level == "Mar–Nov") & (tidy.metric == "bias")]
     assert sorted(whole.row) == ["Alk", "SST"]
     assert whole[whole.row == "SST"].value.iloc[0] == pytest.approx(0.07)
+
+
+def test_split_all_files_merged_values_under_the_whole_record_line():
+    # R²/RMSE are the whole-record values, so the data writers put them on the
+    # split_all line -- not on the first season's, which they say nothing about
+    cs = _cs(
+        _Fake("T", depth="surface", time="Mar–Nov", bias=0.1, rmse=0.5, corr=0.9),
+        _Fake("T", depth="column", time="Mar–Nov", bias=0.2, rmse=0.6, corr=0.8),
+        _Fake("T", depth="surface", time="MAM", bias=0.31),
+        _Fake("T", depth="column", time="MAM", bias=0.41),
+    )
+    t = cs.table(
+        metrics=("r2", "rmse", "bias"),
+        split={"bias": "time"},
+        join={"r2": "depth", "rmse": "depth", "bias": "depth"},
+        split_all="Mar–Nov",
+    )
+    df = t.to_dataframe()
+    assert df.loc[("T", "Mar–Nov"), ("rmse", "surface")] == pytest.approx(0.5)
+    assert df.loc[("T", "Mar–Nov"), ("r2", "surface")] == pytest.approx(0.81)
+    assert np.isnan(df.loc[("T", "MAM"), ("rmse", "column")])
+    assert np.isnan(df.loc[("T", "MAM"), ("r2", "surface")])
+    tidy = t.to_tidy()
+    assert set(tidy[tidy.metric.isin(["r2", "rmse"])].level) == {"Mar–Nov"}
 
 
 def test_split_all_needs_split_and_a_name():

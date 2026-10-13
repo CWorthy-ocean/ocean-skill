@@ -722,10 +722,100 @@ def is_depth_band(depth: Any) -> bool:
     """Report whether ``depth`` asks for an average over a band rather than a level.
 
     ``{"min": 0, "max": 10}`` — the YAML-friendly spelling of a range, since YAML has
-    no slice literal. A band is averaged, not interpolated: see
-    :func:`ocean_skill.roms.depth_average`.
+    no slice literal. A band is a layer *average*, not interpolated: see
+    :func:`ocean_skill.roms.depth_average`. ``{"min": 0, "max": 10, "average": False}``
+    is still a band by this test but keeps the observations' own levels inside it
+    instead of averaging them (:func:`band_keeps_levels`) -- station data compared from
+    saved pairs only, e.g. to pool every observed level in the layer as its own sample.
     """
     return isinstance(depth, dict) and {"min", "max"} <= set(depth)
+
+
+def band_keeps_levels(depth: Any) -> bool:
+    """Report whether ``depth`` is a band that keeps the observed levels unaveraged.
+
+    ``{"min": 0, "max": 5, "average": False}``: every observed level inside the band
+    stands as its own sample, rather than the layer being averaged (the default, and
+    what ``"average": True`` spells out). Only station references (casts, bottles,
+    ADCPs, moorings) compared from saved pairs can answer it
+    (:func:`ocean_skill.pairs.derive`); anywhere else it is refused
+    (:func:`_require_averaged_bands`). A single-item list holding the band counts.
+    Raises ``ValueError`` when ``average`` is not a ``bool``.
+    """
+    if isinstance(depth, list | tuple) and len(depth) == 1:
+        depth = depth[0]
+    if not is_depth_band(depth) or "average" not in depth:
+        return False
+    flag = depth["average"]
+    if not isinstance(flag, bool):
+        raise ValueError(  # noqa: TRY004 -- a bad value, not a type error
+            f"a depth band's 'average' must be True or False, got {flag!r}: "
+            '{"min": 0, "max": 5, "average": False} keeps the observed levels '
+            "inside the band; leave it out (or True) to average over the band."
+        )
+    return not flag
+
+
+def _band_items(depth: Any) -> list[dict[str, Any]]:
+    """Return every depth band named by ``depth`` (a band, or a list holding some)."""
+    items = list(depth) if isinstance(depth, list | tuple) else [depth]
+    return [d for d in items if is_depth_band(d)]
+
+
+def _any_band_keeps_levels(depth: Any) -> bool:
+    """Whether ``depth`` is, or lists, at least one :func:`band_keeps_levels` band."""
+    return any(band_keeps_levels(b) for b in _band_items(depth))
+
+
+_KEEP_LEVELS_REFUSAL = (
+    'a depth band with "average": False keeps the observations\' own levels, so it '
+    "is only answerable for station data (casts, bottles, ADCPs, moorings) compared "
+    "from saved pairs -- not for a gridded reference, a bare Field, or a model-only "
+    "request. Drop it to average over the band, or give a list of depths to sample "
+    "at specific levels."
+)
+
+
+def _require_averaged_bands(depth: Any) -> None:
+    """Raise unless every band in ``depth`` is an average.
+
+    The one place the lane pipeline (:func:`_prepare`, and the pre-read guard in
+    :meth:`Comparison._align_pipeline`) refuses a ``"average": False`` band: a lane
+    only knows how to average a layer, so a request for the observed levels is not one
+    it can answer. A station compared from saved pairs never gets here -- it is derived
+    first (:mod:`ocean_skill.pairs`).
+    """
+    if _any_band_keeps_levels(depth):
+        several = isinstance(depth, list | tuple) and len(depth) > 1
+        raise ValueError(
+            _KEEP_LEVELS_REFUSAL
+            + (
+                " (Several bands in one select are not answerable together either: "
+                "osk.compare(depths=[...]) compares one band at a time.)"
+                if several
+                else ""
+            )
+        )
+
+
+def _validate_depth_bands(select: Any, aggregate: Any) -> None:
+    """Check each lane's depth bands: ``average`` is a bool, and no vertical aggregate.
+
+    A band that keeps the observed levels has nothing for a vertical aggregate to
+    collapse -- the two ask for opposite things -- so the combination is refused up
+    front, whatever the reference, instead of being quietly half-answered.
+    """
+    for role in ("test", "reference"):
+        sel = select_for(select, role)
+        agg = aggregate_for(aggregate, role) or {}
+        depth = next((sel[k] for k in _VERTICAL_KEYS if k in sel), None)
+        if _any_band_keeps_levels(depth) and any(k in agg for k in _VERTICAL_KEYS):
+            raise ValueError(
+                'a depth band with "average": False keeps the observed levels, so '
+                "it cannot also be reduced by a vertical aggregate "
+                f"(aggregate={agg!r}): drop one -- remove the vertical aggregate to "
+                'keep the levels, or drop "average": False to average over the band.'
+            )
 
 
 def is_surface_request(depth: Any) -> bool:
@@ -885,6 +975,9 @@ def _merge_relabels(comps: list[Any]) -> dict[str, dict[str, str]]:
 def _depth_label(depth: Any) -> str:
     """Format a depth for labels/repr: ``"surface"``, ``"0-10 m"`` or ``"<n> m"``.
 
+    A band that keeps the observed levels (``"average": False``) reads ``"0-10 m
+    levels"``, so it never collides with the averaged ``"0-10 m"``.
+
     A list — several levels kept as facet rows — spells each element by the same
     rules: ``["surface", 50, 100]`` reads ``"surface, 50 m, 100 m"``. But a list of
     more than :data:`_MAX_ENUMERATED_LEVELS` bare numbers -- a full profile's worth
@@ -907,7 +1000,9 @@ def _depth_label(depth: Any) -> str:
     if is_column_request(depth):
         return "full water column"
     if is_depth_band(depth):
-        return f"{float(depth['min']):g}-{float(depth['max']):g} m"
+        span = f"{float(depth['min']):g}-{float(depth['max']):g} m"
+        # a kept-levels band never reads like the averaged layer of the same range
+        return f"{span} levels" if band_keeps_levels(depth) else span
     if isinstance(depth, list | tuple):
         span = _numeric_span(list(depth))
         if span is not None:
@@ -2996,6 +3091,9 @@ def _prepare(
         obj = apply_transect(obj, transect_spec, subject=source)
 
     depth = next((select[k] for k in _VERTICAL_KEYS if k in select), None)
+    # The lane pipeline only averages a band; a request for the observed levels
+    # ("average": False) is answered from saved pairs or not at all.
+    _require_averaged_bands(depth)
     sigma = select.get("sigma0")
     if depth is not None and sigma is not None:
         raise ValueError(
@@ -5079,6 +5177,7 @@ class Comparison:
                         f"side must be a dict or None, matching aggregate= itself; "
                         f"got {side!r}."
                     )
+        _validate_depth_bands(self.select, self.aggregate)
         self.method = method
         # An explicit over= always wins; otherwise the reference's featureType decides,
         # since a station reference has a time axis and no map to draw -- and failing
@@ -6816,16 +6915,17 @@ class Comparison:
         has_time = tdim is not None and tdim in reference.dims
         # Layers are not levels the cast never sampled: an empty one among several is
         # NaN by request (pairs.derive warned), and stays on the axis it was asked for.
-        bands = _bands_of(
-            next(
-                (
-                    plan.args["select"][k]
-                    for k in _VERTICAL_KEYS
-                    if k in plan.args["select"]
-                ),
-                None,
-            )
+        # (a band that keeps the observed levels is a depth subset like a list: a level
+        # the cast never sampled is still a hole to drop)
+        asked = next(
+            (
+                plan.args["select"][k]
+                for k in _VERTICAL_KEYS
+                if k in plan.args["select"]
+            ),
+            None,
         )
+        bands = None if _any_band_keeps_levels(asked) else _bands_of(asked)
         if (
             zdim is not None
             and zdim in reference.dims
@@ -7467,6 +7567,13 @@ class Comparison:
         plan = self._derivation_plan()
         if plan.basic is not None:
             return self._align_from_pairs(plan, use_cache, refresh)
+        # Past this point only the lanes can answer, and they only average a band: say
+        # so before anything is read (_prepare refuses it too, for a bare Field).
+        for role in ("test", "reference"):
+            lane_select = select_for(self.select, role)
+            _require_averaged_bands(
+                next((lane_select[k] for k in _VERTICAL_KEYS if k in lane_select), None)
+            )
 
         # A vertical score (over="Z"/"vertical") needs a depth axis left standing to
         # score down; a select that collapses depth to one level -- a scalar, or the
@@ -13165,6 +13272,12 @@ def compare(
         A ``{"min", "max"}`` band is a mooring's one level when its
         instrument lies inside it, and a mooring outside it is likewise left
         out.
+        A band is a layer *average*; ``{"min": 0, "max": 5, "average": False}``
+        keeps the observed levels in the layer unaveraged instead (labelled
+        ``"0-5 m levels"``; pairs as samples, e.g. for :meth:`ComparisonSet.pool`).
+        It is answered only for station references (casts, bottles, ADCPs,
+        moorings) from their saved pairs -- anything else raises -- and it cannot
+        be combined with a vertical ``aggregate``.
     times
         ``None`` (default, no time fan), a dict deriving bins from the
         test's own time axis (``{"resample": ..., "reduce": ...}``,

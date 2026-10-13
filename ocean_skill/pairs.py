@@ -38,6 +38,15 @@ plain mean of the *pairs* at the obs levels inside it, not the model's
 thickness-weighted band average matched against the obs. Both lanes are masked to the
 points where both are finite first, so the two means describe the same samples.
 
+A band with ``"average": False`` (``{"min": 0, "max": 5, "average": False}``) is the
+other reading of a band, and only pairs can give it: the obs levels inside
+``[min, max]`` are kept standing, unaveraged, as the pairs at those levels (jointly
+masked the same way) -- every level its own sample, for pooling. It takes no vertical
+aggregate (the two ask for opposite things), one band at a time, and a layer holding
+none of the obs levels is not derivable; ``depth_band`` records the layer. The lane
+pipeline cannot answer it, so a request that is not derivable here is refused there
+(:func:`ocean_skill.comparison._require_averaged_bands`).
+
 The order is fixed -- time select, detide, depth, time aggregate, then ``difference``
 recomputed from the reduced ``test`` and ``reference`` (never reduced itself: a standard
 deviation of differences is not the difference of standard deviations).
@@ -99,9 +108,13 @@ def _classify_depth(depth: Any) -> tuple[str, Any]:
 
     ``kind`` is ``"all"`` (nothing named: the base's levels as they are), ``"surface"``
     (``"surface"`` by name, alone or as a one-item list), ``"scalar"`` (one level),
-    ``"levels"`` (a list of levels), or ``"bands"`` (a list of ``(min, max)`` pairs; one
-    band is a list of one). Anything else -- ``"column"``, a string, a slice -- is not
-    derivable.
+    ``"levels"`` (a list of levels), ``"bands"`` (a list of ``(min, max)`` pairs, each
+    averaged; one band is a list of one), or ``"band_levels"`` (exactly one
+    ``(min, max)`` band with ``"average": False``: the observed levels inside it kept
+    standing, unaveraged). Several kept-levels bands, or one mixed with averaged ones,
+    are not derivable -- :func:`ocean_skill.comparison.compare` sends one band per
+    comparison, and overlapping layers have no single set of levels. Anything else --
+    ``"column"``, a string, a slice -- is not derivable.
     """
     c = _vocabulary()
     if c.is_column_request(depth):
@@ -119,12 +132,12 @@ def _classify_depth(depth: Any) -> tuple[str, Any]:
     ):
         return "surface", None
     if c.is_depth_band(depth):
-        return "bands", [_band(depth)]
+        return _classify_bands([depth])
     if _is_number(depth):
         return "scalar", float(depth)
     if isinstance(depth, list | tuple) and depth:
         if all(isinstance(d, dict) for d in depth):
-            return "bands", [_band(d) for d in depth]
+            return _classify_bands(list(depth))
         if all(_is_number(d) for d in depth):
             return "levels", [float(d) for d in depth]
     raise _NotDerivable(
@@ -132,15 +145,33 @@ def _classify_depth(depth: Any) -> tuple[str, Any]:
     )
 
 
+def _classify_bands(specs: list[Any]) -> tuple[str, Any]:
+    """Name a list of band specs: ``("bands", [...])`` or ``("band_levels", [one])``."""
+    c = _vocabulary()
+    bands = [_band(spec) for spec in specs]
+    keeps = [c.band_keeps_levels(spec) for spec in specs]
+    if not any(keeps):
+        return "bands", bands
+    if len(specs) != 1:
+        raise _NotDerivable(
+            'a depth band with "average": False keeps the observed levels, which only '
+            "one band at a time can ask for (several, or one mixed with averaged "
+            "bands, have no single set of levels to keep)"
+        )
+    return "band_levels", bands
+
+
 def _band(spec: Any) -> tuple[float, float]:
-    """Return ``(min, max)`` of one ``{"min", "max"}`` band, or raise."""
+    """Return ``(min, max)`` of one ``{"min", "max"[, "average"]}`` band, or raise."""
     if not (
         _vocabulary().is_depth_band(spec)
-        and set(spec) == {"min", "max"}
+        and set(spec) <= {"min", "max", "average"}
         and _is_number(spec["min"])
         and _is_number(spec["max"])
     ):
-        raise _NotDerivable(f"{spec!r} is not a plain {{'min', 'max'}} depth band")
+        raise _NotDerivable(
+            f"{spec!r} is not a plain {{'min', 'max'[, 'average']}} depth band"
+        )
     return float(spec["min"]), float(spec["max"])
 
 
@@ -212,6 +243,11 @@ def _check(select, aggregate, *, feature_type, obs_levels, depth_method=None) ->
             '"surface" with (only a station at the surface does)'
         )
     z_agg = next((aggregate[k] for k in vertical_keys if k in aggregate), None)
+    if kind == "band_levels" and z_agg is not None:
+        raise _NotDerivable(
+            'a depth band with "average": False keeps the observed levels, so it '
+            f"cannot also be reduced by a vertical aggregate ({z_agg!r}): drop one"
+        )
     if z_agg is not None and not operators._is_plain_mean(z_agg):
         raise _NotDerivable(
             f"only a plain mean over depth can be taken of saved pairs (got {z_agg!r})"
@@ -221,7 +257,11 @@ def _check(select, aggregate, *, feature_type, obs_levels, depth_method=None) ->
             "a depth band without a vertical mean asks for the model averaged over "
             "the band, which the saved pairs at the obs levels cannot give"
         )
-    if kind == "bands" and obs_levels is not None and len(obs_levels) > 0:
+    if (
+        kind in ("bands", "band_levels")
+        and obs_levels is not None
+        and len(obs_levels) > 0
+    ):
         # A layer none of the observations' levels falls in has no data: the nearest
         # level would silently pool an out-of-range depth into its average. Several
         # layers may have an empty one among them (derive leaves it NaN); asking for
@@ -284,6 +324,11 @@ def derivable(
     for a scalar or list inside the levels' range -- outside it nothing is derivable,
     since the pairs do not extrapolate. ``None`` keeps to the observations' own levels.
     ``reason`` says why not, or for ``True`` what was checked.
+
+    A depth band is derivable only with a plain vertical mean (the pairs' levels in it
+    averaged) -- or, with ``"average": False``, only *without* any vertical aggregate
+    (the levels in it kept standing); the two together, a layer holding none of the
+    levels, and several kept-levels bands at once are not derivable.
     """
     select, aggregate = dict(select or {}), dict(aggregate or {})
     try:
@@ -528,6 +573,10 @@ def derive(
     ``<depth>_bounds`` coordinate and the ``bounds`` attribute naming it; a time select
     that leaves nothing is an error, not an empty pair.
 
+    A ``"average": False`` band keeps the base's levels inside ``[min, max]``
+    (inclusive) with no mean: the lanes are masked jointly, ``depth_band`` is the layer,
+    and ``actual_depth`` names the level only when exactly one is kept.
+
     ``obs_levels`` names the levels the pairs sit at when the base has no depth axis to
     read them from -- a mooring's one instrument depth -- so a request naming that depth
     is recognised as the base itself rather than refused as unsampled.
@@ -639,6 +688,22 @@ def derive(
             attrs.pop("actual_depth", None)
             if len(idx) == 1:
                 attrs["actual_depth"] = float(levels[idx[0]])
+    elif zdim is not None and kind == "band_levels":
+        # the observed levels inside the layer, kept standing: no mean, so the layer
+        # is just a depth subset -- jointly masked so both lanes hold the same samples
+        ((lo, hi),) = payload
+        inside = np.flatnonzero((levels >= lo) & (levels <= hi))
+        if inside.size == 0:
+            raise ValueError(
+                f"{subject} has no level in {c._layer_label(payload)} to keep"
+            )
+        test, reference = _joint(
+            test.isel({zdim: inside}), reference.isel({zdim: inside})
+        )
+        attrs.pop("actual_depth", None)
+        if inside.size == 1:
+            attrs["actual_depth"] = float(levels[inside[0]])
+        attrs["depth_band"] = [lo, hi]
     elif zdim is not None and kind == "bands":
         test, reference = _joint(test, reference)
         parts_t, parts_r, used, empty = [], [], [], []

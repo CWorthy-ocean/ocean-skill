@@ -965,3 +965,207 @@ def test_a_catalog_fan_saves_the_base_an_off_bin_interp_then_derives_from(world)
     assert ds.attrs["actual_depth"] == 8.0
     np.testing.assert_allclose(ds.attrs["depth_interpolated_between"], [6.0, 10.5])
     assert _said(msgs, "interpolated to 8 m between its levels 6 and 10.5 m")
+
+
+# -- a band that keeps the observed levels ("average": False) --------------------------
+
+KEEP_6 = {"min": 0, "max": 6, "average": False}  # ADCP bins 2 and 6
+KEEP_12 = {"min": 0, "max": 12, "average": False}  # ADCP bins 2, 6 and 10.5
+
+
+def _kept(reference: str, depths, **kw):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return compare(
+            reference=reference,
+            test="his",
+            variables=[TEMPERATURE],
+            depths=depths,
+            **kw,
+        )
+
+
+def test_kept_levels_bands_label_distinctly_from_the_averaged_layer():
+    label = comparison._depth_label
+    assert label({"min": 0, "max": 5, "average": False}) == "0-5 m levels"
+    assert label({"min": 0, "max": 5, "average": True}) == "0-5 m"
+    assert label({"min": 0, "max": 5}) == "0-5 m"
+    assert comparison.band_keeps_levels({"min": 0, "max": 5, "average": False})
+    assert comparison.band_keeps_levels([{"min": 0, "max": 5, "average": False}])
+    assert not comparison.band_keeps_levels({"min": 0, "max": 5, "average": True})
+    assert not comparison.band_keeps_levels({"min": 0, "max": 5})
+    assert not comparison.band_keeps_levels(5.0)
+    assert comparison.is_depth_band({"min": 0, "max": 5, "average": False})
+
+
+@pytest.mark.parametrize("bad", ["no", 0, None, "False"])
+def test_a_non_boolean_average_raises(world, bad):
+    band = {"min": 0, "max": 5, "average": bad}
+    with pytest.raises(ValueError, match="'average' must be True or False"):
+        comparison.band_keeps_levels(band)
+    with pytest.raises(ValueError, match="'average' must be True or False"):
+        _kept("adcp", [band])
+
+
+def test_a_kept_levels_band_is_every_observed_level_derived_from_the_pairs(world):
+    base = _adcp_base()
+    zdim = _zdim(base)
+    world.block_model()
+    ds, _ = _adcp_compare(depths=[KEEP_12])
+    assert ds.attrs["derived_from"] == "pairs"
+    assert ds.attrs["depth_band"] == [0.0, 12.0]
+    assert list(ds["reference"].coords[_zdim(ds)].values) == [2.0, 6.0, 10.5]
+    assert ds["reference"].sizes["time"] == base["reference"].sizes["time"]
+    # unaveraged: the pairs are exactly the base's at those levels (jointly masked)
+    kept = base.isel({zdim: [0, 1, 2]})
+    both = kept["test"].notnull() & kept["reference"].notnull()
+    np.testing.assert_allclose(
+        ds["test"].values, kept["test"].where(both).transpose(*ds["test"].dims).values
+    )
+
+
+def test_kept_levels_bands_pool_as_levels_times_valid_pairs(world):
+    base = _adcp_base()
+    zdim = _zdim(base)
+    world.block_model()
+    cs = _kept("adcp", [KEEP_6, KEEP_12])
+    # an unpooled comparison reports its raw select; every label reader spells it
+    assert [comparison._depth_label(d) for d in cs.metrics()["depth"]] == [
+        "0-6 m levels",
+        "0-12 m levels",
+    ]
+    pooled = cs.pool(by=["variable", "depth", "time"])
+    table = pooled.metrics().set_index("depth")
+    both = base["test"].notnull() & base["reference"].notnull()
+    for name, n_levels in (("0-6 m levels", 2), ("0-12 m levels", 3)):
+        expected = int(both.isel({zdim: list(range(n_levels))}).sum())
+        assert expected > 0
+        assert int(table.loc[name, "n"]) == expected
+    # sel() reads the new label, and never the averaged layer's
+    assert len(pooled.sel(depth="0-6 m levels")) == 1
+    assert len(pooled.sel(depth="0-6M LEVELS")) == 1
+    with pytest.raises(ValueError):
+        pooled.sel(depth="0-6 m")
+    renamed = pooled.relabel(depth={"0-6 m levels": "Upper bins"}).metrics()
+    assert set(renamed["depth"]) == {"Upper bins", "0-12 m levels"}
+
+
+def test_the_kept_and_averaged_band_never_share_a_cache_entry(world):
+    _adcp_base()
+    world.block_model()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        (avg,) = compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            depths=[{"min": 0, "max": 12}],
+            aggregate={"Z": "mean"},
+        )
+        (flag_true,) = compare(
+            reference="adcp",
+            test="his",
+            variables=[TEMPERATURE],
+            depths=[{"min": 0, "max": 12, "average": True}],
+            aggregate={"Z": "mean"},
+        )
+        (kept,) = compare(
+            reference="adcp", test="his", variables=[TEMPERATURE], depths=[KEEP_12]
+        )
+        kept_ds, avg_ds = kept.align(), avg.align()
+    assert kept._cache_key != avg._cache_key
+    assert kept._cache_key != flag_true._cache_key
+    assert kept_ds["test"].ndim == 2 and avg_ds["test"].ndim == 1
+    # an exact repeat of the kept request is a plain hit of its own entry
+    (again,) = _kept("adcp", [KEEP_12])
+    assert again._cache_key == kept._cache_key
+    assert again.align()["test"].ndim == 2
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_a_kept_levels_band_with_a_vertical_aggregate_is_refused(world):
+    with pytest.raises(ValueError, match="cannot also be reduced by a vertical"):
+        _kept("adcp", [KEEP_12], aggregate={"Z": "mean"})
+    with pytest.raises(ValueError, match="drop one"):
+        Comparison(
+            reference="adcp",
+            test="his",
+            variable=TEMPERATURE,
+            select={"depth": KEEP_12},
+            aggregate={"Z": "mean"},
+        )
+
+
+def test_a_kept_levels_band_on_a_cast_keeps_its_levels(world):
+    _basic_cast()
+    world.block_model()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        (c,) = _kept("cast", [{"min": 4, "max": 10, "average": False}])
+        ds = c.align()
+    assert ds.attrs["derived_from"] == "pairs"
+    zdim = _zdim_of(ds)
+    assert list(ds["reference"].coords[zdim].values) == [5.0, 9.0]
+    np.testing.assert_allclose(ds["reference"].values, [9.0, 8.0])
+
+
+def _zdim_of(ds: xr.Dataset) -> str:
+    return next(iter(ds["reference"].dims))
+
+
+def test_a_kept_levels_band_holding_a_moorings_instrument_is_its_series(world):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        (c,) = _kept("moor", [{"min": 0, "max": 10, "average": False}])
+        ds = c.align()
+        basic = _align("moor")
+    assert ds.attrs["derived_from"] == "pairs" or "basic" in ds.attrs["derived_reason"]
+    assert ds.attrs.get("depth_band") == [0.0, 10.0]
+    np.testing.assert_allclose(_values(ds), _values(basic))
+    assert comparison._depth_label(c.metrics()["depth"]) == "0-10 m levels"
+
+
+def test_a_kept_levels_band_with_no_level_in_it_has_no_data(world):
+    _adcp_base()
+    with pytest.raises(ValueError, match="has no data in the 20–30 m layer"):
+        _kept("adcp", [{"min": 20, "max": 30, "average": False}])[0].align()
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_a_kept_levels_band_of_a_gridded_reference_is_refused(world):
+    c = Comparison(
+        reference="his",
+        test="his",
+        variable=TEMPERATURE,
+        select={"depth": KEEP_6},
+    )
+    with pytest.raises(ValueError, match="keeps the observations' own levels"):
+        c.align()
+    assert world.model_reads == 0  # refused before anything was read
+
+
+def test_a_kept_levels_band_of_a_bare_field_or_lane_is_refused(world):
+    from ocean_skill.comparison import _prepare
+
+    with pytest.raises(ValueError, match="only answerable for station data"):
+        _prepare(world.model, world.model_meta, TEMPERATURE, {"depth": KEEP_6})
+    with pytest.raises(ValueError, match="give a list of depths"):
+        _prepare(world.model, world.model_meta, TEMPERATURE, {"depth": [KEEP_6]})
+    several = [KEEP_6, KEEP_12]
+    with pytest.raises(ValueError, match="one band at a time"):
+        _prepare(world.model, world.model_meta, TEMPERATURE, {"depth": several})
+    # the averaged band is untouched
+    da, _ = _prepare(
+        world.model,
+        world.model_meta,
+        TEMPERATURE,
+        {"depth": {"min": 0, "max": 6, "average": True}, "eta_rho": 1, "xi_rho": 1},
+        {"Z": "mean"},
+    )
+    assert "s_rho" not in da.dims
+
+
+@pytest.mark.filterwarnings("ignore:.*resolved to standard_name")
+def test_a_kept_levels_band_through_compare_of_a_gridded_reference_is_refused(world):
+    with pytest.raises(ValueError, match="keeps the observations' own levels"):
+        _kept("his", [KEEP_6])
