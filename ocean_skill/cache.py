@@ -533,6 +533,26 @@ def _strip_codec_encoding(ds):
     return out
 
 
+def _float_encode_nat_times(ds) -> None:
+    """Write datetime/timedelta variables that contain NaT as float64, in place.
+
+    xarray's default encoding stores them as int64 with NaT as int64-min, which its
+    own decoder then cannot read back ("unable to decode time units ...", or an
+    int64 * timedelta64 overflow), so the entry was dropped and recomputed on every
+    run. As float64, NaT is written as NaN and decodes back to NaT. xarray still picks
+    the coarsest units that hold the values exactly, so precision is lost only for
+    sub-microsecond times spread over more than ~100 days. Variables without NaT keep
+    their usual int64 encoding. ``ds`` must be save()'s shallow copy, not the caller's.
+    """
+    import numpy as np
+
+    for var in ds.variables.values():
+        if var.dtype.kind in "mM" and np.isnat(var.values).any():
+            var.encoding["dtype"] = "float64"
+            var.encoding.pop("_FillValue", None)
+            var.encoding.pop("missing_value", None)
+
+
 def save(key: str, ds, kind: str = "aligned") -> None:
     """Write ``ds`` to the cache under ``key``, replacing any existing entry.
 
@@ -557,6 +577,7 @@ def save(key: str, ds, kind: str = "aligned") -> None:
         # consolidated=False because zarr v3 warns that consolidated metadata is
         # outside its spec; these stores are small, so the read cost is noise.
         out = _strip_codec_encoding(ds.assign_attrs({_ORDER_ATTR: list(ds.data_vars)}))
+        _float_encode_nat_times(out)
         out.to_zarr(tmp, mode="w", consolidated=False)
         shutil.rmtree(store, ignore_errors=True)
         os.replace(tmp, store)
