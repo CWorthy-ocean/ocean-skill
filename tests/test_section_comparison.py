@@ -943,6 +943,18 @@ def test_from_reference_refuses_times_fan(casts_and_model):
         )
 
 
+def test_from_reference_refuses_sample_subset_times_fan(casts_and_model):
+    casts = casts_and_model
+    with pytest.raises(ValueError, match="times="):
+        osk.compare(
+            reference=casts,
+            test="roms_test",
+            variables=[VAR],
+            select={"transect": {"from": "reference"}, "depth": [50.0, 200.0]},
+            times={"seasons": ["MAM"]},
+        )
+
+
 # -- regression: the test/model lane must not read its whole time record ------------
 #
 # The route above forgot to narrow the test lane's own time axis to the casts'
@@ -1122,3 +1134,53 @@ def test_from_reference_repeat_visit_casts_average_over_their_own_visits(patched
     )
     got = np.asarray(out.comparisons[0].aligned["test"].transpose(ALONG_DIM, "z"))
     np.testing.assert_allclose(got, expected, rtol=1e-10)
+
+
+def test_from_reference_season_fan_matches_hand_built_per_season(patched_sources):
+    """A season times= fan on a from-reference section: one section per season."""
+    model = _roms_run_with_time(150)  # Jan 1 -> May 30: DJF and MAM only
+    visits = {"cast_1": [4, 100], "cast_2": [10, 110]}
+    lonlats = {"cast_1": (-94.9, 25.0), "cast_2": (-93.1, 27.8)}
+    roms_meta = {"model": "roms", "vertical": {"s_dim": "s_rho", "hc": HC}}
+    sources = {"roms_test": (model, roms_meta)}
+    for name, days in visits.items():
+        sources[name] = (_tsp_cast(*lonlats[name], days, base=16.0), _CAST_META)
+    patched_sources(sources)
+    kw = {
+        "reference": ["cast_1", "cast_2"],
+        "test": "roms_test",
+        "variables": [VAR],
+    }
+    depths = [50.0, 200.0]
+    out = osk.compare(
+        **kw,
+        select={"transect": {"from": "reference"}, "depth": depths},
+        times={"groupby": "season", "seasons": ["DJF", "MAM", "SON"], "reduce": "mean"},
+    )
+    # SON has no data in either lane: skipped like any missing pair.
+    assert len(out.comparisons) == 2
+    labels = [c.label for c in out.comparisons]
+    assert len(set(labels)) == 2
+    assert any("DJF" in lab for lab in labels)
+    assert any("MAM" in lab for lab in labels)
+    for c, season in zip(out.comparisons, ["DJF", "MAM"], strict=True):
+        transect = {"from": "reference"}
+        reduction = {"groupby": "season", "seasons": [season], "reduce": "mean"}
+        by_hand = osk.compare(
+            **kw,
+            select={"transect": transect, "depth": depths, "season": season},
+            aggregate={"time": reduction},
+        ).comparisons[0]
+        assert c.select == by_hand.select
+        assert c.aggregate == by_hand.aggregate
+        for lane in ("test", "reference"):
+            np.testing.assert_allclose(
+                np.asarray(c.aligned[lane]),
+                np.asarray(by_hand.aligned[lane]),
+                rtol=1e-12,
+            )
+    # The two seasons really differ (the model drifts through time).
+    assert not np.allclose(
+        np.asarray(out.comparisons[0].aligned["test"]),
+        np.asarray(out.comparisons[1].aligned["test"]),
+    )
