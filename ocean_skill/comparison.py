@@ -1854,22 +1854,20 @@ def _depth_method_from_select(
     return {k: v for k, v in select.items() if k != "method"}, asked
 
 
-def _asks_off_bin_depths(passed: dict[str, Any], obs_levels: list[float]) -> bool:
-    """Whether ``passed``'s depth request has a fixed depth that is not an obs level.
+def _asks_fixed_depths(passed: dict[str, Any]) -> bool:
+    """Whether ``passed``'s depth request names a fixed depth (a number, or a list).
 
-    Bands and the surface are not fixed depths; only a number (or a list of them) can
-    sit between two levels. Used to tell the requests an interpolated depth_method
-    actually reads *between* the saved levels (see ``Comparison._plan_derivation``).
+    Bands and the surface are not fixed depths. A fixed depth is where the pairs'
+    ``depth_method`` shows: interpolated between the saved levels when it sits between
+    them, and, on one of them, still the model's side matched one way or the other (see
+    ``Comparison._plan_derivation``).
     """
     depth = next((passed[k] for k in _VERTICAL_KEYS if k in passed), None)
     if depth is None:
         return False
     values = depth if isinstance(depth, list | tuple) else [depth]
-    levels = np.asarray(obs_levels, dtype=float)
     return any(
-        isinstance(v, int | float | np.number)
-        and not isinstance(v, bool)
-        and not bool(np.isclose(levels, float(v)).any())
+        isinstance(v, int | float | np.number) and not isinstance(v, bool)
         for v in values
     )
 
@@ -6475,9 +6473,10 @@ class Comparison:
         :func:`~ocean_skill.pairs.derive` for a cast or profiling station only, so a
         fixed depth that is not one of the reference's own levels is answerable: snapped
         to the nearest level (``"nearest"``) or interpolated between the two around it
-        (``"interp"``/``"linear"``). An interpolated request whose own ``interp`` basic
-        comparison is not saved, but whose ``nearest`` one is, is answered from the
-        latter -- ``extra_attrs["pairs_depth_method"] = "nearest"``, which
+        (``"interp"``/``"linear"``). An interpolated request at a fixed depth (between
+        levels or on one) whose own ``interp`` basic comparison is not saved, but whose
+        ``nearest`` one is, is answered from the latter --
+        ``extra_attrs["pairs_depth_method"] = "nearest"``, which
         :attr:`_cache_key` keys apart and :meth:`_warn_on_pairs_depth` reports --
         rather than reading the model again to save an ``interp`` set.
         """
@@ -6620,14 +6619,15 @@ class Comparison:
         if (
             depth_method in ("interp", "linear")
             and self._use_cache()
-            and _asks_off_bin_depths(passed, obs_levels)
+            and _asks_fixed_depths(passed)
         ):
-            # An interpolated answer between obs levels is built from the saved pairs of
+            # An interpolated answer at a fixed depth is built from the saved pairs of
             # the same depth_method when they exist. When they do not but the *nearest*
             # pairs do (the usual case: the full-column comparison was run first, with
             # the default), those answer instead -- interpolating the matched values
-            # between the two bracketing levels -- rather than reading the whole model
-            # again to save an "interp" set just for this. The result says so (see
+            # between the two bracketing levels, or taking the level itself when the
+            # depth is one -- rather than reading the whole model again to save an
+            # "interp" set just for this. The result says so (see
             # _warn_on_pairs_depth) and is keyed apart (_cache_key), so a later
             # interp-built base is never shadowed by this fallback answer.
             from ocean_skill import cache as _cache
@@ -6728,12 +6728,13 @@ class Comparison:
         * ``depth_requested`` is on the pair: the asked depth was not one of the
           reference's sampled levels and ``depth_method="nearest"`` snapped it to the
           nearest, ``actual_depth``;
-        * the pairs interpolated between two levels
-          (``depth_interpolated_between``) but were themselves matched with
-          ``depth_method="nearest"`` -- the fallback of :meth:`_plan_derivation` when
-          only the nearest full-column pairs are saved, flagged by
-          ``pairs_depth_method``. Interpolating pairs of the same method is the
-          ordinary answer and is silent.
+        * the request was interpolated (``depth_method="interp"``) but the pairs were
+          matched with ``depth_method="nearest"`` -- the fallback of
+          :meth:`_plan_derivation` when only the nearest full-column pairs are saved,
+          flagged by ``pairs_depth_method``: between two levels
+          (``depth_interpolated_between``) or on one of them, where the model side is
+          still at its nearest level. Pairs of the same method are the ordinary answer
+          and are silent.
         """
         import warnings
 
@@ -6776,6 +6777,21 @@ class Comparison:
                 f"{ref}: interpolated to {where} from the saved model-data pairs, "
                 "which were matched with depth_method='nearest' (no 'interp' set is "
                 "saved).",
+                stacklevel=_stacklevel.find(),
+            )
+        elif attrs.get("pairs_depth_method") == "nearest":
+            # an interp request at one of the reference's own levels: nothing to
+            # interpolate between, but the model side of those pairs was still taken at
+            # its nearest level rather than interpolated to the observation's
+            target = np.asarray(attrs.get("actual_depth", []), dtype=float).reshape(-1)
+            at = (
+                f" at {', '.join(f'{z:g}' for z in target)} m" if target.size else ""
+            )
+            warnings.warn(
+                f"{ref}: compared{at} from the saved model-data pairs, whose model "
+                "values were matched with depth_method='nearest' (no 'interp' set is "
+                "saved), so the model is at its nearest level there rather than "
+                "interpolated to it.",
                 stacklevel=_stacklevel.find(),
             )
 
@@ -11220,12 +11236,26 @@ def _profile_reference_depths(
             "found to read its own levels from -- pass depths=[...] explicitly, or "
             "check the catalog entry's axes/standard_names."
         )
+    # A real-metres variable alongside a bare index axis wins over the index, as in
+    # _prepare's own level picks: an ADCP's `DEPTH` dimension carries no values of its
+    # own (its depths are `DEPH`, often renamed `depth`), and reading the axis there
+    # gives 0, 1, 2, ... -- positions, not metres.
+    from ocean_skill.cf import find_coord
+
+    levels_var = obj[zname]
+    depth_var = find_coord(obj, "vertical")
+    if (
+        depth_var is not None
+        and str(depth_var.name) != zname
+        and tuple(depth_var.dims) == (zname,)
+    ):
+        levels_var = depth_var
     try:
         convention = depth_convention_module.resolve(meta)
     except ValueError:
         convention = None  # a broken declaration is the lane's to report
     values = depth_convention_module.positive_down_values(
-        obj[zname].values, obj[zname].attrs, convention=convention
+        levels_var.values, levels_var.attrs, convention=convention
     )
     keep = np.isfinite(values)
     if not keep.any():

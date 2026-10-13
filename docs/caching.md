@@ -256,7 +256,9 @@ The interpolation uses the matches made with `depth_method="interp"` when they a
 only the `"nearest"` ones are (the usual case: the full-column comparison ran first, with the
 default), they are used instead, interpolated the same way, with a warning that the matches
 underneath were nearest-matched; no second read of the model is made just to save an `interp`
-set. That answer is saved under its own entry, so running the full column with
+set. The same goes for an `interp` request at a depth that *is* one of the bins: it is
+answered from the nearest-matched set, with a warning that the model there is at its
+nearest level rather than interpolated to the bin. That answer is saved under its own entry, so running the full column with
 `depth_method="interp"` later is never shadowed by it. A list of depths is answered the same
 way under `"interp"` (each between its own two bins); under `"nearest"` a list, and any depth
 outside the sampled range, still goes through the model.

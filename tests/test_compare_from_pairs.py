@@ -824,13 +824,35 @@ def test_depths_with_select_method_derives_too(world):
     assert ds.attrs["actual_depth"] == 8.0
 
 
-def test_the_nearest_pairs_are_not_used_when_the_request_is_not_between_bins(world):
-    _adcp_base("nearest")
-    # 6 m is a bin: its interpolation needs interp pairs, which are not saved, so the
-    # request is built on its own interp base instead of borrowing nearest pairs
+def test_interp_at_an_exact_bin_uses_the_nearest_pairs_when_only_they_are_saved(world):
+    base = _adcp_base("nearest")
+    reads = world.model_reads
+    world.block_model()
+
+    ds, msgs = _adcp_compare(select={"depth": 6.0, "method": "interp"})
+
+    assert ds.attrs["derived_from"] == "pairs"
+    assert world.model_reads == reads
+    assert ds.attrs["pairs_depth_method"] == "nearest"
+    assert ds.attrs["actual_depth"] == 6.0
+    assert "depth_interpolated_between" not in ds.attrs
+    (said,) = _said(msgs, "compared at 6 m", "depth_method='nearest'")
+    assert "nearest level" in said
+    assert not _said(msgs, "interpolated to 6 m between")
+    z = _zdim(base)
+    for name in ("test", "reference"):
+        np.testing.assert_allclose(
+            _values(ds, name), np.asarray(base[name].sel({z: 6.0})).reshape(-1)
+        )
+
+
+def test_interp_at_an_exact_bin_from_interp_pairs_is_silent(world):
+    _adcp_base("interp")
+    world.block_model()
     ds, msgs = _adcp_compare(select={"depth": 6.0}, depth_method="interp")
+    assert ds.attrs["derived_from"] == "pairs"
     assert "pairs_depth_method" not in ds.attrs
-    assert not _said(msgs, "interpolated")
+    assert not _said(msgs, "depth_method='nearest'")
 
 
 def test_select_method_is_depth_method(world):

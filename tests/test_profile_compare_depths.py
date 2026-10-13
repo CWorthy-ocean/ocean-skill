@@ -208,6 +208,35 @@ def test_reference_depths_read_from_a_dataframe_profile():
         assert _profile_reference_depths("ctd", {}) == [5.0, 25.0, 50.0]
 
 
+def test_reference_depths_come_from_the_depth_coordinate_beside_a_bare_index():
+    """An ADCP's levels are its bin depths, not the index of its bare ``DEPTH`` axis.
+
+    Its bin depths are ``DEPH`` (renamed ``depth``) along that axis. Reading the axis
+    itself gave 0, 1, 2, ..., which made 10 m look like one of the bins and kept an
+    off-bin request from the saved pairs.
+    """
+    bins = np.array([58.03, 54.03, 50.03, 10.03, 6.03, 2.03, -1.97])
+    src = xr.Dataset(
+        {"WECT": (("DEPTH", "TIME"), np.ones((bins.size, 3)))},
+        coords={
+            "depth": (
+                ("DEPTH",),
+                bins,
+                {"standard_name": "depth", "positive": "down", "units": "m"},
+            ),
+            "TIME": [0.0, 1.0, 2.0],
+        },
+    )
+    meta = {"featureType": "timeSeriesProfile", "axes": {"Z": "depth", "T": "TIME"}}
+    with (
+        mock.patch("ocean_skill.sources.read", lambda name, **kw: src),
+        mock.patch(
+            "ocean_skill.catalog.resolve", lambda n: SimpleNamespace(metadata=meta)
+        ),
+    ):
+        assert _profile_reference_depths("adcp", {}) == sorted(bins.tolist())
+
+
 def test_reference_with_no_vertical_axis_is_a_clear_error():
     flat = xr.Dataset({"TEMP": (("x",), [1.0, 2.0])}, coords={"x": [0, 1]})
     with (
