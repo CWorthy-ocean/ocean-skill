@@ -660,3 +660,34 @@ def test_r2_is_corr_squared_and_registered_after_corr():
     assert only["r2"] == pytest.approx(
         rec["corr"] ** 2
     )  # corr is computed to derive it
+
+
+def test_labels_naming_split_and_join_levels_are_rebuilt_into_one_row_per_variable():
+    # real pooled labels name every level ("temperature 0-5 m MAM"); with split= and
+    # join= over those fields that would give each season and depth its own row
+    comps = list(_target_set())
+    labels = [
+        " ".join(
+            str(x)
+            for x in (c.variable, c.select["depth"], c.select.get("time", "all"))
+        )
+        for c in comps
+    ]
+    t = ComparisonSet(comps, labels=labels).table(
+        metrics=("r2", "rmse", "bias"),
+        split={"bias": "time"},
+        join={"r2": "depth", "rmse": "depth"},
+    )
+    rows = list(dict.fromkeys(t.to_dataframe().index.get_level_values(0)))
+    assert len(rows) == 4
+    assert not any("MAM" in r or "surface" in r for r in rows)
+
+
+def test_row_units_fall_back_to_any_record_of_the_row():
+    comps = [
+        _Fake("SST", depth="surface", units=None),
+        _Fake("SST", depth="column", units="degC"),
+        _Fake("Alk", variable=ALK, units="umol/kg"),
+    ]
+    t = _cs(*comps).table(metrics=("bias",), join={"bias": "depth"})
+    assert "°C" in t.to_markdown().splitlines()[2]
