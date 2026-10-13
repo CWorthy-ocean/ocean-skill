@@ -20,8 +20,9 @@ formats; a format that cannot merge (Markdown, text) leaves the covered cells bl
 of that field gets its own line (seasons MAM/JJA/SON for ``bias``) and *joined* when the
 levels share one cell (``R²`` at surface / column). Records that share a row key but
 differ only in the split/join field are one row; a record whose split field is the
-"whole" value (no season label) feeds the metrics that are not split. Anything else
-sharing a cell is a duplicate and raises, as it does for the portrait.
+"whole" value (no season label) feeds the metrics that are not split, and ``split_all=``
+shows it for the split ones too, as one more line. Anything else sharing a cell is a
+duplicate and raises, as it does for the portrait.
 """
 
 from __future__ import annotations
@@ -52,6 +53,9 @@ DEFAULT_HEADERS: dict[str, str] = {
 
 #: The shown form of an en dash standing for "nothing here" in a joined cell.
 _MISSING = "–"
+
+#: The whole-record line of a split metric (``split_all=``), in place of a level.
+_ALL = object()
 
 #: The writers' file suffixes, for :meth:`MetricsTable.save`.
 _SUFFIXES = (".tex", ".md", ".html", ".csv")
@@ -708,6 +712,7 @@ def build_table(
     split: dict[str, str] | None = None,
     join: dict[str, str] | None = None,
     join_labels: dict[str, list[str]] | None = None,
+    split_all: str | None = None,
     layout: str = "rows",
     headers: dict[str, str] | None = None,
     units: bool = True,
@@ -739,6 +744,18 @@ def build_table(
     headers = dict(headers or {})
     split = dict(split or {})
     join = dict(join or {})
+    if split_all is not None:
+        if not isinstance(split_all, str) or not split_all:
+            raise ValueError(
+                f"split_all= is the name of the whole-record line, a non-empty string "
+                f"like 'All year', not {split_all!r}."
+            )
+        if not split:
+            raise ValueError(
+                f"split_all={split_all!r} adds a whole-record line to the split "
+                "metrics, but nothing is split -- give split={'bias': 'time'} or drop "
+                "split_all=."
+            )
     for what, mapping in (("split", split), ("join", join)):
         stray = [m for m in mapping if m not in names]
         if stray:
@@ -881,6 +898,8 @@ def build_table(
         lines = [lv for lv in split_levels if _hashable(lv) in present]
         row.lines = lines if (lines and split_metrics) else [None]
         wholes = [r for r in row.recs if whole(r)]
+        if split_all is not None and split_metrics and wholes and layout == "rows":
+            row.lines = [*(row.lines if row.lines != [None] else []), _ALL]
         row.rep = (wholes or row.recs)[0]
 
     def candidates(row: _Row, ck, *, level, level_given: bool):
@@ -998,6 +1017,8 @@ def build_table(
 
     def level_name(row: _Row, i: int) -> str:
         lv = row.lines[i]
+        if lv is _ALL:
+            return split_all
         return "" if lv is None else _level_text(sfield, lv)
 
     def plain_spec(m: str, ck):
@@ -1029,7 +1050,8 @@ def build_table(
 
         def cell(row: _Row, i: int):
             lv = row.lines[i]
-            found = candidates(row, ck, level=lv, level_given=lv is not None)
+            given = lv is not None and lv is not _ALL
+            found = candidates(row, ck, level=lv if given else None, level_given=given)
             return one_cell(row, ck, m, found, level_name(row, i)), True
 
         return {"path": hdr, "align": "c", "span": False, "cell": cell}
@@ -1039,10 +1061,10 @@ def build_table(
 
         def cell(row: _Row, i: int):
             has_splits = any(not whole(r) for r in row.recs)
-            if lv is None:  # "all": the whole-record value of a row with no levels
+            if lv is None:  # "all": the whole-record value (of a row with no levels)
                 found = (
                     []
-                    if has_splits
+                    if has_splits and split_all is None
                     else candidates(row, ck, level=None, level_given=False)
                 )
             else:
@@ -1081,7 +1103,9 @@ def build_table(
                         specs.append(
                             split_columns_spec(m, ck, lv, _level_text(sfield, lv))
                         )
-                    if any_unsplit:
+                    if split_all is not None:
+                        specs.append(split_columns_spec(m, ck, None, split_all))
+                    elif any_unsplit:
                         specs.append(split_columns_spec(m, ck, None, "all"))
             elif m in join:
                 specs.append(join_spec(m, ck))

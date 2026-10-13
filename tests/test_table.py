@@ -808,3 +808,116 @@ def test_the_user_pool_gives_one_row_per_variable_with_seasons_and_depths_joined
     # the whole-record (Mar–Nov) values feed R² and RMSE, not a fourth season line
     assert "Mar" not in md
     assert "°C" in md.splitlines()[2]  # full-column temperature borrows the units
+
+
+# --- split_all: the whole-record value of a split metric as one more line ----------
+
+
+def _season_whole_set():
+    """Build a row with seasons and a whole-record window, and one with only a whole."""
+    return _cs(
+        _Fake("SST", time="Mar–Nov", bias=0.07, rmse=0.5, corr=0.9),
+        _Fake("SST", time="MAM", bias=0.21),
+        _Fake("SST", time="JJA", bias=0.32),
+        _Fake("SST", time="SON", bias=-0.13),
+        _Fake(
+            "Alk", variable=ALK, time="Mar–Nov", bias=-2.0, rmse=9.0, units="umol/kg"
+        ),
+    )
+
+
+def test_split_all_adds_a_whole_record_line_after_the_levels():
+    t = _season_whole_set().table(
+        metrics=("bias", "rmse"), split={"bias": "time"}, split_all="Mar–Nov"
+    )
+    head = [c.text for c in t._layout.header[0]]
+    body = t._layout.body
+    sst = body[:4]
+    levels = [r[head.index("Season")].text for r in sst]
+    assert levels == ["MAM", "JJA", "SON", "Mar–Nov"]
+    bias_j = next(i for i, h in enumerate(head) if h.startswith("bias"))
+    assert [r[bias_j].text for r in sst] == ["0.21", "0.32", "-0.13", "0.07"]
+    # RMSE is one merged cell over all four lines, still the whole-record value
+    rmse_j = next(i for i, h in enumerate(head) if h.startswith("RMSE"))
+    assert sst[0][rmse_j].rowspan == 4 and sst[0][rmse_j].text == "0.5"
+    assert sst[0][0].rowspan == 4
+    df = t.to_dataframe()
+    assert df.loc[("SST", "Mar–Nov"), "bias"] == pytest.approx(0.07)
+    assert df.loc[("SST", "MAM"), "rmse"] == pytest.approx(0.5)
+    tex = t.to_latex()
+    assert r"\multirow{4}{*}{SST}" in tex
+    assert r"\multirow{4}{*}{0.5}" in tex
+
+
+def test_split_all_names_the_only_line_of_a_row_without_seasons():
+    t = _season_whole_set().table(
+        metrics=("bias", "rmse"), split={"bias": "time"}, split_all="All year"
+    )
+    df = t.to_dataframe()
+    assert list(df.loc["Alk"].index) == ["All year"]
+    assert df.loc[("Alk", "All year"), "bias"] == pytest.approx(-2.0)
+    assert df.loc[("Alk", "All year"), "rmse"] == pytest.approx(9.0)
+    assert sum(line.startswith("Alk") for line in str(t).splitlines()) == 1
+
+
+def test_split_all_columns_layout_fills_every_row_and_replaces_the_all_column():
+    t = _season_whole_set().table(
+        metrics=("bias", "rmse"),
+        split={"bias": "time"},
+        split_all="Mar–Nov",
+        layout="columns",
+    )
+    paths = [c.path for c in t._layout.cols if c.path[0] == "bias"]
+    assert paths == [
+        ("bias", "MAM"),
+        ("bias", "JJA"),
+        ("bias", "SON"),
+        ("bias", "Mar–Nov"),
+    ]
+    df = t.to_dataframe()
+    assert df.loc["SST", ("bias", "Mar–Nov")] == pytest.approx(0.07)
+    assert df.loc["SST", ("bias", "MAM")] == pytest.approx(0.21)
+    assert df.loc["Alk", ("bias", "Mar–Nov")] == pytest.approx(-2.0)
+
+
+def test_split_all_line_keeps_a_joined_split_metric_joined():
+    cs = _cs(
+        _Fake("T", depth="surface", time="Mar–Nov", bias=0.1),
+        _Fake("T", depth="column", time="Mar–Nov", bias=0.2),
+        _Fake("T", depth="surface", time="MAM", bias=0.31),
+        _Fake("T", depth="column", time="MAM", bias=0.41),
+    )
+    t = cs.table(
+        metrics=("bias",),
+        split={"bias": "time"},
+        join={"bias": "depth"},
+        split_all="Mar–Nov",
+    )
+    md = t.to_markdown()
+    assert "| MAM | 0.31 / 0.41 |" in md
+    assert "| Mar–Nov | 0.1 / 0.2 |" in md
+
+
+def test_split_all_level_is_in_the_tidy_table():
+    t = _season_whole_set().table(
+        metrics=("bias", "rmse"), split={"bias": "time"}, split_all="Mar–Nov"
+    )
+    tidy = t.to_tidy()
+    whole = tidy[(tidy.level == "Mar–Nov") & (tidy.metric == "bias")]
+    assert sorted(whole.row) == ["Alk", "SST"]
+    assert whole[whole.row == "SST"].value.iloc[0] == pytest.approx(0.07)
+
+
+def test_split_all_needs_split_and_a_name():
+    cs = _season_whole_set()
+    with pytest.raises(ValueError, match="split_all"):
+        cs.table(metrics=("bias",), split_all="Mar–Nov")
+    with pytest.raises(ValueError, match="split_all"):
+        cs.table(metrics=("bias",), split={"bias": "time"}, split_all=3)
+
+
+def test_split_all_default_leaves_the_table_as_it_was():
+    cs = _season_whole_set()
+    kw = {"metrics": ("bias", "rmse"), "split": {"bias": "time"}}
+    assert str(cs.table(**kw)) == str(cs.table(split_all=None, **kw))
+    assert "Mar–Nov" not in str(cs.table(**kw))
