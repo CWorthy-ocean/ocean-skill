@@ -228,6 +228,10 @@ def _level_text(field_name: str, value: Any) -> str:
     """One level as a table reads it: depth bands as ``"0-5 m"``, windows as spans."""
     if value is None:
         return ""
+    if field_name == "variable":
+        from ocean_skill.plot.summary import pretty_level
+
+        return pretty_level(field_name, value)  # "temperature", not the CF name
     if isinstance(value, str):
         return value
     if field_name == "depth":
@@ -273,7 +277,7 @@ def _ordered_levels(field_name: str, values) -> list:
     elif field_name == "depth":
 
         def depth_rank(v):
-            text = _level_text("depth", v)
+            text = _level_text("depth", v).lower()
             if text == "surface":
                 return (0, 0.0)
             if "column" in text:
@@ -645,14 +649,15 @@ def _table_records(cs, skip: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     by the pooling rule without them (``temperature``). Labels that already group them
     (your ``labels=``, or a dict's keys) are kept.
     """
-    from ocean_skill.comparison import _pooled_labels
-    from ocean_skill.plot.summary import _records
+    from ocean_skill.comparison import _row_labels
+    from ocean_skill.plot.summary import _hashable, _records
 
     recs = _records(cs.comparisons)
     groups = getattr(cs, "_groups", None)
     labels = [str(cs._label_for(i)) for i in range(len(cs.comparisons))]
     if skip and groups is None:
-        rebuilt = _pooled_labels(cs.comparisons, skip=skip)
+        levels = [tuple(_hashable(r.get(f)) for f in skip) for r in recs]
+        rebuilt = _row_labels(cs.comparisons, skip, levels)
         if len(set(rebuilt)) < len(set(labels)):
             labels = rebuilt
     for i, (c, rec) in enumerate(zip(cs.comparisons, recs, strict=True)):

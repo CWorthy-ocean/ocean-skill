@@ -714,3 +714,97 @@ def test_a_split_metric_can_also_be_joined_by_another_field():
     assert "-2 / –" in md  # the unsplit row joins its whole-record value
     tidy = t.to_tidy()
     assert len(tidy[tidy.metric == "bias"]) == 4  # T's whole record shows no bias
+
+
+def test_rows_ignore_names_that_only_change_with_the_season_or_depth():
+    # a pooled reference reads "pool of 22 reference sources" in one season and
+    # "pool of 20" in the next; that must not give each season its own row
+    comps = [
+        _Fake("x", depth=d, time=t, reference=f"pool of {n} reference sources")
+        for n, (d, t) in enumerate(
+            [(d, t) for d in ("surface", "column") for t in (None, "MAM", "JJA")]
+        )
+    ] + [
+        _Fake("y", variable=SALT, depth=d, time=t, reference=f"pool of {9 - n}")
+        for n, (d, t) in enumerate([("surface", None), ("surface", "MAM")])
+    ]
+    labels = [f"{c.variable} {c.reference_name}" for c in comps]
+    t = ComparisonSet(comps, labels=labels).table(
+        metrics=("rmse", "bias"),
+        split={"bias": "time"},
+        join={"rmse": "depth", "bias": "depth"},
+    )
+    rows = list(dict.fromkeys(t.to_dataframe().index.get_level_values(0)))
+    assert rows == ["temperature", "salinity"]
+
+
+def test_rows_by_variable_read_as_short_names():
+    t = _plain_set().table(metrics=("bias",), rows="variable")
+    rows = list(t.to_dataframe().index)
+    assert "temperature" in rows[0] and "sea_water" not in rows[0]
+
+
+def _user_pool():
+    """The 40 comparisons of a real pooled set (2026-10-12), fields as metrics() gave.
+
+    Labels name every level ("temperature 0-5 m MAM"); depth is the relabelled
+    "Surface"/"Full column"; the whole record's time is a window ("Mar–Nov"); the
+    pooled reference's name changes with season and depth; full-column temperature
+    comes back without units.
+    """
+    refs = {
+        TEMP: ([22, 20, 20, 22], [31, 32, 25, 36]),
+        SALT: ([22, 20, 20, 22], [28, 27, 23, 31]),
+        ALK: ([7] * 4, [7] * 4),
+        "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water": (
+            [7] * 4,
+            [7] * 4,
+        ),
+        "mole_concentration_of_silicate_in_sea_water": ([7] * 4, [7] * 4),
+    }
+    short = {TEMP: "temperature", SALT: "salinity", ALK: "alkalinity"}
+    comps, labels = [], []
+    k = 0
+    for var, by_depth in refs.items():
+        for depth, band, ns in zip(("Surface", "Full column"), ("0-5", "0-65"), by_depth):
+            for time, n in zip(("MAM", "JJA", "SON", "Mar–Nov"), ns):
+                k += 1
+                units = {TEMP: "degC", SALT: "PSU"}.get(var, "mmol/m3")
+                if var == TEMP and depth == "Full column":
+                    units = None
+                comps.append(
+                    _Fake(
+                        f"x{k}",
+                        variable=var,
+                        depth=depth,
+                        time=time,
+                        reference=f"pool of {n} reference sources",
+                        units=units,
+                        bias=k / 100,
+                    )
+                )
+                name = short.get(var, var.split("_of_")[-1].split("_in_")[0])
+                tlabel = "MAMJJASON" if time == "Mar–Nov" else time
+                labels.append(f"{name} {band} m {tlabel}")
+    return ComparisonSet(comps, labels=labels)
+
+
+def test_the_user_pool_gives_one_row_per_variable_with_seasons_and_depths_joined():
+    t = _user_pool().table(
+        metrics=("r2", "rmse", "bias"),
+        split={"bias": "time"},
+        join={"r2": "depth", "rmse": "depth", "bias": "depth"},
+        join_labels={"depth": ["surface", "full column"]},
+        headers={"label": "Variable", "bias": "Bias"},
+    )
+    df = t.to_dataframe()
+    rows = list(dict.fromkeys(df.index.get_level_values(0)))
+    assert len(rows) == 5
+    assert rows[:3] == ["temperature", "salinity", "alkalinity"]
+    assert len(df) == 15  # five variables x three seasons
+    md = t.to_markdown()
+    # temperature MAM: surface is comparison 1, full column comparison 5
+    assert "| temperature | 0.81 / 0.81 | 0.5 / 0.5 | MAM | 0.01 / 0.05 |" in md
+    # the whole-record (Mar–Nov) values feed R² and RMSE, not a fourth season line
+    assert "Mar" not in md
+    assert "°C" in md.splitlines()[2]  # full-column temperature borrows the units
