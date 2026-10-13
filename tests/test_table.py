@@ -351,8 +351,8 @@ def test_split_and_join_misuse_raises():
     cs = _target_set()
     with pytest.raises(ValueError, match="not among"):
         cs.table(metrics=("bias",), split={"rmse": "time"})
-    with pytest.raises(ValueError, match="both split= and join="):
-        cs.table(metrics=("bias",), split={"bias": "time"}, join={"bias": "depth"})
+    with pytest.raises(ValueError, match="the same field"):
+        cs.table(metrics=("bias",), split={"bias": "time"}, join={"bias": "time"})
     with pytest.raises(ValueError, match="no record has"):
         cs.table(metrics=("bias",), split={"bias": "nope"})
     with pytest.raises(ValueError, match="layout="):
@@ -691,3 +691,26 @@ def test_row_units_fall_back_to_any_record_of_the_row():
     ]
     t = _cs(*comps).table(metrics=("bias",), join={"bias": "depth"})
     assert "°C" in t.to_markdown().splitlines()[2]
+
+
+def test_a_split_metric_can_also_be_joined_by_another_field():
+    # each season's bias at two depths: one line per season, "surface / column" in it
+    cs = _cs(
+        _Fake("T", depth="surface", bias=0.1),
+        _Fake("T", depth="column", bias=0.2),
+        _Fake("T", depth="surface", time="MAM", bias=0.31),
+        _Fake("T", depth="column", time="MAM", bias=0.41),
+        _Fake("T", depth="surface", time="JJA", bias=0.52),
+        _Fake("A", variable=ALK, bias=-2.0),
+    )
+    t = cs.table(
+        metrics=("rmse", "bias"),
+        split={"bias": "time"},
+        join={"rmse": "depth", "bias": "depth"},
+    )
+    md = t.to_markdown()
+    assert "| MAM | 0.31 / 0.41 |" in md
+    assert "| JJA | 0.52 / – |" in md
+    assert "-2 / –" in md  # the unsplit row joins its whole-record value
+    tidy = t.to_tidy()
+    assert len(tidy[tidy.metric == "bias"]) == 4  # T's whole record shows no bias

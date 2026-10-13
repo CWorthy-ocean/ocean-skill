@@ -747,11 +747,13 @@ def build_table(
                     f"{what}={{{m!r}: {f!r}}}: no record has a {f!r} field "
                     f"(fields: {sorted(set().union(*recs))})."
                 )
-    both = [m for m in split if m in join]
+    both = [m for m in split if join.get(m) == split[m]]
     if both:
         raise ValueError(
-            f"metric(s) {both} are in both split= and join=: a field's levels are "
-            "either separate lines or one cell, not both."
+            f"metric(s) {both} split= and join= the same field: a field's levels are "
+            "either separate lines or one cell, not both. (Splitting by one field and "
+            "joining by another is fine: split={'bias': 'time'}, join={'bias': "
+            "'depth'}.)"
         )
     if len(set(split.values())) > 1:
         raise ValueError(
@@ -826,9 +828,44 @@ def build_table(
             f"table: more than one comparison has {rows}={row.text!r}"
             + (f", {cols}={what!r}" if cols else "")
             + f" ({len(found)} candidates for one cell) -- a table cell is one number. "
-            "Narrow the comparisons, join= the field that tells them apart, or choose "
-            "a rows=/cols= that does."
+            "Narrow the comparisons, join= the field that tells them apart (a split "
+            "metric can be joined too), or choose a rows=/cols= that does."
         )
+
+    def one_cell(row: _Row, ck, m: str, found, level: str, slot: str = ""):
+        """The text of one cell from its candidate records, joined if ``m`` is."""
+        if m not in join:
+            if len(found) > 1:
+                dup(row, col_text.get(ck, ""), found)
+            val = number(found[0], m) if found else None
+            if found:
+                emit(row, level, col_text.get(ck, ""), m, slot, val)
+            return _format(m, val, round)
+        f = join[m]
+        slots: dict = {}
+        for r in found:
+            k = _hashable(r.get(f))
+            if k in slots:
+                dup(row, col_text.get(ck, ""), found)
+            slots[k] = r
+        if not slots:
+            return ""
+        shown = []
+        for lv, name in zip(join_levels[m], join_names[m], strict=True):
+            r = slots.get(_hashable(lv))
+            val = number(r, m) if r is not None else None
+            text = _format(m, val, round)
+            shown.append(text if text else _MISSING)
+            if r is not None:
+                emit(
+                    row,
+                    level,
+                    col_text.get(ck, ""),
+                    m,
+                    f"{slot} {name}".strip(),
+                    val,
+                )
+        return " / ".join(shown)
 
     for row in row_objs.values():
         present = (
@@ -974,25 +1011,11 @@ def build_table(
 
     def join_spec(m: str, ck):
         hdr = (metric_header(m),) + ((col_text[ck],) if cols else ())
-        f = join[m]
 
         def cell(row: _Row, i: int):
             found = candidates(row, ck, level=None, level_given=False)
-            slots: dict = {}
-            for r in found:
-                k = _hashable(r.get(f))
-                if k in slots:
-                    dup(row, col_text.get(ck, ""), found)
-                slots[k] = r
-            shown = []
-            for lv, name in zip(join_levels[m], join_names[m], strict=True):
-                r = slots.get(_hashable(lv))
-                val = number(r, m) if r is not None else None
-                text = _format(m, val, round)
-                shown.append(text if text else _MISSING)
-                if r is not None:
-                    emit(row, level_name(row, 0), col_text.get(ck, ""), m, name, val)
-            return " / ".join(shown), True
+            text = one_cell(row, ck, m, found, level_name(row, 0))
+            return (text or " / ".join([_MISSING] * len(join_levels[m]))), True
 
         return {"path": hdr, "align": "c", "span": True, "cell": cell}
 
@@ -1002,12 +1025,7 @@ def build_table(
         def cell(row: _Row, i: int):
             lv = row.lines[i]
             found = candidates(row, ck, level=lv, level_given=lv is not None)
-            if len(found) > 1:
-                dup(row, col_text.get(ck, ""), found)
-            val = number(found[0], m) if found else None
-            if found:
-                emit(row, level_name(row, i), col_text.get(ck, ""), m, "", val)
-            return _format(m, val, round), True
+            return one_cell(row, ck, m, found, level_name(row, i)), True
 
         return {"path": hdr, "align": "c", "span": False, "cell": cell}
 
@@ -1024,12 +1042,7 @@ def build_table(
                 )
             else:
                 found = candidates(row, ck, level=lv, level_given=True)
-            if len(found) > 1:
-                dup(row, col_text.get(ck, ""), found)
-            val = number(found[0], m) if found else None
-            if found:
-                emit(row, "", col_text.get(ck, ""), m, label, val)
-            return _format(m, val, round), True
+            return one_cell(row, ck, m, found, "", label), True
 
         return {"path": hdr, "align": "c", "span": True, "cell": cell}
 
