@@ -13683,7 +13683,9 @@ def compare(
     "reduce": ...}}`` and ``select={"season": <that season>}`` for you). A season
     with no data in a given pair is skipped like any other missing pair (see
     ``skip_missing``); pass ``spread="std"`` alongside ``reduce`` for a
-    mean-and-spread comparison, the same as ``aggregate=`` accepts directly.
+    mean-and-spread comparison, the same as ``aggregate=`` accepts directly. This
+    season form also fans a ``select={"transect": {"from": "reference"}}`` section,
+    one section per season; the other ``times=`` forms are still refused there.
 
     ``times={"seasons": ["MAM", "JJA", "SON"]}`` -- no ``groupby``/``reduce`` -- is
     the **sample-subset** form of the same fan: one comparison per season, each
@@ -13957,14 +13959,17 @@ def compare(
     from ocean_skill.sources import _TIME_KEYS
 
     times_fan = _normalize_times(times)
-    if is_from_reference and times_fan is not None:
+    if is_from_reference and times_fan is not None and times_fan[0] != "seasons":
         raise ValueError(
             "compare() got both times= and "
             "select={'transect': {'from': 'reference'}} -- fanning a section "
-            "into one comparison per time bin is a follow-up, not yet built. "
-            "Drop times= (each cast is matched at its own time, so a section has "
-            "no time axis left to fan). A CTD transect entry given with times= "
-            "and no select={'transect': ...} is compared cast by cast instead."
+            "into one comparison per time bin (or per listed time) is a "
+            "follow-up, not yet built; only times={'groupby': 'season', "
+            "'reduce': ...} is supported there, one section per season. "
+            "Otherwise drop times= (each cast is matched at its own time, so a "
+            "section has no time axis left to fan). A CTD transect entry given "
+            "with times= and no select={'transect': ...} is compared cast by "
+            "cast instead."
         )
     time_freq: str | None = None
     time_window: Any = None
@@ -14246,6 +14251,8 @@ def compare(
         tests_: list[str],
         *,
         own_levels: bool = False,
+        aggregate_: Any = None,
+        label: str | None = None,
     ) -> None:
         """Align one section stacked from ``members`` (casts, in order) per test.
 
@@ -14254,9 +14261,15 @@ def compare(
         ``shown`` -- and ``sel`` its select (the ``{"from": "reference"}`` transect
         and the levels). ``own_levels``: the levels are, per variable, those each cast
         sampled it at, merged, rather than a list the caller named
-        (:attr:`Comparison._section_own_levels`).
+        (:attr:`Comparison._section_own_levels`). ``aggregate_`` and ``label``
+        override the call's own aggregate and the variable's short label (a season
+        fan merges its own aggregate and labels each season).
         """
         short = _short_variable_label(var)
+        if aggregate_ is None:
+            aggregate_ = aggregate
+        if label is None:
+            label = short
         prefix = f"{short} " if len(variables) > 1 else ""
         for pair_num, tst in enumerate(tests_, start=1):
             _set_pair(display_name, tst, short)
@@ -14266,7 +14279,7 @@ def compare(
                 test=tst,
                 variable=var,
                 select=sel,
-                aggregate=aggregate,
+                aggregate=aggregate_,
                 method=method,
                 over=over,
                 time_method=time_method,
@@ -14276,7 +14289,7 @@ def compare(
                 min_coverage=min_coverage,
                 min_pairs=min_pairs,
                 metrics=metrics,
-                label=short,
+                label=label,
                 cache=cache,
                 qc=qc,
                 subtract_mean=subtract_mean,
@@ -14359,11 +14372,13 @@ def compare(
             # source -- not one per reference, the ordinary fan below -- since
             # the casts collectively *are* the section's reference lane, laid
             # along the path in this list's own order (see
-            # Comparison._prepare_section_from_casts). No depth/time fan either:
+            # Comparison._prepare_section_from_casts). No depth fan either:
             # has_transect's own checks above already require a single fixed
             # depth *list* (fan_values is a 1-tuple holding it, exactly as the
-            # ordinary single-reference transect route already relies on) and
-            # refuse times= outright.
+            # ordinary single-reference transect route already relies on). The
+            # one time fan allowed is the season form (the guard above refuses
+            # the rest): one section per season, each merging its own
+            # select/aggregate like the ordinary fan below.
             if len(matching) < 2:
                 print(
                     f"  fewer than 2 of the {len(refs)} requested casts offer "
@@ -14371,14 +14386,31 @@ def compare(
                 )
                 n_skipped += len(matching_tests)
                 continue
-            _form_sections(
-                var,
-                matching,
-                f"{len(matching)} casts",
-                "+".join(matching),
-                _fanned_select(select, fan_key, fan_values[0], calculated),
-                matching_tests,
-            )
+            base_sel = _fanned_select(select, fan_key, fan_values[0], calculated)
+            short = _short_variable_label(var)
+            section_times = _times_for(None)
+            for t in section_times:
+                if times_fan is None:
+                    sel_t, agg_t, label_t = base_sel, None, None
+                else:
+                    sel_t = _fanned_season_select(base_sel, t)
+                    agg_t = _merged_season_aggregate(aggregate, season_entry, t)
+                    parts = []
+                    if many_vars:
+                        parts.append(short)
+                    if len(section_times) > 1:
+                        parts.append(_time_label(t))
+                    label_t = " ".join(parts) if parts else short
+                _form_sections(
+                    var,
+                    matching,
+                    f"{len(matching)} casts",
+                    "+".join(matching),
+                    sel_t,
+                    matching_tests,
+                    aggregate_=agg_t,
+                    label=label_t,
+                )
             continue
 
         # A CTD transect entry (see _expand_transects) is ONE section per test,
