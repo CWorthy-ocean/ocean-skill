@@ -606,7 +606,42 @@ def _time_coverage_of(source: str) -> tuple[Any, Any] | None:
     return start - pad, stop + pad
 
 
-def _provably_disjoint_axes(test: str, reference: str) -> list[str]:
+def _both_lanes_reduce_time(aggregate: Any) -> bool:
+    """Whether *both* lanes' aggregates reduce the time axis away.
+
+    Each lane's own aggregate is read (:func:`aggregate_for` -- a shared spec, or a
+    ``{"test": ..., "reference": ...}`` pair-spec) with :func:`_collapses_time`, so a
+    chain is judged by its last step and a ``groupby``/``resample`` fold, which keeps
+    a time axis, does not count. One lane reducing time and the other not is
+    ``False``: that pair still compares a time axis against a time axis.
+    """
+    return all(
+        _collapses_time(aggregate_for(aggregate, role))
+        for role in ("test", "reference")
+    )
+
+
+def _reduces_horizontal(agg: dict[str, Any] | None) -> bool:
+    """Whether ``agg`` names a longitude and/or latitude reduction at all.
+
+    A domain mean (``{"lon": "mean", "lat": "mean"}``) or a band mean (one of the
+    two) leaves the lane with no horizontal extent of its own to read: the
+    coordinates that survive are the one centroid, or the band's midpoint. Any key
+    spelling :func:`ocean_skill.operators.aggregate` accepts for a horizontal axis
+    counts, whatever the reduction -- the question is only whether the prepared lane's
+    own lon/lat still describe where its data came from (they do not), so
+    :meth:`Comparison.align` reads the pre-aggregation extent instead
+    (:meth:`Comparison._test_extent_before_aggregation`).
+    """
+    from ocean_skill import operators
+
+    horizontal = operators._POINT_LON_KEYS | operators._POINT_LAT_KEYS
+    return any(key in (agg or {}) for key in horizontal)
+
+
+def _provably_disjoint_axes(
+    test: str, reference: str, *, time_reduced: bool = False
+) -> list[str]:
     """The axes ("space", "time") on which two sources' declared extents never meet.
 
     Read-free -- :func:`ocean_skill.catalog.overlap` over both entries' catalog
@@ -618,7 +653,10 @@ def _provably_disjoint_axes(test: str, reference: str) -> list[str]:
     (WOA's ``"months since 1965-01-01"``; :func:`ocean_skill.align.subset_to_time`
     refuses to crop one away for the same reason), so a declared-span mismatch
     against one is a false alarm, not a provable miss. Space still disqualifies
-    either way.
+    either way. ``time_reduced=True`` (both lanes' aggregates reduce time away --
+    :func:`_both_lanes_reduce_time`) extends the same exemption to any pair: two
+    time-reduced states, say two runs' initial conditions each averaged over its own
+    snapshot, are compared at no shared date, so their dates need not meet.
 
     Shared by :meth:`Comparison._warn_if_no_overlap` (a warning, for a directly
     built :class:`Comparison`) and :func:`compare`'s fan-out (a read-free skip,
@@ -628,7 +666,9 @@ def _provably_disjoint_axes(test: str, reference: str) -> list[str]:
 
     ov = overlap(test, reference)
     bad = [axis for axis, ok in (("space", ov.space), ("time", ov.time)) if ok is False]
-    if "time" in bad and (_is_climatology(test) or _is_climatology(reference)):
+    if "time" in bad and (
+        time_reduced or _is_climatology(test) or _is_climatology(reference)
+    ):
         bad.remove("time")
     return bad
 
@@ -5566,6 +5606,94 @@ class Comparison:
         test_axis, reference_axis = self._slab_axes()
         return test_axis if test_axis == reference_axis else None
 
+    def _test_extent_before_aggregation(
+        self, region: tuple[float, float, float, float] | None = None
+    ) -> tuple[float, float, float, float] | None:
+        """Return the test lane's horizontal extent after select, before aggregate.
+
+        ``(lon_min, lat_min, lon_max, lat_max)``, for cropping the *reference* to
+        where the test's data actually came from when the test's own aggregate
+        reduces a horizontal axis (:func:`_reduces_horizontal`). Cropping to the
+        prepared lane's extent (:func:`ocean_skill.align.bbox_of`) is right for a map
+        or a time series, but a domain mean has been collapsed to its centroid by then
+        -- a reference cropped to *that* is averaged over a few cells at the middle
+        of the region, not over the region (a warm-tropics/cold-poles field averaged
+        at its warm centre is the visible symptom).
+
+        Coordinate-only: the lane's lon/lat are stood up as a throwaway all-zero
+        array (the memoized read, :func:`ocean_skill.sources.read`, is lazy and shared
+        with the lane itself), cropped to ``region`` -- the bbox the test lane was
+        itself read with, when it was -- and put through the same horizontal select
+        the lane applied (:func:`_select_horizontal_then_aggregate` with nothing to
+        aggregate), so a box or band select narrows this extent exactly as it
+        narrowed the data. No variable is read.
+
+        A grid straddling the antimeridian but stored in ±180 (longitudes near both
+        ends) would otherwise span the globe; its extent is re-expressed 0-360 when
+        that is the narrower reading, which :func:`ocean_skill.align.subset_to_bbox`
+        takes as a seam-straddling box and re-expresses the reference around.
+
+        ``None`` when the source carries no gridded lon/lat to read it from (a
+        trajectory, a table), or when ``region`` is a point -- the caller then reads
+        the reference uncropped, which is always correct, only slower.
+        """
+        import warnings
+
+        import xarray as xr
+
+        import ocean_skill as osk
+        from ocean_skill import operators
+        from ocean_skill.align import _is_point_bbox, _lon_name, bbox_of, subset_to_bbox
+        from ocean_skill.cf import find_coord
+
+        if region is not None and _is_point_bbox(region):
+            return None
+        obj = osk.read(self.test_name)
+        lon_c, lat_c = find_coord(obj, "longitude"), find_coord(obj, "latitude")
+        if lon_c is None or lat_c is None:
+            return None
+        if (
+            lon_c.ndim == 1
+            and lat_c.ndim == 1
+            and lon_c.dims == (lon_c.name,)
+            and lat_c.dims == (lat_c.name,)
+        ):
+            dims = (lat_c.dims[0], lon_c.dims[0])
+            shape = (lat_c.size, lon_c.size)
+        elif lon_c.ndim == 2 and lat_c.ndim == 2 and lon_c.dims == lat_c.dims:
+            dims, shape = lon_c.dims, lon_c.shape
+        else:
+            return None
+        grid = xr.DataArray(
+            np.zeros(shape, dtype="int8"),
+            dims=dims,
+            coords={
+                str(lon_c.name): lon_c.variable.load(),
+                str(lat_c.name): lat_c.variable.load(),
+            },
+        )
+        if region is not None:
+            grid = subset_to_bbox(grid, region)
+        horizontal = {
+            k: v
+            for k, v in select_for(self.select, "test").items()
+            if k in operators._POINT_LON_KEYS | operators._POINT_LAT_KEYS
+        }
+        if horizontal:
+            # Keys that name no axis of this stand-in warn about it; the lane's own
+            # prepare already said so (or the key was meant for another variable).
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                grid = _select_horizontal_then_aggregate(
+                    grid, horizontal, None, self.test_name
+                )
+        lon_min, lat_min, lon_max, lat_max = bbox_of(grid)
+        if lon_max - lon_min > 180.0:
+            wrapped = np.asarray(grid[_lon_name(grid)], dtype="float64") % 360.0
+            if np.nanmax(wrapped) - np.nanmin(wrapped) < lon_max - lon_min:
+                lon_min, lon_max = float(np.nanmin(wrapped)), float(np.nanmax(wrapped))
+        return lon_min, lat_min, lon_max, lat_max
+
     def _resolved_path(
         self, t, troute: dict[str, Any]
     ) -> tuple[dict[str, Any], tuple[float, float, float, float]]:
@@ -6115,7 +6243,11 @@ class Comparison:
 
         from ocean_skill import _stacklevel
 
-        bad = _provably_disjoint_axes(self.test_name, self.reference_name)
+        bad = _provably_disjoint_axes(
+            self.test_name,
+            self.reference_name,
+            time_reduced=_both_lanes_reduce_time(self.aggregate),
+        )
         if not bad:
             return
         warnings.warn(
@@ -6266,6 +6398,14 @@ class Comparison:
             # naming the identical points directly would share a key despite
             # not being guaranteed to mean the same thing forever.
             extra["_transect_sample"] = True
+        if self.over is not None and _reduces_horizontal(
+            aggregate_for(self.aggregate, "test")
+        ):
+            # The reference is cropped to the test's extent *before* its horizontal
+            # aggregate (see align()), not to the centroid that aggregate leaves --
+            # a domain mean cached before that was averaged over a few cells at the
+            # middle of the region on the reference side, and must not be served.
+            extra["_ref_crop"] = "pre_aggregation"
         if self._slab_route() is not None:
             # A slab comparison's lanes are reduced to sections (see
             # _slab_to_section) -- a shape the same select and aggregate never
@@ -7743,6 +7883,9 @@ class Comparison:
             # which as a bbox would crop the reference to a zero-width strip).
             slab = self._slab_route()
             keep = SECTION_VERTICAL_DIMS if troute is not None or slab else ()
+            # The crop the test lane was actually read with: the retry below drops
+            # it, and _test_extent_before_aggregation must mirror whichever ran.
+            test_bbox_used = test_bbox
             try:
                 t, _ = self._prepare_lane(
                     self.test_name,
@@ -7782,6 +7925,7 @@ class Comparison:
                     "instead of the derived crop.",
                     stacklevel=_stacklevel.find(),
                 )
+                test_bbox_used = None
                 t, _ = self._prepare_lane(
                     self.test_name,
                     use_cache,
@@ -7800,6 +7944,15 @@ class Comparison:
                 from ocean_skill.align import bbox_of, time_span_of
 
                 bbox = bbox_of(t)
+                if _reduces_horizontal(aggregate_for(self.aggregate, "test")):
+                    # The test lane's aggregate has already collapsed its horizontal
+                    # axis (a domain or band mean), so bbox_of(t) is the centroid
+                    # -- and a reference cropped to that is averaged over a few
+                    # cells at the middle of the region, not the region. Crop to
+                    # where the test's data came from instead: its extent after
+                    # its select, before its aggregate. None (unknown) reads the
+                    # reference whole, which is slower but never wrong.
+                    bbox = self._test_extent_before_aggregation(test_bbox_used)
                 # ...and the same crop along time. Cropping the region but not
                 # the window still reads the whole record: MUR over a regional
                 # model's footprint is a workable map per step and 2.2 TB
@@ -14411,6 +14564,11 @@ def compare(
         aggregate_for(aggregate, "reference")
     )
 
+    # Both lanes reduce time away -- the read-free disjoint-in-time skip is then
+    # moot (see _provably_disjoint_axes). Computed once: it depends only on the
+    # call's aggregate, which no reference/test/variable varies.
+    _both_lanes_time_reduced = _both_lanes_reduce_time(aggregate)
+
     def _times_for(tst: str) -> tuple[Any, ...]:
         if times_fan is None:
             return (None,)
@@ -14752,10 +14910,14 @@ def compare(
             # (_profile_depth_plan below opens the reference source).
             # _provably_disjoint_axes carries the climatology exemption: a
             # climatology's declared calendar span disqualifies nothing here --
-            # only its space can.
+            # only its space can. So with both lanes' aggregates reducing time away
+            # (two time-reduced states, e.g. two runs' initial conditions averaged
+            # over their own snapshots): their dates need not meet either.
             viable_tests = []
             for tst in matching_tests:
-                bad = _provably_disjoint_axes(tst, ref)
+                bad = _provably_disjoint_axes(
+                    tst, ref, time_reduced=_both_lanes_time_reduced
+                )
                 if not bad:
                     viable_tests.append(tst)
                     continue

@@ -261,7 +261,9 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     entries are rebuilt on every run. An entry with a ``ref`` reads a kerchunk
     reference kept there, which the builder rebuilds only when the matched files
     change, so a run with unchanged forcing reuses it and opens nothing else; an entry
-    without one reads the files themselves.
+    without one reads the files themselves. An entry's ``subchunk`` key (only with a
+    ``ref``) is forwarded to the reference build, to join files whose time chunks
+    differ in length.
 
     ``files`` is a glob or a list of globs, each expanded and sorted, then joined in
     the order given (so one run's forcing spread over several folders reads as one
@@ -321,7 +323,14 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
             continue
         kwargs = {
             k: entry[k]
-            for k in ("variables", "climatology", "sides", "time_coord", "ref")
+            for k in (
+                "variables",
+                "climatology",
+                "sides",
+                "time_coord",
+                "ref",
+                "subchunk",
+            )
             if k in entry
         }
         boundary = entry["kind"] == "boundary"
