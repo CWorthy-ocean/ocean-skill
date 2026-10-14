@@ -991,7 +991,10 @@ def make_kerchunk(
         divisor, or a dim that is not actually outermost) rather than skipping —
         unlike a compressed variable, a bad request is something the caller can
         fix. Values are byte-identical to an unsplit build either way; only the
-        read granularity changes.
+        read granularity changes. A ``concat_dim`` entry is also applied to each file
+        *before* they are joined, which is what lets files whose stored chunks differ
+        in length along it (monthly files of 28 to 31 steps, one chunk each) be
+        concatenated at all: ``{"bry_time": 1}``.
     min_age
         Seconds a local file must have gone untouched before it is considered ready.
         ``0`` (default) skips only files that fail to open at all -- empty, a header
@@ -1074,6 +1077,18 @@ def make_kerchunk(
         if keep == "latest-per-file"
         else None
     )
+    if subchunk and concat_dim in subchunk:
+        # Files whose chunks along the concat dim differ in length (monthly files of
+        # 28-31 steps, one chunk each) cannot be concatenated as stored, so that one
+        # dim is split in each file *before* they are joined; the full spec is applied
+        # to the result below, as always.
+        per_file = {concat_dim: subchunk[concat_dim]}
+        first_pass = preprocess
+
+        def preprocess(ds):
+            if first_pass is not None:
+                ds = first_pass(ds)
+            return _subchunk(ds, per_file)
 
     with contextlib.ExitStack() as stack:
         if tolerant_attrs:
@@ -3928,6 +3943,15 @@ def _forcing_layout(
         return _forcing_time_layout(ds, time_name, climatology)
 
 
+def _forcing_check_subchunk(subchunk, ref) -> None:
+    """Raise ``ValueError`` for a ``subchunk`` given without the ``ref`` it shapes."""
+    if subchunk and ref is None:
+        raise ValueError(
+            "subchunk= shapes the kerchunk reference, so it needs ref= (without one "
+            "the files are opened as they are)."
+        )
+
+
 def _forcing_reference(
     files,
     ref: str | Path,
@@ -3935,6 +3959,7 @@ def _forcing_reference(
     concat_dim: str,
     loadable_variables: Sequence[str],
     keep: str = "last",
+    subchunk: dict[str, int] | None = None,
 ) -> Path:
     """Return ``ref``, a kerchunk reference over ``files``, building it only if stale.
 
@@ -3942,13 +3967,19 @@ def _forcing_reference(
     on every read; a reference makes later opens take seconds. Next to it,
     ``<ref>.sources.json`` records what it was built from: every file's resolved path,
     size and mtime (in the order given), and the arguments that shaped it
-    (``concat_dim``, ``loadable_variables``, ``keep``). The reference is reused when the
-    sidecar matches the call exactly; a touched or added file, or any other difference,
-    rebuilds it. The stale sidecar is removed *before* the rebuild and the new one
-    written (temp file, ``os.replace``) only *after* it succeeds, so a crash never
-    leaves a sidecar vouching for a broken reference. A file that looks unfinished
-    (:func:`_partition_unfinished`) raises rather than being left out, so the sidecar
-    always describes every file the reference holds.
+    (``concat_dim``, ``loadable_variables``, ``keep``, and ``subchunk`` when given). The
+    reference is reused when the sidecar matches the call exactly; a touched or added
+    file, or any other difference, rebuilds it. The stale sidecar is removed *before*
+    the rebuild and the new one written (temp file, ``os.replace``) only *after* it
+    succeeds, so a crash never leaves a sidecar vouching for a broken reference. A file
+    that looks unfinished (:func:`_partition_unfinished`) raises rather than being left
+    out, so the sidecar always describes every file the reference holds.
+
+    ``subchunk`` (``{dim: chunk length}``, passed to :func:`make_kerchunk`) splits each
+    file's stored chunks, e.g. ``{"bry_time": 1}``. Files whose time chunks differ in
+    length (monthly files of 28 to 31 steps, one chunk each) cannot be concatenated
+    otherwise, and the build then raises ``ValueError`` saying so and naming the fix.
+    It works only for uncompressed files (netCDF-3, or netCDF-4 without compression).
 
     The grid is not merged here (the reader chain merges it), and nothing else is
     changed from :func:`make_kerchunk`'s defaults. Two entries over the same files may
@@ -3964,6 +3995,8 @@ def _forcing_reference(
         "concat_dim": concat_dim,
         "loadable_variables": list(loadable_variables),
         "keep": keep,
+        # recorded only when given, so a reference built without it stays fresh
+        **({"subchunk": dict(subchunk)} if subchunk else {}),
     }
     if _forcing_sidecar(ref) == want:
         return ref
@@ -3981,13 +4014,24 @@ def _forcing_reference(
             f"cannot build the reference {ref}: "
             + "; ".join(f"{p} ({why})" for p, why in unfinished.items())
         )
-    make_kerchunk(
-        [s["path"] for s in stamps],
-        ref,
-        concat_dim=concat_dim,
-        loadable_variables=tuple(loadable_variables),
-        keep=keep,
-    )
+    try:
+        make_kerchunk(
+            [s["path"] for s in stamps],
+            ref,
+            concat_dim=concat_dim,
+            loadable_variables=tuple(loadable_variables),
+            keep=keep,
+            **({"subchunk": dict(subchunk)} if subchunk else {}),
+        )
+    except ValueError as exc:
+        if subchunk or "inconsistent chunk shapes" not in str(exc):
+            raise
+        raise ValueError(
+            f"{exc}\nThe files' time chunks differ in length (monthly files of "
+            "different numbers of steps). Give the entry "
+            f"subchunk: {{{concat_dim}: 1}} to split them into equal chunks; this "
+            "works for uncompressed (netCDF-3) files."
+        ) from exc
     tmp = side.with_name(side.name + ".tmp")
     tmp.write_text(json.dumps(want, indent=1))
     os.replace(tmp, side)
@@ -4151,6 +4195,7 @@ def add_boundary_sources(
     climatology: bool = False,
     vertical: dict[str, Any] | None = None,
     ref: str | Path | None = None,
+    subchunk: dict[str, int] | None = None,
     **metadata: Any,
 ) -> list[str]:
     """Add a roms-tools boundary-forcing file as one ROMS entry per side of the grid.
@@ -4208,6 +4253,13 @@ def add_boundary_sources(
         unchanged (path, size and modification time, recorded in ``<ref>.sources.json``
         beside it); a touched or added file rebuilds it. All the sides share it, and so
         may other entries over the same files. ``None`` (the default) opens the files.
+    subchunk
+        ``{dim: chunk length}`` passed to :func:`make_kerchunk` when ``ref`` is built,
+        e.g. ``{"bry_time": 1}``: it splits each file's stored chunks so files whose
+        time chunks differ in length (months of 28 to 31 steps) can be joined, which
+        they cannot be otherwise (the build then raises, naming this fix). Only valid
+        for uncompressed (netCDF-3) files. It shapes the reference, so it needs ``ref``
+        (``ValueError`` without one); a change rebuilds the reference.
     **metadata
         Anything else :func:`add_source` takes (``standard_names`` merges over the
         ROMS names this adds; ``name_map``, ``probe``, ...) and entry metadata.
@@ -4227,13 +4279,18 @@ def add_boundary_sources(
             "on staggered u/v points, so they do not sit on the rho-point grid row an "
             "entry carries. Leave them out of variables=."
         )
+    _forcing_check_subchunk(subchunk, ref)
     first = files if isinstance(files, (str, Path)) else next(iter(files))
     grid_names, vert = _forcing_grid(grid, vertical)
     file_list = [files] if isinstance(files, (str, Path)) else list(files)
     time_dim, loadable = _forcing_layout(first, file_list, ref, "bry_time", climatology)
     if ref is not None:
         ref = _forcing_reference(
-            file_list, ref, concat_dim=time_dim, loadable_variables=loadable
+            file_list,
+            ref,
+            concat_dim=time_dim,
+            loadable_variables=loadable,
+            subchunk=subchunk,
         )
     base_entry, file_vars = _forcing_entry(
         first,
@@ -4304,6 +4361,7 @@ def add_forcing_source(
     climatology: bool = False,
     vertical: dict[str, Any] | None = None,
     ref: str | Path | None = None,
+    subchunk: dict[str, int] | None = None,
     **metadata: Any,
 ) -> str:
     """Add a roms-tools 2-D forcing file on the model grid as a ROMS entry.
@@ -4324,21 +4382,27 @@ def add_forcing_source(
     ``standard_names=`` adds more.
 
     See :func:`add_boundary_sources` for ``grid``, ``climatology``, ``vertical``,
-    ``ref`` and ``**metadata``; ``time_coord`` is the file's time *variable* (``"time"``
-    in a roms-tools surface file, ``"xco2_time"`` in a CO2 file), which need not be
-    named like the dimension it lies on (that is read from the file), and ``variables``
-    restricts which variables are kept. A climatology needs no time variable: it is
-    read by its ``month`` variable. ``ref`` is most worth giving here: a decade of
-    hourly surface forcing at tens of GB a file is where ``open_mfdataset`` takes
-    minutes, and the reference is reused until a file changes. Returns the entry name.
+    ``ref``, ``subchunk`` and ``**metadata``; ``time_coord`` is the file's time
+    *variable* (``"time"`` in a roms-tools surface file, ``"xco2_time"`` in a CO2
+    file), which need not be named like the dimension it lies on (that is read from the
+    file), and ``variables`` restricts which variables are kept. A climatology needs no
+    time variable: it is read by its ``month`` variable. ``ref`` is most worth giving
+    here: a decade of hourly surface forcing at tens of GB a file is where
+    ``open_mfdataset`` takes minutes, and the reference is reused until a file changes.
+    Returns the entry name.
     """
+    _forcing_check_subchunk(subchunk, ref)
     first = files if isinstance(files, (str, Path)) else next(iter(files))
     grid_names, vert = _forcing_grid(grid, vertical)
     file_list = [files] if isinstance(files, (str, Path)) else list(files)
     time_dim, loadable = _forcing_layout(first, file_list, ref, time_coord, climatology)
     if ref is not None:
         ref = _forcing_reference(
-            file_list, ref, concat_dim=time_dim, loadable_variables=loadable
+            file_list,
+            ref,
+            concat_dim=time_dim,
+            loadable_variables=loadable,
+            subchunk=subchunk,
         )
     entry, keep = _forcing_entry(
         first,

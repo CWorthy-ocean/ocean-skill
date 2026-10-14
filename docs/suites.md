@@ -88,6 +88,9 @@ refresh:                              # optional: rebuild the model's kerchunk r
       files: [y2011/*_boundary-physics_*.nc, y2012/*_boundary-physics_*.nc]  # glob or globs, joined in order
       grid: input/grid.nc
       ref: refs/base_bry.parquet      # optional: kerchunk reference, rebuilt only when the files change
+      subchunk: {bry_time: 1}         # optional, needs ref:, forwarded to make_kerchunk: split each file's time chunk
+                                      # so monthly files of 28-31 steps can be joined (the build otherwise fails with
+                                      # "inconsistent chunk shapes"); uncompressed (netCDF-3) files only
       variables: [temp, salt, NO3]    # optional: base names to keep; default all
       climatology: false              # true -> a 12-month _clim file: month replaces time
       sides: [south, north]           # optional, boundary only; default all four
