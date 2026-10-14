@@ -212,13 +212,14 @@ kd490:
 
 # Aliases: salt is the ROMS tracer name (see the iron entry above on matching);
 # sea_water_salinity is near-identical (see "temperature" above); and
-# sea_surface_salinity is the surface spelling, as for temperature.
+# sea_surface_salinity is the surface spelling, as for temperature; sss is its
+# abbreviation, the name roms-tools gives surface salinity in a restoring file.
 # Pattern: Argo/OceanSITES's `PSAL`, and the plain/CTD-export `sal`/`sal_psu`
 # family. Must not claim `psalm`, `salt_flux`, `sla` (sea_level_anomaly is its own
 # entry), `salinity_flag`, or `basalt` -- the anchoring refuses all of them.
 # Deliberately does not extend to `salt` itself; that stays the exact literal alias.
 salinity:
-  name: '^(?i:salinity|sea_water_practical_salinity|salt|sea_water_salinity|sea_surface_salinity|(?:p?sal(?:inity)?(?:_(?:psu|ctd))?))$'
+  name: '^(?i:salinity|sea_water_practical_salinity|salt|sea_water_salinity|sea_surface_salinity|sss|(?:p?sal(?:inity)?(?:_(?:psu|ctd))?))$'
   standard_name: '^(?i:sea_water_practical_salinity)$'
 
 ssh:

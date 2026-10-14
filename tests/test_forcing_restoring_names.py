@@ -60,3 +60,30 @@ def test_a_restoring_climatology_compares_run_against_run(isolated_catalogs, tmp
         )
     assert len(cs) == 1
     np.testing.assert_allclose(cs[0].metrics()["bias"], -0.5, atol=1e-5)
+
+
+def test_a_restoring_climatology_compares_by_its_raw_name(isolated_catalogs, tmp_path):
+    """``sss`` -- what the file calls it -- is a vocabulary alias of salinity.
+
+    Reading renames ``sss`` to ``sea_water_salinity`` on *both* entries, so the raw
+    name only resolves through the vocabulary; before ``sss`` was an alias neither
+    lane found it (the message named the reference only because it is probed first).
+    """
+    grid, _, _ = _grid(tmp_path)
+    cat = build.new_catalog(title="restoring")
+    for run, offset in (("a", 0.0), ("b", 0.5)):
+        f = tmp_path / f"{run}_restoring_clim.nc"
+        _restoring_file(f, offset)
+        build.add_forcing_source(cat, f"{run}_restoring", f, grid, climatology=True)
+    build.save(cat, isolated_catalogs / "restoring.yaml")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cs = osk.compare(
+            test="a_restoring",
+            reference=["b_restoring"],
+            variables=["sss"],
+            aggregate={"month": "mean"},
+            cache=False,
+        )
+    assert len(cs) == 1
+    np.testing.assert_allclose(cs[0].metrics()["bias"], -0.5, atol=1e-5)
