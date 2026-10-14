@@ -1327,6 +1327,29 @@ def test_main_list_flag(tmp_path, stub_model, capsys):
     assert "Physics latest" in capsys.readouterr().out
 
 
+def test_main_no_refresh_flag_skips_the_refresh_block(
+    tmp_path, stub_model, monkeypatch, capsys
+):
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.workflows.run._refresh_sources",
+        lambda spec, cat: calls.append(spec),
+    )
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": "catalogs/x.yaml",
+            "sources": [{"name": "stub", "files": "x/*.nc", "ref": "refs/x.parquet"}],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    assert main([str(path), "--list", "--no-refresh"]) == 0
+    assert calls == []
+    assert "refresh: skipped (--no-refresh)" in capsys.readouterr().out
+    assert main([str(path), "--list"]) == 0
+    assert len(calls) == 1
+
+
 def test_main_no_args_is_a_usage_error():
     assert main([]) == 2
 
@@ -1574,10 +1597,55 @@ def test_report_dir_gets_a_snapshot_of_the_refreshed_reference(tmp_path, stub_mo
 
     manifest = json.loads(result.manifest.read_text())
     assert manifest["refresh"]["catalog"] == str(catalog_path.resolve())
+    assert manifest["refresh"]["rebuilt"] is True
     [record] = manifest["refresh"]["sources"]
     assert record["name"] == "GOM_bgc"
     assert record["ref"] == str(ref.resolve())
     assert record["snapshot"] == str(snapshot)
+
+
+def test_no_refresh_reads_the_existing_reference_and_still_snapshots_it(
+    tmp_path, stub_model, monkeypatch, capsys
+):
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    ref = tmp_path / "refs" / "gom_bgc.json"
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": str(tmp_path / "catalogs" / "x.yaml"),
+            "sources": [
+                {
+                    "name": "GOM_bgc",
+                    "files": str(tmp_path / "out.*.nc"),
+                    "ref": str(ref),
+                }
+            ],
+            "forcing": [
+                {"name": "bry", "kind": "boundary", "files": "b/*.nc", "grid": "g.nc"}
+            ],
+        },
+    )
+    path = _write_suite(tmp_path, suite)
+    # a first, ordinary run builds the shared reference (the forcing glob matches
+    # nothing, so that entry is just reported as skipped)
+    run_suite(path)
+    capsys.readouterr()
+
+    def _must_not_run(spec, cat):
+        raise AssertionError("refresh ran under refresh=False")
+
+    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", _must_not_run)
+    monkeypatch.setattr("ocean_skill.workflows.run._refresh_forcing", _must_not_run)
+
+    run_suite(path, list_only=True, refresh=False)
+    result = run_suite(path, refresh=False)
+    assert "refresh: skipped (--no-refresh)" in capsys.readouterr().out
+
+    snapshot = result.report_dir / "refs" / "gom_bgc.json"
+    assert snapshot.read_bytes() == ref.read_bytes()
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["refresh"]["rebuilt"] is False
+    assert manifest["refresh"]["sources"][0]["snapshot"] == str(snapshot)
 
 
 def test_snapshot_survives_the_next_refresh_overwriting_the_shared_ref(
