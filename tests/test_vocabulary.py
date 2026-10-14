@@ -430,6 +430,8 @@ def test_find_variable_keeps_coordinates():
         ("CTD_Temperature", "sea_water_potential_temperature"),
         ("PSAL", "sea_water_practical_salinity"),
         ("sal_psu", "sea_water_practical_salinity"),
+        ("sss", "sea_water_practical_salinity"),
+        ("SSS", "sea_water_practical_salinity"),
         ("DOXY", OXYGEN),
         ("chl_a", CHL),
         ("CHLA", CHL),
@@ -441,7 +443,7 @@ def test_pattern_spelling_resolves_to_the_canonical_name(spelling, expected):
 
 @pytest.mark.parametrize(
     "not_a_match",
-    ["my_temp_ctd", "temp_ctd_2", "psalm", "salt_flux", "chlamydomonas"],
+    ["my_temp_ctd", "temp_ctd_2", "psalm", "salt_flux", "sss_time", "chlamydomonas"],
 )
 def test_pattern_matching_is_fullmatch_not_substring(not_a_match):
     """A pattern recognizes the whole name, never a name merely containing it."""
