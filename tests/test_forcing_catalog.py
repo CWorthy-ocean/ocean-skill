@@ -70,7 +70,7 @@ def _bry_time(days):
     return t
 
 
-def _boundary_file(path, days, offset=0.0, *, month=False):
+def _boundary_file(path, days, offset=0.0, *, month=False, fmt=None):
     """One boundary file: temp/salt/NO3/zeta per side plus the staggered u/v."""
     days = np.asarray(days)
     nt = len(days)
@@ -108,7 +108,9 @@ def _boundary_file(path, days, offset=0.0, *, month=False):
     }
     if month:
         coords["month"] = ("bry_time", np.arange(1, nt + 1))
-    xr.Dataset(data, coords=coords).to_netcdf(path)
+    xr.Dataset(data, coords=coords).to_netcdf(
+        path, format=fmt, **({"engine": "netcdf4"} if fmt else {})
+    )
 
 
 def _surface_file(path, offset=0.0):
@@ -1054,4 +1056,151 @@ def test_a_ref_over_remote_files_is_refused(layouts):
             layouts["tmp"] / "r.parquet",
             concat_dim="time",
             loadable_variables=["time"],
+        )
+
+
+# ======================================================================================
+# Monthly files of different lengths: subchunk= makes their time chunks equal
+# ======================================================================================
+
+#: roms-tools writes uncompressed netCDF-3 (CDF-5); one chunk per variable per file
+NC3 = "NETCDF3_64BIT_DATA"
+MONTH_DAYS = ([0, 1, 2], [31, 32, 33, 34], [59, 60])
+
+
+def _uneven_months(tmp_path):
+    """Three monthly boundary files with 3, 4 and 2 time steps (uncompressed CDF-5)."""
+    files = []
+    for i, days in enumerate(MONTH_DAYS):
+        files.append(tmp_path / f"bry_2011{i + 1:02d}.nc")
+        _boundary_file(files[-1], days, fmt=NC3)
+    return files
+
+
+def test_files_of_different_lengths_need_subchunk_and_the_error_says_so(layouts):
+    files = _uneven_months(layouts["tmp"])
+    ref = layouts["tmp"] / "bry.parquet"
+    with pytest.raises(ValueError, match="inconsistent chunk shapes") as err:
+        build.add_boundary_sources(
+            build.new_catalog(), "bry", files, layouts["grid"], ref=ref
+        )
+    assert "subchunk: {bry_time: 1}" in str(err.value)
+    assert not Path(str(ref) + ".sources.json").exists()
+
+
+def test_subchunk_joins_files_of_different_lengths_and_reads_every_step(layouts):
+    files = _uneven_months(layouts["tmp"])
+    ref = layouts["tmp"] / "bry.parquet"
+    cat = build.new_catalog()
+    build.add_boundary_sources(
+        cat,
+        "bry",
+        files,
+        layouts["grid"],
+        sides=["south"],
+        ref=ref,
+        subchunk={"bry_time": 1},
+    )
+    _save(layouts, cat)
+    ds = sources.read("bry_south").load()
+    days = np.concatenate(MONTH_DAYS)
+    assert list(ds["time"].values.astype("datetime64[D]")) == list(
+        np.datetime64(EPOCH) + days
+    )
+    expected = np.concatenate([xr.open_dataset(f)["temp_south"].values for f in files])
+    got = ds[TEMP].squeeze("eta_rho").transpose("time", "s_rho", "xi_rho").values
+    np.testing.assert_allclose(got, expected)
+
+
+def test_changing_subchunk_rebuilds_the_ref_and_records_it(layouts, monkeypatch):
+    import json
+
+    files = _uneven_months(layouts["tmp"])
+    ref = layouts["tmp"] / "bry.parquet"
+    side = Path(str(ref) + ".sources.json")
+    watch = _Watch(monkeypatch, files)
+
+    def build_it(**kw):
+        build.add_boundary_sources(
+            build.new_catalog(),
+            "bry",
+            files,
+            layouts["grid"],
+            sides=["south"],
+            ref=ref,
+            **kw,
+        )
+
+    build_it(subchunk={"bry_time": 1})
+    assert json.loads(side.read_text())["subchunk"] == {"bry_time": 1}
+    build_it(subchunk={"bry_time": 1})
+    assert watch.builds == 1, "the same subchunk must reuse the reference"
+    build_it(subchunk={"bry_time": 1, "s_rho": 1})
+    assert watch.builds == 2
+    assert json.loads(side.read_text())["subchunk"] == {"bry_time": 1, "s_rho": 1}
+
+
+def test_subchunk_without_a_ref_is_refused(layouts):
+    files = _uneven_months(layouts["tmp"])
+    with pytest.raises(ValueError, match="needs ref="):
+        build.add_boundary_sources(
+            build.new_catalog(),
+            "bry",
+            files,
+            layouts["grid"],
+            subchunk={"bry_time": 1},
+        )
+    with pytest.raises(ValueError, match="needs ref="):
+        build.add_forcing_source(
+            build.new_catalog(),
+            "surf",
+            files[0],
+            layouts["grid"],
+            subchunk={"time": 1},
+        )
+
+
+def test_refresh_forcing_subchunk_builds_a_set_that_otherwise_fails(
+    isolated_catalogs, tmp_path, capsys
+):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    grid, _, _ = _grid(tmp_path)
+    _uneven_months(tmp_path)
+    entry = {
+        "name": "bry",
+        "kind": "boundary",
+        "files": str(tmp_path / "bry_*.nc"),
+        "grid": str(grid),
+        "sides": ["south"],
+        "ref": str(tmp_path / "bry.parquet"),
+    }
+    catalog_path = isolated_catalogs / "run.yaml"
+    _refresh_forcing([entry], catalog_path)
+    out = capsys.readouterr().out
+    assert "FAILED bry" in out and "subchunk: {bry_time: 1}" in out
+    _refresh_forcing([{**entry, "subchunk": {"bry_time": 1}}], catalog_path)
+    assert "reference rebuilt" in capsys.readouterr().out
+    assert sources.read("bry_south").sizes["time"] == 9
+
+
+def test_refresh_forcing_subchunk_needs_a_ref():
+    from pydantic import ValidationError
+
+    from ocean_skill.config import RefreshConfig
+
+    with pytest.raises(ValidationError, match="subchunk: shapes the kerchunk"):
+        RefreshConfig.model_validate(
+            {
+                "catalog": "c.yaml",
+                "forcing": [
+                    {
+                        "name": "f",
+                        "kind": "boundary",
+                        "files": "*.nc",
+                        "grid": "g.nc",
+                        "subchunk": {"bry_time": 1},
+                    }
+                ],
+            }
         )

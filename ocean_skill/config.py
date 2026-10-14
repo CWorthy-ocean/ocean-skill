@@ -87,6 +87,12 @@ class RefreshForcingConfig(BaseModel):
     ``ref``, when given, is where a kerchunk reference over the files is kept; it is
     rebuilt only when the matched files change, and opens in seconds where the files
     themselves can take minutes.
+
+    ``subchunk`` (``{dim: chunk length}``) splits the files' stored chunks along the
+    time dimension, e.g. ``{bry_time: 1}``, so files whose time chunks differ in length
+    (monthly files of 28 to 31 steps) can be joined into one reference, which they
+    cannot otherwise. It is only valid for uncompressed files (netCDF-3, or netCDF-4
+    without compression) and needs ``ref``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -100,9 +106,15 @@ class RefreshForcingConfig(BaseModel):
     sides: list[str] | None = None
     time_coord: str | None = None
     ref: str | None = None
+    subchunk: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def _kind_keys(self) -> RefreshForcingConfig:
+        if self.subchunk is not None and self.ref is None:
+            raise ValueError(
+                f"refresh.forcing {self.name!r}: subchunk: shapes the kerchunk "
+                "reference, so it needs ref:"
+            )
         if self.kind == "surface" and self.sides is not None:
             raise ValueError(
                 f"refresh.forcing {self.name!r}: sides: is for kind: boundary"

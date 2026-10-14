@@ -109,6 +109,28 @@ def test_a_subchunk_key_is_forwarded(tmp_path):
     assert "keep" not in make.call_args.kwargs
 
 
+def test_a_forcing_entrys_subchunk_key_is_forwarded(tmp_path):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    (tmp_path / "bry_201101.nc").touch()
+    entry = {
+        "name": "bry",
+        "kind": "boundary",
+        "files": str(tmp_path / "bry_*.nc"),
+        "grid": str(tmp_path / "grid.nc"),
+        "ref": str(tmp_path / "bry.parquet"),
+    }
+    with mock.patch(
+        "ocean_skill.build.add_boundary_sources", return_value=["bry_south"]
+    ) as add, mock.patch("ocean_skill.build.save"):
+        _refresh_forcing(
+            [{**entry, "subchunk": {"bry_time": 1}}], tmp_path / "catalog.yaml"
+        )
+        assert add.call_args.kwargs["subchunk"] == {"bry_time": 1}
+        _refresh_forcing([entry], tmp_path / "catalog.yaml")
+        assert "subchunk" not in add.call_args.kwargs
+
+
 def test_no_keep_key_collapses_a_genuine_disagreement_without_raising(tmp_path):
     """A real overlapping rerun that is not bit-reproducible must not block a build.
 
