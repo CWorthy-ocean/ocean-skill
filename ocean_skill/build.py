@@ -152,7 +152,11 @@ def tolerant_hdf_attrs():
     }
     original = vzhdf._extract_attrs
 
-    def lenient(h5obj):
+    def lenient(h5obj, links_and_references=False):
+        # Newer virtualizarr passes an opt-in flag for its links/object-references
+        # convention, which nothing here turns on; leave that path to its own code.
+        if links_and_references:
+            return original(h5obj, links_and_references)
         attrs = {}
         for name, v in h5obj.attrs.items():
             if name in hidden:

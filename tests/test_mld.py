@@ -171,6 +171,24 @@ def test_mld_density_attrs_are_named_by_the_sigma_theta_criterion():
     assert out.attrs["mld_ref_depth"] == mld.REF_DEPTH
 
 
+def test_a_tide_lifting_the_top_cell_above_5_m_still_gives_a_density():
+    """The gsw check refuses ``z > 5`` as a sign error; a macrotidal tide reaches it.
+
+    PACMED restarts carry the tide, and zeta of 5.4 m put the top cell above the
+    threshold, so every MLD over those months was skipped. Such a cell is read as at
+    the surface: the same density as at z = 0.
+    """
+    pytest.importorskip("gsw")
+
+    z = xr.DataArray([5.3, 0.0, -10.0], dims="s_rho")
+    temp = xr.DataArray([20.0, 20.0, 18.0], dims="s_rho")
+    salt = xr.DataArray([35.0, 35.0, 35.0], dims="s_rho")
+    lon, lat = xr.DataArray(200.0), xr.DataArray(5.0)
+    sigma0 = mld.potential_density(temp, salt, z, lon, lat)
+    assert np.isfinite(sigma0).all()
+    assert float(sigma0[0]) == pytest.approx(float(sigma0[1]))
+
+
 def test_every_method_has_a_cf_name():
     """Every method in ``_METHODS`` has an entry in ``_STANDARD_NAMES``.
 
