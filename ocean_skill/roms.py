@@ -28,6 +28,7 @@ there.
 
 from __future__ import annotations
 
+import math
 import warnings
 from collections.abc import Mapping
 from typing import Any
@@ -782,6 +783,41 @@ def _s_to_z(sigma, Cs, h, zeta, hc: float, vtransform: int):
     return zeta + (zeta + h) * s
 
 
+def _s_to_z_chunked(sigma, Cs, h, zeta, hc: float, vtransform: int):
+    """:func:`_s_to_z`, with the inputs chunked so the lazy result is in bounded chunks.
+
+    ``sigma``/``Cs`` are tiny vectors along the vertical; a store subchunked along its
+    leading dimensions can hand them over as many small chunks, and their outer product
+    with ``zeta``'s per-step chunks is a graph with many times more blocks than any
+    input (dask's "Increasing number of chunks by factor of ..." warning) of which the
+    depth match then merges the vertical straight back. They are made one chunk instead,
+    and ``zeta``/``h`` are split horizontally just far enough that one column chunk of
+    the result stays within dask's ``array.chunk-size`` (:func:`_budgeted_sizes`), so
+    the frame is never built as one gigabyte-class block per time step. Values are
+    unchanged (the transform is elementwise); numpy-backed inputs are left as they are.
+    """
+    if sigma.ndim != 1 or all(a.chunks is None for a in (sigma, Cs, h, zeta)):
+        return _s_to_z(sigma, Cs, h, zeta, hc, vtransform)
+    (s_dim,) = sigma.dims
+    if sigma.chunks is not None:
+        sigma = sigma.chunk({s_dim: -1})
+    if Cs.chunks is not None:
+        Cs = Cs.chunk({s_dim: -1})
+    sizes: dict[str, int] = {}
+    for a in (h, zeta):
+        if a.chunks is not None:
+            for dim, chunks in zip(a.dims, a.chunks, strict=True):
+                sizes[dim] = max(sizes.get(dim, 0), max(chunks))
+    split = _budgeted_sizes(sizes, sigma.sizes[s_dim])
+    h, zeta = (
+        a.chunk({d: n for d, n in split.items() if d in a.dims})
+        if a.chunks is not None
+        else a
+        for a in (h, zeta)
+    )
+    return _s_to_z(sigma, Cs, h, zeta, hc, vtransform)
+
+
 def _zeta_of(ds: xr.Dataset) -> xr.DataArray:
     """Return the free-surface height ``zeta`` (metres above mean sea level) of ``ds``.
 
@@ -823,7 +859,7 @@ def add_depth_coord(
     """
     hc, vtransform = _vertical_params(ds, meta)
     zeta = xr.zeros_like(ds["h"]) if zero_zeta else _zeta_of(ds)
-    z_rho = _s_to_z(ds["sigma_r"], ds["Cs_r"], ds["h"], zeta, hc, vtransform)
+    z_rho = _s_to_z_chunked(ds["sigma_r"], ds["Cs_r"], ds["h"], zeta, hc, vtransform)
     # The preferred order for the full field; `...` carries forward anything not
     # named here (`along`, for a vertical section already sliced to one grid
     # column -- see ocean_skill.transect.grid_slice) in whatever order it already
@@ -855,7 +891,7 @@ def add_interface_coord(
     """
     hc, vtransform = _vertical_params(ds, meta)
     zeta = xr.zeros_like(ds["h"]) if zero_zeta else _zeta_of(ds)
-    z_w = _s_to_z(ds["sigma_w"], ds["Cs_w"], ds["h"], zeta, hc, vtransform)
+    z_w = _s_to_z_chunked(ds["sigma_w"], ds["Cs_w"], ds["h"], zeta, hc, vtransform)
     dims = ("time", "s_w", "eta_rho", "xi_rho")  # see add_depth_coord's note on `...`
     z_w = z_w.transpose(*[d for d in dims if d in z_w.dims], ...)
     return ds.assign_coords(z_w=z_w)
@@ -1156,12 +1192,55 @@ def bottom(ds: xr.Dataset, meta: dict[str, Any] | None = None) -> xr.Dataset:
     return low.drop_vars([s_dim, "z_rho"], errors="ignore")
 
 
-def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
-    """Return ``da`` with its vertical axis in a single dask chunk.
+def _budgeted_sizes(
+    sizes: dict[str, int], n_s: int, itemsize: int = 8
+) -> dict[str, int]:
+    """Shrink the non-vertical chunk ``sizes`` until a column chunk is within budget.
 
-    Matching to a depth reads the whole water column at once — the vertical is an
+    The budget is dask's configured ``array.chunk-size`` (128 MiB by default), counted
+    for a chunk spanning ``n_s`` vertical levels at ``max(itemsize, 8)`` bytes a value
+    -- the frame is float64 whatever the data's own precision, and counting at the
+    larger itemsize gives data and frame the *same* chunk shape, so the two meet in the
+    match kernel without dask having to re-merge either. Halves the largest chunk until
+    the column chunk fits, so a dimension that is already chunked finely is left exactly
+    as it is; only dimensions that had to be split appear in the result (empty when
+    nothing needs to change). Dimensions of chunk size 1 (a time axis, say) cannot
+    shrink further.
+    """
+    import dask
+    from dask.utils import parse_bytes
+
+    limit = parse_bytes(dask.config.get("array.chunk-size"))
+    current = dict(sizes)
+    per_value = max(itemsize, 8) * n_s
+    while current and per_value * math.prod(current.values()) > limit:
+        widest = max(current, key=current.get)
+        if current[widest] == 1:
+            break
+        current[widest] = -(-current[widest] // 2)
+    return {dim: size for dim, size in current.items() if size != sizes[dim]}
+
+
+def _column_chunk_sizes(da: xr.DataArray, s_dim: str) -> dict[str, int]:
+    """Return the non-vertical chunk sizes that keep one whole column chunk in budget.
+
+    The sizes :func:`_budgeted_sizes` picks for ``da`` once its vertical ``s_dim`` is
+    one chunk, starting from its existing chunks.
+    """
+    sizes = {
+        dim: max(chunks)
+        for dim, chunks in zip(da.dims, da.chunks, strict=True)
+        if dim != s_dim
+    }
+    return _budgeted_sizes(sizes, da.sizes[s_dim], da.dtype.itemsize)
+
+
+def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
+    """Return ``da`` with its vertical axis in a single dask chunk, in bounded chunks.
+
+    Matching to a depth reads the whole water column at once -- the vertical is an
     ``apply_ufunc`` *core* dimension, as it is for the depth kernel here and for xgcm's
-    transform — so a source chunked along ``s_rho`` fails outright with "consists of
+    transform -- so a source chunked along ``s_rho`` fails outright with "consists of
     multiple chunks, but is also a core dimension". Whether that happens is a property
     of how the store was written, which is why it can lie unnoticed until a particular
     dataset is used.
@@ -1169,15 +1248,39 @@ def _contiguous_column(da: xr.DataArray, s_dim: str) -> xr.DataArray:
     Rechunking here rather than passing ``allow_rechunk=True``: the two do the
     same work, but allow_rechunk lets dask decide, and its warning that this "may
     significantly increase memory usage" is well earned on a full model run. One
-    column is the smallest unit the match can act on, and doing it explicitly
-    leaves the *horizontal* chunking — which is what bounds memory here — untouched.
+    column is the smallest unit the match can act on, and doing it explicitly keeps
+    the *size* of that unit in hand: a store subchunked only along its leading
+    dimensions (``make_kerchunk``'s automatic subchunking) holds each level as one
+    horizontal chunk, so making the vertical one chunk would otherwise give chunks of
+    ``n_s`` times a full level -- over a gigabyte on a kilometre-scale grid, several
+    times over in the kernel, one per core. The horizontal dimensions are therefore
+    split as well, only as far as it takes to bring a column chunk within dask's
+    ``array.chunk-size`` (:func:`_column_chunk_sizes`); a source whose horizontal
+    chunks are already that small keeps them untouched. The same rule applied to the
+    frame (:func:`frame_coordinate`) and to every variable gives them identical
+    horizontal chunks, so they meet in the kernel without dask re-merging either.
 
     A numpy-backed array is returned unchanged; ``.chunk()`` on one would make it lazy,
     which is a surprising thing for a rechunk helper to do.
     """
     if da.chunks is None or s_dim not in da.dims:
         return da
-    return da.chunk({s_dim: -1})
+    return da.chunk({s_dim: -1, **_column_chunk_sizes(da, s_dim)})
+
+
+def _like_horizontal(da: xr.DataArray, like: xr.DataArray) -> xr.DataArray:
+    """Return ``da`` chunked as ``like`` is along the dimensions they share.
+
+    The water-column bounds have no vertical, so :func:`_contiguous_column` leaves them
+    as they came (one chunk per horizontal field) while the frame beside them has been
+    split to keep a column chunk in budget; handed to the kernel together, dask would
+    have to re-merge the one or the other. Chunking the bounds the same way up front
+    leaves nothing to reconcile. Unchanged when either is numpy-backed.
+    """
+    if da.chunks is None or like.chunks is None:
+        return da
+    shared = {dim: like.chunksizes[dim] for dim in da.dims if dim in like.dims}
+    return da.chunk(shared) if shared else da
 
 
 def _z_grid(ds: xr.Dataset, s_dim: str):
@@ -1377,8 +1480,11 @@ def _match_variable(da, frame, top, bottom, s_dim: str, targets, mode: str):
     """Run :func:`_match_columns` over one variable, lazily (dask in -> dask out).
 
     The vertical is an ``apply_ufunc`` *core* dimension, so it is made one dask chunk
-    first (:func:`_contiguous_column`); the horizontal and time chunking, which is what
-    bounds memory, is left alone. The result has ``z`` last; any dimension the frame
+    first (:func:`_contiguous_column`), which splits the horizontal as needed to keep
+    each column chunk within dask's chunk size. How much is *read* per chunk is still
+    the stored chunking's doing: a store whose chunks span the whole horizontal (no
+    ``subchunk`` along it) reads every level of the domain to build any one column
+    chunk. The result has ``z`` last; any dimension the frame
     has and the variable lacks (a time axis, for a field that does not vary in time) is
     put first, ahead of the variable's own. Coordinates other than the dimension ones
     are left off -- the caller attaches the ones it wants.
@@ -1612,6 +1718,7 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
             _at_ref_time(a, meta, ref_time) for a in (frame, top, bottom)
         )
     frame = _contiguous_column(frame, s_dim)
+    top, bottom = (_like_horizontal(a, frame) for a in (top, bottom))
 
     # Rho-point fields share z_rho's own horizontal dims; staggered u/v (xi_u/eta_v)
     # need interpolation to rho first (deferred), so are skipped here. Read off lon's
@@ -1851,6 +1958,9 @@ def to_sigma0(
             "(or not standardized to that name -- check the catalog entry's "
             "standard_names map, or that the source actually carries it)."
         )
+    # temp/salt/z_rho meet in one elementwise product: put the tracers in the frame's
+    # column chunks first, or dask re-merges the vertical *and* the horizontal there.
+    temp, salt = (_contiguous_column(a, s_dim) for a in (temp, salt))
     try:
         sigma0 = potential_density(temp, salt, ds["z_rho"], ds["lon"], ds["lat"])
     except ImportError as exc:

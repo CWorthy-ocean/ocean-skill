@@ -58,7 +58,13 @@ def check_draw(title: str, draw: str, contours: Any) -> None:
 
 
 class RefreshSourceConfig(BaseModel):
-    """One stream to rebuild before the suite runs -- forwarded to ``make_kerchunk``."""
+    """One stream to rebuild before the suite runs -- forwarded to ``make_kerchunk``.
+
+    ``subchunk`` (``{dim: chunk length}``) splits the stored chunks further, e.g.
+    ``{s_rho: 1, eta_rho: 74}`` so a page that needs whole water columns (anything
+    matched to a depth) reads a band of rows without loading every level of the
+    whole domain at once.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -68,6 +74,7 @@ class RefreshSourceConfig(BaseModel):
     grid: str | None = None
     keep: str | None = None
     min_age: float | None = None
+    subchunk: dict[str, int] | None = None
 
 
 class RefreshForcingConfig(BaseModel):
@@ -77,6 +84,9 @@ class RefreshForcingConfig(BaseModel):
     (one entry per side, ``<name>_<side>``), ``kind: surface`` to
     :func:`ocean_skill.build.add_forcing_source` (one entry, ``<name>``). ``files`` is a
     glob or a list of globs, each expanded and sorted, joined in the order given.
+    ``ref``, when given, is where a kerchunk reference over the files is kept; it is
+    rebuilt only when the matched files change, and opens in seconds where the files
+    themselves can take minutes.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -89,6 +99,7 @@ class RefreshForcingConfig(BaseModel):
     climatology: bool = False
     sides: list[str] | None = None
     time_coord: str | None = None
+    ref: str | None = None
 
     @model_validator(mode="after")
     def _kind_keys(self) -> RefreshForcingConfig:

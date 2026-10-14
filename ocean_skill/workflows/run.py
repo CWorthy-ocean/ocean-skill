@@ -189,7 +189,8 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     entry the catalog already had. A source whose glob matches nothing simply keeps
     whatever entry it already had; only sources that actually rebuilt get touched.
 
-    An entry's ``keep`` key, when given, is forwarded to
+    An entry's ``subchunk`` key is forwarded to ``make_kerchunk`` as it is. Its
+    ``keep`` key, when given, is forwarded to
     :func:`ocean_skill.build.make_kerchunk` — a restart stream that is still being
     refreshed against a live run declares ``keep: latest-per-file`` to drop each
     file's earlier, superseded record. Left unset, ``make_kerchunk``'s own default
@@ -233,9 +234,9 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         if not ready:
             skipped.append(entry["name"])
             continue
-        # Left out entirely (not defaulted to "all") when the suite doesn't name one,
-        # so make_kerchunk's own default -- "unique" -- takes effect here too.
-        kwargs = {"keep": entry["keep"]} if "keep" in entry else {}
+        # Each left out entirely when the suite doesn't name it, so make_kerchunk's
+        # own defaults (keep, automatic subchunking) take effect here too.
+        kwargs = {k: entry[k] for k in ("keep", "subchunk") if k in entry}
         ref = make_kerchunk(
             ready, entry["ref"], grid=entry.get("grid"), min_age=min_age, **kwargs
         )
@@ -257,8 +258,10 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     :func:`ocean_skill.build.add_boundary_sources` (``kind: boundary``, one per side,
     ``<name>_<side>``) or :func:`ocean_skill.build.add_forcing_source` (``kind:
     surface``) write, alongside the model output ``refresh.sources`` rebuilt. The
-    entries are reader chains over the files themselves -- no reference is written --
-    so rebuilding them on every run only re-reads the first file's header.
+    entries are rebuilt on every run. An entry with a ``ref`` reads a kerchunk
+    reference kept there, which the builder rebuilds only when the matched files
+    change, so a run with unchanged forcing reuses it and opens nothing else; an entry
+    without one reads the files themselves.
 
     ``files`` is a glob or a list of globs, each expanded and sorted, then joined in
     the order given (so one run's forcing spread over several folders reads as one
@@ -270,29 +273,67 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     """
     import glob as _glob
 
-    from ocean_skill.build import add_boundary_sources, add_forcing_source, save
+    from ocean_skill.build import (
+        _local_path,
+        add_boundary_sources,
+        add_forcing_source,
+        save,
+    )
 
     catalog_path = Path(catalog_path).expanduser()
     cat = _reopen_catalog(catalog_path)
 
-    rebuilt, skipped, failed = [], [], []
+    matched = {}
     for entry in spec:
         globs = [entry["files"]] if isinstance(entry["files"], str) else entry["files"]
-        files = [
+        matched[entry["name"]] = [
             f
             for pattern in globs
             for f in sorted(_glob.glob(str(Path(pattern).expanduser())))
         ]
+    # Entries may share a ref only over the very same files: otherwise each would
+    # rebuild it over its own on every run, and the first one's catalog entry would
+    # read the last one's data.
+    by_ref: dict[Path, list[str]] = {}
+    for entry in spec:
+        if "ref" in entry and matched[entry["name"]]:
+            by_ref.setdefault(_local_path(entry["ref"]), []).append(entry["name"])
+    conflicted = {
+        name: names
+        for names in by_ref.values()
+        if len({tuple(matched[n]) for n in names}) > 1
+        for name in names
+    }
+
+    rebuilt, skipped, failed = [], [], []
+    for entry in spec:
+        files = matched[entry["name"]]
+        if entry["name"] in conflicted:
+            failed.append(entry["name"])
+            print(
+                f"  refresh: FAILED {entry['name']}: its ref {entry['ref']} is shared "
+                f"with {conflicted[entry['name']]} over different files; give each "
+                "file set its own ref"
+            )
+            continue
         if not files:
             skipped.append(entry["name"])
             continue
         kwargs = {
             k: entry[k]
-            for k in ("variables", "climatology", "sides", "time_coord")
+            for k in ("variables", "climatology", "sides", "time_coord", "ref")
             if k in entry
         }
         boundary = entry["kind"] == "boundary"
         add = add_boundary_sources if boundary else add_forcing_source
+        # the builder writes this record of the files next to a reference it
+        # (re)builds, so an unchanged one means the reference was reused
+        sidecar = (
+            Path(str(_local_path(entry["ref"])) + ".sources.json")
+            if "ref" in entry
+            else None
+        )
+        before = _mtime(sidecar)
         try:
             added = add(cat, entry["name"], files, entry["grid"], **kwargs)
         except Exception as exc:
@@ -304,7 +345,15 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
             continue
         added = [added] if isinstance(added, str) else added
         rebuilt.append(entry["name"])
-        print(f"  refresh: {entry['name']} <- {len(files)} files -> {', '.join(added)}")
+        how = ""
+        if sidecar is not None:
+            how = " (reference reused)" if _mtime(sidecar) == before else (
+                " (reference rebuilt)"
+            )
+        print(
+            f"  refresh: {entry['name']} <- {len(files)} files{how} -> "
+            f"{', '.join(added)}"
+        )
 
     if skipped:
         print(f"  refresh: no forcing files matched for {skipped}; kept their entries")
@@ -312,6 +361,14 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         print(f"  refresh: could not build {failed}; their pages will be skipped")
     if rebuilt:
         save(cat, catalog_path)
+
+
+def _mtime(path: Path | None) -> int | None:
+    """``path``'s modification time in ns, or None when there is no such file."""
+    try:
+        return path.stat().st_mtime_ns if path is not None else None
+    except FileNotFoundError:
+        return None
 
 
 def _snapshot_refs(refresh: Any, report_dir: Path) -> list[dict[str, Any]]:
@@ -552,7 +609,18 @@ def run_suite(
         expanded = _pages.expand(suite)
 
         test_source = suite.defaults.get("test")
-        index = extrema._native_time_index(test_source) if test_source else None
+        index = None
+        if test_source:
+            # Not fatal: expand() has already flagged the pages this source spoils
+            # (a refresh that failed to build it, or a climatology), and the rest
+            # still draw. The report then just has no time range in its name.
+            try:
+                index = extrema._native_time_index(test_source)
+            except Exception as exc:
+                print(
+                    f"latest step of {test_source}: unknown "
+                    f"({type(exc).__name__}: {exc})"
+                )
         # Printed once, unconditionally, so it lands in run.log even for an
         # ordinary (non-list_only) run: whether "latest" moved since the last run
         # is exactly what decides whether the cache-eligible pages below actually
@@ -586,6 +654,8 @@ def run_suite(
                 if p.draw not in (None, "plot"):
                     chain += f" + draw: {p.draw}"
                 print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){chain}")
+                if p.problem:
+                    print(f"      will be skipped: {p.problem}")
             return SuiteResult(pages=expanded)
 
         output_dir = (
@@ -664,6 +734,14 @@ def run_suite(
                     report.section(i, page.title, page.kwargs["text"])
                     continue
                 print(f"== page {i}/{n}: {page.title} ==")
+                if page.problem:
+                    # found while expanding (its source could not be read), so not
+                    # tried again here: that read can itself be the slow part
+                    page.elapsed = 0.0
+                    page.status = "skipped"
+                    page.reason = page.problem
+                    print(f"   SKIPPED: {page.reason}")
+                    continue
                 t0 = time.perf_counter()
                 try:
                     results = _pages.build(page, pooled_records=pooled_records)

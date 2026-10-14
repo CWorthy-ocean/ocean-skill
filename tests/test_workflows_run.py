@@ -89,6 +89,26 @@ def test_an_explicit_keep_key_is_still_forwarded(tmp_path):
     assert ds.sizes["ocean_time"] == 4, "keep='all' must still keep every record"
 
 
+def test_a_subchunk_key_is_forwarded(tmp_path):
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    with mock.patch(
+        "ocean_skill.build.make_kerchunk", return_value=tmp_path / "r.json"
+    ) as make, mock.patch("ocean_skill.build.add_source"):
+        _refresh_sources(
+            [
+                {
+                    "name": "GOM_bgc",
+                    "files": str(tmp_path / "out.*.nc"),
+                    "ref": str(tmp_path / "r.json"),
+                    "subchunk": {"s_rho": 1, "eta_rho": 74},
+                }
+            ],
+            tmp_path / "catalog.yaml",
+        )
+    assert make.call_args.kwargs["subchunk"] == {"s_rho": 1, "eta_rho": 74}
+    assert "keep" not in make.call_args.kwargs
+
+
 def test_no_keep_key_collapses_a_genuine_disagreement_without_raising(tmp_path):
     """A real overlapping rerun that is not bit-reproducible must not block a build.
 
@@ -1427,6 +1447,133 @@ def test_run_log_of_a_skipped_page(tmp_path, stub_model, monkeypatch, capsys):
 
     # The log also carries the traceback the terminal never shows for a skipped page.
     assert "Traceback" in log_text
+
+
+def test_a_page_whose_source_cannot_be_read_is_skipped_untried(
+    tmp_path, stub_model, monkeypatch, capsys
+):
+    from ocean_skill.workflows import pages as _pages
+
+    def index(source):
+        if source == "gone":
+            raise KeyError(source)
+        return _INDEX
+
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", index)
+    suite = _model_only_suite(tmp_path)
+    suite["pages"].append(
+        {"title": "Gone", "compare": {"test": "gone", "reference": ["stub"]}}
+    )
+    path = _write_suite(tmp_path, suite)
+
+    run_suite(path, list_only=True)
+    assert "will be skipped: source 'gone' could not be read" in capsys.readouterr().out
+
+    built = []
+    real_build = _pages.build
+
+    def build(page, **kwargs):
+        built.append(page.title)
+        return real_build(page, **kwargs)
+
+    monkeypatch.setattr(_pages, "build", build)
+    result = run_suite(path)
+    assert built == ["Physics latest"]
+    gone = next(p for p in result.pages if p.title == "Gone")
+    assert gone.status == "skipped"
+    assert gone.reason.startswith("source 'gone' could not be read")
+    assert result.exit_code == 3
+
+
+def test_entries_sharing_a_ref_over_different_files_are_refused(
+    tmp_path, monkeypatch, capsys
+):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    for year in (2011, 2013):
+        (tmp_path / f"co2_{year}.nc").write_text("")
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.build.add_forcing_source",
+        lambda cat, name, *a, **k: calls.append(name) or name,
+    )
+    shared = {"kind": "surface", "grid": "g.nc", "ref": str(tmp_path / "co2.parquet")}
+    spec = [
+        {"name": "a_co2", "files": str(tmp_path / "co2_2011.nc"), **shared},
+        {"name": "b_co2", "files": str(tmp_path / "co2_2013.nc"), **shared},
+        {"name": "c_co2", "files": str(tmp_path / "co2_2011.nc"), "kind": "surface",
+         "grid": "g.nc", "ref": str(tmp_path / "own.parquet")},
+    ]
+    _refresh_forcing(spec, tmp_path / "cat.yaml")
+    out = capsys.readouterr().out
+    assert calls == ["c_co2"]
+    assert "FAILED a_co2: its ref" in out and "FAILED b_co2: its ref" in out
+
+
+def test_a_ref_under_home_is_reported_rebuilt(tmp_path, monkeypatch, capsys):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "surf.nc").write_text("")
+
+    def fake_add(cat, name, files, grid, *, ref):
+        sidecar = Path(str(Path(ref).expanduser()) + ".sources.json")
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text("{}")
+        return name
+
+    monkeypatch.setattr("ocean_skill.build.add_forcing_source", fake_add)
+    spec = [{"name": "surf", "kind": "surface", "files": str(tmp_path / "surf.nc"),
+             "grid": "g.nc", "ref": "~/refs/surf.parquet"}]
+    _refresh_forcing(spec, tmp_path / "cat.yaml")
+    assert "(reference rebuilt)" in capsys.readouterr().out
+
+
+def test_an_unreadable_defaults_test_does_not_abort_the_run(
+    tmp_path, stub_model, monkeypatch, capsys
+):
+    def index(source):
+        raise KeyError(source)
+
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", index)
+    path = _write_suite(tmp_path, _model_only_suite(tmp_path))
+    result = run_suite(path, list_only=True)
+    out = capsys.readouterr().out
+    assert "latest step of stub: unknown (KeyError" in out
+    assert "will be skipped: source 'stub' could not be read" in out
+    assert len(result.pages) == 1
+
+
+def test_refresh_forcing_says_whether_a_reference_was_reused(
+    tmp_path, monkeypatch, capsys
+):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    (tmp_path / "surf.nc").write_text("")
+    ref = tmp_path / "refs" / "surf.parquet"
+
+    def fake_add(cat, name, files, grid, *, ref):
+        # the builder's contract: it writes the sidecar only when it (re)builds
+        sidecar = Path(str(ref) + ".sources.json")
+        if not sidecar.exists():
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            sidecar.write_text("{}")
+        return name
+
+    monkeypatch.setattr("ocean_skill.build.add_forcing_source", fake_add)
+    spec = [
+        {
+            "name": "surf",
+            "kind": "surface",
+            "files": str(tmp_path / "surf.nc"),
+            "grid": "g.nc",
+            "ref": str(ref),
+        }
+    ]
+    _refresh_forcing(spec, tmp_path / "cat.yaml")
+    assert "surf <- 1 files (reference rebuilt) -> surf" in capsys.readouterr().out
+    _refresh_forcing(spec, tmp_path / "cat.yaml")
+    assert "surf <- 1 files (reference reused) -> surf" in capsys.readouterr().out
 
 
 def test_refresh_forcing_runs_after_the_sources_into_the_same_catalog(

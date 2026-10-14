@@ -13,7 +13,9 @@ dims; the grid file has ``lon_rho``/``lat_rho``/``h``/``mask_rho``/``sigma_r``/`
 and ``hc``/``theta_s``/``theta_b`` as global attributes.
 """
 
+import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -602,4 +604,454 @@ def test_refresh_forcing_keys_are_checked_against_the_kind(kind, extra, message)
                     {"name": "f", "kind": kind, "files": "*.nc", "grid": "g.nc"} | extra
                 ],
             }
+        )
+
+
+# ======================================================================================
+# The real roms-tools layouts: climatology with a plain ``month`` variable, a time
+# variable named unlike its dimension (CO2), and ``ref=`` (a kerchunk reference)
+# ======================================================================================
+
+DAYS_2000 = "relative time: days since 2000-01-01 00:00:00"
+
+
+def _clim_surface_file(path, names):
+    """Write a roms-tools surface climatology.
+
+    ``month`` is a data variable and there is no ``time`` variable, only one
+    ``<name>_time`` per field and an ``abs_time``.
+    """
+    days = 30.4 * np.arange(12)
+    data: dict = {}
+    for k, v in enumerate(names):
+        vals = k + np.arange(12)[:, None, None] + np.zeros((12, NY, NX))
+        data[v] = (("time", "eta_rho", "xi_rho"), vals)
+        data[f"{v}_time"] = (
+            "time",
+            days,
+            {"units": "days", "long_name": DAYS_2000},
+        )
+    data["month"] = ("time", np.arange(1, 13), {"long_name": "Month index (1-12)"})
+    data["abs_time"] = (
+        "time",
+        days,
+        {"units": "days since 2000-01-16 00:00:00"},
+    )
+    attrs = {"climatology": "True", "model_reference_date": "2000-01-01 00:00:00"}
+    xr.Dataset(data, attrs=attrs).to_netcdf(path)
+
+
+CO2_YEARS = (2011, 2012, 2013)
+CO2_STEP, CO2_N = 20.0, 16  # days between records, records per file
+
+
+def _co2_days(year):
+    """Return the days since 2000-01-01 of a year's CO2 records."""
+    start = np.datetime64(f"{year}-01-01") - np.datetime64("2000-01-01")
+    return start.astype(int) + CO2_STEP * np.arange(CO2_N)
+
+
+def _co2_file(path, year):
+    """Write one year of the CO2 file.
+
+    ``xco2_time`` is the time variable, on dimension ``time``, and there is no variable
+    called ``time``.
+    """
+    days = _co2_days(year)
+    vals = (
+        (year - 2010)
+        + np.arange(CO2_N)[:, None, None] * 0.01
+        + np.zeros((CO2_N, NY, NX))
+    )
+    xr.Dataset(
+        {
+            "xco2_air": (("time", "eta_rho", "xi_rho"), vals),
+            "xco2_air_alt": (("time", "eta_rho", "xi_rho"), vals + 0.5),
+            "abs_time": (
+                "time",
+                days * 1440.0,
+                {"units": "minutes since 2011-01-01 00:00:00"},
+            ),
+            "xco2_time": ("time", days, {"units": "days", "long_name": DAYS_2000}),
+        }
+    ).to_netcdf(path)
+
+
+def _physics_file(path, month):
+    """Write one month of hourly surface physics.
+
+    ``time`` is both the dimension and the variable, with a second ``rad_time`` and an
+    ``abs_time`` beside it.
+    """
+    nt = 5
+    days = 4018 + 31.0 * month + np.arange(nt) / 24.0
+    rng = np.random.default_rng(month)
+    dims = ("time", "eta_rho", "xi_rho")
+    data = {v: (dims, rng.normal(size=(nt, NY, NX))) for v in ("uwnd", "vwnd", "Tair")}
+    data["abs_time"] = (
+        "time",
+        days * 24.0,
+        {"units": "hours since 1900-01-01 00:00:00"},
+    )
+    data["rad_time"] = ("time", days, {"units": "days", "long_name": DAYS_2000})
+    xr.Dataset(
+        data,
+        coords={"time": ("time", days, {"units": "days", "long_name": DAYS_2000})},
+    ).to_netcdf(path)
+
+
+def _case_clim_bgc(tmp_path, grid):
+    f = tmp_path / "surface-bgc-unified_clim.nc"
+    _clim_surface_file(f, ["dust", "iron", "nox", "nhy"])
+    return "surface", [f], {"climatology": True}
+
+
+def _case_clim_restoring(tmp_path, grid):
+    f = tmp_path / "surface-restoring_clim.nc"
+    _clim_surface_file(f, ["sss"])
+    return "surface", [f], {"climatology": True}
+
+
+def _case_co2(tmp_path, grid):
+    files = []
+    for year in CO2_YEARS:
+        files.append(tmp_path / f"surface-bgc-mbl_co2_{year}.nc")
+        _co2_file(files[-1], year)
+    return "surface", files, {"time_coord": "xco2_time"}
+
+
+def _case_physics(tmp_path, grid):
+    files = []
+    for month in (0, 1):
+        files.append(tmp_path / f"surface-physics_2011{month + 1:02d}.nc")
+        _physics_file(files[-1], month)
+    return "surface", files, {}
+
+
+def _case_boundary(tmp_path, grid):
+    files = [tmp_path / "bry_201101.nc", tmp_path / "bry_201102.nc"]
+    _boundary_file(files[0], [0, 1, 2])
+    _boundary_file(files[1], [31, 32, 33])
+    return "boundary", files, {"sides": ["south", "west"]}
+
+
+def _case_boundary_clim(tmp_path, grid):
+    f = tmp_path / "bry_clim.nc"
+    _boundary_file(f, np.arange(12) * 30.4, month=True)
+    return "boundary", [f], {"climatology": True, "sides": ["south"]}
+
+
+CASES = {
+    "clim_bgc": _case_clim_bgc,
+    "clim_restoring": _case_clim_restoring,
+    "co2": _case_co2,
+    "physics": _case_physics,
+    "boundary": _case_boundary,
+    "boundary_clim": _case_boundary_clim,
+}
+
+
+def _add(cat, name, case, grid, **extra):
+    """Add one case's entries to ``cat`` under ``name``; return their names."""
+    kind, files, kwargs = case
+    if kind == "boundary":
+        return build.add_boundary_sources(cat, name, files, grid, **kwargs, **extra)
+    return [build.add_forcing_source(cat, name, files, grid, **kwargs, **extra)]
+
+
+@pytest.fixture
+def layouts(isolated_catalogs, tmp_path):
+    grid, lon, lat = _grid(tmp_path)
+    return {
+        "grid": grid,
+        "lon": lon,
+        "lat": lat,
+        "tmp": tmp_path,
+        "catalogs": isolated_catalogs,
+    }
+
+
+def _save(layouts, cat, stem="layouts"):
+    build.save(cat, layouts["catalogs"] / f"{stem}.yaml")
+
+
+@pytest.mark.parametrize(("key", "n_vars"), [("clim_bgc", 4), ("clim_restoring", 1)])
+def test_a_surface_climatology_with_a_plain_month_variable_builds(layouts, key, n_vars):
+    case = CASES[key](layouts["tmp"], layouts["grid"])
+    cat = build.new_catalog(title=key)
+    (name,) = _add(cat, key, case, layouts["grid"])
+    _save(layouts, cat, key)
+    ds = sources.read(name)
+    fields = {k: v for k, v in ds.data_vars.items() if "month" in v.dims}
+    assert len(fields) == n_vars
+    assert all(v.dims == ("month", "eta_rho", "xi_rho") for v in fields.values())
+    assert list(ds["month"].values) == list(range(1, 13))
+    assert "time" not in ds.variables and "abs_time" not in ds.variables
+    np.testing.assert_allclose(ds["lon"].values, layouts["lon"])
+    np.testing.assert_allclose(ds["lat"].values, layouts["lat"])
+    meta = sources.resolve(name).metadata
+    assert meta["climatology"] is True and meta["climatology_period"] == "monthly"
+    # month 3 is the third step of the file: 2 along the monthly ramp (the first
+    # variable in the file has no offset of its own)
+    f = osk.field(source=name, variable=next(iter(fields)), select={"month": 3})
+    assert "month" not in f.data.dims
+    np.testing.assert_allclose(f.data.isel(eta_rho=0, xi_rho=0).values, 2.0)
+
+
+def test_a_time_variable_named_unlike_its_dimension_joins_the_files(layouts):
+    case = _case_co2(layouts["tmp"], layouts["grid"])
+    cat = build.new_catalog(title="co2")
+    (name,) = _add(cat, "co2", case, layouts["grid"])
+    _save(layouts, cat, "co2")
+    ds = sources.read(name)
+    assert {"xco2_air", "xco2_air_alt"} <= set(ds.data_vars)
+    assert ds["xco2_air"].dims == ("time", "eta_rho", "xi_rho")
+    assert ds.sizes["time"] == 3 * CO2_N
+    assert "xco2_time" not in ds.variables
+    want = np.concatenate(
+        [
+            np.datetime64("2000-01-01") + _co2_days(y).astype("timedelta64[D]")
+            for y in CO2_YEARS
+        ]
+    )
+    assert ds["time"].dtype.kind == "M"
+    assert list(ds["time"].values.astype("datetime64[D]")) == list(want)
+    meta = sources.resolve(name).metadata
+    assert (meta["time_coord"], meta["time_dim"], meta["time_units"]) == (
+        "time",
+        "time",
+        "days",
+    )
+    assert meta["reference_date"] == "2000-01-01"
+    # the second year's first record is where its own file put it
+    np.testing.assert_allclose(
+        ds["xco2_air"].isel(time=CO2_N, eta_rho=0, xi_rho=0), 2.0
+    )
+
+
+def test_a_time_variable_the_file_does_not_have_is_named_in_the_error(layouts):
+    f = layouts["tmp"] / "surface-restoring_clim.nc"
+    _clim_surface_file(f, ["sss"])
+    with pytest.raises(ValueError, match="No time coordinate 'time'"):
+        build.add_forcing_source(build.new_catalog(), "s", f, layouts["grid"])
+    with pytest.raises(ValueError, match=r"No time coordinate 'time'.*sss_time"):
+        build.add_forcing_source(
+            build.new_catalog(),
+            "s",
+            f,
+            layouts["grid"],
+            ref=layouts["tmp"] / "r.parquet",
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "suffix"),
+    [(k, ".parquet") for k in CASES] + [("co2", ".json"), ("boundary", ".json")],
+)
+def test_ref_reads_the_same_values_as_the_files(layouts, key, suffix):
+    case = CASES[key](layouts["tmp"], layouts["grid"])
+    cat = build.new_catalog(title=key)
+    # the reference first: kerchunking opens each file lock-free, which HDF5 refuses
+    # while the same process still holds one open with locking (a plain entry's probe)
+    ref = layouts["tmp"] / f"{key}{suffix}"
+    viaref = _add(cat, "viaref", case, layouts["grid"], ref=ref)
+    plain = _add(cat, "plain", case, layouts["grid"])
+    _save(layouts, cat, key)
+    assert ref.exists() and Path(str(ref) + ".sources.json").is_file()
+    assert [n.replace("viaref", "plain") for n in viaref] == plain
+    for a, b in zip(plain, viaref):
+        want, got = sources.read(a).load(), sources.read(b).load()
+        xr.testing.assert_allclose(got, want)
+        assert set(got.coords) == set(want.coords)
+        for dim in want.dims:
+            assert got.sizes[dim] == want.sizes[dim]
+        ma, mb = sources.resolve(a).metadata, sources.resolve(b).metadata
+        for k in (
+            "time_coord",
+            "time_dim",
+            "time_units",
+            "reference_date",
+            "climatology",
+            "variables",
+            "time_coverage_start",
+            "time_coverage_end",
+        ):
+            assert ma.get(k) == mb.get(k), k
+
+
+def test_ref_sidecar_records_the_files_and_the_arguments(layouts):
+    import json
+
+    cat = build.new_catalog()
+    case = _case_co2(layouts["tmp"], layouts["grid"])
+    ref = layouts["tmp"] / "co2.parquet"
+    _add(cat, "co2", case, layouts["grid"], ref=ref)
+    state = json.loads(Path(str(ref) + ".sources.json").read_text())
+    files = case[1]
+    assert [f["path"] for f in state["files"]] == [str(f.resolve()) for f in files]
+    assert state["files"][0]["size"] == files[0].stat().st_size
+    assert state["files"][0]["mtime_ns"] == files[0].stat().st_mtime_ns
+    assert state["concat_dim"] == "time"
+    assert state["loadable_variables"] == ["xco2_time"]
+    assert state["keep"] == "last"
+    clim = _case_clim_bgc(layouts["tmp"], layouts["grid"])
+    _add(cat, "clim", clim, layouts["grid"], ref=layouts["tmp"] / "clim.parquet")
+    state = json.loads((layouts["tmp"] / "clim.parquet.sources.json").read_text())
+    assert state["concat_dim"] == "time" and state["loadable_variables"] == ["month"]
+
+
+class _Watch:
+    """Count ``make_kerchunk`` calls and record every forcing file xarray opens."""
+
+    def __init__(self, monkeypatch, forcing_files):
+        self.builds = 0
+        self.opened: list[str] = []
+        self.names = {Path(f).name for f in forcing_files}
+        real = build.make_kerchunk
+
+        def make(*a, **k):
+            self.builds += 1
+            return real(*a, **k)
+
+        monkeypatch.setattr(build, "make_kerchunk", make)
+        for fn in ("open_dataset", "open_mfdataset"):
+            monkeypatch.setattr(xr, fn, self._wrap(getattr(xr, fn)))
+
+    def _wrap(self, real):
+        def opener(first, *a, **k):
+            paths = first if isinstance(first, (list, tuple)) else [first]
+            self.opened += [str(p) for p in paths if Path(str(p)).name in self.names]
+            return real(first, *a, **k)
+
+        return opener
+
+
+@pytest.mark.parametrize("key", ["co2", "clim_bgc", "boundary", "physics"])
+def test_a_fresh_ref_is_reused_and_no_forcing_file_is_opened(layouts, monkeypatch, key):
+    case = CASES[key](layouts["tmp"], layouts["grid"])
+    ref = layouts["tmp"] / "r.parquet"
+    watch = _Watch(monkeypatch, case[1])
+    cat = build.new_catalog()
+    first = _add(cat, "one", case, layouts["grid"], ref=ref)
+    assert watch.builds == 1
+    watch.opened.clear()
+    second = _add(cat, "two", case, layouts["grid"], ref=ref)
+    assert watch.builds == 1, "a fresh reference was rebuilt"
+    assert watch.opened == []
+    _save(layouts, cat, key)
+    for name in second:
+        sources.read(name).load()
+    assert watch.opened == []
+    assert [n.replace("one", "two") for n in first] == second
+
+
+def test_touching_or_adding_a_file_rebuilds_the_ref(layouts, monkeypatch):
+    case = _case_co2(layouts["tmp"], layouts["grid"])
+    kind, files, kwargs = case
+    ref = layouts["tmp"] / "r.parquet"
+    watch = _Watch(monkeypatch, files)
+    cat = build.new_catalog()
+    _add(cat, "a", case, layouts["grid"], ref=ref)
+    assert watch.builds == 1
+    st = files[1].stat()
+    os.utime(files[1], ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _add(cat, "b", case, layouts["grid"], ref=ref)
+    assert watch.builds == 2
+    _add(cat, "c", case, layouts["grid"], ref=ref)
+    assert watch.builds == 2
+    # a fourth file joins the set
+    extra = layouts["tmp"] / "surface-bgc-mbl_co2_2014.nc"
+    _co2_file(extra, 2014)
+    _add(cat, "d", (kind, [*files, extra], kwargs), layouts["grid"], ref=ref)
+    assert watch.builds == 3
+    _save(layouts, cat, "co2")
+    assert sources.read("d").sizes["time"] == 4 * CO2_N
+
+
+def test_the_order_of_the_files_is_part_of_freshness(layouts, monkeypatch):
+    """The files join in the order given, so another order is another reference."""
+    _, files, kwargs = _case_co2(layouts["tmp"], layouts["grid"])
+    ref = layouts["tmp"] / "r.parquet"
+    watch = _Watch(monkeypatch, files)
+    for name, order in (("a", files), ("b", files[::-1])):
+        build.add_forcing_source(
+            build.new_catalog(), name, order, layouts["grid"], ref=ref, **kwargs
+        )
+    assert watch.builds == 2
+
+
+def test_two_entries_sharing_a_ref_build_it_once(layouts, monkeypatch):
+    _, files, kwargs = _case_co2(layouts["tmp"], layouts["grid"])
+    ref = layouts["tmp"] / "shared.parquet"
+    watch = _Watch(monkeypatch, files)
+    cat = build.new_catalog()
+    build.add_forcing_source(cat, "co2_a", files, layouts["grid"], ref=ref, **kwargs)
+    build.add_forcing_source(
+        cat, "co2_b", files, layouts["grid"], ref=ref, variables=["xco2_air"], **kwargs
+    )
+    assert watch.builds == 1
+    # the four sides of a boundary share one reference too
+    _, bfiles, _ = _case_boundary(layouts["tmp"], layouts["grid"])
+    watch = _Watch(monkeypatch, bfiles)
+    names = build.add_boundary_sources(
+        cat, "bry", bfiles, layouts["grid"], ref=layouts["tmp"] / "bry.parquet"
+    )
+    assert watch.builds == 1 and len(names) == 4
+
+
+def test_an_unfinished_file_refuses_the_reference_instead_of_leaving_a_gap(
+    layouts, monkeypatch
+):
+    _, files, kwargs = _case_co2(layouts["tmp"], layouts["grid"])
+    with open(files[-1], "r+b") as f:  # a truncated last year
+        f.truncate(files[-1].stat().st_size // 2)
+    ref = layouts["tmp"] / "r.parquet"
+    calls = []
+    monkeypatch.setattr(build, "make_kerchunk", lambda *a, **k: calls.append(a))
+    with pytest.raises(ValueError, match="cannot build the reference"):
+        build.add_forcing_source(
+            build.new_catalog(), "a", files, layouts["grid"], ref=ref, **kwargs
+        )
+    assert calls == []
+    assert not Path(str(ref) + ".sources.json").exists()
+
+
+def test_a_failed_build_leaves_no_sidecar(layouts, monkeypatch):
+    _, files, kwargs = _case_co2(layouts["tmp"], layouts["grid"])
+    ref = layouts["tmp"] / "r.parquet"
+    side = Path(str(ref) + ".sources.json")
+    real = build.make_kerchunk
+
+    def broken(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(build, "make_kerchunk", broken)
+    with pytest.raises(RuntimeError, match="disk full"):
+        build.add_forcing_source(
+            build.new_catalog(), "a", files, layouts["grid"], ref=ref, **kwargs
+        )
+    assert not side.exists() and not Path(str(side) + ".tmp").exists()
+    # and a good sidecar does not outlive the rebuild that failed after it
+    monkeypatch.setattr(build, "make_kerchunk", real)
+    build.add_forcing_source(
+        build.new_catalog(), "a", files, layouts["grid"], ref=ref, **kwargs
+    )
+    assert side.is_file()
+    st = files[0].stat()
+    os.utime(files[0], ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    monkeypatch.setattr(build, "make_kerchunk", broken)
+    with pytest.raises(RuntimeError, match="disk full"):
+        build.add_forcing_source(
+            build.new_catalog(), "a", files, layouts["grid"], ref=ref, **kwargs
+        )
+    assert not side.exists()
+
+
+def test_a_ref_over_remote_files_is_refused(layouts):
+    with pytest.raises(ValueError, match="local forcing files"):
+        build._forcing_reference(
+            ["https://example.org/a.nc"],
+            layouts["tmp"] / "r.parquet",
+            concat_dim="time",
+            loadable_variables=["time"],
         )
