@@ -366,6 +366,49 @@ def _template_value(value: Any, namespace: dict[str, Any], *, title: str) -> Any
     return value
 
 
+# -- sources whose time axis cannot pin a window ---------------------------------------
+#
+# ``expand()`` reads each test source's native time index to inject a run window. Two
+# things can go wrong there without the suite being wrong, and neither may abort the
+# whole expansion: a source with *no time axis* (a monthly climatology on a ``month``
+# dimension) is static data -- its pages get no window and are cacheable; a source that
+# *cannot be read at all* (its catalog entry is missing, opening it raises) leaves its
+# pages unwindowed, uncacheable and flagged with ``ExpandedPage.problem`` so the run
+# can list them and skip just those. The "no time axis" case is told apart from a real
+# read failure by looking at the opened source (``_lacks_time_axis``), never by parsing
+# the error text.
+
+
+class _SourceUnreadable(Exception):
+    """A page's source could not be read at expand time (the message says why)."""
+
+    def __init__(self, source: str, cause: BaseException) -> None:
+        super().__init__(
+            f"source {source!r} could not be read at expand time: "
+            f"{type(cause).__name__}: {cause}"
+        )
+        self.source = source
+
+
+def _lacks_time_axis(source: str) -> bool:
+    """Whether ``source`` opens fine but has no time axis at all (a climatology).
+
+    Checked on the opened object itself so any other failure -- a missing catalog
+    entry, an open error -- stays a failure. A time axis that exists but carries no
+    values is a failure too, not "timeless": that is a run whose time did not decode,
+    and treating it as static would cache pages that go stale as it grows.
+    """
+    try:
+        from ocean_skill import operators
+        from ocean_skill.sources import read
+
+        obj = read(source)
+        dim = operators.resolve_dim(obj, "time")
+        return dim is None
+    except Exception:
+        return False
+
+
 # -- for_each expansion -------------------------------------------------------------
 
 
@@ -394,10 +437,22 @@ def _months_in(index: Any, spec: Any) -> list[tuple[int, int]]:
 
 
 def _for_each_values(
-    name: str, spec: Any, *, defaults: dict[str, Any], test_index: Any
+    name: str,
+    spec: Any,
+    *,
+    defaults: dict[str, Any],
+    test_index: Any,
+    index_error: Exception | None = None,
 ) -> list[Any]:
-    """Return the concrete list of raw values one ``for_each`` name iterates over."""
+    """Return the concrete list of raw values one ``for_each`` name iterates over.
+
+    ``index_error`` is why ``test_index`` is missing (a source with no time axis, or
+    one that could not be read): raised only when ``month: run`` needs the index, so
+    every other ``for_each`` name still expands.
+    """
     if name == "month":
+        if index_error is not None:
+            raise index_error
         return [_MonthNS(y, m) for y, m in _months_in(test_index, spec)]
     if isinstance(spec, str):
         m = _EXACT_PLACEHOLDER_RE.match(spec)
@@ -423,6 +478,7 @@ def _expand_for_each(
     *,
     defaults: dict[str, Any],
     test_index: Any,
+    index_error: Exception | None = None,
 ) -> list[dict[str, Any]]:
     """One namespace dict per combination, in YAML key order then product order."""
     if not for_each:
@@ -435,7 +491,13 @@ def _expand_for_each(
         )
     names = list(for_each)
     value_lists = [
-        _for_each_values(name, for_each[name], defaults=defaults, test_index=test_index)
+        _for_each_values(
+            name,
+            for_each[name],
+            defaults=defaults,
+            test_index=test_index,
+            index_error=index_error,
+        )
         for name in names
     ]
     combos = []
@@ -655,7 +717,13 @@ def _pin_test_lane(
     cacheable)``: ``select`` is the (now windowed) dict, ``had_explicit_time`` whether
     the page named a time at all -- ``"latest"`` counts -- and ``cacheable`` that
     verdict, before the suite-wide ``cache:`` switch is applied.
+
+    ``index`` is ``None`` for a source with no time axis (static data): nothing is
+    injected and the result is cacheable.
     """
+    if index is None:
+        select = kwargs.setdefault("select", {})
+        return select, "time" in select, True
     t0, t1 = index[0].isoformat(), index[-1].isoformat()
     select = kwargs.setdefault("select", {})
     had_explicit_time = "time" in select
@@ -792,6 +860,12 @@ class ExpandedPage:
     #: A compare page's drawing method (one of :data:`COMPARE_DRAWS`; ``"plot"``
     #: unless the page says otherwise), ``None`` for every other kind of page.
     draw: str | None = None
+    #: Why this page cannot be drawn, found at expand time -- a source that could not
+    #: be read (``"source 'x' could not be read at expand time: KeyError: ..."``).
+    #: ``None`` for a healthy page. Such a page is still emitted (unwindowed, never
+    #: cached) so the run can list it and skip it with this reason. Part of
+    #: ``as_dict()`` only when set, so every other page's dict is unchanged.
+    problem: str | None = None
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
@@ -805,7 +879,7 @@ class ExpandedPage:
     results: list[dict[str, Any]] = _dc_field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "title": self.title,
             "kind": self.kind,
             "kwargs": self.kwargs,
@@ -815,6 +889,9 @@ class ExpandedPage:
             "contours": self.contours,
             "draw": self.draw,
         }
+        if self.problem is not None:
+            out["problem"] = self.problem
+        return out
 
 
 def _pin_to_page(kwargs: dict[str, Any], *, seen: set[str]) -> dict[str, Any]:
@@ -891,8 +968,8 @@ def _resolve_series_window(
     explicit window is used verbatim, never padded.
     """
     time_value = select.get("time")
-    if not isinstance(time_value, str):
-        return
+    if index is None or not isinstance(time_value, str):
+        return  # no time axis to pad around (or no instant to pad)
     for step in steps:
         if step["name"] != "series":
             continue
@@ -956,7 +1033,7 @@ def _expand_xy_page(
     test_source: str | None,
     get_index: Any,
     suite_cache: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str | None]:
     """Resolve one ``XY:``/``TS:`` page into the kwargs :func:`build` draws from.
 
     Each member becomes a ``field()`` kwargs dict (``source``, ``variable``, its own
@@ -969,6 +1046,11 @@ def _expand_xy_page(
     change per run; refused if it names a ``time`` of its own, and a no-op on the test
     member). ``regions`` and ``at_center`` are checked here (so a typo fails at
     ``--list``) but stored as written: XY expands the boxes itself.
+
+    Returns ``(kwargs, problem)``: ``problem`` is the :class:`_SourceUnreadable`
+    message when a member's source could not be read (that member is then left
+    unwindowed and uncached), else ``None``. A test source with no time axis pins
+    nothing and is cacheable.
     """
     kind = page.kind
     # Deep-copied for the same reason as a field page's kwargs (see expand()): a
@@ -979,6 +1061,7 @@ def _expand_xy_page(
     args = _check_xy_args(raw, kind=kind, title=title)
     x, y = (_TS_X, _TS_Y) if kind == "TS" else (args.x, args.y)
 
+    problem: str | None = None
     members: dict[str, dict[str, Any]] = {}
     for label, spec in args.members.items():
         m = dict(spec or {})
@@ -1013,7 +1096,11 @@ def _expand_xy_page(
         if test_source is not None and source == test_source:
             if m.get("select") is None:
                 m["select"] = {}
-            _, _, cacheable = _pin_test_lane(m, get_index(source))
+            try:
+                _, _, cacheable = _pin_test_lane(m, get_index(source))
+            except _SourceUnreadable as exc:
+                problem = problem or str(exc)
+                cacheable = False
             m["cache"] = suite_cache and cacheable
         else:
             if window == "run":
@@ -1029,8 +1116,18 @@ def _expand_xy_page(
                         "the other"
                     )
                 # A literal window, so the cache key stays right when the run grows.
-                index = get_index(test_source)
-                _inject_field_window(m, index[0].isoformat(), index[-1].isoformat())
+                try:
+                    index = get_index(test_source)
+                except _SourceUnreadable as exc:
+                    problem = problem or str(exc)
+                else:
+                    if index is None:
+                        raise ValueError(
+                            f"page {title!r}: {kind}: member {label!r}: window: run "
+                            f"needs the test source {test_source!r} to have a time "
+                            "axis, but it has none (a climatology has no run span)"
+                        )
+                    _inject_field_window(m, index[0].isoformat(), index[-1].isoformat())
             m["cache"] = suite_cache
         members[label] = m
 
@@ -1059,7 +1156,7 @@ def _expand_xy_page(
         "y": y,
         "regions": args.regions,
         "at_center": list(args.at_center),
-    }
+    }, problem
 
 
 def _window_source(source: Any, test_source: Any, *, title: str) -> str:
@@ -1086,15 +1183,18 @@ def _window_source(source: Any, test_source: Any, *, title: str) -> str:
 
 def _resolve_field_kwargs(
     kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
-) -> tuple[dict[str, Any], dict[str, Any], bool, bool, Any]:
+) -> tuple[dict[str, Any], dict[str, Any], bool, bool, Any, str | None]:
     """Resolve one ``field:`` page's templated kwargs in place.
 
     Fills the ``source`` default, renames ``variables`` to ``variable``, checks the
     depth contradiction and pins the time selection to the run (:func:`_pin_test_lane`)
     -- against the time axis of :func:`_window_source`'s pick when ``source`` is a
-    list. Returns ``(kwargs, select, had_explicit_time, cacheable, index)``. A
-    page's ``contours:`` override mapping goes through here too, so the lines cover
-    the same dates as the fill.
+    list. Returns ``(kwargs, select, had_explicit_time, cacheable, index, problem)``.
+    ``index`` is ``None`` (and the page cacheable, nothing injected) for a source with
+    no time axis; when the source cannot be read at all, the page is left unwindowed
+    and uncacheable and ``problem`` says why (else ``None``). A page's ``contours:``
+    override mapping goes through here too, so the lines cover the same dates as the
+    fill.
     """
     kwargs.setdefault("source", test_source)
     source = kwargs["source"]
@@ -1103,20 +1203,27 @@ def _resolve_field_kwargs(
     if "variables" in kwargs:
         kwargs["variable"] = kwargs.pop("variables")
     _check_field_depth_contradiction(title, kwargs)
-    index = get_index(_window_source(source, test_source, title=title))
+    try:
+        index = get_index(_window_source(source, test_source, title=title))
+    except _SourceUnreadable as exc:
+        select = kwargs.setdefault("select", {})
+        return kwargs, select, "time" in select, False, None, str(exc)
     select, had_explicit_time, cacheable = _pin_test_lane(kwargs, index)
-    return kwargs, select, had_explicit_time, cacheable, index
+    return kwargs, select, had_explicit_time, cacheable, index, None
 
 
 def _resolve_compare_kwargs(
     kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, str | None]:
     """Resolve one ``compare:`` page's templated kwargs in place.
 
     Fills the ``test`` default, injects the run window into the test lane and decides
     whether the result is cacheable (before the suite-wide ``cache:`` switch). Returns
-    ``(kwargs, cacheable)``. A page's ``contours:`` override mapping goes through here
-    too, so the lines cover the same dates as the fill.
+    ``(kwargs, cacheable, problem)``. A test source with no time axis gets no window
+    and is cacheable (static data); one that cannot be read leaves the page
+    unwindowed and uncacheable, ``problem`` saying why (else ``None``). A page's
+    ``contours:`` override mapping goes through here too, so the lines cover the same
+    dates as the fill.
     """
     kwargs.setdefault("test", test_source)
     source = kwargs["test"]
@@ -1128,7 +1235,14 @@ def _resolve_compare_kwargs(
             f"page {title!r}: compare: notes must be a string, got "
             f"{type(kwargs['notes']).__name__} ({kwargs['notes']!r})"
         )
-    index = get_index(source)
+    try:
+        index = get_index(source)
+    except _SourceUnreadable as exc:
+        return kwargs, False, str(exc)
+    if index is None:
+        # A static source: nothing to window. Only ``times:`` can still make it
+        # uncacheable (see below).
+        return kwargs, kwargs.get("times") is None, None
     t0, t1 = index[0].isoformat(), index[-1].isoformat()
     select = kwargs.get("select")
     is_pair_spec = isinstance(select, dict) and (
@@ -1161,7 +1275,7 @@ def _resolve_compare_kwargs(
         # -- what actually gets keyed is not what was just resolved
         # above, so nothing here can vouch for it.
         cacheable = False
-    return kwargs, cacheable
+    return kwargs, cacheable, None
 
 
 def _check_contours_spec(spec: Any, *, kind: str, title: str) -> bool | dict[str, Any]:
@@ -1210,6 +1324,11 @@ def expand(suite: Any) -> list[ExpandedPage]:
     now". That same index also decides each page's ``cache=`` (see
     :func:`_is_closed`), against whatever it resolved to on *this* call --
     a page's cache entry is only ever as fresh as the last time the suite ran.
+
+    A source that cannot supply that index never aborts the expansion: one with no
+    time axis (a monthly climatology) is static -- its pages get no window and are
+    cacheable -- and one that cannot be read at all leaves its pages unwindowed with
+    :attr:`ExpandedPage.problem` set, for the run to list and skip.
     """
     from ocean_skill import extrema
     from ocean_skill.comparison import _ANY_VERTICAL_KEYS
@@ -1222,9 +1341,23 @@ def expand(suite: Any) -> list[ExpandedPage]:
     pin_seen: set[str] = set()
 
     def get_index(source: str) -> Any:
+        """Return the source's native time index, or ``None`` if it has no time axis.
+
+        Raises :class:`_SourceUnreadable` (memoized like a success) when it cannot be
+        read at all -- callers turn that into a page's ``problem``.
+        """
         if source not in index_cache:
-            index_cache[source] = extrema._native_time_index(source)
-        return index_cache[source]
+            try:
+                index_cache[source] = extrema._native_time_index(source)
+            except Exception as exc:
+                timeless = isinstance(exc, ValueError) and _lacks_time_axis(source)
+                index_cache[source] = (
+                    None if timeless else _SourceUnreadable(source, exc)
+                )
+        result = index_cache[source]
+        if isinstance(result, _SourceUnreadable):
+            raise result
+        return result
 
     out: list[ExpandedPage] = []
     for page in suite.pages:
@@ -1265,10 +1398,42 @@ def expand(suite: Any) -> list[ExpandedPage]:
         elif page.kind in ("XY", "TS"):
             page_source = test_source
 
-        test_index = get_index(page_source) if page.for_each and page_source else None
-        combos = _expand_for_each(
-            page.title, page.for_each, defaults=defaults, test_index=test_index
-        )
+        test_index = None
+        index_error: Exception | None = None
+        if page.for_each and page_source:
+            try:
+                test_index = get_index(page_source)
+            except _SourceUnreadable as exc:
+                index_error = exc
+            else:
+                if test_index is None:
+                    index_error = ValueError(
+                        f"page {page.title!r}: for_each: month: needs the time axis "
+                        f"of {page_source!r}, but it has none (a climatology has no "
+                        "run to take months from) -- list the months explicitly"
+                    )
+        try:
+            combos = _expand_for_each(
+                page.title,
+                page.for_each,
+                defaults=defaults,
+                test_index=test_index,
+                index_error=index_error,
+            )
+        except _SourceUnreadable as exc:
+            # ``month: run`` is the only thing that reads the index, and without it
+            # there are no combinations to name: one placeholder carries the reason.
+            out.append(
+                ExpandedPage(
+                    title=page.title,
+                    kind=page.kind,
+                    kwargs={},
+                    plot={},
+                    cache=False,
+                    problem=str(exc),
+                )
+            )
+            continue
 
         plot_defaults = defaults.get("plot", {})
 
@@ -1291,7 +1456,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 # place, and without this a shared placeholder would leak one
                 # page's resolved time into every other page that names it.
                 raw = _template_value(dict(page.field), namespace, title=title)
-                kwargs, select, had_explicit_time, cacheable, index = (
+                kwargs, select, had_explicit_time, cacheable, index, problem = (
                     _resolve_field_kwargs(
                         copy.deepcopy(raw),
                         title=title,
@@ -1339,15 +1504,20 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     # Resolved like the page itself (source default, run window,
                     # latest) so the lines cover the same dates as the fill; the
                     # page is only cacheable when both reads are.
-                    contours, _, _, contour_cacheable, _ = _resolve_field_kwargs(
-                        copy.deepcopy(
-                            _contour_overrides(contours, raw, kind="field", title=title)
-                        ),
-                        title=title,
-                        test_source=test_source,
-                        get_index=get_index,
+                    contours, _, _, contour_cacheable, _, contour_problem = (
+                        _resolve_field_kwargs(
+                            copy.deepcopy(
+                                _contour_overrides(
+                                    contours, raw, kind="field", title=title
+                                )
+                            ),
+                            title=title,
+                            test_source=test_source,
+                            get_index=get_index,
+                        )
                     )
                     cacheable = cacheable and contour_cacheable
+                    problem = problem or contour_problem
                 out.append(
                     ExpandedPage(
                         title=title,
@@ -1357,13 +1527,14 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         cache=suite.cache and cacheable,
                         steps=steps,
                         contours=contours,
+                        problem=problem,
                     )
                 )
 
             elif page.kind == "compare":
                 # See the field branch above for why this is deep-copied.
                 raw = _template_value(dict(page.compare), namespace, title=title)
-                kwargs, cacheable = _resolve_compare_kwargs(
+                kwargs, cacheable, problem = _resolve_compare_kwargs(
                     copy.deepcopy(raw),
                     title=title,
                     test_source=test_source,
@@ -1378,17 +1549,20 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 check_draw(title, draw, contours)
                 if isinstance(contours, dict):
                     # Same treatment as the page (see the field branch above).
-                    contours, contour_cacheable = _resolve_compare_kwargs(
-                        copy.deepcopy(
-                            _contour_overrides(
-                                contours, raw, kind="compare", title=title
-                            )
-                        ),
-                        title=title,
-                        test_source=test_source,
-                        get_index=get_index,
+                    contours, contour_cacheable, contour_problem = (
+                        _resolve_compare_kwargs(
+                            copy.deepcopy(
+                                _contour_overrides(
+                                    contours, raw, kind="compare", title=title
+                                )
+                            ),
+                            title=title,
+                            test_source=test_source,
+                            get_index=get_index,
+                        )
                     )
                     cacheable = cacheable and contour_cacheable
+                    problem = problem or contour_problem
                 out.append(
                     ExpandedPage(
                         title=title,
@@ -1398,11 +1572,12 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         cache=suite.cache and cacheable,
                         contours=contours,
                         draw=draw,
+                        problem=problem,
                     )
                 )
 
             elif page.kind in ("XY", "TS"):
-                kwargs = _expand_xy_page(
+                kwargs, problem = _expand_xy_page(
                     page,
                     namespace,
                     title=title,
@@ -1417,6 +1592,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         kwargs=kwargs,
                         plot=plot,
                         cache=all(m["cache"] for m in kwargs["members"].values()),
+                        problem=problem,
                     )
                 )
 

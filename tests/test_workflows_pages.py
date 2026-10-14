@@ -2322,3 +2322,176 @@ def test_build_metrics_series_forwards_its_own_kwargs(monkeypatch):
     (p,) = P.expand(_suite([page], pdf=False, defaults={"test": "stub"}))
     P.build(p)
     assert calls == [("metrics_series", {"metrics": ["rmse", "bias"]})]
+
+
+# -- sources with no time axis / sources that cannot be read ---------------------------
+#
+# ``clim`` is a monthly climatology (a ``month`` dimension, no ``time``); ``gone`` is a
+# catalog entry that was never built. Neither may abort the whole expansion.
+
+
+@pytest.fixture
+def odd_sources(monkeypatch):
+    import xarray as xr
+
+    clim = xr.Dataset(
+        {"temperature": (("month",), [1.0, 2.0, 3.0])},
+        coords={"month": [1, 2, 3]},
+    )
+
+    def fake_index(source):
+        if source == "clim":
+            raise ValueError(f"{source!r} has no time axis, so a default time ...")
+        if source == "gone":
+            raise KeyError(source)
+        if source == "odd":  # a ValueError that is NOT about a missing time axis
+            raise ValueError("something else entirely")
+        return INDEX
+
+    def fake_read(source):
+        if source == "clim":
+            return clim
+        raise KeyError(source)
+
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", fake_index)
+    monkeypatch.setattr("ocean_skill.sources.read", fake_read)
+
+
+def test_a_time_axis_without_values_is_unreadable_not_timeless(monkeypatch):
+    import xarray as xr
+
+    undecoded = xr.Dataset({"temperature": (("time",), [1.0, 2.0])})
+
+    def fake_index(source):
+        raise ValueError(f"{source!r}'s time axis carries no coordinate values")
+
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", fake_index)
+    monkeypatch.setattr("ocean_skill.sources.read", lambda source: undecoded)
+    page = {
+        "title": "x",
+        "compare": {"test": "run", "reference": "woa", "variables": ["temperature"]},
+    }
+    (p,) = P.expand(_suite([page]))
+    assert p.problem is not None and "could not be read" in p.problem
+    assert not p.cache
+
+
+def test_a_compare_page_on_a_timeless_test_source_gets_no_window(odd_sources):
+    page = {
+        "title": "x",
+        "compare": {
+            "test": "clim",
+            "reference": "woa",
+            "variables": ["temperature"],
+            "aggregate": {"month": "mean"},
+        },
+    }
+    (p,) = P.expand(_suite([page]))
+    assert "select" not in p.kwargs  # nothing injected into any lane
+    assert p.cache and p.problem is None
+
+
+def test_a_timeless_compare_with_times_is_still_uncacheable(odd_sources):
+    page = {
+        "title": "x",
+        "compare": {"test": "clim", "reference": "woa", "times": "month"},
+    }
+    (p,) = P.expand(_suite([page]))
+    assert not p.cache and p.problem is None
+
+
+def test_a_field_page_on_a_timeless_source_gets_no_window(odd_sources):
+    page = {"title": "x", "field": {"variables": ["temperature"]}}
+    (p,) = P.expand(_suite([page], defaults={"test": "clim"}))
+    assert "time" not in p.kwargs["select"]
+    assert p.cache and p.problem is None
+
+
+def test_a_field_list_source_on_a_timeless_pick_gets_no_window(odd_sources):
+    page = _list_source_page(["clim", "stub"], depth="surface")
+    (p,) = P.expand(_suite([page], defaults={"test": "clim"}))
+    assert p.kwargs["select"] == {"depth": "surface"}
+    assert p.cache and p.problem is None
+
+
+def test_an_xy_test_member_on_a_timeless_source_gets_no_window(odd_sources):
+    page = {"title": "x", "TS": {"members": {"clim": {}}}}
+    (p,) = P.expand(_suite([page], defaults={"test": "clim"}))
+    assert p.kwargs["members"]["clim"]["select"] == {}
+    assert p.cache and p.problem is None
+
+
+def test_a_timeless_source_is_told_apart_from_other_value_errors(odd_sources):
+    # a ValueError whose source does not lack a time axis is a read failure
+    page = {"title": "x", "compare": {"test": "odd", "reference": "woa"}}
+    (p,) = P.expand(_suite([page]))
+    assert p.problem is not None and "ValueError: something else" in p.problem
+
+
+def test_an_unreadable_test_source_flags_the_page_and_spares_the_rest(odd_sources):
+    pages = [
+        {"title": "bad", "compare": {"test": "gone", "reference": "woa"}},
+        {"title": "bad field", "field": {"source": "gone", "variables": ["a"]}},
+        {"title": "good", "compare": {"test": "stub", "reference": "woa"}},
+    ]
+    bad, bad_field, good = P.expand(_suite(pages))
+    assert (
+        bad.problem
+        == "source 'gone' could not be read at expand time: KeyError: 'gone'"
+    )
+    assert bad_field.problem == bad.problem
+    for page in (bad, bad_field):
+        assert not page.cache
+        assert "time" not in (page.kwargs.get("select") or {})
+        assert "time" not in ((page.kwargs.get("select") or {}).get("test") or {})
+    assert bad.as_dict()["problem"] == bad.problem
+    assert good.problem is None and "problem" not in good.as_dict()
+    assert good.kwargs["select"]["test"]["time"]["max"] == INDEX[-1].isoformat()
+
+
+def test_an_unreadable_xy_test_member_flags_the_page(odd_sources):
+    page = {"title": "x", "TS": {"members": {"m": {}}}}
+    (p,) = P.expand(_suite([page], defaults={"test": "gone"}))
+    assert p.problem and "'gone'" in p.problem
+    assert not p.cache and "time" not in p.kwargs["members"]["m"]["select"]
+
+
+def test_for_each_month_run_on_a_timeless_source_is_a_clear_error(odd_sources):
+    page = {
+        "title": "{month.name}",
+        "for_each": {"month": "run"},
+        "compare": {"test": "clim", "reference": "woa"},
+    }
+    with pytest.raises(
+        ValueError, match=r"for_each: month.*'clim'.*no time axis|'clim'"
+    ):
+        P.expand(_suite([page]))
+    with pytest.raises(ValueError, match="has none"):
+        P.expand(_suite([page]))
+
+
+def test_for_each_without_month_still_expands_when_the_source_is_unreadable(
+    odd_sources,
+):
+    page = {
+        "title": "t{a}",
+        "for_each": {"a": [10, 20]},
+        "compare": {"test": "gone", "reference": "woa"},
+    }
+    pages = P.expand(_suite([page]))
+    assert len(pages) == 2 and all(p.problem for p in pages)
+
+
+def test_for_each_month_run_on_an_unreadable_source_leaves_one_flagged_page(
+    odd_sources,
+):
+    page = {
+        "title": "{month.name}",
+        "for_each": {"month": "run"},
+        "compare": {"test": "gone", "reference": "woa"},
+    }
+    ok = {"title": "ok", "compare": {"test": "stub", "reference": "woa"}}
+    flagged, fine = P.expand(_suite([page, ok]))
+    assert flagged.title == "{month.name}" and not flagged.cache
+    assert "'gone'" in flagged.problem
+    assert fine.problem is None

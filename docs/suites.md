@@ -79,11 +79,15 @@ refresh:                              # optional: rebuild the model's kerchunk r
       ref: refs/pac_dt_ramp.parquet
       keep: latest-per-file           # forwarded to make_kerchunk; see its own docstring
       min_age: 0.0                    # seconds -- skip a file still being written (build._partition_unfinished)
+      subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}  # optional, forwarded to make_kerchunk: smaller stored chunks
+                                      # (here 1 level x 74 rows), so depth matching reads bands of whole
+                                      # columns, not every level of the domain; the length must divide the dim
   forcing:                            # optional: catalog roms-tools forcing files into the same catalog
     - name: base_bry                  # kind: boundary -> base_bry_south, ..., base_bry_west
       kind: boundary                  # boundary (build.add_boundary_sources) | surface (build.add_forcing_source)
       files: [y2011/*_boundary-physics_*.nc, y2012/*_boundary-physics_*.nc]  # glob or globs, joined in order
       grid: input/grid.nc
+      ref: refs/base_bry.parquet      # optional: kerchunk reference, rebuilt only when the files change
       variables: [temp, salt, NO3]    # optional: base names to keep; default all
       climatology: false              # true -> a 12-month _clim file: month replaces time
       sides: [south, north]           # optional, boundary only; default all four
@@ -91,7 +95,7 @@ refresh:                              # optional: rebuild the model's kerchunk r
       kind: surface
       files: input/*_surface-bgc-mbl_co2_*.nc
       grid: input/grid.nc
-      time_coord: xco2_time           # optional, surface only; default time
+      time_coord: xco2_time           # optional, surface only: the time variable (its dimension may be named otherwise); default time
 
 defaults:                             # merged into every page; a page's own keys win
   test: pac_dt_ramp                   # exactly one source -- required for time: latest/month: run
@@ -744,7 +748,10 @@ catch a C library writing straight to a file descriptor.
 A page is skipped -- never fatal to the rest of the report -- when its variable is
 absent, its observational catalog entry isn't on this machine's search path
 (`osk.catalog.search_paths()`), or the comparison itself raises; `run.log` has the
-traceback. `main`'s exit code: `0` every page drew, `3` the run completed with some
+traceback. A page whose own source cannot be read while the suite is expanded (say a
+`refresh.forcing` entry that failed to build) is skipped without being tried, and
+`--list` already marks it `will be skipped: <why>`. A source with no time axis (a
+monthly climatology) is fine: its pages simply get no run window. `main`'s exit code: `0` every page drew, `3` the run completed with some
 pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn).
 `section:` divider pages are not counted either way -- they are neither "drawn" nor
 "skipped" as far as these codes and the `N page(s) drawn, M skipped` line are concerned,

@@ -3782,13 +3782,27 @@ def _forcing_grid(grid, vertical: dict[str, Any] | None) -> tuple[list[str], dic
     return names, vert
 
 
-def _forcing_reader(files, concat_dim: str):
+def _forcing_reader(files, concat_dim: str, ref: Path | None = None):
     """Build an intake reader for a roms-tools file, or a list joined on ``concat_dim``.
 
     A list is opened together (``xarray.open_mfdataset``) and concatenated along the
     time dimension only; the grid-less file carries nothing else that varies, so
     variables without it are taken from the first file.
+
+    With ``ref`` (a kerchunk reference :func:`_forcing_reference` built over ``files``)
+    the reader opens that instead and no forcing file is touched: the reference is
+    already the joined record. It is opened the way :func:`open_reference` opens a model
+    reference (one dask layer at the storage chunks, the files' protocol named rather
+    than guessed), which a reader inside a chain cannot get from :func:`open_reference`
+    itself.
     """
+    if ref is not None:
+        protocol = _reference_protocol(ref)
+        return _reader_for(
+            str(ref),
+            storage_options={"remote_protocol": protocol} if protocol else None,
+            open_dataset_options={"chunks": None},
+        )
     if isinstance(files, (str, Path)):
         return _reader_for(str(files))
     paths = [str(f) for f in files]
@@ -3802,6 +3816,178 @@ def _forcing_reader(files, concat_dim: str):
         coords="minimal",
         compat="override",
     )
+
+
+#: What a forcing time axis must have, said once for the layout and the time metadata.
+_FORCING_NO_MONTH = (
+    "climatology=True needs the file's 'month' variable (roms-tools writes "
+    "one, 1 to 12, on every climatology file); this one has none."
+)
+
+
+def _forcing_check_time(ds, time_name: str, climatology: bool) -> None:
+    """Raise ``ValueError`` unless ``ds`` has the variable that carries its time axis.
+
+    ``month`` for a climatology, else ``time_name``.
+    """
+    if climatology:
+        if "month" not in ds.variables:
+            raise ValueError(_FORCING_NO_MONTH)
+    elif time_name not in ds.variables:
+        raise ValueError(
+            f"No time coordinate {time_name!r} in the file (it has "
+            f"{sorted(map(str, ds.variables))[:12]}); pass time_coord=."
+        )
+
+
+def _forcing_time_layout(
+    ds, time_name: str, climatology: bool
+) -> tuple[str, tuple[str, ...]]:
+    """Return ``(time dimension, variables a reference must load)`` for a forcing file.
+
+    The time *variable* and the dimension it lives on need not share a name: a
+    roms-tools CO2 file has ``xco2_time`` on the dimension ``time``, and a climatology
+    may have no time variable at all, only ``month`` (a plain data variable, not a
+    coordinate). So the dimension is read off the variable -- ``month`` for a
+    climatology, else ``time_name`` -- and the variables a kerchunk reference has to
+    load (it concatenates on their values) are that one, plus ``month`` when the file
+    has it.
+    """
+    _forcing_check_time(ds, time_name, climatology)
+    first, other = ("month", time_name) if climatology else (time_name, "month")
+    dim = str(ds[first].dims[0])
+    loadable = tuple(
+        n
+        for n in dict.fromkeys((first, other))
+        if n in ds.variables and ds[n].dims == (dim,)
+    )
+    return dim, loadable
+
+
+def _forcing_stamps(files) -> list[dict[str, Any]]:
+    """Each file's resolved path, size and mtime, in the order given.
+
+    What a reference built over ``files`` was true of: a file that is touched or
+    replaced no longer matches, and neither does a different set. The order is kept
+    because the files are concatenated in it.
+    """
+    stamps = []
+    for f in files:
+        if _is_remote(f):
+            raise ValueError(
+                f"ref= needs local forcing files, got {f}: a reference's freshness is "
+                "judged from each file's size and modification time."
+            )
+        path = Path(f).expanduser().resolve()
+        st = path.stat()
+        stamps.append(
+            {"path": str(path), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        )
+    return stamps
+
+
+def _forcing_sidecar(ref: Path) -> dict[str, Any] | None:
+    """Return what ``<ref>.sources.json`` records, or ``None`` if none is usable.
+
+    ``None`` too when ``ref`` itself is missing: a sidecar without its reference
+    vouches for nothing.
+    """
+    import json
+
+    side = Path(str(ref) + ".sources.json")
+    if not (ref.exists() and side.is_file()):
+        return None
+    try:
+        state = json.loads(side.read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _forcing_layout(
+    first, files, ref: Path | None, time_name: str, climatology: bool
+) -> tuple[str, tuple[str, ...]]:
+    """:func:`_forcing_time_layout` of a forcing set, without opening a file if it can.
+
+    A fresh reference's sidecar already says the time dimension and what was loaded, so
+    a set whose reference is up to date is never opened. Otherwise ``first`` is, once.
+    """
+    if ref is not None:
+        state = _forcing_sidecar(_local_path(ref))
+        if state is not None and state.get("files") == _forcing_stamps(files):
+            loadable = tuple(state.get("loadable_variables") or ())
+            if ("month" if climatology else time_name) in loadable:
+                return str(state["concat_dim"]), loadable
+    import xarray as xr
+
+    with xr.open_dataset(str(first), decode_times=False) as ds:
+        return _forcing_time_layout(ds, time_name, climatology)
+
+
+def _forcing_reference(
+    files,
+    ref: str | Path,
+    *,
+    concat_dim: str,
+    loadable_variables: Sequence[str],
+    keep: str = "last",
+) -> Path:
+    """Return ``ref``, a kerchunk reference over ``files``, building it only if stale.
+
+    A 37 GB-per-file hourly forcing set takes minutes to open with ``open_mfdataset``
+    on every read; a reference makes later opens take seconds. Next to it,
+    ``<ref>.sources.json`` records what it was built from: every file's resolved path,
+    size and mtime (in the order given), and the arguments that shaped it
+    (``concat_dim``, ``loadable_variables``, ``keep``). The reference is reused when the
+    sidecar matches the call exactly; a touched or added file, or any other difference,
+    rebuilds it. The stale sidecar is removed *before* the rebuild and the new one
+    written (temp file, ``os.replace``) only *after* it succeeds, so a crash never
+    leaves a sidecar vouching for a broken reference. A file that looks unfinished
+    (:func:`_partition_unfinished`) raises rather than being left out, so the sidecar
+    always describes every file the reference holds.
+
+    The grid is not merged here (the reader chain merges it), and nothing else is
+    changed from :func:`make_kerchunk`'s defaults. Two entries over the same files may
+    share one ``ref``: the second finds it fresh. Concurrent builds of the same ``ref``
+    from different processes are not guarded against.
+    """
+    import json
+
+    ref = _local_path(ref)
+    stamps = _forcing_stamps(files)
+    want = {
+        "files": stamps,
+        "concat_dim": concat_dim,
+        "loadable_variables": list(loadable_variables),
+        "keep": keep,
+    }
+    if _forcing_sidecar(ref) == want:
+        return ref
+    side = Path(str(ref) + ".sources.json")
+    side.unlink(missing_ok=True)
+    # make_kerchunk leaves out a file that looks unfinished and builds from the rest,
+    # which is right for a live run's output but not here: the sidecar would vouch
+    # for every file and the gap would never be rebuilt. Forcing is written once, so
+    # such a file is an error (truncated, or still open in this process).
+    _, unfinished = _partition_unfinished(
+        [Path(s["path"]) for s in stamps], min_age=0.0
+    )
+    if unfinished:
+        raise ValueError(
+            f"cannot build the reference {ref}: "
+            + "; ".join(f"{p} ({why})" for p, why in unfinished.items())
+        )
+    make_kerchunk(
+        [s["path"] for s in stamps],
+        ref,
+        concat_dim=concat_dim,
+        loadable_variables=tuple(loadable_variables),
+        keep=keep,
+    )
+    tmp = side.with_name(side.name + ".tmp")
+    tmp.write_text(json.dumps(want, indent=1))
+    os.replace(tmp, side)
+    return ref
 
 
 def _forcing_time(
@@ -3818,18 +4004,9 @@ def _forcing_time(
     """
     from ocean_skill.roms import TIME_UNIT_SECONDS, time_epoch, time_unit_seconds
 
+    _forcing_check_time(ds, time_name, climatology)
     if climatology:
-        if "month" not in ds.variables:
-            raise ValueError(
-                "climatology=True needs the file's 'month' variable (roms-tools writes "
-                "one, 1 to 12, on every climatology file); this one has none."
-            )
         return {"climatology": True, "climatology_period": "monthly"}
-    if time_name not in ds.variables:
-        raise ValueError(
-            f"No time coordinate {time_name!r} in the file (it has "
-            f"{sorted(map(str, ds.variables))[:12]}); pass time_coord=."
-        )
     attrs = ds[time_name].attrs
     # roms-tools writes a bare "days" (the epoch is in long_name); an attribute that is
     # absent or empty means the same. A unit this package cannot decode is an error
@@ -3862,6 +4039,7 @@ def _forcing_entry(
     vert: dict[str, Any],
     metadata: dict[str, Any],
     probe,
+    ref: Path | None = None,
 ):
     """Open ``first`` once and return ``(entry skeleton, probe(probe_ds))``.
 
@@ -3869,10 +4047,15 @@ def _forcing_entry(
     self-contained grid, ``featureType``, ``vertical``, the time block and the caller's
     ``**metadata``); ``probe`` is called with the opened dataset, which is closed after.
     The caller adds whatever else its entries carry (``boundary_side``, standard names).
+    With ``ref`` the reference is opened instead of ``first``, so no forcing file is.
     """
     import xarray as xr
 
-    with xr.open_dataset(str(first), decode_times=False) as probe_ds:
+    if ref is not None:
+        probe_ds = open_reference(str(ref), decode_times=False)
+    else:
+        probe_ds = xr.open_dataset(str(first), decode_times=False)
+    with probe_ds:
         time_md = _forcing_time(probe_ds, time_name, climatology, metadata, first)
         found = probe(probe_ds)
     skeleton = {
@@ -3893,28 +4076,44 @@ def _forcing_chain(
     *,
     keep: dict[str, str],
     time_dim: str,
+    time_var: str,
     time_name: str,
     fixed: tuple[str, int] | None,
     climatology: bool,
+    ref: Path | None = None,
 ):
     """Build the reader chain every roms-tools forcing entry shares.
 
-    Reads ``files`` (a list is joined along the file's ``time_dim``), keeps the
-    variables named in ``keep`` (``{name in file: name in the entry}``) and renames
-    them -- the time coordinate too, from ``time_dim`` to ``time_name``, so a boundary
-    file's ``bry_time`` is the ``time`` the probe and the reader look for -- merges the
-    grid's lon/lat/depth variables in, and returns the chain.
+    Reads ``files`` (a list is joined along the file's ``time_dim``; with ``ref`` the
+    kerchunk reference over them is read instead), keeps the variables named in ``keep``
+    (``{name in file: name in the entry}``) and renames them. The file's time variable
+    ``time_var`` is kept too and becomes the coordinate ``time_name`` on a dimension of
+    that name -- a boundary file's ``bry_time`` is the ``time`` the probe and the reader
+    look for, and a CO2 file's ``xco2_time`` is made the time axis in place of its
+    dimension ``time`` (``time_dim``, where the two differ). The grid's lon/lat/depth
+    variables are merged in.
 
     For a boundary, ``fixed = (dim, index)`` names the grid row or column it lies on:
     the variables get that dimension back at length 1 (the file drops it) and the grid
     is cut to the same row, so a boundary reads as a one-row ROMS field, which is what
     lets it be a section (``{"transect": {"eta_rho": 0}}``) or be compared along its
     path.
+
+    A climatology has ``month`` (1 to 12) as its time axis instead, kept through the
+    selection because roms-tools writes it as a plain variable, and it need not have a
+    ``time_var`` at all.
     """
-    chain = _forcing_reader(files, time_dim)[list(keep)]
+    chain = _forcing_reader(files, time_dim, ref)
+    axis = "month" if climatology else time_var
+    chain = chain[[*keep, *([axis] if axis not in keep else [])]]
     renames = {old: new for old, new in keep.items() if old != new}
-    if time_dim != time_name:
-        renames[time_dim] = time_name
+    if not climatology:
+        if time_var != time_dim:
+            # the time variable is on a dimension of another name: make it the
+            # dimension's coordinate, so the rename below leaves one axis called "time"
+            chain = chain.set_coords(time_var).swap_dims({time_dim: time_var})
+        if time_var != time_name:
+            renames[time_var] = time_name
     if renames:
         chain = chain.rename(renames)
     grid_reader = _reader_for(str(grid))[grid_names]
@@ -3922,8 +4121,9 @@ def _forcing_chain(
         dim, index = fixed
         chain = chain.expand_dims(**{dim: 1})
         grid_reader = grid_reader.isel(**{dim: [index]})
+    lead = time_dim if climatology else time_name
     chain = (
-        chain.transpose(time_name, "s_rho", "eta_rho", "xi_rho", missing_dims="ignore")
+        chain.transpose(lead, "s_rho", "eta_rho", "xi_rho", missing_dims="ignore")
         .drop_vars("abs_time", errors="ignore")  # roms-tools' absolute time: raw here
         .merge(other=grid_reader)
     )
@@ -3931,8 +4131,8 @@ def _forcing_chain(
         # ``month`` (1..12) replaces the time axis, as it does for the other monthly
         # climatologies, so ``select={"month": 8}`` picks a month. The file's own
         # relative times are of no use across years, so they go.
-        chain = chain.set_coords("month").swap_dims({time_name: "month"})
-        chain = chain.drop_vars(time_name)
+        chain = chain.set_coords("month").swap_dims({time_dim: "month"})
+        chain = chain.drop_vars([time_var, time_name], errors="ignore")
     return chain
 
 
@@ -3946,6 +4146,7 @@ def add_boundary_sources(
     variables: Sequence[str] | None = None,
     climatology: bool = False,
     vertical: dict[str, Any] | None = None,
+    ref: str | Path | None = None,
     **metadata: Any,
 ) -> list[str]:
     """Add a roms-tools boundary-forcing file as one ROMS entry per side of the grid.
@@ -3994,6 +4195,15 @@ def add_boundary_sources(
         Overrides for the entry's ``vertical`` block (``hc``, ``Vtransform``,
         ``theta_s``, ``theta_b``), which default to the grid file's attributes and a
         ``Vtransform`` of 2.
+    ref
+        A kerchunk reference to build over ``files`` and read the entries from
+        (``.parquet`` or ``.json``), instead of opening the netCDF files. A big set
+        (months of hourly files, tens of GB each) takes minutes to open every time it
+        is read; a reference makes later opens take seconds. It is built once, with
+        ``bry_time`` (and ``month``) loaded, and reused while the files it matched are
+        unchanged (path, size and modification time, recorded in ``<ref>.sources.json``
+        beside it); a touched or added file rebuilds it. All the sides share it, and so
+        may other entries over the same files. ``None`` (the default) opens the files.
     **metadata
         Anything else :func:`add_source` takes (``standard_names`` merges over the
         ROMS names this adds; ``name_map``, ``probe``, ...) and entry metadata.
@@ -4015,6 +4225,12 @@ def add_boundary_sources(
         )
     first = files if isinstance(files, (str, Path)) else next(iter(files))
     grid_names, vert = _forcing_grid(grid, vertical)
+    file_list = [files] if isinstance(files, (str, Path)) else list(files)
+    time_dim, loadable = _forcing_layout(first, file_list, ref, "bry_time", climatology)
+    if ref is not None:
+        ref = _forcing_reference(
+            file_list, ref, concat_dim=time_dim, loadable_variables=loadable
+        )
     base_entry, file_vars = _forcing_entry(
         first,
         "bry_time",
@@ -4022,6 +4238,7 @@ def add_boundary_sources(
         vert,
         metadata,
         lambda ds: {str(k): v.dims for k, v in ds.data_vars.items()},
+        ref,
     )
 
     added: list[str] = []
@@ -4034,7 +4251,7 @@ def add_boundary_sources(
                 continue
             if variables is not None and base not in variables:
                 continue
-            if not set(dims) <= {"bry_time", "s_rho", along}:
+            if not set(dims) <= {time_dim, "s_rho", along}:
                 continue  # not on this side's rho points (u_north is on xi_u)
             keep[var] = base
         if not keep:
@@ -4050,10 +4267,12 @@ def add_boundary_sources(
             grid,
             grid_names,
             keep=keep,
-            time_dim="bry_time",
+            time_dim=time_dim,
+            time_var="bry_time",
             time_name="time",
             fixed=(fixed_dim, index),
             climatology=climatology,
+            ref=ref,
         )
         std = {
             b: ROMS_STANDARD_NAMES[b] for b in keep.values() if b in ROMS_STANDARD_NAMES
@@ -4080,6 +4299,7 @@ def add_forcing_source(
     variables: Sequence[str] | None = None,
     climatology: bool = False,
     vertical: dict[str, Any] | None = None,
+    ref: str | Path | None = None,
     **metadata: Any,
 ) -> str:
     """Add a roms-tools 2-D forcing file on the model grid as a ROMS entry.
@@ -4099,13 +4319,23 @@ def add_forcing_source(
     shared vocabulary know (``temp``, ``salt``, ``NO3``, ...) are mapped as usual, and
     ``standard_names=`` adds more.
 
-    See :func:`add_boundary_sources` for ``grid``, ``climatology``, ``vertical`` and
-    ``**metadata``; ``time_coord`` is the file's time variable (``"time"`` in a
-    roms-tools surface file), and ``variables`` restricts which variables are kept.
-    Returns the entry name.
+    See :func:`add_boundary_sources` for ``grid``, ``climatology``, ``vertical``,
+    ``ref`` and ``**metadata``; ``time_coord`` is the file's time *variable* (``"time"``
+    in a roms-tools surface file, ``"xco2_time"`` in a CO2 file), which need not be
+    named like the dimension it lies on (that is read from the file), and ``variables``
+    restricts which variables are kept. A climatology needs no time variable: it is
+    read by its ``month`` variable. ``ref`` is most worth giving here: a decade of
+    hourly surface forcing at tens of GB a file is where ``open_mfdataset`` takes
+    minutes, and the reference is reused until a file changes. Returns the entry name.
     """
     first = files if isinstance(files, (str, Path)) else next(iter(files))
     grid_names, vert = _forcing_grid(grid, vertical)
+    file_list = [files] if isinstance(files, (str, Path)) else list(files)
+    time_dim, loadable = _forcing_layout(first, file_list, ref, time_coord, climatology)
+    if ref is not None:
+        ref = _forcing_reference(
+            file_list, ref, concat_dim=time_dim, loadable_variables=loadable
+        )
     entry, keep = _forcing_entry(
         first,
         time_coord,
@@ -4118,6 +4348,7 @@ def add_forcing_source(
             if {"eta_rho", "xi_rho"} <= set(v.dims)
             and (variables is None or str(k) in variables)
         },
+        ref,
     )
     if not keep:
         raise ValueError(
@@ -4130,10 +4361,12 @@ def add_forcing_source(
         grid,
         grid_names,
         keep=keep,
-        time_dim=time_coord,
+        time_dim=time_dim,
+        time_var=time_coord,
         time_name="time",
         fixed=None,
         climatology=climatology,
+        ref=ref,
     )
     add_source(cat, name, reader=chain, **{**entry, **metadata})
     return name
