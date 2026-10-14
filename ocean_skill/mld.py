@@ -174,7 +174,13 @@ def potential_density(temp, salt, z, lon, lat):
     import gsw
     import xarray as xr
 
-    pressure = xr.apply_ufunc(gsw.p_from_z, z, lat, dask="parallelized", output_dtypes=[float])
+    # A free surface carrying the tide puts the top cells metres above the geoid
+    # (over 5 m on a macrotidal coast), which gsw.p_from_z refuses as a likely sign
+    # error. Read those cells as at the surface, 0 dbar: pressure only enters through
+    # SA_from_SP here, where a few dbar is immaterial.
+    pressure = xr.apply_ufunc(
+        gsw.p_from_z, z.clip(max=0.0), lat, dask="parallelized", output_dtypes=[float]
+    )
     sa = xr.apply_ufunc(
         gsw.SA_from_SP, salt, pressure, lon, lat, dask="parallelized", output_dtypes=[float]
     )
