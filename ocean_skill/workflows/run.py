@@ -493,14 +493,18 @@ def _resolve_cache_dir(entry: str | None, suite_path: Path) -> Path | None:
     return d.resolve()
 
 
-def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
+def run_suite(
+    path: str | Path, *, list_only: bool = False, refresh: bool = True
+) -> SuiteResult:
     """Load, expand, and draw a suite YAML; return a :class:`SuiteResult`.
 
     ``list_only=True`` validates the schema, resolves every ``latest``/``month:
     run``/``for_each`` and the literal time windows, and prints the resolved page
     list without drawing any page or writing a report. It is not read-only: a
     ``refresh:`` block still runs first, rebuilding the kerchunk references and
-    catalog entries it names.
+    catalog entries it names -- unless ``refresh=False``, which reads the catalog
+    and references as they already are. That is what lets several suites sharing
+    one ``refresh:`` target run at once: one refreshes, the rest only read.
     """
     import yaml
 
@@ -529,7 +533,12 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
             cache.enable(cache_dir)
 
-        if suite.refresh is not None:
+        if suite.refresh is not None and not refresh:
+            print(
+                f"refresh: skipped (--no-refresh); reading {suite.refresh.catalog} "
+                "as it is"
+            )
+        elif suite.refresh is not None:
             _refresh_sources(
                 [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
                 suite.refresh.catalog,
@@ -617,6 +626,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
             ref_records = _snapshot_refs(suite.refresh, report_dir)
             refresh_info = {
                 "catalog": str(Path(suite.refresh.catalog).expanduser().resolve()),
+                "rebuilt": refresh,
                 "sources": ref_records,
             }
 
@@ -746,7 +756,7 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: ``ocean-skill-run suite.yaml [--list]``."""
+    """CLI entry point: ``ocean-skill-run suite.yaml [--list] [--no-refresh]``."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -761,6 +771,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print the expanded page list and exit without drawing anything",
     )
+    parser.add_argument(
+        "--no-refresh",
+        action="store_true",
+        help="skip the suite's refresh: block and read its catalog as it is",
+    )
     argv = argv if argv is not None else sys.argv[1:]
     try:
         args = parser.parse_args(argv)
@@ -768,7 +783,9 @@ def main(argv: list[str] | None = None) -> int:
         return exc.code if isinstance(exc.code, int) else 2
 
     try:
-        result = run_suite(args.suite, list_only=args.list)
+        result = run_suite(
+            args.suite, list_only=args.list, refresh=not args.no_refresh
+        )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

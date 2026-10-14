@@ -721,8 +721,10 @@ person with the same suite YAML and the same catalogs gets the identical report.
 right after the report directory is created, before any page is drawn -- so it
 matches the model state the report was actually drawn from, even though the shared
 reference at `ref:` is overwritten by the *next* run's own refresh. `manifest.json`'s
-`"refresh"` key records `{"catalog": ..., "sources": [{"name", "ref", "snapshot"}]}`,
-where `snapshot` is the copy's path (`null` if no reference existed yet to copy). The
+`"refresh"` key records `{"catalog": ..., "rebuilt": ..., "sources": [{"name", "ref",
+"snapshot"}]}`, where `snapshot` is the copy's path (`null` if no reference existed yet
+to copy) and `rebuilt` is `false` for a `--no-refresh` run, which snapshots the
+references as it found them. The
 copy pins file paths and byte ranges into the model output, not file contents: a
 restart that rewrites an output file in place still changes what the snapshot reads.
 Open a snapshot directly with `ocean_skill.build.open_reference(path)` (one dask layer, and
@@ -751,7 +753,7 @@ so a suite whose only data pages skipped is `1` however many dividers it has.
 ## CLI
 
 ```
-ocean-skill-run SUITE.yaml [--list]
+ocean-skill-run SUITE.yaml [--list] [--no-refresh]
 ```
 
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
@@ -760,9 +762,17 @@ expanded page list without drawing any page or writing a report (no report direc
 long run's `month: run` will produce, before committing to the full run. It is **not**
 read-only, though: `--list` still runs the `refresh:` block first, so it rebuilds the
 kerchunk reference and the catalog entries that block names (resolving `latest`/`month:
-run` needs the refreshed time axis). Avoid it against a run you do not want touched, or
-drop `refresh:` from the suite for a dry check. `--list` also registers
+run` needs the refreshed time axis). Add `--no-refresh` for a dry check that writes nothing. `--list` also registers
 `catalog_search_paths:` first, since resolving `latest`/`month: run` reads a source's time
-axis. There is no other flag: everything
-that changes what gets drawn is a YAML key, so the suite file alone is what reproduces a
-report.
+axis.
+
+`--no-refresh` skips the `refresh:` block, with or without `--list`, and reads the
+catalog and references as they already are (`manifest.json` records `"rebuilt": false`).
+It is how several suites that share a `refresh:` target run at once. Their refreshes
+would otherwise rewrite the same reference and catalog, at the same time or while another
+suite is still reading them. Start one suite normally and wait for its `latest step of
+...` line, which prints once its refresh has saved the catalog. Then start the rest with
+`--no-refresh`. The one refreshing has to cover every source the others read.
+
+There is no other flag: everything that changes what gets drawn is a YAML key, so the
+suite file alone is what reproduces a report.
