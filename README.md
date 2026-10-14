@@ -1149,6 +1149,60 @@ URL here — the `engine="scipy"` is what actually reads the classic file.
 `osk.find(variable="mld_by_sigma_theta")` now finds it, and `"mld_by_sigma_theta"` is the
 name the pair-spec above reads it by.
 
+### ROMS forcing files (roms-tools)
+
+A run's [roms-tools](https://roms-tools.readthedocs.io) forcing files can be catalogued
+too, to compare two runs' forcing with each other or a run's boundary and surface
+forcing with an observed climatology (WOA23, GLODAP). The files carry no grid, so each
+entry's reader chain merges the run's grid file in and the entry reads like ROMS output
+(`lon`/`lat`, a land mask, a `z_rho` depth coordinate, decoded times). Two helpers build
+the chains; both take the run's roms-tools grid file:
+
+```python
+from glob import glob
+
+from ocean_skill import build
+
+cat = build.new_catalog(title="Forcing of two runs")
+for run in ("base", "alt"):
+    # boundary physics + BGC: one entry per side, "<name>_<side>"
+    build.add_boundary_sources(
+        cat, f"{run}_bry",                       # -> base_bry_south, ..., base_bry_west
+        sorted(glob(f"{run}/*_boundary-physics_*.nc")),   # a list is joined along bry_time
+        f"{run}/grid.nc",
+    )
+    build.add_boundary_sources(
+        cat, f"{run}_bgc",
+        sorted(glob(f"{run}/*_boundary-bgc-esper-*_*.nc")),
+        f"{run}/grid.nc",
+        variables=["NO3", "PO4", "SiO3", "O2", "DIC", "ALK"],   # base names; default all
+    )
+    # 2-D forcing on the grid: surface physics, surface BGC, restoring
+    build.add_forcing_source(
+        cat, f"{run}_surface", sorted(glob(f"{run}/*_surface-physics_*.nc")), f"{run}/grid.nc"
+    )
+# a 12-month boundary climatology: month replaces the time axis
+build.add_boundary_sources(
+    cat, "base_bgc_clim", "base/PACMED12km_boundary-bgc-unified_clim.nc", "base/grid.nc",
+    climatology=True,
+)
+build.save(cat, "catalogs/forcing.yaml")
+```
+
+A boundary entry is a one-row field: `select={"transect": {"eta_rho": 0}}` on a south
+entry (`-1` on north; `{"xi_rho": 0}` / `{"xi_rho": -1}` on west / east) is a section
+along it, which two runs on one grid compare directly and which compares with a
+climatology along its path. Climatology entries take `select={"month": 8}`. Variables
+keep their ROMS names (`temp`, `salt`, `NO3`, `zeta`, ...; surface `Tair`, `swrad`, `uwnd`
+stay raw, since none has a safe CF equivalent).
+
+A suite builds the same entries itself, on every run, from its `refresh.forcing:`
+list, into the catalog its model output goes to (see `docs/suites.md`).
+
+Not supported: the boundary velocities (`u`, `v`, `ubar`, `vbar` are grid-relative on
+staggered points), river forcing (indexed by `nriver`, not on the grid) and tidal forcing,
+which has its own recipe below.
+
 ### Tidal forcing as a reference
 
 A run's own [roms-tools](https://roms-tools.readthedocs.io) tidal forcing file (TPXO9

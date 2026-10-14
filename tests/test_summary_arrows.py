@@ -260,6 +260,28 @@ def test_target_arrows_field_is_itself_a_band_depth():
     assert arrow.xy[1] == pytest.approx(0.2)
 
 
+def test_target_arrows_chain_a_section_with_a_depth_list():
+    """A section comparison's ``depth`` identity is the list of levels it was
+    sampled at; grouping on it raised ``TypeError: unhashable type: 'list'``."""
+    recs = [
+        _FakeComparison(
+            f"runA {t}",
+            corr=0.9,
+            std_test=1.0,
+            bias=b,
+            crmsd=0.1,
+            test="runA",
+            time=t,
+            depth=[20.0, 100.0, 200.0],
+        )
+        for t, b in [("2011-01", 0.2), ("2011-02", 0.4)]
+    ]
+    fig = target(recs, arrows=True, legend_style=None)
+    (arrow,) = _arrows(fig.axes[0])
+    assert arrow.xyann[1] == pytest.approx(0.2)
+    assert arrow.xy[1] == pytest.approx(0.4)
+
+
 def test_target_arrows_unsortable_values_keep_input_order():
     unsortable = [
         _FakeComparison(

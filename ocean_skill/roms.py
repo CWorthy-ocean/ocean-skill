@@ -185,8 +185,65 @@ def _open_grid(meta: dict[str, Any]) -> xr.Dataset:
     return xr.open_dataset(grid_path)
 
 
+#: Seconds in each ROMS time unit :func:`_decode_time` can decode, keyed by the unit's
+#: lowercase name. UCLA-ROMS output counts seconds; roms-tools' forcing and boundary
+#: files count days (``bry_time``/``time``: "relative time: days since <date>").
+TIME_UNIT_SECONDS = {
+    "second": 1,
+    "seconds": 1,
+    "s": 1,
+    "minute": 60,
+    "minutes": 60,
+    "min": 60,
+    "hour": 3600,
+    "hours": 3600,
+    "day": 86400,
+    "days": 86400,
+}
+
+
+def time_epoch(attrs: dict[str, Any], meta: dict[str, Any]) -> str | None:
+    """Return the ``YYYY-MM-DD`` epoch a ROMS time counts from, else ``None``.
+
+    The entry's ``reference_date`` wins; failing that it is read from the coordinate's
+    own ``units`` ("days since 2011-01-01") or ``long_name`` ("relative time: days since
+    2011-01-01 00:00:00"), the way roms-tools states it.
+    """
+    import re
+
+    if meta.get("reference_date") is not None:
+        return str(meta["reference_date"])
+    text = f"{attrs.get('units', '')} {attrs.get('long_name', '')}"
+    m = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", text)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+
+
+def time_unit_seconds(unit: Any) -> int | None:
+    """Return the seconds in a ROMS time ``unit``, else ``None`` if it is not one.
+
+    Any unit starting with ``"s"`` has always meant seconds (``"second"``, ``"sec"``,
+    ``"s"``); the rest are looked up in :data:`TIME_UNIT_SECONDS`.
+    """
+    word = str(unit).strip().lower()
+    return 1 if word.startswith("s") else TIME_UNIT_SECONDS.get(word)
+
+
+def decode_relative_time(values, per: int, epoch: str) -> np.ndarray:
+    """Return ``epoch + values`` as ``datetime64[s]``, each value counting ``per`` s.
+
+    ``per`` is :func:`time_unit_seconds` of the unit and ``epoch`` a ``YYYY-MM-DD``
+    date (:func:`time_epoch`). Whole seconds are added exactly; other units are
+    rounded to the second.
+    """
+    values = np.asarray(values)
+    if per == 1:
+        return np.datetime64(epoch) + values.astype("timedelta64[s]")
+    secs = np.round(values.astype("float64") * per).astype("timedelta64[s]")
+    return np.datetime64(epoch) + secs
+
+
 def _decode_time(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
-    """Decode the ROMS time coordinate (non-CF 'seconds since <reference_date>')."""
+    """Decode the ROMS time coordinate (non-CF '<seconds|hours|days> since <date>')."""
     tcoord = meta.get("time_coord", "ocean_time")
     tdim = meta.get("time_dim", "time")
     if tcoord not in ds.variables:
@@ -201,11 +258,25 @@ def _decode_time(ds: xr.Dataset, meta: dict[str, Any]) -> xr.Dataset:
         if tcoord in ds.indexes:
             ds = ds.drop_indexes(tcoord)
         ds = ds.rename_dims({tcoord: tdim})
-    ref = np.datetime64(meta.get("reference_date", "2000-01-01"))
     units = meta.get("time_units", "seconds")
-    if units not in ("seconds", "second", "s"):
-        raise ValueError(f"Unsupported time_units {units!r} (expected seconds).")
-    times = ref + ds[tcoord].values.astype("timedelta64[s]")
+    per = time_unit_seconds(units)
+    if per is None:
+        raise ValueError(
+            f"Unsupported time_units {units!r} "
+            "(expected seconds, minutes, hours or days)."
+        )
+    if per == 1:
+        epoch = meta.get("reference_date", "2000-01-01")
+    else:
+        # hours/days: the epoch is the entry's, else the one the coordinate itself
+        # states
+        epoch = time_epoch(ds[tcoord].attrs, meta)
+        if epoch is None:
+            raise ValueError(
+                f"Cannot decode {tcoord!r} in {units!r}: no 'reference_date' in the "
+                "entry and no 'since <date>' in the coordinate's units or long_name."
+            )
+    times = decode_relative_time(ds[tcoord].values, per, epoch)
     return ds.assign_coords(time=(tdim, times))
 
 

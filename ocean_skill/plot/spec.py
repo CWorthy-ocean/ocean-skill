@@ -51,6 +51,7 @@ FAMILIES = (
     "target",
     "paired",
     "portrait",
+    "metrics_series",
     "locations",
 )
 
@@ -91,6 +92,9 @@ class PlotSpec:
         rows and columns named by two record fields (``variable``/``test`` by
         default), each cell one metric's value, colour and all. It is the scoreboard
         counterpart to ``skill_map``'s map panels, not a fourth point diagram.
+        ``metrics_series`` takes the same item once more and draws the records as
+        lines against time (each record's ``time`` is its x), one panel per metric --
+        see :mod:`ocean_skill.plot.metrics_series`.
 
         ``skill_map`` items carry one further *optional* key, ``stations``: a dict of
         ``lon``, ``lat``, ``names`` and ``values`` (one array per metric), drawn as

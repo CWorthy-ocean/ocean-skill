@@ -1766,6 +1766,60 @@ For the same scoreboard as numbers rather than colours -- a publishable table of
 selected metrics, with seasonal sub-rows, joined cells and Notes -- see
 [`osk.table()`](tables.md).
 
+## The `metrics_series` family (skill metrics through time)
+
+`ComparisonSet.metrics_series()` draws a `compare(..., times=...)` fan-out as lines:
+x is each comparison's time bin, y a metric's value, so monthly RMSE and bias between
+two runs (or a run and observations) read straight off the figure. It is the plain
+counterpart to [`arrows=`](#arrows-summary-diagrams) on `target`/`taylor`, which draws
+the same fan-out as drift through a diagram. It reads the same `{metrics, label, units}`
+records as the other summary families, so it pools, relabels and groups exactly as they
+do. A set whose comparisons carry no `time` raises, telling you to pass `times=` to
+`compare()`.
+
+```python
+runs = osk.compare(reference=..., test=...,
+                   times={"resample": "1MS", "reduce": "mean"})
+runs.metrics_series()                                   # rmse and bias, one line per variable
+runs.metrics_series(metrics=("rmse", "bias", "corr"))   # any metric the records carry
+runs.metrics_series(color_by="depth", marker_by="test") # a line per (depth, run)
+runs.metrics_series(rows="variable")                    # one row per variable, a column per metric
+runs.metrics_series(renderer="holoviews")               # interactive, hover on every point
+```
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `metrics` | `("rmse", "bias")` | metric name or names, one panel each; a name no record carries raises, naming what they do |
+| `color_by` | `"variable"` | metric-record field that splits the lines (`"variable"`, `"depth"`, `"test"`, `"reference"`, `"label"`, `groups=`'s `"group"`, ...); colours are the usual cycle, or `colors=` |
+| `marker_by` | `None` | splits lines further by marker shape, as on `target`/`taylor` |
+| `rows` | `"metric"` | `"metric"` stacks one panel per metric on a shared time axis; `"variable"` is the transpose (one row per variable, one column per metric) |
+| `groups`, `level_labels` | `None` | as on the other summary diagrams |
+| `title`, `figsize`, `size`, `zoom`, `font_scale`, `save` | | as everywhere; `figsize` is static only, `save` writes the static figure |
+
+A line is one value per time: two comparisons of one line at the same time raise,
+asking for a `color_by`/`marker_by` field that tells them apart. A point is drawn at
+the middle of its period (a whole month at mid-month); a bin spelled as a `{"min",
+"max"}` window is placed at the window's midpoint, a full timestamp at itself, and a
+time with no place on an axis (a season name) raises. An undefined metric value is a
+gap in the line.
+
+**Units.** `rmse` and `bias` are in the variable's own units, so they cannot share
+one axis between variables in different units. With `rows="metric"`, such a metric
+splits into one panel per distinct unit string, laid out as columns (temperature in
+°C beside salinity in psu), while variables that share units stay on one axis;
+unitless metrics (`corr`, `sigma_ratio`) never split. Every panel title names its
+metric and units, and the one figure-level key lists every line. `rows="variable"`
+avoids the question by giving each variable its own row. A `bias` panel gets a faint
+zero line.
+
+**Return value.** Static: a matplotlib `Figure`. Interactive: an `hv.Overlay` for a
+single panel, otherwise an `hv.Layout` of them, with the panels' time axes linked, a
+hover tooltip (time, value, variable, depth, test, reference, `n`) on every point, and
+the legend on the first panel when every panel draws the same lines (on each panel
+otherwise). Both renderers are drawn from one `ocean_skill.plot.metrics_series.
+build_layout`, so line membership, time order, colours, markers and panel titles
+cannot disagree between them.
+
 ## The `series` family (time series)
 
 A comparison whose two lanes reduce to one time axis draws as lines rather than maps:

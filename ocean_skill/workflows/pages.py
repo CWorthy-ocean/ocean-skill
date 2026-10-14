@@ -52,7 +52,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-__all__ = ["STEP_REGISTRY", "MetricRecord", "build", "expand"]
+from ocean_skill.config import COMPARE_DRAWS, check_draw
+
+__all__ = ["COMPARE_DRAWS", "STEP_REGISTRY", "MetricRecord", "build", "expand"]
 
 _EXACT_PLACEHOLDER_RE = re.compile(
     r"^\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}$"
@@ -787,6 +789,9 @@ class ExpandedPage:
     #: run through the same window injection) that :func:`build` draws the lines
     #: from. Part of ``as_dict()`` since none of it needs data.
     contours: bool | dict[str, Any] = False
+    #: A compare page's drawing method (one of :data:`COMPARE_DRAWS`; ``"plot"``
+    #: unless the page says otherwise), ``None`` for every other kind of page.
+    draw: str | None = None
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
@@ -808,6 +813,7 @@ class ExpandedPage:
             "cache": self.cache,
             "steps": self.steps,
             "contours": self.contours,
+            "draw": self.draw,
         }
 
 
@@ -1056,16 +1062,39 @@ def _expand_xy_page(
     }
 
 
+def _window_source(source: Any, test_source: Any, *, title: str) -> str:
+    """Pick the one source whose time axis pins a ``field:`` page's window and cache.
+
+    A plain ``source: name`` is its own. A list (``source: [a, b]`` -- ``osk.field``
+    builds one member per entry, overlaid in a :class:`~ocean_skill.field.FieldSet`)
+    has several time axes but only one window, shared by every member: it comes from
+    ``defaults.test`` when that is one of the entries, else from the first entry. The
+    list's order is therefore meaningful when no entry is the test source -- put the
+    run whose "latest"/whole-run span the page should follow first.
+    """
+    if isinstance(source, (list, tuple)):
+        if not source:
+            raise ValueError(f"page {title!r}: field: source: is an empty list")
+        source = test_source if test_source in source else source[0]
+    if not isinstance(source, str):
+        raise ValueError(
+            f"page {title!r}: field: source: must be a source name or a list of "
+            f"them, got {source!r}"
+        )
+    return source
+
+
 def _resolve_field_kwargs(
     kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
 ) -> tuple[dict[str, Any], dict[str, Any], bool, bool, Any]:
     """Resolve one ``field:`` page's templated kwargs in place.
 
     Fills the ``source`` default, renames ``variables`` to ``variable``, checks the
-    depth contradiction and pins the time selection to the run (:func:`_pin_test_lane`).
-    Returns ``(kwargs, select, had_explicit_time, cacheable, index)``. A page's
-    ``contours:`` override mapping goes through here too, so the lines cover the
-    same dates as the fill.
+    depth contradiction and pins the time selection to the run (:func:`_pin_test_lane`)
+    -- against the time axis of :func:`_window_source`'s pick when ``source`` is a
+    list. Returns ``(kwargs, select, had_explicit_time, cacheable, index)``. A
+    page's ``contours:`` override mapping goes through here too, so the lines cover
+    the same dates as the fill.
     """
     kwargs.setdefault("source", test_source)
     source = kwargs["source"]
@@ -1074,7 +1103,7 @@ def _resolve_field_kwargs(
     if "variables" in kwargs:
         kwargs["variable"] = kwargs.pop("variables")
     _check_field_depth_contradiction(title, kwargs)
-    index = get_index(source)
+    index = get_index(_window_source(source, test_source, title=title))
     select, had_explicit_time, cacheable = _pin_test_lane(kwargs, index)
     return kwargs, select, had_explicit_time, cacheable, index
 
@@ -1227,6 +1256,10 @@ def expand(suite: Any) -> list[ExpandedPage]:
         page_source = None
         if page.kind == "field":
             page_source = (page.field or {}).get("source", test_source)
+            # only a ``for_each:`` reads this (to size its time axis); the page's own
+            # window is picked, once per combo, by ``_resolve_field_kwargs`` below
+            if page.for_each and isinstance(page_source, (list, tuple)):
+                page_source = _window_source(page_source, test_source, title=page.title)
         elif page.kind == "compare":
             page_source = (page.compare or {}).get("test", test_source)
         elif page.kind in ("XY", "TS"):
@@ -1341,6 +1374,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
                     kind="compare",
                     title=title,
                 )
+                draw = _template_value(page.draw, namespace, title=title) or "plot"
+                check_draw(title, draw, contours)
                 if isinstance(contours, dict):
                     # Same treatment as the page (see the field branch above).
                     contours, contour_cacheable = _resolve_compare_kwargs(
@@ -1362,6 +1397,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         plot=plot,
                         cache=suite.cache and cacheable,
                         contours=contours,
+                        draw=draw,
                     )
                 )
 
@@ -1468,6 +1504,11 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
     .field.field` accepts) pass straight through the same way; only ``cache`` is
     reserved, since that is the suite's own to set (``cache:``/``cache_dir:``, or
     a page's own open-window rule -- see ``docs/suites.md``).
+
+    A ``compare`` page with ``draw:`` other than ``plot`` (see
+    :data:`COMPARE_DRAWS`) is drawn by that :class:`~ocean_skill.comparison
+    .ComparisonSet` method instead -- ``plot:`` forwarded as its keyword
+    arguments -- as one figure of the whole set, so there is no per-family split.
 
     A field page's ``then:`` chain (already normalized and type-checked by
     :func:`expand`) is applied here, in order, via plain ``getattr`` -- one
@@ -1586,6 +1627,10 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
             _check_contour_families(
                 page.title, families, [c.family for c in cs], contour_cs
             )
+        if page.draw not in (None, "plot"):
+            # The whole set as one figure -- metric diagrams and series pool every
+            # family, so there is no per-family split (and no suffix) here.
+            return [("", getattr(cs, page.draw)(**page.plot))]
         results = []
         for fam in families:
             bucket = osk.ComparisonSet([c for c in cs if c.family == fam])

@@ -79,6 +79,19 @@ refresh:                              # optional: rebuild the model's kerchunk r
       ref: refs/pac_dt_ramp.parquet
       keep: latest-per-file           # forwarded to make_kerchunk; see its own docstring
       min_age: 0.0                    # seconds -- skip a file still being written (build._partition_unfinished)
+  forcing:                            # optional: catalog roms-tools forcing files into the same catalog
+    - name: base_bry                  # kind: boundary -> base_bry_south, ..., base_bry_west
+      kind: boundary                  # boundary (build.add_boundary_sources) | surface (build.add_forcing_source)
+      files: [y2011/*_boundary-physics_*.nc, y2012/*_boundary-physics_*.nc]  # glob or globs, joined in order
+      grid: input/grid.nc
+      variables: [temp, salt, NO3]    # optional: base names to keep; default all
+      climatology: false              # true -> a 12-month _clim file: month replaces time
+      sides: [south, north]           # optional, boundary only; default all four
+    - name: base_co2
+      kind: surface
+      files: input/*_surface-bgc-mbl_co2_*.nc
+      grid: input/grid.nc
+      time_coord: xco2_time           # optional, surface only; default time
 
 defaults:                             # merged into every page; a page's own keys win
   test: pac_dt_ramp                   # exactly one source -- required for time: latest/month: run
@@ -92,6 +105,7 @@ pages:
     for_each: {...}        # optional: fan this one page into several (see below)
     then: [...]            # optional, field: pages only: a method chain (see below)
     contours: true         # optional, field:/compare: pages: contour lines over the fill (see below)
+    draw: target           # optional, compare: pages only: plot (default) | metrics_series | target | taylor (see below)
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
                             # (size:/zoom:/figsize: are pinned to the page canvas and warned
                             # about instead while pdf: true -- see Page size, below)
@@ -153,6 +167,17 @@ per variable -- fine for a snapshot, but every member must already be a single m
 one still faceted over time or depth (several steps standing) is refused, naming the
 offending source and axis.
 
+`source:` may be a **list** (`source: [roms_run_a, roms_run_b]`): `osk.field()` then
+builds a `FieldSet` with one member per source, drawn together -- series and profiles
+overlay, and `plot: {encode: {color: source}}` colors them by source. Every member
+shares the page's one `select:`, so the suite resolves the window from a single source's
+time axis: `defaults.test` if it is one of the entries, otherwise **the first entry** (so
+put the run whose span the page should follow first). That source's index resolves
+`time: latest`, a `month: run` fan, and the whole-run window injected when the page names
+no time, and it is also what the cache rule below is checked against; the other members
+simply read the same literal window. A list does not combine with `then:` (more than one
+member), and an empty list is refused.
+
 A depth-selected page cannot include a variable with no vertical axis (`ssh`, `mld`,
 `co2_flux`, `PH`, `pCO2`) -- that raises a clear schema error naming the offending
 variable.
@@ -163,6 +188,43 @@ Keys map onto `osk.compare(test=, reference=, variables=, select=, aggregate=, .
 (`test` defaults to `defaults.test`). Sets that end up mixing plot families are drawn
 as one figure per family, suffixed in the PNG filename; an empty result (every pair
 `skip_missing`-ed) is a skipped page, not a fatal error.
+
+An optional `draw:` key names which `ComparisonSet` method draws the page, with `plot:`
+forwarded as that method's keyword arguments in place of `.plot()`'s:
+
+| `draw:` | draws |
+|---|---|
+| `plot` (default) | `ComparisonSet.plot()`, one figure per plot family (suffixed in the PNG name) |
+| `metrics_series` | `ComparisonSet.metrics_series()`: metrics over the `times=` bins |
+| `target` | `ComparisonSet.target()`: bias vs. centered RMSD |
+| `taylor` | `ComparisonSet.taylor()`: correlation and variability |
+
+Every `draw:` other than `plot` draws the whole set as **one figure** -- one PNG named
+for the page, no per-family split. An unknown value, `draw:` on a non-`compare:` page,
+and `contours:` beside any `draw:` but `plot` are all schema errors (caught by `--list`).
+`--list` marks a page drawn another way with `+ draw: <method>`, and `manifest.json`
+records `draw` in the page's record (`"plot"` for a compare page that leaves it out). The
+page-size pinning under `pdf: true` (see Page size) applies the same way.
+
+```yaml
+# metrics over monthly bins -- RMSE and bias against the reference, one line per variable
+- title: "Monthly RMSE and bias"
+  compare:
+    reference: [glorys_monthly]
+    variables: [temperature, salinity]
+    times: {resample: 1MS, reduce: mean}
+  draw: metrics_series
+  plot: {metrics: [rmse, bias]}
+
+# target diagram with a drift arrow through each run's monthly points
+- title: "Monthly target diagram"
+  compare:
+    reference: [glorys_monthly]
+    variables: [temperature, salinity]
+    times: {resample: 1MS, reduce: mean}
+  draw: target
+  plot: {arrows: true, color_by: variable}
+```
 
 An optional `notes:` string is display text for a later [`osk.table()`](tables.md): it
 goes to `compare(notes=)`, is stored on each comparison and in its metrics record, and
@@ -507,6 +569,7 @@ reference panel, pairing is by position, and a grid mismatch is refused.
 - `contours:` is refused on `summary:`/`section:`/`XY:`/`TS:` pages and on a `field:`
   page with a `then:` chain (schema/`--list` errors), and when `plot:` also sets
   `contours:`. A value other than `true`/`false` or a non-empty mapping is an error.
+- `contours:` is also refused beside a `draw:` other than `plot` (see `compare:`).
 - `--list` marks such a page with `+ contours`; `manifest.json` records the resolved
   contour kwargs under the page's own `contours:`.
 
@@ -543,6 +606,11 @@ The member that reads `defaults.test` follows the rule above (an injected whole-
 or `time: latest` tracks the run; an explicit window must be closed); every other member --
 a climatology, say -- has no run window to track and caches whenever the suite does. The
 page is marked `(cache)` in `--list` only when all its members are.
+
+A `field:` page whose `source:` is a list is checked against one source's time axis --
+`defaults.test` if listed, else the first entry (see `field:` above); the other members
+read the same literal window and are not separately vouched for, so a listed run that is
+itself still growing inside a closed window is not tracked.
 
 Set the suite-level `cache: false` to disable caching for every page regardless of any
 of the above -- useful after any change that a select-identity key cannot see on its
@@ -664,7 +732,8 @@ no fsspec protocol scan, which can crash on a parquet reference).
 and a `done in Ns`/`SKIPPED after Ns` line bracket each page, so a warning in between
 is attributable to the page that raised it. It also carries the full traceback for
 every skipped page and, if the run crashes outright, for the crash itself -- neither of
-which the terminal shows. `--list` writes nothing, so no `run.log` is created for it.
+which the terminal shows. `--list` writes no report, so no `run.log` is created for it
+-- but it is not write-free: a `refresh:` block still runs under `--list` (see CLI).
 A Python-level tee catches everything this package or its warnings print; it does not
 catch a C library writing straight to a file descriptor.
 
@@ -674,11 +743,10 @@ A page is skipped -- never fatal to the rest of the report -- when its variable 
 absent, its observational catalog entry isn't on this machine's search path
 (`osk.catalog.search_paths()`), or the comparison itself raises; `run.log` has the
 traceback. `main`'s exit code: `0` every page drew, `3` the run completed with some
-pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn
-or written). `section:` divider pages are not counted either way -- they are neither
-"drawn" nor "skipped" as far as these codes and the `N page(s) drawn, M skipped` line
-are concerned, so a suite whose only data pages skipped is `1` however many dividers it
-has.
+pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn).
+`section:` divider pages are not counted either way -- they are neither "drawn" nor
+"skipped" as far as these codes and the `N page(s) drawn, M skipped` line are concerned,
+so a suite whose only data pages skipped is `1` however many dividers it has.
 
 ## CLI
 
@@ -687,9 +755,14 @@ ocean-skill-run SUITE.yaml [--list]
 ```
 
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
-expanded page list with no drawing and nothing written -- a fast check on an edited
-suite, or on how many pages a long run's `month: run` will produce, before committing
-to the full run. `--list` still registers `catalog_search_paths:` first, since resolving
-`latest`/`month: run` reads a source's time axis. There is no other flag: everything
+expanded page list without drawing any page or writing a report (no report directory,
+`run.log`, PNGs or manifest) -- a fast check on an edited suite, or on how many pages a
+long run's `month: run` will produce, before committing to the full run. It is **not**
+read-only, though: `--list` still runs the `refresh:` block first, so it rebuilds the
+kerchunk reference and the catalog entries that block names (resolving `latest`/`month:
+run` needs the refreshed time axis). Avoid it against a run you do not want touched, or
+drop `refresh:` from the suite for a dry check. `--list` also registers
+`catalog_search_paths:` first, since resolving `latest`/`month: run` reads a source's time
+axis. There is no other flag: everything
 that changes what gets drawn is a YAML key, so the suite file alone is what reproduces a
 report.

@@ -66,9 +66,11 @@ from ocean_skill.cf import find_coord
 
 __all__ = [
     "ROMS_STANDARD_NAMES",
+    "add_boundary_sources",
     "add_catalog",
     "add_copernicus_source",
     "add_erddap_source",
+    "add_forcing_source",
     "add_source",
     "add_sources",
     "build_catalog",
@@ -1475,8 +1477,6 @@ def _decode_times(ds, var):
     climatologies like WOA's ``"months since 1965-01-01"``, where a date range isn't
     meaningful anyway (see ``climatology_period`` instead).
     """
-    import re
-
     import numpy as np
     import xarray as xr
 
@@ -1495,13 +1495,14 @@ def _decode_times(ds, var):
         except Exception:
             return None  # e.g. "months since ..." — not a fixed-length unit
 
-    # ROMS: units="second", epoch only in the long_name text
-    text = f"{var.attrs.get('long_name', '')} {units}"
-    m = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", text)
-    if not m or not units.lower().startswith(("second", "s")):
+    # ROMS: units="second" (or roms-tools' "days"), epoch only in the long_name text
+    from ocean_skill.roms import decode_relative_time, time_epoch, time_unit_seconds
+
+    epoch = time_epoch(var.attrs, {})
+    per = time_unit_seconds(units)
+    if epoch is None or per is None:
         return None
-    epoch = np.datetime64(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
-    return epoch + vals.astype("timedelta64[s]")
+    return decode_relative_time(vals, per, epoch)
 
 
 # ---------------------------------------------------------------------- featureType
@@ -2333,7 +2334,7 @@ def _roms_metadata(ds) -> dict[str, Any]:
     """
     import re
 
-    from ocean_skill.roms import _record_dims
+    from ocean_skill.roms import _record_dims, time_epoch
 
     # A store that stacked its files' grids along the record dimension (see
     # ocean_skill.roms._static_grid_fields) has ``s_rho`` as ``(ocean_time, s_rho)`` and
@@ -2382,20 +2383,16 @@ def _roms_metadata(ds) -> dict[str, Any]:
                 md["vertical"][k] = float(v)
     if "ocean_time" in ds.variables:
         t = ds["ocean_time"]
-        text = f"{t.attrs.get('long_name', '')} {t.attrs.get('units', '')}"
-        m = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", text)
-        # ocean_skill.roms._decode_time raises on anything but seconds, so record
-        # the file's own unit here: a classic file in "days since ..." then fails
-        # loudly at read time rather than being silently decoded as seconds. Units
-        # with no "since" (some UCLA files) keep today's "seconds".
+        # ocean_skill.roms._decode_time decodes seconds, hours and days and raises on
+        # anything else, so record the file's own unit here: a file in "days since ..."
+        # is then decoded as days rather than silently as seconds. Units with no
+        # "since" (some UCLA files) keep today's "seconds".
         um = re.match(r"^\s*(\w+)\s+since\s+", str(t.attrs.get("units", "")), re.I)
         md.update(
             time_coord="ocean_time",
             time_dim="time",
             time_units=um.group(1).lower() if um else "seconds",
-            reference_date=(
-                f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "2000-01-01"
-            ),
+            reference_date=time_epoch(t.attrs, {}) or "2000-01-01",
         )
     return md
 
@@ -3717,6 +3714,429 @@ def add_sources(
                 raise RuntimeError(f"failed adding {name!r} ({url}): {exc}") from exc
             warnings.warn(f"skipping {name!r} ({url}): {exc}", stacklevel=2)
     return added
+
+
+#: The four boundaries of a ROMS grid, with the rho-grid dimension that runs *along*
+#: each, the one it is fixed on, and the index of the grid row/column it sits on.
+_BOUNDARY_SIDES = {
+    "south": ("xi_rho", "eta_rho", 0),
+    "north": ("xi_rho", "eta_rho", -1),
+    "west": ("eta_rho", "xi_rho", 0),
+    "east": ("eta_rho", "xi_rho", -1),
+}
+
+#: Velocity names left out of a boundary entry: grid-relative components on staggered
+#: u/v points. ``u_north`` is on ``xi_u`` and ``v_north`` on ``xi_rho`` with a cross-
+#: boundary half-cell offset, and neither is rotated to east/north, so they cannot sit
+#: on the rho grid row the entry carries without being wrong by up to half a cell.
+_BOUNDARY_VELOCITIES = ("u", "v", "ubar", "vbar")
+
+#: The grid variables a roms-tools forcing entry takes from the grid file (if present).
+_FORCING_GRID_VARIABLES = (
+    "lon_rho",
+    "lat_rho",
+    "h",
+    "mask_rho",
+    "angle",
+    "pm",
+    "pn",
+    "sigma_r",
+    "Cs_r",
+    "sigma_w",
+    "Cs_w",
+)
+
+
+def _forcing_grid(grid, vertical: dict[str, Any] | None) -> tuple[list[str], dict]:
+    """Check a roms-tools grid file and return its variables to merge and ``vertical``.
+
+    ``vertical`` is what :mod:`ocean_skill.roms` needs for depth: ``hc`` (and
+    ``theta_s``/``theta_b``) from the grid's global attributes, the roms-tools
+    ``Vtransform`` of 2 unless the file or the caller says otherwise.
+    """
+    import xarray as xr
+
+    with xr.open_dataset(str(grid), decode_times=False) as g:
+        names = [v for v in _FORCING_GRID_VARIABLES if v in g.variables]
+        missing = {"lon_rho", "lat_rho", "h", "Cs_r"} - set(names)
+        if "sigma_r" not in names and "s_rho" not in g.variables:
+            missing.add("sigma_r")
+        if missing:
+            raise ValueError(
+                f"{grid} is not a roms-tools grid file: it has no {sorted(missing)}."
+            )
+        attrs = dict(g.attrs)
+    vert: dict[str, Any] = {"s_dim": "s_rho"}
+    if "hc" in attrs:
+        vert["hc"] = float(attrs["hc"])
+    for key in ("theta_s", "theta_b"):
+        if key in attrs:
+            vert[key] = float(attrs[key])
+    vert["Vtransform"] = int(attrs.get("Vtransform", 2))
+    vert.update(vertical or {})
+    if "hc" not in vert:
+        raise ValueError(
+            f"{grid} has no 'hc' attribute; pass vertical={{'hc': ...}} "
+            "(and Vtransform)."
+        )
+    return names, vert
+
+
+def _forcing_reader(files, concat_dim: str):
+    """Build an intake reader for a roms-tools file, or a list joined on ``concat_dim``.
+
+    A list is opened together (``xarray.open_mfdataset``) and concatenated along the
+    time dimension only; the grid-less file carries nothing else that varies, so
+    variables without it are taken from the first file.
+    """
+    if isinstance(files, (str, Path)):
+        return _reader_for(str(files))
+    paths = [str(f) for f in files]
+    if len(paths) == 1:
+        return _reader_for(paths[0])
+    return _reader_for(
+        paths,
+        combine="nested",
+        concat_dim=concat_dim,
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+    )
+
+
+def _forcing_time(
+    ds,
+    time_name: str,
+    climatology: bool,
+    metadata: dict[str, Any],
+    source: Any = None,
+):
+    """Return the time ``metadata`` of a roms-tools forcing entry.
+
+    ``source`` is the file ``ds`` was read from, named in the error for a time unit
+    this package cannot decode.
+    """
+    from ocean_skill.roms import TIME_UNIT_SECONDS, time_epoch, time_unit_seconds
+
+    if climatology:
+        if "month" not in ds.variables:
+            raise ValueError(
+                "climatology=True needs the file's 'month' variable (roms-tools writes "
+                "one, 1 to 12, on every climatology file); this one has none."
+            )
+        return {"climatology": True, "climatology_period": "monthly"}
+    if time_name not in ds.variables:
+        raise ValueError(
+            f"No time coordinate {time_name!r} in the file (it has "
+            f"{sorted(map(str, ds.variables))[:12]}); pass time_coord=."
+        )
+    attrs = ds[time_name].attrs
+    # roms-tools writes a bare "days" (the epoch is in long_name); an attribute that is
+    # absent or empty means the same. A unit this package cannot decode is an error
+    # now, not a silent days: that would shift every time by the wrong factor.
+    words = str(attrs.get("units") or "days").split()
+    unit = words[0].lower() if words else "days"
+    if time_unit_seconds(unit) is None:
+        raise ValueError(
+            f"{source or 'the file'}: time variable {time_name!r} counts in {unit!r} "
+            f"(units={attrs.get('units')!r}), which cannot be decoded; expected one "
+            f"of {sorted(TIME_UNIT_SECONDS)}."
+        )
+    epoch = time_epoch(attrs, metadata)
+    if epoch is None:
+        raise ValueError(
+            f"{time_name!r} states no 'since <date>' epoch; pass reference_date=."
+        )
+    return {
+        "time_coord": "time",
+        "time_dim": "time",
+        "time_units": unit,
+        "reference_date": epoch,
+    }
+
+
+def _forcing_entry(
+    first,
+    time_name: str,
+    climatology: bool,
+    vert: dict[str, Any],
+    metadata: dict[str, Any],
+    probe,
+):
+    """Open ``first`` once and return ``(entry skeleton, probe(probe_ds))``.
+
+    The skeleton is the metadata every roms-tools forcing entry shares (model, loader,
+    self-contained grid, ``featureType``, ``vertical``, the time block and the caller's
+    ``**metadata``); ``probe`` is called with the opened dataset, which is closed after.
+    The caller adds whatever else its entries carry (``boundary_side``, standard names).
+    """
+    import xarray as xr
+
+    with xr.open_dataset(str(first), decode_times=False) as probe_ds:
+        time_md = _forcing_time(probe_ds, time_name, climatology, metadata, first)
+        found = probe(probe_ds)
+    skeleton = {
+        "model": "roms",
+        "loader": "ocean_skill.roms",
+        "self_contained_grid": True,
+        "featureType": "grid",
+        "vertical": vert,
+        **time_md,
+    }
+    return skeleton, found
+
+
+def _forcing_chain(
+    files,
+    grid,
+    grid_names: list[str],
+    *,
+    keep: dict[str, str],
+    time_dim: str,
+    time_name: str,
+    fixed: tuple[str, int] | None,
+    climatology: bool,
+):
+    """Build the reader chain every roms-tools forcing entry shares.
+
+    Reads ``files`` (a list is joined along the file's ``time_dim``), keeps the
+    variables named in ``keep`` (``{name in file: name in the entry}``) and renames
+    them -- the time coordinate too, from ``time_dim`` to ``time_name``, so a boundary
+    file's ``bry_time`` is the ``time`` the probe and the reader look for -- merges the
+    grid's lon/lat/depth variables in, and returns the chain.
+
+    For a boundary, ``fixed = (dim, index)`` names the grid row or column it lies on:
+    the variables get that dimension back at length 1 (the file drops it) and the grid
+    is cut to the same row, so a boundary reads as a one-row ROMS field, which is what
+    lets it be a section (``{"transect": {"eta_rho": 0}}``) or be compared along its
+    path.
+    """
+    chain = _forcing_reader(files, time_dim)[list(keep)]
+    renames = {old: new for old, new in keep.items() if old != new}
+    if time_dim != time_name:
+        renames[time_dim] = time_name
+    if renames:
+        chain = chain.rename(renames)
+    grid_reader = _reader_for(str(grid))[grid_names]
+    if fixed is not None:
+        dim, index = fixed
+        chain = chain.expand_dims(**{dim: 1})
+        grid_reader = grid_reader.isel(**{dim: [index]})
+    chain = (
+        chain.transpose(time_name, "s_rho", "eta_rho", "xi_rho", missing_dims="ignore")
+        .drop_vars("abs_time", errors="ignore")  # roms-tools' absolute time: raw here
+        .merge(other=grid_reader)
+    )
+    if climatology:
+        # ``month`` (1..12) replaces the time axis, as it does for the other monthly
+        # climatologies, so ``select={"month": 8}`` picks a month. The file's own
+        # relative times are of no use across years, so they go.
+        chain = chain.set_coords("month").swap_dims({time_name: "month"})
+        chain = chain.drop_vars(time_name)
+    return chain
+
+
+def add_boundary_sources(
+    cat,
+    name: str,
+    files: str | Path | Sequence[str | Path],
+    grid: str | Path,
+    *,
+    sides: Sequence[str] = ("south", "north", "east", "west"),
+    variables: Sequence[str] | None = None,
+    climatology: bool = False,
+    vertical: dict[str, Any] | None = None,
+    **metadata: Any,
+) -> list[str]:
+    """Add a roms-tools boundary-forcing file as one ROMS entry per side of the grid.
+
+    roms-tools writes a run's open-boundary conditions as one file per month (or one
+    climatology) with every variable once per side -- ``temp_south``, ``temp_north``,
+    ... on ``(bry_time, s_rho, xi_rho)`` or ``(..., eta_rho)`` -- and no coordinates
+    but time. Each side becomes its own entry, ``f"{name}_{side}"``, that reads like
+    a slice of ROMS output: the side's variables renamed to ``temp``, ``salt``, ``NO3``
+    ..., the grid row or column the boundary lies on merged in (so ``lon``/``lat``,
+    ``mask_rho`` and a ``z_rho`` depth coordinate exist) with the cross-boundary
+    dimension kept at length 1, and ``bry_time`` decoded to datetimes. Two runs'
+    entries on one grid compare directly; one entry is a section along the boundary
+    with ``select={"transect": {"eta_rho": 0}}`` (south; ``-1`` for north, and
+    ``xi_rho`` for west and east); and a section compares with an observed climatology
+    like WOA23 or GLODAP along its path.
+
+    The reader is an ordinary intake chain saved in the catalog: ``files`` (one path,
+    or a list of monthly files joined along ``bry_time``), a variable subset and rename,
+    ``expand_dims`` and the grid ``merge``. No custom reader, and nothing to repeat at
+    read time.
+
+    Parameters
+    ----------
+    cat, name
+        Catalog, and the entry-name stem.
+    files
+        The boundary file(s). A list is concatenated along ``bry_time``.
+    grid
+        The run's roms-tools grid file (``lon_rho``, ``lat_rho``, ``h``, ``mask_rho``,
+        ``sigma_r``/``Cs_r``, ...; ``hc``/``theta_s``/``theta_b`` as global attributes).
+    sides
+        Which of ``"south"``, ``"north"``, ``"east"``, ``"west"`` to add.
+    variables
+        Base names to keep (``["temp", "salt"]``); default every variable the side
+        has. Only variables on the grid's rho points are supported: ``zeta``,
+        temperature, salinity, the biogeochemical tracers. The velocities (``u``,
+        ``v``, ``ubar``, ``vbar``) are grid-relative and on staggered points, so
+        they are left out of the default and naming one raises ``ValueError``.
+    climatology
+        A 12-step climatology file (roms-tools' ``..._clim.nc``): ``bry_time`` is
+        replaced by a ``month`` dimension (1 to 12), and the entry is marked
+        ``climatology`` / ``climatology_period: monthly``, so ``select={"month": 8}``
+        picks a month.
+    vertical
+        Overrides for the entry's ``vertical`` block (``hc``, ``Vtransform``,
+        ``theta_s``, ``theta_b``), which default to the grid file's attributes and a
+        ``Vtransform`` of 2.
+    **metadata
+        Anything else :func:`add_source` takes (``standard_names`` merges over the
+        ROMS names this adds; ``name_map``, ``probe``, ...) and entry metadata.
+
+    Returns the names of the entries added, in the order of ``sides``.
+    """
+    bad = [s for s in sides if s not in _BOUNDARY_SIDES]
+    if bad:
+        raise ValueError(
+            f"Unknown boundary side(s) {bad}; expected {list(_BOUNDARY_SIDES)}."
+        )
+    if variables is not None and (
+        vel := [v for v in variables if v in _BOUNDARY_VELOCITIES]
+    ):
+        raise ValueError(
+            f"Boundary velocities {vel} are not supported: they are grid-relative and "
+            "on staggered u/v points, so they do not sit on the rho-point grid row an "
+            "entry carries. Leave them out of variables=."
+        )
+    first = files if isinstance(files, (str, Path)) else next(iter(files))
+    grid_names, vert = _forcing_grid(grid, vertical)
+    base_entry, file_vars = _forcing_entry(
+        first,
+        "bry_time",
+        climatology,
+        vert,
+        metadata,
+        lambda ds: {str(k): v.dims for k, v in ds.data_vars.items()},
+    )
+
+    added: list[str] = []
+    for side in sides:
+        along, fixed_dim, index = _BOUNDARY_SIDES[side]
+        keep: dict[str, str] = {}
+        for var, dims in file_vars.items():
+            base, _, tail = var.rpartition("_")
+            if tail != side or base in _BOUNDARY_VELOCITIES:
+                continue
+            if variables is not None and base not in variables:
+                continue
+            if not set(dims) <= {"bry_time", "s_rho", along}:
+                continue  # not on this side's rho points (u_north is on xi_u)
+            keep[var] = base
+        if not keep:
+            warnings.warn(
+                f"{name!r}: no {side} variables on rho points"
+                + (f" among {list(variables)}" if variables is not None else "")
+                + f"; no {side} entry added.",
+                stacklevel=_stacklevel.find(),
+            )
+            continue
+        chain = _forcing_chain(
+            files,
+            grid,
+            grid_names,
+            keep=keep,
+            time_dim="bry_time",
+            time_name="time",
+            fixed=(fixed_dim, index),
+            climatology=climatology,
+        )
+        std = {
+            b: ROMS_STANDARD_NAMES[b] for b in keep.values() if b in ROMS_STANDARD_NAMES
+        }
+        entry = {
+            **base_entry,
+            "boundary_side": side,
+            **({"standard_names": std} if std else {}),
+            **metadata,
+        }
+        entry_name = f"{name}_{side}"
+        add_source(cat, entry_name, reader=chain, **entry)
+        added.append(entry_name)
+    return added
+
+
+def add_forcing_source(
+    cat,
+    name: str,
+    files: str | Path | Sequence[str | Path],
+    grid: str | Path,
+    *,
+    time_coord: str = "time",
+    variables: Sequence[str] | None = None,
+    climatology: bool = False,
+    vertical: dict[str, Any] | None = None,
+    **metadata: Any,
+) -> str:
+    """Add a roms-tools 2-D forcing file on the model grid as a ROMS entry.
+
+    For the surface-forcing files (``Tair``, ``qair``, ``rain``, ``swrad``, ``lwrad``,
+    ``uwnd``, ``vwnd``), surface BGC forcing, restoring/climatology fields: anything
+    on ``(time, eta_rho, xi_rho)``. The file carries no grid, so the chain merges the
+    whole grid in and the entry reads like ROMS output (``lon``/``lat``, land mask,
+    ``time`` decoded from ``time_coord``). ``files`` may be a list of files, joined
+    along the time dimension. Variables not on ``(eta_rho, xi_rho)`` (river forcing is
+    indexed by ``nriver``, which this does not support) are left out.
+
+    The variables keep their raw roms-tools names (``uwnd``, ``swrad``, ...), which
+    :func:`ocean_skill.compare` and :func:`ocean_skill.field` take as they are: none
+    has a CF equivalent that is safe to assert (``uwnd``/``vwnd`` are rotated to the
+    grid's x/y, ``swrad`` is a corrected downward flux). Names the ROMS table or the
+    shared vocabulary know (``temp``, ``salt``, ``NO3``, ...) are mapped as usual, and
+    ``standard_names=`` adds more.
+
+    See :func:`add_boundary_sources` for ``grid``, ``climatology``, ``vertical`` and
+    ``**metadata``; ``time_coord`` is the file's time variable (``"time"`` in a
+    roms-tools surface file), and ``variables`` restricts which variables are kept.
+    Returns the entry name.
+    """
+    first = files if isinstance(files, (str, Path)) else next(iter(files))
+    grid_names, vert = _forcing_grid(grid, vertical)
+    entry, keep = _forcing_entry(
+        first,
+        time_coord,
+        climatology,
+        vert,
+        metadata,
+        lambda ds: {
+            str(k): str(k)
+            for k, v in ds.data_vars.items()
+            if {"eta_rho", "xi_rho"} <= set(v.dims)
+            and (variables is None or str(k) in variables)
+        },
+    )
+    if not keep:
+        raise ValueError(
+            f"{first} has no variables on (eta_rho, xi_rho)"
+            + (f" among {list(variables)}" if variables is not None else "")
+            + "."
+        )
+    chain = _forcing_chain(
+        files,
+        grid,
+        grid_names,
+        keep=keep,
+        time_dim=time_coord,
+        time_name="time",
+        fixed=None,
+        climatology=climatology,
+    )
+    add_source(cat, name, reader=chain, **{**entry, **metadata})
+    return name
 
 
 def build_catalog(

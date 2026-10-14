@@ -32,7 +32,9 @@ tied to the exact data it was drawn from even after the shared reference is
 overwritten by a later run.
 
 Optionally the suite can refresh a model's kerchunk reference before running, which
-is what makes it usable against a run that is still writing output.
+is what makes it usable against a run that is still writing output. The same block's
+``forcing:`` list catalogs the run's roms-tools forcing files (boundary and surface)
+into that catalog too, so forcing pages need no separate catalog build.
 """
 
 from __future__ import annotations
@@ -161,6 +163,23 @@ def _capture_terminal():
         err.close()
 
 
+def _reopen_catalog(catalog_path: Path):
+    """Reopen ``catalog_path`` to update in place, or start a fresh catalog."""
+    import intake
+
+    from ocean_skill.build import new_catalog
+
+    if catalog_path.exists():
+        try:
+            return intake.from_yaml_file(str(catalog_path))
+        except Exception as exc:
+            print(
+                f"  refresh: could not reopen existing {catalog_path} ({exc}); "
+                "starting a fresh catalog"
+            )
+    return new_catalog(title="refreshed by ocean_skill.workflows.run")
+
+
 def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> None:
     """Rebuild kerchunk references and their catalog entries from the current files.
 
@@ -188,28 +207,15 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     """
     import glob as _glob
 
-    import intake
-
     from ocean_skill.build import (
         _partition_unfinished,
         add_source,
         make_kerchunk,
-        new_catalog,
         save,
     )
 
     catalog_path = Path(catalog_path).expanduser()
-    cat = None
-    if catalog_path.exists():
-        try:
-            cat = intake.from_yaml_file(str(catalog_path))
-        except Exception as exc:
-            print(
-                f"  refresh: could not reopen existing {catalog_path} ({exc}); "
-                "starting a fresh catalog"
-            )
-    if cat is None:
-        cat = new_catalog(title="refreshed by ocean_skill.workflows.run")
+    cat = _reopen_catalog(catalog_path)
 
     rebuilt, skipped = [], []
     for entry in spec:
@@ -242,6 +248,70 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     if not rebuilt and not skipped:
         return  # nothing declared to refresh; leave the file untouched
     save(cat, catalog_path)
+
+
+def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> None:
+    """Catalog a suite's roms-tools forcing files into the ``refresh:`` catalog.
+
+    Each ``refresh.forcing`` entry becomes the catalog entries
+    :func:`ocean_skill.build.add_boundary_sources` (``kind: boundary``, one per side,
+    ``<name>_<side>``) or :func:`ocean_skill.build.add_forcing_source` (``kind:
+    surface``) write, alongside the model output ``refresh.sources`` rebuilt. The
+    entries are reader chains over the files themselves -- no reference is written --
+    so rebuilding them on every run only re-reads the first file's header.
+
+    ``files`` is a glob or a list of globs, each expanded and sorted, then joined in
+    the order given (so one run's forcing spread over several folders reads as one
+    time series). An entry whose globs match nothing keeps whatever entries it had, as
+    for ``refresh.sources``. An entry that matches files but cannot be built is
+    reported (``FAILED``, naming it and the error) and left as it was, and the rest
+    still build: a page reading an entry that was never built is skipped like any page
+    whose source is missing, so one bad forcing set costs only its own pages.
+    """
+    import glob as _glob
+
+    from ocean_skill.build import add_boundary_sources, add_forcing_source, save
+
+    catalog_path = Path(catalog_path).expanduser()
+    cat = _reopen_catalog(catalog_path)
+
+    rebuilt, skipped, failed = [], [], []
+    for entry in spec:
+        globs = [entry["files"]] if isinstance(entry["files"], str) else entry["files"]
+        files = [
+            f
+            for pattern in globs
+            for f in sorted(_glob.glob(str(Path(pattern).expanduser())))
+        ]
+        if not files:
+            skipped.append(entry["name"])
+            continue
+        kwargs = {
+            k: entry[k]
+            for k in ("variables", "climatology", "sides", "time_coord")
+            if k in entry
+        }
+        boundary = entry["kind"] == "boundary"
+        add = add_boundary_sources if boundary else add_forcing_source
+        try:
+            added = add(cat, entry["name"], files, entry["grid"], **kwargs)
+        except Exception as exc:
+            failed.append(entry["name"])
+            print(
+                f"  refresh: FAILED {entry['name']} ({len(files)} file(s) starting "
+                f"{files[0]}): {type(exc).__name__}: {exc}"
+            )
+            continue
+        added = [added] if isinstance(added, str) else added
+        rebuilt.append(entry["name"])
+        print(f"  refresh: {entry['name']} <- {len(files)} files -> {', '.join(added)}")
+
+    if skipped:
+        print(f"  refresh: no forcing files matched for {skipped}; kept their entries")
+    if failed:
+        print(f"  refresh: could not build {failed}; their pages will be skipped")
+    if rebuilt:
+        save(cat, catalog_path)
 
 
 def _snapshot_refs(refresh: Any, report_dir: Path) -> list[dict[str, Any]]:
@@ -428,7 +498,9 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
 
     ``list_only=True`` validates the schema, resolves every ``latest``/``month:
     run``/``for_each`` and the literal time windows, and prints the resolved page
-    list without drawing or writing anything.
+    list without drawing any page or writing a report. It is not read-only: a
+    ``refresh:`` block still runs first, rebuilding the kerchunk references and
+    catalog entries it names.
     """
     import yaml
 
@@ -462,6 +534,11 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                 [s.model_dump(exclude_none=True) for s in suite.refresh.sources],
                 suite.refresh.catalog,
             )
+            if suite.refresh.forcing:
+                _refresh_forcing(
+                    [f.model_dump(exclude_none=True) for f in suite.refresh.forcing],
+                    suite.refresh.catalog,
+                )
 
         expanded = _pages.expand(suite)
 
@@ -497,6 +574,8 @@ def run_suite(path: str | Path, *, list_only: bool = False) -> SuiteResult:
                 )
                 if p.contours:
                     chain += " + contours"
+                if p.draw not in (None, "plot"):
+                    chain += f" + draw: {p.draw}"
                 print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){chain}")
             return SuiteResult(pages=expanded)
 

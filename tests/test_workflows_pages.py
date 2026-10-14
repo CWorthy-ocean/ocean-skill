@@ -2047,3 +2047,278 @@ def test_compare_page_notes_pass_through_to_compare(monkeypatch):
 def test_compare_page_notes_must_be_a_string():
     with pytest.raises(ValueError, match=r"page 'x': compare: notes must be a string"):
         P.expand(_suite([_notes_page(["a", "b"])], defaults={"test": "stub"}))
+
+
+# -- field: source: [a, b] -- a list of sources pins its window to one of them --------
+
+_LATE = pd.date_range("2012-06-01", periods=5, freq="1D")  # a different run's axis
+
+
+@pytest.fixture
+def two_axes(monkeypatch):
+    """``stub`` -> Jan-Mar 2010 (INDEX); ``other`` -> June 2012; records every read."""
+    reads = []
+
+    def fake(source):
+        reads.append(source)
+        return {"stub": INDEX, "other": _LATE}[source]
+
+    monkeypatch.setattr("ocean_skill.extrema._native_time_index", fake)
+    return reads
+
+
+def _list_source_page(source, **select):
+    return {
+        "title": "x",
+        "field": {"source": source, "variables": ["temperature"], "select": select},
+    }
+
+
+def test_a_field_list_source_pins_the_window_to_defaults_test_when_listed(two_axes):
+    suite = _suite(
+        [_list_source_page(["other", "stub"], depth="surface")],
+        defaults={"test": "stub"},
+    )
+    (page,) = P.expand(suite)
+    assert set(two_axes) == {"stub"}  # only the pin source's axis is read
+    assert page.kwargs["source"] == ["other", "stub"]  # handed on unchanged
+    assert page.kwargs["select"]["time"] == {
+        "min": INDEX[0].isoformat(),
+        "max": INDEX[-1].isoformat(),
+    }
+    assert page.cache  # an injected whole-run window tracks the run
+
+
+def test_a_field_list_source_falls_back_to_the_first_entry(two_axes):
+    suite = _suite(
+        [_list_source_page(["other", "stub"], depth="surface", time="latest")],
+        defaults={"test": "somewhere_else"},
+    )
+    (page,) = P.expand(suite)
+    assert set(two_axes) == {"other"}
+    assert page.kwargs["select"]["time"] == _LATE[-1].isoformat()  # latest of `other`
+    assert page.cache  # latest tracks the pinned source
+
+
+def test_a_field_list_source_without_defaults_test_uses_the_first_entry(two_axes):
+    (page,) = P.expand(_suite([_list_source_page(["other", "stub"])]))
+    assert page.kwargs["select"]["time"]["max"] == _LATE[-1].isoformat()
+
+
+def test_a_field_list_source_closed_window_is_checked_against_the_pinned_axis(
+    two_axes,
+):
+    # Jun 2-3, 2012 lies strictly inside `other`'s axis and clear of its last step,
+    # so it is closed there -- but would read as empty (not closed) on `stub`'s axis.
+    closed = _suite(
+        [
+            _list_source_page(
+                ["other", "stub"], time={"min": "2012-06-02", "max": "2012-06-03"}
+            )
+        ]
+    )
+    assert P.expand(closed)[0].cache
+    # The same window on the test source's own axis is not closed (selects nothing).
+    on_stub = _suite(
+        [
+            _list_source_page(
+                ["stub", "other"], time={"min": "2012-06-02", "max": "2012-06-03"}
+            )
+        ]
+    )
+    assert not P.expand(on_stub)[0].cache
+
+
+def test_a_field_list_source_feeds_for_each_month_run(two_axes):
+    suite = _suite(
+        [
+            {
+                "title": "m {month}",
+                "for_each": {"month": "run"},
+                "field": {
+                    "source": ["other", "stub"],
+                    "variables": ["temperature"],
+                    "select": {"time": "{month.window}"},
+                },
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    assert [p.title for p in P.expand(suite)] == ["m 2010-01", "m 2010-02", "m 2010-03"]
+    assert set(two_axes) == {"stub"}
+
+
+def test_a_field_list_source_contours_override_pins_the_same_way(two_axes):
+    page = _list_source_page(["other", "stub"], depth="surface")
+    page["contours"] = {"variable": "salinity"}
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    assert p.contours["source"] == ["other", "stub"]
+    assert p.contours["select"]["time"]["max"] == INDEX[-1].isoformat()
+
+
+def test_a_field_list_source_counts_one_member_per_entry(two_axes):
+    suite = _suite(
+        [
+            {
+                **_list_source_page(["stub", "other"], depth="surface", time="latest"),
+                "then": [{"extremum": "min"}],
+            }
+        ],
+        defaults={"test": "stub"},
+    )
+    with pytest.raises(ValueError, match=r"builds 2 members"):
+        P.expand(suite)
+
+
+def test_an_empty_or_nonstring_field_source_list_is_refused(two_axes):
+    with pytest.raises(ValueError, match=r"page 'x': field: source: is an empty list"):
+        P.expand(_suite([_list_source_page([])], defaults={"test": "stub"}))
+    with pytest.raises(ValueError, match=r"page 'x': field: source: must be"):
+        P.expand(_suite([_list_source_page([{"a": 1}])], defaults={"test": "stub"}))
+
+
+def test_expanded_list_source_page_is_json_serializable_and_deterministic(two_axes):
+    suite = _suite([_list_source_page(["other", "stub"])], defaults={"test": "stub"})
+    first = [p.as_dict() for p in P.expand(suite)]
+    assert first == [p.as_dict() for p in P.expand(suite)]
+    json.dumps(first)
+
+
+# -- draw: -- which ComparisonSet method draws a compare: page -----------------------
+
+
+def _draw_page(draw=None, **extra):
+    page = {
+        "title": "x",
+        "compare": {"reference": ["ref"], "variables": ["temperature"]},
+        **extra,
+    }
+    if draw is not None:
+        page["draw"] = draw
+    return page
+
+
+def test_draw_defaults_to_plot_on_a_compare_page_and_is_none_elsewhere():
+    (page,) = P.expand(_suite([_draw_page()], defaults={"test": "stub"}))
+    assert page.draw == "plot" and page.as_dict()["draw"] == "plot"
+    (fld,) = P.expand(
+        _suite(
+            [{"title": "f", "field": {"variables": ["temperature"]}}],
+            defaults={"test": "stub"},
+        )
+    )
+    assert fld.draw is None and fld.as_dict()["draw"] is None
+
+
+@pytest.mark.parametrize("draw", ["plot", "metrics_series", "target", "taylor"])
+def test_expand_keeps_each_known_draw(draw):
+    (page,) = P.expand(_suite([_draw_page(draw)], defaults={"test": "stub"}))
+    assert page.draw == draw
+    json.dumps(page.as_dict())
+
+
+def test_an_unknown_draw_is_a_schema_error():
+    with pytest.raises(Exception, match=r"draw: 'bogus' is not a known drawing method"):
+        _suite([_draw_page("bogus")])
+
+
+def test_a_draw_placeholder_is_resolved_and_checked_at_expansion():
+    page = _draw_page("{how}")
+    (p,) = P.expand(_suite([page], defaults={"test": "stub", "how": "taylor"}))
+    assert p.draw == "taylor"
+    with pytest.raises(ValueError, match=r"page 'x': draw: 'nope' is not a known"):
+        P.expand(_suite([page], defaults={"test": "stub", "how": "nope"}))
+
+
+@pytest.mark.parametrize(
+    "kind,body",
+    [
+        ("field", {"variables": ["temperature"]}),
+        ("summary", {}),
+        ("section", "text"),
+        ("XY", {"members": {"a": {}}, "x": "salinity", "y": "temperature"}),
+    ],
+)
+def test_draw_on_a_non_compare_page_is_a_schema_error(kind, body):
+    with pytest.raises(Exception, match=rf"draw: is only supported on compare.*{kind}"):
+        _suite([{"title": "x", kind: body, "draw": "target"}])
+
+
+def test_contours_with_a_draw_other_than_plot_is_refused():
+    with pytest.raises(Exception, match=r"contours: only applies to draw: plot"):
+        _suite([_draw_page("target", contours=True)])
+    # ... and is fine with the default drawing method, spelled out or not.
+    _suite([_draw_page("plot", contours=True)])
+    _suite([_draw_page(contours=True)])
+    # A placeholder draw is judged once it resolves, at expansion.
+    page = _draw_page("{how}", contours=True)
+    with pytest.raises(ValueError, match=r"contours: only applies to draw: plot"):
+        P.expand(_suite([page], defaults={"test": "stub", "how": "taylor"}))
+
+
+def test_a_draw_page_still_pins_the_figure_to_the_page_canvas():
+    page = _draw_page("target", plot={"arrows": True, "zoom": 2})
+    with pytest.warns(UserWarning, match=r"zoom=2.*ignored"):
+        (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    assert p.plot == {"arrows": True, "size": "page"}
+
+
+def _fake_draw_osk(monkeypatch, *, families=("map", "section")):
+    """Stub osk.compare returning a set whose draw methods record their kwargs."""
+    import ocean_skill as osk
+
+    calls = []
+
+    class FakeSet(list):
+        def plot(self, **opts):
+            calls.append(("plot", opts))
+            return "plot-figure"
+
+        def target(self, **opts):
+            calls.append(("target", opts))
+            return "target-figure"
+
+        def taylor(self, **opts):
+            calls.append(("taylor", opts))
+            return "taylor-figure"
+
+        def metrics_series(self, **opts):
+            calls.append(("metrics_series", opts))
+            return "series-figure"
+
+    monkeypatch.setattr(
+        osk,
+        "compare",
+        lambda **kw: FakeSet(_FakeComparison(f, "test") for f in families),
+    )
+    monkeypatch.setattr(osk, "ComparisonSet", FakeSet)
+    return calls
+
+
+@pytest.mark.parametrize("draw", ["metrics_series", "target", "taylor"])
+def test_build_draws_the_whole_set_with_the_named_method_and_one_figure(
+    monkeypatch, draw
+):
+    calls = _fake_draw_osk(monkeypatch)  # two families: .plot() would split in two
+    page = _draw_page(draw, plot={"color_by": "variable"})
+    (p,) = P.expand(_suite([page], defaults={"test": "stub"}))
+    pairs = P.build(p)
+    assert pairs == [("", f"{'series' if draw == 'metrics_series' else draw}-figure")]
+    # the page's plot: kwargs (plus the pdf pin) go to that method, not .plot()
+    assert calls == [(draw, {"color_by": "variable", "size": "page"})]
+    assert len(p.metrics_records) == 2  # the summary page still sees the pairs
+
+
+def test_build_without_draw_still_splits_by_family_and_calls_plot(monkeypatch):
+    calls = _fake_draw_osk(monkeypatch)
+    (p,) = P.expand(_suite([_draw_page()], defaults={"test": "stub"}))
+    assert [s for s, _ in P.build(p)] == ["_map", "_section"]
+    assert [name for name, _ in calls] == ["plot", "plot"]
+
+
+def test_build_metrics_series_forwards_its_own_kwargs(monkeypatch):
+    calls = _fake_draw_osk(monkeypatch)
+    page = _draw_page("metrics_series", plot={"metrics": ["rmse", "bias"]})
+    (p,) = P.expand(_suite([page], pdf=False, defaults={"test": "stub"}))
+    P.build(p)
+    assert calls == [("metrics_series", {"metrics": ["rmse", "bias"]})]

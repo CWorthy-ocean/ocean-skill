@@ -81,6 +81,22 @@ def _diagram_figsize(default, *, size=None, zoom: float = 1.0):
     return (default[0] * factor, default[1] * factor)
 
 
+def _apply_groups(recs: list[dict[str, Any]], groups: dict[str, Any] | None) -> bool:
+    """Set each record's ``"group"`` from ``groups``; True when ``groups`` was given.
+
+    Looks the record's ``reference`` up in ``groups``, then its ``label``, else
+    ``"other"`` (see :func:`_records`). The return value is whether the caller should
+    default ``color_by`` to ``"group"`` when it named none.
+    """
+    if not groups:
+        return False
+    for rec in recs:
+        rec["group"] = groups.get(
+            rec.get("reference"), groups.get(rec["label"], "other")
+        )
+    return True
+
+
 def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Metric records plus a short label for each comparison.
 
@@ -111,11 +127,8 @@ def _records(comparisons, groups: dict[str, Any] | None = None) -> list[dict[str
         # display-only: these feed _shared_units (the Target/Taylor axis labels), so a
         # spread reads as its colour bar does
         rec["units"] = units_text(units, stat) or None
-        if groups:
-            rec["group"] = groups.get(
-                rec.get("reference"), groups.get(rec["label"], "other")
-            )
         out.append(rec)
+    _apply_groups(out, groups)
     return out
 
 
@@ -1141,11 +1154,13 @@ def _resolve_arrows(arrows: bool | str | None) -> str | None:
 def _hashable(value):
     """Turn an identity-tuple element into something hashable.
 
-    A ``{"min", "max"}`` time window is the one shape a metric record carries that
-    plain ``dict`` grouping chokes on.
+    A ``{"min", "max"}`` time window and a section's list of depths are the shapes a
+    metric record carries that plain ``dict`` grouping chokes on.
     """
     if isinstance(value, dict):
         return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(v) for v in value)
     return value
 
 

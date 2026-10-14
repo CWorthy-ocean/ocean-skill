@@ -10627,6 +10627,68 @@ class ComparisonSet:
         )
 
     @graft_from(
+        "plot/metrics_series.py",
+        "metrics_series",
+        label="ocean_skill.plot.metrics_series.metrics_series",
+    )
+    def metrics_series(
+        self,
+        *,
+        metrics: str | tuple[str, ...] = ("rmse", "bias"),
+        color_by: str | None = "variable",
+        rows: str = "metric",
+        labels: list[str] | None = None,
+        renderer: str = "matplotlib",
+        **kwargs: Any,
+    ):
+        """Skill metrics as lines against time, for a ``compare(..., times=...)`` set.
+
+        One comparison per time bin, each metric record carrying its bin's ``time``:
+        ``osk.compare(..., times={"resample": "1MS", "reduce": "mean"})`` gives monthly
+        RMSE and bias through a simulation. A set whose comparisons carry no time
+        raises, naming ``times=``.
+
+        Parameters
+        ----------
+        metrics
+            Metric name or names, one panel each (default ``("rmse", "bias")``).
+        color_by
+            Metric-record field that splits the lines (default ``"variable"``);
+            ``marker_by=`` splits them further by marker shape.
+        rows
+            ``"metric"`` (default) stacks one panel per metric, sharing the time axis,
+            splitting a metric into one panel per distinct unit when variables have
+            different units; ``"variable"`` is the transpose, one row per variable and
+            one column per metric.
+        labels
+            Optional list of str, one per comparison, naming each -- see
+            :meth:`taylor`'s ``labels``; useful with ``color_by="label"``.
+        renderer
+            One of ``"matplotlib"`` (default, static; returns a Figure) or
+            ``"holoviews"`` (interactive; returns a holoviews Layout/Overlay).
+        **kwargs
+            Plot options forwarded to the renderer: ``marker_by``, ``colors``,
+            ``groups``, ``level_labels``, ``title``, ``figsize``, ``size``, ``zoom``,
+            ``font_scale``, ``save``. See ``docs/plot_styling_reference.md``.
+        """
+        from ocean_skill.plot.registry import render
+        from ocean_skill.plot.spec import PlotSpec
+
+        return render(
+            PlotSpec(
+                family="metrics_series",
+                items=self._metric_items(labels=labels),
+                options={
+                    "metrics": metrics,
+                    "color_by": color_by,
+                    "rows": rows,
+                    **kwargs,
+                },
+            ),
+            renderer=renderer,
+        )
+
+    @graft_from(
         "plot/map_metrics.py",
         "map_metrics",
         label="ocean_skill.plot.map_metrics.map_metrics",

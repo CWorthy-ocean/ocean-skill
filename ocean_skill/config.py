@@ -19,6 +19,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
+    "COMPARE_DRAWS",
     "PageConfig",
     "RefreshConfig",
     "RefreshSourceConfig",
@@ -28,6 +29,32 @@ __all__ = [
 
 #: The mutually exclusive page kinds, in the order their error messages list them.
 _PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
+
+#: The ``draw:`` values a ``compare:`` page accepts: which
+#: :class:`~ocean_skill.comparison.ComparisonSet` method draws it, with the page's
+#: ``plot:`` mapping forwarded as that method's keyword arguments. ``plot`` (the
+#: default) is the per-family ``.plot()``; the rest each draw the whole set as one
+#: figure.
+COMPARE_DRAWS = ("plot", "metrics_series", "target", "taylor")
+
+
+def check_draw(title: str, draw: str, contours: Any) -> None:
+    """Raise unless ``draw`` is a known drawing method that takes these ``contours``.
+
+    The one check of a compare page's ``draw:`` value, called at load time (before
+    ``{placeholders}`` are filled) and again after they are, by
+    :func:`ocean_skill.workflows.pages.expand`.
+    """
+    if draw not in COMPARE_DRAWS:
+        raise ValueError(
+            f"page {title!r}: draw: {draw!r} is not a known drawing "
+            f"method -- choose one of {list(COMPARE_DRAWS)}"
+        )
+    if draw != "plot" and contours:
+        raise ValueError(
+            f"page {title!r}: contours: only applies to draw: plot (this "
+            f"page draws with {draw})"
+        )
 
 
 class RefreshSourceConfig(BaseModel):
@@ -43,17 +70,53 @@ class RefreshSourceConfig(BaseModel):
     min_age: float | None = None
 
 
+class RefreshForcingConfig(BaseModel):
+    """One roms-tools forcing file set to catalog before the suite runs.
+
+    ``kind: boundary`` is forwarded to :func:`ocean_skill.build.add_boundary_sources`
+    (one entry per side, ``<name>_<side>``), ``kind: surface`` to
+    :func:`ocean_skill.build.add_forcing_source` (one entry, ``<name>``). ``files`` is a
+    glob or a list of globs, each expanded and sorted, joined in the order given.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: Literal["boundary", "surface"]
+    files: str | list[str]
+    grid: str
+    variables: list[str] | None = None
+    climatology: bool = False
+    sides: list[str] | None = None
+    time_coord: str | None = None
+
+    @model_validator(mode="after")
+    def _kind_keys(self) -> RefreshForcingConfig:
+        if self.kind == "surface" and self.sides is not None:
+            raise ValueError(
+                f"refresh.forcing {self.name!r}: sides: is for kind: boundary"
+            )
+        if self.kind == "boundary" and self.time_coord is not None:
+            raise ValueError(
+                f"refresh.forcing {self.name!r}: time_coord: is for kind: surface "
+                "(a boundary file's time is always bry_time)"
+            )
+        return self
+
+
 class RefreshConfig(BaseModel):
     """``refresh:`` block: rebuild a live run's kerchunk references first.
 
-    Forwarded, unchanged in shape, to
-    :func:`ocean_skill.workflows.run._refresh_sources`.
+    ``sources`` is forwarded, unchanged in shape, to
+    :func:`ocean_skill.workflows.run._refresh_sources`; ``forcing`` to
+    :func:`ocean_skill.workflows.run._refresh_forcing`, into the same catalog.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     catalog: str
-    sources: list[RefreshSourceConfig]
+    sources: list[RefreshSourceConfig] = Field(default_factory=list)
+    forcing: list[RefreshForcingConfig] = Field(default_factory=list)
 
 
 class RunInfoConfig(BaseModel):
@@ -132,6 +195,7 @@ class PageConfig(BaseModel):
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
     contours: Any = None
+    draw: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> PageConfig:
@@ -220,6 +284,19 @@ class PageConfig(BaseModel):
                 f"page {self.title!r}: contours: is only supported on field: and "
                 f"compare: pages (this page is {self.kind}:)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _draw_is_compare_only_and_known(self) -> PageConfig:
+        if self.draw is None:
+            return self
+        if self.kind != "compare":
+            raise ValueError(
+                f"page {self.title!r}: draw: is only supported on compare: pages "
+                f"(this page is {self.kind}:)"
+            )
+        if "{" not in self.draw:
+            check_draw(self.title, self.draw, self.contours)
         return self
 
 
