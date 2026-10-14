@@ -318,7 +318,7 @@ pages:
       variables: [east_velocity]
       select:
         lon: {min: 200, max: 240}
-        lat: {min: -20, max: 20}
+        lat: {min: -10, max: 18}   # where this band's obs have data (10S-18N)
         depth: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200,
                 225, 250, 275, 300, 350, 400, 450, 500]
       aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}

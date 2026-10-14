@@ -12608,6 +12608,10 @@ def _time_bins(source: str, freq: str, window: Any) -> list[tuple[Any, Any]]:
                 f"times=...'s window {window!r} matched no data in {source!r} "
                 f"along its time axis: {err}"
             ) from err
+        if dim not in obj.dims and dim in obj.coords:
+            # A full timestamp (what `time: latest` resolves to) selects one step
+            # as a scalar and drops the axis: that is one step of data, not none.
+            obj = obj.expand_dims(dim)
         if obj.sizes.get(dim, 0) == 0:
             raise ValueError(
                 f"times=...'s window {window!r} matched no data in {source!r} "

@@ -317,6 +317,18 @@ def test_a_window_narrows_which_bins_are_returned(monkeypatch, daily_dataset):
     assert [str(s)[:7] for s, _ in bins] == ["2010-02"]
 
 
+def test_a_window_of_one_exact_timestamp_is_one_bin_not_no_data(monkeypatch):
+    """``time: latest`` resolves to a full stamp, which selects one step as a scalar."""
+    time = pd.to_datetime(["2013-11-30 23:45", "2013-12-31 23:45"]).values.astype(
+        "datetime64[s]"
+    )
+    restarts = xr.Dataset({"v": (("time",), [1.0, 2.0])}, coords={"time": time})
+    monkeypatch.setattr("ocean_skill.sources.read", lambda source, **k: restarts)
+    bins = _time_bins("fake", "1D", "2013-12-31T23:45:00")
+    assert [str(s)[:10] for s, _ in bins] == ["2013-12-31"]
+    assert str(bins[0][1])[:19] == "2013-12-31T23:45:00"
+
+
 def test_a_period_window_matching_nothing_raises_valueerror(monkeypatch, daily_dataset):
     monkeypatch.setattr(
         "ocean_skill.sources.read", lambda source, **k: daily_dataset
