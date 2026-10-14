@@ -74,6 +74,7 @@ from ocean_skill.plot.section import contour_levels as _contour_levels_for
 from ocean_skill.plot.typography import (
     PAGE_W,
     PT_PER_CSS_PX,
+    SERIES_ASPECT,
     bokeh_fontsize,
     bokeh_scale,
     diagram_scale_factor,
@@ -4576,6 +4577,162 @@ def _portrait(
     return result
 
 
+def _metrics_series(
+    items,
+    metrics=("rmse", "bias"),
+    color_by: str | None = "variable",
+    marker_by: str | None = None,
+    rows: str = "metric",
+    colors=None,
+    groups: dict[str, Any] | None = None,
+    level_labels: dict[str, dict[str, str]] | None = None,
+    title: str | None = None,
+    figsize=None,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    hover: bool = True,
+    **_,
+):
+    """Interactive metrics series: lines of metrics against time, hover for the record.
+
+    Every option means what it does in
+    :func:`ocean_skill.plot.metrics_series.metrics_series`, whose
+    :func:`~ocean_skill.plot.metrics_series.build_layout` this draws directly, so the
+    two renderers cannot disagree about which records form a line, their order, their
+    colour or marker, which panel a line lands in, or a panel's title. Hovering a point
+    shows its time, value and (when present) variable, depth, test, reference and ``n``.
+
+    The legend sits on the first panel when every panel draws the same lines, and on
+    each panel otherwise (units split a metric into panels with different variables).
+    ``figsize`` is accepted for parity but bokeh frames are sized in pixels, so only
+    ``size``/``zoom`` change the size. The panels' time axes are linked.
+
+    Returns an ``hv.Overlay`` for a single panel, else an ``hv.Layout`` of them, each
+    panel in the cell the static figure gives it (a ragged grid leaves empty cells).
+    """
+    import pandas as pd
+
+    from ocean_skill.plot.metrics_series import build_layout
+    from ocean_skill.plot.summary import (
+        _apply_groups,
+        _resolve_level_labels,
+        pretty_level,
+    )
+
+    hv = _extension()
+    recs = [
+        dict(
+            i.get("metrics", {}),
+            label=i.get("label") or "",
+            units=units_text(i.get("units"), statistic_of(i)) or None,
+        )
+        for i in items
+    ]
+    if _apply_groups(recs, groups) and not color_by:
+        color_by = "group"
+    level_labels = _resolve_level_labels(level_labels, recs)
+    layout = build_layout(
+        recs,
+        metrics=metrics,
+        color_by=color_by,
+        marker_by=marker_by,
+        rows=rows,
+        colors=colors,
+        level_labels=level_labels,
+    )
+
+    factor = _canvas_factor(size, zoom)
+    # a lone column takes the series width; a grid of columns shares it out, shrinking
+    # each panel by less than the full share so they stay readable
+    width = SERIES_WIDTH_PX * factor / max(layout.ncols, 1) ** 0.5
+    px = frame_px(SERIES_ASPECT, width_px=width)
+    fontsize = bokeh_fontsize(px, font_scale=font_scale)
+
+    hover_fields = ("variable", "depth", "test", "reference", "n")
+
+    def _hover_value(field, value):
+        if isinstance(value, float | int | np.integer | np.floating):
+            return value
+        return pretty_level(field, value, level_labels)
+
+    panels = []
+    for k, panel in enumerate(layout.panels):
+        elements = []
+        # one dimension name per panel: holoviews links axes by dimension name, so two
+        # panels drawing different metrics (or one metric in different units) must not
+        # share a y name -- the visible label is the panel's own title
+        ydim = hv.Dimension(f"panel{k}", label=panel.title)
+        first_with_legend = layout.uniform and k == 0
+        show_legend = first_with_legend or not layout.uniform
+        for line in panel.lines:
+            frame = pd.DataFrame(
+                {
+                    "time": pd.to_datetime(line.x),
+                    ydim.name: line.y,
+                    **{
+                        f: [_hover_value(f, r.get(f)) for r in line.recs]
+                        for f in hover_fields
+                        if any(f in r for r in line.recs)
+                    },
+                }
+            )
+            for col in frame.columns:
+                if not pd.api.types.is_numeric_dtype(frame[col]) and col != "time":
+                    frame[col] = frame[col].astype(object)
+            vdims = [c for c in frame.columns if c != "time"]
+            elements.append(
+                hv.Curve(frame, kdims=["time"], vdims=vdims, label=line.label).opts(
+                    color=line.color,
+                    line_width=1.6,
+                    show_legend=show_legend,
+                    tools=[],
+                )
+            )
+            elements.append(
+                hv.Scatter(frame, kdims=["time"], vdims=vdims, label=line.label).opts(
+                    color=line.color,
+                    marker=_BOKEH_MARKERS[line.marker_index % len(_BOKEH_MARKERS)],
+                    size=6,
+                    show_legend=False,
+                    tools=["hover"] if hover else [],
+                )
+            )
+        if panel.metric == "bias":
+            elements.append(
+                hv.HLine(0).opts(color="#b3b3b3", line_width=1, line_dash="solid")
+            )
+        overlay = hv.Overlay(elements).opts(
+            hv.opts.Overlay(
+                title=panel.title,
+                frame_width=px[0],
+                frame_height=px[1],
+                fontsize=fontsize,
+                legend_position="right",
+                show_legend=show_legend,
+                ylabel=panel.title,
+                xlabel="",
+            )
+        )
+        panels.append(overlay)
+
+    if len(panels) == 1:
+        return panels[0].opts(title=str(title)) if title else panels[0]
+    # place each panel at its own (row, col), as the static figure does: a ragged grid
+    # (a metric split by units into more columns than its neighbour) leaves cells
+    # empty, and a flat Layout would slide later panels left into them
+    by_cell = {
+        (p.row, p.col): ov for p, ov in zip(layout.panels, panels, strict=True)
+    }
+    cells = [
+        by_cell.get((r, c), hv.Empty())
+        for r in range(layout.nrows)
+        for c in range(layout.ncols)
+    ]
+    result = hv.Layout(cells).cols(layout.ncols).opts(hv.opts.Layout(shared_axes=True))
+    return result.opts(hv.opts.Layout(title=str(title))) if title else result
+
+
 #: Name of the dimension a movie's frames vary along, i.e. what the slider is labelled.
 #: A movie's frames are usually time steps, but not necessarily — the static renderer
 #: calls the per-frame text a ``frame_label`` for the same reason — so the neutral name
@@ -7763,6 +7920,10 @@ def render(spec, **kwargs: Any):
         # A line panel has no colormap, no map and no fixed axes, so the map-only drops
         # do not apply to it -- and `mark` and `metrics_kwargs` do.
         drops = [d for d in drops if d not in ("mark", "metrics")]
+    if family == "metrics_series":
+        # `metrics` here is the family's own option (which metrics to draw), not the
+        # map families' statistics box
+        drops = [d for d in drops if d != "metrics"]
     if family in ("time_depth", "time_depth_row"):
         # time_depth's own mark ("scatter"/"pcolormesh") is load-bearing here too --
         # unlike a map family, it genuinely changes which of two drawing calls this
@@ -7903,6 +8064,8 @@ def render(spec, **kwargs: Any):
         return _target(spec.items, **opts)
     if family == "portrait":
         return _portrait(spec.items, **opts)
+    if family == "metrics_series":
+        return _metrics_series(spec.items, **opts)
     raise NotImplementedError(f"holoviews renderer: family {family!r} not implemented")
 
 

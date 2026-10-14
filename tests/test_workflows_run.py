@@ -472,6 +472,45 @@ def test_then_extremum_repr_is_printed_to_run_log(tmp_path, stub_extremum_model)
     assert "lon -90.0000, lat 20.0000" in log_text
 
 
+def test_list_only_marks_a_page_drawn_by_another_method(tmp_path, stub_model, capsys):
+    suite = _model_only_suite(tmp_path)
+    suite["pages"] += [
+        {
+            "title": "Monthly target",
+            "draw": "target",
+            "compare": {"reference": ["ref"], "variables": ["temperature"]},
+        },
+        {
+            "title": "Plain compare",
+            "compare": {"reference": ["ref"], "variables": ["temperature"]},
+        },
+    ]
+    result = run_suite(_write_suite(tmp_path, suite), list_only=True)
+    lines = capsys.readouterr().out.splitlines()
+    (target_line,) = [ln for ln in lines if "Monthly target" in ln]
+    (plain_line,) = [ln for ln in lines if "Plain compare" in ln]
+    assert target_line.endswith("+ draw: target")
+    assert "draw:" not in plain_line  # the default method is not worth a marker
+    assert [p.draw for p in result.pages] == [None, "target", "plot"]
+
+
+def test_list_only_still_runs_the_refresh_block(tmp_path, stub_model):
+    """--list is not write-free: refresh: rebuilds the kerchunk ref and catalog."""
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": str(tmp_path / "catalog.yaml"),
+            "sources": [{"name": "stub", "files": "x*.nc", "ref": "stub.json"}],
+        },
+    )
+    with mock.patch("ocean_skill.workflows.run._refresh_sources") as refresh:
+        run_suite(_write_suite(tmp_path, suite), list_only=True)
+    refresh.assert_called_once()
+    (sources, catalog_path), _ = refresh.call_args
+    assert sources[0]["name"] == "stub"
+    assert catalog_path == str(tmp_path / "catalog.yaml")
+
+
 def test_list_only_shows_the_then_chain(tmp_path, stub_extremum_model, capsys):
     path = _write_suite(tmp_path, _extremum_suite(tmp_path))
     run_suite(path, list_only=True)
@@ -1365,6 +1404,48 @@ def test_run_log_of_a_skipped_page(tmp_path, stub_model, monkeypatch, capsys):
 
     # The log also carries the traceback the terminal never shows for a skipped page.
     assert "Traceback" in log_text
+
+
+def test_refresh_forcing_runs_after_the_sources_into_the_same_catalog(
+    tmp_path, stub_model, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        "ocean_skill.workflows.run._refresh_sources",
+        lambda spec, cat: calls.append(("sources", spec, cat)),
+    )
+    monkeypatch.setattr(
+        "ocean_skill.workflows.run._refresh_forcing",
+        lambda spec, cat: calls.append(("forcing", spec, cat)),
+    )
+    suite = _model_only_suite(
+        tmp_path,
+        refresh={
+            "catalog": "catalogs/x.yaml",
+            "sources": [{"name": "stub", "files": "x/*.nc", "ref": "refs/x.parquet"}],
+            "forcing": [
+                {
+                    "name": "bry",
+                    "kind": "boundary",
+                    "files": ["a/*.nc", "b/*.nc"],
+                    "grid": "grid.nc",
+                }
+            ],
+        },
+    )
+    run_suite(_write_suite(tmp_path, suite))
+    assert [c[0] for c in calls] == ["sources", "forcing"]
+    _, forcing, catalog = calls[1]
+    assert catalog == "catalogs/x.yaml"
+    assert forcing == [
+        {
+            "name": "bry",
+            "kind": "boundary",
+            "files": ["a/*.nc", "b/*.nc"],
+            "grid": "grid.nc",
+            "climatology": False,
+        }
+    ]
 
 
 def test_output_before_report_dir_exists_is_buffered_into_run_log(
