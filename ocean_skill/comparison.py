@@ -9411,7 +9411,15 @@ def _identity(c) -> tuple:
     Built from the object's own attributes rather than from ``c._cache_key``, which
     hashes very nearly this but exists to name a zarr store — pooling has no business
     depending on the cache's format version or on what it deliberately leaves out.
+
+    An object that carries no specification -- a suite's pooled metric row, which is
+    all that is left of a comparison once its page is drawn -- says who it is with its
+    own ``identity``; read off the attributes below, every such row would look like
+    every other and all but the first would be dropped.
     """
+    own = getattr(c, "identity", None)
+    if own is not None:
+        return own
     return (
         getattr(c, "test_name", None),
         getattr(c, "reference_name", None),
