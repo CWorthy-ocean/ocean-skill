@@ -54,7 +54,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from ocean_skill.config import COMPARE_DRAWS, check_draw
 
-__all__ = ["COMPARE_DRAWS", "STEP_REGISTRY", "MetricRecord", "build", "expand"]
+__all__ = [
+    "COMPARE_DRAWS",
+    "STEP_REGISTRY",
+    "MetricRecord",
+    "PageSkipped",
+    "build",
+    "expand",
+    "self_check_page",
+    "self_check_problem",
+]
 
 _EXACT_PLACEHOLDER_RE = re.compile(
     r"^\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\}$"
@@ -883,6 +892,13 @@ class ExpandedPage:
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
+    #: Peak resident memory of the process while the page was drawn, in MB (``None``
+    #: until drawn). Written by the runner into the manifest, not part of ``as_dict()``.
+    peak_mb: float | None = None
+    #: Comparisons :func:`build` left out of a compare page because their test or
+    #: reference data was entirely NaN, one reason each (the page itself still drew
+    #: from the rest). Empty for every other page.
+    dropped: list[str] = _dc_field(default_factory=list)
     metrics_records: list[dict[str, Any]] = _dc_field(default_factory=list)
     #: What a ``then:`` step actually found once the page was drawn -- e.g. one
     #: record per ``extremum`` step (value, position, snapshot). Data-dependent,
@@ -1674,6 +1690,223 @@ def _extremum_record(ext: Any) -> dict[str, Any]:
     }
 
 
+class PageSkipped(Exception):
+    """A page that was deliberately not drawn, as opposed to one that crashed.
+
+    :func:`build` raises it when the page's data is not there to draw (every
+    comparison entirely NaN, say). The runner treats it like any other skip but files it
+    under ``skipped`` rather than ``failed`` in its problems list.
+    """
+
+
+def _test_side(spec: Any) -> Any:
+    """Return a pair-spec's ``test`` side; any other spec unchanged."""
+    if isinstance(spec, dict) and {"test", "reference"} <= spec.keys():
+        return spec["test"]
+    return spec
+
+
+def _self_check_kwargs(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """One compare call's kwargs with every lane-specific setting set to the test's.
+
+    ``None`` when the call cannot be turned into a test-against-itself (several test
+    sources: the reference list would pair each with all the others).
+    """
+    test = kwargs.get("test")
+    if not isinstance(test, str):
+        return None
+    out = copy.deepcopy(kwargs)
+    out["reference"] = test
+    variables = out.get("variables")
+    if isinstance(variables, list):
+        out["variables"] = [_test_side(v) for v in variables]
+    elif variables is not None:
+        out["variables"] = _test_side(variables)
+    select = out.get("select")
+    if select is not None:
+        out["select"] = _test_side(select)
+    aggregate = out.get("aggregate")
+    if isinstance(aggregate, list):
+        out["aggregate"] = [_test_side(a) for a in aggregate]
+    elif aggregate is not None:
+        out["aggregate"] = _test_side(aggregate)
+    if "qc" in out:
+        out["qc"] = _test_side(out["qc"])
+    # Per-lane switches that would otherwise treat the two copies of one source
+    # differently (detide the reference only, demean one side): both lanes get the
+    # test's choice.
+    sm = out.get("subtract_mean")
+    if isinstance(sm, str):
+        out["subtract_mean"] = sm == "test"
+    elif isinstance(sm, dict):
+        out["subtract_mean"] = bool(sm.get("test", False))
+    dt = out.get("detide")
+    if dt == "reference":
+        out["detide"] = False
+    elif dt == "test":
+        out["detide"] = True
+    elif isinstance(dt, dict) and dt.keys() & {"test", "reference"}:
+        out["detide"] = dt.get("test", False)
+    return out
+
+
+def self_check_page(page: ExpandedPage) -> ExpandedPage | None:
+    """Return a ``compare`` page redrawn against itself, or ``None`` if not possible.
+
+    The reference is replaced by the test source, and every ``{test, reference}``
+    pair-spec (``variables``, ``select``, ``aggregate``, ``qc``) is collapsed to its
+    test side, so both lanes are the very same recipe: any difference the comparison
+    then reports comes from the pipeline treating the two lanes differently, not from
+    the data. The copy is titled ``"[self-check] <title>"`` and never cached (a stored
+    result would hide whatever the code does now). ``None`` for any other kind of page,
+    and for a page whose ``test`` is not one source name.
+    """
+    if page.kind != "compare":
+        return None
+    kwargs = _self_check_kwargs(page.kwargs)
+    if kwargs is None:
+        return None
+    contours = page.contours
+    if isinstance(contours, dict):
+        contours = _self_check_kwargs(contours)
+        if contours is None:
+            return None
+    from dataclasses import replace
+
+    return replace(
+        page,
+        title=f"[self-check] {page.title}",
+        kwargs=kwargs,
+        contours=contours,
+        cache=False,
+        metrics_records=[],
+        results=[],
+        dropped=[],
+    )
+
+
+def self_check_problem(page: ExpandedPage) -> str | None:
+    """Why a drawn self-check page's metrics are not those of identical lanes, or None.
+
+    Two lanes carrying the same data must show zero bias, zero error and perfect
+    correlation. Each comparison's record is checked against a tolerance scaled to the
+    data (``1e-6`` of the larger of its mean, spread and 1), so float noise passes and a
+    lane that was cropped, shifted or masked differently does not.
+    """
+    bad = []
+    for rec in page.metrics_records:
+        scale = max(
+            [abs(rec[k]) for k in ("mean_test", "std_test") if _finite(rec.get(k))]
+            + [1.0]
+        )
+        tol = 1e-6 * scale
+        found = []
+        # A NaN here is itself the finding: identical lanes always have a bias and an
+        # error. (corr alone may be NaN -- a constant field has no correlation.)
+        nan = [k for k in ("bias", "rmse") if k in rec and _non_finite(rec[k])]
+        if nan:
+            found.append(f"{'/'.join(nan)} NaN although the lanes should be identical")
+        if _finite(rec.get("bias")) and abs(rec["bias"]) > tol:
+            found.append(f"bias {rec['bias']:.4g}")
+        if _finite(rec.get("rmse")) and rec["rmse"] > tol:
+            found.append(f"rmse {rec['rmse']:.4g}")
+        if _finite(rec.get("corr")) and rec["corr"] < 1 - 1e-6:
+            found.append(f"corr {rec['corr']:.6g}")
+        if found:
+            label = rec.get("label") or rec.get("variable") or "comparison"
+            where = ", ".join(
+                f"{k}={rec[k]}" for k in ("depth", "time") if rec.get(k) is not None
+            )
+            bad.append(f"{label}{f' ({where})' if where else ''}: {', '.join(found)}")
+    if not bad:
+        return None
+    more = f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""
+    return (
+        f"identical lanes disagree -- {'; '.join(bad[:3])}{more} -- a lane is being "
+        "treated differently from the other"
+    )
+
+
+def _non_finite(x: Any) -> bool:
+    """Report whether ``x`` is a number that is NaN or infinite (not ``None``)."""
+    import math
+
+    try:
+        return not math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def _finite(x: Any) -> bool:
+    import math
+
+    try:
+        return math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def _all_nan_reason(c: Any) -> str | None:
+    """``"all-NaN: <lane> has no data at ..."`` if a comparison's lane is all NaN."""
+    import numpy as np
+
+    try:
+        aligned = c.aligned
+        lane = next(
+            (
+                name
+                for name in ("test", "reference")
+                if name in aligned and not bool(np.isfinite(aligned[name]).any())
+            ),
+            None,
+        )
+    except Exception as exc:
+        warnings.warn(
+            f"could not check {getattr(c, 'variable', '?')!r} "
+            f"({getattr(c, 'test_name', '?')} vs {getattr(c, 'reference_name', '?')}) "
+            f"for all-NaN data, so it is drawn as it is: {type(exc).__name__}: {exc}",
+            stacklevel=2,
+        )
+        return None
+    if lane is None:
+        return None
+    try:
+        depth, time = c._record_depth_time()
+    except Exception:
+        depth = time = None
+    where = ", ".join(
+        f"{k} {v}" for k, v in (("depth", depth), ("time", time)) if v is not None
+    )
+    what = (
+        f"{getattr(c, 'variable', None)}: {getattr(c, 'test_name', '?')} vs "
+        f"{getattr(c, 'reference_name', '?')}"
+    )
+    return f"all-NaN: {lane} has no data at {where or 'the selected cells'} ({what})"
+
+
+def _drop_all_nan(page: ExpandedPage, cs: Any, *, osk: Any) -> tuple[Any, list[bool]]:
+    """``cs`` without its all-NaN comparisons, and which of its members were kept.
+
+    Raises :class:`PageSkipped` if none is left; otherwise the reasons for those that
+    went are warned and kept on ``page.dropped``.
+    """
+    reasons = [_all_nan_reason(c) for c in cs]
+    keep = [r is None for r in reasons]
+    if all(keep):
+        return cs, keep
+    dropped = [r for r in reasons if r is not None]
+    if not any(keep):
+        more = f" (+{len(dropped) - 3} more)" if len(dropped) > 3 else ""
+        raise PageSkipped("; ".join(dropped[:3]) + more)
+    page.dropped = dropped
+    warnings.warn(
+        f"page {page.title!r}: dropped {len(dropped)} of {len(reasons)} comparison(s): "
+        + "; ".join(dropped[:3]),
+        stacklevel=3,
+    )
+    return osk.ComparisonSet([c for c, k in zip(cs, keep, strict=True) if k]), keep
+
+
 def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = None):
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
@@ -1809,11 +2042,28 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
         cs = build_compare(page.kwargs)
         if len(cs) == 0:
             raise ValueError("every comparison in this page was skipped (skip_missing)")
+        n_built = len(cs)
+        cs, kept = _drop_all_nan(page, cs, osk=osk)
         page.metrics_records = [c.metrics() for c in cs]
         families = sorted({c.family for c in cs})
         contour_cs = None
         if isinstance(page.contours, dict):
             contour_cs = build_compare(page.contours)
+            if len(cs) != n_built:
+                if len(contour_cs) != n_built:
+                    # the lines are paired with the fill by position; with members
+                    # gone and no one-to-one match left, any pairing would be a guess
+                    raise ValueError(
+                        f"page {page.title!r}: {n_built - len(cs)} of {n_built} "
+                        "comparison(s) were left out as all-NaN, and the contours: "
+                        f"overlay has {len(contour_cs)} -- they can no longer be "
+                        "paired with the fill. Narrow the page so every comparison "
+                        "has data."
+                    )
+                # they lose the same members
+                contour_cs = osk.ComparisonSet(
+                    [c for c, k in zip(contour_cs, kept, strict=True) if k]
+                )
             _check_contour_families(
                 page.title, families, [c.family for c in cs], contour_cs
             )

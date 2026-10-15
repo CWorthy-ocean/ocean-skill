@@ -25,6 +25,7 @@ at the same catalog path, the cache will happily serve the old result. Call
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -46,6 +47,7 @@ __all__ = [
     "obs_dir",
     "path",
     "report_use",
+    "scoped",
     "verbose",
 ]
 
@@ -300,9 +302,39 @@ _EXTENSIONS = {
 }
 
 
+#: Where :func:`scoped` has moved the identity-keyed result kinds, else ``None``.
+_scoped_root: Path | None = None
+
+#: Kinds :func:`scoped` leaves where they are: ``weights`` is keyed on a hash of the two
+#: grids' own coordinates, so it can never answer for the wrong data and is the one
+#: result worth sharing (it is also the slowest to rebuild).
+_UNSCOPED_KINDS = ("weights",)
+
+
 def path(kind: str = "aligned") -> Path:
     """Return the directory holding cached results of one :data:`KINDS` kind."""
+    if _scoped_root is not None and kind not in _UNSCOPED_KINDS:
+        return _scoped_root / kind
     return base_dir() / "cache" / kind
+
+
+@contextlib.contextmanager
+def scoped(name: str):
+    """Keep this block's cached results in ``<base_dir>/<name>/`` instead of ``cache/``.
+
+    For a run whose inputs differ from what the identity key can see -- a model read
+    with only its last few time steps (``ocean-skill-run --smoke``) -- so its results
+    can neither be served from the real cache nor poison it. Applies to the prepared,
+    aligned and calculated kinds; ``weights`` (content-keyed) and downloaded sources
+    (:func:`obs_dir`) stay shared. The previous location is restored on exit.
+    """
+    global _scoped_root
+    saved = _scoped_root
+    _scoped_root = base_dir() / name
+    try:
+        yield _scoped_root
+    finally:
+        _scoped_root = saved
 
 
 def enable(directory: str | Path | None = None) -> None:

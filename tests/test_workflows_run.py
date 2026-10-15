@@ -1269,7 +1269,7 @@ def test_a_failing_compare_page_is_skipped_and_summary_is_skipped_too(
     assert result.exit_code == 1  # both of this suite's two pages were skipped
 
 
-def test_exit_code_is_3_when_some_pages_ok_and_some_skipped(
+def test_exit_code_is_4_when_some_pages_ok_and_one_failed(
     tmp_path, stub_model, monkeypatch
 ):
     real_build = _pages.build
@@ -1293,7 +1293,8 @@ def test_exit_code_is_3_when_some_pages_ok_and_some_skipped(
     )
     path = _write_suite(tmp_path, suite)
     result = run_suite(path)
-    assert result.exit_code == 3
+    # a page whose draw raised is "failed", not a benign skip: 4 (see exit_code)
+    assert result.exit_code == 4
     assert result.report_dir.exists()
 
 
@@ -2039,7 +2040,7 @@ def test_a_section_whose_pages_all_skipped_leaves_no_orphan_divider(
     assert bad.status == "skipped"
     assert good.status == "ok"
     assert _pagecount_by_bytes(result.pdf) == 2  # "Good part" divider + "Good page"
-    assert result.exit_code == 3  # one data page skipped, one drew
+    assert result.exit_code == 4  # one data page failed, one drew
 
 
 def test_pdf_false_leaves_every_section_skipped_with_its_own_reason(
@@ -2089,8 +2090,8 @@ def test_a_run_where_nothing_drew_writes_no_pdf_despite_its_sections(
         (["S", "F", "S"], set(), 0, "1 page(s) drawn, 0 skipped"),
         # an undrawn data page: 1 -- the divider that *was* written does not rescue it
         (["S", "F"], {"F"}, 1, "0 page(s) drawn, 1 skipped"),
-        # mixed data pages: 3
-        (["S", "F", "S", "G"], {"G"}, 3, "1 page(s) drawn, 1 skipped"),
+        # mixed data pages, one of which failed (raised): 4
+        (["S", "F", "S", "G"], {"G"}, 4, "1 page(s) drawn, 1 skipped"),
         # nothing but dividers: still no report to speak of
         (["S", "S"], set(), 1, "0 page(s) drawn, 0 skipped"),
     ],
