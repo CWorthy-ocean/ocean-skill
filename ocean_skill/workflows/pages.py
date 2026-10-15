@@ -74,9 +74,23 @@ class MetricRecord:
     """
 
     def __init__(self, record: dict[str, Any], *, label: str, units: str | None = None):
+        from ocean_skill.comparison import _canonical
+
         self._record = dict(record)
         self.label = label
         self.units = units
+        # What pooling de-duplicates on: the whole row. Two rows are the same
+        # comparison only if every field -- pair, variable, depth, time and every
+        # metric -- matches, which is what drawing one page twice would produce.
+        self.identity = ("metric-record", _canonical(self._record))
+        # What the summary's point labels are read from (comparison._LABEL_DIMS), off
+        # the row's own columns.
+        self.variable = record.get("variable")
+        self.test_name = record.get("test")
+        self.reference_name = record.get("reference")
+        self.select = {
+            k: record[k] for k in ("depth", "time") if record.get(k) is not None
+        }
 
     def metrics(self, **extra: Any) -> dict[str, Any]:
         return {**self._record, **extra}
