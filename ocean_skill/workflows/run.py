@@ -31,6 +31,15 @@ of that reference under the report directory's own ``refs/``, so the report stay
 tied to the exact data it was drawn from even after the shared reference is
 overwritten by a later run.
 
+Guardrails against finding a bug only after hours of compute (see "Guardrails" in
+``docs/suites.md``): ``smoke=N`` reads every model source of the ``refresh:`` block
+with only its last N steps (own output directory and results cache), ``self_check``
+redraws every ``compare:`` page against itself and flags any difference,
+``only=GLOB`` draws just the matching pages, and ``strict`` counts a layout warning as
+a problem. Whatever goes wrong -- a skipped or failed page, a self-check mismatch, a
+strict warning -- is collected in :attr:`SuiteResult.problems`, listed at the end of the
+run with its time and peak memory, and makes :attr:`SuiteResult.exit_code` nonzero.
+
 Optionally the suite can refresh a model's kerchunk reference before running, which
 is what makes it usable against a run that is still writing output. The same block's
 ``forcing:`` list catalogs the run's roms-tools forcing files (boundary and surface)
@@ -41,20 +50,23 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fnmatch
 import io
 import json
+import re
 import shutil
 import sys
+import threading
 import time
 import traceback
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from dataclasses import field as _dc_field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-__all__ = ["main", "run_suite"]
+__all__ = ["PageProblem", "SuiteResult", "main", "run_suite"]
 
 #: What a run writes into its report directory, so what a fixed-mode run clears first
 #: (see :func:`_clear_previous_report`). Nothing else in the directory is ever touched.
@@ -423,6 +435,25 @@ def _snapshot_refs(refresh: Any, report_dir: Path) -> list[dict[str, Any]]:
 
 
 @dataclass
+class PageProblem:
+    """One thing a run found wrong with a page, for the end-of-run list.
+
+    ``kind`` is ``"skipped"`` (the page, or part of it, was not drawn for a reason the
+    code knew: its source could not be read, its data was all NaN), ``"failed"`` (the
+    draw raised), ``"self-check"`` (``run_suite(self_check=True)`` found the two
+    identical lanes disagreeing) or ``"strict"`` (a layout warning under ``strict``).
+    ``seconds`` and ``peak_mb`` are what drawing the page took and the process's peak
+    memory while it did (``None`` if it was never tried).
+    """
+
+    title: str
+    kind: str
+    reason: str
+    seconds: float | None = None
+    peak_mb: float | None = None
+
+
+@dataclass
 class SuiteResult:
     """What :func:`run_suite` produced."""
 
@@ -434,19 +465,168 @@ class SuiteResult:
     manifest: Path | None = None
     log: Path | None = None
     refs: list[Path] = _dc_field(default_factory=list)
+    #: Everything wrong with the pages that were attempted (see :class:`PageProblem`).
+    problems: list[PageProblem] = _dc_field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
+        """Return the process exit code.
+
+        ``0`` clean, ``1`` no page drew, ``3`` pages skipped or flagged, ``4`` a page
+        failed or a self-check found a lane bug (so not a benign skip).
+        """
         # A section: divider is not a figure: whether it was written to the PDF says
         # nothing about whether the report drew, so it takes no part in the code.
         statuses = {p.status for p in self.pages if p.kind != "section"}
-        if not statuses:
-            return 1
-        if statuses == {"ok"}:
-            return 0
         if "ok" not in statuses:
             return 1
+        if any(p.kind in ("failed", "self-check") for p in self.problems):
+            return 4
+        if statuses == {"ok"} and not self.problems:
+            return 0
+        # some page skipped, or every page drew but something is still wrong with one
         return 3
+
+
+#: Warnings that mean a page drew but badly (``strict`` turns them into problems): the
+#: layout ones. Ordinary data warnings -- thin samples, partial bins -- are not here.
+_STRICT_PATTERNS = (
+    r".*the maps are only [\d.]+in wide",
+    r".*on a canvas capped at [\d.]+in leaves .* less than the labeling needs",
+    r".*the maps may be squeezed",
+    r".*[Tt]ight layout not applied",
+    r".*constrained_layout not applied",
+)
+
+
+@contextlib.contextmanager
+def _watch_warnings(patterns):
+    """Collect the text of every warning matching ``patterns`` raised in the block.
+
+    The warning still goes wherever it was going (the terminal and ``run.log``); this
+    only listens. A matching warning is made to fire every time (``"always"``), since
+    Python otherwise reports one location once and a second page's identical problem
+    would never be seen.
+    """
+    hits: list[str] = []
+    compiled = [re.compile(p, re.DOTALL) for p in patterns]
+    with warnings.catch_warnings():
+        for p in patterns:
+            warnings.filterwarnings("always", message=p)
+        previous = warnings.showwarning
+
+        def show(message, category, filename, lineno, file=None, line=None):
+            text = str(message)
+            if any(c.match(text) for c in compiled):
+                hits.append(text)
+            previous(message, category, filename, lineno, file, line)
+
+        warnings.showwarning = show
+        yield hits
+
+
+def _rss_mb() -> float | None:
+    """Return this process's resident memory in MB, or ``None`` without psutil.
+
+    ``resource.ru_maxrss`` would do for a whole run but is a process-lifetime peak, so
+    it says nothing about one page; better no number than a misleading one.
+    """
+    try:
+        import psutil
+
+        return psutil.Process().memory_info().rss / 1e6
+    except Exception:
+        return None
+
+
+class _PeakMemory:
+    """Context manager recording the peak resident memory (MB) reached in its block.
+
+    A background thread samples the process every 0.1 s, so a short spike between
+    samples can be missed; it is for spotting the page that needs gigabytes, not for
+    accounting. ``peak_mb`` stays ``None`` when memory cannot be read (no psutil).
+    """
+
+    interval = 0.1
+
+    def __enter__(self) -> _PeakMemory:
+        self.peak_mb = _rss_mb()
+        self._thread = None
+        if self.peak_mb is None:
+            return self
+        self._stop = threading.Event()
+
+        def sample() -> None:
+            while not self._stop.wait(self.interval):
+                now = _rss_mb()
+                if now is not None:
+                    self.peak_mb = max(self.peak_mb, now)
+
+        self._thread = threading.Thread(target=sample, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        now = _rss_mb()
+        if now is not None:
+            self.peak_mb = max(self.peak_mb, now)
+
+
+def _select_pages(expanded: list[Any], glob: str) -> list[Any]:
+    """Keep the figure pages whose title matches ``glob`` (case-insensitive fnmatch).
+
+    A ``section:`` divider stays only when a matching page follows it before the next
+    divider, so the report has no heading over nothing.
+    """
+    pattern = glob.lower()
+    keep = [
+        p.kind != "section" and fnmatch.fnmatchcase(p.title.lower(), pattern)
+        for p in expanded
+    ]
+    if not any(keep):
+        titles = [p.title for p in expanded if p.kind != "section"]
+        raise ValueError(
+            f"--only {glob!r} matches no page; the pages are: "
+            + "; ".join(repr(t) for t in titles[:12])
+            + (" ..." if len(titles) > 12 else "")
+        )
+    selected: list[Any] = []
+    pending = None
+    for page, kept in zip(expanded, keep, strict=True):
+        if page.kind == "section":
+            pending = page
+        elif kept:
+            if pending is not None:
+                selected.append(pending)
+                pending = None
+            selected.append(page)
+    return selected
+
+
+def _short(text: str, limit: int = 200) -> str:
+    """Return ``text`` on one line, cut to ``limit`` characters."""
+    one = " ".join(str(text).split())
+    return one if len(one) <= limit else one[: limit - 3] + "..."
+
+
+def _problem_lines(problems: list[PageProblem]) -> list[str]:
+    """Format the end-of-run problem list, one line per problem."""
+    if not problems:
+        return []
+    lines = [f"{len(problems)} problem(s):"]
+    for p in problems:
+        cost = []
+        if p.seconds is not None:
+            cost.append(f"{p.seconds:.1f}s")
+        if p.peak_mb is not None:
+            cost.append(f"peak {p.peak_mb:,.0f} MB")
+        tail = f" ({', '.join(cost)})" if cost else ""
+        lines.append(f"  [{p.kind}] {p.title}: {_short(p.reason)}{tail}")
+    return lines
 
 
 def _report_dir_name(name: str, test_source: str, index: Any) -> str:
@@ -493,6 +673,8 @@ def _write_manifest(
     refresh: dict[str, Any] | None = None,
     pdf_images_applied: bool = False,
     run_info: dict[str, Any] | None = None,
+    modes: dict[str, Any] | None = None,
+    problems: list[PageProblem] | None = None,
 ) -> None:
     import ocean_skill
     from ocean_skill import cache as _cache
@@ -505,6 +687,10 @@ def _write_manifest(
         "catalog_search_paths": [str(d) for d in (catalog_dirs or [])],
         "cache_dir": str(_cache.base_dir()),
         "refresh": refresh,
+        # smoke / self_check / only / strict as the run was invoked, ``None`` for an
+        # ordinary full run
+        "modes": modes,
+        "problems": [asdict(p) for p in problems or []],
         # The cover page's content (see ocean_skill.workflows.cover.RunInfo.as_dict).
         "run_info": run_info,
         # What the suite asked of report.pdf's rasters, and whether the Ghostscript
@@ -516,6 +702,8 @@ def _write_manifest(
                 **p.as_dict(),
                 "status": p.status,
                 "reason": p.reason,
+                "seconds": p.elapsed,
+                "peak_mb": p.peak_mb,
                 # Data-dependent (a then: step's own extremum(), say) and so left
                 # out of as_dict()/the determinism check -- see ExpandedPage.
                 "results": p.results,
@@ -559,8 +747,57 @@ def _resolve_cache_dir(entry: str | None, suite_path: Path) -> Path | None:
     return d.resolve()
 
 
+def _self_check_pages(expanded: list[Any]) -> tuple[list[Any], set[int]]:
+    """Swap every ``compare:`` page for its self-check copy; also return their ids."""
+    from ocean_skill.workflows import pages as _pages
+
+    out, checked = [], set()
+    for page in expanded:
+        copy = _pages.self_check_page(page) if not page.problem else None
+        if copy is None:
+            if page.kind == "compare":
+                print(f"self-check: {page.title!r} cannot be checked; drawn as written")
+            out.append(page)
+            continue
+        out.append(copy)
+        checked.add(id(copy))
+    return out, checked
+
+
+def _page_problems(
+    page: Any, strict_hits: list[str], self_checked: bool
+) -> list[tuple[str, str]]:
+    """Return the ``(kind, reason)`` problems of a page that drew."""
+    from ocean_skill.workflows import pages as _pages
+
+    found = []
+    if page.dropped:
+        found.append(
+            (
+                "skipped",
+                f"{len(page.dropped)} comparison(s) left out: "
+                + "; ".join(page.dropped[:3]),
+            )
+        )
+    if self_checked:
+        reason = _pages.self_check_problem(page)
+        if reason:
+            found.append(("self-check", reason))
+    if strict_hits:
+        more = f" (+{len(strict_hits) - 1} more)" if len(strict_hits) > 1 else ""
+        found.append(("strict", strict_hits[0] + more))
+    return found
+
+
 def run_suite(
-    path: str | Path, *, list_only: bool = False, refresh: bool = True
+    path: str | Path,
+    *,
+    list_only: bool = False,
+    refresh: bool = True,
+    smoke: int | None = None,
+    self_check: bool = False,
+    only: str | None = None,
+    strict: bool = False,
 ) -> SuiteResult:
     """Load, expand, and draw a suite YAML; return a :class:`SuiteResult`.
 
@@ -571,6 +808,32 @@ def run_suite(
     catalog entries it names -- unless ``refresh=False``, which reads the catalog
     and references as they already are. That is what lets several suites sharing
     one ``refresh:`` target run at once: one refreshes, the rest only read.
+
+    The remaining options are guardrails that make a bug show up in minutes rather than
+    after the full compute; all combine with each other and with ``list_only``/
+    ``refresh``:
+
+    ``smoke=N``
+        Read every model source named under ``refresh.sources`` (or, with no
+        ``refresh:`` block, ``defaults.test``) with only its last ``N`` time steps --
+        through :func:`ocean_skill.sources.truncate_time`, so the ``latest``/``month:
+        run`` lookups at expansion see the same shortened record. The cache key does not
+        know about the truncation, so the run's results go in
+        ``<cache>/smoke-cache/`` (:func:`ocean_skill.cache.scoped`), never the real
+        cache, and the report in ``<output_dir>/<name>-smoke/``.
+    ``self_check``
+        Every ``compare:`` page is redrawn with the reference replaced by the test
+        source (:func:`ocean_skill.workflows.pages.self_check_page`) and any bias, error
+        or correlation shortfall between those identical lanes is a problem. Report in
+        ``<name>-selfcheck/``.
+    ``only``
+        Draw only the pages whose title matches this case-insensitive glob. Report in
+        ``<name>-only/``.
+    ``strict``
+        A layout warning raised while drawing a page (:data:`_STRICT_PATTERNS`) is a
+        problem; the page still draws.
+
+    Whatever is wrong with the pages is returned in :attr:`SuiteResult.problems`.
     """
     import yaml
 
@@ -582,7 +845,34 @@ def run_suite(
     raw = yaml.safe_load(path.read_text())
     suite = SuiteConfig.model_validate(raw)
 
-    with _capture_terminal() as cap:
+    if smoke is not None and smoke < 1:
+        raise ValueError(f"smoke: need at least 1 time step, got {smoke}")
+
+    # Only the options that are set. A run that is not the whole suite as written must
+    # not replace the real report, so these also name its directory (``mode_tag``).
+    modes: dict[str, Any] = {
+        k: v
+        for k, v in (
+            ("smoke", smoke),
+            ("self_check", True if self_check else None),
+            ("only", only),
+            ("strict", True if strict else None),
+        )
+        if v is not None
+    }
+    mode_tag = "".join(
+        tag
+        for key, tag in (
+            ("smoke", "-smoke"),
+            ("self_check", "-selfcheck"),
+            ("only", "-only"),
+        )
+        if key in modes
+    )
+    smoke_sources: list[str] | None = None
+    smoke_dir: Path | None = None
+
+    with _capture_terminal() as cap, contextlib.ExitStack() as stack:
         catalog_dirs = _resolve_catalog_dirs(suite.catalog_search_paths, path)
         for entry, resolved in zip(suite.catalog_search_paths, catalog_dirs):
             if not resolved.is_dir():
@@ -615,7 +905,46 @@ def run_suite(
                     suite.refresh.catalog,
                 )
 
+        if smoke is not None:
+            from ocean_skill import cache as _smoke_cache
+            from ocean_skill import sources as _sources
+
+            test = suite.defaults.get("test")
+            smoke_sources = (
+                [src.name for src in suite.refresh.sources] if suite.refresh else []
+            )
+            if not smoke_sources and isinstance(test, str):
+                smoke_sources = [test]
+            if not smoke_sources:
+                raise ValueError(
+                    "smoke: no model source to shorten -- name them under "
+                    "refresh.sources or set defaults.test"
+                )
+            smoke_dir = stack.enter_context(_smoke_cache.scoped("smoke-cache"))
+            # Scratch: its keys know neither N nor how far the model has grown since,
+            # so a smoke run must never be served an earlier one's results.
+            if not list_only and smoke_dir.name == "smoke-cache":
+                shutil.rmtree(smoke_dir, ignore_errors=True)
+            modes["smoke_sources"] = smoke_sources
+            modes["smoke_cache"] = str(smoke_dir)
+            # the other sources are cut to end where the test source does, so a
+            # reference run that continues past the suite's window stays inside it
+            anchor = test if isinstance(test, str) else smoke_sources[0]
+            stack.enter_context(
+                _sources.truncate_time(smoke_sources, smoke, anchor=anchor)
+            )
+            print(
+                f"smoke: reading only the last {smoke} time step(s) of "
+                f"{smoke_sources}; results cached in {smoke_dir}"
+            )
+
         expanded = _pages.expand(suite)
+        if only is not None:
+            expanded = _select_pages(expanded, only)
+        if self_check:
+            expanded, self_checked = _self_check_pages(expanded)
+        else:
+            self_checked = set()
 
         test_source = suite.defaults.get("test")
         index = None
@@ -641,6 +970,8 @@ def run_suite(
             from ocean_skill import cache as _cache
 
             print(f"cache: {_cache.base_dir()}")
+            if smoke_dir is not None:
+                print(f"smoke cache: {smoke_dir}")
             for i, p in enumerate(expanded, 1):
                 if p.kind == "section":
                     print(f"{i:2d}. [section] {p.title}")
@@ -675,10 +1006,10 @@ def run_suite(
         output_dir.mkdir(parents=True, exist_ok=True)
         if suite.timestamped_dir:
             report_dir = output_dir / _report_dir_name(
-                suite.name, test_source or "model", index
+                suite.name + mode_tag, test_source or "model", index
             )
         else:
-            report_dir = output_dir / outputs.slug(suite.name)
+            report_dir = output_dir / outputs.slug(suite.name + mode_tag)
         report_dir.mkdir(parents=True, exist_ok=True)
         if not suite.timestamped_dir:
             _clear_previous_report(report_dir)
@@ -709,6 +1040,8 @@ def run_suite(
                 "sources": ref_records,
             }
 
+        problems: list[PageProblem] = []
+
         manifest_path = report_dir / "manifest.json"
         _write_manifest(
             manifest_path,
@@ -718,6 +1051,7 @@ def run_suite(
             catalog_dirs=catalog_dirs,
             refresh=refresh_info,
             run_info=info.as_dict() if info else None,
+            modes=modes or None,
         )
 
         pdf_path = (report_dir / "report.pdf") if suite.pdf else None
@@ -750,23 +1084,56 @@ def run_suite(
                     page.status = "skipped"
                     page.reason = page.problem
                     print(f"   SKIPPED: {page.reason}")
+                    problems.append(
+                        PageProblem(page.title, "skipped", page.problem, 0.0)
+                    )
                     continue
                 t0 = time.perf_counter()
-                try:
-                    results = _pages.build(page, pooled_records=pooled_records)
-                except Exception as exc:
-                    page.elapsed = time.perf_counter() - t0
-                    page.status = "skipped"
-                    page.reason = f"{type(exc).__name__}: {exc}"
-                    warnings.warn(f"skipping page {page.title!r}: {exc}", stacklevel=2)
-                    cap.log_only(traceback.format_exc())
-                    print(f"   SKIPPED after {page.elapsed:.1f}s: {page.reason}")
-                    continue
+                watch = (
+                    _watch_warnings(_STRICT_PATTERNS)
+                    if strict
+                    else contextlib.nullcontext([])
+                )
+                with _PeakMemory() as mem, watch as strict_hits:
+                    try:
+                        results = _pages.build(page, pooled_records=pooled_records)
+                        error = None
+                    except Exception as exc:
+                        error = exc
+                        cap.log_only(traceback.format_exc())
+                    if error is None:
+                        # inside the watch: layout warnings (tight/constrained layout)
+                        # fire when the figure is rendered, which is here, not in build
+                        for suffix, fig in results:
+                            report.emit(fig, outputs.slug(page.title) + suffix)
                 page.elapsed = time.perf_counter() - t0
+                page.peak_mb = mem.peak_mb
+                if error is not None:
+                    page.status = "skipped"
+                    page.reason = f"{type(error).__name__}: {error}"
+                    warnings.warn(
+                        f"skipping page {page.title!r}: {error}", stacklevel=2
+                    )
+                    print(f"   SKIPPED after {page.elapsed:.1f}s: {page.reason}")
+                    kind = (
+                        "skipped" if isinstance(error, _pages.PageSkipped) else "failed"
+                    )
+                    problems.append(
+                        PageProblem(
+                            page.title, kind, page.reason, page.elapsed, page.peak_mb
+                        )
+                    )
+                    continue
                 page.status = "ok"
                 print(f"   done in {page.elapsed:.1f}s")
-                for suffix, fig in results:
-                    report.emit(fig, outputs.slug(page.title) + suffix)
+                found = _page_problems(page, strict_hits, id(page) in self_checked)
+                for kind, reason in found:
+                    print(f"   PROBLEM [{kind}]: {_short(reason)}")
+                    problems.append(
+                        PageProblem(
+                            page.title, kind, reason, page.elapsed, page.peak_mb
+                        )
+                    )
                 pooled_records.extend(page.metrics_records)
 
             metrics_csv = None
@@ -813,17 +1180,20 @@ def run_suite(
             refresh=refresh_info,
             pdf_images_applied=pdf_images_applied,
             run_info=info.as_dict() if info else None,
+            modes=modes or None,
+            problems=problems,
         )
 
-        latest_path = output_dir / "latest.txt"
-        latest_path.write_text(str(report_dir))
-        latest_link = output_dir / "latest"
-        try:
-            if latest_link.is_symlink() or latest_link.exists():
-                latest_link.unlink()
-            latest_link.symlink_to(report_dir.name)
-        except OSError:
-            pass  # best-effort only; latest.txt is the real contract
+        if not mode_tag:  # a smoke/self-check/partial report is not "the latest report"
+            latest_path = output_dir / "latest.txt"
+            latest_path.write_text(str(report_dir))
+            latest_link = output_dir / "latest"
+            try:
+                if latest_link.is_symlink() or latest_link.exists():
+                    latest_link.unlink()
+                latest_link.symlink_to(report_dir.name)
+            except OSError:
+                pass  # best-effort only; latest.txt is the real contract
 
         result = SuiteResult(
             pages=expanded,
@@ -838,12 +1208,19 @@ def run_suite(
                 for r in (refresh_info["sources"] if refresh_info else [])
                 if r["snapshot"]
             ],
+            problems=problems,
         )
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: ``ocean-skill-run suite.yaml [--list] [--no-refresh]``."""
+    """CLI entry point.
+
+    ``ocean-skill-run suite.yaml [--list] [--no-refresh] [--smoke [N]] [--self-check]
+    [--only GLOB] [--strict]``. Put ``--smoke``'s count right after it
+    (``--smoke 3``, or ``--smoke=3``), and the suite path before it, or the path is
+    taken as the count.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -863,6 +1240,33 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the suite's refresh: block and read its catalog as it is",
     )
+    parser.add_argument(
+        "--smoke",
+        nargs="?",
+        const=2,
+        default=None,
+        type=int,
+        metavar="N",
+        help="read only the last N (default 2) time steps of the suite's model "
+        "sources; report in <name>-smoke/, results in a separate smoke-cache",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="draw every compare page against itself (reference = test source) and "
+        "report any bias/error/correlation shortfall between the identical lanes",
+    )
+    parser.add_argument(
+        "--only",
+        metavar="GLOB",
+        help="draw only the pages whose title matches this case-insensitive glob",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="count a layout warning (cramped maps...) raised while drawing a page "
+        "as a problem",
+    )
     argv = argv if argv is not None else sys.argv[1:]
     try:
         args = parser.parse_args(argv)
@@ -871,7 +1275,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = run_suite(
-            args.suite, list_only=args.list, refresh=not args.no_refresh
+            args.suite,
+            list_only=args.list,
+            refresh=not args.no_refresh,
+            smoke=args.smoke,
+            self_check=args.self_check,
+            only=args.only,
+            strict=args.strict,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -895,6 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
             f"  refs: {len(result.refs)} reference snapshot(s) -> "
             f"{result.report_dir / 'refs'}"
         )
+    summary_lines.extend(_problem_lines(result.problems))
     for line in summary_lines:
         print(line)
     # run_suite's own tee is closed by the time these lines print, so append them

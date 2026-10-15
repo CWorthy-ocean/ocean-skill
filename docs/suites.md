@@ -657,6 +657,11 @@ overwrites an earlier report; use it if two runs of the same suite might overlap
 <output_dir>/latest            -- symlink to it
 ```
 
+A run that is not the whole suite as written -- `--smoke`, `--self-check` or `--only` (see
+Guardrails under CLI) -- writes to `<name>-smoke/`, `<name>-selfcheck/`, `<name>-only/` (or
+their combination, e.g. `<name>-smoke-selfcheck/`) instead, and leaves `latest.txt`/`latest`
+alone, so it can never replace the real report.
+
 ### Cover page
 
 Page 1 of `report.pdf` says which simulation the report is about. It is titled with the
@@ -754,8 +759,12 @@ absent, its observational catalog entry isn't on this machine's search path
 traceback. A page whose own source cannot be read while the suite is expanded (say a
 `refresh.forcing` entry that failed to build) is skipped without being tried, and
 `--list` already marks it `will be skipped: <why>`. A source with no time axis (a
-monthly climatology) is fine: its pages simply get no run window. `main`'s exit code: `0` every page drew, `3` the run completed with some
-pages skipped, `1` no page drew at all, `2` a schema or usage error (nothing was drawn).
+monthly climatology) is fine: its pages simply get no run window. `main`'s exit code: `0` every page drew and nothing was flagged, `3` the run completed
+with some pages skipped or flagged (a source that could not be read, an all-NaN
+comparison, a `--strict` layout warning), `4` a page *failed* (its draw raised) or a
+`--self-check` found a lane bug -- so a batch script can tell a crash or a real bug from a
+benign skip -- `1` no page drew at all, `2` a schema or usage error (nothing was drawn).
+See Guardrails under CLI for what is flagged.
 `section:` divider pages are not counted either way -- they are neither "drawn" nor
 "skipped" as far as these codes and the `N page(s) drawn, M skipped` line are concerned,
 so a suite whose only data pages skipped is `1` however many dividers it has.
@@ -763,7 +772,8 @@ so a suite whose only data pages skipped is `1` however many dividers it has.
 ## CLI
 
 ```
-ocean-skill-run SUITE.yaml [--list] [--no-refresh]
+ocean-skill-run SUITE.yaml [--list] [--no-refresh] [--smoke [N]] [--self-check]
+                [--only GLOB] [--strict]
 ```
 
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
@@ -784,5 +794,91 @@ suite is still reading them. Start one suite normally and wait for its `latest s
 ...` line, which prints once its refresh has saved the catalog. Then start the rest with
 `--no-refresh`. The one refreshing has to cover every source the others read.
 
-There is no other flag: everything that changes what gets drawn is a YAML key, so the
-suite file alone is what reproduces a report.
+Everything that changes what a page shows is a YAML key, so the suite file alone is what
+reproduces a report. The other flags only decide *how much* of it is drawn and how
+carefully it is checked: they are the guardrails below, and all of them combine with each
+other and with `--list` and `--no-refresh`.
+
+### Guardrails: find the bug in minutes, not after the full run
+
+A full run on an HPC can take hours, and a mistake in the suite or a bug in the code only
+shows once a page reaches it. These flags make most of them show early.
+
+**`--smoke [N]`** reads every model source named under `refresh.sources` (by `name`;
+with no `refresh:` block, `defaults.test`) with only its **last N time steps** (default
+2). Observation and reference catalogs and `refresh.forcing` entries are read whole.
+Every `latest`/`month: run` lookup made while the suite is expanded sees the shortened
+record too, so the pages expand and draw consistently, just over very little data. Write
+the count right after the flag (`--smoke 3` or `--smoke=3`) and put the suite path first.
+
+A smoke run never touches the real results:
+
+- its report goes to `<output_dir>/<name>-smoke/` (not `<name>/`), and `latest.txt`/
+  `latest` are left pointing at the last full report;
+- its cached results (the `prepared`, `aligned` and `calculated` kinds) go to
+  `<cache base dir>/smoke-cache/` -- `cache_dir:` if the suite sets one, else the default
+  -- because the cache key knows nothing about the truncation and a shortened result
+  must never be served to a full run. It is scratch: the key also knows neither N nor
+  how far the model has grown since, so the folder is **emptied at the start of every
+  `--smoke` run** (never reused between runs). Regrid weights (keyed on the grids' own contents)
+  and downloaded observation files stay shared, so a smoke run does not re-download WOA.
+  Delete the folder any time.
+
+**`--self-check`** draws every `compare:` page against itself: the reference is replaced
+by the test source, and every `{test: ..., reference: ...}` pair-spec (`variables`,
+`select`, `aggregate`, `qc`) is collapsed to its test side, so both lanes are the very
+same recipe. Identical lanes must show zero bias, zero error and a correlation of 1, so
+any comparison with `|bias|` or `rmse` above `1e-6` of the data's scale (the larger of
+its mean, spread and 1), or `corr` below `1 - 1e-6`, is reported as a `self-check`
+problem with the numbers (a NaN `bias` or `rmse` is a problem too -- identical lanes
+always have both; a NaN `corr` alone is not, a constant field has none). It catches lane-asymmetry bugs -- one lane cropped, shifted or
+masked differently from the other -- that otherwise look like a plausible model bias.
+Pages are titled `[self-check] <title>`, are never cached, and are drawn into
+`<output_dir>/<name>-selfcheck/` so the real report is never replaced; `field:`, `TS:`/
+`XY:` and `summary:` pages run as written. A compare page with several `test` sources
+cannot be paired with itself and is drawn as written (the log says so).
+
+**`--only GLOB`** draws only the pages whose title matches the case-insensitive glob
+(`fnmatch`: `*`, `?`, `[...]`), matched against the title as written (not the
+`[self-check]` one). A `section:` divider is kept only if a matching page follows it. The
+report goes to `<output_dir>/<name>-only/`, so a quick look at one page never replaces
+the full report. A `summary:` page needs its compare pages: select them too, or it is
+skipped. A glob that matches nothing is an error that lists the page titles.
+
+**`--strict`** turns layout warnings into problems: any warning raised while drawing a
+page that says the figure came out cramped -- "the maps are only ...in wide", "panels on
+a canvas capped at ...", "the maps may be squeezed", matplotlib's "Tight layout not
+applied" -- is reported as a `strict` problem for that page (the first message, and how
+many more). Both drawing the figure and saving it are watched, since the layout warnings
+matplotlib raises come at save time. The page still draws. Ordinary data warnings (thin samples, partial bins)
+are left alone: they are in `run.log`, not failures.
+
+**Problems and the summary.** However the pages are drawn, the end of the run prints (and
+appends to `run.log`, and writes to `manifest.json` as `"problems"`) one line per
+problem after the usual `N page(s) drawn, M skipped` line:
+
+```
+2 problem(s):
+  [skipped] Nitrate at 200 m: all-NaN: reference has no data at depth 200 (...) (12.4s, peak 3,102 MB)
+  [strict] Salinity grid: the maps are only 1.20in wide: ... (31.0s, peak 4,870 MB)
+```
+
+`kind` is `skipped` (not drawn, or part of it left out, for a reason the code knew: a
+source that could not be read, or a comparison whose test or reference data is entirely
+NaN once aligned -- a 200 m comparison on a 75 m shelf -- which is left out with a
+warning rather than drawn as an empty plot, the page skipped only if none remains),
+`failed` (the draw raised), `self-check` or `strict`. The time is what drawing the page
+took and the peak memory is the process's resident size while it ran, sampled every
+0.1 s (so a short spike can be missed; blank without `psutil`, since the fallback would
+be a lifetime peak for the whole process). Both are also recorded per page in
+`manifest.json` as `"seconds"` and `"peak_mb"`. The exit code is nonzero whenever there
+is a problem: `3` for skipped or `strict` problems if anything drew (even when every page
+did), `4` for any `failed` or `self-check` problem, `1` if nothing drew. A
+smoke/self-check/only/strict run is recorded in `manifest.json` under `"modes"`.
+
+**Recommended workflow.** On the HPC, run the suite quickly first with
+`ocean-skill-run SUITE.yaml --smoke --self-check --strict`: a few steps of data, every
+compare page checked against itself, cramped layouts caught -- minutes, in
+`<name>-smoke-selfcheck/`. Fix what it lists (and use `--only` to redraw just the pages you
+changed), then start the full run, which reuses the real cache and refreshes
+`<name>/` as usual.

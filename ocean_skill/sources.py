@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import warnings
 from collections import OrderedDict
 from typing import Any
 
 from ocean_skill import casts, time_zone
 from ocean_skill.catalog import SourceRef, resolve
 
-__all__ = ["erddap_constraints", "read"]
+__all__ = ["erddap_constraints", "read", "truncate_time"]
 
 #: In-process memo of :func:`read`'s standardized result, keyed on source identity +
 #: catalog-file freshness + the call's own qc/kwargs (see ``_read_cache_key`` below).
@@ -34,6 +35,88 @@ __all__ = ["erddap_constraints", "read"]
 #: below -- so the existing cache controls also govern this one.
 _READ_CACHE: OrderedDict[tuple, Any] = OrderedDict()
 _READ_CACHE_MAXSIZE = 8
+
+#: Entry name -> ``(steps, anchor)``: how many trailing time steps :func:`read` keeps of
+#: it and the source whose last time bounds them (or ``None``). Set only inside
+#: :func:`truncate_time` (``ocean-skill-run --smoke``). Applied to every result *after*
+#: the memo above, never before it: the memo and the on-disk cache keys know nothing
+#: about it, so what they hold must stay the full record.
+_TRUNCATE: dict[str, tuple[int, str | None]] = {}
+
+#: Slack allowed past the anchor's last time, for sources stamped slightly differently.
+_ANCHOR_TOLERANCE = "12h"  # under a daily step, so it admits no extra one
+
+
+@contextlib.contextmanager
+def truncate_time(names, steps: int, *, anchor: str | None = None):
+    """Make :func:`read` return only the last ``steps`` time steps of ``names``.
+
+    For a quick look at a long model run (``--smoke``): every comparison, field and
+    time-index lookup that goes through :func:`read` sees the shortened record, so a
+    suite expands and draws consistently, in a fraction of the time. Scoped to the
+    ``with`` block -- the previous setting is restored on the way out, even on an
+    error -- and applied after :func:`read`'s own memo, so nothing truncated is ever
+    stored under a key that means "the full record". The on-disk cache has no such
+    protection (its keys do not know about the truncation), which is why a caller must
+    also point the results cache somewhere separate (:func:`ocean_skill.cache.scoped`).
+    A source with no time axis (an observation climatology, say) is returned whole.
+
+    ``anchor`` names the test source the other sources are compared against: the last
+    ``steps`` of every *other* name are taken from those no later than the anchor's
+    last time (plus 12 hours), so a reference run that continues past the test's end
+    does not end up entirely outside the window. If none qualifies, its last ``steps``.
+    """
+    if steps < 1:
+        raise ValueError(f"truncate_time: steps must be at least 1, got {steps}")
+    saved = dict(_TRUNCATE)
+    _TRUNCATE.update(dict.fromkeys(names, (int(steps), anchor)))
+    try:
+        yield
+    finally:
+        _TRUNCATE.clear()
+        _TRUNCATE.update(saved)
+
+
+def _anchor_end(anchor: str):
+    """Return the last time of the ``anchor`` source (truncation never moves it)."""
+    from ocean_skill import operators
+
+    obj = read(anchor)
+    dim = operators.resolve_dim(obj, "time") if hasattr(obj, "dims") else None
+    if dim is None or dim not in obj.indexes or not len(obj.indexes[dim]):
+        return None
+    return obj.indexes[dim][-1]
+
+
+def _truncated(ref: SourceRef, obj):
+    """``obj`` cut to its last :data:`_TRUNCATE` steps if ``ref`` is named there."""
+    entry = _TRUNCATE.get(ref.name) if _TRUNCATE else None
+    if entry is None or not hasattr(obj, "dims"):
+        return obj
+    steps, anchor = entry
+    from ocean_skill import operators
+
+    dim = operators.resolve_dim(obj, "time")
+    if dim is None or dim not in obj.dims:
+        return obj
+    if anchor is not None and dim in obj.indexes:
+        try:
+            # the anchor itself is plain last-N (and must not be asked for its own end)
+            end = None if resolve(anchor).name == ref.name else _anchor_end(anchor)
+            if end is not None:
+                import pandas as pd
+
+                limit = end + pd.Timedelta(_ANCHOR_TOLERANCE)
+                inside = [i for i, t in enumerate(obj.indexes[dim]) if t <= limit]
+                if inside:
+                    return obj.isel({dim: inside[-steps:]})
+        except (TypeError, ValueError) as exc:  # calendars or types that do not compare
+            warnings.warn(
+                f"smoke: could not bound {ref.name!r} by the end of {anchor!r} "
+                f"({type(exc).__name__}: {exc}); keeping its last {steps} step(s)",
+                stacklevel=2,
+            )
+    return obj.isel({dim: slice(-steps, None)})
 
 
 def _read_cache_key(ref: SourceRef, qc: Any, kwargs: dict[str, Any]) -> tuple | None:
@@ -109,7 +192,7 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
     key = _read_cache_key(ref, qc, kwargs) if use_memo else None
     if key is not None and key in _READ_CACHE:
         _READ_CACHE.move_to_end(key)
-        return _READ_CACHE[key].copy(deep=False)
+        return _truncated(ref, _READ_CACHE[key].copy(deep=False))
 
     obj = _read_uncached(ref, meta, qc, kwargs)
 
@@ -118,8 +201,8 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
         _READ_CACHE.move_to_end(key)
         while len(_READ_CACHE) > _READ_CACHE_MAXSIZE:
             _READ_CACHE.popitem(last=False)
-        return _READ_CACHE[key].copy(deep=False)
-    return obj
+        return _truncated(ref, _READ_CACHE[key].copy(deep=False))
+    return _truncated(ref, obj)
 
 
 def _cache_clear() -> None:
