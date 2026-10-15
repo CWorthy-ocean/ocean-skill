@@ -2747,7 +2747,11 @@ osk.field("ctd_station_HV5", "sea_water_temperature").plot()
 One panel, colour = value, x = time, y = depth. Naming an explicit list of levels
 (`select={"depth": [0, 50, 100]}`) draws the `series` family instead — one line per
 level — since a named list is asking to tell the levels apart, not to see the whole
-record; a depth band or a bare select both draw `time_depth`.
+record; a depth band or a bare select both draw `time_depth`. To get the colour
+panel from a listed set of levels anyway (a boundary mean interpolated to fixed
+depths, say), ask for it: `.plot(family="time_depth")` on a `Field` or `FieldSet`, or
+`plot: {family: time_depth}` on a suite `field:` page. A shape with no such place (a
+map, a section) refuses by name; `family="series"` asks for the lines the other way.
 
 ### Which mark it draws
 

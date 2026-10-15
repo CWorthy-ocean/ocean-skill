@@ -405,6 +405,8 @@ class Field:
         self.detide = _normalize_detide_side(detide)
         self._data = None
         self._actual_depth = None
+        # Set only on the copy :meth:`_with_family` hands back (``plot(family=...)``).
+        self._requested_family: str | None = None
 
     @property
     def standard_name(self) -> str | None:
@@ -534,6 +536,27 @@ class Field:
         )
 
     @property
+    def _admits_time_depth(self) -> bool:
+        """Whether the shape *can* draw as ``time_depth`` (a point, time and depth).
+
+        :attr:`is_time_depth` is this, minus the explicit-depth-list exception.
+        """
+        from ocean_skill.align import point_of
+        from ocean_skill.operators import resolve_dim
+
+        da = self.data
+        if point_of(da) is None:
+            return False
+        tdim = self._time_axis_dim(da)
+        zdim = resolve_dim(da, "Z")
+        return (
+            tdim is not None
+            and tdim in da.dims
+            and zdim is not None
+            and zdim in da.dims
+        )
+
+    @property
     def is_time_depth(self) -> bool:
         """Whether this field's prepared data is a place through both time and depth.
 
@@ -545,23 +568,54 @@ class Field:
         (``select={"depth": [0, 50, 100]}``) is excluded and keeps the old
         per-level lines: naming discrete levels is asking to tell them apart, not
         to see the whole record, and a list too long to draw as separate lines
-        should be narrowed or aggregated, not silently redirected here. "Time"
-        includes a time groupby's surviving dimension, with the matching
+        should be narrowed or aggregated, not silently redirected here. Asking
+        for the layout outright with ``plot(family="time_depth")`` lifts that
+        exception (and ``family="series"`` insists on it) -- see :meth:`plot`.
+        "Time" includes a time groupby's surviving dimension, with the matching
         exception for an explicit month list (see :meth:`_time_axis_dim`).
         """
-        from ocean_skill.align import point_of
         from ocean_skill.comparison import _selected_depth
-        from ocean_skill.operators import resolve_dim
 
-        da = self.data
-        if point_of(da) is None:
+        if not self._admits_time_depth:
             return False
-        tdim = self._time_axis_dim(da)
-        zdim = resolve_dim(da, "Z")
-        if tdim is None or tdim not in da.dims or zdim is None or zdim not in da.dims:
-            return False
+        if self._requested_family is not None:
+            return self._requested_family == "time_depth"
         requested = _selected_depth(self.select, default=None)
         return not isinstance(requested, list | tuple)
+
+    def _with_family(self, family: str) -> Field:
+        """Return a shallow copy of this field that draws as ``family``, or refuse.
+
+        The behind-the-scenes half of ``plot(family=...)``. Only the two families
+        a point with both time and depth can draw as are accepted -- ``"time_depth"``
+        (colour = value) and ``"series"`` (one line per level) -- and the shape is
+        checked here, naming what it actually is when it cannot. The copy shares
+        this field's already-loaded data, so nothing is read twice.
+        """
+        import copy
+
+        if family not in ("time_depth", "series"):
+            raise ValueError(
+                f"family={family!r} is not one this can ask for: pick "
+                "'time_depth' (colour = value against time and depth) or "
+                "'series' (one line per level). The other families follow from "
+                "the select=/aggregate= shape alone."
+            )
+        if family == "time_depth" and not self._admits_time_depth:
+            raise ValueError(
+                f"family='time_depth' needs one place with both a time and a depth "
+                f"axis, but {self.source!r} draws as {self.family!r} "
+                f"({self.family_reason}). Narrow select=/aggregate= to one "
+                "lon/lat position and keep time and depth standing."
+            )
+        if family == "series" and not self.is_series:
+            raise ValueError(
+                f"family='series' needs one place with a time axis, but "
+                f"{self.source!r} draws as {self.family!r} ({self.family_reason})."
+            )
+        out = copy.copy(self)
+        out._requested_family = family
+        return out
 
     @property
     def is_section(self) -> bool:
@@ -595,7 +649,8 @@ class Field:
         — the prepared data's shape decides. :attr:`is_time_depth` is checked
         *before* :attr:`is_series`, since both hold for a point where time and
         depth both survive; only an explicit list of depths falls through to
-        ``series`` instead (see :attr:`is_time_depth`).
+        ``series`` instead (see :attr:`is_time_depth`), unless ``plot(family=...)``
+        asked for one of the two outright.
         """
         if self.is_time_depth:
             return "time_depth"
@@ -611,6 +666,11 @@ class Field:
     def family_reason(self) -> str:
         """Why :attr:`family` came out the way it did, for tracing a surprise."""
         if self.is_time_depth:
+            if self._requested_family == "time_depth":
+                return (
+                    "drawn as depth against time: plot(family='time_depth') "
+                    "asked for it"
+                )
             return (
                 "drawn as depth against time: the selection leaves one place "
                 "with both time and depth standing"
@@ -1411,6 +1471,7 @@ class Field:
         renderer: str = "matplotlib",
         locations: Any = None,
         contours: Any = None,
+        family: str | None = None,
         **kwargs: Any,
     ):
         """Draw this field: map panels, a section, a profile, a line, or depth vs time.
@@ -1420,6 +1481,19 @@ class Field:
         renderer
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive) -- goes through the same renderer registry either way.
+        family
+            ``"time_depth"`` or ``"series"``, for a field at one place with both
+            a time and a depth axis: which of the two layouts to draw. By default
+            such a field draws as ``time_depth`` (colour = value, x = time, y =
+            depth) *unless* the depths were requested as an explicit list
+            (``select={"depth": [5, 10, 25]}``), which keeps one line per level.
+            ``family="time_depth"`` asks for the colour layout from that list too
+            -- the way to see a fixed-depth slice, such as a boundary mean
+            interpolated to chosen depths, as depth against time;
+            ``family="series"`` insists on the lines. Refused with a
+            ``ValueError`` naming the shape when the field has no such place (a
+            map, a section, a profile). Nothing else can be asked for here: every
+            other family follows from the ``select=``/``aggregate=`` shape alone.
         locations
             Map panels only. Draw where things sit on top of the field: anything
             :func:`~ocean_skill.plot.map_locations.map_locations` accepts -- catalog
@@ -1479,9 +1553,18 @@ class Field:
         if grid_meta is not None:
             if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
                 return self._surfaced().plot(
-                    renderer=renderer, locations=locations, contours=contours, **kwargs
+                    renderer=renderer,
+                    locations=locations,
+                    contours=contours,
+                    family=family,
+                    **kwargs,
                 )
             self._refuse_bare_multistep_time_precheck()
+
+        if family is not None:
+            return self._with_family(family).plot(
+                renderer=renderer, locations=locations, contours=contours, **kwargs
+            )
 
         contour_keys: dict[str, Any] = {}
         if contours is not None:
@@ -1884,7 +1967,12 @@ class FieldSet:
 
     @graft_plot_options()
     def plot(
-        self, *, renderer: str = "matplotlib", contours: Any = None, **kwargs: Any
+        self,
+        *,
+        renderer: str = "matplotlib",
+        contours: Any = None,
+        family: str | None = None,
+        **kwargs: Any,
     ):
         """Draw every member on one figure, laid out by :mod:`plot.series`,
         :mod:`plot.profile`, one panel per member for ``time_depth``, or one map
@@ -1906,6 +1994,11 @@ class FieldSet:
             Sections only. A :class:`FieldSet` (or a list of fields) of the same
             length, paired with this set's members by position, drawn as contour
             lines over each member's fill -- see :meth:`Field.plot`.
+        family
+            ``"time_depth"`` or ``"series"``: asks every member for that layout
+            -- see :meth:`Field.plot`. ``"time_depth"`` draws one panel per member
+            even where the depths were given as an explicit list. A member whose
+            shape cannot draw that way refuses the whole call, by name.
 
         A set built with a :attr:`title` (an extremum's point series names the
         extremum it follows) draws it as the figure's ``title=``, whichever layout
@@ -1981,7 +2074,17 @@ class FieldSet:
                 kwargs["contours"] = [
                     o for f, o in zip(self.fields, overlays, strict=True) if f in usable
                 ]
-            return FieldSet(usable, title=self.title).plot(renderer=renderer, **kwargs)
+            return FieldSet(usable, title=self.title).plot(
+                renderer=renderer, family=family, **kwargs
+            )
+
+        if family is not None:
+            # Every member checked against the request (naming the first that
+            # cannot draw that way), then the set is drawn as usual from copies
+            # that carry it -- one decision per member, shared with Field.plot.
+            return FieldSet(
+                [f._with_family(family) for f in self.fields], title=self.title
+            ).plot(renderer=renderer, contours=contours, **kwargs)
 
         if overlays is not None:
             from ocean_skill._overlay import field_contour
