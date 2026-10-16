@@ -4527,6 +4527,8 @@ def _skill_map(
 
     if layout not in ("rows", "columns"):
         raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
+    if title is None:  # "" asks for none: the panels name metrics, this the variable
+        title = _titles.skill_map_title(items)
     metric_titles = metric_panel_titles(names)
     stacked = len(items) > 1
     if stacked:
@@ -6016,6 +6018,11 @@ _BOKEH_LEGEND_POSITION = {
 }
 
 
+#: Bokeh's own padding around an autoranged curve's value axis, as a fraction of the
+#: data's span, each side -- named so a panel with ``headroom`` can add to the top one.
+_SERIES_PAD = 0.1
+
+
 def _series_geometry(*, font_scale: float = 1.0, canvas_factor: float = 1.0, aspect):
     """``(frame_width, frame_height, fontsize)`` for one interactive series panel.
 
@@ -6232,6 +6239,8 @@ def _series(
         ncols=ncols,
         nrows=nrows,
         highlight=highlight,
+        # a fixed or shared value axis cannot be stretched to make room for the box/key
+        headroom=ylim is None and not sharey,
     )
     width, height, fontsize = _series_geometry(
         font_scale=font_scale,
@@ -6332,6 +6341,14 @@ def _series(
                 **({"xticks": xticks} if xticks else {}),
                 **({"xlim": panel_x} if panel_x is not None else {}),
                 **({"ylim": shared_y} if shared_y is not None else {}),
+                # room above the data for the box and key, as the static renderer's
+                # stretched axis gives them: (x, (below, above)) as fractions of the
+                # data's span, on top of bokeh's own 10% either side
+                **(
+                    {"padding": (0, (_SERIES_PAD, _SERIES_PAD + panel.headroom))}
+                    if panel.headroom
+                    else {}
+                ),
             ),
             hv.opts.Overlay(
                 title=panel.title,
@@ -6352,14 +6369,23 @@ def _series(
         plot = overlay.opts(*opt_specs)
         plots.append(plot)
         if panel.residual:
-            residual_dim = hv.Dimension("residual", label="test − reference")
+            # The static renderer's own spelling: the strip is a third of a panel high,
+            # so the units go on a second line rather than lengthening the label past
+            # its frame. (The panel's own label needs no such wrap here: a bokeh panel
+            # keeps its full height, and the strip is a plot of its own with its own
+            # axis margin, so the two labels cannot run into each other.)
+            units = panel.ylabel.partition("[")[2].rstrip("]")
+            residual_dim = hv.Dimension(
+                "residual",
+                label="test − reference" + (f"\n[{units}]" if units else ""),
+            )
             strip = hv.Overlay(
                 _series_highlight_bands(hv, panel, x_dim, residual_dim)
                 + [
                     _series_curve(hv, line, (x_dim, residual_dim), mark=mark)
                     for line in panel.residual
                 ]
-            ) * hv.HLine(0.0).opts(color="0.7", line_width=1)
+            ) * hv.HLine(0.0).opts(color="#b3b3b3", line_width=1)
             strip_specs = [
                 hv.opts.Curve(
                     frame_width=width,
@@ -6418,7 +6444,7 @@ def _series_highlight_labels(hv, panel, y_limits, *, font_size: str) -> list:
             ]
         )
         low, high = float(np.nanmin(ys)), float(np.nanmax(ys))
-        top = high + 0.1 * (high - low)
+        top = high + (_SERIES_PAD + panel.headroom) * (high - low)
     return [
         hv.Text(
             span.start + (span.end - span.start) // 2,
@@ -6451,6 +6477,9 @@ def _series_metrics_text(hv, panel):
     vertical, horizontal = panel.metrics_corner.split()
     x_at = x[int(0.02 * (len(x) - 1))] if horizontal == "left" else x[-1]
     y_at = high if vertical == "upper" else low
+    if panel.headroom and vertical == "upper":
+        # hung from the top of the stretched axis, in the clear band, not from the data
+        y_at = high + (_SERIES_PAD + panel.headroom) * (high - low)
     return hv.Text(
         x_at,
         y_at,

@@ -12,6 +12,7 @@ tested without going through ``compare()``.
 
 from __future__ import annotations
 
+import itertools
 import warnings
 
 import numpy as np
@@ -1817,3 +1818,230 @@ def test_highlight_is_a_declared_option_of_both_renderers():
 
     assert "highlight" in _top_level_options()
     assert "highlight" in inspect.signature(series).parameters
+
+
+# -- strip mean titles, residual strips per variable, room for the overlays ------------
+
+
+def test_a_mean_along_a_strip_does_not_read_domain_mean():
+    """lon/lat on one shared dimension (a boundary strip) is a line, not the domain."""
+    item = _single_item(lon=-166.0, lat=10.0)
+    attrs = item["aligned"]["value"].attrs
+    attrs["spatial_mean"] = "area-weighted mean (cell_area)"
+    attrs["spatial_mean_extent"] = "along-transect"
+    static = _matplotlib_titles(render(_spec([item]), renderer="matplotlib"))
+    interactive = _holoviews_titles(render(_spec([item]), renderer="holoviews"))
+    assert static == interactive
+    assert any("along-transect mean" in t for t in static)
+    assert not any("domain mean" in t for t in static)
+
+
+def test_horizontal_mean_over_one_shared_dimension_is_marked_along_transect():
+    from ocean_skill.operators import _horizontal_mean
+
+    n = 6
+    strip = xr.DataArray(
+        np.arange(n, dtype=float),
+        dims="s",
+        coords={
+            "lon": ("s", np.linspace(140.0, 150.0, n)),
+            "lat": ("s", np.linspace(50.0, 40.0, n)),
+        },
+        attrs={"units": "degC"},
+    )
+    grid = xr.DataArray(
+        np.ones((3, 4)),
+        dims=("lat", "lon"),
+        coords={"lat": [10.0, 20.0, 30.0], "lon": [0.0, 1.0, 2.0, 3.0]},
+        attrs={"units": "degC"},
+    )
+    assert _horizontal_mean(strip).attrs["spatial_mean_extent"] == "along-transect"
+    assert "spatial_mean_extent" not in _horizontal_mean(grid).attrs
+
+
+def test_residual_gives_each_variable_its_own_panel_and_strip():
+    """Twin axes would share one strip, drawn in one variable's units."""
+    items = [_item(TEMPERATURE), _item(SALINITY, units="PSU")]
+    layout = _series.compose(items, residual=True)
+    assert [len(p.lines) for p in layout.panels] == [2, 2]
+    assert all(not p.secondary and p.residual for p in layout.panels)
+    # without a strip they still share one panel on twin axes, as before
+    assert len(_series.compose(items).panels) == 1
+
+    fig = render(_spec(items, residual=True), renderer="matplotlib")
+    strips = [
+        ax.get_ylabel() for ax in fig.axes if "test − reference" in ax.get_ylabel()
+    ]
+    assert len(strips) == 2
+    assert "[°C]" in strips[0] and "[PSU]" in strips[1]
+
+    assert len(render(_spec(items, residual=True), renderer="holoviews")) == 4
+
+
+def test_a_residual_panels_unit_goes_on_its_own_line_clear_of_the_strip_label():
+    fig = render(_spec([_item()], residual=True), renderer="matplotlib")
+    panel = fig.axes[0]
+    assert "\n[°C]" in panel.get_ylabel()
+
+
+def test_the_interactive_residual_strip_spells_its_units_like_the_static_one():
+    import holoviews as hv
+
+    items = [_item()]
+    static = render(_spec(items, residual=True), renderer="matplotlib")
+    strip_label = next(
+        ax.get_ylabel() for ax in static.axes if "test − reference" in ax.get_ylabel()
+    )
+    obj = render(_spec(items, residual=True), renderer="holoviews")
+    labels = [
+        hv.render(plot, backend="bokeh").yaxis[0].axis_label for plot in obj.values()
+    ]
+    assert len(labels) == 2
+    assert labels[1] == strip_label == "test − reference\n[°C]"
+    # the panel above keeps its one-line label: bokeh's panel is not shortened by the
+    # strip, which is a plot of its own
+    assert "\n" not in labels[0] and "[°C]" in labels[0]
+
+
+def _data_and_overlays_overlap(fig) -> bool:
+    """Whether the box or key of any panel in ``fig`` sits on a curve's drawn points."""
+    fig.canvas.draw()
+    for ax in fig.axes:
+        boxes = []
+        text = getattr(ax, "_osk_metrics_text", None)
+        if text is not None:
+            boxes.append(text.get_window_extent())
+        if ax.get_legend() is not None:
+            boxes.append(ax.get_legend().get_window_extent())
+        for line in ax.get_lines():
+            if line.get_label().startswith("_"):
+                continue
+            x = np.asarray(line.get_xdata(), dtype=float)
+            xy = ax.transData.transform(np.column_stack([x, line.get_ydata()]))
+            # sample along each segment too: a curve can cross a box between two points
+            for a, b in itertools.pairwise(xy):
+                for t in np.linspace(0, 1, 12):
+                    point = a + t * (b - a)
+                    if any(box.contains(*point) for box in boxes):
+                        return True
+    return False
+
+
+def test_the_box_and_key_are_kept_off_the_curves_in_the_static_renderer():
+    """A panel the curves fill is stretched upward and both go in the clear band."""
+    items = [_item(), _item(test="other", offset=-0.4)]
+    layout = _series.compose(items, metric_keys=("bias", "rmse", "corr"))
+    assert layout.panels[0].headroom > 0
+    fig = render(
+        _spec(items, metric_keys=("bias", "rmse", "corr")), renderer="matplotlib"
+    )
+    assert not _data_and_overlays_overlap(fig)
+
+
+def test_a_key_too_wide_to_share_the_stretched_band_leaves_the_axes():
+    """Box (~0.4 wide) + key (up to 0.9) cannot sit side by side in the top band."""
+    lines = _series.compose(
+        [_item(), _item(test="other", offset=-0.4)], metric_keys=("bias",)
+    ).panels[0].lines
+    corner, legend_at, extra = _series.overlay_plan(
+        lines, box=(0.4, 0.2), key=(0.9, 0.3)
+    )
+    assert (corner, legend_at) == ("upper left", _series.KEY_OUTSIDE)
+    assert extra > 0
+    # a narrow key still goes beside the box, inside the axes
+    _, legend_at, _ = _series.overlay_plan(lines, box=(0.4, 0.2), key=(0.3, 0.3))
+    assert legend_at in _series.CORNERS
+
+
+def test_a_wide_key_becomes_the_combined_key_in_both_renderers():
+    long_a = "a very long model source label for the regional run, v2"
+    long_b = "another quite long reference label for the mooring record"
+    items = [_item(test=long_a), _item(test=long_b, offset=-0.4)]
+    opts = {"metric_keys": ("bias", "rmse", "corr")}
+    layout = _series.compose(items, **opts)
+    assert layout.legend_placement == "below"
+    assert layout.panels[0].headroom > 0
+
+    fig = render(_spec(items, **opts), renderer="matplotlib")
+    # one key for the figure, none inside the axes, so nothing to overlap the box
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    assert fig.legends
+    assert not _data_and_overlays_overlap(fig)
+
+    import holoviews as hv
+
+    obj = render(_spec(items, **opts), renderer="holoviews")
+    assert hv.render(obj.values()[0], backend="bokeh") is not None
+    # a forced corner is the caller's choice and is never moved
+    forced = _series.compose(items, legend="upper right", **opts)
+    assert forced.legend_placement == "corner"
+
+
+def test_an_unobstructed_panel_is_not_stretched():
+    """Corners clear of the data take the box and key; nothing is added."""
+    item = _item(n=36)
+    values = np.zeros(36)
+    values[18] = 10.0  # one spike mid-panel: all four corners are clear
+    for name in ("reference", "test"):
+        item["aligned"][name] = item["aligned"][name] * 0 + values
+    layout = _series.compose([item], metric_keys=("bias",))
+    assert layout.panels[0].headroom == 0.0
+
+
+def test_the_stretch_is_left_out_when_the_value_axis_is_fixed():
+    items = [_item()]
+    fixed = _series.compose(items, metric_keys=("bias",), headroom=False)
+    assert fixed.panels[0].headroom == 0.0
+    fig = render(_spec(items, ylim=(0.0, 20.0)), renderer="matplotlib")
+    assert fig.axes[0].get_ylim() == (0.0, 20.0)
+
+
+def test_both_renderers_make_room_for_the_overlays():
+    items = [_item(), _item(test="other", offset=-0.4)]
+    opts = {"metric_keys": ("bias", "rmse", "corr")}
+    headroom = _series.compose(items, **opts).panels[0].headroom
+    assert headroom > 0
+
+    import holoviews as hv
+
+    obj = render(_spec(items, **opts), renderer="holoviews")
+    curves = obj.traverse(lambda x: x, [hv.Curve])
+    values = np.concatenate(
+        [np.asarray(c.dimension_values(1), dtype=float) for c in curves]
+    )
+    low, high = float(values.min()), float(values.max())
+    # bokeh's own 10% each side, plus the headroom above the data
+    figure = hv.render(obj.values()[0], backend="bokeh")
+    assert figure.y_range.end == pytest.approx(
+        high + (0.1 + headroom) * (high - low), rel=1e-6
+    )
+    assert figure.y_range.start == pytest.approx(low - 0.1 * (high - low), rel=1e-6)
+    text = obj.traverse(lambda x: x, [hv.Text])[0]
+    # the box hangs from the top of the clear band
+    assert text.y == pytest.approx(figure.y_range.end)
+    # and nothing is stretched when the caller fixed the axis
+    fixed = render(_spec(items, ylim=(0.0, 20.0), **opts), renderer="holoviews")
+    assert not any(
+        "padding" in e.opts.get("plot").kwargs
+        for e in fixed.traverse(lambda x: x, [hv.Curve])
+    )
+
+
+def test_a_residual_figure_names_each_variable_once_not_in_every_legend_entry():
+    """A panel per variable already titles it, so the key reads as sources only.
+
+    Being the same in every panel, it is then drawn once for the figure.
+    """
+    items = [_item(TEMPERATURE), _item(SALINITY, units="PSU")]
+    layout = _series.compose(items, residual=True)
+    assert [line.label for line in layout.panels[0].lines] == [
+        "ooi-papa-ctd",
+        "oceansoda_ethz",
+    ]
+    assert layout.shared_legend
+    fig = render(_spec(items, residual=True), renderer="matplotlib")
+    assert all(ax.get_legend() is None for ax in fig.axes)
+    assert len(fig.legends) == 1
+    # on shared twin axes the variable is what tells the lines apart: it stays
+    twin = _series.compose(items).panels[0]
+    assert any("temperature" in line.label for line in twin.lines)

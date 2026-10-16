@@ -629,12 +629,24 @@ def _resolve_colors(colors, levels, field):
     names only a couple of levels still gets the other groups auto-coloured rather than
     all sharing one placeholder. Returns a :class:`_LevelMap` for the same reason
     :func:`_resolve_per_level` does — ``levels`` may be a band ``depth`` dict.
+
+    The exception is ``field="variable"``: a variable's default colour comes from
+    *which variable it is* (:func:`ocean_skill.plot.style.variable_colors`), not from
+    its position in this figure, so nitrate is the same colour on every page of a
+    report -- the order the levels happen to appear in no longer decides it.
     """
-    from ocean_skill.plot.style import COLOR_CYCLE
+    from ocean_skill.plot.style import COLOR_CYCLE, variable_colors
 
     cycle = COLOR_CYCLE
+    by_name = variable_colors(levels) if field == "variable" else {}
+
+    def default(i, lev):
+        if isinstance(lev, str) and lev in by_name:
+            return by_name[lev]
+        return cycle[i % len(cycle)]
+
     if colors is None:
-        return _LevelMap((lev, cycle[i % len(cycle)]) for i, lev in enumerate(levels))
+        return _LevelMap((lev, default(i, lev)) for i, lev in enumerate(levels))
     if isinstance(colors, str):
         return _LevelMap((lev, colors) for lev in levels)
     if isinstance(colors, dict):
@@ -644,8 +656,7 @@ def _resolve_colors(colors, levels, field):
             raise ValueError(_unknown_level_error(unknown, levels, field, "colors"))
         colors = _LevelMap(colors)
         return _LevelMap(
-            (lev, colors.get(lev, cycle[i % len(cycle)]))
-            for i, lev in enumerate(levels)
+            (lev, colors.get(lev, default(i, lev))) for i, lev in enumerate(levels)
         )
     # A plain sequence: a palette assigned to levels in the order they first appear —
     # not one colour per point, so it composes with color_by/marker_by/groups instead

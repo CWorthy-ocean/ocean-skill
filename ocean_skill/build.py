@@ -71,6 +71,7 @@ __all__ = [
     "add_copernicus_source",
     "add_erddap_source",
     "add_forcing_source",
+    "add_initial_conditions",
     "add_source",
     "add_sources",
     "build_catalog",
@@ -78,8 +79,10 @@ __all__ = [
     "detect_concat",
     "discover_opendap_files",
     "guess_feature_type",
+    "join_boundary_sides",
     "make_kerchunk",
     "new_catalog",
+    "order_segments",
     "save",
     "tolerant_hdf_attrs",
 ]
@@ -873,6 +876,85 @@ def _dedup_concat_axis(
             stacklevel=3,
         )
     return vds
+
+
+def order_segments(
+    groups: Sequence[Sequence[str | Path]], *, keep: str = "last"
+) -> tuple[list[Path], list[tuple[str, Path, Path]]]:
+    """Join output files from several folders into one list in time order.
+
+    ``groups`` is one list of paths per glob, in the order the caller gave the globs
+    (each already sorted): a run's output spread over several task folders, some of
+    which repeat the same dates (a test segment, a rerun). The files come back sorted by
+    their time stamps, ready for :func:`make_kerchunk`, which concatenates in the order
+    it is handed -- globbing task folders by name gives an order that is not
+    chronological (``first_half`` sorts before ``first_wk``).
+
+    Where two files give the same time step the later one wins: a file of a later glob
+    beats one of an earlier glob, and within a glob the later path in sorted order
+    beats the earlier one. A file that gives one record (every file, once ``keep`` is
+    ``"latest-per-file"`` has cut each to its newest) is dropped when another beats it,
+    and the loss is reported; a file with several records that is not cut that way is
+    never dropped here -- make_kerchunk's own ``keep`` rule collapses repeats among
+    them, the later in the order it is given winning. A path named by more than one glob
+    counts once, at its last place.
+
+    Returns ``(ordered paths, replaced)`` with ``replaced`` a ``(time, winner path,
+    loser path)`` per dropped file, ``time`` as ISO text.
+    """
+    import numpy as np
+    import xarray as xr
+
+    order: dict[Path, int] = {}
+    for group in groups:
+        for path in group:
+            order[Path(path)] = len(order)  # a repeat moves to its later place
+    paths = list(order)
+    if not paths:
+        return [], []
+    _, (tname, *_) = detect_concat(paths[0])
+
+    records: dict[Path, tuple] = {}
+    for path in paths:
+        with xr.open_dataset(path, decode_times=False, engine="netcdf4") as ds:
+            var = ds[tname]
+            raw = np.asarray(var.values).ravel()
+            decoded = _decode_times(ds, var)
+        stamps = raw if decoded is None else np.asarray(decoded).ravel()
+        if not stamps.size:
+            raise ValueError(f"{path} has no time records ({tname!r} is empty).")
+        if keep == "latest-per-file":
+            stamps = stamps[[int(np.argmax(raw))]]
+        records[path] = tuple(stamps)
+
+    holders: dict[Any, list[Path]] = {}
+    for path, stamps in records.items():
+        for stamp in stamps:
+            holders.setdefault(stamp, []).append(path)
+    dropped: dict[Path, tuple[Any, Path]] = {}
+    for stamp, files in sorted(holders.items(), key=lambda item: item[0]):
+        if len(files) < 2:
+            continue
+        winner = max(files, key=order.__getitem__)
+        for path in files:
+            if path != winner and len(records[path]) == 1:
+                dropped[path] = (stamp, winner)
+
+    kept = [p for p in paths if p not in dropped]
+    kept.sort(key=lambda p: (max(records[p]), order[p]))
+
+    def iso(stamp) -> str:
+        if isinstance(stamp, np.datetime64):
+            return str(np.datetime_as_string(stamp, unit="s"))
+        return str(stamp)
+
+    replaced = [
+        (iso(stamp), winner, path)
+        for path, (stamp, winner) in sorted(
+            dropped.items(), key=lambda item: (item[1][0], order[item[0]])
+        )
+    ]
+    return kept, replaced
 
 
 def _keep_latest_per_file(concat_dim: str, loadable_variables: tuple[str, ...]):
@@ -3766,18 +3848,32 @@ _FORCING_GRID_VARIABLES = (
 )
 
 
-def _forcing_grid(grid, vertical: dict[str, Any] | None) -> tuple[list[str], dict]:
+def _forcing_grid(
+    grid,
+    vertical: dict[str, Any] | None,
+    *,
+    file_attrs: Mapping[str, Any] | None = None,
+    file_has_cs: bool = False,
+) -> tuple[list[str], dict]:
     """Check a roms-tools grid file and return its variables to merge and ``vertical``.
 
     ``vertical`` is what :mod:`ocean_skill.roms` needs for depth: ``hc`` (and
     ``theta_s``/``theta_b``) from the grid's global attributes, the roms-tools
     ``Vtransform`` of 2 unless the file or the caller says otherwise.
+
+    ``file_attrs`` are the global attributes of the data file itself, for a file that
+    states part of the vertical grid (an initial-conditions file has ``theta_s`` and
+    ``theta_b``, and sometimes ``hc``): they win over the grid file's, and the
+    caller's ``vertical`` wins over both. ``file_has_cs`` says the data file carries
+    its own ``Cs_r``, so the grid file need not (see :func:`add_initial_conditions`).
     """
     import xarray as xr
 
     with xr.open_dataset(str(grid), decode_times=False) as g:
         names = [v for v in _FORCING_GRID_VARIABLES if v in g.variables]
-        missing = {"lon_rho", "lat_rho", "h", "Cs_r"} - set(names)
+        missing = {"lon_rho", "lat_rho", "h"} - set(names)
+        if not file_has_cs and "Cs_r" not in names:
+            missing.add("Cs_r")
         if "sigma_r" not in names and "s_rho" not in g.variables:
             missing.add("sigma_r")
         if missing:
@@ -3786,17 +3882,19 @@ def _forcing_grid(grid, vertical: dict[str, Any] | None) -> tuple[list[str], dic
             )
         attrs = dict(g.attrs)
     vert: dict[str, Any] = {"s_dim": "s_rho"}
-    if "hc" in attrs:
-        vert["hc"] = float(attrs["hc"])
-    for key in ("theta_s", "theta_b"):
-        if key in attrs:
-            vert[key] = float(attrs[key])
-    vert["Vtransform"] = int(attrs.get("Vtransform", 2))
+    for key in ("hc", "theta_s", "theta_b"):
+        for source in (attrs, file_attrs or {}):
+            if key in source:
+                vert[key] = float(source[key])
+    vtransform = (file_attrs or {}).get("Vtransform", attrs.get("Vtransform", 2))
+    vert["Vtransform"] = int(vtransform)
     vert.update(vertical or {})
     if "hc" not in vert:
         raise ValueError(
-            f"{grid} has no 'hc' attribute; pass vertical={{'hc': ...}} "
-            "(and Vtransform)."
+            f"No 'hc' (the s-coordinate's critical depth) in {grid}"
+            + (" or in the data file" if file_attrs is not None else "")
+            + "; pass vertical={'hc': ...} (and Vtransform), or hc: on a "
+            "refresh.forcing entry."
         )
     return names, vert
 
@@ -4193,6 +4291,7 @@ def add_boundary_sources(
     sides: Sequence[str] = ("south", "north", "east", "west"),
     variables: Sequence[str] | None = None,
     climatology: bool = False,
+    strip: Sequence[str] | None = None,
     vertical: dict[str, Any] | None = None,
     ref: str | Path | None = None,
     subchunk: dict[str, int] | None = None,
@@ -4240,6 +4339,18 @@ def add_boundary_sources(
         replaced by a ``month`` dimension (1 to 12), and the entry is marked
         ``climatology`` / ``climatology_period: monthly``, so ``select={"month": 8}``
         picks a month.
+    strip
+        Sides to also join into one more entry, ``f"{name}_strip"``: ``["west",
+        "south"]`` is the west boundary run north to south, then the south boundary run
+        west to east, the corner cell once -- the strip ``select={"transect":
+        {"boundary": [...]}}`` draws from model output
+        (:func:`ocean_skill.transect.boundary_strip`), here as a catalog entry of its
+        own (see :func:`join_boundary_sides`). It is a section already: ``s_rho`` by
+        ``along`` (kilometres along the strip) plus time (or ``month``), carrying the
+        corner marks a section draws. The sides must each meet the next at a grid corner
+        and be among ``sides``; only the variables every one of them has are kept.
+        Written to the entry's reader chain, so nothing beyond the per-side entries is
+        saved or opened. ``None`` (the default) adds no strip.
     vertical
         Overrides for the entry's ``vertical`` block (``hc``, ``Vtransform``,
         ``theta_s``, ``theta_b``), which default to the grid file's attributes and a
@@ -4264,7 +4375,7 @@ def add_boundary_sources(
         Anything else :func:`add_source` takes (``standard_names`` merges over the
         ROMS names this adds; ``name_map``, ``probe``, ...) and entry metadata.
 
-    Returns the names of the entries added, in the order of ``sides``.
+    Returns the names of the entries added, in the order of ``sides``, the strip's last.
     """
     bad = [s for s in sides if s not in _BOUNDARY_SIDES]
     if bad:
@@ -4279,6 +4390,16 @@ def add_boundary_sources(
             "on staggered u/v points, so they do not sit on the rho-point grid row an "
             "entry carries. Leave them out of variables=."
         )
+    if strip is not None:
+        from ocean_skill.transect import check_boundary_sides
+
+        strip = check_boundary_sides(strip, f"{name!r}: strip={list(strip)!r}")
+        outside = [side for side in strip if side not in sides]
+        if outside:
+            raise ValueError(
+                f"{name!r}: strip={strip} names {outside}, which are not among "
+                f"sides={list(sides)} -- the strip joins entries this call adds."
+            )
     _forcing_check_subchunk(subchunk, ref)
     first = files if isinstance(files, (str, Path)) else next(iter(files))
     grid_names, vert = _forcing_grid(grid, vertical)
@@ -4302,9 +4423,9 @@ def add_boundary_sources(
         ref,
     )
 
-    added: list[str] = []
-    for side in sides:
-        along, fixed_dim, index = _BOUNDARY_SIDES[side]
+    def side_keep(side: str) -> dict[str, str]:
+        """Return ``{variable in the file: base name}`` for this side's rho row."""
+        along = _BOUNDARY_SIDES[side][0]
         keep: dict[str, str] = {}
         for var, dims in file_vars.items():
             base, _, tail = var.rpartition("_")
@@ -4315,15 +4436,11 @@ def add_boundary_sources(
             if not set(dims) <= {time_dim, "s_rho", along}:
                 continue  # not on this side's rho points (u_north is on xi_u)
             keep[var] = base
-        if not keep:
-            warnings.warn(
-                f"{name!r}: no {side} variables on rho points"
-                + (f" among {list(variables)}" if variables is not None else "")
-                + f"; no {side} entry added.",
-                stacklevel=_stacklevel.find(),
-            )
-            continue
-        chain = _forcing_chain(
+        return keep
+
+    def side_chain(side: str, keep: dict[str, str]):
+        _, fixed_dim, index = _BOUNDARY_SIDES[side]
+        return _forcing_chain(
             files,
             grid,
             grid_names,
@@ -4335,9 +4452,26 @@ def add_boundary_sources(
             climatology=climatology,
             ref=ref,
         )
-        std = {
+
+    def standard_names(keep: dict[str, str]) -> dict[str, str]:
+        return {
             b: ROMS_STANDARD_NAMES[b] for b in keep.values() if b in ROMS_STANDARD_NAMES
         }
+
+    added: list[str] = []
+    kept: dict[str, dict[str, str]] = {}
+    for side in sides:
+        keep = side_keep(side)
+        if not keep:
+            warnings.warn(
+                f"{name!r}: no {side} variables on rho points"
+                + (f" among {list(variables)}" if variables is not None else "")
+                + f"; no {side} entry added.",
+                stacklevel=_stacklevel.find(),
+            )
+            continue
+        kept[side] = keep
+        std = standard_names(keep)
         entry = {
             **base_entry,
             "boundary_side": side,
@@ -4345,9 +4479,127 @@ def add_boundary_sources(
             **metadata,
         }
         entry_name = f"{name}_{side}"
-        add_source(cat, entry_name, reader=chain, **entry)
+        add_source(cat, entry_name, reader=side_chain(side, keep), **entry)
         added.append(entry_name)
+
+    if strip:
+        missing = [side for side in strip if side not in kept]
+        if missing:
+            warnings.warn(
+                f"{name!r}: no {name}_strip entry added: strip={strip} needs "
+                f"{missing}, which have no variables on rho points.",
+                stacklevel=_stacklevel.find(),
+            )
+            return added
+        common = set.intersection(*(set(kept[side].values()) for side in strip))
+        if not common:
+            raise ValueError(
+                f"{name!r}: the sides of strip={strip} have no variable in common "
+                f"({ {side: sorted(set(kept[side].values())) for side in strip} })."
+            )
+        dropped = sorted(
+            {b for side in strip for b in kept[side].values()} - common
+        )
+        if dropped:
+            warnings.warn(
+                f"{name!r}: {name}_strip leaves out {dropped}, which not every side "
+                f"of {strip} has.",
+                stacklevel=_stacklevel.find(),
+            )
+        chains = {
+            side: side_chain(
+                side, {k: b for k, b in kept[side].items() if b in common}
+            )
+            for side in strip
+        }
+        joined = chains[strip[0]].apply(
+            join_boundary_sides,
+            sides=list(strip),
+            **{f"side{i}": chains[side] for i, side in enumerate(strip) if i > 0},
+        )
+        std = standard_names({b: b for b in common})
+        entry = {
+            **base_entry,
+            "boundary_strip": list(strip),
+            **({"standard_names": std} if std else {}),
+            **metadata,
+        }
+        add_source(cat, f"{name}_strip", reader=joined, **entry)
+        added.append(f"{name}_strip")
     return added
+
+
+def join_boundary_sides(first, *, sides: Sequence[str], **rest):
+    """Join the per-side datasets of a boundary-forcing entry into one strip.
+
+    The function a ``<name>_strip`` entry's reader chain calls
+    (:func:`add_boundary_sources` ``strip=``); an importable module-level function so a
+    saved catalog can name it. ``first`` is the first side's dataset as the per-side
+    chain reads it -- ``(time, s_rho, eta_rho, xi_rho)`` with the boundary's own row or
+    column at length 1 on the dimension it lies across, the grid row/column merged in
+    -- and ``side1``, ``side2``, ... the following sides' (``sides`` names all of them
+    in walk order).
+
+    The sides are joined the way :func:`ocean_skill.transect.boundary_strip` walks
+    model output (:func:`ocean_skill.transect.boundary_walk`): each side runs from the
+    corner it shares with the previous side to the one it shares with the next, so
+    ``["west", "south"]`` is the west column north to south, then the south row west to
+    east, the corner cell kept once.
+
+    The result reads like a *south* entry whose single row is the whole strip: the
+    same dimensions (``eta_rho`` of length 1 and ``xi_rho`` running along the strip),
+    the grid's ``lon_rho``/``lat_rho``/``h``/``mask_rho``/... on them, so the loader
+    masks land and builds ``z_rho`` as it does for any entry, and
+    ``select={"transect": {"eta_rho": 0}}`` cuts it into a section whose ``along``
+    coordinate is the cumulative great-circle distance over the joined lon/lat. The
+    corner cells are recorded as the dataset attributes ``boundary_sides``
+    (``"west,south"``) and ``boundary_corner_km`` (the along distance of each corner),
+    which :func:`ocean_skill.transect.grid_slice` puts on the ``along`` coordinate for
+    a section to draw the corner lines from, as it does for a strip cut from model
+    output.
+    """
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill.align import _haversine_km
+    from ocean_skill.transect import boundary_walk
+
+    ordered = [first, *(rest[k] for k in sorted(rest, key=lambda k: int(k[4:])))]
+    if len(ordered) != len(sides):
+        raise ValueError(
+            f"join_boundary_sides: {len(sides)} sides named ({list(sides)}) but "
+            f"{len(ordered)} datasets given."
+        )
+    pieces = []
+    for i, (side, piece, ascending) in enumerate(
+        zip(sides, ordered, boundary_walk(list(sides)), strict=True)
+    ):
+        if _BOUNDARY_SIDES[side][0] == "eta_rho":
+            # a west/east column runs along eta: swap the two dimension names so every
+            # side runs along xi_rho, as a south row does (rename cannot swap in one go)
+            piece = piece.rename({"eta_rho": "_along", "xi_rho": "eta_rho"}).rename(
+                {"_along": "xi_rho"}
+            )
+        if not ascending:
+            piece = piece.isel(xi_rho=slice(None, None, -1))
+        if i > 0:
+            piece = piece.isel(xi_rho=slice(1, None))  # the corner, once
+        pieces.append(piece)
+    joined = xr.concat(
+        pieces, dim="xi_rho", data_vars="minimal", coords="minimal", compat="override"
+    )
+    lead = "month" if "month" in joined.dims else "time"
+    joined = joined.transpose(
+        lead, "s_rho", "eta_rho", "xi_rho", ..., missing_dims="ignore"
+    )
+    lon = np.asarray(joined["lon_rho"], dtype="float64").ravel()
+    lat = np.asarray(joined["lat_rho"], dtype="float64").ravel()
+    legs = _haversine_km(lon[:-1], lat[:-1], lon[1:], lat[1:])
+    along = np.concatenate([[0.0], np.cumsum(legs)])
+    corner_at = np.cumsum([piece.sizes["xi_rho"] for piece in pieces])[:-1] - 1
+    joined.attrs["boundary_sides"] = ",".join(sides)
+    joined.attrs["boundary_corner_km"] = [float(along[k]) for k in corner_at]
+    return joined
 
 
 def add_forcing_source(
@@ -4437,6 +4689,161 @@ def add_forcing_source(
         ref=ref,
     )
     add_source(cat, name, reader=chain, **{**entry, **metadata})
+    return name
+
+
+#: Variables of a roms-tools initial-conditions file that are the s-coordinate's, not
+#: fields: kept in the entry (the file's own stretching beats the grid file's) but never
+#: offered as data.
+_IC_VERTICAL_VARIABLES = ("Cs_r", "Cs_w", "sigma_r", "sigma_w")
+
+
+def add_initial_conditions(
+    cat,
+    name: str,
+    file: str | Path | Sequence[str | Path],
+    grid: str | Path,
+    *,
+    variables: Sequence[str] | None = None,
+    vertical: dict[str, Any] | None = None,
+    **metadata: Any,
+) -> str:
+    """Add a roms-tools initial-conditions file as one ROMS entry, like model output.
+
+    The file is one model state on the ROMS grid -- ``temp``, ``salt``, the BGC tracers
+    and ``zeta`` on ``(ocean_time, s_rho, eta_rho, xi_rho)``, ``u``/``v`` on their
+    staggered points -- with its own ``Cs_r``/``Cs_w`` and the vertical grid's
+    ``theta_s``/``theta_b`` (and, from some roms-tools versions, ``hc``) as global
+    attributes, and no grid. The entry is an ordinary reader chain that merges the
+    run's grid file in (``lon_rho``/``lat_rho``/``h``/``mask_rho``/``sigma_r``/...), so
+    it reads like a restart: ``lon``/``lat``, a land mask, a ``z_rho`` depth coordinate
+    and the one time step decoded, and ``compare()``/``field()`` select a depth on it
+    (``depth: surface``, ``200``) exactly as they do on model output. Compared with the
+    same run's first restart it shows what the model did to its own start.
+
+    Parameters
+    ----------
+    cat, name
+        Catalog, and the entry name.
+    file
+        The initial-conditions file; one file (a list of one is the same).
+    grid
+        The run's roms-tools grid file (see :func:`add_boundary_sources`). Its ``Cs_r``
+        is used only when the file has none of its own.
+    variables
+        Names to keep (``["temp", "salt", "NO3"]``); default every field in the file.
+    vertical
+        Overrides for the entry's ``vertical`` block (``hc``, ``Vtransform``,
+        ``theta_s``, ``theta_b``). ``theta_s``/``theta_b``/``hc`` are taken from the
+        file's attributes, else the grid file's: roms-tools 4.0.0 writes no ``hc`` in an
+        initial-conditions file, so ``hc`` then comes from the grid file, and when
+        neither has one this raises ``ValueError`` asking for ``vertical={"hc": ...}``.
+    **metadata
+        Anything else :func:`add_source` takes, and entry metadata.
+
+    The time is ``ocean_time``, seconds since the file's ``model_reference_date``; it
+    is checked against the file's own ``ini_time`` and a disagreement raises
+    ``ValueError`` rather than shifting the entry. Returns the entry name.
+    """
+    import re
+
+    import numpy as np
+    import xarray as xr
+
+    from ocean_skill.roms import (
+        TIME_UNIT_SECONDS,
+        decode_relative_time,
+        time_epoch,
+        time_unit_seconds,
+    )
+
+    paths = [file] if isinstance(file, (str, Path)) else list(file)
+    if len(paths) != 1:
+        raise ValueError(
+            f"{name!r}: an initial-conditions entry is one file, got {len(paths)}"
+            + (f" ({paths[0]} first)" if paths else "")
+            + "."
+        )
+    path = paths[0]
+    with xr.open_dataset(str(path), decode_times=False) as ds:
+        attrs = dict(ds.attrs)
+        if "ocean_time" not in ds.variables:
+            raise ValueError(
+                f"{path} has no 'ocean_time' variable: not a roms-tools "
+                "initial-conditions file (it has "
+                f"{sorted(map(str, ds.variables))[:12]})."
+            )
+        t = ds["ocean_time"]
+        cs_vars = [v for v in ("Cs_r", "Cs_w") if v in ds.variables]
+        fields = {
+            str(k): v.dims
+            for k, v in ds.data_vars.items()
+            if v.dims[:1] == t.dims and str(k) not in _IC_VERTICAL_VARIABLES
+        }
+        values = np.asarray(t.values)
+        t_attrs = dict(t.attrs)
+    if not fields:
+        raise ValueError(
+            f"{path} has no fields along its time dimension {t.dims[0]!r}."
+        )
+    if variables is not None:
+        unknown = [v for v in variables if v not in fields]
+        if unknown:
+            raise ValueError(
+                f"{name!r}: {unknown} are not variables of {path} "
+                f"(it has {sorted(fields)})."
+            )
+        fields = {k: v for k, v in fields.items() if k in variables}
+
+    unit_match = re.match(r"^\s*(\w+)\s+since\s+", str(t_attrs.get("units", "")), re.I)
+    unit = unit_match.group(1).lower() if unit_match else "seconds"
+    per = time_unit_seconds(unit)
+    if per is None:
+        raise ValueError(
+            f"{path}: ocean_time counts in {unit!r}, which cannot be decoded; expected "
+            f"one of {sorted(TIME_UNIT_SECONDS)}."
+        )
+    epoch = time_epoch({"long_name": attrs.get("model_reference_date", "")}, {})
+    epoch = epoch or time_epoch(t_attrs, {})
+    if epoch is None:
+        raise ValueError(
+            f"{path}: no 'model_reference_date' attribute and no 'since <date>' in "
+            "ocean_time's units; cannot tell what its seconds count from."
+        )
+    start = decode_relative_time(values, per, epoch)[0]
+    if "ini_time" in attrs:
+        stated = np.datetime64(str(attrs["ini_time"]).strip().replace(" ", "T"))
+        if abs(int((start - stated) / np.timedelta64(1, "s"))) > 1:
+            raise ValueError(
+                f"{path}: ocean_time decodes to {start} (seconds since {epoch}) but "
+                f"the file's ini_time says {attrs['ini_time']!r}; refusing to guess "
+                "which is right."
+            )
+
+    grid_names, vert = _forcing_grid(
+        grid, vertical, file_attrs=attrs, file_has_cs="Cs_r" in cs_vars
+    )
+    # the file's own stretching, not the grid file's
+    grid_names = [n for n in grid_names if n not in cs_vars]
+    keep = [*fields, "ocean_time", *cs_vars]
+    chain = _reader_for(str(path))[keep].drop_vars("abs_time", errors="ignore")
+    chain = chain.merge(other=_reader_for(str(grid))[grid_names])
+    std = {b: ROMS_STANDARD_NAMES[b] for b in fields if b in ROMS_STANDARD_NAMES}
+    entry = {
+        "model": "roms",
+        "loader": "ocean_skill.roms",
+        "self_contained_grid": True,
+        "featureType": "grid",
+        "vertical": vert,
+        "time_coord": "ocean_time",
+        "time_dim": "time",
+        "time_units": unit,
+        "reference_date": epoch,
+        "initial_conditions": True,
+        **({"standard_names": std} if std else {}),
+        **metadata,
+    }
+    add_source(cat, name, reader=chain, **entry)
     return name
 
 

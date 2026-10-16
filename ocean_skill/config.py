@@ -114,17 +114,30 @@ class RefreshSourceConfig(BaseModel):
     ``{s_rho: 1, eta_rho: 74}`` so a page that needs whole water columns (anything
     matched to a depth) reads a band of rows without loading every level of the
     whole domain at once.
+
+    ``files`` is a glob, or a list of globs for output spread over several folders (the
+    task folders of a run restarted in pieces): the matched files are joined in time
+    order, and where two give the same time step the later one wins -- the later glob of
+    the list, within one glob the later path in sorted order
+    (:func:`ocean_skill.workflows.run._refresh_sources`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    files: str
+    files: str | list[str]
     ref: str
     grid: str | None = None
     keep: str | None = None
     min_age: float | None = None
     subchunk: dict[str, int] | None = None
+
+    @field_validator("files")
+    @classmethod
+    def _files_not_empty(cls, files: str | list[str]) -> str | list[str]:
+        if isinstance(files, list) and not files:
+            raise ValueError("refresh.sources files: needs at least one glob")
+        return files
 
 
 class RefreshForcingConfig(BaseModel):
@@ -132,8 +145,10 @@ class RefreshForcingConfig(BaseModel):
 
     ``kind: boundary`` is forwarded to :func:`ocean_skill.build.add_boundary_sources`
     (one entry per side, ``<name>_<side>``), ``kind: surface`` to
-    :func:`ocean_skill.build.add_forcing_source` (one entry, ``<name>``). ``files`` is a
-    glob or a list of globs, each expanded and sorted, joined in the order given.
+    :func:`ocean_skill.build.add_forcing_source` (one entry, ``<name>``) and ``kind:
+    initial_conditions`` to :func:`ocean_skill.build.add_initial_conditions` (one entry,
+    ``<name>``, one file). ``files`` is a glob or a list of globs, each expanded and
+    sorted, joined in the order given.
     ``ref``, when given, is where a kerchunk reference over the files is kept; it is
     rebuilt only when the matched files change, and opens in seconds where the files
     themselves can take minutes.
@@ -143,18 +158,26 @@ class RefreshForcingConfig(BaseModel):
     (monthly files of 28 to 31 steps) can be joined into one reference, which they
     cannot otherwise. It is only valid for uncompressed files (netCDF-3, or netCDF-4
     without compression) and needs ``ref``.
+
+    ``strip`` (boundary only) names sides to also join into one more entry,
+    ``<name>_strip``: ``[west, south]`` is the west boundary run north to south then the
+    south boundary west to east (:func:`ocean_skill.build.join_boundary_sides`). ``hc``
+    is the s-coordinate's critical depth, for a grid file (and, for initial conditions,
+    a data file) that states none.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    kind: Literal["boundary", "surface"]
+    kind: Literal["boundary", "surface", "initial_conditions"]
     files: str | list[str]
     grid: str
     variables: list[str] | None = None
     climatology: bool = False
     sides: list[str] | None = None
+    strip: list[str] | None = None
     time_coord: str | None = None
+    hc: float | None = None
     ref: str | None = None
     subchunk: dict[str, int] | None = None
 
@@ -165,15 +188,43 @@ class RefreshForcingConfig(BaseModel):
                 f"refresh.forcing {self.name!r}: subchunk: shapes the kerchunk "
                 "reference, so it needs ref:"
             )
-        if self.kind == "surface" and self.sides is not None:
+        if self.kind != "boundary" and self.sides is not None:
             raise ValueError(
                 f"refresh.forcing {self.name!r}: sides: is for kind: boundary"
             )
-        if self.kind == "boundary" and self.time_coord is not None:
+        if self.kind != "boundary" and self.strip is not None:
+            raise ValueError(
+                f"refresh.forcing {self.name!r}: strip: is for kind: boundary"
+            )
+        if self.kind != "surface" and self.time_coord is not None:
             raise ValueError(
                 f"refresh.forcing {self.name!r}: time_coord: is for kind: surface "
                 "(a boundary file's time is always bry_time)"
             )
+        if self.kind == "initial_conditions":
+            extra = [
+                key
+                for key in ("ref", "subchunk")
+                if getattr(self, key) is not None
+            ] + (["climatology"] if self.climatology else [])
+            if extra:
+                raise ValueError(
+                    f"refresh.forcing {self.name!r}: {extra} do not apply to kind: "
+                    "initial_conditions (one file, read as it is)"
+                )
+        if self.strip is not None:
+            from ocean_skill.transect import check_boundary_sides
+
+            strip = check_boundary_sides(
+                self.strip, f"refresh.forcing {self.name!r}: strip: {self.strip!r}"
+            )
+            sides = self.sides if self.sides is not None else strip
+            outside = [s for s in strip if s not in sides]
+            if outside:
+                raise ValueError(
+                    f"refresh.forcing {self.name!r}: strip: names {outside}, which are "
+                    f"not among sides: {self.sides}"
+                )
         return self
 
 

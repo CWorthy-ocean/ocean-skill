@@ -171,6 +171,12 @@ class Panel:
     metrics_text: str = ""
     metrics_corner: str = "upper left"
     legend_corner: str = "upper right"
+    #: Extra room, as a fraction of the data's own span, the value axis is stretched
+    #: by above the top of the data so the statistics box and the key sit in clear
+    #: space rather than on the lines (see :func:`overlay_plan`). ``0.0`` leaves the
+    #: axis exactly as the renderer would have drawn it. The corners above are the top
+    #: two when this is set. A twin axis is stretched by the same fraction.
+    headroom: float = 0.0
     #: True for an empty cell in a two-axis ``rows=``×``cols=`` grid (see
     #: :func:`facet_grid`) -- a (row, column) combination nothing matched (a
     #: variable missing one of the periods another one has, say). Every other
@@ -913,7 +919,10 @@ def _place_of(da) -> str:
     lon/lat at the domain's bounding-box midpoint -- on a curvilinear grid that can
     be open ocean far from anything sampled, and on one straddling the dateline a
     spot on the wrong side of the world. That midpoint is bookkeeping, not a place,
-    so this reads ``"domain mean"`` and never prints it.
+    so this reads ``"domain mean"`` and never prints it. When the mean ran along a
+    line instead -- the data's lon and lat sit on one shared dimension, as a boundary
+    strip's do (``attrs["spatial_mean_extent"]``) -- it reads ``"along-transect mean"``:
+    a strip's mean is not the domain's, and a title claiming so misled.
     """
     region = da.attrs.get("region")
     if region is not None:
@@ -921,6 +930,11 @@ def _place_of(da) -> str:
 
         return f"mean over {_region_label(region)}"
     if da.attrs.get("spatial_mean"):
+        # a mean along a line (a boundary strip, a section's path) is not a mean over
+        # the domain: its lon and lat share one dimension (see
+        # :func:`ocean_skill.operators._horizontal_mean`)
+        if da.attrs.get("spatial_mean_extent") == "along-transect":
+            return "along-transect mean"
         return "domain mean"
 
     from ocean_skill.align import _lat_name, _lon_name
@@ -1046,6 +1060,165 @@ def free_corners(lines) -> list[str]:
     if not xs:
         return list(CORNERS)
     return _rank_corners(np.concatenate(xs), np.concatenate(ys))
+
+
+#: How big a panel's overlays are, in inches at the default type sizes -- estimates, not
+#: measurements: compose() runs before any figure exists, and both renderers must agree
+#: on the answer. A key row (a handle and one label) is about 0.17in high and a
+#: character of its label 0.07in wide; the statistics box's larger type is 0.2in a row
+#: and 0.077in a character. The numbers err large, since a corner judged occupied only
+#: costs a little headroom while one judged free that is not costs a label drawn over
+#: the data.
+_KEY_ROW_IN, _KEY_CHAR_IN, _KEY_PAD_IN = 0.17, 0.07, 1.0
+_BOX_ROW_IN, _BOX_CHAR_IN, _BOX_PAD_IN = 0.2, 0.077, 0.3
+
+#: A panel's rough size on the page, for turning those inches into axes fractions: the
+#: axes are about 6.3in wide in a single column and at most 2.2in tall, shrinking as
+#: panels stack down a page (a residual strip under each takes about a third more).
+_PANEL_W_IN, _PANEL_H_IN, _PAGE_H_IN = 6.3, 2.2, 7.8
+
+
+def panel_inches(nrows: int, ncols: int, *, residual: bool) -> tuple[float, float]:
+    """Estimated ``(width, height)`` in inches of one panel's axes."""
+    strip = 1.35 if residual else 1.0
+    return (
+        _PANEL_W_IN / max(ncols, 1),
+        min(_PANEL_H_IN, _PAGE_H_IN / max(nrows, 1) / strip),
+    )
+
+
+def overlay_size(
+    text_rows: int, chars: int, *, key: bool, panel: tuple[float, float] = (6.3, 2.2)
+) -> tuple[float, float]:
+    """Estimate ``(width, height)`` of a statistics box or a key, as axes fractions.
+
+    ``panel`` is the axes' ``(width, height)`` in inches (:func:`panel_inches`).
+    """
+    row, char, pad = (
+        (_KEY_ROW_IN, _KEY_CHAR_IN, _KEY_PAD_IN)
+        if key
+        else (_BOX_ROW_IN, _BOX_CHAR_IN, _BOX_PAD_IN)
+    )
+    width, height = panel
+    return (
+        min(0.9, (pad + chars * char) / width),
+        min(0.9, (0.1 + text_rows * row) / height),
+    )
+
+
+def _outline(lines, samples: int = 240):
+    """Return the panel's drawn curves as a dense scatter in axes fractions.
+
+    Each line is scaled to its own value range (a twin axis has one) and resampled on
+    ``samples`` evenly spaced x positions, so a curve that crosses a box *between* two
+    of its points still counts as being in it -- :func:`free_corners` only counts the
+    samples themselves, which is enough to rank corners but not to tell whether a box of
+    a given size would sit on a line.
+    """
+    xs, ys = [], []
+    for line in lines:
+        values = np.asarray(line.spec.values.values, dtype="float64")
+        finite = np.isfinite(values)
+        if finite.sum() < 1:
+            continue
+        position = np.linspace(0.0, 1.0, values.size)
+        low, high = np.nanmin(values), np.nanmax(values)
+        scaled = _scale_into_unit(values, low, high - low)
+        grid = np.linspace(position[finite][0], position[finite][-1], samples)
+        xs.append(grid)
+        ys.append(np.interp(grid, position[finite], scaled[finite]))
+    if not xs:
+        return np.empty(0), np.empty(0)
+    return np.concatenate(xs), np.concatenate(ys)
+
+
+def _inside(x, y, corner: str, size: tuple[float, float]) -> int:
+    """How many outline samples fall in a ``size`` box anchored at ``corner``."""
+    vertical, horizontal = corner.split()
+    w, h = size
+    in_x = x <= w if horizontal == "left" else x >= 1 - w
+    in_y = y >= 1 - h if vertical == "upper" else y <= h
+    return int(np.count_nonzero(in_x & in_y))
+
+
+#: What :func:`overlay_plan` returns for the key's corner when the key cannot sit
+#: beside the statistics box inside the panel: :func:`compose` then draws one combined
+#: key outside the axes (``legend="below"``) for the whole figure, which both renderers
+#: already do.
+KEY_OUTSIDE = "outside"
+
+
+def overlay_plan(
+    lines,
+    *,
+    box: tuple[float, float] | None,
+    key: tuple[float, float] | None,
+    metrics_loc: str = "auto",
+    key_corner: str | None = None,
+    ranked: list[str] | None = None,
+    headroom: bool = True,
+) -> tuple[str, str, float]:
+    """Return ``(metrics_corner, legend_corner, headroom)`` for a panel's overlays.
+
+    Worked out from the data's own outline.
+
+    ``box``/``key`` are the :func:`overlay_size` of the statistics box and the legend
+    (``None`` for one that is not drawn in the panel). The pair of distinct corners with
+    the fewest data samples under the two overlays wins, ties going to the order
+    :func:`free_corners` ranked them in. When even the best pair sits on the data -- a
+    panel whose curves fill it, which is most of them once there are two or three --
+    the value axis is stretched instead (the returned headroom, a fraction of the data's
+    span) and both go in the clear band across the top: box upper left, key upper right.
+
+    When the box and the key together are wider than the panel the stretched band
+    cannot hold both side by side, so the key's corner comes back as
+    :data:`KEY_OUTSIDE` and the stretch only has to clear the box.
+
+    A corner the caller fixed (``metrics_loc=``, a forced ``legend=`` corner) is never
+    moved, and nothing is stretched when ``headroom`` is ``False`` (the caller fixed the
+    axis' limits too): those fall back to the best corners available.
+    """
+    ranked = ranked or list(CORNERS)
+    fixed_box = metrics_loc != "auto"
+    box_choices = [metrics_loc] if fixed_box else list(CORNERS)
+    key_choices = [key_corner] if key_corner else list(CORNERS)
+    x, y = _outline(lines)
+
+    def cost(mc, kc):
+        return (_inside(x, y, mc, box) if box else 0) + (
+            _inside(x, y, kc, key) if key else 0
+        )
+
+    def collide(mc, kc):
+        # two boxes on one side of the panel that together are wider than it overlap
+        return (
+            box
+            and key
+            and mc.split()[0] == kc.split()[0]
+            and box[0] + key[0] > 0.98
+        )
+
+    pairs = [
+        (mc, kc)
+        for mc in box_choices
+        for kc in key_choices
+        if mc != kc and not collide(mc, kc)
+    ] or [(box_choices[0], key_choices[0])]
+    best = min(
+        pairs,
+        key=lambda p: (cost(*p), ranked.index(p[0]) + ranked.index(p[1]), p),
+    )
+    if cost(*best) == 0 or not headroom or fixed_box or key_corner or not (box or key):
+        return best[0], best[1], 0.0
+    # nothing is clear: free the top band instead
+    if collide("upper left", "upper right"):
+        # the key is too wide to sit beside the box in that band: it leaves the
+        # axes instead (the layout's combined key, see :data:`KEY_OUTSIDE`), and
+        # only the box needs the stretched band
+        top = min(0.5, box[1] + 0.03)
+        return "upper left", KEY_OUTSIDE, top / (1.0 - top)
+    top = min(0.5, max((box or (0, 0))[1], (key or (0, 0))[1]) + 0.03)
+    return "upper left", "upper right", top / (1.0 - top)
 
 
 def _metrics_rows(items, metric_keys, *, stacked: bool = False):
@@ -1235,6 +1408,7 @@ def compose(
     ncols: int | None = None,
     nrows: int | None = None,
     highlight=None,
+    headroom: bool = True,
 ) -> Layout:
     """Group ``items`` into panels and resolve every line's style and labelling.
 
@@ -1286,6 +1460,11 @@ def compose(
     bands, resolved against that panel's own x values. It needs a real date axis, so a
     groupby/climatology axis refuses it, and a highlight selecting none of a panel's
     points is skipped with one warning per label.
+
+    ``headroom=False`` says the renderer cannot stretch a panel's value axis (the caller
+    fixed ``ylim=`` or shares it across panels), so a statistics box and key that would
+    sit on the curves are given the best corners there are instead of clear space above
+    them -- see :func:`overlay_plan`.
     """
     items = list(items)
     if not items:
@@ -1321,6 +1500,27 @@ def compose(
     }
     varying = _style.varying_fields(all_specs)
 
+    # Items are carried with their index throughout: the styled lines are keyed on it,
+    # and two items can be equal dicts (the same comparison drawn twice), so identity
+    # has to be positional rather than by value.
+    indexed = list(enumerate(items))
+    variables = []
+    for _, item in indexed:
+        key = _group_key(item, "variable", 0)
+        if key not in variables:
+            variables.append(key)
+    # A residual strip is one quantity's difference, in that quantity's units: two
+    # variables on twin axes would share it, which can only be right for one of them
+    # (temperature's -0.2 degC drawn under salinity's axis). So residual=True gives each
+    # variable its own panel, and its own strip.
+    use_secondary = (
+        not two_facets
+        and facet is None
+        and secondary_y
+        and len(variables) == 2
+        and not residual
+    )
+
     # A row/col facet on "variable" already says which variable a panel is in the
     # title (see panel_title, below) -- naming it again in every legend entry is the
     # one thing that made the user's own two-panel figure never agree on a label set
@@ -1330,7 +1530,12 @@ def compose(
     # would make a panel unidentifiable rather than merely less repetitive. With two
     # facets, either axis (not just whichever `facet` happens to alias) can name it.
     facet_axes = {rows, cols} if two_facets else {facet}
-    if facet_axes & {"variable", "standard_name"}:
+    # The default split of several variables into one panel each (neither a facet nor
+    # twin axes) is the same situation: each panel's title names its variable.
+    split_by_variable = (
+        not two_facets and facet is None and len(variables) > 1 and not use_secondary
+    )
+    if split_by_variable or facet_axes & {"variable", "standard_name"}:
         label_varying = varying - {"variable"}
         ambiguous = _style.ambiguous_sources(all_specs)
         styled = {
@@ -1365,17 +1570,6 @@ def compose(
         if date_axis or axis_coord is None
         else groupby_ticks(axis_dim, axis_coord.values)
     )
-
-    # Items are carried with their index throughout: the styled lines are keyed on it,
-    # and two items can be equal dicts (the same comparison drawn twice), so identity
-    # has to be positional rather than by value.
-    indexed = list(enumerate(items))
-    variables = []
-    for _, item in indexed:
-        key = _group_key(item, "variable", 0)
-        if key not in variables:
-            variables.append(key)
-    use_secondary = not two_facets and facet is None and secondary_y and len(variables) == 2
 
     row_values: list[Any] = []
     col_values: list[Any] = []
@@ -1572,6 +1766,59 @@ def compose(
     shared = (
         len({tuple(line.label for line in p.lines + p.secondary) for p in drawn}) <= 1
     )
+    # Does each panel carry its own key? Then it is one of the things to keep off the
+    # curves; a combined key (below/right, or "auto" once the panels agree) is outside.
+    own_key = legend_placement in CORNERS or (
+        legend_placement == "auto" and not (shared and len(panels) > 1)
+    )
+    forced_corner = legend_placement if legend_placement in CORNERS else None
+    inches = panel_inches(eff_nrows, eff_ncols, residual=residual)
+    placed = []
+    key_outside = False
+    for panel in panels:
+        everything = panel.lines + panel.secondary
+        if (
+            panel.blank
+            or not (panel.metrics_text or own_key)
+            or not everything
+            or metrics_loc not in ("auto", *CORNERS)
+        ):
+            placed.append(panel)
+            continue
+        text = panel.metrics_text.splitlines()
+        entries = list(dict.fromkeys(line.label for line in everything if line.label))
+        corner, legend_at, extra = overlay_plan(
+            everything,
+            box=(
+                overlay_size(len(text), max(map(len, text)), key=False, panel=inches)
+                if text
+                else None
+            ),
+            key=(
+                overlay_size(
+                    len(entries), max(map(len, entries)), key=True, panel=inches
+                )
+                if own_key and entries
+                else None
+            ),
+            metrics_loc=metrics_loc,
+            key_corner=forced_corner,
+            ranked=free_corners(everything),
+            headroom=headroom,
+        )
+        if legend_at == KEY_OUTSIDE:
+            key_outside = True
+            legend_at = "upper right"  # unused once the key is combined, below
+        placed.append(
+            replace(
+                panel, metrics_corner=corner, legend_corner=legend_at, headroom=extra
+            )
+        )
+    panels = placed
+    if key_outside:
+        # one panel's key was too wide to share its stretched band with the box: every
+        # key goes outside the axes as one combined key, which fits any panel
+        legend_placement = "below"
     return Layout(
         panels=tuple(panels),
         nrows=eff_nrows,

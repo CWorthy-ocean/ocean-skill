@@ -39,6 +39,7 @@ __all__ = [
     "CHANNELS",
     "COLOR_CYCLE",
     "LINESTYLES",
+    "VARIABLE_COLOR_SLOTS",
     "LineSpec",
     "StyledLine",
     "ambiguous_sources",
@@ -48,18 +49,97 @@ __all__ = [
     "resolve",
     "series_label",
     "spread_of",
+    "variable_colors",
     "varying_fields",
 ]
 
 #: tab20 reordered darks-then-lights: indices 0-9 are exactly tab10 (matplotlib's own
 #: order), 10-19 are tab20's lighter companions. This is also what ``summary._group_styles``
-#: assigns by level index — so a Taylor/Target diagram and a series panel of the same
-#: comparisons come out the same colours, and don't repeat until the 21st series/level.
+#: assigns by level index (except a variable, see :data:`VARIABLE_COLOR_SLOTS`) — so a
+#: Taylor/Target diagram and a series panel of the same comparisons come out the same
+#: colours, and don't repeat until the 21st series/level.
 #: Derived from the colormap (matplotlib is a core dependency) rather than pinned, so the
 #: two renderers can't drift from it independently.
 COLOR_CYCLE = tuple(
     to_hex(colormaps["tab20"](i)) for i in (*range(0, 20, 2), *range(1, 20, 2))
 )
+
+#: Which :data:`COLOR_CYCLE` slot each well-known variable owns, keyed by its short name
+#: (:func:`ocean_skill.vars.short_name`, lower-cased). A variable's colour is a property
+#: of *which variable it is*, not of where it happened to fall in one figure's legend:
+#: with the colour handed out by position, nitrate was green on one page and chlorophyll
+#: green on the next, and a reader scanning a report for "the green line" was wrong half
+#: the time. Slots follow tab10's own order (blue, orange, green, red, purple, brown,
+#: pink, grey, olive, cyan), so temperature and salinity keep the blue and orange they
+#: always had. The tail of the cycle (slots 10-19, the lighter tab20 companions) is left
+#: to the hashed fallback in :func:`variable_colors`.
+VARIABLE_COLOR_SLOTS: dict[str, int] = {
+    "temperature": 0,
+    "salinity": 1,
+    "chlorophyll a": 2,
+    "alkalinity": 3,
+    "oxygen": 4,
+    "nitrate": 5,
+    "phosphate": 6,
+    "mld": 7,
+    "silicate": 8,
+    "dic": 9,
+}
+
+
+def _variable_key(level: str) -> str:
+    """Return a variable's canonical identity for colouring, its lower-cased short name.
+
+    Through :func:`ocean_skill.vars.short_name`, so ``"temp"``, ``"temperature"`` and
+    ``"sea_water_potential_temperature"`` are one variable with one colour, and a
+    criterion-specific mixed layer depth (``"MLD (σθ)"``) shares the generic ``MLD``'s.
+    """
+    from ocean_skill.vars import short_name
+
+    key = short_name(str(level)).strip().casefold()
+    if key.startswith("ocean mixed layer thickness"):  # the generic MLD's long name
+        return "mld"
+    return key.split(" (", 1)[0] if key.startswith("mld") else key
+
+
+def variable_colors(levels) -> dict:
+    """One colour per variable level, stable from figure to figure and report to report.
+
+    A known variable (:data:`VARIABLE_COLOR_SLOTS`) always takes its own slot. Any other
+    variable hashes its canonical name to one of the *remaining* slots (the lighter
+    tab20 companions, 10-19) -- with md5 rather than :func:`hash`, which Python
+    randomizes per process and would colour one variable differently in two runs of one
+    report. A hashed slot already taken *within this figure* moves on to the next free
+    one, so two lines are never the same colour just because their names collide; that
+    depends on the figure's levels alone, so the same variables always draw the same
+    way, and a known variable never moves for anyone. A level that is not a name (a
+    depth band dict, say) has no identity to key on and is left out -- the caller
+    colours it by position as before.
+    """
+    import hashlib
+
+    named = [lev for lev in levels if isinstance(lev, str)]
+    keys = {lev: _variable_key(lev) for lev in named}
+    taken: set[int] = set()
+    out: dict = {}
+    # known variables claim their slot first, so a hashed one can never displace them
+    for lev in named:
+        if keys[lev] in VARIABLE_COLOR_SLOTS:
+            slot = VARIABLE_COLOR_SLOTS[keys[lev]]
+            taken.add(slot)
+            out[lev] = COLOR_CYCLE[slot]
+    spare = len(COLOR_CYCLE) - len(VARIABLE_COLOR_SLOTS)
+    for lev in named:
+        if lev in out:
+            continue
+        start = int.from_bytes(hashlib.md5(keys[lev].encode()).digest()[:4], "big")
+        order = [len(VARIABLE_COLOR_SLOTS) + (start + k) % spare for k in range(spare)]
+        order += [i for i in range(len(VARIABLE_COLOR_SLOTS)) if i not in taken]
+        slot = next((i for i in order if i not in taken), order[0])
+        taken.add(slot)
+        out[lev] = COLOR_CYCLE[slot]
+    return out
+
 
 #: matplotlib line styles. Index 0 is the reference's; the rest are the test cycle.
 LINESTYLES = ("-", "--", ":", "-.")

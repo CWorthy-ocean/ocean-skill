@@ -1204,3 +1204,416 @@ def test_refresh_forcing_subchunk_needs_a_ref():
                 ],
             }
         )
+
+
+# ======================================================================================
+# kind: initial_conditions -- one model state that reads like restart output
+# ======================================================================================
+
+
+def _ic_grid(tmp_path, *, hc=True):
+    """Write the grid file an entry merges in, with or without an ``hc`` attribute."""
+    from tests import _suite_fixture as sf
+
+    path = sf.write_forcing_grid(tmp_path / "ic_grid.nc")
+    if not hc:
+        ds = xr.open_dataset(path).load()
+        ds.close()
+        ds.attrs.pop("hc")
+        path.unlink()
+        ds.to_netcdf(path)
+    return path
+
+
+@pytest.fixture
+def ic(isolated_catalogs, tmp_path):
+    """Write an IC file as roms-tools 4.0.0 does (no ``hc``), dated 2010-01-01."""
+    from tests import _suite_fixture as sf
+
+    grid = _ic_grid(tmp_path)
+    path = sf.write_initial_conditions(tmp_path / "ic.nc", "20100101")
+    cat = build.new_catalog(title="ic")
+    build.add_initial_conditions(cat, "ic_a", path, grid)
+    ic_b = sf.write_initial_conditions(tmp_path / "ic_b.nc", "20100101", shift=0.5)
+    build.add_initial_conditions(cat, "ic_b", ic_b, grid)
+    build.save(cat, isolated_catalogs / "ic.yaml")
+    return {"tmp": tmp_path, "grid": grid, "file": path}
+
+
+def test_an_ic_entry_reads_like_a_restart(ic):
+    ds = sources.read("ic_a")
+    # model-output layout: one decoded time step, rho fields on (time, s_rho, eta, xi)
+    assert ds[TEMP].dims == ("time", "s_rho", "eta_rho", "xi_rho")
+    assert ds.sizes["time"] == 1
+    assert {"z_rho", "lon", "lat", "mask_rho", "h", "sigma_r", "Cs_r"} <= set(ds.coords)
+    assert {TEMP, SALT, NITRATE} <= set(ds.data_vars)
+    # the BGC tracers keep their model names where the table maps them
+    assert "mole_concentration_of_dissolved_inorganic_carbon_in_sea_water" in ds
+
+
+def test_the_ic_time_decodes_to_the_files_ini_time(ic):
+    ds = sources.read("ic_a")
+    assert ds["time"].values.astype("datetime64[s]").tolist() == [
+        np.datetime64("2010-01-01T00:00:00").tolist()
+    ]
+    meta = sources.resolve("ic_a").metadata
+    assert (meta["time_coverage_start"], meta["time_coverage_end"]) == (
+        "2010-01-01",
+        "2010-01-01",
+    )
+    assert (meta["time_coord"], meta["time_dim"], meta["reference_date"]) == (
+        "ocean_time",
+        "time",
+        "2000-01-01",
+    )
+
+
+def test_an_ic_time_that_disagrees_with_ini_time_is_refused(tmp_path):
+    from tests import _suite_fixture as sf
+
+    path = sf.write_initial_conditions(
+        tmp_path / "ic.nc", "20100101", ini_time="2011-01-01 00:00:00"
+    )
+    with pytest.raises(ValueError, match="ini_time"):
+        build.add_initial_conditions(
+            build.new_catalog(), "ic", path, _ic_grid(tmp_path)
+        )
+
+
+def test_the_ic_vertical_takes_theta_from_the_file_and_hc_from_the_grid(ic):
+    """roms-tools 4.0.0 writes theta_s/theta_b but no hc: hc is the grid file's."""
+    from tests import _suite_fixture as sf
+
+    meta = sources.resolve("ic_a").metadata
+    assert meta["vertical"] == {
+        "s_dim": "s_rho",
+        "hc": sf.HC,
+        "theta_s": sf.THETA_S,
+        "theta_b": sf.THETA_B,
+        "Vtransform": 2,
+    }
+
+
+def test_an_ic_hc_attribute_beats_the_grids_and_an_explicit_hc_beats_both(tmp_path):
+    from tests import _suite_fixture as sf
+
+    grid = _ic_grid(tmp_path)
+    ds = xr.open_dataset(grid).load()
+    ds.close()
+    ds.attrs["hc"] = 77.0
+    other = tmp_path / "other_grid.nc"
+    ds.to_netcdf(other)
+    path = sf.write_initial_conditions(tmp_path / "ic.nc", "20100101", hc_attr=True)
+    cat = build.new_catalog()
+    build.add_initial_conditions(cat, "from_file", path, other)
+    assert cat["from_file"].metadata["vertical"]["hc"] == sf.HC
+    build.add_initial_conditions(cat, "explicit", path, other, vertical={"hc": 33.0})
+    assert cat["explicit"].metadata["vertical"]["hc"] == 33.0
+
+
+def test_an_ic_with_no_hc_anywhere_needs_one_and_says_so(tmp_path):
+    from tests import _suite_fixture as sf
+
+    grid = _ic_grid(tmp_path, hc=False)
+    path = sf.write_initial_conditions(tmp_path / "ic.nc", "20100101")
+    with pytest.raises(ValueError, match=r"No 'hc'.*hc: on a refresh\.forcing entry"):
+        build.add_initial_conditions(build.new_catalog(), "ic", path, grid)
+    cat = build.new_catalog()
+    build.add_initial_conditions(cat, "ic", path, grid, vertical={"hc": 100.0})
+    assert cat["ic"].metadata["vertical"]["hc"] == 100.0
+
+
+def test_an_ic_is_one_file_and_names_what_it_does_not_have(tmp_path):
+    from tests import _suite_fixture as sf
+
+    grid = _ic_grid(tmp_path)
+    a = sf.write_initial_conditions(tmp_path / "a.nc", "20100101")
+    b = sf.write_initial_conditions(tmp_path / "b.nc", "20100102")
+    with pytest.raises(ValueError, match="one file, got 2"):
+        build.add_initial_conditions(build.new_catalog(), "ic", [a, b], grid)
+    with pytest.raises(ValueError, match="not variables of"):
+        build.add_initial_conditions(
+            build.new_catalog(), "ic", a, grid, variables=["temp", "nope"]
+        )
+    cat = build.new_catalog()
+    build.add_initial_conditions(cat, "ic", a, grid, variables=["temp", "salt"])
+    assert set(cat["ic"].metadata["variables"]) == {TEMP, SALT}
+
+
+def test_an_ic_selects_a_depth_as_a_restart_does(ic):
+    for depth in ("surface", 200):
+        f = osk.field(source="ic_a", variable=TEMP, select={"depth": depth})
+        assert {"eta_rho", "xi_rho"} <= set(f.data.dims) and "s_rho" not in f.data.dims
+        assert np.isfinite(f.data.values).any()
+    surface = osk.field(source="ic_a", variable=TEMP, select={"depth": "surface"})
+    deep = osk.field(source="ic_a", variable=TEMP, select={"depth": 200})
+    assert float(surface.data.mean()) > float(deep.data.mean())  # warm at the top
+
+
+def test_two_ics_compare_at_a_depth(ic):
+    result = osk.compare(
+        test="ic_b",
+        reference="ic_a",
+        variables=[TEMP],
+        select={"depth": 200},
+    )
+    (c,) = result.comparisons
+    diff = c.aligned["difference"]
+    assert np.isfinite(diff.values).any() and float(diff.mean()) > 0  # b is the warmer
+
+
+def test_refresh_forcing_builds_an_ic_entry_and_takes_an_hc(
+    isolated_catalogs, tmp_path, capsys
+):
+    from ocean_skill.workflows.run import _refresh_forcing
+    from tests import _suite_fixture as sf
+
+    grid = _ic_grid(tmp_path, hc=False)
+    sf.write_initial_conditions(tmp_path / "ic.nc", "20100101")
+    entry = {
+        "name": "ic_run",
+        "kind": "initial_conditions",
+        "files": [str(tmp_path / "ic.nc")],
+        "grid": str(grid),
+        "climatology": False,  # the config's own default must not reach the builder
+    }
+    catalog_path = isolated_catalogs / "run.yaml"
+    _refresh_forcing([entry], catalog_path)
+    # no hc anywhere: said, not raised
+    assert "FAILED ic_run" in capsys.readouterr().out
+    _refresh_forcing([{**entry, "hc": 100.0}], catalog_path)
+    assert "-> ic_run" in capsys.readouterr().out
+    assert sources.read("ic_run").sizes["time"] == 1
+    assert not sources.resolve("ic_run").metadata.get("climatology")
+
+
+# ======================================================================================
+# strip: -- the boundary sides joined into one section
+# ======================================================================================
+
+
+def _strip_catalog(
+    isolated_catalogs, tmp_path, strip=("west", "south"), grid_path=None
+):
+    """Two dated runs (B = A + 1) and a monthly climatology, each with a strip."""
+    grid, lon, lat = _grid(tmp_path)
+    grid = grid_path or grid
+    cat = build.new_catalog(title="strip")
+    for run, offset in (("a", 0.0), ("b", 1.0)):
+        f = tmp_path / f"{run}_bry.nc"
+        _boundary_file(f, [0, 1, 2], offset)
+        build.add_boundary_sources(cat, f"{run}_bry", f, grid, strip=list(strip))
+    clim = tmp_path / "clim.nc"
+    _boundary_file(clim, np.arange(12) * 30.4, 0.0, month=True)
+    build.add_boundary_sources(
+        cat, "c_bry", clim, grid, climatology=True, strip=list(strip)
+    )
+    build.save(cat, isolated_catalogs / "strip.yaml")
+    return lon, lat
+
+
+def _model_strip(lon, lat, sides):
+    """Return the strip ``transect: {boundary: sides}`` draws from model output."""
+    from ocean_skill.transect import boundary_strip
+
+    ds = xr.Dataset(
+        {"x": (("eta_rho", "xi_rho"), np.zeros(lon.shape))},
+        coords={
+            "lon": (("eta_rho", "xi_rho"), lon),
+            "lat": (("eta_rho", "xi_rho"), lat),
+        },
+    )
+    return boundary_strip(ds, list(sides))
+
+
+def _entry_strip(source, select=None, variable=TEMP):
+    f = osk.field(
+        source=source,
+        variable=variable,
+        select={"transect": {"eta_rho": 0}, **(select or {})},
+    )
+    return f.data
+
+
+@pytest.mark.parametrize(
+    "sides",
+    [
+        ("west", "south"),
+        ("south", "east"),
+        ("east", "north"),
+        ("north", "west", "south"),
+        ("west",),
+    ],
+)
+def test_a_strip_walks_the_sides_exactly_as_the_model_output_strip_does(
+    isolated_catalogs, tmp_path, sides
+):
+    lon, lat = _strip_catalog(isolated_catalogs, tmp_path, strip=sides)
+    want = _model_strip(lon, lat, sides)
+    da = _entry_strip("a_bry_strip")
+    # same cells in the same order, the corner(s) once, along in km
+    np.testing.assert_allclose(da["path_lon"].values, want["path_lon"].values)
+    np.testing.assert_allclose(da["path_lat"].values, want["path_lat"].values)
+    np.testing.assert_allclose(da["along"].values, want["along"].values)
+    assert da["along"].attrs["boundary_sides"] == ",".join(sides)
+    np.testing.assert_allclose(
+        da["along"].attrs["boundary_corner_km"],
+        want["along"].attrs["boundary_corner_km"],
+    )
+    assert da.sizes["along"] == sum(
+        {"west": NY, "east": NY, "south": NX, "north": NX}[s] for s in sides
+    ) - (len(sides) - 1)
+
+
+def test_the_west_south_strip_values_come_from_each_sides_own_file_data(
+    isolated_catalogs, tmp_path
+):
+    """West run north to south, then south run west to east, the corner once.
+
+    ``_boundary_file`` writes ``temp = index along the side + 0.1 per step + 0.01 per
+    level``, so which side and which cell a column came from is readable off its value.
+    """
+    lon, lat = _strip_catalog(isolated_catalogs, tmp_path)
+    da = _entry_strip("a_bry_strip", {"depth": [20.0]}).isel(time=0, z=0)
+    # west is the eta axis (0 = south end): north to south counts down NY-1 ... 0, and
+    # the south row then counts up 1 ... NX-1 -- the corner (index 0 of both) once
+    ramp = np.concatenate([np.arange(NY)[::-1], np.arange(1, NX)])
+    np.testing.assert_allclose(da.values, ramp + 0.02, atol=0.011)
+    np.testing.assert_allclose(da["path_lon"].values[:NY], lon[::-1, 0])
+    np.testing.assert_allclose(da["path_lon"].values[NY - 1 :], lon[0, :])
+    np.testing.assert_allclose(da["path_lat"].values[: NY - 1 + 1], lat[::-1, 0])
+    km = da["along"].attrs["boundary_corner_km"]
+    assert len(km) == 1 and km[0] == pytest.approx(float(da["along"].values[NY - 1]))
+
+
+def test_a_strip_entry_is_one_row_that_selects_a_section(isolated_catalogs, tmp_path):
+    _strip_catalog(isolated_catalogs, tmp_path)
+    ds = sources.read("a_bry_strip")
+    assert ds[TEMP].dims == ("time", "s_rho", "eta_rho", "xi_rho")
+    assert ds.sizes["eta_rho"] == 1 and ds.sizes["xi_rho"] == NY + NX - 1
+    meta = sources.resolve("a_bry_strip").metadata
+    assert meta["boundary_strip"] == ["west", "south"]
+    da = _entry_strip("a_bry_strip", {"depth": [20.0, 100.0]})
+    assert set(da.dims) == {"time", "along", "z"}
+
+
+def test_the_strip_leaves_land_missing_like_the_sides(isolated_catalogs, tmp_path):
+    grid, _, _ = _grid(tmp_path)
+    ds = xr.open_dataset(grid).load()
+    ds.close()
+    ds["mask_rho"][2, 0] = 0.0  # a land cell on the west column, third from the south
+    land = tmp_path / "land_grid.nc"
+    ds.to_netcdf(land)
+    _strip_catalog(isolated_catalogs, tmp_path, grid_path=land)
+    da = _entry_strip("a_bry_strip", {"depth": [20.0]}).isel(time=0, z=0)
+    # west runs north to south: eta index 2 is NY - 1 - 2 = 2 places in
+    assert np.isnan(da.values[NY - 1 - 2])
+    assert np.isfinite(np.delete(da.values, NY - 1 - 2)).all()
+
+
+def test_two_runs_strips_compare_and_draw_in_both_renderers(
+    isolated_catalogs, tmp_path
+):
+    import holoviews as hv
+
+    _strip_catalog(isolated_catalogs, tmp_path)
+    result = osk.compare(
+        test="a_bry_strip",
+        reference="b_bry_strip",
+        variables=[TEMP],
+        select={"transect": {"eta_rho": 0}, "depth": DEPTHS},
+        aggregate={"time": "mean"},
+    )
+    (c,) = result.comparisons
+    assert c.is_section and c.family == "section_row"
+    assert c.aligned.sizes["along"] == NY + NX - 1
+    np.testing.assert_allclose(c.aligned["difference"].values, -1.0)
+    attrs = c.aligned["along"].attrs
+    assert attrs["boundary_sides"] == "west,south"
+    assert len(attrs["boundary_corner_km"]) == 1
+    # the static renderer reads the corner off the section it draws ...
+    from ocean_skill.plot.matplotlib_renderer import boundary_corners
+
+    assert boundary_corners(c.aligned["test"], "along") == pytest.approx(
+        attrs["boundary_corner_km"]
+    )
+    fig = result.plot()
+    assert fig is not None
+    # ... and the interactive one renders without error
+    hv.render(result.plot(renderer="holoviews"))
+
+
+def test_a_dated_strip_compares_with_a_climatology_strip(isolated_catalogs, tmp_path):
+    _strip_catalog(isolated_catalogs, tmp_path)
+    clim = sources.read("c_bry_strip")
+    # the strip of a climatology keeps its month axis, as the side entries do
+    assert clim[TEMP].dims == ("month", "s_rho", "eta_rho", "xi_rho")
+    assert list(clim["month"].values) == list(range(1, 13))
+    assert "time" not in clim.variables
+    assert sources.resolve("c_bry_strip").metadata["climatology"] is True
+    f = osk.field(
+        source="c_bry_strip",
+        variable=TEMP,
+        select={"transect": {"eta_rho": 0}, "month": 3, "depth": DEPTHS},
+    )
+    assert "month" not in f.data.dims and f.data.sizes["along"] == NY + NX - 1
+    result = osk.compare(
+        test="a_bry_strip",
+        reference="c_bry_strip",
+        variables=[TEMP],
+        select={"transect": {"eta_rho": 0}, "depth": DEPTHS},
+        aggregate={"test": {"time": "mean"}, "reference": {"month": "mean"}},
+    )
+    (c,) = result.comparisons
+    assert c.is_section and c.aligned.sizes["along"] == NY + NX - 1
+
+
+def test_a_strip_of_sides_that_do_not_meet_is_refused(tmp_path):
+    grid, _, _ = _grid(tmp_path)
+    f = tmp_path / "bry.nc"
+    _boundary_file(f, [0, 1, 2])
+    with pytest.raises(ValueError, match="opposite sides"):
+        build.add_boundary_sources(
+            build.new_catalog(), "x", f, grid, strip=["west", "east"]
+        )
+    with pytest.raises(ValueError, match="not among"):
+        build.add_boundary_sources(
+            build.new_catalog(), "x", f, grid, sides=["south"], strip=["west", "south"]
+        )
+
+
+def test_a_strip_keeps_only_the_variables_every_side_has(tmp_path):
+    grid, _, _ = _grid(tmp_path)
+    f = tmp_path / "bry.nc"
+    _boundary_file(f, [0, 1, 2])
+    ds = xr.open_dataset(f).load()
+    ds.close()
+    f.unlink()
+    ds.drop_vars("NO3_south").to_netcdf(f)  # the south side has no nitrate
+    cat = build.new_catalog()
+    with pytest.warns(UserWarning, match="leaves out.*NO3"):
+        build.add_boundary_sources(cat, "x", f, grid, strip=["west", "south"])
+    assert set(cat["x_strip"].metadata["variables"]) == {
+        TEMP,
+        SALT,
+        "sea_surface_height_above_geoid",
+    }
+    assert NITRATE in cat["x_west"].metadata["variables"]
+
+
+def test_refresh_forcing_builds_a_strip_entry(isolated_catalogs, tmp_path, capsys):
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    grid, _, _ = _grid(tmp_path)
+    _boundary_file(tmp_path / "bry.nc", [0, 1, 2])
+    entry = {
+        "name": "bry",
+        "kind": "boundary",
+        "files": [str(tmp_path / "bry.nc")],
+        "grid": str(grid),
+        "sides": ["west", "south"],
+        "strip": ["west", "south"],
+    }
+    _refresh_forcing([entry], isolated_catalogs / "run.yaml")
+    assert "-> bry_west, bry_south, bry_strip" in capsys.readouterr().out
+    assert _entry_strip("bry_strip", {"depth": [20.0]}).sizes["along"] == NY + NX - 1

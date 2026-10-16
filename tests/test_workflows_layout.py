@@ -1349,3 +1349,62 @@ def test_self_check_collapses_an_entrys_own_select_and_aggregate():
         "A": {"select": {"lat": 0}, "aggregate": {"time": "mean"}},
         "B": {"select": {"lat": 5}, "aggregate": [{"time": "mean"}]},
     }
+
+
+# ======================================================================================
+# for_each items that are mappings
+# ======================================================================================
+
+
+def test_a_for_each_mapping_item_fills_dotted_placeholders():
+    groups = [
+        {"name": "physics", "variables": ["temperature", "salinity"]},
+        {"name": "nutrients", "variables": ["nitrate"]},
+    ]
+    pages = _expand(
+        {
+            "title": "{group.name} maps",
+            "for_each": {"group": "{groups}"},
+            "compare": {"reference": ["woa"], "variables": "{group.variables}"},
+        },
+        defaults={"test": "stub", "groups": groups},
+    )
+    assert [p.title for p in pages] == ["physics maps", "nutrients maps"]
+    assert [p.kwargs["variables"] for p in pages] == [
+        ["temperature", "salinity"],
+        ["nitrate"],
+    ]
+
+
+def test_a_for_each_mapping_key_named_like_a_dict_method_reads_the_key():
+    groups = [
+        {"name": "a", "values": "salt", "items": ["x"], "get": "g", "keys": "k"},
+    ]
+    pages = _expand(
+        {
+            "title": "{group.values} {group.get} {group.keys}",
+            "for_each": {"group": "{groups}"},
+            "compare": {"reference": ["woa"], "variables": "{group.items}"},
+        },
+        defaults={"test": "stub", "groups": groups},
+    )
+    assert [p.title for p in pages] == ["salt g k"]
+    assert pages[0].kwargs["variables"] == ["x"]
+
+
+def test_a_whole_for_each_mapping_value_is_a_plain_dict():
+    import json
+
+    groups = [{"name": "a", "items": ["x"], "values": 1}]
+    pages = _expand(
+        {
+            "title": "t",
+            "for_each": {"group": "{groups}"},
+            "compare": {"reference": ["woa"], "variables": ["v"], "extra": "{group}"},
+        },
+        defaults={"test": "stub", "groups": groups},
+    )
+    extra = pages[0].kwargs["extra"]
+    assert type(extra) is dict
+    assert extra == groups[0]
+    assert json.dumps(extra)

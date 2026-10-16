@@ -1,6 +1,7 @@
-"""The three PACMED suites, expanded and drawn end to end against a synthetic PACMED.
+"""The PACMED suites, expanded and drawn end to end against a synthetic PACMED.
 
-``suites/mid-run-check.yaml``, ``final-report.yaml`` and ``model-comparison.yaml`` used
+``suites/mid-run-check.yaml`` (and its CCS copy), ``final-report.yaml`` and
+``model-comparison.yaml`` used
 to be debugged one failure at a time, hours into an HPC run. ``_suite_fixture`` builds a
 small stand-in for every input they read (UCLA restart files, roms-tools forcing, WOA23,
 GLODAP, Holte & Talley, Copernicus, Cravatte -- see its docstring for the quirks it
@@ -35,7 +36,12 @@ from ocean_skill.workflows.run import run_suite
 from tests import _suite_fixture as fx
 
 SUITES = Path(__file__).resolve().parents[1] / "suites"
-PACMED_SUITES = ("mid-run-check", "final-report", "model-comparison")
+PACMED_SUITES = (
+    "mid-run-check",
+    "ccs-mid-run-check",
+    "final-report",
+    "model-comparison",
+)
 
 
 @dataclass(frozen=True)
@@ -166,7 +172,7 @@ def test_forcing_months_are_unequal_and_cdf5_where_the_parser_reads_it(pacmed):
                 else "NETCDF3_64BIT_OFFSET"
             )
     assert len(set(lengths)) > 1, lengths
-    clim = pacmed.forcing["pacmed2015_bry_bgc"]["files"][0]
+    clim = pacmed.forcing["mld_bry_bgc"]["files"][0]
     with netCDF4.Dataset(clim) as nc:
         assert nc.dimensions["bry_time"].size == 12 and "month" in nc.variables
 
@@ -215,7 +221,8 @@ def test_localizing_a_suite_points_every_path_at_the_fixture(pacmed, tmp_path, n
         files = entry["files"] if isinstance(entry["files"], list) else [entry["files"]]
         assert all(str(pacmed.root) in f for f in files), entry["name"]
         assert str(pacmed.root) in entry["grid"]
-        assert entry["ref"].startswith(str(tmp_path / "refs"))
+        if "ref" in entry:  # initial-conditions entries read one file: no reference
+            assert entry["ref"].startswith(str(tmp_path / "refs"))
     text = yaml.safe_dump(out)
     assert "/anvil/" not in text, "a path of the real run was left in"
 

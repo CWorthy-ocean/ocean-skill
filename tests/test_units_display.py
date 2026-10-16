@@ -359,3 +359,10 @@ def test_ppt_is_not_turned_into_psu_but_psu_spellings_are():
         "practical salinity units",
     ):
         assert u.display(spelling) == "PSU"
+
+
+def test_a_dimensionless_one_prints_no_label():
+    from ocean_skill.plot._statistic import units_text
+
+    assert units_text("1") == ""
+    assert units_text("1e-3") == "1e-3"  # a scale factor is still shown

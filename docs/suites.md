@@ -74,7 +74,7 @@ refresh:                              # optional: rebuild the model's kerchunk r
   catalog: catalogs/pac_dt_ramp.yaml
   sources:
     - name: pac_dt_ramp
-      files: tasks/*/joined_output/output_rst.*.nc
+      files: tasks/*/joined_output/output_rst.*.nc   # a glob, or a list of globs (see Refresh: ...)
       grid: tasks/third_1wks/input/input_datasets/grid.nc
       ref: refs/pac_dt_ramp.parquet
       keep: latest-per-file           # forwarded to make_kerchunk; see its own docstring
@@ -85,6 +85,7 @@ refresh:                              # optional: rebuild the model's kerchunk r
   forcing:                            # optional: catalog roms-tools forcing files into the same catalog
     - name: base_bry                  # kind: boundary -> base_bry_south, ..., base_bry_west
       kind: boundary                  # boundary (build.add_boundary_sources) | surface (build.add_forcing_source)
+                                      # | initial_conditions (build.add_initial_conditions)
       files: [y2011/*_boundary-physics_*.nc, y2012/*_boundary-physics_*.nc]  # glob or globs, joined in order
       grid: input/grid.nc
       ref: refs/base_bry.parquet      # optional: kerchunk reference, rebuilt only when the files change
@@ -94,11 +95,17 @@ refresh:                              # optional: rebuild the model's kerchunk r
       variables: [temp, salt, NO3]    # optional: base names to keep; default all
       climatology: false              # true -> a 12-month _clim file: month replaces time
       sides: [south, north]           # optional, boundary only; default all four
+      strip: [west, south]            # optional, boundary only: also write <name>_strip, the sides joined (see below)
+      hc: 250.0                       # optional: the s-coordinate's critical depth, for a grid file that states none
     - name: base_co2
       kind: surface
       files: input/*_surface-bgc-mbl_co2_*.nc
       grid: input/grid.nc
       time_coord: xco2_time           # optional, surface only: the time variable (its dimension may be named otherwise); default time
+    - name: ic_run                    # kind: initial_conditions -> one entry, ic_run, that reads like a restart
+      kind: initial_conditions
+      files: input/*_initial_conditions_*.nc   # exactly one file
+      grid: input/grid.nc
 
 defaults:                             # merged into every page; a page's own keys win
   test: pac_dt_ramp                   # exactly one source -- required for time: latest/month: run
@@ -118,6 +125,76 @@ pages:
                             # about instead while pdf: true -- see Page size, below)
     caption: "..."         # optional, any page but section:: text under the figure in report.pdf (see Captions)
 ```
+
+### Refresh: several folders, initial conditions, boundary strips
+
+**`refresh.sources[].files` as a list of globs.** A run restarted in pieces leaves its
+output in several task folders, and a second run continues in more, some repeating dates
+(a test segment):
+
+```yaml
+sources:
+  - name: pacmed
+    files:
+      - /anvil/scratch/x-me/cstar/pacmed/tasks/*/output/output_rst.2010*.nc   # first_wk, second_wk, ...
+      - /anvil/scratch/x-me/cstar/pacmed_2015/tasks/*/output/output_rst.*.nc
+    keep: latest-per-file
+    ...
+```
+
+(Globs are Python's: `*`, `?` and `[...]`, no `{a,b}`.) The matched
+files are joined into one reference in **time order** -- not path order, since folder
+names do not sort chronologically (`first_half` comes before `first_wk`). When two files
+give the same time step, after `keep: latest-per-file` has cut each to its newest record,
+the **later one wins**: a file of a later glob beats one of an earlier glob, and within
+one glob the later path in sorted order beats the earlier. Each file dropped that way is
+logged:
+
+    refresh: pacmed: 2010-01-07T23:45:00 from <path> replaces <path>
+
+A path two globs both match counts once, at its later place; a glob that matches nothing
+does not stop the others. Only a file that gives *one* record is dropped for a repeat (every
+file under `latest-per-file`); with another `keep:` the build's own rule decides among
+repeated records, the later in the order handed over winning. A single glob written as a
+string reads as it always did (every match in path order); write it as a one-item list to
+get the time ordering.
+
+**`kind: initial_conditions`.** A roms-tools initial-conditions file becomes one catalog
+entry, `<name>`, that reads like model output: `s_rho x eta_rho x xi_rho` fields (`temp`,
+`salt`, the BGC tracers, `zeta`, `u`/`v`) at one time step, with `lon`/`lat`, a land mask
+and a `z_rho` depth coordinate. So a page can compare it with the run's own first restart
+at `depth: surface` or `200` exactly as it compares two restarts. `files` is one file and
+`grid:` the run's roms-tools grid file, which supplies the horizontal grid and `sigma_r`.
+The file's own `Cs_r`/`Cs_w` and `theta_s`/`theta_b` attributes are used. `hc`
+comes from the file's attribute, else the grid file's, else the entry's `hc:` key (roms-tools
+4.0.0 writes no `hc` attribute in an initial-conditions file); an explicit `hc:` beats both,
+and none of the three is an error that says so. The time is `ocean_time` (seconds since the
+file's `model_reference_date`), checked against its `ini_time`: they must agree. `variables:`
+limits the fields kept; `ref`, `subchunk`, `climatology` and `sides` do not apply.
+
+**`strip:` on a `kind: boundary` entry.** `strip: [west, south]` also writes an entry
+`<name>_strip` beside the per-side ones: the west boundary run north to south, then the south
+boundary run west to east, the corner cell once -- the strip `select: {transect: {boundary:
+[west, south]}}` draws from model output, as a catalog entry of its own. It is built in the
+reader chain (no file is written) and only holds the variables every named side has. Each side
+must meet the next at a grid corner (`[west, east]` is an error) and be among `sides:`. Read
+it like a south entry whose single row is the whole strip -- `select: {transect: {eta_rho: 0}}`
+cuts the section, with `along` in kilometres (the cumulative great-circle distance over the
+joined lon/lat) and the corner lines a boundary-following section draws; pages then need an
+explicit depth list, as every section comparison does:
+
+```yaml
+- title: "Boundary temperature, west + south strip"
+  compare:
+    test: pyesper_bry_phys_strip
+    reference: [pacmed2015_bry_phys_strip]
+    variables: [temperature]
+    select: {transect: {eta_rho: 0}, depth: [5, 50, 200, 500, 1000], time: "{period}"}
+    aggregate: {time: mean}
+```
+
+Against a climatology's strip (`climatology: true`, which keeps its `month` axis) give each
+side its own aggregate: `aggregate: {test: {time: mean}, reference: {month: mean}}`.
 
 ### Suite-wide plot options: `defaults.plot`
 
@@ -259,6 +336,14 @@ page-size pinning under `pdf: true` (see Page size) applies the same way.
   draw: target
   plot: {arrows: true, color_by: variable}
 ```
+
+Two `times:` forms matter for these pages. `times: {resample: 1YS, reduce: pool}` scores
+each year from *every* step as samples (the page then draws the year's mean map), where
+`reduce: mean` scores the year's mean map; and against a monthly-climatology reference
+(WOA23 monthly, a roms-tools boundary climatology, Holte and Talley) every `times:` bin,
+a `draw: metrics_series` page and an `over: time` page pair each test step with its own
+calendar month automatically -- no `reference: {month: "{month.month}"}` pin needed (an
+explicit `month` select or aggregate still means what it says). See `compare()`'s `times=`.
 
 **`max_rows:` -- a long grid becomes several figures.** One row per comparison is
 readable up to a few rows; six variables at two statistics is twelve rows, each too small
@@ -990,8 +1075,18 @@ A full run on an HPC can take hours, and a mistake in the suite or a bug in the 
 shows once a page reaches it. These flags make most of them show early.
 
 **`--smoke [N]`** reads every model source named under `refresh.sources` (by `name`;
-with no `refresh:` block, `defaults.test`) with only its **last N time steps** (default
-2). Observation and reference catalogs and `refresh.forcing` entries are read whole.
+with no `refresh:` block, `defaults.test`) with only its **first and last N time steps** (default
+2), plus the steps the pages **pin**: the nearest step (within 2 days, else none) to every date a
+page names (a date in `select` time, an entry of a `times:` list, including a `{placeholder}` that
+expands to one) and the first and last N steps inside every time window under 62 days (a
+`{min, max}` window, a period such as `"2010-01"`). A window longer than that, such as the whole-run
+`period`, adds nothing, and neither does a `times: {resample: ...}` (it bins whatever is kept), so a
+suite whose pages name dates all through a long run still gets them from `--smoke 2`. The pins are
+collected from a first, throwaway expansion of the suite made before the cut (so `month: run`
+placeholders see the whole run); the run log says how many instants and windows it found and how
+many steps of each source are kept. For another source (a reference run), the steps are chosen from
+those up to the test source's last time. Observation and reference catalogs and `refresh.forcing`
+entries are read whole.
 Every `latest`/`month: run` lookup made while the suite is expanded sees the shortened
 record too, so the pages expand and draw consistently, just over very little data. Write
 the count right after the flag (`--smoke 3` or `--smoke=3`) and put the suite path first.
@@ -1001,12 +1096,19 @@ A smoke run never touches the real results:
 - its report goes to `<output_dir>/<name>-smoke/` (not `<name>/`), and `latest.txt`/
   `latest` are left pointing at the last full report;
 - its cached results (the `prepared`, `aligned` and `calculated` kinds) go to
-  `<cache base dir>/smoke-cache/` -- `cache_dir:` if the suite sets one, else the default
-  -- because the cache key knows nothing about the truncation and a shortened result
-  must never be served to a full run. It is scratch: the key also knows neither N nor
-  how far the model has grown since, so the folder is **emptied at the start of every
-  `--smoke` run** (never reused between runs). Regrid weights (keyed on the grids' own contents)
-  and downloaded observation files stay shared, so a smoke run does not re-download WOA.
+  `<cache base dir>/smoke-cache/<hash>/` -- `cache_dir:` if the suite sets one, else the
+  default -- because the cache key knows nothing about the truncation and a shortened result
+  must never be served to a full run. `<hash>` is a short hash of everything the key cannot
+  see: each truncated source's name, N and the time stamps actually kept, pinned ones included (so
+  a run that has grown, or pages that now name other dates, keep different steps and start fresh), and the code version
+  (the package version, the git `HEAD`, and, if the tree has uncommitted changes, a hash of
+  them). A repeat run on the same steps with the same code **reuses the folder** (the run log
+  says `smoke cache: <dir> (reused)` or `(new)`, and `manifest.json` `"modes"` records it),
+  while any code change, edited file included, starts cold, so a fix is always exercised.
+  Without a git checkout to name the code version every run starts cold. Only the newest
+  few `<hash>/` folders are kept (`SMOKE_CACHE_KEEP`); older ones, unused for an hour, are
+  deleted by the next smoke run. Regrid weights (keyed on the grids' own contents) and
+  downloaded observation files stay shared, so a smoke run does not re-download WOA.
   Delete the folder any time.
 
 **`--self-check`** draws every `compare:` page against itself: the reference is replaced

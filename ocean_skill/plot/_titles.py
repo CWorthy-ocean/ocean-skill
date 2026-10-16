@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-__all__ = ["map_panel_titles", "map_title_parts", "resolve_titles"]
+__all__ = ["map_panel_titles", "map_title_parts", "resolve_titles", "skill_map_title"]
 
 
 def resolve_titles(
@@ -87,3 +87,28 @@ def map_panel_titles(items) -> list[str]:
     if not varying:
         return [row[0] for row in parts]
     return [" · ".join(_elide(row[k]) for k in varying if row[k]) for row in parts]
+
+
+def skill_map_title(items) -> str:
+    """Return the suptitle a ``skill_map`` carries when the caller named none.
+
+    That is the variable.
+
+    The panels are metrics (bias, crmsd, corr, ...) and a stacked figure's rows are
+    named by whatever distinguishes the comparisons (the depth, the period), so
+    nothing on the figure said *which variable* was scored -- a page of per-cell skill
+    for alkalinity and one for oxygen differed only in their colorbar units. Named only
+    when every row is of one variable; a single comparison, whose depth has no row label
+    to carry it, also gets its depth. Spelled as every other title spells a variable
+    (:func:`ocean_skill.plot.matplotlib_renderer.field_title`). ``""`` when the rows
+    mix variables (or carry none), so nothing is guessed.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_title
+
+    names = list(
+        dict.fromkeys(field_title(item.get("standard_name")) for item in items)
+    )
+    if len(names) != 1 or not names[0]:
+        return ""
+    depth = items[0].get("depth") if len(items) == 1 else None
+    return f"{names[0]} · {depth}" if depth else names[0]
